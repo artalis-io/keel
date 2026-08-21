@@ -12,7 +12,7 @@
  * via KlHttpServerConfig.event_provider.
  *
  * The server auto-wires the matched overlapped socket provider from the injected loop's
- * native_provider (server.c 8f-5a), exactly as the compiled-in completion path does — the
+ * native_provider (http_server.c 8f-5a), exactly as the compiled-in completion path does — the
  * caller sets only event_provider. A blocking loopback client does GET / and asserts 200 +
  * the expected body. Prints COMPLETION-INJECT PASS on success.
  *
@@ -55,7 +55,7 @@ static void *server_thread(void *arg) {
 int main(void) {
     /* An OTHERWISE-DEFAULT server: the ONLY non-default knob is the injected completion
      * provider. No .sockets — the server auto-adopts the provider's overlapped native
-     * provider (server.c 8f-5a) since the injected loop advertises KL_EVENT_CAP_COMPLETION. */
+     * provider (http_server.c 8f-5a) since the injected loop advertises KL_EVENT_CAP_COMPLETION. */
     KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_pollcomp() };
     if (kl_http_server_init(&g_srv, &cfg) < 0) {

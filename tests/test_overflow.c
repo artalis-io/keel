@@ -98,7 +98,7 @@ UTEST(overflow, ws_frame_control_oversized) {
 /* ── Connection pool overflow ────────────────────────────────────── */
 
 UTEST(overflow, conn_pool_negative) {
-    /* connection.c:42 — capacity <= 0 returns -1 */
+    /* http_connection.c:42 — capacity <= 0 returns -1 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpConnPool pool;
 
@@ -106,7 +106,7 @@ UTEST(overflow, conn_pool_negative) {
 }
 
 UTEST(overflow, conn_pool_size_guard_exists) {
-    /* connection.c:46 — SIZE_MAX / sizeof(KlHttpConn) guard is in place.
+    /* http_connection.c:46 — SIZE_MAX / sizeof(KlHttpConn) guard is in place.
      * On 64-bit, INT_MAX won't trigger it (would need > 2^51), but
      * the guard protects 32-bit platforms. Verify the math. */
     ASSERT_TRUE(sizeof(KlHttpConn) > 0);
@@ -117,7 +117,7 @@ UTEST(overflow, conn_pool_size_guard_exists) {
 }
 
 UTEST(overflow, conn_pool_zero) {
-    /* connection.c:42 — capacity <= 0 */
+    /* http_connection.c:42 — capacity <= 0 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpConnPool pool;
     ASSERT_EQ(kl_http_conn_pool_init(&pool, 0, &alloc), -1);
@@ -127,7 +127,7 @@ UTEST(overflow, conn_pool_zero) {
 /* ── Chunked hex overflow ────────────────────────────────────────── */
 
 UTEST(overflow, chunked_hex_too_many_digits) {
-    /* chunked.c:60 — max 16 hex digits */
+    /* http1_chunked.c:60 — max 16 hex digits */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -138,7 +138,7 @@ UTEST(overflow, chunked_hex_too_many_digits) {
 }
 
 UTEST(overflow, chunked_hex_accumulator_overflow) {
-    /* chunked.c:64 — size_accum > SIZE_MAX / 16 */
+    /* http1_chunked.c:64 — size_accum > SIZE_MAX / 16 */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -153,7 +153,7 @@ UTEST(overflow, chunked_hex_accumulator_overflow) {
 }
 
 UTEST(overflow, chunked_no_digits_before_cr) {
-    /* chunked.c:47 — size_digits == 0 when CR arrives */
+    /* http1_chunked.c:47 — size_digits == 0 when CR arrives */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -163,7 +163,7 @@ UTEST(overflow, chunked_no_digits_before_cr) {
 }
 
 UTEST(overflow, chunked_no_digits_before_ext) {
-    /* chunked.c:39 — size_digits == 0 when ';' arrives */
+    /* http1_chunked.c:39 — size_digits == 0 when ';' arrives */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -266,7 +266,7 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
 }
 
 UTEST(overflow, multipart_max_total_size_exceeded) {
-    /* body_reader_multipart.c:66-67 — max_total_size enforcement */
+    /* http_body_reader_multipart.c:66-67 — max_total_size enforcement */
     KlAllocator alloc = kl_allocator_default();
 
     KlHttpRequest req;
@@ -307,7 +307,7 @@ static void dummy_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 UTEST(overflow, router_capacity_overflow) {
-    /* router.c:25 — capacity > INT_MAX / 2 */
+    /* http_router.c:25 — capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -326,7 +326,7 @@ UTEST(overflow, router_capacity_overflow) {
 }
 
 UTEST(overflow, router_mw_overflow) {
-    /* router.c:144 — mw_capacity > INT_MAX / 2 */
+    /* http_router.c:144 — mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -344,7 +344,7 @@ UTEST(overflow, router_mw_overflow) {
 }
 
 UTEST(overflow, router_post_mw_overflow) {
-    /* router.c:189 — post_mw_capacity > INT_MAX / 2 */
+    /* http_router.c:189 — post_mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -364,7 +364,7 @@ UTEST(overflow, router_post_mw_overflow) {
 /* ── Body reader buffer overflow ─────────────────────────────────── */
 
 UTEST(overflow, body_reader_buffer_max_size) {
-    /* body_reader_buffer.c:10 — max_size enforcement */
+    /* http_body_reader_buffer.c:10 — max_size enforcement */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRequest req;
     memset(&req, 0, sizeof(req));

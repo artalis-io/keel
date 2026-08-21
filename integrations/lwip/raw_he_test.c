@@ -5,7 +5,7 @@
  * The proof for LC-2 (docs/phase10_lwip_raw_client_design.md §8 LC-2): the SAME single-loop model
  * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
  * KlHttpClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
- * Happy-Eyeballs layer (src/client.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
+ * Happy-Eyeballs layer (src/http_client_async.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
  * natively. The winning pcb is adopted; every losing/connecting pcb is aborted (kl_comp_cancel ->
  * kl_lwr_tcp_abort) and its glue slot freed — the new memory-safety surface this test hardens.

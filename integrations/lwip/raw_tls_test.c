@@ -11,7 +11,7 @@
  *
  *   1. Client side = the mbedTLS socket-BIO through the CONFIGURED socket provider. tls_mbedtls.c's
  *      bio_send/bio_recv call kl_sock_send/kl_sock_recv(t->sp, t->fd, ...) — the provider wired via
- *      set_socket_provider, which src/client.c sets to ev_ctx->sockets. On raw that is
+ *      set_socket_provider, which src/http_client_async.c sets to ev_ctx->sockets. On raw that is
  *      kl_socket_provider_lwip_raw(), so bio_send/recv -> lwr_sock_send/recv -> tcp_write/read over
  *      the pcb. The WANT_READ/WANT_WRITE handshake churn rides the raw backend's emulated readiness
  *      watcher (writable = sndbuf headroom; readable = retained rx / peer close).

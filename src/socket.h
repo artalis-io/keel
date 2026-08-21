@@ -7,7 +7,7 @@
  * The public authoring API — KlSocketProvider, KlSocketOps, KlIoVec, the
  * capability flags, the provider factories, the query helpers, and
  * kl_sock_errno_to_error — lives in the installed <keel/socket.h>. This internal
- * header adds the two things a *consumer* (server.c, connection.c, response.c,
+ * header adds the two things a *consumer* (http_server.c, http_connection.c, http_response.c,
  * client.c, …) needs but a provider author does not:
  *
  *   - kl_sockdef_*  : the built-in platform defaults (raw syscall per op),

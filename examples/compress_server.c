@@ -2,7 +2,7 @@
  * compress_server.c — Response compression with miniz gzip backend
  *
  * Concepts: KlCompress vtable, KlCompressConfig, kl_http_response_body_compress,
- * KlCompressStream, kl_compress_stream_begin/write/end.
+ * KlHttpCompressStream, kl_http_compress_stream_begin/write/end.
  *
  * Demonstrates:
  *   /json    — buffer body compression (gzip if Accept-Encoding: gzip)
@@ -56,18 +56,18 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *user_da
         /* Compressed chunked stream */
         kl_http_response_header(res, "Content-Type", "text/plain");
 
-        KlCompressStream cs;
-        if (kl_compress_stream_begin(res, app->compress, 200, &cs) < 0)
+        KlHttpCompressStream cs;
+        if (kl_http_compress_stream_begin(res, app->compress, 200, &cs) < 0)
             return;
 
         for (int i = 0; i < 10; i++) {
             char line[64];
             int n = snprintf(line, sizeof(line), "chunk %d: hello world\n", i);
             if (n < 0) break;
-            if (kl_compress_stream_write(&cs, line, (size_t)n) < 0) break;
+            if (kl_http_compress_stream_write(&cs, line, (size_t)n) < 0) break;
         }
 
-        kl_compress_stream_end(&cs);
+        kl_http_compress_stream_end(&cs);
     } else {
         /* Uncompressed chunked stream */
         KlHttpResponseWriteFn write_fn;

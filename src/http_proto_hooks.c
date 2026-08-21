@@ -1,5 +1,5 @@
 /*
- * proto_hooks.c — storage for the per-protocol server upgrade seam (proto_hooks.h).
+ * http_proto_hooks.c — storage for the per-protocol server upgrade seam (http_proto_hooks.h).
  *
  * Freestanding-safe: two file-scope pointers + getters/setters, nothing else.
  * Linked into BOTH the hosted core and the freestanding server archive. In a

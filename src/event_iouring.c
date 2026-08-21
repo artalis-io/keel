@@ -549,7 +549,7 @@ static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
 
 /* Fallback for kernels without IORING_OP_SPLICE: pread the file body into a malloc'd send
  * buffer after the head, and send it as a plain WRITE (the 8f-1 mechanism). The response
- * owns file_fd and closes it (response.c), so pread is ownership-neutral. */
+ * owns file_fd and closes it (http_response.c), so pread is ownership-neutral. */
 static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVec *head_iov,
                                   int head_n, size_t head_total, int file_fd, uint64_t count) {
     KlIouOp *op = iou_op_alloc(stream->alloc);

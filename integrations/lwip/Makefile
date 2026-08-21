@@ -180,7 +180,7 @@ raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
 #   4. Link + run raw_tick_test against those objects + the stock libkeel + liblwip_raw.a.
 #
 # raw_tick_test injects the provider at runtime: kl_event_ctx_init_ex(.., kl_event_provider_
-# lwip_raw()) for P9-1, and KlConfig.event_provider = kl_event_provider_lwip_raw() for the
+# lwip_raw()) for P9-1, and KlHttpServerConfig.event_provider = kl_event_provider_lwip_raw() for the
 # server cases (P9-2/3/4) — the server auto-wires the paired overlapped socket provider from
 # the loop's native_provider(). Existing readiness targets (loopback/loopback-tls/raw-spike)
 # are untouched.

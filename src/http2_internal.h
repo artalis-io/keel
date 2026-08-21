@@ -1,10 +1,10 @@
 /*
- * h2_internal.h — INTERNAL HTTP/2 server state (PAL 8d-4).
+ * http2_internal.h — INTERNAL HTTP/2 server state (PAL 8d-4).
  *
  * The per-connection (KlHttp2ServerConn) and per-stream (KlHttp2ServerStream) bodies live
  * here, not in the public <keel/http2_server.h>, so they are truly opaque to users: the
- * KlHttp2ServerSession vtable treats the connection as a void*, and only connection.c,
- * server.c and h2.c (plus the white-box h2 unit test) touch these fields. Keeping the
+ * KlHttp2ServerSession vtable treats the connection as a void*, and only http_connection.c,
+ * http_server.c and h2.c (plus the white-box h2 unit test) touch these fields. Keeping the
  * bodies internal means new internal state — e.g. the output-writer seam below — is not
  * a public-API change.
  */

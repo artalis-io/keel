@@ -92,7 +92,7 @@ UTEST(stream_single_shot, one_completion_per_op) {
     g_target = &st;
 
     /* Associate the fd with the loop exactly as the completion server does at accept
-     * (completion_server.c) — inert-ish on pollcomp/io_uring, CreateIoCompletionPort on IOCP. */
+     * (completion_http_server.c) — inert-ish on pollcomp/io_uring, CreateIoCompletionPort on IOCP. */
     ASSERT_EQ(kl_event_add(&ctx.loop, st.fd, KL_EVENT_READ, &st), 0);
 
     /* ── READ: one posted recv → exactly one completion ────────────────────────────────────────── */

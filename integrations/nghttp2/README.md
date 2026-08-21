@@ -3,8 +3,8 @@
 First-party adapters implementing Keel's HTTP/2 **session** vtables on top of
 [nghttp2](https://github.com/nghttp2/nghttp2):
 
-- **client** — `KlHttp2ClientSession` (`include/keel/h2_client.h`)
-- **server** — `KlHttp2ServerSession` (`include/keel/h2_server.h`)
+- **client** — `KlHttp2ClientSession` (`include/keel/http2_client.h`)
+- **server** — `KlHttp2ServerSession` (`include/keel/http2_server.h`)
 
 Keel's HTTP/2 code is framing-agnostic: it drives a session vtable and never
 speaks HPACK/frames itself. These adapters plug nghttp2 in behind that seam.
@@ -98,7 +98,7 @@ Three levels of coverage, all under [`e2e/`](e2e/):
 
 > **Maintainer note — client connection preface.** The server session is created
 > with `nghttp2_option_set_no_recv_client_magic`: Keel's h2c prior-knowledge path
-> (`connection.c`) consumes the 24-byte `PRI * HTTP/2.0...` magic *before* feeding
+> (`http_connection.c`) consumes the 24-byte `PRI * HTTP/2.0...` magic *before* feeding
 > the session, and the h2c-Upgrade / ALPN paths never send it. Without this the
 > session stalls waiting for the magic and resets the connection. `test_roundtrip`
 > mirrors this by stripping the leading 24 bytes on its first server feed.
@@ -134,7 +134,7 @@ one KEEL-specific delta is an abortive close (RST) where the reference does a
 graceful FIN — a core connection-teardown behavior, out of scope for the adapter.
 
 Getting there fixed three real adapter/integration bugs, all in
-`http2_nghttp2_server.c` (+ a `want_read` vtable method in `h2_server.h`):
+`http2_nghttp2_server.c` (+ a `want_read` vtable method in `http2_server.h`):
 - **`no_recv_client_magic`** (above) — the initial connect fix.
 - **`want_read`** → KEEL (`h2.c`) closes once the session wants neither read nor
   write (a terminated session, e.g. after a GOAWAY), instead of lingering until

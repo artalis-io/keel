@@ -5,7 +5,7 @@
 #include <keel/http_response.h>
 #include <stddef.h>
 
-/** @file cors.h
+/** @file http_cors.h
  *  @brief Built-in CORS middleware.
  *
  *  Usage:

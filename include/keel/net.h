@@ -6,7 +6,7 @@
  *
  * The single place Keel's *installed* headers resolve where struct sockaddr /
  * sockaddr_storage / socklen_t come from across platforms. Public headers that
- * expose socket addresses in their API (connection.h, resolver.h,
+ * expose socket addresses in their API (http_connection.h, resolver.h,
  * proxy_protocol.h, udp.h, udp_server.h) include this instead of <sys/socket.h>,
  * so the platform selection lives in one file rather than scattered #ifdefs.
  *

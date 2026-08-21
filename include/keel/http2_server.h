@@ -1,9 +1,9 @@
 /**
- * @file h2_server.h
+ * @file http2_server.h
  * @brief Server-side HTTP/2 API
  *
  * Server-side HTTP/2 types and functions. Shared protocol constants
- * (max streams, window size) live in h2.h.
+ * (max streams, window size) live in http2.h.
  */
 
 #ifndef KEEL_HTTP2_SERVER_H
@@ -105,7 +105,7 @@ typedef struct KlHttp2ServerConfig {
  * session callbacks as an opaque void*. Keeping the bodies out of this public header lets
  * KEEL evolve internal h2 state (buffering seams, etc.) without a public-API change. */
 
-/* ── Internal functions (used by connection.c, server.c) ─────────── */
+/* ── Internal functions (used by http_connection.c, http_server.c) ─────────── */
 
 /** @brief Upgrade a connection to HTTP/2 (direct h2c). */
 int  kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,

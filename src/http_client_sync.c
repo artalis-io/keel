@@ -1,5 +1,5 @@
 /*
- * client_sync.c — HTTP/1.1 client, blocking (hosted) API
+ * http_client_sync.c — HTTP/1.1 client, blocking (hosted) API
  *
  * Freestanding step B2b: the blocking poll()-based request/response path lives
  * here — connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>   /* strcasecmp (no longer pulled transitively via request.h) */
+#include <strings.h>   /* strcasecmp (no longer pulled transitively via http_request.h) */
 #include <unistd.h>
 #include <stddef.h>
 #include <sys/types.h>
@@ -228,7 +228,7 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t req_len = 0;
-    /* Shared serialization (client_proxy.c) — identical bytes to the async client. */
+    /* Shared serialization (http_client_proxy.c) — identical bytes to the async client. */
     if (kl_proxy_build_connect(buf, sizeof(buf), &req_len, host, port, proxy_auth) != 0)
         return -1;
     int n = (int)req_len;
@@ -268,7 +268,7 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         recv_len += (size_t)r;
         buf[recv_len] = '\0';
 
-        /* Shared status check (client_proxy.c): 1 = tunnel up, 0 = need more, -1 = error. */
+        /* Shared status check (http_client_proxy.c): 1 = tunnel up, 0 = need more, -1 = error. */
         int st = kl_proxy_connect_status(buf, recv_len);
         if (st != 0)
             return st == 1 ? 0 : -1;

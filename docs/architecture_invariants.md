@@ -198,11 +198,11 @@ seam only when a missing semantic is documented and reviewed.
   backends, socket providers, platform glue, the completion driver/adapters, the transport state
   machines, and the run-loop / async-connect drivers). This is the **mechanical classification rule**:
   a newly added protocol TU is governed automatically, so the whole protocol layer — including the
-  pure-byte TUs `router.c`/`cors.c`/`chunked.c`/`body_reader*.c`/`parsers/*.c` — is covered, not just
+  pure-byte TUs `http_router.c`/`http_cors.c`/`http1_chunked.c`/`body_reader*.c`/`parsers/*.c` — is covered, not just
   the network-facing subset. Include-based, so robust against the `WSA*`/overlapped mentions that
-  appear only in explanatory comments (`connection.c`/`response.c`/`client_sync.c`).
+  appear only in explanatory comments (`http_connection.c`/`http_response.c`/`http_client_sync.c`).
 - **`TIER1_INFRA` allowlist (with reason):** the bridge layer legitimately includes these headers.
-  Notably `server.c` and `client_async.c` sit there because they drive the run loop / async connect
+  Notably `http_server.c` and `http_client_async.c` sit there because they drive the run loop / async connect
   via the Keel completion **tick** (`io_engine.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
   orchestration seam, not a backend internal. A new infrastructure TU that needs the headers is added
   to `TIER1_INFRA` with a reason; nothing else may include them.

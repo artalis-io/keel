@@ -1,5 +1,5 @@
 /**
- * @file client.h
+ * @file http_client.h
  * @brief HTTP/1.1 client (sync + async).
  *
  * Sync API: blocking request/response with poll()-based I/O.

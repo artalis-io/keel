@@ -1,11 +1,11 @@
 /**
- * @file h2_client.h
+ * @file http2_client.h
  * @brief HTTP/2 client API
  *
  * Async HTTP/2 client driven by KlEventCtx watchers.
  * Uses a pluggable session vtable (KlHttp2ClientSession) so the actual
  * HTTP/2 framing can be backed by nghttp2 or any other library.
- * Shared protocol constants (max streams, window size) from h2.h.
+ * Shared protocol constants (max streams, window size) from http2.h.
  */
 
 #ifndef KEEL_HTTP2_CLIENT_H

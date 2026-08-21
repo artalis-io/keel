@@ -53,7 +53,7 @@ completion axis (the readiness axis is covered by the default `make test`).
 | Streaming (SSE/chunked/response) | flush on writability | `comp_stream_pump` over `KlDrain`, `stream_inflight` ≤1 | `smoke-pollcomp`/`-iouring`/`-iocp` bigstream; `docs/streaming_contract.md` |
 | Partial I/O (short read/write) | EAGAIN / short `writev` retried | completion reports `< requested`; driver re-posts remainder | `test_client_stream`, `multipart_stream` |
 | TLS (handshake + app data) | `read`/`write` vtable on the socket | memory-BIO `feed_input`/`drain_output` | `tls`, `tls_integration`, `peer_cert` over completion; `smoke-*-tls` |
-| PROXY protocol header | `kl_conn_read_proxy_header` (peek+consume) | `comp_drive_proxy` + `kl_conn_ingest_proxy` from `read_buf` | `test_peer_addr` 6/6 over completion; `smoke-*` proxy |
+| PROXY protocol header | `kl_http_conn_read_proxy_header` (peek+consume) | `comp_drive_proxy` + `kl_http_conn_ingest_proxy` from `read_buf` | `test_peer_addr` 6/6 over completion; `smoke-*` proxy |
 | Close with outstanding work | stale-event guard after close | single terminal completion; op/buffer freed once | ASan/LSan smokes; `test_read_flow_control.shutdown_while_paused` |
 | Timeout | idle sweep + timer heap | same timer heap; deadline on the loop | `test_timeout`, `test_timer` |
 | UDP datagram (source + local addr) | `recvmsg`/`IP_PKTINFO` | `kl_comp_post_udp_recv`/`send` (WSARecvMsg on IOCP) | `udp`, `udp_server`, `udp_batching/offload/tos` over completion |
@@ -96,8 +96,8 @@ See `integrations/README.md`. Validated outside CI (BYO libraries):
 | Adapter | Vtable | Validation |
 |---|---|---|
 | mbedTLS (`integrations/mbedtls`) | `KlTls` | Real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`); `tls`/`tls_integration`/`peer_cert` suites. |
-| nghttp2 client (`integrations/nghttp2`) | `KlH2ClientSession` | In-memory roundtrip + **real-socket e2e** via `kl_h2_client_connect` (h2c); ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
-| nghttp2 server (`integrations/nghttp2`) | `KlH2ServerSession` | In-memory roundtrip + **real-socket e2e** via `KlConfig.h2` (h2c prior-knowledge) + **third-party interop** (`curl --http2-prior-knowledge`); same sanitizer coverage. |
+| nghttp2 client (`integrations/nghttp2`) | `KlHttp2ClientSession` | In-memory roundtrip + **real-socket e2e** via `kl_http2_client_connect` (h2c); ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
+| nghttp2 server (`integrations/nghttp2`) | `KlHttp2ServerSession` | In-memory roundtrip + **real-socket e2e** via `KlHttpServerConfig.h2` (h2c prior-knowledge) + **third-party interop** (`curl --http2-prior-knowledge`); same sanitizer coverage. |
 
 ---
 

@@ -70,7 +70,7 @@ int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms);
  * timer runs against logically destroyed state (async ops / file_io already torn down). Called once
  * from kl_http_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
  * -1 if the force could not be guaranteed (caller leaves the backend close as the physical backstop).
- * The impl (completion_server.c) owns the completion dispatch hook + the listener; server_core.c
+ * The impl (completion_http_server.c) owns the completion dispatch hook + the listener; http_server_core.c
  * stays decoupled from the internal completion vtable. Aborting stub under KEEL_NO_COMPLETION. */
 int kl_io_engine_quiesce_accepts(struct KlHttpServer *s);
 

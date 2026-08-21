@@ -370,6 +370,9 @@ jobs:
       - name: Stale-name gate (deleted KlUdp object API does not reappear)
         run: make check-no-kludp
 
+      - name: Stale-name gate (renamed HTTP taxonomy — no legacy KlServer/KlClient/KlH2/... names)
+        run: make check-no-httplegacy
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 

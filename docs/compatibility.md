@@ -40,8 +40,8 @@ consumer that relinks a newer Keel can verify it at runtime.
 - Public function names, signatures, and documented semantics.
 - The order and meaning of existing fields in public structs.
 - Existing `KlError` and other enum values.
-- The function-pointer order of published vtables (`KlTls`, `KlBodyReader`,
-  `KlH2ClientSession`, `KlH2ServerSession`, `KlResolver`, `KlCompress`, …).
+- The function-pointer order of published vtables (`KlTls`, `KlHttpBodyReader`,
+  `KlHttp2ClientSession`, `KlHttp2ServerSession`, `KlResolver`, `KlCompress`, …).
 
 ## May evolve without a major bump (minor)
 
@@ -53,7 +53,7 @@ consumer that relinks a newer Keel can verify it at runtime.
 - **New enum values appended** at the end.
 - **New optional config knobs** as trailing fields (0 = prior default).
 
-Because callers embed structs like `KlConfig`, `KlAsyncOp`, and `KlClientConfig`
+Because callers embed structs like `KlHttpServerConfig`, `KlAsyncOp`, and `KlHttpClientConfig`
 by value, appending a field changes `sizeof` — hence the recompile. Never insert
 or reorder existing fields within a major version.
 
@@ -79,7 +79,7 @@ independent backends should adopt it from the start.
 ## Integrations
 
 The first-party adapters in `integrations/` implement **existing core vtables**
-(`KlTls` for mbedTLS; `KlH2ClientSession`/`KlH2ServerSession` for nghttp2). They
+(`KlTls` for mbedTLS; `KlHttp2ClientSession`/`KlHttp2ServerSession` for nghttp2). They
 track those vtables and are versioned with the core — a vtable change is a source
 change the adapter recompiles against. No integration adds a type to a core
 public header, and none uses dynamic loading, a plugin registry, or global

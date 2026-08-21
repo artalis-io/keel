@@ -85,7 +85,7 @@ whitelisted() {
     #    identical. Any OTHER __* compiler-runtime symbol is NOT whitelisted (a real
     #    finding). See docs/phase10_uefi_feasibility_design.md (B1).
     __chkstk|chkstk) return 0 ;;
-    # 1d. PE FLOATING-POINT compiler-runtime residual (server core: connection.c's
+    # 1d. PE FLOATING-POINT compiler-runtime residual (server core: http_connection.c's
     #    access-log computes a double duration). _fltused is the MSVC/PE marker the
     #    backend emits when a TU uses floating point — it tells the CRT to pull the
     #    FP support; the CRT/EDK2 (or a `int _fltused = 0;` in the EFI entry) supplies

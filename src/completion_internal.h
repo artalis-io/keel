@@ -14,13 +14,13 @@
  *                         (comp_conn_dispatch / comp_udp_dispatch) so a client-only
  *                         build (CONNECT/WATCHER + timers only) links neither the
  *                         server nor UDP handlers.
- *   completion_server.c — the KlHttpConn/HTTP-1 server state machine over completions,
+ *   completion_http_server.c — the KlHttpConn/HTTP-1 server state machine over completions,
  *                         PLUS the server-side memory-BIO TLS leg (comp_tls_*). TLS is
  *                         folded in because comp_tls_drive ↔ comp_after_state ↔
  *                         comp_h2_drive mutually recurse — separating TLS would need a
  *                         forward-declaration web with no real decoupling benefit.
  *                         Registers comp_server_conn_dispatch on the ctx hook.
- *   completion_h2.c     — comp_h2_drive (HTTP/2 over completions).
+ *   completion_http2.c     — comp_h2_drive (HTTP/2 over completions).
  *   completion_ws.c     — comp_ws_drive (WebSocket over completions).
  *
  * This header declares the handful of helpers that now cross those TU boundaries.

@@ -186,7 +186,7 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * auto-wires each session's provider from `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`
  * via the `KlTls.set_socket_provider` vtable hook (which overrides this ctx default
  * at handshake time). Use this setter for **standalone** KlTls use — driving the
- * vtable directly without connection.c/client.c. Set once on the context, before
+ * vtable directly without http_connection.c/client.c. Set once on the context, before
  * any handshake; every KlTls the factory creates inherits it. Applies only to the
  * synchronous socket-BIO path — the completion (memory-BIO) mode ignores it.
  *

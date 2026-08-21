@@ -114,7 +114,7 @@ typedef struct {
 typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 
 /* A posted server-side recv or send on an accepted child (S-4). The client rides the
- * watcher relay; the SERVER completion driver (completion_server.c) posts recv/send as
+ * watcher relay; the SERVER completion driver (completion_http_server.c) posts recv/send as
  * completion-native ops. drain services each via the U-2 SYNC socket provider and
  * surfaces KL_COMP_READ / KL_COMP_WRITE. The captured generation is the stale guard: an
  * op for a child that closed (generation bumped) or whose slot was reused (magic

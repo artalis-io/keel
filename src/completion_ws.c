@@ -13,7 +13,7 @@
 #include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <stdint.h>
 #include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
-                                    transitively via response.h before off_t neutralization */
+                                    transitively via http_response.h before off_t neutralization */
 
 /* Drive an established WebSocket connection over the completion loop (8e-1). Feed
  * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
@@ -53,9 +53,9 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
-/* Completion-drive seam registration (proto_hooks.h): completion_server.c reaches
+/* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches
  * WebSocket-over-completion only through this table. The installer (called by
- * completion_server.c) registers it and pulls this object out of the archive. */
+ * completion_http_server.c) registers it and pulls this object out of the archive. */
 static const KlWsCompHooks kl_ws_comp_hooks_table = { .drive = kl_comp_ws_drive };
 
 void kl_ws_comp_hooks_install(void) {

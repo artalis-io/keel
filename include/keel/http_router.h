@@ -234,7 +234,7 @@ int  kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlH
  * read the return value to know what happened.
  *
  * This is the in-process counterpart to the network-driven dispatch in
- * `connection.c` / `h2.c`. Hull's test harness uses it; user code can
+ * `http_connection.c` / `h2.c`. Hull's test harness uses it; user code can
  * use it for synthetic requests (e.g. agent-API self-calls).
  *
  * @param r              Router instance.

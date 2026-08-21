@@ -1,8 +1,8 @@
 /**
- * @file h2.h
+ * @file http2.h
  * @brief Shared HTTP/2 protocol constants
  *
- * Contains constants shared by both server (h2_server.h) and client (h2_client.h).
+ * Contains constants shared by both server (http2_server.h) and client (http2_client.h).
  */
 
 #ifndef KEEL_HTTP2_H

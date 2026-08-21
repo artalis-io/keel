@@ -9,10 +9,10 @@
  *     DEFAULT-provider fallbacks. The EFI_TCP4 provider always supplies these ops, so
  *     the kl_sockdef_* else-branch of the seam inline is never taken — but the symbol
  *     must still resolve under -nostdlib (the compiler emits the reference). Fail-closed.
- *   - the file-response platform hooks (response.c's kl_http_response_send/reset/free). The
+ *   - the file-response platform hooks (http_response.c's kl_http_response_send/reset/free). The
  *     EFI server serves only in-memory (borrowed) bodies — no kl_http_response_file — so
  *     these never run; fail-closed.
- *   - _fltused: the PE/COFF floating-point marker the backend emits for connection.c's
+ *   - _fltused: the PE/COFF floating-point marker the backend emits for http_connection.c's
  *     access-log double. The CRT/EDK2 supplies it on a real target; here a plain int.
  *
  * A later phase (S-6 file responses / S-7 teardown) can promote any of these to real
@@ -51,5 +51,5 @@ void kl_plat_file_close(int fd) { (void)fd; }
  * only has to resolve the link. */
 void kl_plat_wakeup_close(KlPlatWakeup *w) { (void)w; }
 
-/* ── PE/COFF floating-point marker (connection.c access-log double) ── */
+/* ── PE/COFF floating-point marker (http_connection.c access-log double) ── */
 int _fltused = 0;

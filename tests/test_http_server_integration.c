@@ -27,7 +27,7 @@ static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* ── A provider with native fds but NO vectored/sendfile support: forces the
- * serialized writev + pread-send sendfile fallbacks in response.c. send/recv
+ * serialized writev + pread-send sendfile fallbacks in http_response.c. send/recv
  * are plain POSIX; the other ops fall back to POSIX (NULL). ────────────────── */
 static ssize_t noviv_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
     (void)c; return send((int)fd, b, n, 0);
@@ -542,7 +542,7 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
 }
 #endif /* !_WIN32 */
 
-/* A provider without KL_SOCK_CAP_WRITEV makes response.c serialize its
+/* A provider without KL_SOCK_CAP_WRITEV makes http_response.c serialize its
  * vectored writes through kl_sock_send. The full 64 KB body must still arrive
  * byte-correct, proving the serialized writev fallback. */
 UTEST(server_integration, serialized_writev_fallback) {
@@ -586,7 +586,7 @@ UTEST(server_integration, serialized_writev_fallback) {
     kl_http_server_free(&srv);
 }
 
-/* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_HTTP_BODY_FILE
+/* A provider without KL_SOCK_CAP_SENDFILE makes http_response.c serve KL_HTTP_BODY_FILE
  * via pread + kl_sock_send instead of sendfile(); the file body must arrive
  * byte-correct. */
 #if !defined(_WIN32)   /* hardcoded /tmp path + CRT file I/O — POSIX-specific */

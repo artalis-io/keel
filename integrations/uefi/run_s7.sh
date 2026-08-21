@@ -133,7 +133,7 @@ grep -E 'S-7:' "$SERIAL" 2>/dev/null || echo "(no S-7 markers found)"
 
 # After curl gets its 200 the guest serves the grace tail, tears down, and prints the
 # clean-teardown markers. Give it a moment, then require BOTH the 200 and "S-7: PASS"
-# (served + kl_server_free + 0 live sockets + kl_uefi_shutdown).
+# (served + kl_http_server_free + 0 live sockets + kl_uefi_shutdown).
 for _ in $(seq 1 30); do grep -q "S-7: PASS\|S-7: FAIL" "$SERIAL" 2>/dev/null && break; sleep 1; done
 if [ "$status" = "200" ] && grep -q "S-7: PASS" "$SERIAL" 2>/dev/null; then
   echo "S-7: PASS — served GET / -> 200 then clean teardown (0 live sockets, providers released)"

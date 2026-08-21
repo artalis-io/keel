@@ -4,7 +4,7 @@
  * The TLS mirror of S-4: a STOCK freestanding KlHttpServer answers `GET / -> 200` over
  * HTTPS (EFI_TCP4 + freestanding mbedTLS) on bare UEFI firmware, driven by the EFI
  * completion backend. The completion-mode TLS server is entirely in the model-blind
- * core (completion_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
+ * core (completion_http_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
  * the EFI backend supplies only the two documented obligations:
  *   1. post_recv does raw transport I/O into the caller-chosen buffer (event_efi.c) — the HTTP
  *      completion adapter (comp_on_read) feeds received CIPHERTEXT to tls->feed_input,

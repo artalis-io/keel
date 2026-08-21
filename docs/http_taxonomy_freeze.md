@@ -494,6 +494,17 @@ update in T3/T4.
 
 ## 9. Stale-name gate (T4) — `check-no-httplegacy`
 
+**IMPLEMENTED (T4).** Wired into the Makefile (`.PHONY`) and CI (`ci.yml`, next to `check-no-kludp`). As a
+discovery tool it surfaced three real stragglers the T2/T3 increments had missed — all folded into T4:
+(1) the §3.6 HTTP compression adapter `KlCompressStream` / `kl_compress_stream_*` (→ `KlHttpCompressStream`
+/ `kl_http_compress_stream_*`) was never renamed in `src/compress.c` / `include/keel/compress.h` /
+`tests/test_compress.c` / `examples/compress_server.c`; (2) `integrations/uefi/run_s7.sh` still called
+`kl_server_free`; (3) the response body-mode enum `KlBodyMode` (→ `KlHttpBodyMode`). The generic codec
+(`KlCompress`/`KlCompressConfig`/`KlCompressCtx`/`KlCompressFactory`/`kl_compress_*`) stays untouched.
+The **Makefile itself is outside the scan set** (it *defines* the banned-token regexes + canaries, so it
+would always self-match — exactly as `check-no-kludp`'s `KLUDP_*` block contains `KlUdp`/`kl_udp_`);
+its explanatory comments were reconciled by hand instead.
+
 A permanent gate (sibling of `check-no-kludp` / `check-doc-refs`), token-oriented to resist mixed-line
 masking (the lesson from the `check-no-kludp` correction):
 
@@ -537,8 +548,24 @@ THREE independent scans (the `check-no-kludp` lesson: token-oriented, not line-f
   codec family `kl_compress_*` and all of `kl_decompress_*` stay allowed). Retained generic roots
   (`kl_socket_ kl_stream_ kl_datagram_ kl_event_ kl_watcher_ kl_timer_ kl_tls_ kl_url_ kl_thread_pool_
   kl_async_ kl_drain_ kl_proxy_ kl_resolver_ kl_dns_ kl_ws_`) are never matched.
-- **Allowlist:** historical design docs under `docs/` (this freeze, the taxonomy prompt, the datagram
-  design docs) — an explicit path list, so recorded history is not rejected.
+- **Deleted module FILENAMES (4th scan — reviewer P1).** Identifier scans (1–3) cannot catch a doc/comment
+  that still names a *renamed file* (e.g. "see `src/connection.c`" or a Key-Types row citing `server.h`),
+  so a fourth scan bans the old header/TU basenames (`server.h request.h response.h client.h router.h
+  cors.h body_reader.h body_reader_multipart.h sse.h redirect.h client_pool.h connection.h parser.h
+  chunked.h h2.h h2_server.h h2_client.h` + the internal `*_internal.h`/`server_plat.h`/`proto_hooks.h` +
+  `keel_h2_nghttp2.h`; and the old `.c` TUs `server*.c client_*.c response.c connection.c router.c cors.c
+  chunked.c redirect.c completion_h2.c completion_server.c proto_hooks.c server_h2.c *_llhttp.c
+  h2_nghttp2_*.c`). Bare-anchored for unambiguous names; the two basenames that also exist as **retained
+  example scenarios** (`sse.c`, `h2_client.c`) are flagged ONLY when path-qualified `src/…`, so
+  `examples/sse.c`/`examples/h2_client.c` (and the example-only `h2_server.c`) stay allowed. A dedicated
+  canary proves the regex both detects a deleted `src/…` name and does NOT flag a retained `examples/…` one.
+- **Allowlist:** only GENUINE history under `docs/` — dated design/audit/phase records (`phase*`, `r3*`,
+  `*_design`, `*audit`, the datagram/pal/dns/udp designs), this freeze, and the taxonomy prompts — plus
+  generated `docs/api/`, so recorded history is not rejected. It is NOT a blanket `docs/` exemption:
+  living docs that describe CURRENT public behavior/API ARE scanned — the two living-architecture docs
+  **and** the current contracts/policies/matrices (`alpn_policy`, `async_lifecycle`, `capability_matrix`,
+  `comparison`, `compatibility`, `roadmap`, `stream_contract`, `streaming_contract`, `transport_surface`)
+  are in `HTTPLEGACY_SCAN`.
 - Portable BSD+GNU grep, `-I` binary skip, `file:line` diagnostics, permanent mixed-line canary proving
   a co-located new name cannot mask an old one.
 

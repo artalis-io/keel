@@ -259,7 +259,7 @@ UTEST(connection, max_header_size_default) {
     /* Before server init sets it, max_header_size is 0 */
     ASSERT_EQ(pool.conns[0].max_header_size, (size_t)0);
 
-    /* Simulate what server.c does */
+    /* Simulate what http_server.c does */
     for (int i = 0; i < 2; i++)
         pool.conns[i].max_header_size = KL_HTTP_CONN_READ_BUF_SIZE;
 

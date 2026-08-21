@@ -4,9 +4,9 @@
 #endif
 
 /*
- * server_plat_posix.c — POSIX implementation of the server platform services
- * (server_plat.h). The AF_UNIX node lifecycle, peer credentials, and signal
- * handling extracted from server.c so that TU stays platform-#ifdef-free.
+ * http_server_plat_posix.c — POSIX implementation of the server platform services
+ * (http_server_plat.h). The AF_UNIX node lifecycle, peer credentials, and signal
+ * handling extracted from http_server.c so that TU stays platform-#ifdef-free.
  *
  * This is a POSIX TU: it keeps intra-POSIX (__linux__ vs __APPLE__/BSD)
  * variance behind #ifdef, exactly like socket_posix.c does for sendfile.

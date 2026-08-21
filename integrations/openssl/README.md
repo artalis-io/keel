@@ -71,7 +71,7 @@ cc app.c \
 ```c
 KlTlsCtx *ctx = kl_tls_openssl_ctx_create("cert.pem", "key.pem", NULL,
                                           KL_MTLS_NONE, &alloc);
-KlConfig config = {
+KlHttpServerConfig config = {
     .tls = &(KlTlsConfig){
         .ctx = ctx,
         .factory = kl_tls_openssl_create,

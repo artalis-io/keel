@@ -1,10 +1,10 @@
 /*
- * completion_server.c — the server + TLS leg of the split completion driver (B2a).
+ * completion_http_server.c — the server + TLS leg of the split completion driver (B2a).
  *
  * The KlHttpConn/HTTP-1 connection state machine over *completion* events, PLUS the
  * server-side memory-BIO TLS path (comp_tls_*). Extracted verbatim from the old
  * completion_driver.c (only the generic tick — kl_comp_run — and the h2/ws drives were
- * split out to completion_core.c / completion_h2.c / completion_ws.c).
+ * split out to completion_core.c / completion_http2.c / completion_ws.c).
  *
  * TLS is folded into this TU rather than a separate completion_tls.c: comp_tls_drive ↔
  * comp_after_state ↔ comp_h2_drive mutually recurse, so a separate TLS TU would need a
@@ -543,7 +543,7 @@ static void comp_setup_accepted(struct KlHttpServer *s, KlSocketHandle fd,
      * before any TLS/HTTP. Reached only through the PROXY seam — NULL in a
      * freestanding firmware server (proxy_protocol.c not linked; proxy_trusted_cidrs
      * never set), so this is skipped and the archive omits the hosted PROXY parser.
-     * Mirrors the readiness accept gate (server.c). */
+     * Mirrors the readiness accept gate (http_server.c). */
     const KlProxyHooks *ph = kl_proxy_hooks();
     if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
         kl_sockaddr_family(&nc->stream.peer_addr) != KL_AF_UNSPEC &&
@@ -596,7 +596,7 @@ static void comp_accept_dispose(void *ctx, KlSocketHandle fd) {
 static void comp_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
     KlHttpServer *s = ctx;
     /* Commit the reserved credit to a KlHttpConn. The peer was stashed on the server just before
-     * kl_listener_on_accepted (single-threaded, consumed immediately) — mirrors server.c. */
+     * kl_listener_on_accepted (single-threaded, consumed immediately) — mirrors http_server.c. */
     comp_setup_accepted(s, fd, &s->accept_pending_peer, lease);
 }
 

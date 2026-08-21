@@ -165,8 +165,8 @@ DNS_SYS_SRC ?= src/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
 # (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
-# server/TLS leg (completion_server.c: the KlConn state machine + kl_io_engine_*) + the
-# h2/ws legs (completion_h2.c / completion_ws.c) + the runtime-dispatch surface
+# server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_io_engine_*) + the
+# h2/ws legs (completion_http2.c / completion_ws.c) + the runtime-dispatch surface
 # (completion_dispatch.c: the kl_comp_* primitives, routed to the compiled-in backend or a
 # runtime provider) are linked on EVERY build. On a readiness build they are never called
 # (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
@@ -524,7 +524,7 @@ smoke-pollcomp-asan:
 # provider form: no kl_event_*_builtin / kl_comp_ops_builtin → no clash with the default
 # backend's _builtin or the readiness kl_comp_ops_builtin stub already in libkeel.a), then
 # link smoke_completion_inject.c against libkeel.a + that one object. The smoke sets
-# KlConfig.event_provider = kl_event_provider_pollcomp() so the server runs on the injected
+# KlHttpServerConfig.event_provider = kl_event_provider_pollcomp() so the server runs on the injected
 # completion loop. Proves the completion axis is genuinely runtime-injectable (RC-2).
 SMOKE_INJECT_BIN = tests/smoke_completion_inject$(EXE)
 SMOKE_INJECT_OBJ = src/event_pollcomp.inject.o
@@ -595,15 +595,15 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # Phase 8f-3: unit-test suites that run over the io_uring completion backend — a
 # regression gate alongside the smokes. Two groups: backend-agnostic logic suites (they
 # don't touch the event loop) + protocol/loop suites that drive the loop through the
-# backend-neutral kl_server_run / kl_event_ctx_run path. Run under
+# backend-neutral kl_http_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
 # 56 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
-# rejected at kl_server_init) → +2 (integration, server_integration) once the completion
-# run loop got prompt teardown (kl_server_stop self-pipe wakeup) and graceful-drain progress
-# (kl_server_drain_progress ran in the completion branch too — it previously never exited
+# rejected at kl_http_server_init) → +2 (integration, server_integration) once the completion
+# run loop got prompt teardown (kl_http_server_stop self-pipe wakeup) and graceful-drain progress
+# (kl_http_server_drain_progress ran in the completion branch too — it previously never exited
 # drain mode, hanging server_integration's drain tests) → +1 (request) once the completion
 # path null-terminated parsed request fields: that was done at the shared conn_dispatch_request
 # core (not the readiness call site), so both event models get it and can't drift) → +1
@@ -631,8 +631,8 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # a *synchronous* EACCES that only holds for readiness (completion sends are queued async).
 # Backend-specific: iocp_engine.
 # → +1 (peer_addr) once the completion driver grew a PROXY-header phase (comp_drive_proxy +
-# kl_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
-# recv is plaintext during KL_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
+# kl_http_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
+# recv is plaintext during KL_HTTP_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
 # tests pass. (This replaced the #134 fail-loud init rejection.)
 # → +5 (alpn, event_provider, sockaddr, stream_transport, version) — backend-agnostic unit/seam
 # suites with no readiness kl_event_wait driver: pure value tests (sockaddr, version), the ALPN
@@ -644,7 +644,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # → +1 (async) once two fixes landed (2026-08-03): (a) a TEST-FIXTURE gap — the suspend/resume
 # tests acquired a bare conn and left conn->ctx NULL, so the completion resume path NULL-derefed in
 # kl_comp_post_send (iou_state = c->ctx->loop._backend); now the fixtures set conn->ctx = &s.ev
-# mirroring server.c:419, and the watcher/loop tests drive kl_event_ctx_run (the portable wait+
+# mirroring http_server.c:419, and the watcher/loop tests drive kl_event_ctx_run (the portable wait+
 # dispatch tick) instead of a raw readiness kl_event_wait; and (b) a real io_uring BACKEND bug —
 # kl_event_mod re-arming an already-armed watch to a new mask no-op'd (iou_arm_watch's
 # `if (w->armed) return 0`), so READ→WRITE interest never fired when the old condition couldn't
@@ -878,14 +878,14 @@ check-sockaddr-neutral:
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
 # the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
 # in TIER1_INFRA), so a new file cannot silently include completion.h/a platform header the way the
-# old AXIS_PROTO_TUS-only manifest allowed (e.g. router.c / cors.c / http1_chunked.c / body_reader*.c /
+# old AXIS_PROTO_TUS-only manifest allowed (e.g. http_router.c / http_cors.c / http1_chunked.c / body_reader*.c /
 # parsers/*.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
 # TIER1_INFRA below, with a reason. Include-based → robust vs the WSA*/overlapped mentions that appear
-# only in explanatory comments (http_connection.c / http_response.c / client_sync.c). Backstop for
+# only in explanatory comments (http_connection.c / http_response.c / http_client_sync.c). Backstop for
 # docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
 #
 # TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
-# for the transport machines + run-loop/async drivers). server.c / client_async.c live here because
+# for the transport machines + run-loop/async drivers). http_server.c / http_client_async.c live here because
 # they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
@@ -969,6 +969,72 @@ check-no-kludp:
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-no-kludp: OK (object types rejected tree-wide; every kl_udp_* token is a retained cmsg helper)"
 
+# Stale-name gate (T4): the HTTP taxonomy rename (KlServer->KlHttpServer, KlClient->KlHttpClient,
+# KlRequest/KlResponse/KlConn/KlRouter/.../KlH2*->KlHttp*/KlHttp1*/KlHttp2*, kl_server_/kl_client_/kl_h2_
+# -> kl_http_*, KL_H2_/KL_CLIENT_/... -> KL_HTTP*) is complete; fail if any OLD public name reappears in
+# code or LIVING docs. FOUR INDEPENDENT scans (the check-no-kludp lesson -- a whole-line
+# grep -v cannot mask a forbidden token co-located with an allowed one):
+#   1. Object TYPES -- the exact freeze-S9 identifier list, \b-anchored (so KlConn never matches the
+#      generic KlConnectOp; longer names precede their prefixes so KlClientPool wins over KlClient).
+#   2. Constant PREFIXES/tokens -- the old KL_ families (KL_CONN_/KL_BODY_/KL_CLIENT_/KL_H2_/KL_PARSE_/
+#      KL_CHUNK_/KL_MP_/KL_CORS_/KL_CPOOL_/KL_REDIRECT_/KL_TRANSPORT_/KL_LOG_) + the exact stragglers.
+#   3. Function TOKENS -- old kl_ families extracted individually (grep -o); the retained generic roots
+#      (kl_socket_/kl_stream_/kl_datagram_/kl_event_/kl_compress_/kl_decompress_/kl_ws_/...) never match,
+#      and the new kl_http*/kl_comp_http2_ names are outside every pattern.
+#   4. Deleted module FILENAMES -- the old header/TU names (server.h, request.h, connection.c, server_h2.c,
+#      client_async.c, h2_client.h, proto_hooks.c, keel_h2_nghttp2.h, ...) so living docs/comments never
+#      point at a nonexistent file. Bare-anchored for unambiguous names; the two basenames that also exist
+#      as retained example scenarios (sse.c, h2_client.c) are flagged ONLY when path-qualified as src/, so
+#      examples/sse.c and examples/h2_client.c (and the example-only h2_server.c) stay allowed.
+# SCAN SET = code (src include parsers tests examples bench fuzz integrations) + the LIVING docs:
+# README/CLAUDE/AGENTS/CONTRIBUTING, examples' & integrations' READMEs (via their dirs), site/index.html,
+# and the docs/ that describe CURRENT public behavior/API -- the two living-architecture docs plus the
+# contracts/policies/matrices (alpn_policy, async_lifecycle, capability_matrix, comparison, compatibility,
+# roadmap, stream_contract, streaming_contract, transport_surface). OUTSIDE the scan set BY DESIGN (they
+# record old names as history): genuine design/audit/phase records under docs/ (phase*/r3*/*_design/*audit,
+# datagram/pal/dns/udp designs), this freeze, the taxonomy prompts, generated docs/api/, untracked
+# site/build/, and the Makefile itself (it DEFINES the regexes+canaries below, so it would self-match --
+# exactly as check-no-kludp's KLUDP_* block contains KlUdp/kl_udp_; its comments are reconciled by hand).
+# Binary files skipped (-I). Permanent mixed-line canaries prove a co-located new name masks neither an old
+# type/constant nor an old function token.
+HTTPLEGACY_TYPES_RE = \b(KlServerStats|KlServer|KlConfig|KlClientPoolConfig|KlClientPoolConn|KlClientPoolEntry|KlClientPool|KlClientConfig|KlClientResponse|KlClientHeader|KlClientDoneFn|KlClientBodyFn|KlClientHeadersFn|KlClientReadFn|KlClientStreamCfg|KlClientState|KlClientConnectAttempt|KlClient|KlProxyConfig|KlRequestParser|KlRequest|KlResponseParserFactory|KlResponseParser|KlResponse|KlBodyMode|KlWriteFn|KlConnState|KlConnPool|KlConn|KlHandler|KlMiddlewareEntry|KlMiddleware|KlRouter|KlRoute|KlParam|KlBodyReaderFactory|KlCorsConfig|KlBodyReader|KlBufReader|KlMultipartReader|KlMultipartPartMeta|KlMultipartPart|KlMultipartConfig|KlMultipartEvent|KlMultipartErrorCode|KlSse|KlCompressStream|KlRedirectClient|KlRedirectConfig|KlRedirectDoneFn|KlChunkedDecoder|KlChunkedState|KlParserFactory|KlParseResult|KlParser|KlH2ServerSessionFactory|KlH2ServerSession|KlH2ServerConfig|KlH2ServerConn|KlH2ServerCallbacks|KlH2ServerStream|KlH2ServerHooks|KlH2ClientSessionFactory|KlH2ClientSession|KlH2ClientConfig|KlH2ClientConn|KlH2ClientCallbacks|KlH2ClientStream|KlH2ClientResponseFn|KlH2ClientResponse|KlH2ClientHeader|KlH2ClientErrorFn|KlH2Client|KlH2WriteFn|KlH2CompHooks|KlAccessLogFn|KlLogFn|KlTransport)\b
+HTTPLEGACY_CONST_RE = KL_(CONN|BODY|CLIENT|H2|PARSE|CHUNK|MP|CORS|CPOOL|REDIRECT|TRANSPORT|LOG)_|\bKL_READ_BUF_SIZE\b|\bKL_PEER_(SOCKET|PROXY)\b|\bKL_MAX_PARAMS\b|\bKL_DEFAULT_(MAX_CONNS|READ_TIMEOUT|MAX_BODY_SIZE)\b
+HTTPLEGACY_FN_RE = kl_(server|client|request|response|conn|router|cors|body_reader|buf_reader|multipart|sse|redirect|cpool|parser|chunked|h2|comp_h2|compress_stream)_[A-Za-z0-9_]*|\bkl_log(_errno)?\b
+HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
+HTTPLEGACY_FILES_RE = \b(body_reader\.h|body_reader_buffer\.c|body_reader_multipart\.c|body_reader_multipart\.h|chunked\.c|client\.h|client_async\.c|client_common\.c|client_internal\.h|client_pool\.c|client_pool\.h|client_proxy\.c|client_proxy\.h|client_sync\.c|completion_h2\.c|completion_server\.c|conn_internal\.h|connection\.c|connection\.h|cors\.c|cors\.h|h2\.h|h2_client\.h|h2_internal\.h|h2_nghttp2_client\.c|h2_nghttp2_server\.c|h2_server\.h|keel_h2_nghttp2\.h|parser_llhttp\.c|proto_hooks\.c|proto_hooks\.h|redirect\.c|redirect\.h|request\.h|response\.c|response\.h|response_internal\.h|response_parser_llhttp\.c|router\.c|router\.h|server\.c|server\.h|server_activation\.c|server_core\.c|server_h2\.c|server_plat\.h|server_plat_posix\.c|server_plat_win\.c|server_ws\.c|sse\.h)\b|\bsrc/(client|h2_client|sse)\.c\b
+check-no-httplegacy:
+	@bad=0; \
+	tcanary='KlServer x; KlHttpServer ok'; \
+	if ! printf '%s\n' "$$tcanary" | grep -qE '$(HTTPLEGACY_TYPES_RE)'; then \
+	  echo "check-no-httplegacy: SELF-TEST FAILED -- type regex no longer detects KlServer"; exit 1; fi; \
+	ccanary='KL_H2_DEFAULT_MAX_STREAMS x; KL_HTTP2_DEFAULT_MAX_STREAMS ok'; \
+	cleak=`printf '%s\n' "$$ccanary" | grep -oE '$(HTTPLEGACY_CONST_RE)'`; \
+	if [ "$$cleak" != "KL_H2_" ]; then \
+	  echo "check-no-httplegacy: SELF-TEST FAILED -- constant regex leaked/masked (surfaced: '$$cleak')"; exit 1; fi; \
+	fcanary='kl_server_init(a); kl_http_server_init(b)'; \
+	fleak=`printf '%s\n' "$$fcanary" | grep -oE '$(HTTPLEGACY_FN_RE)'`; \
+	if [ "$$fleak" != "kl_server_init" ]; then \
+	  echo "check-no-httplegacy: SELF-TEST FAILED -- a new kl_http_* name masked/leaked (surfaced: '$$fleak')"; exit 1; fi; \
+	types=`grep -rInE '$(HTTPLEGACY_TYPES_RE)' $(HTTPLEGACY_SCAN) 2>/dev/null`; \
+	for keep in examples/sse.c examples/h2_client.c examples/client.c h2_server.c; do \
+	  if printf '%s\n' "$$keep" | grep -qE '$(HTTPLEGACY_FILES_RE)'; then \
+	    echo "check-no-httplegacy: SELF-TEST FAILED -- filename regex flagged a retained example ($$keep)"; exit 1; fi; \
+	done; \
+	for drop in src/connection.c src/sse.c src/h2_client.c src/client.c server.h h2_client.h; do \
+	  if ! printf '%s\n' "$$drop" | grep -qE '$(HTTPLEGACY_FILES_RE)'; then \
+	    echo "check-no-httplegacy: SELF-TEST FAILED -- filename regex no longer detects deleted $$drop"; exit 1; fi; \
+	done; \
+	if [ -n "$$types" ]; then echo "$$types"; echo "check-no-httplegacy: FAILED -- a renamed HTTP object TYPE reappeared"; bad=1; fi; \
+	consts=`grep -rInE '$(HTTPLEGACY_CONST_RE)' $(HTTPLEGACY_SCAN) 2>/dev/null`; \
+	if [ -n "$$consts" ]; then echo "$$consts"; echo "check-no-httplegacy: FAILED -- a renamed HTTP CONSTANT reappeared"; bad=1; fi; \
+	fns=`grep -rInoE '$(HTTPLEGACY_FN_RE)' $(HTTPLEGACY_SCAN) 2>/dev/null`; \
+	if [ -n "$$fns" ]; then echo "$$fns"; echo "check-no-httplegacy: FAILED -- a renamed kl_http* FUNCTION token reappeared"; bad=1; fi; \
+	files=`grep -rInE '$(HTTPLEGACY_FILES_RE)' $(HTTPLEGACY_SCAN) 2>/dev/null`; \
+	if [ -n "$$files" ]; then echo "$$files"; echo "check-no-httplegacy: FAILED -- a reference to a RENAMED/DELETED module filename reappeared (living docs must not point at nonexistent files)"; bad=1; fi; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-no-httplegacy: OK (types/constants/functions/filenames -- no legacy HTTP name or deleted-module path in code or living docs)"
+
+
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
 #    KEEL_FREESTANDING config, where the DNS-over-TCP fallback (the whole KlDnsTcp struct usage +
@@ -993,10 +1059,10 @@ cppcheck:
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
 # Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
-# the raw KlStream (&conn->stream) as udata, not a bare KlConn. Pointer equality (stream is the
+# the raw KlStream (&conn->stream) as udata, not a bare KlHttpConn. Pointer equality (stream is the
 # leading member) hides regressions from behavioral tests. tools/check_readiness_identity.pl parses
 # whole call expressions (balanced parens), so it catches BOTH single-line and multiline calls. The
-# completion accept path (completion_server.c) still registers KlConn until 6B-3 and is excluded.
+# completion accept path (completion_http_server.c) still registers KlHttpConn until 6B-3 and is excluded.
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
 	     src/http_server.c src/async.c src/http_server_core.c src/completion_http_server.c \
@@ -1108,7 +1174,7 @@ smoke: examples
 # hosted libc — -ffreestanding, full -Werror — and that none of them pull a
 # POSIX socket/system header. The in-gate vs out-of-gate header list (http_response.h
 # and file_io.h are now in-gate after off_t→uint64_t; why resolver.h / udp*.h /
-# server.h stay out) is documented at the top of tests/freestanding_headers.c.
+# http_server.h stay out) is documented at the top of tests/freestanding_headers.c.
 #
 # The dep proof matches the FORBIDDEN header paths *exactly at a leaf boundary*
 # (e.g. .../sys/socket.h, .../strings.h) so it flags only headers our code
@@ -1172,7 +1238,7 @@ freestanding-headers:
 # resolution hooks (kl_plat_* / kl_monotonic_ms / kl_resolve_sync), and the
 # socket/event/completion PROVIDER ops reached via vtable (kl_sockdef_* /
 # kl_event_*_builtin / kl_comp_ops_builtin) — the injection points a freestanding
-# build fills with its own provider. It contains NO server (kl_conn_*/kl_server_*/
+# build fills with its own provider. It contains NO server (kl_http_conn_*/kl_http_server_*/
 # comp_on_*/router), thread_pool/pthread, kl_udp_*, kl_dns_*, file_io, or
 # OS-syscall/errno symbol; the gate FAILS if any appears. This is the concrete
 # payoff of the freestanding phase and the launch point for the UEFI spike
@@ -1181,7 +1247,7 @@ freestanding-headers:
 # The manifest is genuinely client + completion only: the KlEventCtx/watcher half
 # of async.c was split into event_ctx.c (the server-suspend half — which pulls the
 # server connection driver — stays in async.c and is EXCLUDED), and the built-in
-# DNS auto-create in client_async.c is #ifdef'd out under KEEL_FREESTANDING (a
+# DNS auto-create in http_client_async.c is #ifdef'd out under KEEL_FREESTANDING (a
 # freestanding client resolves via cfg->resolver or a numeric address; DNS/UDP is
 # out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
 # deliberately NOT in the manifest — a freestanding build supplies its own
@@ -1288,12 +1354,12 @@ freestanding-lib:
 	$(call fs_build_and_gate,$(FREESTANDING_CLIENT_SRC),libkeel_freestanding,,)
 
 # ── Freestanding SERVER archive (Phase 10 UEFI server, S-1) ───────────────────
-# The model-blind HTTP/1.1 server core (server_core.c) + the completion server
-# driver (completion_server.c over completion_core.c) + protocol layer
-# (http_connection.c, http_response.c, router.c, http1_chunked.c, drain.c, body_reader_buffer.c,
+# The model-blind HTTP/1.1 server core (http_server_core.c) + the completion server
+# driver (completion_http_server.c over completion_core.c) + protocol layer
+# (http_connection.c, http_response.c, http_router.c, http1_chunked.c, drain.c, http_body_reader_buffer.c,
 # the request parser, proxy_protocol.c) + the ws/h2 upgrade-seam storage
-# (proto_hooks.c, tables NOT installed → HTTP/1.1 only). NO server.c (hosted:
-# bind/listen/systemd/signals/readiness loop), NO server_ws.c/server_h2.c
+# (http_proto_hooks.c, tables NOT installed → HTTP/1.1 only). NO http_server.c (hosted:
+# bind/listen/systemd/signals/readiness loop), NO http_server_ws.c/http2_server.c
 # (WebSocket/HTTP-2 out of scope), NO OS sockets — a freestanding build injects its
 # own socket + completion providers (EFI_TCP4 + the EFI completion backend). The
 # symbol gate proves the undefined closure is the SAME documented whitelist as the
@@ -1726,7 +1792,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-no-kludp freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-no-kludp check-no-httplegacy freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

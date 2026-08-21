@@ -97,7 +97,7 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
  */
 int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out);
 
-/* ── Internal (used by connection.c / server.c) ──────────────────── */
+/* ── Internal (used by http_connection.c / http_server.c) ──────────────────── */
 
 int  kl_ws_server_upgrade(KlHttpConn *c, const char *leftover, size_t leftover_len);
 int  kl_ws_server_on_readable(KlHttpConn *c);

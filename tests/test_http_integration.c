@@ -250,7 +250,7 @@ static int  eer_err_on_data(KlHttpBodyReader *self, const char *data, size_t len
     if (r->responded || !r->conn || !r->res) return 0;
     /* Handler is alive — now pretend we just hit a cap. Write a
      * structured "handler" response BEFORE returning -1. The new
-     * error-path branch in connection.c sees state == SENDING and
+     * error-path branch in http_connection.c sees state == SENDING and
      * returns it without overwriting. */
     kl_http_response_status(r->res, 413);
     kl_http_response_header(r->res, "Content-Type", "text/plain");
@@ -396,7 +396,7 @@ static int  eer_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     if (r->responded || !r->conn || !r->res) return 0;
     /* Mimic a coroutine waking on first on_data: set up the response,
      * transition state to SENDING. The new mid-stream early-exit
-     * branch in connection.c sees the terminal state and returns it
+     * branch in http_connection.c sees the terminal state and returns it
      * instead of forcing READING_BODY. */
     kl_http_response_status(r->res, 200);
     kl_http_response_header(r->res, "Content-Type", "text/plain");
@@ -912,7 +912,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
     /* Synthetic streaming handler that "yields" at dispatch time and
      * "wakes" inside on_data to send a 200 response BEFORE the body
      * is fully received. Without the v2.1.1 mid-stream early-exit
-     * check in connection.c's READING_BODY, Keel would force the
+     * check in http_connection.c's READING_BODY, Keel would force the
      * state back to READING_BODY after on_data, ignoring the
      * handler's SENDING transition, and the response would never be
      * sent (the test would hang).

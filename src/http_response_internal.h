@@ -1,5 +1,5 @@
 /*
- * response_internal.h — INTERNAL. Response serialization for the completion driver.
+ * http_response_internal.h — INTERNAL. Response serialization for the completion driver.
  *
  * kl_http_response_send() serializes a buffered response (status line + headers +
  * Content-Length + Connection + CRLF + body) into an iovec and writes it with the

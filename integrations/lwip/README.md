@@ -17,7 +17,7 @@ build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
 - `resolve_sync_lwip.c` — blocking name resolution over `lwip_getaddrinfo` (the
   client-axis seam; overrides the stock host `kl_resolve_sync` at link time).
 - `platform_wakeup_lwip.c` — self-connected lwIP UDP wakeup (responsive
-  `kl_server_stop`; overrides the generic `src/platform_wakeup_*` seam).
+  `kl_http_server_stop`; overrides the generic `src/platform_wakeup_*` seam).
 - `keel_lwip.h` — `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`.
 - `lwipopts.h` — a **production-oriented baseline** config (Keel provider
   requirements + security hardening + a documented sizing block to TUNE per
@@ -85,7 +85,7 @@ libkeel, `make loopback`), so the payoff is regression-protected.
 
 **Responsive stop** is wired: `platform_wakeup_lwip.c` provides a self-connected
 lwIP UDP wakeup (overriding the generic `src/platform_wakeup_*` seam at link time),
-so `kl_server_stop` wakes `lwip_poll` immediately rather than on the next tick.
+so `kl_http_server_stop` wakes `lwip_poll` immediately rather than on the next tick.
 
 **TLS over lwIP** needs **no lwIP-specific TLS code**: the mbedTLS integration's
 socket-BIO can be routed through a `KlSocketProvider`
@@ -121,7 +121,7 @@ Two lwIP integrations ship:
    injected into a **stock** `libkeel.a` — the always-linked completion driver + dispatch reach
    it via `loop->ops->completion` (`BACKEND=lwipraw` is retired). KEEL's event loop *is* the lwIP
    mainloop (`sys_check_timeouts()` + `netif_poll()`; raw `tcp_*` callbacks feed the completion
-   driver). A raw-backed `KlServer` serves HTTP over the loopback netif — accept/recv/send,
+   driver). A raw-backed `KlHttpServer` serves HTTP over the loopback netif — accept/recv/send,
    backpressure, file responses, and full close/cancel/idle-timeout lifetime — all in-process (no
    tap, no root), CI-gated (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean.
    `make raw-spike` is the minimal foundation spike. Notably this needed **zero** changes to
@@ -141,15 +141,15 @@ support:
 
 | Capability | Status | Notes |
 |------------|--------|-------|
-| IPv4 TCP **server** (`KlServer`) | **Supported** | accept/recv/send over the loopback netif |
-| IPv4 TCP **client** (`KlClient`) | **Supported** (LC-1/2) | outbound connect via the **completion** connect primitive (`kl_comp_post_connect` → `tcp_connect`) + Happy-Eyeballs address racing; send/recv on an emulated readiness watcher |
-| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` / `KlClient` |
+| IPv4 TCP **server** (`KlHttpServer`) | **Supported** | accept/recv/send over the loopback netif |
+| IPv4 TCP **client** (`KlHttpClient`) | **Supported** (LC-1/2) | outbound connect via the **completion** connect primitive (`kl_comp_post_connect` → `tcp_connect`) + Happy-Eyeballs address racing; send/recv on an emulated readiness watcher |
+| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlHttpServer` / `KlHttpClient` |
 | **HTTPS** (client + server) | **Supported** (LC-4) | client over the mbedTLS socket-BIO routed through `kl_socket_provider_lwip_raw()`; server over the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no TLS file/stream body). BYO mbedTLS |
 | **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops (`.dgram != NULL`); `kl_datagram_socket_init` runs `KlDatagram` over the raw completion loop |
 | **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`src/dns_resolver.c`) over `KlDatagram`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
 | Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
 | Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
-| Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlServer` |
+| Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlHttpServer` |
 | Multiple **sequential** event contexts | **Supported** | create → destroy → create |
 | The **synchronous** socket-provider `connect` op | **Unsupported by design** | returns `-1` / `ENOTSUP` — a blocking connect is nonsensical on `NO_SYS=1`; the client connects via the **completion** primitive above |
 | **IPv6** | **Unsupported (fails early)** | `bind` rejects a non-IPv4 address (the loopif is IPv4) |
@@ -161,8 +161,8 @@ For **IPv6** or the BSD-socket lwIP model, use the readiness integration above
 
 ### Max connections + per-connection memory
 
-`conn_cap = KlConfig.max_connections` is the **one authoritative capacity** — the same value
-sizes the `KlConn` pool and the backend's raw slot table (`kl_lwr_ctx_ensure_cap` at prime).
+`conn_cap = KlHttpServerConfig.max_connections` is the **one authoritative capacity** — the same value
+sizes the `KlHttpConn` pool and the backend's raw slot table (`kl_lwr_ctx_ensure_cap` at prime).
 Over-capacity accepts are rejected (`tcp_abort`), never queued.
 
 Per-connection backend memory is fixed and independent of response/request size:

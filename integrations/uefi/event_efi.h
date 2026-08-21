@@ -18,7 +18,7 @@
  *     send/recv ride the drain WATCHER RELAY (KL_COMP_WATCHER) over the U-2 provider's
  *     synchronous ops — the emulated-readiness model of tests/freestanding_harness.c.
  *   - SERVER: completion-NATIVE accept/recv/send. The generic completion server
- *     (completion_server.c) posts prime_accepts/post_recv/post_send directly, surfaced by
+ *     (completion_http_server.c) posts prime_accepts/post_recv/post_send directly, surfaced by
  *     drain as KL_COMP_ACCEPT / KL_COMP_READ / KL_COMP_WRITE. Accept arming is
  *     capacity-gated (kl_uefi_socket_accept_arm, backpressure). No heap in the send path
  *     (the response iovec is snapshotted into a fixed inline op buffer).

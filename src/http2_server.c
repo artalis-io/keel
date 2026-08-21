@@ -403,7 +403,7 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
 
-    /* Enforce body size limit (mirrors HTTP/1.1 path in connection.c) */
+    /* Enforce body size limit (mirrors HTTP/1.1 path in http_connection.c) */
     size_t max = h2c->conn->max_body_size;
     if (max > 0) {
         if (len > max - stream->body_received) return -1;
@@ -672,11 +672,11 @@ void kl_http2_server_cleanup(KlHttpConn *c) {
     c->h2 = NULL;
 }
 
-/* ── HTTP/2 server upgrade seam registration (proto_hooks.h) ─────────────────
+/* ── HTTP/2 server upgrade seam registration (http_proto_hooks.h) ─────────────────
  * The shared server core reaches HTTP/2 only through this table; installing it
  * both wires the core and forces server_h2.o out of the static archive. */
 /* Readiness WRITE-interest predicate (h2 analogue of ws drain_pending): does the session
- * have queued output? Keeps server.c's rearm from peeking KlHttp2ServerConn internals. */
+ * have queued output? Keeps http_server.c's rearm from peeking KlHttp2ServerConn internals. */
 static int kl_http2_server_want_write_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && c->h2->session->want_write(c->h2->session);
 }
@@ -695,7 +695,7 @@ void kl_http2_server_hooks_install(void) {
     kl_http2_server_hooks_set(&kl_http2_server_hooks_table);
 }
 
-/* Also self-install at load, so a consumer driving connection.c's dispatch directly
+/* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
  * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_http2_server_* reference pulls it in). */
 __attribute__((constructor))

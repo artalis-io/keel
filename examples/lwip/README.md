@@ -43,7 +43,7 @@ files as the platform's socket + event backend (replacing `socket_posix.c`/
 loopback netif — `LWIP_NETIF_LOOPBACK` — lets `127.0.0.1` work on a dev host with
 no hardware), and the sys/arch port (`contrib/ports/unix` on a host, or your
 target's port). Server/client code is then identical to any other platform —
-select the provider via `KlConfig.sockets = kl_socket_provider_lwip()`. That build
+select the provider via `KlHttpServerConfig.sockets = kl_socket_provider_lwip()`. That build
 integration is the platform-port **promotion path** (a `PLATFORM=lwip` Makefile
 branch), deliberately out of scope for this opt-in reference — see
 `docs/lwip_platform_design.md` §7.

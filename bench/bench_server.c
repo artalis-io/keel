@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
     }
 
     /* Multi-worker: fork (workers-1) children; every process runs its own KlHttpServer on the
-     * same port. Each listen socket sets SO_REUSEPORT (server.c), so the kernel load-balances
+     * same port. Each listen socket sets SO_REUSEPORT (http_server.c), so the kernel load-balances
      * incoming connections across the workers — Keel's horizontal-scaling model (one
      * single-threaded accept loop per core), demonstrated here for the connection-churn bench. */
     for (int w = 1; w < workers; w++) {

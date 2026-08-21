@@ -2,7 +2,7 @@
 
 Keel's networking core is not HTTP-only. A protocol author can build an arbitrary
 TCP (or datagram) server on the **same public primitives** the HTTP server is
-built on, with no HTTP machinery (`KlServer`, router, request/response) and no
+built on, with no HTTP machinery (`KlHttpServer`, router, request/response) and no
 internal headers. This document is the authoritative map of that surface; the
 working proof is `tests/test_stream_transport.c` — a length-prefixed framed-echo
 server built entirely from what is described here.

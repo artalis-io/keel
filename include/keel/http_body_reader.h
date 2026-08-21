@@ -4,7 +4,7 @@
 #include <keel/allocator.h>
 #include <stddef.h>
 
-/** @brief Forward declaration — full definition in request.h. */
+/** @brief Forward declaration — full definition in http_request.h. */
 typedef struct KlHttpRequest KlHttpRequest;
 
 /**

@@ -56,7 +56,7 @@ test: $(LIB) e2e
 	@echo "integrations/nghttp2: roundtrip OK"
 
 # End-to-end over a real loopback socket + KEEL event loop: KEEL nghttp2 client
-# (kl_http2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlConfig.h2,
+# (kl_http2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlHttpServerConfig.h2,
 # h2c prior-knowledge). Exercises both adapters through the real driver paths.
 e2e: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }

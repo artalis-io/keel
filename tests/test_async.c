@@ -248,7 +248,7 @@ UTEST(async, suspend_sets_state) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -300,7 +300,7 @@ UTEST(async, complete_calls_on_resume) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -357,7 +357,7 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -389,7 +389,7 @@ UTEST(async, deadline_fires_on_timeout) {
     /* Wait for the deadline to pass */
     usleep(30000);  /* 30ms */
 
-    /* Run the deadline sweep manually (mirrors server.c logic) */
+    /* Run the deadline sweep manually (mirrors http_server.c logic) */
     uint64_t now = kl_monotonic_ms();
     KlAsyncOp *aop = s.async_ops;
     while (aop) {
@@ -419,7 +419,7 @@ UTEST(async, cancel_on_server_free) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -472,7 +472,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -498,7 +498,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     /* Set last_active_ms to far in the past — simulates long idle */
     c->last_active_ms = kl_monotonic_ms() - 60000;  /* 60s ago */
 
-    /* Run the timeout sweep logic (mirrors server.c) */
+    /* Run the timeout sweep logic (mirrors http_server.c) */
     uint64_t now = kl_monotonic_ms();
     uint64_t timeout = 30000;  /* 30s read timeout */
     int reaped = 0;
@@ -552,7 +552,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
     }
 
     /* Create a connection with socketpair */
@@ -781,7 +781,7 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
     for (int i = 0; i < 4; i++) {                                              \
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);          \
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 */               \
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 */               \
     }                                                                          \
     int fds[2]; ASSERT_EQ(kl_test_socketpair(fds), 0);                         \
     set_nonblocking(fds[0]); set_nonblocking(fds[1]);                          \

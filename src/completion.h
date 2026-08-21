@@ -10,8 +10,8 @@
  * consumer (completion_driver.c). A backend TU (event_iocp.c) implements it.
  *
  * The generic driver (completion_driver.c) consumes KlCompletionEvent's and drives
- * connections via the model-blind protocol core (conn_internal.h /
- * response_internal.h) + these post primitives — platform-independently. See
+ * connections via the model-blind protocol core (http_conn_internal.h /
+ * http_response_internal.h) + these post primitives — platform-independently. See
  * docs/phase8b_iocp_breadth_design.md.
  */
 #ifndef KEEL_SRC_COMPLETION_H
@@ -202,7 +202,7 @@ int kl_comp_prime_accepts(struct KlHttpServer *s);
  * force could not be guaranteed. Call only after kl_listener_close() + closing the listen socket. */
 int kl_comp_shutdown_accepts(struct KlHttpServer *s);
 
-/* HTTP-adapter helper (defined in completion_server.c): choose the receive buffer for the
+/* HTTP-adapter helper (defined in completion_http_server.c): choose the receive buffer for the
  * connection's current phase — plaintext/PROXY → c->stream.read_buf; TLS → the per-conn
  * ciphertext scratch (c->comp_cipher) — then post the raw receive. This is where all
  * TLS/PROXY/state knowledge lives; the backend below sees only (stream, buf, cap). */

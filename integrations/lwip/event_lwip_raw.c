@@ -279,7 +279,7 @@ static int lwr_sock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
 }
 
 /* listen: tcp_listen relocates the pcb (frees the passed-in one, returns a smaller LISTEN
- * pcb) and the glue arms the accept callback + tracks the relocated handle. server.c still
+ * pcb) and the glue arms the accept callback + tracks the relocated handle. http_server.c still
  * holds the freed handle in s->listen_fd; kl_comp_prime_accepts adopts the relocated one
  * (kl_lwr_listen_pcb) so close() later targets a live pcb, not the dangling original. */
 static int lwr_sock_listen(void *c, KlSocketHandle fd, int backlog) {
@@ -441,7 +441,7 @@ static int lwr_comp_prime_accepts(struct KlHttpServer *s) {
     int cap = s->config.max_connections;
     if (cap > 0 && kl_lwr_ctx_ensure_cap(st->lwrctx, cap) < 0) return -1;
     st->primed = 1;
-    /* tcp_listen relocated the listen pcb (freeing the one server.c bound); adopt the live
+    /* tcp_listen relocated the listen pcb (freeing the one http_server.c bound); adopt the live
      * handle so s->listen_fd is valid for the eventual close (kl_http_server_close_listener). */
     void *lp = kl_lwr_listen_pcb(st->lwrctx);
     if (lp) s->listen_fd = (KlSocketHandle)lp;

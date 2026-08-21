@@ -27,7 +27,7 @@ make clean        # remove all build artifacts
 
 - `include/keel/` — Public headers. Each module is a `.h` file. `keel.h` is the umbrella.
 - `src/` — Core source. Each module is a `.c` file.
-- `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
+- `parsers/` — Pluggable parser backends (`http1_parser_llhttp.c`, `http1_response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
 - `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, unix_socket_server, compress_server, decompress_client).
@@ -39,10 +39,10 @@ make clean        # remove all build artifacts
 **Three orthogonal axes** (see `docs/keel_axis_audit.md`), each independently replaceable:
 
 - **Event axis** — `event.h` (readiness) + `completion.h` + the completion driver (platform-independent). Readiness backends: `event_epoll.c` / `event_kqueue.c` / `event_wsapoll.c` / `event_poll.c`. Completion backends: `event_iouring.c` (Linux SQE/CQE + splice), `event_iocp.c` (Windows), `event_pollcomp.c` (a portable `poll()` completion double for CI/ASan). Capability negotiation (`src/event_caps.h`: `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) matches a loop to a compatible socket provider.
-- **Socket axis** — `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlConfig.sockets` / `KlClientConfig.sockets`.
-- **Protocol axis** — `connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `sse.c`, the `KlTls` vtable, body readers, `response.c`. These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
+- **Socket axis** — `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlHttpServerConfig.sockets` / `KlHttpClientConfig.sockets`.
+- **Protocol axis** — `http_connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `sse.c`, the `KlTls` vtable, body readers, `http_response.c`. These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
 
-`integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged: `lwip/` (BSD sockets + a raw NO_SYS completion provider), `uefi/` (a freestanding EFI_TCP4/UDP4 provider — stock async `KlClient` on bare firmware; see `docs/phase10_uefi_feasibility_design.md`), `mbedtls/` (TLS), `nghttp2/` (HTTP/2 session).
+`integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged: `lwip/` (BSD sockets + a raw NO_SYS completion provider), `uefi/` (a freestanding EFI_TCP4/UDP4 provider — stock async `KlHttpClient` on bare firmware; see `docs/phase10_uefi_feasibility_design.md`), `mbedtls/` (TLS), `nghttp2/` (HTTP/2 session).
 
 Below the axes, orthogonal modules, each independently testable:
 
@@ -72,8 +72,8 @@ Below the axes, orthogonal modules, each independently testable:
 24. **timer** — One-shot timer scheduling on KlEventCtx (min-heap, checked per event loop tick)
 25. **client_pool** — HTTP client connection pool: caches idle TCP+TLS connections keyed by (host, port, is_tls) for keep-alive reuse
 26. **redirect** — HTTP redirect following: automatic 3xx redirect with RFC 7231/7538 method transformation, cross-origin auth stripping, URL resolution
-27. **compress** — Pluggable response compression vtable: single-shot buffer + streaming chunked, with KlCompressConfig on KlConfig for server-wide use
-28. **decompress** — Pluggable response decompression vtable: single-shot buffer + streaming, with KlDecompressConfig on KlClientConfig for client-side use
+27. **compress** — Pluggable response compression vtable: single-shot buffer + streaming chunked, with KlCompressConfig on KlHttpServerConfig for server-wide use
+28. **decompress** — Pluggable response decompression vtable: single-shot buffer + streaming, with KlDecompressConfig on KlHttpClientConfig for client-side use
 29. **drain** — Backpressure write buffer: buffers unsent data on would-block, flushes on write-readiness, with on_drain callback and max_size cap
 30. **file_io** — Pluggable async file I/O vtable: submit/cancel/tick lifecycle. Its io_uring async-read backend was retired; file responses now ride zero-copy `splice` on the io_uring completion backend (`kl_file_io_create` is a NULL stub)
 31. **resolver_cache** — Caching DNS resolver decorator: wraps any KlResolver, caches successful results with configurable TTL/capacity, transparent to consumers
@@ -86,7 +86,7 @@ Below the axes, orthogonal modules, each independently testable:
 - **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker). No mutexes, no data races. `KlThreadPool` offloads blocking work; multi-core scaling is horizontal via `SO_REUSEPORT`.
 - **O(n) router** — Linear scan over routes. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O. A trie would add complexity for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per tick. At default `max_connections=256`, this fits in L1 cache. Not worth optimizing.
-- **No built-in 503 / load shedding** — `kl_server_stats()` exposes connection counts so users can implement load shedding as middleware. Policy decisions (thresholds, Retry-After values) belong in application code, not the framework.
+- **No built-in 503 / load shedding** — `kl_http_server_stats()` exposes connection counts so users can implement load shedding as middleware. Policy decisions (thresholds, Retry-After values) belong in application code, not the framework.
 - **No global memory monitoring** — The allocator is pluggable, so the framework can't reliably track total memory. OS-level OOM handling is the right layer. Existing per-resource caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors.
 - **Resolver sync-completion contract** — `KlResolver.resolve()` may call `done_fn` synchronously. Decorators handle this via an `in_resolve`/`completed` sentinel pattern (see `resolver_cache.c`). This is inherent to sync-completion-capable vtables and documented rather than architecturally changed.
 
@@ -94,25 +94,25 @@ Below the axes, orthogonal modules, each independently testable:
 
 | Type | Header | Purpose |
 |------|--------|---------|
-| `KlServer` | `server.h` | Server instance: config, router, pool, event loop |
-| `KlConfig` | `server.h` | Configuration: port, bind_addr, max_connections, timeouts, max_body_size, max_header_size, allocator, parser |
-| `KlRequest` | `request.h` | Parsed request: method, path, query, headers, content_length, body_reader |
-| `KlResponse` | `response.h` | Response builder: status, headers, body/file/stream modes |
-| `KlBodyReader` | `body_reader.h` | Vtable: on_data, on_complete, on_error, destroy |
-| `KlBufReader` | `body_reader.h` | Buffer reader: growable buffer with max_size limit |
-| `KlMultipartReader` | `body_reader_multipart.h` | Multipart parser: parts array, state machine, overlap buffer |
-| `KlMultipartPart` | `body_reader_multipart.h` | Single part: name, filename, content_type, data, data_len |
-| `KlMultipartConfig` | `body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
-| `KlChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
+| `KlHttpServer` | `http_server.h` | Server instance: config, router, pool, event loop |
+| `KlHttpServerConfig` | `http_server.h` | Configuration: port, bind_addr, max_connections, timeouts, max_body_size, max_header_size, allocator, parser |
+| `KlHttpRequest` | `http_request.h` | Parsed request: method, path, query, headers, content_length, body_reader |
+| `KlHttpResponse` | `http_response.h` | Response builder: status, headers, body/file/stream modes |
+| `KlHttpBodyReader` | `http_body_reader.h` | Vtable: on_data, on_complete, on_error, destroy |
+| `KlHttpBufReader` | `http_body_reader.h` | Buffer reader: growable buffer with max_size limit |
+| `KlHttpMultipartReader` | `http_body_reader_multipart.h` | Multipart parser: parts array, state machine, overlap buffer |
+| `KlHttpMultipartPart` | `http_body_reader_multipart.h` | Single part: name, filename, content_type, data, data_len |
+| `KlHttpMultipartConfig` | `http_body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
+| `KlHttp1ChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
 | `KlAllocator` | `allocator.h` | Vtable: malloc, realloc (with old_size), free (with size) |
-| `KlRequestParser` | `parser.h` | Vtable: parse (returns KlParseResult), reset, destroy |
-| `KlResponseParser` | `parser.h` | Client-side response parser vtable |
-| `KlConn` | `connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
-| `KlRouter` | `router.h` | Route table + match function |
-| `KlRoute` | `router.h` | Single route: method, pattern, handler, user_data, body_reader |
-| `KlMiddleware` | `router.h` | Middleware function: `int (*)(KlRequest *, KlResponse *, void *)` |
-| `KlMiddlewareEntry` | `router.h` | Registered middleware: method, pattern, fn, user_data |
-| `KlCorsConfig` | `cors.h` | CORS config: allowed origins, methods, headers, credentials |
+| `KlHttp1RequestParser` | `parser.h` | Vtable: parse (returns KlHttp1ParseResult), reset, destroy |
+| `KlHttp1ResponseParser` | `parser.h` | Client-side response parser vtable |
+| `KlHttpConn` | `http_connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
+| `KlHttpRouter` | `http_router.h` | Route table + match function |
+| `KlHttpRoute` | `http_router.h` | Single route: method, pattern, handler, user_data, body_reader |
+| `KlHttpMiddleware` | `http_router.h` | Middleware function: `int (*)(KlHttpRequest *, KlHttpResponse *, void *)` |
+| `KlHttpMiddlewareEntry` | `http_router.h` | Registered middleware: method, pattern, fn, user_data |
+| `KlHttpCorsConfig` | `http_cors.h` | CORS config: allowed origins, methods, headers, credentials |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
 | `KlEventCtx` | `event_ctx.h` | Composable event context: loop + allocator + watcher list |
 | `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, set_hostname, destroy, alpn_protocol, peer_cert |
@@ -129,16 +129,16 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlWorkItem` | `thread_pool.h` | Work item: work_fn (worker), done_fn (event loop), cancel_fn (shutdown) |
 | `KlThreadPoolConfig` | `thread_pool.h` | Config: num_workers, queue_capacity, allocator |
 | `KlUrl` | `url.h` | Parsed URL: is_https, host, port, path |
-| `KlClientHeader` | `client.h` | Request/response header: name, value |
-| `KlClientResponse` | `client.h` | Response: status, body, headers, allocator (by value) |
-| `KlProxyConfig` | `client.h` | Proxy config: host, port, auth (borrowed pointers) |
-| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS, proxy, connect_attempt_delay_ms (Happy Eyeballs) |
-| `KlClient` | `client.h` | Opaque async client handle |
-| `KlClientDoneFn` | `client.h` | Async completion callback |
-| `KlClientStreamCfg` | `client.h` | Per-request streaming config: response push callbacks + request pull callback |
-| `KlClientBodyFn` | `client.h` | Response body streaming callback (push-based) |
-| `KlClientHeadersFn` | `client.h` | Response headers-complete callback |
-| `KlClientReadFn` | `client.h` | Request body streaming callback (pull-based, like read()) |
+| `KlHttpClientHeader` | `http_client.h` | Request/response header: name, value |
+| `KlHttpClientResponse` | `http_client.h` | Response: status, body, headers, allocator (by value) |
+| `KlHttpProxyConfig` | `http_client.h` | Proxy config: host, port, auth (borrowed pointers) |
+| `KlHttpClientConfig` | `http_client.h` | Client config: timeout_ms, max_response_size, TLS, proxy, connect_attempt_delay_ms (Happy Eyeballs) |
+| `KlHttpClient` | `http_client.h` | Opaque async client handle |
+| `KlHttpClientDoneFn` | `http_client.h` | Async completion callback |
+| `KlHttpClientStreamCfg` | `http_client.h` | Per-request streaming config: response push callbacks + request pull callback |
+| `KlHttpClientBodyFn` | `http_client.h` | Response body streaming callback (push-based) |
+| `KlHttpClientHeadersFn` | `http_client.h` | Response headers-complete callback |
+| `KlHttpClientReadFn` | `http_client.h` | Request body streaming callback (pull-based, like read()) |
 | `KlResolver` | `resolver.h` | Pluggable async DNS resolver vtable: resolve, cancel, destroy |
 | `KlResolveReq` | `resolver.h` | Opaque per-request handle (resolver-owned) |
 | `KlResolveResult` | `resolver.h` | Resolved address: sockaddr_storage, addrlen, ai_family |
@@ -146,26 +146,26 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlWsClientConn` | `websocket_client.h` | WebSocket client connection handle |
 | `KlWsClientConfig` | `websocket_client.h` | Client config: timeout, max_frame_size, TLS, protocol, ping_interval_ms |
 | `KlWsClientCallbacks` | `websocket_client.h` | Callbacks: on_open, on_message, on_close, on_error |
-| `KlH2ClientConn` | `h2_client.h` | HTTP/2 client connection handle |
-| `KlH2ClientConfig` | `h2_client.h` | Config: timeout, max_streams, TLS, session factory |
-| `KlH2ClientSession` | `h2_client.h` | Pluggable session vtable (wraps nghttp2 etc.) |
-| `KlH2ClientHeader` | `h2_client.h` | Request/response header: name, value |
-| `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
-| `KlSse` | `sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
+| `KlHttp2ClientConn` | `http2_client.h` | HTTP/2 client connection handle |
+| `KlHttp2ClientConfig` | `http2_client.h` | Config: timeout, max_streams, TLS, session factory |
+| `KlHttp2ClientSession` | `http2_client.h` | Pluggable session vtable (wraps nghttp2 etc.) |
+| `KlHttp2ClientHeader` | `http2_client.h` | Request/response header: name, value |
+| `KlHttp2ClientResponse` | `http2_client.h` | Accumulated stream response: status, headers, body |
+| `KlHttpSse` | `http_sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
 | `KlError` | `error.h` | Diagnostic error enum: 25 codes (alloc, network, DNS, TLS, HTTP, redirect, proxy, event, thread, pipe) |
 | `KlTimerFn` | `timer.h` | Timer callback: `void (*)(void *user_data)` |
 | `KlTimerEntry` | `timer.h` | Timer heap entry: deadline_ms, cb, user_data, id |
-| `KlClientPool` | `client_pool.h` | Connection pool: flat array, idle timers, per-host limits |
-| `KlClientPoolConfig` | `client_pool.h` | Pool config: capacity, max_per_host, idle_ms |
-| `KlClientPoolConn` | `client_pool.h` | Acquired connection handle: fd, tls, reused flag |
-| `KlRedirectConfig` | `redirect.h` | Redirect config: max_redirects |
-| `KlRedirectClient` | `redirect.h` | Opaque async redirect client handle |
-| `KlRedirectDoneFn` | `redirect.h` | Async redirect completion callback |
+| `KlHttpClientPool` | `http_client_pool.h` | Connection pool: flat array, idle timers, per-host limits |
+| `KlHttpClientPoolConfig` | `http_client_pool.h` | Pool config: capacity, max_per_host, idle_ms |
+| `KlHttpClientPoolConn` | `http_client_pool.h` | Acquired connection handle: fd, tls, reused flag |
+| `KlHttpRedirectConfig` | `http_redirect.h` | Redirect config: max_redirects |
+| `KlHttpRedirectClient` | `http_redirect.h` | Opaque async redirect client handle |
+| `KlHttpRedirectDoneFn` | `http_redirect.h` | Async redirect completion callback |
 | `KlCompress` | `compress.h` | Pluggable compression vtable: compress, feed, encoding, reset, destroy |
 | `KlCompressCtx` | `compress.h` | Opaque per-server compression context (user-owned) |
 | `KlCompressConfig` | `compress.h` | Compression config: ctx, factory, ctx_destroy |
 | `KlCompressFactory` | `compress.h` | Factory: creates per-operation KlCompress from shared context |
-| `KlCompressStream` | `compress.h` | Compressed streaming handle: comp, write_fn, write_ctx, res |
+| `KlHttpCompressStream` | `compress.h` | Compressed streaming handle: comp, write_fn, write_ctx, res |
 | `KlDecompress` | `decompress.h` | Pluggable decompression vtable: decompress, dfeed, encoding, reset, destroy |
 | `KlDecompressConfig` | `decompress.h` | Decompression config: ctx, factory, ctx_destroy (shares KlCompressCtx) |
 | `KlDecompressStream` | `decompress.h` | Decompression stream handle: decomp, alloc, error |
@@ -175,7 +175,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlFileIO` | `file_io.h` | Pluggable async file I/O vtable: submit, cancel, tick, destroy |
 | `KlFileIOResult` | `file_io.h` | File I/O completion result: udata + bytes read |
 | `KlResolverCacheConfig` | `resolver_cache.h` | Cache config: ttl_ms, capacity |
-| `KlServerStats` | `server.h` | Read-only server load snapshot: active_connections, max_connections, async_suspended, listen_paused |
+| `KlHttpServerStats` | `http_server.h` | Read-only server load snapshot: active_connections, max_connections, async_suspended, listen_paused |
 | `KlDatagram` | `datagram.h` | Tier-1 datagram primitive: caller-owned handle over a prepared UDP fd; async recv (source + local addr), fixed-slot send queue with on-drain backpressure, confirmed-detachment close. STABLE contract; opt-in layout via `datagram_detail.h` |
 | `KlDatagramSocketConfig` | `datagram.h` | Datagram socket config: ctx, sockets, family, bind_addr/port, reuse_addr/port, recv_pktinfo/recv_tos/recv_gro, so_rcvbuf/sndbuf, tos, broadcast, multicast_ttl/disable_loop/iface/group, queue_policy, send_slots/slot_cap/byte_budget, recv_cap, want/optional/rx caps, allocator |
 | `KlDatagramMessage` | `datagram.h` | One outbound datagram (borrowed, copied before send returns): data, len, peer, local (source-pin), tos, flags |
@@ -192,8 +192,8 @@ Below the axes, orthogonal modules, each independently testable:
 - C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror`
 - `-fstack-protector-strong` for buffer overflow detection
 - No direct malloc/free — all allocation through `KlAllocator` interface
-- All public functions prefixed with `kl_` (e.g. `kl_router_init`, `kl_response_json`)
-- Header-only code in `request.h` uses `static inline`
+- All public functions prefixed with `kl_` (e.g. `kl_http_router_init`, `kl_http_response_json`)
+- Header-only code in `http_request.h` uses `static inline`
 - Vendor code compiled with `-w` (relaxed warnings, no `-Werror`)
 - Integer overflow guards: check against `SIZE_MAX/2` or `INT_MAX/2` before arithmetic
 - TLS wraps transport — all I/O goes through `conn_read`/`conn_write` helpers when TLS is active
@@ -205,15 +205,15 @@ Below the axes, orthogonal modules, each independently testable:
 Body readers use a vtable interface:
 
 ```c
-struct KlBodyReader {
-    int  (*on_data)(KlBodyReader *self, const char *data, size_t len);
-    void (*on_complete)(KlBodyReader *self);
-    void (*on_error)(KlBodyReader *self);
-    void (*destroy)(KlBodyReader *self);
+struct KlHttpBodyReader {
+    int  (*on_data)(KlHttpBodyReader *self, const char *data, size_t len);
+    void (*on_complete)(KlHttpBodyReader *self);
+    void (*on_error)(KlHttpBodyReader *self);
+    void (*destroy)(KlHttpBodyReader *self);
 };
 ```
 
-Factory signature: `KlBodyReader *(*factory)(KlAllocator *alloc, KlRequest *req, void *user_data)`
+Factory signature: `KlHttpBodyReader *(*factory)(KlAllocator *alloc, KlHttpRequest *req, void *user_data)`
 
 - Factory is called after headers are fully parsed (header pointers still valid)
 - `on_data` is called as body chunks arrive — return `-1` to abort (triggers 413)
@@ -225,10 +225,10 @@ To add a new reader: implement the 4 vtable functions, write a factory, register
 
 ## Middleware Pattern
 
-Middleware uses the `KlMiddleware` function signature:
+Middleware uses the `KlHttpMiddleware` function signature:
 
 ```c
-typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
+typedef int (*KlHttpMiddleware)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 ```
 
 - Return `0` → continue to next middleware / handler
@@ -244,18 +244,18 @@ Middleware runs in two phases:
 headers → route match → init response → PRE-BODY middleware → ws/h2 → body reading → POST-BODY middleware → handler
 ```
 
-**Pre-body** (`kl_server_use()` / `kl_router_use()`):
+**Pre-body** (`kl_http_server_use()` / `kl_http_router_use()`):
 - Runs before body is read — ideal for rate limiting, CORS, auth via headers
 - Short-circuit disables keep-alive (body may be unread)
 
-**Post-body** (`kl_server_use_post()` / `kl_router_use_post()`):
+**Post-body** (`kl_http_server_use_post()` / `kl_http_router_use_post()`):
 - Runs after body is fully consumed — can access `req->body_reader` data
 - Short-circuit preserves keep-alive (body already consumed)
 - Use for middleware that needs form body access (e.g. CSRF token validation)
 
-Built-in: `kl_cors_middleware` (pass `KlCorsConfig *` as user_data) — pre-body.
+Built-in: `kl_http_cors_middleware` (pass `KlHttpCorsConfig *` as user_data) — pre-body.
 
-To add a new middleware: implement the `KlMiddleware` signature, register with `kl_server_use()` (pre-body) or `kl_server_use_post()` (post-body).
+To add a new middleware: implement the `KlHttpMiddleware` signature, register with `kl_http_server_use()` (pre-body) or `kl_http_server_use_post()` (post-body).
 
 ## Async Pattern
 
@@ -263,7 +263,7 @@ KEEL provides two async primitives for non-blocking operations without stalling 
 
 ### KlWatcher — Generic FD Callbacks
 
-Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread. Watchers operate on `KlEventCtx` (not `KlServer` directly).
+Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread. Watchers operate on `KlEventCtx` (not `KlHttpServer` directly).
 
 ```c
 int  kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
@@ -271,7 +271,7 @@ int  kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask);
 void kl_watcher_del(KlEventCtx *ctx, int fd);
 ```
 
-Watchers are heap-allocated and ctx-owned. `KlServer` embeds `KlEventCtx ev` — use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
+Watchers are heap-allocated and ctx-owned. `KlHttpServer` embeds `KlEventCtx ev` — use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
 
 ### Dispatch Helpers
 
@@ -305,8 +305,8 @@ while (!done) {
 Suspend a connection for an async operation. The connection is removed from the event loop and exempt from idle timeouts while suspended.
 
 ```c
-int  kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op);
-void kl_async_complete(KlServer *s, KlAsyncOp *op);
+int  kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op);
+void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
 ```
 
 Three callbacks per op (separate because deadline semantics differ per use case):
@@ -319,9 +319,9 @@ Three callbacks per op (separate because deadline semantics differ per use case)
 ### Typical async flow
 
 ```c
-void handler(KlRequest *req, KlResponse *res, void *user_data) {
-    KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+void handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
+    KlHttpServer *srv = user_data;
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Set up async op (caller-owned, must remain valid until completion) */
     MyCtx *ctx = ...;
@@ -402,7 +402,7 @@ Thread safety is guaranteed by construction:
 ```c
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     /* ... blocking work context ... */
 } MyWork;
 
@@ -442,8 +442,8 @@ Test naming: `UTEST(suite, test_name)` — e.g. `UTEST(mp, boundary_spanning)`.
 - **Error handling**: Functions return `int` — negative on error, 0 or positive on success
 - **Resource cleanup**: Always pair `_init`/`_free`. Response has `_reset` for keep-alive reuse.
 - **Overflow guards**: Before `a + b`, check `a > SIZE_MAX/2 || b > SIZE_MAX/2`. Before `n * size`, check `n > SIZE_MAX / size`.
-- **Header access**: Use `kl_request_header(req, "Content-Type")` — case-insensitive, returns null-terminated value or NULL if missing
-- **Body access**: Cast `req->body_reader` to the concrete type (`KlBufReader *`, `KlMultipartReader *`)
+- **Header access**: Use `kl_http_request_header(req, "Content-Type")` — case-insensitive, returns null-terminated value or NULL if missing
+- **Body access**: Cast `req->body_reader` to the concrete type (`KlHttpBufReader *`, `KlHttpMultipartReader *`)
 
 ## Debugging
 

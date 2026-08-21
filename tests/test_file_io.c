@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 
-/* File I/O phase constants (mirror connection.c) */
+/* File I/O phase constants (mirror http_connection.c) */
 #define FILE_IO_IDLE       0
 #define FILE_IO_READING    1
 #define FILE_IO_WRITING    2

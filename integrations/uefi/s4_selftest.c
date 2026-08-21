@@ -137,7 +137,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("S-4: server up (efi-tcp4-completion)");
 
-    /* NB: kl_http_server_free (like kl_http_server_bind_listener) lives in the hosted server.c
+    /* NB: kl_http_server_free (like kl_http_server_bind_listener) lives in the hosted http_server.c
      * and is archive-excluded — proper listener teardown + EBS-clean shutdown is S-7
      * (kl_uefi_shutdown). On any error here the firmware simply parks; QEMU is
      * power-cycled by the harness, so there is no leak to reclaim. */
@@ -147,7 +147,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
 
     /* Manual listener bring-up: kl_http_server_bind_listener (TCP socket()+bind()+listen())
-     * lives in the hosted server.c and is archive-excluded, so drive the socket seam
+     * lives in the hosted http_server.c and is archive-excluded, so drive the socket seam
      * directly against the adopted EFI provider (s.ev.sockets). */
     KlSockAddr bind_sa;
     if (kl_sockaddr_parse(&bind_sa, "0.0.0.0", (uint16_t)S4_BIND_PORT) != 0) {

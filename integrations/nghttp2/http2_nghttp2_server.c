@@ -359,7 +359,7 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
     /* Expect the client connection preface ("PRI * HTTP/2.0...") on the stream —
      * nghttp2's default. KEEL feeds the full preface through for all three h2
      * server entry paths (ALPN-negotiated h2 over TLS, h2c Upgrade, and h2c
-     * prior-knowledge — connection.c hands over the whole buffer, magic included),
+     * prior-knowledge — http_connection.c hands over the whole buffer, magic included),
      * so nghttp2 consumes it itself. */
     int rc = nghttp2_session_server_new(&s->ng, cbs, s);
     nghttp2_session_callbacks_del(cbs);

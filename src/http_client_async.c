@@ -1,12 +1,12 @@
 /*
- * client_async.c — HTTP/1.1 client, async (event-driven) API
+ * http_client_async.c — HTTP/1.1 client, async (event-driven) API
  *
  * Freestanding step B2b: the non-blocking state machine driven by KlEventCtx
  * watchers lives here — Happy Eyeballs (RFC 8305) racing connect, the
  * completion-connect path (LC-0), async DNS, the SENDING/RECEIVING/TLS/proxy
  * states, and the public kl_http_client_start[_s] + kl_http_client_start_pooled entry
  * points. The async path uses kl_sock_send/kl_sock_recv through the provider +
- * watchers, so this TU links without the blocking sync path (client_sync.c).
+ * watchers, so this TU links without the blocking sync path (http_client_sync.c).
  *
  * All allocation through KlAllocator. No Hull dependencies.
  */
@@ -60,7 +60,7 @@ static int build_connect_request(KlHttpClient *c, const char *host,
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t n = 0;
-    /* Shared serialization (client_proxy.c) — one definition for sync + async. */
+    /* Shared serialization (http_client_proxy.c) — one definition for sync + async. */
     if (kl_proxy_build_connect(buf, sizeof(buf), &n, host, port, auth) != 0)
         return -1;
 
@@ -637,7 +637,7 @@ static void async_handle_proxy_handshake(KlHttpClient *c)
         c->proxy_recv_len += (size_t)r;
         c->proxy_recv[c->proxy_recv_len] = '\0';
 
-        /* Shared status check (client_proxy.c): 0 = need more, 1 = tunnel up, -1 = error. */
+        /* Shared status check (http_client_proxy.c): 0 = need more, 1 = tunnel up, -1 = error. */
         int st = kl_proxy_connect_status(c->proxy_recv, c->proxy_recv_len);
         if (st == 0)
             continue;

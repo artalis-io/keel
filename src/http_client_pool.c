@@ -1,5 +1,5 @@
 /*
- * client_pool.c — HTTP client connection pool
+ * http_client_pool.c — HTTP client connection pool
  *
  * Flat array of KlHttpClientPoolEntry with linear scan. Pool sizes are
  * small (32-128 max), so linear scan is cache-friendly and simpler

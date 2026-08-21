@@ -1,9 +1,9 @@
 /**
- * @file redirect.h
+ * @file http_redirect.h
  * @brief HTTP redirect following (sync + async).
  *
  * Orthogonal redirect module that wraps the existing client APIs
- * with automatic 3xx redirect following. Does not modify client.h
+ * with automatic 3xx redirect following. Does not modify http_client.h
  * or client.c. Supports both unpooled and pooled variants.
  */
 

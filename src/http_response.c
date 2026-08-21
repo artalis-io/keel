@@ -386,7 +386,7 @@ static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 
 /* Assemble the buffered-response wire bytes into iov — the single source of truth
  * for the byte layout, shared by kl_http_response_send (synchronous seam writev) and the
- * IOCP completion driver (overlapped WSASend). See response_internal.h. */
+ * IOCP completion driver (overlapped WSASend). See http_response_internal.h. */
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out) {
     (void)cl_buf_cap;   /* caller guarantees >= 48 (Content-Length line) */

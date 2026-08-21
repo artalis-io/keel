@@ -14,8 +14,8 @@
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_http_server_stop wakes the run loop */
-/* No websocket_server.h / h2_server.h / h2_internal.h: the readiness data plane now
- * dispatches ws/h2 (and PROXY) through proto_hooks.h — the same seam the completion
+/* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
+ * dispatches ws/h2 (and PROXY) through http_proto_hooks.h — the same seam the completion
  * driver uses — so this TU names no optional-protocol type or symbol (Finding 1). */
 #include "http_proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
@@ -179,11 +179,11 @@ int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out) {
     return conn->tls->peer_cert(conn->tls, out);
 }
 
-/* Socket-activation (systemd LISTEN_* fd inheritance) moved to server_activation.c
+/* Socket-activation (systemd LISTEN_* fd inheritance) moved to http_server_activation.c
  * (Finding 6): a self-contained responsibility, separate from the readiness loop,
  * TCP listener construction, and peer accessors. */
 
-/* Non-static so the freestanding kl_http_server_free (server_core.c) can call it on the
+/* Non-static so the freestanding kl_http_server_free (http_server_core.c) can call it on the
  * hosted path (it needs the AF_UNIX unlink); declared in internal.h. */
 void kl_http_server_close_listener(KlHttpServer *s) {
     if (kl_handle_valid(s->listen_fd)) {
@@ -193,10 +193,10 @@ void kl_http_server_close_listener(KlHttpServer *s) {
     kl_http_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
-/* kl_http_server_conn_release moved to the freestanding-safe server core (server_core.c)
+/* kl_http_server_conn_release moved to the freestanding-safe server core (http_server_core.c)
  * — the completion sweeps there call it, so the archive needs it in-core.
  *
- * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also moved to server_core.c in
+ * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also moved to http_server_core.c in
  * the Phase 10 UEFI server carve (S-4): a freestanding EFI server constructs its
  * KlHttpServer from the archive alone. The hosted-only pieces (ws/h2/proxy hook installers,
  * PROXY CIDR allowlist, async file I/O, self-pipe) are #ifndef KEEL_FREESTANDING there. */
@@ -204,8 +204,8 @@ void kl_http_server_close_listener(KlHttpServer *s) {
 
 /* Route + middleware registration (the kl_http_server_route / kl_http_server_use family) and
  * the read-side body flow control (kl_http_request_pause_body / resume_body) plus
- * kl_http_server_stats moved to the freestanding-safe server core (server_core.c) in the
- * S-1 bisection. kl_http_server_ws_upgrade moved to server_ws.c (Finding 1): the WebSocket type +
+ * kl_http_server_stats moved to the freestanding-safe server core (http_server_core.c) in the
+ * S-1 bisection. kl_http_server_ws_upgrade moved to http_server_ws.c (Finding 1): the WebSocket type +
  * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
@@ -356,7 +356,7 @@ int kl_http_server_run(KlHttpServer *s) {
     while (atomic_load(&s->running)) {
         if (completion_loop) {
             /* One completion-loop tick — factored into the freestanding-safe server
-             * core (server_core.c) so a freestanding EFI server shares it verbatim. */
+             * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */
             if (kl_http_server_run_completion_loop(s) < 0)
                 break;
             continue;
@@ -671,9 +671,9 @@ void kl_http_server_stop(KlHttpServer *s) {
 }
 
 /* kl_http_request_pause_body / kl_http_request_resume_body / kl_http_server_stats moved to the
- * freestanding-safe server core (server_core.c) in the S-1 bisection. */
+ * freestanding-safe server core (http_server_core.c) in the S-1 bisection. */
 
-/* kl_http_server_free moved to the freestanding-safe server core (server_core.c) in the
+/* kl_http_server_free moved to the freestanding-safe server core (http_server_core.c) in the
  * Phase 10 UEFI server S-7 teardown carve — a freestanding EFI server tears itself down
  * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
  * archive alone, then kl_uefi_shutdown() releases the EFI providers before

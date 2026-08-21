@@ -1,5 +1,5 @@
 /*
- * response_parser_llhttp.c — llhttp backend for KlHttp1ResponseParser vtable
+ * http1_response_parser_llhttp.c — llhttp backend for KlHttp1ResponseParser vtable
  *
  * Uses llhttp in HTTP_RESPONSE mode to parse response status, headers,
  * and body. Accumulates headers and body into the KlHttpClientResponse struct.

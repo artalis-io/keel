@@ -1,14 +1,14 @@
 /*
- * server_core.c — the model-blind, freestanding-safe half of the KlHttpServer.
+ * http_server_core.c — the model-blind, freestanding-safe half of the KlHttpServer.
  *
- * Split out of server.c for the Phase 10 UEFI *server* (docs/phase10_uefi_server_design.md,
+ * Split out of http_server.c for the Phase 10 UEFI *server* (docs/phase10_uefi_server_design.md,
  * S-1), mirroring the client's async.c -> event_ctx.c bisection. This TU holds the
  * server API + run machinery that touches ONLY the completion / connection-pool /
  * router / timer seams — no OS sockets, no signals, no systemd, no self-pipe, no
  * readiness event loop, no stdio. A freestanding completion server (EFI_TCP4 +
- * the EFI completion backend) links it WITHOUT dragging in server.c's hosted half.
+ * the EFI completion backend) links it WITHOUT dragging in http_server.c's hosted half.
  *
- * The hosted half stays byte-identical in server.c: kl_http_server_log/kl_http_server_log_errno (stdio),
+ * The hosted half stays byte-identical in http_server.c: kl_http_server_log/kl_http_server_log_errno (stdio),
  * TCP/AF_UNIX bind + listen, systemd socket activation, signal handling, the
  * stop-wakeup self-pipe, and the readiness kl_http_server_run wait/accept/dispatch loop
  * (which delegates its completion branch to kl_http_server_run_completion_loop here).
@@ -33,8 +33,8 @@
 #include <stdint.h>
 #include <stdatomic.h>
 
-/* Same tick bound server.c's readiness loop uses; a local copy keeps this TU
- * independent of server.c (both are plain compile-time constants). */
+/* Same tick bound http_server.c's readiness loop uses; a local copy keeps this TU
+ * independent of http_server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
 
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
@@ -66,7 +66,7 @@ static void kl_http_server_wakeup_init(KlHttpServer *s) {
 #endif /* !KEEL_FREESTANDING */
 
 /* ── Server construction (model-blind: pool + router + event ctx + provider) ───
- * Moved from server.c in the Phase 10 UEFI server carve so the freestanding EFI
+ * Moved from http_server.c in the Phase 10 UEFI server carve so the freestanding EFI
  * server can construct a KlHttpServer from the archive alone. The hosted-only pieces —
  * the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
  * async file-I/O backend, and the stop self-pipe — are compiled out under
@@ -82,7 +82,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
 
 #ifndef KEEL_FREESTANDING
-    /* Register the WebSocket / HTTP-2 upgrade tables so connection.c's dispatch is
+    /* Register the WebSocket / HTTP-2 upgrade tables so http_connection.c's dispatch is
      * wired (idempotent; also pulls server_ws.o / server_h2.o out of the static
      * archive). A freestanding HTTP/1.1 server never links these — the seam stays
      * NULL and the core runs pure HTTP/1.1. */
@@ -323,7 +323,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
 }
 
 /* ── Server teardown (model-blind: close sockets, free pool/router, destroy ctx) ──
- * Moved from server.c in the S-7 teardown carve so a freestanding EFI server can tear
+ * Moved from http_server.c in the S-7 teardown carve so a freestanding EFI server can tear
  * itself down from the archive alone (then kl_uefi_shutdown() releases the EFI providers
  * before ExitBootServices). kl_http_conn_pool_free closes every accepted child's socket
  * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
@@ -444,7 +444,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
         return -1;
     cnow = kl_monotonic_ms();
     /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
-     * completion path never falls through to the readiness sweep in server.c. */
+     * completion path never falls through to the readiness sweep in http_server.c. */
     kl_http_server_sweep_conn_timeouts(s, cnow, 1);
     for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
         KlAsyncOp *next_aop = aop->next;
@@ -461,7 +461,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
 }
 
 /* ── Idle-timeout sweep + graceful-drain (shared by both run-loop branches) ────
- * Moved here from server.c so the freestanding completion server has them
+ * Moved here from http_server.c so the freestanding completion server has them
  * in-archive. WebSocket/HTTP-2 are reached only through the upgrade seam, so these
  * name no ws/h2 symbol; a freestanding HTTP/1.1 build leaves the hooks NULL. */
 

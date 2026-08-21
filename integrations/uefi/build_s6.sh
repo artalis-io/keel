@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_s6.sh — build the S-6 KlServer HTTPS-over-EFI_TCP4+mbedTLS self-test into
+# build_s6.sh — build the S-6 KlHttpServer HTTPS-over-EFI_TCP4+mbedTLS self-test into
 # BOOTX64.EFI. The server mirror of build_u4.sh (which builds the HTTPS *client*):
 #   - compile ALL mbedTLS library/*.c freestanding with the U-4 config.
 #   - compile the Keel mbedTLS adapter + the mbedTLS platform TUs (entropy/time/heap).

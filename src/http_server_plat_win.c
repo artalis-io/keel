@@ -1,6 +1,6 @@
 /*
- * server_plat_win.c — Windows implementation of the server platform services
- * (server_plat.h). The Windows sibling of server_plat_posix.c; compiled only on
+ * http_server_plat_win.c — Windows implementation of the server platform services
+ * (http_server_plat.h). The Windows sibling of http_server_plat_posix.c; compiled only on
  * Windows (Makefile SERVER_PLAT_SRC), so it uses Win32 directly with no
  * internal #ifdef.
  *

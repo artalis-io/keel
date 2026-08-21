@@ -13,7 +13,7 @@
  *
  * These definitions OWN the public kl_comp_* names; each completion backend renames its
  * own impls (static) and exposes them through kl_comp_ops_builtin(). The generic driver
- * (completion_driver.c) and the completion callers (async.c / server.c) call
+ * (completion_driver.c) and the completion callers (async.c / http_server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
 #include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlHttpServer/KlHttpConn reach the loop */
@@ -50,7 +50,7 @@ int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
 }
 
 /* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
- * _send/_sendfile (KlHttpConn form) live in completion_server.c and call these; the backend
+ * _send/_sendfile (KlHttpConn form) live in completion_http_server.c and call these; the backend
  * behind the vtable does raw I/O only and never sees a KlHttpConn. */
 int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap) {
     return kl_comp_ops(&stream->ctx->loop)->post_recv(stream, buf, cap);

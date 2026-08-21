@@ -2,12 +2,12 @@
 #define KEEL_SRC_HTTP_SERVER_PLAT_H
 
 /*
- * server_plat.h — platform-specific server services.
+ * http_server_plat.h — platform-specific server services.
  *
- * One implementation per platform family (server_plat_posix.c /
- * server_plat_win.c), Makefile-selected via SERVER_PLAT_SRC — the same
+ * One implementation per platform family (http_server_plat_posix.c /
+ * http_server_plat_win.c), Makefile-selected via SERVER_PLAT_SRC — the same
  * one-platform-per-TU pattern as event_*.c / socket_*.c / platform_*.c. This
- * keeps server.c free of platform #ifdefs: the AF_UNIX node lifecycle, peer
+ * keeps http_server.c free of platform #ifdefs: the AF_UNIX node lifecycle, peer
  * credentials, and signal handling — all of which use POSIX-only types
  * (uid_t / sockaddr_un / struct ucred / struct sigaction) — live in the
  * per-platform TU. The interface here is deliberately type-neutral so it
@@ -40,7 +40,7 @@ void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s);
  * success, -1 if unavailable (non-Linux, or no label). */
 int  kl_http_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen);
 
-/* kl_peer_cred_fd(KlSocketHandle, KlPeerCred *) is declared in keel/server.h
+/* kl_peer_cred_fd(KlSocketHandle, KlPeerCred *) is declared in keel/http_server.h
  * (public API); its definition also lives in the platform TU. */
 
 /* Remove an environment variable (used to stop the systemd LISTEN_* socket-

@@ -1,16 +1,16 @@
 /*
- * client_internal.h — shared internals for the split HTTP/1.1 client TUs
+ * http_client_internal.h — shared internals for the split HTTP/1.1 client TUs
  *
- * src/client.c was split (freestanding step B2b) into three translation units
+ * The HTTP/1.1 client was split (freestanding step B2b) into three translation units
  * so a freestanding *async* client links without dragging in the blocking /
  * hosted sync path (poll()/read()/write()/blocking DNS):
  *
- *   - client_common.c — shared by sync + async: CRLF guard, plain/TLS I/O
+ *   - http_client_common.c — shared by sync + async: CRLF guard, plain/TLS I/O
  *     abstraction, heap request formatting, header helpers, response
  *     decompression, response free.
- *   - client_sync.c   — the blocking hosted API only (connect_with_timeout,
+ *   - http_client_sync.c   — the blocking hosted API only (connect_with_timeout,
  *     recv_response_sync, kl_http_client_request[_s], kl_http_client_request_pooled).
- *   - client_async.c  — the event-driven client (Happy Eyeballs, the state
+ *   - http_client_async.c  — the event-driven client (Happy Eyeballs, the state
  *     machine, completion connect, kl_http_client_start[_s], kl_http_client_start_pooled).
  *
  * This header is src/-internal (never installed). It carries only the surface
@@ -59,7 +59,7 @@ typedef struct {
 } DecompStreamWrap;
 
 /* ══════════════════════════════════════════════════════════════════════
- * Async client state machine (client_async.c) — struct exposed here so the
+ * Async client state machine (http_client_async.c) — struct exposed here so the
  * async-only helper build_connect_request (which mutates a KlHttpClient) and the
  * async TU share one definition.
  * ══════════════════════════════════════════════════════════════════════ */
@@ -164,7 +164,7 @@ struct KlHttpClient {
 };
 
 /* ══════════════════════════════════════════════════════════════════════
- * Shared helpers (client_common.c) — used by both sync + async TUs.
+ * Shared helpers (http_client_common.c) — used by both sync + async TUs.
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* CRLF injection guard: 1 if s[0..len) contains CR or LF. */

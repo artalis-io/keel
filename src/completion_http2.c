@@ -1,5 +1,5 @@
 /*
- * completion_h2.c — HTTP/2-over-completion leg of the split completion driver (B2a).
+ * completion_http2.c — HTTP/2-over-completion leg of the split completion driver (B2a).
  * Extracted verbatim from completion_driver.c: the driver-owned h2 output capture and
  * the h2 connection drive. Reaches back into the server TU for kl_comp_close /
  * kl_comp_tls_drain_output (completion_internal.h); reuses the h2 session vtable +
@@ -101,9 +101,9 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     }
 }
 
-/* Completion-drive seam registration (proto_hooks.h): completion_server.c reaches
+/* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches
  * HTTP/2-over-completion only through this table. The installer (called by
- * completion_server.c) registers it and pulls this object out of the archive. */
+ * completion_http_server.c) registers it and pulls this object out of the archive. */
 static const KlHttp2CompHooks kl_http2_comp_hooks_table = { .drive = kl_comp_http2_drive };
 
 void kl_http2_comp_hooks_install(void) {

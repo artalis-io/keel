@@ -144,7 +144,7 @@ typedef struct KlHttpServer {
     /* Self-pipe/loopback wakeup so kl_http_server_stop() wakes the run loop immediately
      * instead of waiting up to KL_POLL_TIMEOUT_MS for the current wait/drain to
      * return. The two handles are a KlPlatWakeup (internal type kept out of this
-     * public header); server.c constructs the wrapper from them. KL_INVALID_SOCKET
+     * public header); http_server.c constructs the wrapper from them. KL_INVALID_SOCKET
      * if the pair couldn't be opened (falls back to tick-timeout latency). */
     KlSocketHandle stop_wake_rd; /**< wakeup read end (registered as a run-loop watcher) */
     KlSocketHandle stop_wake_wr; /**< wakeup write end (kl_http_server_stop signals it) */
@@ -202,7 +202,7 @@ int  kl_http_server_route_streaming(KlHttpServer *s, const char *method, const c
  *        Synchronous C handlers that need the body fully buffered
  *        before they run should keep using kl_http_server_route_streaming.
  *
- *        See router.h::kl_http_router_add_streaming_async for the full
+ *        See http_router.h::kl_http_router_add_streaming_async for the full
  *        contract.
  *
  * @return 0 on success, -1 on failure.

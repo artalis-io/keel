@@ -23,9 +23,9 @@
 #include "keel/handle.h"
 
 /* Monotonic clock in milliseconds. POSIX: clock_gettime(CLOCK_MONOTONIC).
- * Windows: QueryPerformanceCounter. Also declared in keel/connection.h (public,
+ * Windows: QueryPerformanceCounter. Also declared in keel/http_connection.h (public,
  * unchanged); the identical redeclaration here lets the per-OS TU avoid dragging
- * in the not-yet-Windows-ready connection.h. */
+ * in the not-yet-Windows-ready http_connection.h. */
 uint64_t kl_monotonic_ms(void);
 
 /* Fill @buf with @len secure-random bytes (best-effort — always fills the whole
@@ -75,7 +75,7 @@ int kl_plat_cpu_count(void);
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
 
 /* Close a file-body descriptor opened for a KL_HTTP_BODY_FILE response. A platform
- * seam (not a raw close()) so response.c stays freestanding: POSIX/Windows close
+ * seam (not a raw close()) so http_response.c stays freestanding: POSIX/Windows close
  * the CRT fd; a freestanding build (no filesystem) supplies its own — typically a
  * no-op. Ignores a negative fd. */
 void kl_plat_file_close(int fd);

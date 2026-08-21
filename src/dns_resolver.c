@@ -1566,7 +1566,7 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
         return -1;
     r->nns = nns;
     /* KlDatagramSocketConfig.family is a host domain (AF_INET/AF_INET6); map from the neutral family,
-     * exactly as the freestanding client (client_async.c) does when opening a socket. */
+     * exactly as the freestanding client (http_client_async.c) does when opening a socket. */
     *family = (fam == KL_AF_INET6) ? AF_INET6 : AF_INET;
     return 0;
 }

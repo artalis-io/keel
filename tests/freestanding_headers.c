@@ -20,7 +20,7 @@
  *   parser, request, body_reader, chunked, drain, tls, h2, h2_client,
  *   response, file_io
  *
- * response.h / file_io.h joined the gate in the off_t-neutralization step: the
+ * http_response.h / file_io.h joined the gate in the off_t-neutralization step: the
  * file size/offset types (KlHttpResponse.file_size/offset, kl_http_response_file, the
  * KlFileIO submit offset) are now uint64_t — non-negative, same neutral type as
  * the internal sendfile seam (src/socket.h) — so neither header needs the hosted
@@ -32,11 +32,11 @@
  * neutral KlSockAddr (kl_http_request_peer_sockaddr, kl_proxy_protocol_parse,
  * kl_cidr_match) and their file size/offset the uint64_t sendfile seam — so a
  * freestanding UEFI server can compile the whole protocol-layer public API with
- * no POSIX socket/type header. (server.h's AF_UNIX / peer-cred references are
+ * no POSIX socket/type header. (http_server.h's AF_UNIX / peer-cred references are
  * feature flags + a path string, not a native sockaddr in the ABI.)
  *
  * OUT-OF-GATE (deliberately NOT included here) and WHY:
- *   - resolver.h, udp.h, udp_server.h, client.h, client_pool.h, net.h —
+ *   - resolver.h, udp.h, udp_server.h, http_client.h, http_client_pool.h, net.h —
  *     legitimately expose native socket addresses (sockaddr_storage / struct
  *     sockaddr) for EXCLUDED features; their native->KlSockAddr conversion is a
  *     later phase.

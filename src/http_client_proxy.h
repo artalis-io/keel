@@ -1,15 +1,15 @@
 /*
- * client_proxy.h — transport-independent HTTP CONNECT (proxy tunnel) helpers.
+ * http_client_proxy.h — transport-independent HTTP CONNECT (proxy tunnel) helpers.
  *
- * The sync (client_sync.c) and async (client_async.c) clients both establish a proxy
+ * The sync (http_client_sync.c) and async (http_client_async.c) clients both establish a proxy
  * tunnel with an HTTP CONNECT handshake. They previously each open-coded the request
  * serialization (one via snprintf, one via kl_buf_append_*) and the response validation,
  * risking behavioral drift around authority formatting, auth handling and the 200 check.
  * These two pure-byte functions are the single shared definition; the two clients differ
  * ONLY in how they move bytes (blocking send/recv vs the async state machine).
  *
- * Both are locale-free and allocation-free, so client_proxy.c joins the freestanding
- * client archive alongside client_async.c.
+ * Both are locale-free and allocation-free, so http_client_proxy.c joins the freestanding
+ * client archive alongside http_client_async.c.
  */
 #ifndef KEEL_HTTP_CLIENT_PROXY_H
 #define KEEL_HTTP_CLIENT_PROXY_H

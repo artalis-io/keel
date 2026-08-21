@@ -1,5 +1,5 @@
 /**
- * @file client_pool.h
+ * @file http_client_pool.h
  * @brief HTTP client connection pool.
  *
  * Caches idle TCP+TLS connections keyed by (host, port, is_tls),

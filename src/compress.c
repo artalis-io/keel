@@ -62,7 +62,7 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
 
 /* Emit callback for streaming: forwards compressed data to chunked stream */
 static int stream_emit(void *ctx, const char *data, size_t len) {
-    KlCompressStream *cs = ctx;
+    KlHttpCompressStream *cs = ctx;
     if (cs->error) return -1;
     if (len == 0) return 0;
     if (cs->write_fn(cs->write_ctx, data, len) < 0) {
@@ -72,8 +72,8 @@ static int stream_emit(void *ctx, const char *data, size_t len) {
     return 0;
 }
 
-int kl_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
-                              int status, KlCompressStream *cs) {
+int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
+                              int status, KlHttpCompressStream *cs) {
     if (!res || !cfg || !cfg->factory || !cs) return -1;
 
     KlAllocator *alloc = res->alloc;
@@ -108,7 +108,7 @@ int kl_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
     return 0;
 }
 
-int kl_compress_stream_write(KlCompressStream *cs, const char *data,
+int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
                               size_t len) {
     if (!cs || !cs->comp) return -1;
     if (cs->error) return -1;
@@ -122,7 +122,7 @@ int kl_compress_stream_write(KlCompressStream *cs, const char *data,
     return 0;
 }
 
-int kl_compress_stream_end(KlCompressStream *cs) {
+int kl_http_compress_stream_end(KlHttpCompressStream *cs) {
     if (!cs || !cs->comp) return -1;
 
     int rc = 0;

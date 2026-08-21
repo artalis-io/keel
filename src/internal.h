@@ -19,7 +19,7 @@
 /* Completion-mode TLS ciphertext scratch size (one TLS record + slack). The HTTP completion
  * adapter hands a per-connection buffer of this size (KlHttpConn.comp_cipher, preallocated at
  * server init for TLS+completion slots) to the raw receive; the backend does raw I/O into it
- * with no TLS knowledge. Internal — not a public API (was briefly in connection.h). */
+ * with no TLS knowledge. Internal — not a public API (was briefly in http_connection.h). */
 #define KL_COMP_CIPHER_SIZE (17u * 1024u)
 
 /* ── Transport helpers — TLS-aware read/write ────────────────────── */
@@ -91,15 +91,15 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
     (void)r;
 }
 
-/* Release a connection and resume listening if paused (defined in server.c) */
+/* Release a connection and resume listening if paused (defined in http_server.c) */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
 
 /* Server bisection (S-1): the completion run-loop tick lives in the freestanding-safe
- * server core (server_core.c); the idle/drain sweeps stay in server.c (they own
+ * server core (http_server_core.c); the idle/drain sweeps stay in http_server.c (they own
  * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
 int  kl_http_server_run_completion_loop(KlHttpServer *s);
 /* Close the listen socket (+ unlink an owned AF_UNIX path, hosted). Non-static so the
- * freestanding kl_http_server_free (server_core.c) reaches it on the hosted path (S-7). */
+ * freestanding kl_http_server_free (http_server_core.c) reaches it on the hosted path (S-7). */
 void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
@@ -121,7 +121,7 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
 typedef ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
 void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
 
-/* Server logging helpers (defined in server.c; used by the per-platform
+/* Server logging helpers (defined in http_server.c; used by the per-platform
  * server_plat_*.c TUs too). */
 __attribute__((format(printf, 3, 4)))
 void kl_http_server_log(KlHttpServer *s, int level, const char *fmt, ...);

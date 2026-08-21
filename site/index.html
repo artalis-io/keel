@@ -240,27 +240,27 @@
             </header>
 <pre><span class="tk-kw">#include</span> <span class="tk-str">&lt;keel/keel.h&gt;</span>
 
-<span class="tk-kw">static void</span> <span class="tk-fn">handle_run</span>(KlRequest *req,
-                       KlResponse *res,
+<span class="tk-kw">static void</span> <span class="tk-fn">handle_run</span>(KlHttpRequest *req,
+                       KlHttpResponse *res,
                        <span class="tk-kw">void</span> *ctx) {
     (<span class="tk-kw">void</span>)req;
     (<span class="tk-kw">void</span>)ctx;
 
     <span class="tk-kw">static const char</span> body[] =
         <span class="tk-str">"{\"ok\":true,\"runtime\":\"keel\"}"</span>;
-    <span class="tk-fn">kl_response_json</span>(res, <span class="tk-num">200</span>, body,
+    <span class="tk-fn">kl_http_response_json</span>(res, <span class="tk-num">200</span>, body,
         <span class="tk-kw">sizeof</span>(body) - <span class="tk-num">1</span>);
 }
 
 <span class="tk-kw">int</span> <span class="tk-fn">main</span>(<span class="tk-kw">void</span>) {
-    KlServer s;
-    KlConfig cfg = { .<span class="tk-key">port</span> = <span class="tk-num">7070</span> };
+    KlHttpServer s;
+    KlHttpServerConfig cfg = { .<span class="tk-key">port</span> = <span class="tk-num">7070</span> };
 
-    <span class="tk-fn">kl_server_init</span>(&amp;s, &amp;cfg);
-    <span class="tk-fn">kl_server_route</span>(&amp;s, <span class="tk-str">"GET"</span>, <span class="tk-str">"/run"</span>,
+    <span class="tk-fn">kl_http_server_init</span>(&amp;s, &amp;cfg);
+    <span class="tk-fn">kl_http_server_route</span>(&amp;s, <span class="tk-str">"GET"</span>, <span class="tk-str">"/run"</span>,
         handle_run, NULL, NULL);
-    <span class="tk-fn">kl_server_run</span>(&amp;s);
-    <span class="tk-fn">kl_server_free</span>(&amp;s);
+    <span class="tk-fn">kl_http_server_run</span>(&amp;s);
+    <span class="tk-fn">kl_http_server_free</span>(&amp;s);
 }</pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">

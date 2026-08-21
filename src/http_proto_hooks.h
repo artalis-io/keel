@@ -2,11 +2,11 @@
 #define KEEL_HTTP_PROTO_HOOKS_H
 
 /*
- * proto_hooks.h — the per-protocol server upgrade seam.
+ * http_proto_hooks.h — the per-protocol server upgrade seam.
  *
- * The shared HTTP/1.1 server core (connection.c, server_core.c, and the sweep/drain
- * in server.c) dispatches into the WebSocket and HTTP-2 server modules on upgrade,
- * cleanup, and the drain/idle sweeps. Those modules (server_ws.c / server_h2.c) are
+ * The shared HTTP/1.1 server core (http_connection.c, http_server_core.c, and the sweep/drain
+ * in http_server.c) dispatches into the WebSocket and HTTP-2 server modules on upgrade,
+ * cleanup, and the drain/idle sweeps. Those modules (http_server_ws.c / http2_server.c) are
  * OPTIONAL — a freestanding HTTP/1.1 server (UEFI, docs/phase10_uefi_server_design.md
  * §6) links neither. So the core never names kl_ws_server_* / kl_http2_server_* directly;
  * it goes through a SEPARATE hook table PER PROTOCOL, registered by that module.
@@ -36,7 +36,7 @@ typedef struct KlWsServerHooks {
     int  (*upgrade)(KlHttpConn *c, const char *leftover, size_t leftover_len);
     /* Readiness data plane (KL_HTTP_CONN_WEBSOCKET): drive a read/write-ready frame pump;
      * each returns the next KlHttpConnState as int. The completion path uses .drive
-     * (KlWsCompHooks); this is its readiness counterpart so server.c dispatches through
+     * (KlWsCompHooks); this is its readiness counterpart so http_server.c dispatches through
      * the same seam instead of naming kl_ws_server_* directly. */
     int  (*on_readable)(KlHttpConn *c);
     int  (*on_writable)(KlHttpConn *c);
@@ -47,9 +47,9 @@ typedef struct KlWsServerHooks {
     void (*drain_close)(KlHttpConn *c);                   /* graceful-drain nudge */
 } KlWsServerHooks;
 
-const KlWsServerHooks *kl_ws_server_hooks(void);      /* NULL if server_ws.c absent */
+const KlWsServerHooks *kl_ws_server_hooks(void);      /* NULL if http_server_ws.c absent */
 void kl_ws_server_hooks_set(const KlWsServerHooks *hooks);
-void kl_ws_server_hooks_install(void);                /* defined in server_ws.c */
+void kl_ws_server_hooks_install(void);                /* defined in http_server_ws.c */
 
 /* ── HTTP/2 server upgrade seam ─────────────────────────────────────────────── */
 typedef struct KlHttp2ServerHooks {
@@ -67,17 +67,17 @@ typedef struct KlHttp2ServerHooks {
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
 } KlHttp2ServerHooks;
 
-const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if server_h2.c absent */
+const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if http2_server.c absent */
 void kl_http2_server_hooks_set(const KlHttp2ServerHooks *hooks);
-void kl_http2_server_hooks_install(void);                /* defined in server_h2.c */
+void kl_http2_server_hooks_install(void);                /* defined in http2_server.c */
 
 /* ── Completion-mode drive seam ─────────────────────────────────────────────
- * Once a connection has upgraded, the completion server driver (completion_server.c)
+ * Once a connection has upgraded, the completion server driver (completion_http_server.c)
  * pumps its frames through the ws/h2 COMPLETION handlers (completion_ws.c /
- * completion_h2.c). Registered from the COMPLETION axis — not server_ws.c/server_h2.c
- * — because those completion TUs share completion_server.c's build axis: a readiness
+ * completion_http2.c). Registered from the COMPLETION axis — not http_server_ws.c/http2_server.c
+ * — because those completion TUs share completion_http_server.c's build axis: a readiness
  * build compiles none of them (so nothing references the drives), and a freestanding
- * HTTP/1.1 server leaves the tables NULL (no upgrade ever occurs). completion_server.c
+ * HTTP/1.1 server leaves the tables NULL (no upgrade ever occurs). completion_http_server.c
  * calls the installers, which also pull the completion TUs out of the static archive. */
 struct KlHttpServer;
 
@@ -93,7 +93,7 @@ typedef struct KlHttp2CompHooks {
 } KlHttp2CompHooks;
 const KlHttp2CompHooks *kl_http2_comp_hooks(void);
 void kl_http2_comp_hooks_set(const KlHttp2CompHooks *hooks);
-void kl_http2_comp_hooks_install(void);                  /* defined in completion_h2.c */
+void kl_http2_comp_hooks_install(void);                  /* defined in completion_http2.c */
 
 /* ── PROXY-protocol seam ────────────────────────────────────────────────────
  * Recovering the real client address behind an L4 load balancer (proxy_protocol.c:

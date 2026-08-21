@@ -7,7 +7,7 @@
 #define KL_MAX_HEADERS 64
 
 /*
- * request.h is a header-only, zero-allocation part of the public API and is in
+ * http_request.h is a header-only, zero-allocation part of the public API and is in
  * the freestanding gate (tests/freestanding_headers.c). To stay hosted-libc-free
  * it uses these tiny inline primitives instead of <string.h>/<strings.h>:
  * kl_ascii_strncasecmp for the (ASCII, locale-free) header-name match, and
@@ -45,7 +45,7 @@ static inline int kl_req_memeq(const char *a, const char *b, size_t n) {
     return 1;
 }
 
-/** @brief Forward declaration — full definition in body_reader.h. */
+/** @brief Forward declaration — full definition in http_body_reader.h. */
 typedef struct KlHttpBodyReader KlHttpBodyReader;
 
 typedef struct {
@@ -88,7 +88,7 @@ struct KlHttpRequest {
     void *_server_ctx;           /**< Opaque — set to KlHttpConn* by connection layer (do not modify). */
 };
 
-/** @brief Forward declaration — full definition in connection.h. */
+/** @brief Forward declaration — full definition in http_connection.h. */
 typedef struct KlHttpConn KlHttpConn;
 
 /** @brief Typed accessor for the connection handle (preferred over raw _server_ctx). */

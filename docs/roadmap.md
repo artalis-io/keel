@@ -8,7 +8,7 @@ Keel is **production-ready for embedded/edge workloads**. 35 orthogonal modules 
 
 ### Strengths
 
-- **Architecture**: 35 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Architecture**: 35 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlHttpServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
 - **Testing**: 62 suites, 837 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, cross-module integration tests, 7 fuzz targets.
@@ -28,7 +28,7 @@ Keel is **production-ready for embedded/edge workloads**. 35 orthogonal modules 
 | Issue | Resolution |
 |-------|------------|
 | `writev_all` spins on EAGAIN | Replaced with single-attempt `try_writev` for buffer bodies. Added `send_offset` for partial send resume. |
-| `kl_response_body_copy` silent failure | Response API functions now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
+| `kl_http_response_body_copy` silent failure | Response API functions now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
 | Blocking DNS in async client | Added `KlResolver` vtable for pluggable async DNS. Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. |
 | Non-null-terminated header values | Method, path, query, and all header names/values null-terminated in-place after parsing. Zero allocation, still zero-copy. |
 
@@ -37,7 +37,7 @@ Keel is **production-ready for embedded/edge workloads**. 35 orthogonal modules 
 | Gap | Resolution |
 |-----|------------|
 | 8KB fixed read buffer | Heap-allocated, growable buffer (doubles up to `max_header_size`). Returns 431 when exceeded. Shrinks back on keep-alive reset. |
-| `connection.c` monolith | Extracted static helpers, unified `HEADERS_OK`/`PARSE_OK` dispatch path (~85 lines removed). |
+| `http_connection.c` monolith | Extracted static helpers, unified `HEADERS_OK`/`PARSE_OK` dispatch path (~85 lines removed). |
 
 **Deliberate design choices** (not gaps):
 
@@ -90,7 +90,7 @@ These belong in application code or middleware, not in the transport library:
 
 2. **No allocation in the hot path** — new features must not introduce per-request malloc in the event loop or state machine. Pre-allocate, pool, or arena-allocate.
 
-3. **Backwards-compatible API evolution** — new `KlConfig` fields default to zero/NULL (disabled). Existing code recompiles and runs unchanged.
+3. **Backwards-compatible API evolution** — new `KlHttpServerConfig` fields default to zero/NULL (disabled). Existing code recompiles and runs unchanged.
 
 4. **Single-header consumption remains possible** — the library should remain simple enough to vendor as a static archive with a single umbrella header.
 

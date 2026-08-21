@@ -1,5 +1,5 @@
 /*
- * redirect.c — HTTP redirect following (sync + async)
+ * http_redirect.c — HTTP redirect following (sync + async)
  *
  * Wraps kl_http_client_request / kl_http_client_start with automatic 3xx
  * redirect following. Method transformation per RFC 7231/7538.

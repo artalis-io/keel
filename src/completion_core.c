@@ -12,7 +12,7 @@
  * The point of the split (from the old completion_driver.c): this TU references NEITHER
  * comp_on_accept/read/write NOR the datagram completion dispatch, so a client-only completion
  * build — which uses only CONNECT/WATCHER + timers — links neither the server nor the datagram
- * stack. The hook implementations live in completion_server.c.
+ * stack. The hook implementations live in completion_http_server.c.
  * See docs/keel_axis_audit.md ("no hidden global event-loop state" — the hooks live on
  * the per-loop KlEventCtx, not a file-scope global).
  */

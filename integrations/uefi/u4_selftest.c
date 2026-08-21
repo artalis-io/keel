@@ -6,7 +6,7 @@
  * TLS is the mbedTLS adapter (integrations/mbedtls/tls_mbedtls.c) built FREESTANDING
  * for the EFI target. mbedTLS's ciphertext BIO routes through the U-2 EFI socket
  * provider (kl_http_client_start sets ev_ctx->sockets = the EFI native provider, and
- * src/client_async.c auto-wires it into the TLS session via set_socket_provider).
+ * src/http_client_async.c auto-wires it into the TLS session via set_socket_provider).
  *
  * Flow (all through the PUBLIC KlHttpClient API — the client is model-blind):
  *   kl_uefi_platform_init(bs, st)            → monotonic clock + EFI_RNG

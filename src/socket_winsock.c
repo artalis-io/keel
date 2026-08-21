@@ -231,7 +231,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     WSABUF *bufs = stackbufs;
     if (iovcnt > (int)(sizeof(stackbufs) / sizeof(stackbufs[0]))) {
         /* Only the response header+body vectors reach here (<= a few, capped at
-         * iov[7] by response.c). Fail loud rather than silently dropping the
+         * iov[7] by http_response.c). Fail loud rather than silently dropping the
          * overflow vectors, which would truncate/corrupt the payload. */
         errno = EINVAL;
         return -1;

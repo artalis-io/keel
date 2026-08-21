@@ -1,6 +1,6 @@
 /*
- * client_proxy.c — shared HTTP CONNECT (proxy tunnel) request/response logic.
- * See client_proxy.h. Extracted from client_sync.c + client_async.c so both transports
+ * http_client_proxy.c — shared HTTP CONNECT (proxy tunnel) request/response logic.
+ * See http_client_proxy.h. Extracted from http_client_sync.c + http_client_async.c so both transports
  * share ONE serialization + status check (no snprintf-vs-append drift). Locale-free and
  * allocation-free; part of the freestanding client archive.
  */

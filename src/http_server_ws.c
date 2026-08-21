@@ -1,10 +1,10 @@
 /*
- * server_ws.c — the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
+ * http_server_ws.c — the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
  * framed send/recv over a KlHttpConn, drain + idle keepalive, and the upgrade-seam
- * registration (proto_hooks.h). Split out of websocket.c in the Phase 10 UEFI
+ * registration (http_proto_hooks.h). Split out of websocket.c in the Phase 10 UEFI
  * server work (S-1) — the shared frame codec (kl_ws_frame_*) stays in websocket.c;
- * this TU mirrors the client's websocket_client.c and the server_core.c /
- * server_h2.c naming. A freestanding HTTP/1.1 server links none of it.
+ * this TU mirrors the client's websocket_client.c and the http_server_core.c /
+ * http2_server.c naming. A freestanding HTTP/1.1 server links none of it.
  */
 
 #include <keel/websocket.h>
@@ -660,7 +660,7 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
     return 1;
 }
 
-/* ── WebSocket server upgrade seam registration (proto_hooks.h) ──────────────
+/* ── WebSocket server upgrade seam registration (http_proto_hooks.h) ──────────────
  * The shared server core reaches WebSocket only through this table; installing it
  * both wires the core and forces server_ws.o out of the static archive. */
 static const KlWsServerHooks kl_ws_server_hooks_table = {
@@ -678,8 +678,8 @@ void kl_ws_server_hooks_install(void) {
     kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
 }
 
-/* Public WebSocket route-registration API. Lives in the ws module (moved from server.c
- * in the Finding-1 decoupling) so the readiness server.c owns no WebSocket type — a
+/* Public WebSocket route-registration API. Lives in the ws module (moved from http_server.c
+ * in the Finding-1 decoupling) so the readiness http_server.c owns no WebSocket type — a
  * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
 int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers the upgrade. */
@@ -689,7 +689,7 @@ int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerCo
     return 0;
 }
 
-/* Also self-install at load, so a consumer driving connection.c's dispatch directly
+/* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
  * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_ws_server_* reference pulls it in). */
 __attribute__((constructor))

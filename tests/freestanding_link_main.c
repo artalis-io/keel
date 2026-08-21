@@ -54,8 +54,8 @@
 #include <stdint.h>
 
 /* ── EFI-style entry: pull the client objects, then return. ─────────────────
- * References a handful of public client APIs so the linker pulls client_async.c
- * / client_common.c (and their transitive archive objects) into the image. The
+ * References a handful of public client APIs so the linker pulls http_client_async.c
+ * / http_client_common.c (and their transitive archive objects) into the image. The
  * body never runs; it only needs to REFERENCE these symbols so they are not
  * dead-stripped before the link closure is checked. */
 int efi_main(void *image_handle, void *system_table);

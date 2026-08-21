@@ -1071,10 +1071,10 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
 /* ── Model-blind protocol core (PAL Phase 8) ─────────────────────────
  * Thin non-static handles onto the static helpers above, so the IOCP completion
  * driver can reuse the exact parse→route→handle→lifecycle core after a completed
- * WSARecv, without the readiness transport wrapper and without connection.c
+ * WSARecv, without the readiness transport wrapper and without http_connection.c
  * learning which event model produced the bytes. kl_http_conn_on_readable is unchanged
  * (still calls the statics directly), so the readiness path stays byte-identical.
- * See conn_internal.h / docs/phase8_iocp_design.md §4. */
+ * See http_conn_internal.h / docs/phase8_iocp_design.md §4. */
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len) {
     return conn_dispatch_request(c, router, leftover, leftover_len);
