@@ -185,6 +185,7 @@ int kl_udp_send_family(int fd, const struct sockaddr *dest, const struct sockadd
     if (src && (src->sa_family == AF_INET || src->sa_family == AF_INET6))
         return src->sa_family;
     struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
     socklen_t sl = sizeof(ss);
     if (getsockname(fd, (struct sockaddr *)&ss, &sl) == 0 &&
         (ss.ss_family == AF_INET || ss.ss_family == AF_INET6))

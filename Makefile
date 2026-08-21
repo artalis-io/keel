@@ -323,10 +323,10 @@ ifeq ($(BACKEND),iocp)
 endif
 # test_datagram_public.c drives a scripted COMPLETION mock (a KL_EVENT_CAP_COMPLETION loop +
 # kl_comp_post_dgram_*) with no readiness path; the KEEL_NO_COMPLETION build stubs those entry points
-# to abort() (completion_absent.c), so this completion-axis test cannot run there — exclude it (mirrors
-# the readiness-adapting test_datagram_live, which DOES run under KEEL_NO_COMPLETION).
+# to abort() (completion_absent.c), so these completion-axis tests cannot run there — exclude them
+# (mirrors the readiness-adapting test_datagram_live, which DOES run under KEEL_NO_COMPLETION).
 ifdef KEEL_NO_COMPLETION
-  TEST_SRC := $(filter-out tests/test_datagram_public.c, $(TEST_SRC))
+  TEST_SRC := $(filter-out tests/test_datagram_public.c tests/test_stream_single_shot.c, $(TEST_SRC))
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 

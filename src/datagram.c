@@ -595,6 +595,8 @@ static KlDgramBatchResult dg_batch_submit(void *ctx, const KlDgramTxDesc *descs,
         return (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK)
                ? KL_DGRAM_BATCH_WOULDBLOCK : KL_DGRAM_BATCH_ERROR;
     }
+    if (!ops || !ops->send)
+        return KL_DGRAM_BATCH_ERROR;
     for (int i = 0; i < n; i++) {   /* portable fallback: one provider send() per descriptor, FIFO order */
         kl_ssize_t r = ops->send(pc, dg->fd, descs[i].data, descs[i].len,
                                  dg_addr_or_null(&descs[i].dest), dg_addr_or_null(&descs[i].src), descs[i].tos);

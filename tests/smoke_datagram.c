@@ -64,9 +64,9 @@ int main(void) {
     if (kl_event_ctx_init(&ctx, &alloc) != 0) { fprintf(stderr, "smoke-datagram: ctx init failed\n"); return 1; }
     const KlSocketProvider *sp = ctx.sockets;
 
-    uint16_t port = 0;
+    uint16_t port = 0, txport = 0;
     KlSocketHandle rxfd = prep_fd(sp, 1, &port);
-    KlSocketHandle txfd = prep_fd(sp, 0, NULL);
+    KlSocketHandle txfd = prep_fd(sp, 1, &txport);
     if (!kl_handle_valid(rxfd) || !kl_handle_valid(txfd) || port == 0) {
         fprintf(stderr, "smoke-datagram: fd prep failed (port=%u)\n", (unsigned)port); return 1;
     }
@@ -109,7 +109,8 @@ int main(void) {
      * the close coordinator cancels and drains the terminal completion, retiring the single op exactly
      * once → DETACHED, no UAF / no leak. Runs on every completion backend (IOCP is the target gate). */
     KlDatagram tx2; memset(&tx2, 0, sizeof(tx2));
-    KlSocketHandle txfd2 = prep_fd(sp, 0, NULL);
+    uint16_t txport2 = 0;
+    KlSocketHandle txfd2 = prep_fd(sp, 1, &txport2);
     KlDatagramConfig tc2 = rc; tc2.fd = txfd2; tc2.want_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
     int cancel_ok = 0;
     if (kl_handle_valid(txfd2) && kl_datagram_init_ex(&tx2, &tc2, 0) == 0) {

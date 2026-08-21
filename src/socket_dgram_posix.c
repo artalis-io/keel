@@ -540,7 +540,7 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
             unsigned char *ctrl = b->ctrl + (size_t)i * b->ctrl_sz;
             int fam = kl_udp_send_family((int)fd, dest_len ? (struct sockaddr *)&b->dst[i] : NULL,
                                          src_len ? (struct sockaddr *)&src_ss : NULL);
-            size_t clen;
+            size_t clen = 0;
             /* A descriptor whose requested source-pin/TOS cannot be built (undeterminable family or the
              * cmsg doesn't fit) FAILS the batch — never transmit without the requested metadata. */
             if (fam < 0 ||
@@ -569,6 +569,7 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
 static unsigned pdg_caps(void *ctx, KlSocketHandle fd) {
     (void)ctx;
     struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
     socklen_t sl = sizeof(ss);
     if (getsockname((int)fd, (struct sockaddr *)&ss, &sl) != 0)
         return 0;
