@@ -44,8 +44,8 @@
 #endif
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/http_server.h>
-#include <keel/http_connection.h>
+#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx (R2f) */
+#include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
@@ -331,7 +331,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
 }
 
 int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
-    /* The server drives a completion loop via kl_comp_drain (io_engine seam), not this
+    /* The server drives a completion loop via kl_comp_drain (completion seam), not this
      * readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
     if (timeout_ms > 0) {
@@ -583,9 +583,8 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
 /* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
  * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
  * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
-static int iou_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
+static int iou_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     KlIouState *st = iou_state(stream);
     if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2)
         return -1;                                   /* overflow guard */
@@ -620,9 +619,9 @@ static int iou_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int he
     return 0;
 }
 
-static int iou_comp_post_accept(struct KlHttpServer *s) {
-    if (!s) return -1;
-    KlIouState *st = s->ev.loop._backend;
+static int iou_comp_post_accept(struct KlEventCtx *ctx) {
+    if (!ctx) return -1;
+    KlIouState *st = ctx->loop._backend;
     if (st->accept_pending) return 0;                /* one accept outstanding is enough */
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
@@ -773,11 +772,11 @@ static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int iou_comp_prime_accepts(struct KlHttpServer *s) {
-    if (!s) return -1;
-    KlIouState *st = s->ev.loop._backend;
+static int iou_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    if (!ctx) return -1;
+    KlIouState *st = ctx->loop._backend;
     if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
-    st->listen_fd = s->listen_fd;
+    st->listen_fd = listen_fd;
     st->primed = 1;
     /* Post-driven, window 1: latch the listen fd and let the completion KlListener post the single
      * accept (reserve-before-post backpressure). No accept posted here — the listener arms it. */
@@ -1033,8 +1032,8 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
  * for each even under SQ pressure (iou_sqe flushes + retries; one more submit+get as a backstop),
  * then flushes. Returns 0, or -1 if a cancel SQE genuinely could not be obtained (the server then
  * skips the reap loop rather than block forever). */
-static int iou_shutdown_accepts(struct KlHttpServer *s) {
-    KlIouState *st = s->ev.loop._backend;
+static int iou_shutdown_accepts(struct KlEventCtx *ctx) {
+    KlIouState *st = ctx->loop._backend;
     for (KlIouOp *o = st->ops; o; o = o->next) {
         if (o->type != IOU_ACCEPT) continue;
         o->aborted = 1;

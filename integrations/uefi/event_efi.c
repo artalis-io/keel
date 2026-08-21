@@ -306,28 +306,34 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
  * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
  * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
  * KlListener is installed and the server re-calls this each tick to top the gate up. */
-static int el_prime_accepts(struct KlHttpServer *s) {
-    if (!s) return -1;
+static int el_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    if (!ctx) return -1;
+    /* R2f: the accept ops are neutral (KlEventCtx + listen_fd). EFI is an AUTONOMOUS backend whose
+     * capacity gate needs the pool, so this integration adapter recovers the owning KlHttpServer from
+     * its embedded event ctx (containerof — the same trick completion_http_server.c's server_of_ctx
+     * uses; integrations may know KlHttpServer, only src/ substrate must not). */
+    KlHttpServer *s = (KlHttpServer *)((char *)ctx - offsetof(KlHttpServer, ev));
     g_efi.server = s;
-    g_efi.listen_fd = s->listen_fd;
+    g_efi.listen_fd = listen_fd;
     g_efi.accept_primed = 1;
     /* Capacity-gated arming (Goal 8 backpressure): arm at most as many EFI Accept tokens
      * as there are FREE Keel pool slots. Runs every completion tick (this is called from
-     * kl_io_engine_run_completion), so a freed slot (active_count drops on conn release)
+     * kl_http_comp_run), so a freed slot (active_count drops on conn release)
      * re-arms on the next tick — and a full pool arms nothing, so EFI stops accepting
      * into child handles Keel can't service (they wait in the TCP backlog). */
-    if (kl_handle_valid(s->listen_fd)) {
+    if (kl_handle_valid(listen_fd)) {
         int freeslots = s->pool.capacity - s->pool.active_count;
         if (freeslots < 0) freeslots = 0;
-        (void)kl_uefi_socket_accept_arm(s->listen_fd, freeslots);
+        (void)kl_uefi_socket_accept_arm(listen_fd, freeslots);
     }
     return 0;
 }
 
 /* post_accept: re-arm after the generic server consumed a slot. Identical to prime — the
- * arming is capacity-gated, so this just re-evaluates free capacity and tops up. */
-static int el_post_accept(struct KlHttpServer *s) {
-    return el_prime_accepts(s);
+ * arming is capacity-gated, so this just re-evaluates free capacity and tops up (over the
+ * already-latched listen fd). */
+static int el_post_accept(struct KlEventCtx *ctx) {
+    return el_prime_accepts(ctx, g_efi.listen_fd);
 }
 
 static EfiIoOp *io_op_alloc(void) {

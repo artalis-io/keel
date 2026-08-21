@@ -20,7 +20,7 @@
 #include <keel/timer.h>          /* kl_timer_fire — due timers on the completion tick */
 #include "completion.h"          /* the abstract completion axis (KlCompletionEvent) */
 #include "datagram_life.h"       /* KlDgramLife dispatch — type-safe datagram completion routing (7B-2a) */
-#include "io_engine.h"           /* kl_comp_run (the seam this TU defines) */
+#include "completion_io.h"           /* kl_comp_run (the seam this TU defines) */
 
 #define KL_COMP_MAX_EVENTS 64
 

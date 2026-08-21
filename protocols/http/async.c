@@ -5,7 +5,7 @@
  * freestanding phase (F0) — that half is client-usable and server-free. This TU
  * keeps only the connection-suspension machinery, which reaches into the server
  * connection driver (kl_http_conn_on_writable / kl_http_server_conn_release /
- * kl_io_engine_resume_completion) and so is not part of the freestanding client.
+ * kl_http_comp_resume) and so is not part of the freestanding client.
  */
 #include <keel/clock.h>
 #include <keel/async.h>
@@ -14,7 +14,8 @@
 #include <stdint.h>
 #include "http_internal.h"
 #include "event_caps.h"
-#include "io_engine.h"   /* kl_io_engine_resume_completion — completion resume (8e-2) */
+#include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
+#include "completion_http.h" /* kl_http_comp_resume — completion resume (8e-2) */
 
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
@@ -80,10 +81,10 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     /* On a completion loop, drive the completion send path instead of re-arming the fd —
      * the readiness re-register + kl_http_conn_on_writable below is a no-op there (kl_event_add
      * is inert, kl_http_conn_on_writable does readiness socket writes). Branch on the abstract
-     * event axis (not the backend); the completion send lives behind an io_engine seam so
+     * event axis (not the backend); the completion send lives behind the completion seam so
      * async.c stays free of completion internals (8e-2). */
     if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
-        kl_io_engine_resume_completion(s, conn);
+        kl_http_comp_resume(s, conn);
         return;
     }
 

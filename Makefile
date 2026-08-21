@@ -165,15 +165,15 @@ DNS_SYS_SRC ?= protocols/dns/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
 # (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
-# server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_io_engine_*) + the
-# h2/ws legs (completion_http2.c / completion_ws.c) + the runtime-dispatch surface
-# (completion_dispatch.c: the kl_comp_* primitives, routed to the compiled-in backend or a
-# runtime provider) are linked on EVERY build. On a readiness build they are never called
-# (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
-# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs
-# (completion_absent.c) — the axis is compiled out.
+# server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_http_comp_* orchestration
+# + the HTTP kl_comp_* wrappers) + the h2/ws legs (completion_http2.c / completion_ws.c) + the
+# runtime-dispatch surface (completion_dispatch.c: the neutral kl_comp_*_raw primitives, routed to the
+# compiled-in backend or a runtime provider) are linked on EVERY build. On a readiness build they are
+# never called (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
+# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs — the neutral surface in
+# completion_absent.c + the HTTP surface in completion_http_absent.c (R2f) — the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
-  COMPLETION_CORE = src/completion_absent.c
+  COMPLETION_CORE = src/completion_absent.c protocols/http/completion_http_absent.c
 else
   COMPLETION_CORE = src/completion_core.c protocols/http/completion_http_server.c \
                     protocols/http2/completion_http2.c protocols/websocket/completion_ws.c src/completion_dispatch.c
@@ -883,7 +883,8 @@ check-sockaddr-neutral:
 # DEFAULT-DENY: EVERY src/*.c + parsers/*.c is treated as an above-transport (protocol/util) TU that
 # must NOT reach below the Tier-1 transports (KlListener/KlStream/KlDatagram) into engine/provider
 # internals — no platform networking/event system header, no raw completion seam (completion.h), no
-# completion tick (io_engine.h) — UNLESS it is in TIER1_INFRA: the layer that legitimately bridges
+# completion tick (completion_io.h) or HTTP completion seam (completion_http.h) — UNLESS it is in
+# TIER1_INFRA: the layer that legitimately bridges
 # Tier-1 to the engine/provider (event backends, socket providers, platform glue, the completion
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
 # the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
@@ -896,7 +897,7 @@ check-sockaddr-neutral:
 #
 # TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
 # for the transport machines + run-loop/async drivers). http_server.c / http_client_async.c live here because
-# they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
+# they drive the loop / async connect via the Keel completion tick (completion_io.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
               $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard protocols/websocket/completion_*.c) $(wildcard protocols/dns/dns_sys_*.c) \
@@ -905,8 +906,8 @@ TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard sr
               src/event_ctx.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/http_server.c protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
-# and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
-TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"
+# and the socket-ADDRESS headers, plus the internal completion.h / completion_io.h / completion_http.h seams.
+TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|completion_io|completion_http)\.h"
 check-tier1-boundary:
 	@bad=0; \
 	for f in src/*.c protocols/*/*.c; do \
@@ -916,7 +917,7 @@ check-tier1-boundary:
 	  fi; \
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED — an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
-	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"io_engine.h"'; do \
+	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"completion_io.h"' '"completion_http.h"'; do \
 	  if ! printf '#include %s\n' "$$h" | grep -qE '$(TIER1_FORBIDDEN_RE)'; then \
 	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \

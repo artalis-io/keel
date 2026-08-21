@@ -25,12 +25,12 @@
  * backend's primitives through loop->ops->completion. BACKEND=lwipraw is retired.
  *
  * Division of labour (mirrors event_pollcomp.c — the SIMPLEST completion backend):
- *   - THIS TU defines the completion.h/io_engine.h BACKEND primitives:
+ *   - THIS TU defines the completion.h/completion_io.h BACKEND primitives:
  *       kl_comp_drain / kl_comp_prime_accepts / kl_comp_post_{recv,send,accept,sendfile}
  *       / kl_comp_cancel / kl_comp_post_udp_{recv,send}
  *   - completion_driver.c defines the GENERIC tick + seam entry points on top of them:
- *       kl_comp_run / kl_io_engine_run_completion / kl_io_engine_resume_completion /
- *       kl_io_engine_post_read
+ *       kl_comp_run / kl_http_comp_run / kl_http_comp_resume /
+ *       kl_http_comp_post_read
  *
  * CAPABILITIES (IPv4, loopback): listen/accept + recv/send/sendfile completion for a TCP
  * server, an outbound TCP client connect (LC-1), and — as of LC-3a — a UDP datagram data-plane
@@ -74,7 +74,7 @@
 #include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
-#include "io_engine.h"         /* kl_comp_post_dgram_* decls */
+#include "completion_io.h"         /* kl_comp_post_dgram_* decls */
 #include "datagram_life.h"     /* kl_dgram_life_release — drop the caller-transferred ref (7B-2b) */
 
 #include <string.h>
@@ -176,7 +176,7 @@ static int lwr_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;
 }
 
-/* A completion loop drives via kl_comp_drain (the io_engine seam), not this readiness
+/* A completion loop drives via kl_comp_drain (the completion seam), not this readiness
  * wait — defined only because the KlEventLoop API requires it (same as event_pollcomp).
  * A NO_SYS=1 raw loop cannot block on an fd, so a positive timeout is a coarse sleep. */
 static int lwr_ev_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
@@ -429,8 +429,13 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
  * callback and surface through drain's per-slot scan (below), bounded by the per-conn slot table
  * (sized to max_connections == pool capacity), NOT by posted ops. No completion KlListener is
  * installed; this one-time setup latches the relocated listen pcb. */
-static int lwr_comp_prime_accepts(struct KlHttpServer *s) {
-    if (!s) return -1;
+static int lwr_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    if (!ctx) return -1;
+    (void)listen_fd;   /* lwIP relocates + adopts its own listen pcb below (writes s->listen_fd) */
+    /* R2f: neutral accept ops. lwIP is an AUTONOMOUS backend that needs s->config + MUTATES
+     * s->listen_fd, so this integration adapter recovers the owning KlHttpServer from its embedded
+     * event ctx via containerof (integrations may know KlHttpServer; only src/ substrate must not). */
+    KlHttpServer *s = (KlHttpServer *)((char *)ctx - offsetof(KlHttpServer, ev));
     KlLwrState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     /* fix #2: unify capacity on the AUTHORITATIVE Keel limit. Size the glue's per-conn slot
@@ -450,10 +455,10 @@ static int lwr_comp_prime_accepts(struct KlHttpServer *s) {
     return 0;
 }
 
-static int lwr_comp_post_accept(struct KlHttpServer *s) {
+static int lwr_comp_post_accept(struct KlEventCtx *ctx) {
     /* Passive raw accept: the tcp_accept callback keeps the backlog filled on its own —
      * no per-accept op to re-post (unlike pollcomp's one accept op). Idempotent no-op. */
-    (void)s;
+    (void)ctx;
     return 0;
 }
 
@@ -506,9 +511,8 @@ static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
  * file size). One KL_COMP_WRITE follows when the whole head+file is acked; a file read error
  * surfaces a FAILED terminal (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
  * file_fd; the response layer closes res->file_fd (kl_http_response_reset/free) — not here. */
-static int lwr_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
+static int lwr_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     (void)head_total;
     if (!kl_handle_valid(stream->fd)) return -1;
     if (head_n < 0 || head_n > KL_LWR_MAX_SEND_IOV) return -1;

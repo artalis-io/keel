@@ -12,8 +12,8 @@
  */
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/http_server.h>
-#include <keel/http_connection.h>
+#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx (R2f) */
+#include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -373,9 +373,9 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
     return 0;
 }
 
-static int iocp_comp_post_accept(struct KlHttpServer *s) {
-    if (!s) return -1;
-    KlIocpState *st = s->ev.loop._backend;
+static int iocp_comp_post_accept(struct KlEventCtx *ctx) {
+    if (!ctx) return -1;
+    KlIocpState *st = ctx->loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
                           NULL, 0, WSA_FLAG_OVERLAPPED);
     if (a == INVALID_SOCKET) return -1;
@@ -387,7 +387,7 @@ static int iocp_comp_post_accept(struct KlHttpServer *s) {
     op->alloc = st->alloc;
     op->accept_sock = a;
     /* op_sock = the LISTEN socket: AcceptEx's overlapped I/O runs there (CancelIoEx target). */
-    iocp_op_register(st, op, (SOCKET)s->listen_fd);
+    iocp_op_register(st, op, (SOCKET)st->listen_fd);
 
     /* Track the op BEFORE posting so a synchronous completion (or teardown close) can always find
      * it. On a hard post failure we untrack + free below. */
@@ -396,7 +396,7 @@ static int iocp_comp_post_accept(struct KlHttpServer *s) {
     tr->op = op; tr->next = st->accepts; st->accepts = tr;
 
     DWORD bytes = 0;
-    BOOL ok = st->acceptex((SOCKET)s->listen_fd, a, op->accept_buf,
+    BOOL ok = st->acceptex((SOCKET)st->listen_fd, a, op->accept_buf,
                            0, (DWORD)KL_IOCP_ADDR_LEN, (DWORD)KL_IOCP_ADDR_LEN,
                            &bytes, &op->ov);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
@@ -462,9 +462,8 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
     return 0;
 }
 
-static int iocp_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
+static int iocp_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
@@ -740,13 +739,13 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
  * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
  * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
  * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
-static int iocp_comp_prime_accepts(struct KlHttpServer *s) {
-    if (!s) return -1;
-    KlIocpState *st = s->ev.loop._backend;
+static int iocp_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    if (!ctx) return -1;
+    KlIocpState *st = ctx->loop._backend;
     if (st->started)
         return KL_IOCP_ACCEPT_BACKLOG;
 
-    SOCKET lst = (SOCKET)s->listen_fd;
+    SOCKET lst = (SOCKET)listen_fd;
     st->listen_fd = lst;
     GUID g_accept = WSAID_ACCEPTEX;
     GUID g_addrs  = WSAID_GETACCEPTEXSOCKADDRS;
@@ -1085,8 +1084,8 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
  * DEQUEUES every completion (accept OR read/write/udp/watcher) before freeing it (no OVERLAPPED is
  * freed while the kernel may still be writing → no use-after-free) and routes each ordinarily (no
  * completion lost); accept completions untrack + retire the listener. Nothing more to force here. */
-static int iocp_shutdown_accepts(struct KlHttpServer *s) {
-    KlIocpState *st = s->ev.loop._backend;
+static int iocp_shutdown_accepts(struct KlEventCtx *ctx) {
+    KlIocpState *st = ctx->loop._backend;
     st->quiescing = 1;   /* from now, iocp_comp_drain frees fired watchers instead of re-posting */
     return 0;
 }

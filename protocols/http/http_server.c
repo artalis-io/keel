@@ -12,7 +12,7 @@
 #include "http_internal.h"
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
-#include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
+#include "completion_io.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
@@ -338,7 +338,7 @@ int kl_http_server_run(KlHttpServer *s) {
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
      * wait/dispatch below. Detected once from the backend's advertised event model
-     * (PAL Phase 8 io_engine seam) — the completion concept never enters the
+     * (PAL Phase 8 completion seam) — the completion concept never enters the
      * readiness path. Never true on readiness backends, so that path is unchanged. */
     const int completion_loop =
         (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;

@@ -7,7 +7,7 @@
  * completion branch and the completion dispatchers (completion_dispatch.c) are never
  * called — hence returning NULL is safe (the NULL is never dereferenced). This exists
  * only so the always-linked completion_dispatch.c resolves its kl_comp_ops_builtin()
- * reference without a platform #ifdef. Mirrors the old io_engine.c stub's role for the
+ * reference without a platform #ifdef. Mirrors the former io-engine stub's role for the
  * completion-primitive axis. See completion.h / event_dispatch.c.
  */
 #include "completion.h"

@@ -68,7 +68,7 @@ sockaddr.c, socket_posix.c, socket_winsock.c, socket_dgram_posix.c, socket_dgram
 stream_close.c, stream_read.c, stream_write.c, thread_pool.c, timer.c, udp_cmsg.c, udp_cmsg_win.c, url.c,
 version.c. (`async.c` LEAVES substrate → `protocols/http/`, §4.2.)
 
-**`.h` (substrate):** completion.h, io_engine.h, socket.h, sockaddr_native.h, sockcompat.h, stream*.h,
+**`.h` (substrate):** completion.h, completion_io.h, socket.h, sockaddr_native.h, sockcompat.h, stream*.h,
 datagram*.h (7), dgram_recv_classify.h, listener.h, connect_op.h, event_builtin.h, event_caps.h,
 event_pollcomp_internal.h, platform.h, kl_cstr.h, drain_reserve.h, watcher_internal.h, resolve_sync.h,
 udp_cmsg.h, udp_cmsg_win.h. **NEW substrate `.h`: `stream_io.h`** (the generic `kl_stream_*` I/O inlines
@@ -356,6 +356,26 @@ its own reviewed increment — NOT folded into a protocol move — and validated
 backend (pollcomp/io_uring/IOCP) + readiness + `KEEL_NO_COMPLETION` + freestanding, since it retypes the
 backend vtable and splits the absent stub.
 
+**Implemented (R2f as-built) — three deltas from the frozen text above:**
+1. **`src/io_engine.h` renamed → `src/completion_io.h`** (user directive, mid-implementation): once purified
+   to the neutral surface it held nothing named `io_engine`, so the name was misleading. It is the neutral
+   consumer-facing completion seam (kept in substrate), sitting between `completion.h` (the backend
+   CONTRACT) and consumers. All includers repointed atomically; guard → `KEEL_SRC_COMPLETION_IO_H`. The
+   `kl_io_engine_*` symbols were already retired to `kl_http_comp_*` (unchanged from the frozen table); the
+   retired `io_engine.h` path + `kl_io_engine_*` prefix go into the eventual stale-name gate.
+2. **Autonomous integration backends recover the server via containerof.** The frozen "backends deref only
+   neutral fields" holds for the three CORE backends (iocp/iouring/pollcomp: `ctx->loop._backend` +
+   `listen_fd`). The AUTONOMOUS integration backends need more — EFI's capacity gate reads `s->pool`, and
+   lwIP reads `s->config` and **mutates** `s->listen_fd` — so `el_prime_accepts`/`lwr_comp_prime_accepts`
+   recover the owning `KlHttpServer` from the neutral `KlEventCtx` via `containerof(ctx, KlHttpServer, ev)`
+   (the sanctioned `server_of_ctx` pattern). This keeps the **vtable signature** neutral (substrate purity
+   intact) while integration adapters — which legitimately know `KlHttpServer` (G1 governs `src/` only) —
+   recover what they own. The passed `listen_fd` is used directly by the core backends; the autonomous
+   backends read/write it through the recovered server.
+3. **`completion_http.h` added to the Tier-1/G3 forbidden-header set** (alongside `completion.h`/
+   `completion_io.h`): it exposes the HTTP completion seam and would otherwise be a transitive way to pull
+   `completion.h` past the gate. All its includers are TIER1_INFRA, so the tightened gate stays green.
+
 ## 5. Build / CI / test / fuzz / integration reference inventory
 
 Line numbers approximate (verify at edit time).
@@ -430,7 +450,7 @@ no whole-line allowlist masking):
 ### 6.3 G3 — frozen integration→internal-seam allowlist (EXACT header names, no wildcards)
 Integrations legitimately consume these SUBSTRATE provider/platform seam headers — the **exact,
 enumerated** current set (no `*` patterns, so no future private header is silently authorized):
-`socket.h`, `platform.h`, `io_engine.h`, `event_caps.h`, `event_builtin.h`, `completion.h`,
+`socket.h`, `platform.h`, `completion_io.h`, `event_caps.h`, `event_builtin.h`, `completion.h`,
 `sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
 `datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`. **This exact list is the allowlist.** (`datagram_life.h`
 ← lwIP raw provider; `datagram_open.h` ← EFI host-mock via `"../../src/datagram_open.h"`.) All are

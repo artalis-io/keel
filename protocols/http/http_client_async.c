@@ -27,7 +27,7 @@
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
-#include "io_engine.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
+#include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
 #include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
 #include "http_client_internal.h"
 #include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */

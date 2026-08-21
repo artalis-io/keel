@@ -12,7 +12,7 @@
  * is core (generic, client-linkable) vs server (server-only), which this achieves.
  *
  * This TU installs comp_server_conn_dispatch on the ctx's comp_conn_dispatch hook (in
- * kl_io_engine_run_completion, the single always-hit server-completion-init point,
+ * kl_http_comp_run, the single always-hit server-completion-init point,
  * before any accept is primed), so completion_core.c's kl_comp_run routes
  * ACCEPT/READ/WRITE here without a static reference — a client-only build links neither.
  *
@@ -26,9 +26,10 @@
 #include "http_internal.h"            /* kl_http_server_conn_release */
 #include "http_conn_internal.h"       /* kl_http_conn_dispatch_request / kl_http_conn_send_complete */
 #include "http_response_internal.h"   /* kl_http_response_build_iovec */
-#include "completion.h"          /* the abstract completion axis */
+#include "completion.h"          /* the neutral completion axis (kl_comp_*_raw + kl_comp_drain) */
+#include "completion_http.h"     /* the HTTP completion seam this TU DEFINES (wrappers + kl_http_comp_*) */
 #include "completion_internal.h" /* the cross-TU h2/ws drives + exported server helpers */
-#include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
+#include "completion_io.h"           /* kl_comp_run (the neutral generic tick) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
 #include <keel/sockaddr.h>       /* kl_sockaddr_family — neutral accept addrs from the event */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
@@ -89,6 +90,22 @@ int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t tota
     return kl_comp_post_send_raw(&c->stream, iov, iovcnt, total);
 }
 
+/* Accept/sendfile HTTP wrappers (R2f): each forwards the neutral arg (&s->ev, s->listen_fd, &c->stream)
+ * to the neutral kl_comp_*_raw entry point. The backend never sees an HTTP type. */
+int kl_comp_prime_accepts(struct KlHttpServer *s) {
+    return kl_comp_prime_accepts_raw(&s->ev, s->listen_fd);
+}
+int kl_comp_post_accept(struct KlHttpServer *s) {
+    return kl_comp_post_accept_raw(&s->ev);
+}
+int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
+    return kl_comp_shutdown_accepts_raw(&s->ev);
+}
+int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count) {
+    return kl_comp_post_sendfile_raw(&c->stream, head_iov, head_n, head_total, file_fd, count);
+}
+
 /* Serialize the response head and post it: buffered body inline via WSASend, or a
  * file body via the backend's zero-copy file send (TransmitFile) after the head.
  * The backend copies + owns the head bytes for the op's lifetime. */
@@ -112,7 +129,7 @@ static int comp_send_response(KlHttpConn *c) {
  * the conn parks with no outstanding op until kl_http_request_resume_body re-posts it. */
 static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
     c->stream.read_len = 0;
-    if (c->stream.read_paused) return;   /* paused — resume re-posts via kl_io_engine_post_read */
+    if (c->stream.read_paused) return;   /* paused — resume re-posts via kl_http_comp_post_read */
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
@@ -360,7 +377,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
     } else if (st == KL_HTTP_CONN_SUSPENDED) {
         /* Handler suspended for async I/O (8e-2): leave the connection parked — it holds
          * no pending op and is exempt from the idle sweep. kl_async_complete resumes it
-         * (via kl_io_engine_resume_completion) once the async op finishes. Do nothing. */
+         * (via kl_http_comp_resume) once the async op finishes. Do nothing. */
     } else {
         /* CLOSED. A TLS streaming response that finished during dispatch reports CLOSED
          * (the handler "already sent" it), but on a completion loop its chunks were
@@ -774,7 +791,7 @@ static inline struct KlHttpServer *server_of_ctx(struct KlEventCtx *ctx) {
 
 /* The comp_conn_dispatch hook (completion_core.c → here): route a TCP conn completion
  * (ACCEPT/READ/WRITE) to its server handler. Registered on the ctx in
- * kl_io_engine_run_completion, so completion_core.c's kl_comp_run reaches the server
+ * kl_http_comp_run, so completion_core.c's kl_comp_run reaches the server
  * without a static reference — a client-only build links neither this TU nor these
  * handlers. The event is a const KlCompletionEvent* (opaque const void* at the hook seam,
  * exactly as KlEventOps.completion). */
@@ -797,9 +814,9 @@ static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
 
 /* Resume a suspended connection on a completion loop after an async op completed (8e-2):
  * drive the completion send path for the state on_resume produced — the same path a
- * normal request's dispatch takes. The io_engine seam kl_async_complete calls (only on a
+ * normal request's dispatch takes. The completion seam kl_async_complete calls (only on a
  * completion loop). Keeps the async runtime free of completion knowledge. */
-void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *conn) {
+void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
     if (conn->state == KL_HTTP_CONN_READING) {   /* handler yielded without a response — read on */
         conn->stream.read_len = 0;
         if (kl_comp_post_recv(conn) < 0) kl_comp_close(s, conn);
@@ -809,15 +826,15 @@ void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *c
 }
 
 /* Re-arm a body read after read-side flow control resumes (kl_http_request_resume_body → the
- * io_engine seam on a completion loop): post a fresh recv; on failure release via the normal
+ * completion seam on a completion loop): post a fresh recv; on failure release via the normal
  * completion path. Mirrors comp_start_body_read's post (read_len was reset when the body read
  * started; the next recv appends into read_buf as usual). */
-void kl_io_engine_post_read(struct KlHttpConn *c) {
+void kl_http_comp_post_read(struct KlHttpConn *c) {
     if (kl_comp_post_recv(c) < 0)
         kl_comp_close(server_of_ctx(c->stream.ctx), c);
 }
 
-/* The server's io_engine seam entry: install the conn-dispatch hook (idempotent, the single
+/* The server's completion seam entry: install the conn-dispatch hook (idempotent, the single
  * always-hit server-completion-init point), set up the accept path once from the backend's window,
  * then run one generic tick over its shared event ctx.
  *
@@ -826,7 +843,7 @@ void kl_io_engine_post_read(struct KlHttpConn *c) {
  * posted accept and PAUSEs (kernel backlog queues) when the pool is full instead of accept-and-
  * dropping. window==0 is an AUTONOMOUS backend (EFI/lwip) that gates capacity in its own drain; it
  * gets no listener and is re-primed each tick so a freed slot re-opens its gate (EFI top-up). */
-int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms) {
+int kl_http_comp_run(struct KlHttpServer *s, int timeout_ms) {
     s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
     if (!s->accept_setup_done) {
         int window = kl_comp_prime_accepts(s);   /* one-time setup; returns the accept window */
@@ -863,7 +880,7 @@ int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms) {
  * blocking kl_comp_drain reaps the pending completions. Returns 0, or -1 if the force could not be
  * guaranteed (caller leaves the backend close as the physical backstop). The listen socket must be
  * closed by the caller first (forces IOCP AcceptEx completion). */
-int kl_io_engine_quiesce_accepts(struct KlHttpServer *s) {
+int kl_http_comp_quiesce_accepts(struct KlHttpServer *s) {
     if (kl_comp_shutdown_accepts(s) < 0) return -1;
     while (!kl_listener_is_detached(&s->accept_listener)) {
         KlCompletionEvent evs[KL_COMP_MAX_EVENTS];

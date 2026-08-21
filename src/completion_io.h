@@ -1,28 +1,30 @@
 /*
- * io_engine.h — INTERNAL. The event-model dispatch seam (PAL Phase 8).
+ * completion_io.h — INTERNAL. The NEUTRAL, consumer-facing completion seam (PAL Phase 8; this file
+ * was the former io-engine header, renamed + purified in R2f — after the HTTP surface split out, the
+ * old name was misleading). Substrate.
  *
- * The server run loop is readiness-shaped inline (kl_event_wait → dispatch →
- * conn_read/write). When the event loop is a *completion* loop (IOCP, advertising
- * KL_EVENT_CAP_COMPLETION), the server delegates one tick here instead — so the
- * completion model stays contained to the backend and never leaks into the shared
- * readiness path or Keel's public API.
+ * Declares only the protocol-neutral completion surface a caller reaches without pulling the whole
+ * backend contract (completion.h): the generic completion tick (kl_comp_run), the datagram post
+ * descriptors + ops, neutral cancellation, and outbound connect. It names KlEventCtx / KlStream /
+ * KlSocketHandle / KlDgramLife only — never an HTTP type. (completion.h is the backend CONTRACT:
+ * KlCompletionEvent / KlCompletionOps + the neutral kl_comp_*_raw dispatch decls; this is the neutral
+ * CONSUMER seam over it.)
  *
- * Defined per-backend, selected by the Makefile (no #ifdef in shared code):
- *   - readiness builds link the stub in io_engine.c (never called — the server only
- *     enters the completion branch when the loop advertises COMPLETION);
- *   - the IOCP build links the real tick in event_iocp.c.
- * KlHttpServer is used by-pointer only, so an opaque forward declaration keeps this
- * header free of any other dependency. See docs/phase8_iocp_design.md.
+ * The HTTP run-loop orchestration that used to live here (the four former io-engine run-loop symbols)
+ * moved to protocols/http/completion_http.h and was renamed kl_http_comp_* (R2f;
+ * docs/protocols_restructure_freeze.md §4.8). Each neutral op below is defined per-backend, selected by
+ * the Makefile (no #ifdef in shared code): a readiness build links the completion_readiness_stub.c stub
+ * (never called — the server enters the completion branch only when the loop advertises
+ * KL_EVENT_CAP_COMPLETION); a completion backend links the real impls. See docs/phase8_iocp_design.md.
  */
-#ifndef KEEL_SRC_IO_ENGINE_H
-#define KEEL_SRC_IO_ENGINE_H
+#ifndef KEEL_SRC_COMPLETION_IO_H
+#define KEEL_SRC_COMPLETION_IO_H
 
 #include <stddef.h>   /* size_t (kl_comp_post_dgram_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
 #include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
 #include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
 
-struct KlHttpServer;
 struct KlEventCtx;
 struct sockaddr;
 
@@ -60,27 +62,13 @@ typedef struct {
  * keeping that #ifdef out of the shared negotiation code (F3 / no-#ifdef-in-shared). */
 int kl_completion_axis_available(void);
 
-/* Run one completion-loop tick for the server: prime accepts, then drive one
- * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
-int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms);
-
-/* Teardown accept quiescence (6B-3 2b review): force every posted accept to completion, then reap to
- * confirmed KlListener detachment with a TEARDOWN-SPECIFIC dispatcher that routes ONLY ACCEPT and
- * drops all other completions WITHOUT dispatch — so no HTTP step, application/consumer callback, or
- * timer runs against logically destroyed state (async ops / file_io already torn down). Called once
- * from kl_http_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
- * -1 if the force could not be guaranteed (caller leaves the backend close as the physical backstop).
- * The impl (completion_http_server.c) owns the completion dispatch hook + the listener; http_server_core.c
- * stays decoupled from the internal completion vtable. Aborting stub under KEEL_NO_COMPLETION. */
-int kl_io_engine_quiesce_accepts(struct KlHttpServer *s);
-
 /* The generic completion tick: drain the ctx's completion loop and route each op to
- * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and
- * the standalone kl_event_ctx_run, so standalone consumers (UDP/DNS) run on a
- * completion loop. Defined per-backend, selected by the Makefile (no #ifdef in shared
- * code): the completion driver (completion_driver.c) provides the real tick; the
- * io_engine.c stub is linked on readiness builds and never called (no readiness
- * backend advertises COMPLETION). Returns events processed (>= 0), or -1. */
+ * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop (via the HTTP
+ * orchestration kl_http_comp_run, completion_http.h) and the standalone kl_event_ctx_run, so
+ * standalone consumers (UDP/DNS) run on a completion loop. Defined per-backend, selected by the
+ * Makefile (no #ifdef in shared code): the completion driver (completion_core.c) provides the real
+ * tick; the completion_readiness_stub.c stub is linked on readiness builds and never called (no
+ * readiness backend advertises COMPLETION). Returns events processed (>= 0), or -1. */
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
 
 /* Cancel any pending completion ops on `fd` (PAL hardening — completion-path idle
@@ -89,32 +77,16 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
  * completes with an error, and the driver releases the connection through its normal
  * completion path (so there is never a dangling op or a double release). Backend-defined
  * (event_pollcomp.c removes the ops; event_iocp.c CancelIoEx's them); stubbed in
- * io_engine.c on readiness builds, where it is never called. */
+ * completion_readiness_stub.c on readiness builds, where it is never called. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
-/* Resume a suspended connection on a completion loop after an async op completed (8e-2).
- * kl_async_complete's readiness path re-arms the fd + drives kl_http_conn_on_writable; on a
- * completion loop the resume instead drives the completion send path. Defined in
- * completion_driver.c (runs comp_after_state on the conn's post-resume state); stubbed in
- * io_engine.c on readiness builds, where kl_async_complete never calls it (it branches on
- * KL_EVENT_CAP_COMPLETION). Keeps the async API free of any event-axis awareness. */
-struct KlHttpConn;
-void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *conn);
-
-/* Re-arm a body read on a completion loop after read-side flow control resumes
- * (kl_http_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
- * interest directly (kl_event_mod) and never calls this. Defined in completion_driver.c
- * (kl_comp_post_recv); stubbed in io_engine.c on readiness builds, where it is never reached
- * (resume branches on KL_EVENT_CAP_COMPLETION). Keeps the request API event-axis-agnostic. */
-void kl_io_engine_post_read(struct KlHttpConn *conn);
-
 /* Post one overlapped datagram receive on a completion loop from a neutral descriptor (7B-2b). The
- * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in io_engine.c on non-completion builds. */
+ * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in completion_absent.c on non-completion builds. */
 int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
 
 /* Post one overlapped datagram send on a completion loop from a neutral descriptor (7B-2b). The
  * backend COPIES the payload + dest/src/tos before a successful return; the completion surfaces a
- * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Stubbed in io_engine.c on non-completion builds. */
+ * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Stubbed in completion_absent.c on non-completion builds. */
 int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op);
 
 /* Request cancellation of the outstanding datagram op(s) of `kind` belonging to `life` (7B-2). The
@@ -146,4 +118,4 @@ KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramL
 int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
                          const KlSockAddr *addr, void *watcher_udata);
 
-#endif /* KEEL_SRC_IO_ENGINE_H */
+#endif /* KEEL_SRC_COMPLETION_IO_H */

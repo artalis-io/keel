@@ -16,11 +16,10 @@
  * (completion_driver.c) and the completion callers (async.c / http_server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
-#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlHttpServer/KlHttpConn reach the loop */
-#include <keel/http_server.h>      /* struct KlHttpServer (->ev.loop) */
-#include <keel/http_connection.h>  /* struct KlHttpConn (->ctx->loop) */
+#include <keel/event_ctx.h>   /* KlEventCtx (->loop) */
+#include <keel/stream_detail.h>   /* KlStream layout (stream->ctx->loop in the raw routers) */
 #include "completion.h"
-#include "io_engine.h"        /* kl_completion_axis_available */
+#include "completion_io.h"        /* kl_completion_axis_available */
 
 /* The completion axis IS compiled in this build (completion_absent.c returns 0). */
 int kl_completion_axis_available(void) { return 1; }
@@ -37,21 +36,22 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     return kl_comp_ops(&ctx->loop)->drain(ctx, out, max, timeout_ms);
 }
 
-int kl_comp_prime_accepts(struct KlHttpServer *s) {
-    return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
+int kl_comp_prime_accepts_raw(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    return kl_comp_ops(&ctx->loop)->prime_accepts(ctx, listen_fd);
 }
 
-int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
-    const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
+int kl_comp_shutdown_accepts_raw(struct KlEventCtx *ctx) {
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
     /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
      * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
-    if (ops && ops->shutdown_accepts) return ops->shutdown_accepts(s);
+    if (ops && ops->shutdown_accepts) return ops->shutdown_accepts(ctx);
     return 0;
 }
 
-/* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
- * _send/_sendfile (KlHttpConn form) live in completion_http_server.c and call these; the backend
- * behind the vtable does raw I/O only and never sees a KlHttpConn. */
+/* Raw transport routers (all neutral — KlEventCtx/KlStream). The HTTP-adapter wrappers
+ * (kl_comp_prime_accepts / post_accept / shutdown_accepts / post_recv / post_send / post_sendfile, in
+ * KlHttpServer/KlHttpConn form) live in completion_http_server.c and forward the neutral arg here; the
+ * backend behind the vtable does raw I/O only and never sees an HTTP type. */
 int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap) {
     return kl_comp_ops(&stream->ctx->loop)->post_recv(stream, buf, cap);
 }
@@ -60,14 +60,14 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
     return kl_comp_ops(&stream->ctx->loop)->post_send(stream, iov, iovcnt, total);
 }
 
-int kl_comp_post_accept(struct KlHttpServer *s) {
-    return kl_comp_ops(&s->ev.loop)->post_accept(s);
+int kl_comp_post_accept_raw(struct KlEventCtx *ctx) {
+    return kl_comp_ops(&ctx->loop)->post_accept(ctx);
 }
 
-int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
-                          size_t head_total, int file_fd, uint64_t count) {
-    return kl_comp_ops(&c->stream.ctx->loop)->post_sendfile(c, head_iov, head_n, head_total,
-                                                            file_fd, count);
+int kl_comp_post_sendfile_raw(KlStream *stream, const KlIoVec *head_iov, int head_n,
+                              size_t head_total, int file_fd, uint64_t count) {
+    return kl_comp_ops(&stream->ctx->loop)->post_sendfile(stream, head_iov, head_n, head_total,
+                                                          file_fd, count);
 }
 
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {

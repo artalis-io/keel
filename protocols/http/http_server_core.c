@@ -20,7 +20,8 @@
 #include <keel/timer.h>
 #include <keel/http_request.h>
 #include "http_internal.h"
-#include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read / kl_comp_cancel */
+#include "completion_io.h"    /* kl_comp_cancel (neutral completion seam) */
+#include "completion_http.h" /* kl_http_comp_run / _quiesce_accepts / _post_read (HTTP orchestration) */
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
 #include "http_proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
@@ -376,12 +377,12 @@ void kl_http_server_free(KlHttpServer *s) {
                 kl_sock_close(s->ev.sockets, s->listen_fd);
                 s->listen_fd = KL_INVALID_SOCKET;
             }
-            /* Force + teardown-reap (see kl_io_engine_quiesce_accepts): a teardown-specific
+            /* Force + teardown-reap (see kl_http_comp_quiesce_accepts): a teardown-specific
              * dispatcher routes ONLY ACCEPT to the listener and drops every other completion
              * without dispatch, so no HTTP step / consumer callback / timer runs here — safe now
              * that async ops + file_io are already destroyed. Returns -1 only if the force could
              * not be guaranteed, in which case the backend close below is the physical backstop. */
-            (void)kl_io_engine_quiesce_accepts(s);
+            (void)kl_http_comp_quiesce_accepts(s);
         }
     }
 
@@ -441,7 +442,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
         }
     }
     cwait = kl_timer_next_timeout(&s->ev, cwait);
-    if (kl_io_engine_run_completion(s, cwait) < 0)
+    if (kl_http_comp_run(s, cwait) < 0)
         return -1;
     cnow = kl_monotonic_ms();
     /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
@@ -609,7 +610,7 @@ int kl_http_server_use_post(KlHttpServer *s, const char *method, const char *pat
 
 /* ── Read-side body flow control (event-axis-agnostic) ────────────────────────
  * Readiness drops/re-arms READ interest (kl_event_mod); completion stops posting /
- * re-posts the recv via the io_engine seam. Both idempotent; loop-thread only. */
+ * re-posts the recv via the completion seam. Both idempotent; loop-thread only. */
 void kl_http_request_pause_body(const KlHttpRequest *req) {
     KlHttpConn *c = req ? kl_http_request_conn(req) : NULL;
     if (!c || c->stream.read_paused) return;                 /* idempotent */
@@ -625,7 +626,7 @@ void kl_http_request_resume_body(const KlHttpRequest *req) {
     if (!c || !c->stream.read_paused) return;                /* idempotent */
     c->stream.read_paused = 0;
     if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)
-        kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
+        kl_http_comp_post_read(c);                    /* completion: re-post the body recv */
     else
         (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }

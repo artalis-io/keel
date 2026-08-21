@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include "event_caps.h"
 #include "event_builtin.h"
-#include "io_engine.h"   /* kl_completion_axis_available (KEEL_NO_COMPLETION guard) */
+#include "completion_io.h"   /* kl_completion_axis_available (KEEL_NO_COMPLETION guard) */
 
 int kl_event_init(KlEventLoop *loop) {
     /* Default entry: the compiled-in backend. Zero ops first so a stack-allocated
