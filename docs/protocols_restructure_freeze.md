@@ -529,3 +529,250 @@ lwIP raw + BSD provider; EFI host-mock + QEMU/OVMF; fuzz compile; `git diff --ch
 **Deferred (out of this restructure's scope):** the `KlAsyncOp`→`KlHttpAsyncOp` public rename (§4.2), a
 future `include/keel/clock.h`-style hierarchical/public-API decisions beyond the two narrow ownership
 cleanups ruled above. **Nothing moves until this rev-2 freeze is accepted.**
+
+## 9. Test-layout reconciliation (docs-only; per docs/claude_code_test_layout_prompt.md)
+
+**Status:** R2a–R2f are COMPLETE (HTTP/HTTP2/WS/DNS/PROXY families moved to `protocols/<fam>/`; completion
+axis neutralized). The implementation TUs now live under `protocols/…` but **their tests still all sit flat
+in `tests/`** — the taxonomy the freeze established for `src/` vs `protocols/` is not yet mirrored in the
+test tree. §9 freezes that reconciliation. **No test or production file moves in this increment — docs only.**
+
+### 9.0 Governing rule (frozen)
+
+Tests follow the ownership of the implementation they exercise (§0.1 applied to tests). **Classify by the
+tested CONTRACT, not by incidental consumers/includes** (a generic test used by HTTP stays substrate). A
+mixed test file is split, not assigned by majority. There is **no separate substrate test dir** — generic
+and genuinely cross-layer tests stay directly under `tests/`. Target test tree:
+
+```
+tests/                                  # substrate + genuinely cross-layer + shared harness support
+tests/protocols/{http,http2,websocket,dns,proxy_protocol}/
+integrations/<role>/<backend>/tests/    # backend-specific (moves in R3 WITH its integration)
+```
+Public headers stay flat in `include/keel/` (unchanged). `fuzz/` stays flat (a separate fuzzing-harness
+axis, not `tests/*.c`) — see §9.4.
+
+### 9.1 Exhaustive `tests/` inventory + classification
+
+110 tracked **C files** (`tests/*.c`); `tests/` also holds additional tracked `.h` support headers and
+`tests/fixtures/*` / `tests/freestanding/shim/*` files (group H). Every file appears exactly once below.
+
+**A. Stay in `tests/` — SUBSTRATE (48 pure UTEST TUs + 2 split remainders).** Event/completion axis, streams,
+listeners, datagrams, sockets, sockaddr, timers, allocator, error, url, TLS *interface*, thread pool,
+resolver cache, I/O status, cross-layer primitives:
+`test_allocator, test_connect_op, test_datagram_batch, test_datagram_life,
+test_datagram_live, test_datagram_multicast, test_datagram_open, test_datagram_public, test_datagram_socket,
+test_decompress, test_dgram_close, test_dgram_core, test_dgram_recv, test_dgram_recv_classify, test_dgram_send,
+test_dgram_slots, test_drain, test_error, test_event, test_event_caps, test_event_ctx, test_event_provider,
+test_file_io, test_io_status, test_iocp_engine, test_kl_cstr, test_kl_cstr_builtin, test_listener,
+test_resolver_cache, test_sockaddr, test_socket_provider,
+test_stream, test_stream_close, test_stream_read, test_stream_single_shot, test_stream_transport,
+test_thread_pool, test_timer, test_transport_public,
+test_udp_cmsg, test_unix_socket, test_url, test_version, test_watcher_aba`.
+Plus the **substrate remainders of two split files** (§9.2): `test_async` (generic watcher/`kl_event_ctx_run`
+cases only) and `test_tls` (generic TLS-interface cases only). **NOTE (reviewer P1):** `test_compress`,
+`test_cross_module`, `test_peer_addr`, `test_peer_cert`, `test_tls_vtable` are **NOT** substrate — they move
+wholly to HTTP (group B). `test_overflow` and `test_tls_set_hostname_fail` are split entirely across protocol
+families (§9.2) with **no** substrate remainder.
+
+**B. → `tests/protocols/http/` (HTTP/1 + shared HTTP orchestration):**
+`test_http1_chunked, test_http1_parser, test_http1_response_parser, test_http_body_reader, test_http_client,
+test_http_client_happy_eyeballs, test_http_client_pool, test_http_client_proxy, test_http_client_stream,
+test_http_connection, test_http_cors, test_http_integration, test_http_multipart_stream, test_http_proto_hooks,
+test_http_redirect, test_http_request, test_http_response, test_http_router, test_http_server_integration,
+test_http_server_stats, test_http_sse, test_tls_integration` (HTTPS = TLS-over-HTTP);
+`test_alpn, test_read_flow_control, test_timeout` (§9.8 rulings → HTTP);
+`test_compress, test_cross_module, test_peer_addr, test_peer_cert, test_tls_vtable` (reviewer P1 — moved
+wholly to HTTP); and the **HTTP halves of the split files** (§9.2) `test_http_async` (KlAsyncOp/server
+suspension), `test_http_tls` (HTTP connection/response/pool TLS-adapter cases), `test_http_overflow`,
+`test_http_client_hostname_fail`.
+
+**C. → `tests/protocols/http2/`:** `test_http2, test_http2_client`; + split halves (§9.2) `test_http2_overflow,
+test_http2_client_hostname_fail`.
+**D. → `tests/protocols/websocket/`:** `test_websocket, test_websocket_client`; + split halves (§9.2)
+`test_websocket_overflow, test_websocket_client_hostname_fail`.
+**E. → `tests/protocols/dns/`:** `test_dns_resolver`.
+**F. → `tests/protocols/proxy_protocol/`:** `test_proxy_protocol`.
+
+**G. Smoke programs (standalone, not UTEST) — by SUBJECT (§9.8 rulings applied):**
+- **Stay in `tests/`** (the completion/event BACKEND axis is the tested contract; HTTP + the identity/mock TLS
+  are only the vehicle — rule 5): `smoke_completion_inject, smoke_datagram, smoke_iocp, smoke_iocp_async,
+  smoke_iocp_tls, smoke_iouring, smoke_iouring_async, smoke_iouring_client, smoke_pollcomp, smoke_pollcomp_async,
+  smoke_pollcomp_client, smoke_pollcomp_tls`. (Ruling: the `*_client` and `*_tls`/`*_async` variants stay —
+  `*_client`'s documented contract is the **neutral completion-connect path**, and the `*_tls` variants drive
+  **mock** TLS over the backend, not a real backend.)
+- `tests/protocols/http/`: `smoke_tcp` (§9.8 ruling → HTTP roundtrip).
+- `tests/protocols/websocket/`: `smoke_pollcomp_ws`.
+- `tests/protocols/dns/`: `smoke_dns`.
+- **`integrations/tls/mbedtls/tests/`** (§9.8 ruling — both explicitly validate the **mbedTLS backend**; they
+  move in R3 with the TLS integration): `smoke_tls, smoke_tls_completion`.
+
+**H. Shared harness support (NOT UTEST suites) — STAY in `tests/` (included by many TUs across families):**
+`datagram_test_util.h, mock_tls.h, net_compat.h, net_compat_posix.c, net_compat_win.c, win_prelude.h`, the
+`tests/fixtures/*` check fixtures, and the freestanding-gate harness set `freestanding_headers.c,
+freestanding_harness.c, freestanding_dns_harness.c, freestanding_host_platform.c, freestanding_link_main.c,
+freestanding_platform_test.h` + `tests/freestanding/shim/*` (a cross-cutting build-gate concern, not a
+protocol suite). Per the §9.8 ruling the whole freestanding harness set — including the family-flavored
+`freestanding_harness` (HTTP/1 client mock) and `freestanding_dns_harness` (DNS) — **stays flat in `tests/`**.
+
+### 9.2 Mixed test files that must be split (reviewer P1)
+
+Per §0.1 (split, don't assign by majority). Split files get **family-prefixed, globally-unique basenames**
+(required by the §9.5 resolver + §9.6 uniqueness gate). The exact per-`UTEST`-case partition is performed at
+move time; the frozen destinations + new basenames are:
+
+| current file | split into | home |
+|---|---|---|
+| `test_async.c` (generic watcher + HTTP KlAsyncOp/server-suspension) | `test_async.c` (generic watcher / `kl_event_ctx_run`) | `tests/` |
+| | `test_http_async.c` (KlAsyncOp suspend/resume, server async) | `tests/protocols/http/` |
+| `test_tls.c` (generic TLS interface + HTTP conn/response/pool TLS) | `test_tls.c` (generic `KlTls` vtable/interface) | `tests/` |
+| | `test_http_tls.c` (HTTP connection/response/pool TLS-adapter) | `tests/protocols/http/` |
+| `test_overflow.c` (independent HTTP / HTTP2 / WS cases) | `test_http_overflow.c` | `tests/protocols/http/` |
+| | `test_http2_overflow.c` | `tests/protocols/http2/` |
+| | `test_websocket_overflow.c` | `tests/protocols/websocket/` |
+| `test_tls_set_hostname_fail.c` (independent HTTP / HTTP2 / WS clients) | `test_http_client_hostname_fail.c` | `tests/protocols/http/` |
+| | `test_http2_client_hostname_fail.c` | `tests/protocols/http2/` |
+| | `test_websocket_client_hostname_fail.c` | `tests/protocols/websocket/` |
+
+`test_overflow` and `test_tls_set_hostname_fail` have **no substrate remainder** (all cases are per-protocol);
+`test_async` and `test_tls` keep a generic-substrate remainder at the original basename. Each split re-homes
+its `UTEST` cases verbatim (no case weakened/dropped) and updates the curated-suite lists (§9.4) that named the
+original stem.
+
+**Looks-mixed-but-isn't:** `test_alpn.c` exercises the shared ALPN→adapter dispatch and lands assertions on
+BOTH the HTTP/1 and HTTP/2 REST paths, but its *contract* is the shared HTTP ALPN-negotiation seam — it moves
+**whole** to `tests/protocols/http/` (the H2 leg is coverage of the shared seam, not an independent
+H2-internals suite; §9.8 ruling).
+
+### 9.3 Exact old→new path map
+
+- **Whole moves (unsplit), group B–F:** `tests/<f>.c` → `tests/protocols/<fam>/<f>.c`, basename preserved
+  (basenames stay globally unique — §9.5). E.g. `tests/test_http_router.c → tests/protocols/http/test_http_router.c`;
+  `tests/test_http2_client.c → tests/protocols/http2/test_http2_client.c`;
+  `tests/test_websocket.c → tests/protocols/websocket/test_websocket.c`;
+  `tests/test_dns_resolver.c → tests/protocols/dns/test_dns_resolver.c`;
+  `tests/test_proxy_protocol.c → tests/protocols/proxy_protocol/test_proxy_protocol.c`;
+  the reviewer-P1 whole-moves `tests/test_compress.c → tests/protocols/http/test_compress.c`,
+  `test_cross_module`, `test_peer_addr`, `test_peer_cert`, `test_tls_vtable` likewise → `tests/protocols/http/`.
+- **Splits (§9.2):** original → the new family-prefixed basenames in the §9.2 table (e.g.
+  `tests/test_overflow.c → {tests/protocols/http/test_http_overflow.c, http2/test_http2_overflow.c,
+  websocket/test_websocket_overflow.c}`; `tests/test_async.c` → keep `tests/test_async.c` +
+  `tests/protocols/http/test_http_async.c`).
+- **Smokes (§9.1-G / §9.8):** `tests/smoke_tcp.c → tests/protocols/http/smoke_tcp.c`;
+  `tests/smoke_pollcomp_ws.c → tests/protocols/websocket/smoke_pollcomp_ws.c`;
+  `tests/smoke_dns.c → tests/protocols/dns/smoke_dns.c`;
+  `tests/smoke_tls.c` + `tests/smoke_tls_completion.c → integrations/tls/mbedtls/tests/` (in R3). The
+  completion-backend smokes (incl. `*_client`, `*_tls`, `*_async`) do **not** move.
+- **Group A remainders + group H (helpers/fixtures/freestanding) do NOT move.**
+
+**Integration tests (move in R3 WITH their integration, not here):** `integrations/lwip/*_test.c` +
+`lwip_loopback_test.c` + `lwip_raw_testclient.{c,h}` → `integrations/platform/lwip/tests/`;
+`integrations/uefi/{s,u}*_selftest.c, host_map_test.c, mock_efi_test.c, dgram_*_selftest.c` →
+`integrations/platform/uefi/tests/`; `integrations/nghttp2/e2e/test_roundtrip.c` →
+`integrations/http2/nghttp2/tests/` (role dirs land in R3, §1/§7).
+
+### 9.4 Affected build / CI / fuzz / bench / script / doc / gate references
+
+- **Makefile discovery (L329):** `TEST_SRC = $(filter-out …, $(wildcard tests/test_*.c))` →
+  `$(wildcard tests/test_*.c tests/protocols/*/test_*.c)` (GNU Make 3.81: multiple wildcard patterns, one
+  subdir level — no `**` needed). `TEST_BIN = $(TEST_SRC:.c=)` then yields nested paths automatically.
+- **Pattern rule (L392):** add a sibling `tests/protocols/%$(EXE): tests/protocols/%.c $(LIB) $(TEST_COMPAT_OBJ)`
+  (make 3.81 `%` spans `/`, so `%`=`http/test_http_router`).
+- **Curated suite sets (L376 `WIN_TEST_SUITES`, L412 `WIN_IOCP_TEST_SUITES`, L663 `IOURING_TEST_SUITES`)** use
+  bare suite names via `$(addprefix tests/test_,…)`. After the move a suite may live in a nested dir — and on
+  Windows the binary needs the `$(EXE)` suffix, which resolving against the extensionless `TEST_BIN` does NOT
+  produce. Freeze an explicit **source-path** resolver, then derive each platform's binary from it:
+  ```make
+  # resolve a bare suite name to its .c wherever it lives (flat tests/ or nested tests/protocols/<fam>/)
+  test_src_for = $(filter tests/test_$(1).c tests/protocols/%/test_$(1).c,$(TEST_SRC))
+  test_bin_for = $(patsubst %.c,%$(EXE),$(call test_src_for,$(1)))
+  ```
+  Use `test_bin_for` for `WIN_TEST_BIN`, `WIN_IOCP_TEST_BIN`, and `IOURING_TEST_BIN` (e.g.
+  `IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))`). The **suite-name lists
+  stay stable** (CI/scripts unchanged) and the `$(EXE)` suffix is correct on every platform. Add a **fail-loud
+  uniqueness check**: each `$(call test_src_for,$(s))` must resolve to **exactly one** source (a make-time
+  `$(if $(word 2,…),$(error dup suite $(s)))` / `$(if $(test_src_for…),,$(error unknown suite $(s)))`), so a
+  duplicate basename or a typo'd suite fails the build rather than silently building the wrong/no target.
+- **Smoke targets** (`smoke-iouring`, `smoke-pollcomp*`, `smoke-datagram`, `smoke-tls*`, `smoke-*-ws`, …) +
+  the freestanding targets that name `tests/freestanding*` — repoint each moved smoke path in the target
+  that builds it (per §9.1-G). Freestanding harness paths in group H do NOT move.
+- **Clean (L777/L780):** `$(TEST_BIN)` already covers nested binaries; add nested globs
+  `tests/protocols/*/test_* tests/protocols/*/*.exe tests/protocols/*/smoke_*` + `*.dSYM` to the clean rules.
+- **Fuzz:** `fuzz/` stays flat (not `tests/*.c`); the fuzzers link `libkeel_fuzz.a` symbols + `fuzz/corpus_*`,
+  none of which reference test paths → **no fuzz reference changes** from the test move. (The R2a–e source
+  moves already repointed fuzz inputs.)
+- **Bench:** the wrk bench server is not a `tests/*.c` → unaffected.
+- **CI (`.github/workflows/…`):** any job invoking a suite by path (e.g. `./tests/test_*`) or a curated
+  target must accept the nested paths; jobs that use the `make test`/`test-iouring`/`test-win*` targets are
+  path-agnostic (the Makefile resolves paths) and need no edit. Enumerate + repoint the few path-literal
+  invocations in the increment that moves the relevant family.
+- **Docs / gates:** living docs that cite a moved test path; the boundary gates (§6) — see §9.6.
+
+### 9.5 Discovery, naming, clean (frozen mechanics)
+
+- **Recursive discovery:** one extra wildcard level (`tests/protocols/*/test_*.c`) — the tree is exactly one
+  family level deep, so no `find`/`**` is needed; make-3.81-safe.
+- **Collision-free executables:** every test basename (`test_<suite>` / `smoke_<name>`) is **globally unique**
+  across `tests/` (the §9.2 splits are assigned family-prefixed unique basenames precisely to preserve this),
+  so `test_src_for` returns exactly one source per suite and the flat CI suite-name lists stay valid. The
+  §9.4 fail-loud uniqueness check + the §9.6 ownership gate enforce uniqueness so a future duplicate can't make
+  the resolver ambiguous.
+- **Clean:** nested object/binary/`.dSYM` globs added (above); `TEST_BIN`-derived removal already recursive.
+
+### 9.6 Permanent gates (extend §6)
+
+- **G-test-ownership — EXACT basename→expected-path map (reviewer P1).** A stale-*root* list alone only stops
+  a suite returning to `tests/`; it would NOT catch `test_http2.c` misfiled under `tests/protocols/http/`, or
+  an unknown family dir. So the gate freezes an **exact map of every test basename → its one canonical path**
+  (the group-A–H homes above, including the split basenames) and scans the actual tree, rejecting:
+  (a) any file whose real path ≠ its mapped path (mismatch — wrong family or wrong dir),
+  (b) any basename found at two paths (duplicate / leftover copy),
+  (c) any `tests/**/test_*.c` / `smoke_*.c` not in the map (unknown/unclassified placement),
+  (d) any file under `tests/protocols/<x>/` where `<x>` is not one of the five frozen families.
+  Mirrors `check-no-httplegacy`'s exact-name mechanism (self-canary included). This makes a protocol test
+  unable to drift to the wrong home *and* a new/renamed test unable to land unclassified.
+- **G-test-stale-path:** the retired `tests/test_<moved>.c` / `tests/smoke_<moved>.c` paths (and the pre-split
+  `test_overflow.c` / `test_tls_set_hostname_fail.c`) must not reappear — a moved/split test cannot silently
+  resurrect at its old path (no duplicate/second copy). Subsumed by (b)+(c) above but kept as an explicit
+  moved-away list for clarity.
+- Each gate lands/extends **in the same increment that performs the corresponding move** (§6.1 gate-timing
+  rule); the full exact map is finalized in R4.
+
+### 9.7 Increment sequencing (adapts §7; does NOT touch accepted R2a–R2f)
+
+1. **This freeze revision — docs-only. Pause for review.** *(current)*
+2. **T-split — the §9.2 splits, as ATOMIC transactions (runs BEFORE the family moves; reviewer P1).** A
+   cross-family split cannot move one family at a time and stay green: leaving the original duplicates the
+   already-moved cases; removing only one family's cases strands protocol-owned tests at the root (ownership-
+   gate violation); retiring the original early temporarily drops the remaining cases. So each split is **one
+   commit** that creates ALL its destination files AND deletes/retires the original together, updating
+   discovery + the curated-suite resolution + the exact §9.6 ownership map in that same commit:
+   - `test_overflow.c` → `test_http_overflow.c` (+http2/+websocket), **delete the original in the same commit.**
+   - `test_tls_set_hostname_fail.c` → the three client-family files, **delete the original in the same commit.**
+   These two CROSS-family splits are the dedicated **T-split** increment (cleanest before any family move). The
+   two SINGLE-family splits stay atomic but are naturally carried by **T-http** (§9.2 remainder edited in place
+   + the new HTTP file added in one commit): `test_async.c` → root remainder + `test_http_async.c`;
+   `test_tls.c` → root remainder + `test_http_tls.c`. No case is ever duplicated, stranded, or dropped in any
+   intermediate commit.
+3. Then dedicated reviewable **per-family test-layout increments** (the impls already moved in R2a–e, so tests
+   move on their own): **T-http, T-http2, T-ws, T-dns, T-proxy** — each moves its group-B–F TUs + the group-G
+   smokes it owns, repoints discovery/pattern-rule/curated-set/smoke/CI refs, adds its slice of the §9.6 gates,
+   and passes the full validation matrix. Behavior-neutral; white-box relative includes repointed to the new
+   impl paths; no test weakened/skipped/duplicated. (T-http additionally performs the two single-family splits
+   above.)
+4. **Integration tests** move during **R3** with their owning integration (§9.3), under
+   `integrations/<role>/<backend>/tests/`.
+5. **R4** finalizes recursive discovery, the ownership + stale-path gates, clean rules, and doc reconciliation.
+
+### 9.8 Classification rulings (RESOLVED by reviewer — no open decisions)
+
+- **`test_read_flow_control`, `test_timeout`, `test_alpn` → `tests/protocols/http/`.**
+- **`smoke_tcp` → `tests/protocols/http/`.**
+- **`smoke_tls`, `smoke_tls_completion` → `integrations/tls/mbedtls/tests/`** — both explicitly validate the
+  mbedTLS backend (move in R3 with the TLS integration).
+- **Completion-backend smokes STAY in `tests/`**, including the IOCP/pollcomp **TLS** and **async** variants —
+  HTTP + identity/mock TLS is their vehicle, the completion/event backend axis is their contract (rule 5).
+- **`smoke_iouring_client`, `smoke_pollcomp_client` STAY in `tests/`** — their documented contract is the
+  **neutral completion-connect path**, despite using `KlHttpClient` as the driver.
+- **Freestanding harness set + shared support (group H) stay flat in `tests/`.** Do **not** introduce a
+  `tests/support/` dir.
