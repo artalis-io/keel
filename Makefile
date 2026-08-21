@@ -326,7 +326,8 @@ endif
 # to abort() (completion_absent.c), so these completion-axis tests cannot run there — exclude them
 # (mirrors the readiness-adapting test_datagram_live, which DOES run under KEEL_NO_COMPLETION).
 ifdef KEEL_NO_COMPLETION
-  TEST_SRC := $(filter-out tests/test_datagram_public.c tests/test_stream_single_shot.c, $(TEST_SRC))
+  TEST_SRC := $(filter-out tests/test_datagram_public.c tests/test_stream_single_shot.c \
+                           tests/test_watcher_aba.c, $(TEST_SRC))
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 
@@ -358,7 +359,7 @@ test: $(TEST_BIN)
 # against an in-test mock KlTls and need no mbedTLS.
 #
 # A few suites are not listed. Genuinely POSIX/Linux-only: unix_socket (SO_PEERCRED), file_io (POSIX
-# file-path assumptions). 2 build clean but have runtime failures needing Windows-native
+# file-path assumptions), datagram_socket (copy-POSIX provider fixture). 2 build clean but have runtime failures needing Windows-native
 # iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
 # harness) and proxy (CONNECT tunnel timing) — both still covered on Windows by
 # smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
@@ -371,7 +372,6 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
                   async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  datagram_socket \
                   tls tls_integration peer_cert
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
