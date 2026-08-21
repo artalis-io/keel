@@ -1,4 +1,4 @@
-#include <keel/compress.h>
+#include <keel/http_compress.h>
 #include <string.h>
 
 int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,

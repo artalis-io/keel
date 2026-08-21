@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/compress.h>
+#include <keel/http_compress.h>
 #include <keel/allocator.h>
 #include <string.h>
 #include "net_compat.h"

@@ -17,6 +17,7 @@
  * sockdef+builtin stubs); the 4 datagram-path sockdef seams udp.c references (never
  * called — the mock provider wins) are defined below, fail-closed.
  */
+#include <keel/clock.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>

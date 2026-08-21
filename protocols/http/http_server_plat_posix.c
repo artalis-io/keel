@@ -13,7 +13,7 @@
  */
 
 #include "http_server_plat.h"
-#include "internal.h"        /* kl_http_server_log / kl_http_server_log_errno + KlHttpServer */
+#include "http_internal.h"        /* kl_http_server_log / kl_http_server_log_errno + KlHttpServer */
 #include "socket.h"
 #include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 #include <keel/allocator.h>

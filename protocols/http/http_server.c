@@ -1,3 +1,4 @@
+#include <keel/clock.h>
 #include <keel/http_server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
@@ -8,7 +9,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */

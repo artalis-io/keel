@@ -7,7 +7,8 @@
  */
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
-#include "internal.h"            /* kl_http2_server_feed / kl_http2_server_set_writer */
+#include "http_internal.h"            /* kl_http2_server_feed / kl_http2_server_set_writer */
+#include "http2_internal.h"
 #include "completion.h"          /* kl_comp_post_send / post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_drain_output */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */

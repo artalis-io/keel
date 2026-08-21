@@ -23,7 +23,7 @@
 #include <keel/http_connection.h>
 #include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
 #include <keel/event_ctx.h>      /* KlEventCtx (comp_conn_dispatch hook) */
-#include "internal.h"            /* kl_http_server_conn_release */
+#include "http_internal.h"            /* kl_http_server_conn_release */
 #include "http_conn_internal.h"       /* kl_http_conn_dispatch_request / kl_http_conn_send_complete */
 #include "http_response_internal.h"   /* kl_http_response_build_iovec */
 #include "completion.h"          /* the abstract completion axis */

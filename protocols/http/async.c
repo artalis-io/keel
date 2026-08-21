@@ -7,11 +7,12 @@
  * connection driver (kl_http_conn_on_writable / kl_http_server_conn_release /
  * kl_io_engine_resume_completion) and so is not part of the freestanding client.
  */
+#include <keel/clock.h>
 #include <keel/async.h>
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <stdint.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "event_caps.h"
 #include "io_engine.h"   /* kl_io_engine_resume_completion — completion resume (8e-2) */
 

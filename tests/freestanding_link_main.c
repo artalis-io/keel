@@ -33,6 +33,7 @@
  * freestanding surface, not a hosted libc.
  */
 
+#include <keel/clock.h>
 #include <keel/http_client.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>

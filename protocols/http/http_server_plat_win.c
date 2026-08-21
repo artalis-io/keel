@@ -12,7 +12,7 @@
  */
 
 #include "http_server_plat.h"
-#include "internal.h"   /* kl_http_server_log_errno + KlHttpServer; pulls socket.h -> winsock2/afunix */
+#include "http_internal.h"   /* kl_http_server_log_errno + KlHttpServer; pulls socket.h -> winsock2/afunix */
 #include "socket.h"
 #include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 

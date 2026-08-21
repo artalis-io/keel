@@ -1,3 +1,4 @@
+#include <keel/clock.h>
 #include <keel/http_connection.h>
 #include <keel/http_body_reader.h>
 #include <keel/http1_chunked.h>
@@ -14,7 +15,7 @@
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "http2_internal.h"
 #include "socket.h"
 

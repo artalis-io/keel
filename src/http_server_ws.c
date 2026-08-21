@@ -7,6 +7,7 @@
  * http2_server.c naming. A freestanding HTTP/1.1 server links none of it.
  */
 
+#include <keel/clock.h>
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
@@ -16,7 +17,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "http_proto_hooks.h"   /* WS server upgrade seam — registered for the core */
 #include "sha1.h"
 #include "base64.h"

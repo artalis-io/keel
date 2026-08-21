@@ -57,7 +57,7 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
-  SERVER_PLAT_SRC = src/http_server_plat_win.c
+  SERVER_PLAT_SRC = protocols/http/http_server_plat_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
   DNS_SYS_SRC = src/dns_sys_win.c
@@ -150,7 +150,7 @@ VENDOR_CFLAGS += -MMD -MP
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
-SERVER_PLAT_SRC ?= src/http_server_plat_posix.c
+SERVER_PLAT_SRC ?= protocols/http/http_server_plat_posix.c
 # The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
 # the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
@@ -175,7 +175,7 @@ DNS_SYS_SRC ?= src/dns_sys_posix.c
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c
 else
-  COMPLETION_CORE = src/completion_core.c src/completion_http_server.c \
+  COMPLETION_CORE = src/completion_core.c protocols/http/completion_http_server.c \
                     src/completion_http2.c src/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
@@ -184,18 +184,18 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/http_response.c src/http_router.c \
-           src/http_connection.c src/http_server.c src/http_server_core.c src/http_server_activation.c src/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
-           src/http_body_reader_buffer.c \
-           src/http_body_reader_multipart.c src/http1_chunked.c src/http_cors.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) protocols/http/http_response.c protocols/http/http_router.c \
+           protocols/http/http_connection.c protocols/http/http_server.c protocols/http/http_server_core.c protocols/http/http_server_activation.c protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c protocols/http/async.c src/timer.c \
+           protocols/http/http_body_reader_buffer.c \
+           protocols/http/http_body_reader_multipart.c protocols/http/http1_chunked.c protocols/http/http_cors.c \
            src/websocket.c src/http_server_ws.c src/websocket_client.c \
            src/http2_server.c src/http2_client.c src/thread_pool.c src/url.c \
-           src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
-           src/http_client_proxy.c \
-           src/http_client_pool.c src/http_redirect.c src/http_sse.c \
+           protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
+           protocols/http/http_client_proxy.c \
+           protocols/http/http_client_pool.c protocols/http/http_redirect.c protocols/http/http_sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
-           src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
+           protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
@@ -205,7 +205,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
 # needed here.
 
 # Default parser backend (llhttp)
-LLHTTP_SRC = parsers/http1_parser_llhttp.c parsers/http1_response_parser_llhttp.c \
+LLHTTP_SRC = protocols/http/http1_parser_llhttp.c protocols/http/http1_response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
@@ -270,8 +270,22 @@ else
 	$(AR) rcs $@ $^
 endif
 
+# $(EXTRA_INC) is an empty-by-default per-target include add-on. Protocol objects reach the substrate
+# internal seams (socket.h, stream_io.h, http2_internal.h, ...) via -Isrc and the HTTP-family
+# coordination seam (http_internal.h, http_proto_hooks.h, completion_internal.h) via -Iprotocols/http.
+# Substrate recipes get NEITHER (empty EXTRA_INC), keeping the boundary honest (check-substrate-purity).
+# EXTRA_INC (target-specific, never a command-line var) survives builds that OVERRIDE CFLAGS on the
+# sub-make command line (debug/asan/coverage) — unlike a target-specific `CFLAGS +=`, and portably
+# across GNU Make 3.81 (macOS) which does not prefer the more-specific `protocols/%.o` pattern.
 %.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
+
+protocols/%.o: EXTRA_INC = -Isrc -Iprotocols/http
+# INTERIM (R2a): TUs still resident in src/ that consume the moved HTTP-family seam headers in
+# protocols/http/ — the http2 server + completion adapters (move R2b), the ws upgrade + completion
+# adapter (move R2c), and the PROXY parser that registers a proto-hook (moves R2e). Removed as each moves.
+src/completion_http2.o src/completion_ws.o src/http_server_ws.o src/http2_server.o \
+src/proxy_protocol.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 # The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
@@ -340,7 +354,7 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -381,7 +395,7 @@ WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
 tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -804,6 +818,7 @@ clean:
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	-$(MAKE) -C integrations clean
 	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
+	find protocols -name '*.o' -delete 2>/dev/null || true
 	find . -name '*.d' -delete
 	rm -f keel.pc
 	rm -f coverage.info
@@ -853,11 +868,11 @@ analyze:
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
-AXIS_PROTO_TUS = src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
-                 src/http_client_proxy.c \
+AXIS_PROTO_TUS = protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
+                 protocols/http/http_client_proxy.c \
                  src/http2_client.c src/websocket_client.c \
-                 src/http_connection.c src/http_server.c src/http2_server.c src/websocket.c src/http_server_ws.c \
-                 src/http_sse.c src/http_response.c src/http_redirect.c src/http_client_pool.c \
+                 protocols/http/http_connection.c protocols/http/http_server.c src/http2_server.c src/websocket.c src/http_server_ws.c \
+                 protocols/http/http_sse.c protocols/http/http_response.c protocols/http/http_redirect.c protocols/http/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
 	@bad=0; \
@@ -889,17 +904,17 @@ check-sockaddr-neutral:
 # they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard src/http_server_plat_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard src/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
-              src/event_ctx.c src/async.c src/http_server_core.c src/http_server.c src/http_client_async.c
+              src/event_ctx.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/http_server.c protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
 # and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
 TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"
 check-tier1-boundary:
 	@bad=0; \
-	for f in src/*.c parsers/*.c; do \
+	for f in src/*.c protocols/*/*.c; do \
 	  case " $(TIER1_INFRA) " in *" $$f "*) continue ;; esac; \
 	  if grep -nE '$(TIER1_FORBIDDEN_RE)' "$$f"; then \
 	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
@@ -911,7 +926,7 @@ check-tier1-boundary:
 	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \
 	done; \
-	echo "check-tier1-boundary: OK (default-deny: every src/parsers TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
+	echo "check-tier1-boundary: OK (default-deny: every src/ + protocols/ TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate
@@ -1000,7 +1015,7 @@ check-no-kludp:
 HTTPLEGACY_TYPES_RE = \b(KlServerStats|KlServer|KlConfig|KlClientPoolConfig|KlClientPoolConn|KlClientPoolEntry|KlClientPool|KlClientConfig|KlClientResponse|KlClientHeader|KlClientDoneFn|KlClientBodyFn|KlClientHeadersFn|KlClientReadFn|KlClientStreamCfg|KlClientState|KlClientConnectAttempt|KlClient|KlProxyConfig|KlRequestParser|KlRequest|KlResponseParserFactory|KlResponseParser|KlResponse|KlBodyMode|KlWriteFn|KlConnState|KlConnPool|KlConn|KlHandler|KlMiddlewareEntry|KlMiddleware|KlRouter|KlRoute|KlParam|KlBodyReaderFactory|KlCorsConfig|KlBodyReader|KlBufReader|KlMultipartReader|KlMultipartPartMeta|KlMultipartPart|KlMultipartConfig|KlMultipartEvent|KlMultipartErrorCode|KlSse|KlCompressStream|KlRedirectClient|KlRedirectConfig|KlRedirectDoneFn|KlChunkedDecoder|KlChunkedState|KlParserFactory|KlParseResult|KlParser|KlH2ServerSessionFactory|KlH2ServerSession|KlH2ServerConfig|KlH2ServerConn|KlH2ServerCallbacks|KlH2ServerStream|KlH2ServerHooks|KlH2ClientSessionFactory|KlH2ClientSession|KlH2ClientConfig|KlH2ClientConn|KlH2ClientCallbacks|KlH2ClientStream|KlH2ClientResponseFn|KlH2ClientResponse|KlH2ClientHeader|KlH2ClientErrorFn|KlH2Client|KlH2WriteFn|KlH2CompHooks|KlAccessLogFn|KlLogFn|KlTransport)\b
 HTTPLEGACY_CONST_RE = KL_(CONN|BODY|CLIENT|H2|PARSE|CHUNK|MP|CORS|CPOOL|REDIRECT|TRANSPORT|LOG)_|\bKL_READ_BUF_SIZE\b|\bKL_PEER_(SOCKET|PROXY)\b|\bKL_MAX_PARAMS\b|\bKL_DEFAULT_(MAX_CONNS|READ_TIMEOUT|MAX_BODY_SIZE)\b
 HTTPLEGACY_FN_RE = kl_(server|client|request|response|conn|router|cors|body_reader|buf_reader|multipart|sse|redirect|cpool|parser|chunked|h2|comp_h2|compress_stream)_[A-Za-z0-9_]*|\bkl_log(_errno)?\b
-HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
+HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations protocols README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
 HTTPLEGACY_FILES_RE = \b(body_reader\.h|body_reader_buffer\.c|body_reader_multipart\.c|body_reader_multipart\.h|chunked\.c|client\.h|client_async\.c|client_common\.c|client_internal\.h|client_pool\.c|client_pool\.h|client_proxy\.c|client_proxy\.h|client_sync\.c|completion_h2\.c|completion_server\.c|conn_internal\.h|connection\.c|connection\.h|cors\.c|cors\.h|h2\.h|h2_client\.h|h2_internal\.h|h2_nghttp2_client\.c|h2_nghttp2_server\.c|h2_server\.h|keel_h2_nghttp2\.h|parser_llhttp\.c|proto_hooks\.c|proto_hooks\.h|redirect\.c|redirect\.h|request\.h|response\.c|response\.h|response_internal\.h|response_parser_llhttp\.c|router\.c|router\.h|server\.c|server\.h|server_activation\.c|server_core\.c|server_h2\.c|server_plat\.h|server_plat_posix\.c|server_plat_win\.c|server_ws\.c|sse\.h)\b|\bsrc/(client|h2_client|sse)\.c\b
 check-no-httplegacy:
 	@bad=0; \
@@ -1056,7 +1071,7 @@ cppcheck:
 	  --suppress=constParameterCallback:src/event_iouring.c \
 	  --suppress=constParameterCallback:src/event_pollcomp.c \
 	  -UKEEL_PLATFORM_LWIP \
-	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
+	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Iprotocols/http src/ protocols/
 
 # Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
 # the raw KlStream (&conn->stream) as udata, not a bare KlHttpConn. Pointer equality (stream is the
@@ -1065,7 +1080,7 @@ cppcheck:
 # completion accept path (completion_http_server.c) still registers KlHttpConn until 6B-3 and is excluded.
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
-	     src/http_server.c src/async.c src/http_server_core.c src/completion_http_server.c \
+	     protocols/http/http_server.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/completion_http_server.c \
 	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
@@ -1106,7 +1121,11 @@ FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
                $(COMPRESS_MINIZ_SRC:%.c=%.fuzz.o)
 
 %.fuzz.o: %.c
-	$(CC) $(FUZZ_INSTR_CFLAGS) -c -o $@ $<
+	$(CC) $(FUZZ_INSTR_CFLAGS) $(EXTRA_INC) -c -o $@ $<
+# Protocol + interim-src fuzz objects need the same seam includes as their plain-object twins.
+protocols/%.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http
+src/completion_http2.fuzz.o src/completion_ws.fuzz.o src/http_server_ws.fuzz.o \
+src/http2_server.fuzz.o src/proxy_protocol.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 $(FUZZ_LIB): $(FUZZ_LIB_OBJ)
 	$(AR) rcs $@ $^
@@ -1256,9 +1275,9 @@ FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
-    src/http_client_common.c src/http_client_async.c src/http_client_proxy.c src/http_client_pool.c src/decompress.c \
+    protocols/http/http_client_common.c protocols/http/http_client_async.c protocols/http/http_client_proxy.c protocols/http/http_client_pool.c src/decompress.c \
     src/connect_op.c \
-    parsers/http1_response_parser_llhttp.c \
+    protocols/http/http1_response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
@@ -1368,11 +1387,11 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/completion_http_server.c \
+    src/completion_dispatch.c src/completion_core.c protocols/http/completion_http_server.c \
     src/listener.c src/stream.c \
-    src/http_connection.c src/http_response.c src/http_router.c src/http1_chunked.c src/drain.c \
-    src/http_body_reader_buffer.c src/http_server_core.c src/http_proto_hooks.c \
-    parsers/http1_parser_llhttp.c \
+    protocols/http/http_connection.c protocols/http/http_response.c protocols/http/http_router.c protocols/http/http1_chunked.c src/drain.c \
+    protocols/http/http_body_reader_buffer.c protocols/http/http_server_core.c protocols/http/http_proto_hooks.c \
+    protocols/http/http1_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 freestanding-lib-server:

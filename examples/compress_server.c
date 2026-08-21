@@ -14,6 +14,7 @@
  *         curl -H "Accept-Encoding: gzip" localhost:8080/stream | gunzip
  */
 
+#include <keel/http_compress.h>
 #include <keel/keel.h>
 #include <keel/compress_miniz.h>
 #include <stdio.h>

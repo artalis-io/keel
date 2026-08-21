@@ -26,7 +26,7 @@
  * Windows: QueryPerformanceCounter. Also declared in keel/http_connection.h (public,
  * unchanged); the identical redeclaration here lets the per-OS TU avoid dragging
  * in the not-yet-Windows-ready http_connection.h. */
-uint64_t kl_monotonic_ms(void);
+#include <keel/clock.h>   /* kl_monotonic_ms — generic substrate clock */
 
 /* Fill @buf with @len secure-random bytes (best-effort — always fills the whole
  * buffer, degrading to a non-cryptographic last resort if the OS RNG is somehow

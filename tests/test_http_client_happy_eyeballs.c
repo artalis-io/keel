@@ -22,7 +22,7 @@
 
 /* Internal layout — the retirement/detachment assertions (6C review) inspect the embedded
  * KlConnectOp + conn_racing directly. INTERNAL/UNSTABLE, test-only. */
-#include "../src/http_client_internal.h"
+#include "../protocols/http/http_client_internal.h"
 #include <keel/connect_op.h>
 
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending

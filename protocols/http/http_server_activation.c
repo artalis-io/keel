@@ -11,7 +11,7 @@
  */
 
 #include <keel/http_server.h>
-#include "internal.h"      /* <unistd.h> (getpid) on a hosted build */
+#include "http_internal.h"      /* <unistd.h> (getpid) on a hosted build */
 #include "http_server_plat.h"   /* kl_http_server_plat_unsetenv */
 #include <stdlib.h>        /* getenv, strtol */
 #include <string.h>        /* strchr, strlen, memcmp */

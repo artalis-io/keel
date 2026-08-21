@@ -8,6 +8,7 @@
  * Run:    ./examples/connection_pool
  */
 
+#include <keel/clock.h>
 #include <keel/keel.h>
 #include <stdio.h>
 #include <string.h>

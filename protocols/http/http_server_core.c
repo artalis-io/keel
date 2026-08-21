@@ -14,11 +14,12 @@
  * (which delegates its completion branch to kl_http_server_run_completion_loop here).
  */
 
+#include <keel/clock.h>
 #include <keel/http_server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
 #include <keel/http_request.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read / kl_comp_cancel */
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */

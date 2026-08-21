@@ -1,4 +1,5 @@
 #include "utest.h"
+#include <keel/clock.h>
 #include <keel/http_connection.h>
 
 UTEST(connection, pool_init_and_free) {

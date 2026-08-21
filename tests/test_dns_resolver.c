@@ -1,4 +1,5 @@
 #include "utest.h"
+#include <keel/clock.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
 #include <keel/datagram.h>          /* D2: the fake nameserver + spoofer are bound KlDatagrams now */

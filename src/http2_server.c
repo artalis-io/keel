@@ -1,3 +1,4 @@
+#include <keel/clock.h>
 #include <keel/http2_server.h>
 #include <keel/http_connection.h>
 #include <keel/http_router.h>
@@ -10,7 +11,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
-#include "internal.h"
+#include "http_internal.h"
 #include "http2_internal.h"       /* KlHttp2ServerConn / KlHttp2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
 #include "http_proto_hooks.h"       /* H2 server upgrade seam — registered for the core */

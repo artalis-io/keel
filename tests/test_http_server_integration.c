@@ -1,4 +1,5 @@
 #include "utest.h"
+#include <keel/clock.h>
 #include <keel/keel.h>
 #include "../src/socket.h"   /* internal: exercise the socket-provider seam */
 #include "net_compat.h"

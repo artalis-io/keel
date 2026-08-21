@@ -1,4 +1,5 @@
 #include "utest.h"
+#include <keel/clock.h>
 #include <keel/keel.h>
 #include <keel/async.h>
 #include "net_compat.h"

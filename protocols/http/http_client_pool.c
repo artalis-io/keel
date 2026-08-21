@@ -6,6 +6,7 @@
  * than a hash map.
  */
 
+#include <keel/clock.h>
 #include <keel/http_client_pool.h>
 #include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>

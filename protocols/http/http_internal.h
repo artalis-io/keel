@@ -1,5 +1,13 @@
-#ifndef KEEL_INTERNAL_H
-#define KEEL_INTERNAL_H
+#ifndef KEEL_PROTOCOLS_HTTP_INTERNAL_H
+#define KEEL_PROTOCOLS_HTTP_INTERNAL_H
+
+/*
+ * http_internal.h — HTTP-family internal seam: TLS-aware connection I/O over the
+ * embedded KlStream + HTTP-server cross-TU forward decls. Owned by protocols/http/;
+ * the http2/websocket completion adapters include it for conn_read/conn_write
+ * (permitted HTTP-family coordination seam). Substrate stream I/O lives in
+ * src/stream_io.h (reached via -Isrc).
+ */
 
 #include <keel/http_connection.h>
 #include <keel/http_server.h>
@@ -11,7 +19,7 @@
 #include <unistd.h>
 #endif
 
-#include "socket.h"
+#include "stream_io.h"        /* kl_stream_* raw I/O (substrate, -Isrc) */
 
 /* Max retries on zero-byte write before giving up (conn_write_all, writev_all) */
 #define KL_HTTP_CONN_WRITE_SPIN_MAX 256
@@ -22,30 +30,8 @@
  * with no TLS knowledge. Internal — not a public API (was briefly in http_connection.h). */
 #define KL_COMP_CIPHER_SIZE (17u * 1024u)
 
-/* ── Transport helpers — TLS-aware read/write ────────────────────── */
+/* ── Transport helpers — TLS-aware read/write over the embedded KlStream ──────── */
 
-/* The socket provider for a connection (ctx->sockets; NULL = POSIX fast path). */
-/* ── Raw-transport seam over the embedded KlStream (step 6B-2) ─────────────────────────────────
- * HTTP connection code performs raw socket I/O and identity recovery through the neutral KlStream,
- * never touching the socket provider or fd directly. TLS is an adapter ABOVE these (conn_read/
- * conn_write). The generic KlStream write queue / strict-read facets stay dormant for HTTP/1. */
-static inline const KlSocketProvider *kl_stream_provider(const KlStream *s) {
-    return s->ctx ? s->ctx->sockets : NULL;
-}
-static inline ssize_t kl_stream_recv(const KlStream *s, void *buf, size_t len) {
-    return kl_sock_recv(kl_stream_provider(s), s->fd, buf, len);
-}
-static inline ssize_t kl_stream_send(const KlStream *s, const void *buf, size_t len) {
-    return kl_sock_send(kl_stream_provider(s), s->fd, buf, len);
-}
-static inline ssize_t kl_stream_recv_peek(const KlStream *s, void *buf, size_t len) {
-    return kl_sock_recv_peek(kl_stream_provider(s), s->fd, buf, len);
-}
-/* Classify the last raw stream op's status (would-block / interrupted / etc.) via the seam,
- * so HTTP code never inspects the socket provider directly. */
-static inline KlIoStatus kl_stream_io_status(const KlStream *s) {
-    return kl_sock_io_status(kl_stream_provider(s));
-}
 /* Recover the owning KlHttpConn from its embedded stream at the HTTP adapter boundary. The stream is
  * the leading member (offset 0), but containerof keeps that an implementation detail. */
 static inline KlHttpConn *kl_http_conn_from_stream(KlStream *s) {
@@ -104,27 +90,10 @@ void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 
-/* Drive the HTTP/2 server session with already-received plaintext: parse frames +
- * flush produced output. Returns the next KlHttpConnState (KL_HTTP_CONN_HTTP2 / KL_HTTP_CONN_CLOSED).
- * The transport-agnostic h2 core (defined in h2.c): the readiness drive
- * (kl_http2_server_on_readable) is conn_read + this; the completion driver reads via its
- * own loop then calls this. Internal — the public h2 API and the KlHttp2ServerSession
- * vtable are unchanged, so the event axis stays invisible to h2 users. */
-KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len);
-
-/* HTTP/2 output boundary seam (8d-4). The h2 server writes produced frame bytes through
- * a per-connection writer; the default writes the socket (conn_write). A completion
- * driver installs its own buffering writer around a feed to collect the frames for one
- * ordered overlapped send, then restores the default (fn == NULL). Symmetric with the
- * WebSocket server's kl_drain boundary; keeps all completion buffering in the driver, not
- * h2.c. Defined in h2.c. */
-typedef ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
-void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
-
 /* Server logging helpers (defined in http_server.c; used by the per-platform
- * server_plat_*.c TUs too). */
+ * http_server_plat_*.c TUs too). */
 __attribute__((format(printf, 3, 4)))
 void kl_http_server_log(KlHttpServer *s, int level, const char *fmt, ...);
 void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg);
 
-#endif
+#endif /* KEEL_PROTOCOLS_HTTP_INTERNAL_H */

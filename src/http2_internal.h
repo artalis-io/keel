@@ -19,7 +19,22 @@
 #include <keel/http_router.h>
 #include <stdint.h>
 #include <stddef.h>
-#include "internal.h"          /* KlHttp2WriteFn (the output seam type) */
+
+/* ── HTTP/2 server drive + output-writer seam (moved from internal.h in R2a) ────
+ * The HTTP/2-specific cross-TU decls the HTTP core / completion driver call: the
+ * plaintext-feed entry and the per-connection output writer. HTTP coordinates HTTP/2
+ * through this seam (protocols/http/ → protocols/http2/, per the frozen §147 rule). */
+
+/* Drive the HTTP/2 server session with already-received plaintext: parse frames +
+ * flush produced output. Returns the next KlHttpConnState. Defined in http2_server.c. */
+KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len);
+
+/* HTTP/2 output boundary seam (8d-4): the h2 server writes produced frame bytes through a
+ * per-connection writer; the default writes the socket (conn_write). A completion driver
+ * installs its own buffering writer around a feed, then restores the default (fn == NULL).
+ * Defined in http2_server.c. */
+typedef ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
+void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
 
 /* ── Per-stream state ────────────────────────────────────────────── */
 
