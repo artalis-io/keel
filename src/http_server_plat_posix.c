@@ -95,6 +95,9 @@ static int unlink_stale_unix_socket(KlHttpServer *s, const char *path) {
         return -1;
     }
 
+    /* A pathname race cannot make unlink follow or modify the replacement target: it removes only the
+     * directory entry.  The subsequent bind still fails safely if another process wins this path. */
+    // lgtm[cpp/toctou-race-condition]
     if (unlink(path) < 0) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "unlink unix socket");
         s->last_error = KL_ERR_BIND;

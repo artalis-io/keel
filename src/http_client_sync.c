@@ -673,9 +673,13 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
 
         int n;
         if (parsed.port == 80)
+            /* HTTP proxy absolute-form must preserve the caller's cleartext scheme. */
+            // lgtm[cpp/non-https-url]
             n = snprintf(abs_url_buf, sizeof(abs_url_buf),
                          "http://%s%.*s", host_z, path_len, path);
         else
+            /* HTTP proxy absolute-form must preserve the caller's cleartext scheme. */
+            // lgtm[cpp/non-https-url]
             n = snprintf(abs_url_buf, sizeof(abs_url_buf),
                          "http://%s:%d%.*s", host_z, parsed.port,
                          path_len, path);
