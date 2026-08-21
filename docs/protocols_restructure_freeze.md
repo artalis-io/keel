@@ -683,16 +683,22 @@ H2-internals suite; §9.8 ruling).
   Windows the binary needs the `$(EXE)` suffix, which resolving against the extensionless `TEST_BIN` does NOT
   produce. Freeze an explicit **source-path** resolver, then derive each platform's binary from it:
   ```make
-  # resolve a bare suite name to its .c wherever it lives (flat tests/ or nested tests/protocols/<fam>/)
-  test_src_for = $(filter tests/test_$(1).c tests/protocols/%/test_$(1).c,$(TEST_SRC))
-  test_bin_for = $(patsubst %.c,%$(EXE),$(call test_src_for,$(1)))
+  # resolve a bare suite name to its .c wherever it lives (flat tests/ or nested tests/protocols/<fam>/).
+  # Resolves against the FILESYSTEM, not $(TEST_SRC): a curated set legitimately names suites a given
+  # config excludes from the default `make test` (e.g. iocp_engine unless BACKEND=iocp), and a curated
+  # BIN var is expanded at PARSE time via its target's prerequisites — filtering by TEST_SRC would
+  # false-error every build. Matches the original addprefix behavior (never config-filtered).
+  test_src_for = $(wildcard tests/test_$(1).c tests/protocols/*/test_$(1).c)
+  # EXACTLY ONE source required: zero -> unknown-suite error; >1 -> ambiguity error; one -> the binary.
+  test_bin_for = $(patsubst %.c,%$(EXE),$(if $(call test_src_for,$(1)),\
+                   $(if $(word 2,$(call test_src_for,$(1))),$(error curated test suite '$(1)' is ambiguous: $(call test_src_for,$(1))),$(call test_src_for,$(1))),\
+                   $(error curated test suite '$(1)' is unknown)))
   ```
   Use `test_bin_for` for `WIN_TEST_BIN`, `WIN_IOCP_TEST_BIN`, and `IOURING_TEST_BIN` (e.g.
   `IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))`). The **suite-name lists
-  stay stable** (CI/scripts unchanged) and the `$(EXE)` suffix is correct on every platform. Add a **fail-loud
-  uniqueness check**: each `$(call test_src_for,$(s))` must resolve to **exactly one** source (a make-time
-  `$(if $(word 2,…),$(error dup suite $(s)))` / `$(if $(test_src_for…),,$(error unknown suite $(s)))`), so a
-  duplicate basename or a typo'd suite fails the build rather than silently building the wrong/no target.
+  stay stable** (CI/scripts unchanged) and the `$(EXE)` suffix is correct on every platform. The fail-loud
+  **exactly-one** rule means a typo'd/stale suite (zero) or a duplicate basename (>1) fails the build rather
+  than silently building the wrong or **no** target (a stale name must not remove coverage silently).
 - **Smoke targets** (`smoke-iouring`, `smoke-pollcomp*`, `smoke-datagram`, `smoke-tls*`, `smoke-*-ws`, …) +
   the freestanding targets that name `tests/freestanding*` — repoint each moved smoke path in the target
   that builds it (per §9.1-G). Freestanding harness paths in group H do NOT move.

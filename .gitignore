@@ -34,6 +34,12 @@ examples/*
 # Test binaries
 tests/test_*
 !tests/test_*.c
+# Nested protocol-test binaries (§9: tests/protocols/<fam>/) — binaries/.d/.dSYM ignored,
+# sources (.c) stay tracked.
+tests/protocols/*/test_*
+!tests/protocols/*/test_*.c
+tests/protocols/*/smoke_*
+!tests/protocols/*/smoke_*.c
 # Smoke binaries (all backends: tcp/udp/dns + pollcomp/iocp/iouring + their tls/ws/async
 # variants), incl. .exe and macOS .dSYM bundles. Sources (.c) stay tracked.
 tests/smoke_*

@@ -326,7 +326,10 @@ examples: $(EXAMPLES)
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
 # test_iocp_engine.c requires the IOCP backend (asserts COMPLETION caps +
 # kl_socket_provider_iocp) — exclude by default, add back only for that backend.
-TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c))
+# Discovery is recursive over the protocol test dirs (one family level deep — no `**`
+# needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
+# (docs/protocols_restructure_freeze.md §9).
+TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -340,6 +343,20 @@ ifdef KEEL_NO_COMPLETION
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 
+# Curated-suite resolver (§9.4/§9.5): map a BARE suite name to its source wherever it lives
+# (flat tests/ or nested tests/protocols/<fam>/), then derive the platform binary WITH $(EXE).
+# Keeps the curated suite-name lists stable while the binaries resolve to nested paths and carry the
+# correct Windows extension. Fail-loud — the resolver requires EXACTLY ONE source, so a misspelled/
+# stale suite name cannot silently drop coverage and a duplicate basename cannot build an ambiguous
+# target: zero matches -> unknown-suite error; >1 -> ambiguity error; one -> the binary.
+# Resolves against the FILESYSTEM ($(wildcard ...)), NOT the config-filtered $(TEST_SRC): a curated set
+# legitimately names suites a given config excludes from the default `make test` (e.g. iocp_engine is
+# absent unless BACKEND=iocp), and a curated BIN var is expanded at PARSE time via its target's
+# prerequisites — filtering by TEST_SRC would false-error every build. This matches the original
+# `addprefix` behavior (which never filtered by config), now with path resolution + fail-loud checks.
+test_src_for = $(wildcard tests/test_$(1).c tests/protocols/*/test_$(1).c)
+test_bin_for = $(patsubst %.c,%$(EXE),$(if $(call test_src_for,$(1)),$(if $(word 2,$(call test_src_for,$(1))),$(error curated test suite '$(1)' is ambiguous: $(call test_src_for,$(1))),$(call test_src_for,$(1))),$(error curated test suite '$(1)' is unknown: no tests/test_$(1).c or tests/protocols/*/test_$(1).c)))
+
 # Per-platform test-network helpers (net_compat_posix.c / net_compat_win.c),
 # linked into every test binary. Built by the generic %.o rule.
 TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
@@ -349,7 +366,7 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -374,7 +391,7 @@ test: $(TEST_BIN)
 # smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
 # by `make KEEL_TLS=mbedtls smoke-tls`; mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress drain \
-                  http_multipart_stream overflow http1_parser http1_response_parser http_router url \
+                  http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser http1_response_parser http_router url \
                   http_client http_client_stream http_connection http2_client http_redirect \
                   http_server_stats thread_pool timer websocket_client \
                   error proxy_protocol resolver_cache http_request timeout \
@@ -382,7 +399,7 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
                   tls tls_integration peer_cert
-WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
+WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
 # force-include (utest.h QueryPerformanceCounter clash). POSIX builds fall through
@@ -390,7 +407,11 @@ WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
 tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+# Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
+# so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
+tests/protocols/%$(EXE): tests/protocols/%.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -410,7 +431,7 @@ test-win: $(WIN_TEST_BIN)
 # (test_event_caps is a *readiness*-backend suite — it asserts READINESS caps — so it
 # runs in the WSAPoll/POSIX jobs, NOT here.)
 WIN_IOCP_TEST_SUITES = iocp_engine stream_single_shot
-WIN_IOCP_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_IOCP_TEST_SUITES)))
+WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
 	for t in $(WIN_IOCP_TEST_BIN); do \
@@ -665,12 +686,12 @@ IOURING_TEST_SUITES = allocator alpn async http_body_reader http1_chunked http_c
                           datagram_batch datagram_life datagram_public datagram_live datagram_socket datagram_multicast \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io http2 http2_client http_integration \
-                          http_multipart_stream overflow http1_parser peer_addr peer_cert http_client_proxy \
+                          http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser peer_addr peer_cert http_client_proxy \
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
                           stream_single_shot stream_transport thread_pool timeout timer tls tls_integration \
                           udp_cmsg unix_socket url version websocket websocket_client
-IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
+IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
 	for t in $(IOURING_TEST_BIN); do \
@@ -778,6 +799,11 @@ clean:
 	rm -f tests/smoke_tcp tests/smoke_tcp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
+	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
+	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles
+	# (never .c/.h — a `test_*` glob would delete the sources too).
+	rm -f tests/protocols/*/test_*.exe tests/protocols/*/smoke_*.exe tests/protocols/*/*.d
+	rm -rf tests/protocols/*/*.dSYM
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
 	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
@@ -948,6 +974,34 @@ check-doc-refs:
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-doc-refs: FAILED"; exit 1; fi; \
 	echo "check-doc-refs: OK ($(words $(DOC_REF_FILES)) living-architecture docs, all in-repo links resolve)"
+
+# Test-layout ownership gate (§9.6). Enforces the EXACT authorized test-source layout recorded in
+# tests/test-layout.manifest (basename→path map), so a protocol test cannot drift to the wrong home
+# and a new/renamed/duplicated test cannot land unclassified. Rejects: (a) a file whose real path is
+# not the manifested one (mismatch — wrong family/dir), (b) a basename at two paths (duplicate/leftover
+# copy), (c) any test_*.c/smoke_*.c not in the manifest (unknown), (d) a tests/protocols/<x>/ dir where
+# <x> is not one of the five frozen families. Scopes to test_*.c + smoke_*.c (helpers/fixtures/
+# freestanding harnesses are not suites). Self-canary included.
+TEST_LAYOUT_FAMILIES = http http2 websocket dns proxy_protocol
+check-test-layout:
+	@bad=0; tmp=`mktemp`; \
+	git ls-files 'tests/test_*.c' 'tests/smoke_*.c' 'tests/protocols/*/test_*.c' 'tests/protocols/*/smoke_*.c' | LC_ALL=C sort > $$tmp; \
+	unknown=`grep -vxF -f tests/test-layout.manifest $$tmp || true`; \
+	missing=`grep -vxF -f $$tmp tests/test-layout.manifest || true`; \
+	if [ -n "$$unknown" ]; then echo "$$unknown" | sed 's/^/  UNMAPPED (mismatch\/unknown path): /'; bad=1; fi; \
+	if [ -n "$$missing" ]; then echo "$$missing" | sed 's/^/  MISSING (manifested but absent): /'; bad=1; fi; \
+	dups=`awk -F/ '{print $$NF}' $$tmp | LC_ALL=C sort | uniq -d`; \
+	if [ -n "$$dups" ]; then echo "$$dups" | sed 's/^/  DUPLICATE basename: /'; bad=1; fi; \
+	rm -f $$tmp; \
+	for d in `git ls-files 'tests/protocols/*/*' | sed -E 's#tests/protocols/([^/]+)/.*#\1#' | LC_ALL=C sort -u`; do \
+	  case " $(TEST_LAYOUT_FAMILIES) " in *" $$d "*) ;; *) echo "  UNKNOWN family dir: tests/protocols/$$d/"; bad=1 ;; esac; \
+	done; \
+	if ! grep -qxF 'tests/protocols/http/test_http_overflow.c' tests/test-layout.manifest; then \
+	  echo "check-test-layout: SELF-TEST FAILED — manifest lost a known split file"; exit 1; fi; \
+	if grep -qxF 'tests/test_overflow.c' tests/test-layout.manifest; then \
+	  echo "check-test-layout: SELF-TEST FAILED — manifest still lists a retired pre-split path"; exit 1; fi; \
+	if [ $$bad -ne 0 ]; then echo "check-test-layout: FAILED — the test tree diverges from tests/test-layout.manifest (§9.6); update the manifest in the SAME commit that moves a test"; exit 1; fi; \
+	echo "check-test-layout: OK (`wc -l < tests/test-layout.manifest | tr -d ' '` authorized test sources; families: $(TEST_LAYOUT_FAMILIES))"
 
 # Stale-name gate (D3-3): the KlUdp/KlUdpServer object API was deleted; fail if it reappears in the
 # code tree (src/ include/ tests/ integrations/). TWO INDEPENDENT scans, so an allowed cmsg helper on a
@@ -1805,7 +1859,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-no-kludp check-no-httplegacy freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

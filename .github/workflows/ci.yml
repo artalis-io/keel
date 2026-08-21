@@ -373,6 +373,9 @@ jobs:
       - name: Stale-name gate (renamed HTTP taxonomy — no legacy KlServer/KlClient/KlH2/... names)
         run: make check-no-httplegacy
 
+      - name: Test-layout ownership gate (tests match tests/test-layout.manifest — no drift)
+        run: make check-test-layout
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
