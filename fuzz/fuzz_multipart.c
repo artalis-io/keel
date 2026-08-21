@@ -8,9 +8,9 @@
  *   ./fuzz/fuzz_multipart fuzz/corpus_multipart/ -max_total_time=60
  */
 #include <keel/allocator.h>
-#include <keel/body_reader.h>
-#include <keel/body_reader_multipart.h>
-#include <keel/request.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
+#include <keel/http_request.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -18,7 +18,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     KlAllocator alloc = kl_allocator_default();
 
     /* Set up a fake request with multipart content-type */
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = "POST";
     req.method_len = 4;
@@ -33,13 +33,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     req.headers[0].value_len = strlen(ct);
     req.num_headers = 1;
 
-    KlMultipartConfig cfg = {
+    KlHttpMultipartConfig cfg = {
         .max_part_size = 64 * 1024,
         .max_total_size = 256 * 1024,
         .max_parts = 16,
     };
 
-    KlBodyReader *reader = kl_body_reader_multipart(&alloc, &req, &cfg);
+    KlHttpBodyReader *reader = kl_http_body_reader_multipart(&alloc, &req, &cfg);
     if (!reader) return 0;
 
     /* Feed data in variable-sized chunks */

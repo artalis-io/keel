@@ -2,7 +2,7 @@
  * lwip_loopback_test.c — a full Keel HTTP server running on the lwIP TCP/IP stack
  * (no kernel sockets), proving the socket + event providers end to end.
  *
- * Brings up lwIP (tcpip_init + loopback netif), starts a KlServer configured with
+ * Brings up lwIP (tcpip_init + loopback netif), starts a KlHttpServer configured with
  * kl_socket_provider_lwip() + kl_event_provider_lwip(), then:
  *   (1) a raw lwIP client GETs it (proves the server axis), and
  *   (2) a Keel ASYNC CLIENT on the lwIP providers GETs it (proves the outbound
@@ -11,7 +11,8 @@
  * libkeel — no core recompile. Exit 0 on success.
  */
 #include <keel/keel.h>
-#include <keel/udp.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>   /* complete KlDatagram type — the echo server embeds one */
 #include "keel_lwip.h"
 #ifdef LWT_TLS
 #include <keel_tls_mbedtls.h>   /* Phase 4: HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
@@ -33,16 +34,16 @@
 static sys_sem_t g_ready;
 static void tcpip_done(void *a) { (void)a; sys_sem_signal(&g_ready); }
 
-static void handler(KlRequest *req, KlResponse *res, void *ud) {
+static void handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, "{\"stack\":\"lwip\"}", 16);
+    kl_http_response_json(res, 200, "{\"stack\":\"lwip\"}", 16);
 }
 
-static KlServer g_srv;
-static void *srv_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
 
 static volatile int g_cli_done;
-static void cli_done(KlClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
+static void cli_done(KlHttpClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
 
 /* Phase 2: a Keel async HTTP client on the lwIP providers → the server.
  * Proves the outbound axis (connect + resolve_sync_lwip name resolution). */
@@ -55,36 +56,47 @@ static int keel_client_on_lwip(uint16_t port) {
 
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", (unsigned)port);
-    KlClientConfig ccfg = {
+    KlHttpClientConfig ccfg = {
         .sockets    = kl_socket_provider_lwip(),
         .system_dns = 1,        /* blocking resolve → resolve_sync_lwip (lwip_getaddrinfo) */
         .timeout_ms = 5000,
     };
     g_cli_done = 0;
-    KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+    KlHttpClient *cli = kl_http_client_start(&cev, &alloc, &ccfg, "GET", url,
                                     NULL, 0, NULL, 0, cli_done, NULL);
     int ok = 0;
     if (cli) {
         for (int i = 0; i < 500 && !g_cli_done; i++)
             kl_event_ctx_run(&cev, 16, 20);
-        if (g_cli_done && kl_client_error(cli) == 0) {
-            const KlClientResponse *r = kl_client_response(cli);
+        if (g_cli_done && kl_http_client_error(cli) == 0) {
+            const KlHttpClientResponse *r = kl_http_client_response(cli);
             ok = (r && r->status == 200 && r->body &&
                   strstr(r->body, "\"stack\":\"lwip\"") != NULL);
         }
-        kl_client_free(cli);
+        kl_http_client_free(cli);
     }
     kl_event_ctx_free(&cev);
     return ok;
 }
 
-/* Phase 3: a Keel KlUdp echo server on the lwIP providers, exercised by a raw lwIP
+/* Phase 3: a Keel KlDatagram echo server on the lwIP providers, exercised by a raw lwIP
  * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send) —
  * the foundation for udp_server and the built-in async DNS resolver on lwIP. */
-static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)local; (void)ud;
-    if (src) (void)kl_udp_send_to(udp, data, len, src);   /* bounce it back */
+static void udp_echo(void *ud, const void *data, size_t len,
+                     const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    KlDatagram *echo = ud;
+    if (peer)   /* bounce it back */
+        (void)kl_datagram_send(echo, &(KlDatagramMessage){ .data = data, .len = len, .peer = peer, .tos = -1 });
+}
+
+/* Public close lifecycle over the lwIP readiness loop: abortive close, pump until CLOSED, free. */
+static void dg_close(KlEventCtx *ctx, KlDatagram *dg) {
+    if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
+        (void)kl_datagram_close_cancel(dg);
+    for (int i = 0; i < 300 && kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(ctx, 16, 5);
+    kl_datagram_free(dg);
 }
 
 static int keel_udp_on_lwip(void) {
@@ -94,15 +106,15 @@ static int keel_udp_on_lwip(void) {
         return 0;
     uev.sockets = kl_socket_provider_lwip();
 
-    KlUdp echo;
-    KlUdpConfig ucfg = {
+    KlDatagram echo;
+    KlDatagramSocketConfig ucfg = {
         .ctx = &uev, .family = AF_INET,
         .bind_addr = "127.0.0.1", .bind_port = LWT_UDP_PORT,
         .alloc = &alloc,
     };
-    if (kl_udp_init(&echo, &ucfg) != 0) { kl_event_ctx_free(&uev); return 0; }
-    if (kl_udp_recv_start(&echo, udp_echo, NULL) != 0) {
-        kl_udp_free(&echo); kl_event_ctx_free(&uev); return 0;
+    if (kl_datagram_socket_init(&echo, &ucfg) != 0) { kl_event_ctx_free(&uev); return 0; }
+    if (kl_datagram_recv_start(&echo, udp_echo, &echo) != 0) {
+        dg_close(&uev, &echo); kl_event_ctx_free(&uev); return 0;
     }
 
     /* Raw lwIP UDP client: send a datagram, expect it echoed back. */
@@ -128,7 +140,7 @@ static int keel_udp_on_lwip(void) {
         }
     }
     lwip_close(c);
-    kl_udp_free(&echo);
+    dg_close(&uev, &echo);
     kl_event_ctx_free(&uev);
     return ok;
 }
@@ -136,8 +148,8 @@ static int keel_udp_on_lwip(void) {
 #ifdef LWT_TLS
 /* Phase 4: HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
  * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
- * socket provider — which the framework auto-wires from KlConfig.sockets /
- * KlClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
+ * socket provider — which the framework auto-wires from KlHttpServerConfig.sockets /
+ * KlHttpClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
  * per-ctx call needed) — so a genuine TLS handshake + request runs over lwIP with
  * zero lwIP-specific TLS code. Embedded
  * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
@@ -161,12 +173,12 @@ static const char KEY_PEM[] =
 "HQSP88xCcQ17ZSg3dWoDMRGHDXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7I\n"
 "-----END PRIVATE KEY-----\n";
 
-static void https_handler(KlRequest *req, KlResponse *res, void *ud) {
+static void https_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, "{\"tls\":\"lwip\"}", 15);
+    kl_http_response_json(res, 200, "{\"tls\":\"lwip\"}", 15);
 }
-static KlServer g_tls_srv;
-static void *tls_srv_thread(void *a) { (void)a; kl_server_run(&g_tls_srv); return NULL; }
+static KlHttpServer g_tls_srv;
+static void *tls_srv_thread(void *a) { (void)a; kl_http_server_run(&g_tls_srv); return NULL; }
 
 static int keel_https_on_lwip(void) {
     KlAllocator alloc = kl_allocator_default();
@@ -177,18 +189,18 @@ static int keel_https_on_lwip(void) {
         (const unsigned char *)KEY_PEM,  sizeof(KEY_PEM),
         NULL, 0, KL_MTLS_NONE, &alloc);
     if (!sctx) return 0;
-    /* No explicit provider call — the server auto-wires it from KlConfig.sockets. */
+    /* No explicit provider call — the server auto-wires it from KlHttpServerConfig.sockets. */
     KlTlsConfig stls = { .ctx = sctx, .factory = kl_tls_mbedtls_create };  /* destroy manually */
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = LWT_TLS_PORT, .bind_addr = "127.0.0.1",
         .sockets = kl_socket_provider_lwip(), .event_provider = kl_event_provider_lwip(),
         .tls = &stls,
     };
-    if (kl_server_init(&g_tls_srv, &cfg) < 0) { kl_tls_mbedtls_ctx_destroy(sctx); return 0; }
-    kl_server_route(&g_tls_srv, "GET", "/", https_handler, NULL, NULL);
+    if (kl_http_server_init(&g_tls_srv, &cfg) < 0) { kl_tls_mbedtls_ctx_destroy(sctx); return 0; }
+    kl_http_server_route(&g_tls_srv, "GET", "/", https_handler, NULL, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, tls_srv_thread, NULL) != 0) {
-        kl_server_free(&g_tls_srv); kl_tls_mbedtls_ctx_destroy(sctx); return 0;
+        kl_http_server_free(&g_tls_srv); kl_tls_mbedtls_ctx_destroy(sctx); return 0;
     }
     for (int i = 0; i < 400 && g_tls_srv.bound_port == 0; i++) usleep(5000);
 
@@ -199,35 +211,35 @@ static int keel_https_on_lwip(void) {
         cev.sockets = kl_socket_provider_lwip();
         KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
         if (cctx) {
-            /* No explicit provider call — the client auto-wires it from KlClientConfig.sockets. */
+            /* No explicit provider call — the client auto-wires it from KlHttpClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
             char url[64];
             snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);
-            KlClientConfig ccfg = {
+            KlHttpClientConfig ccfg = {
                 .sockets = kl_socket_provider_lwip(), .system_dns = 1,
                 .timeout_ms = 5000, .tls = &ctls,
             };
             g_cli_done = 0;
-            KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+            KlHttpClient *cli = kl_http_client_start(&cev, &alloc, &ccfg, "GET", url,
                                             NULL, 0, NULL, 0, cli_done, NULL);
             if (cli) {
                 for (int i = 0; i < 500 && !g_cli_done; i++)
                     kl_event_ctx_run(&cev, 16, 20);
-                if (g_cli_done && kl_client_error(cli) == 0) {
-                    const KlClientResponse *r = kl_client_response(cli);
+                if (g_cli_done && kl_http_client_error(cli) == 0) {
+                    const KlHttpClientResponse *r = kl_http_client_response(cli);
                     ok = (r && r->status == 200 && r->body &&
                           strstr(r->body, "\"tls\":\"lwip\"") != NULL);
                 }
-                kl_client_free(cli);
+                kl_http_client_free(cli);
             }
             kl_tls_mbedtls_ctx_destroy(cctx);
         }
         kl_event_ctx_free(&cev);
     }
 
-    kl_server_stop(&g_tls_srv);
+    kl_http_server_stop(&g_tls_srv);
     pthread_join(tid, NULL);
-    kl_server_free(&g_tls_srv);
+    kl_http_server_free(&g_tls_srv);
     kl_tls_mbedtls_ctx_destroy(sctx);
     return ok;
 }
@@ -241,13 +253,13 @@ int main(void) {
     usleep(100000);
 
     /* Keel server on the lwIP providers. */
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = LWT_PORT, .bind_addr = "127.0.0.1",
         .sockets        = kl_socket_provider_lwip(),
         .event_provider = kl_event_provider_lwip(),
     };
-    if (kl_server_init(&g_srv, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }
-    kl_server_route(&g_srv, "GET", "/", handler, NULL, NULL);
+    if (kl_http_server_init(&g_srv, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }
+    kl_http_server_route(&g_srv, "GET", "/", handler, NULL, NULL);
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) { fprintf(stderr, "thread\n"); return 1; }
@@ -281,7 +293,7 @@ int main(void) {
     printf("lwIP loopback: Keel client on lwIP got %s\n",
            client_ok ? "200 (correct)" : "UNEXPECTED");
 
-    /* Phase 3: a Keel KlUdp echo on lwIP, exercised by a raw lwIP UDP client. */
+    /* Phase 3: a Keel KlDatagram echo on lwIP, exercised by a raw lwIP UDP client. */
     int udp_ok = keel_udp_on_lwip();
     printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
            udp_ok ? "round-tripped (correct)" : "UNEXPECTED");
@@ -295,8 +307,8 @@ int main(void) {
            tls_ok ? "handshake + roundtrip OK (correct)" : "UNEXPECTED");
 #endif
 
-    kl_server_stop(&g_srv);          /* loop wakes on its poll timeout, sees stop */
+    kl_http_server_stop(&g_srv);          /* loop wakes on its poll timeout, sees stop */
     pthread_join(tid, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     return (ok && client_ok && udp_ok && tls_ok) ? 0 : 2;
 }

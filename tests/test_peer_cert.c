@@ -11,7 +11,7 @@
  * Passthrough TLS mock with a canned peer_cert
  *
  * The real mbedtls extraction is exercised by the mbedtls backend build;
- * here we validate the vtable plumbing: kl_request_peer_cert() must reach
+ * here we validate the vtable plumbing: kl_http_request_peer_cert() must reach
  * conn->tls->peer_cert and pass its result through unchanged. A global
  * knob selects the mock's behaviour per test.
  * ═══════════════════════════════════════════════════════════════════ */
@@ -57,14 +57,14 @@ static void pt_install_peer_cert(void) {
 static int        g_rc = -2;
 static KlPeerCert g_cert;
 
-static void handle(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&g_cert, 0xAA, sizeof(g_cert));   /* poison to prove it gets filled */
-    g_rc = kl_request_peer_cert(req, &g_cert);
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    g_rc = kl_http_request_peer_cert(req, &g_cert);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *srv_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
 static int connect_local(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -89,16 +89,16 @@ static void drain(int fd) {
 /* Run one request against a server configured via cfg; captures g_rc/g_cert.
  * Returns 0 on success, -1 if setup failed (bind/connect). Not a UTEST body,
  * so it uses plain error handling rather than ASSERT_* macros. */
-static int run_once(KlConfig *cfg) {
+static int run_once(KlHttpServerConfig *cfg) {
     g_rc = -2;
     pt_install_peer_cert();   /* wire the shared mock's peer_cert hook for g_cert_mode */
-    KlServer srv;
-    if (kl_server_init(&srv, cfg) != 0)
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, cfg) != 0)
         return -1;
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     pthread_t t;
     if (pthread_create(&t, NULL, srv_thread, &srv) != 0) {
-        kl_server_free(&srv);
+        kl_http_server_free(&srv);
         return -1;
     }
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -116,9 +116,9 @@ static int run_once(KlConfig *cfg) {
         }
     }
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(t, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     return rc;
 }
 
@@ -127,7 +127,7 @@ static int run_once(KlConfig *cfg) {
 UTEST(peer_cert, present_over_tls) {
     g_cert_mode = PT_CERT_PRESENT;
     KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
 
     ASSERT_EQ(0, g_rc);
@@ -146,7 +146,7 @@ UTEST(peer_cert, none_presented) {
     /* TLS connection, but the client sent no certificate → -1. */
     g_cert_mode = PT_CERT_NONE;
     KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
     ASSERT_EQ(-1, g_rc);
 }
@@ -155,22 +155,22 @@ UTEST(peer_cert, backend_without_support) {
     /* TLS backend that leaves the peer_cert vtable slot NULL → -1. */
     g_cert_mode = PT_CERT_NOSLOT;
     KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
     ASSERT_EQ(-1, g_rc);
 }
 
 UTEST(peer_cert, plaintext_connection) {
     /* No TLS at all → -1 (nothing to extract). */
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
     ASSERT_EQ(0, run_once(&cfg));
     ASSERT_EQ(-1, g_rc);
 }
 
 UTEST(peer_cert, null_args) {
-    ASSERT_EQ(-1, kl_request_peer_cert(NULL, &g_cert));
+    ASSERT_EQ(-1, kl_http_request_peer_cert(NULL, &g_cert));
     /* req==NULL path; out==NULL guarded too (no crash). */
-    ASSERT_EQ(-1, kl_request_peer_cert(NULL, NULL));
+    ASSERT_EQ(-1, kl_http_request_peer_cert(NULL, NULL));
 }
 
 UTEST_MAIN();

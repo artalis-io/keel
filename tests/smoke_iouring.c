@@ -3,9 +3,9 @@
  * io_uring backend (PAL Phase 8f).
  *
  * The runtime validation of the THIRD completion backend (event_iouring.c): a
- * KlServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
+ * KlHttpServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
  * provider), served by the SAME completion driver (completion_driver.c) the IOCP and
- * pollcomp backends drive — reused verbatim — hit by the sync KlClient over loopback. It
+ * pollcomp backends drive — reused verbatim — hit by the sync KlHttpClient over loopback. It
  * proves the completion axis is genuinely platform-independent on a real, completion-native
  * kernel engine, and is the first production Linux completion backend (pollcomp is a test
  * facade). Linux-only (io_uring); the Completion CI job runs it.
@@ -15,6 +15,9 @@
  * idle-timeout + keep-alive churn + resilience, all over the io_uring completion loop.
  */
 #include <keel/keel.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>
+#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
 #include "../src/socket.h"   /* internal kl_socket_provider_iouring() */
 
 #include <pthread.h>
@@ -45,57 +48,57 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+    kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
 #define SMOKE_BIG_LEN (256 * 1024)
 static char g_big[SMOKE_BIG_LEN];
-static void handle_big(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 200);
-    kl_response_body_borrow(res, g_big, SMOKE_BIG_LEN);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, g_big, SMOKE_BIG_LEN);
 }
 
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
-    if (!br || br->len == 0) { kl_response_error(res, 400, "body required"); return; }
-    kl_response_status(res, 200);
-    kl_response_body_borrow(res, br->data, br->len);
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
+    if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_FILE_PATH, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     off_t size = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
-    kl_response_status(res, 200);
-    kl_response_file(res, (KlSocketHandle)fd, size);
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, size);
 }
 
 /* GET /bigfile — a >pipe-capacity file so the splice sendfile loops over multiple
  * file→pipe→socket chunks and exercises the short-splice-out re-submit path (8f-2). */
-static void handle_bigfile(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_BIGFILE_PATH, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     off_t size = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
-    kl_response_status(res, 200);
-    kl_response_file(res, (KlSocketHandle)fd, size);
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, size);
 }
 
-static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    KlWriteFn write_fn = NULL;
+    KlHttpResponseWriteFn write_fn = NULL;
     void *wctx = NULL;
-    if (kl_response_begin_stream(res, 200, &write_fn, &wctx) < 0) return;
+    if (kl_http_response_begin_stream(res, 200, &write_fn, &wctx) < 0) return;
     write_fn(wctx, "chunk-one;", 10);
     write_fn(wctx, "chunk-two", 9);
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
 /* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
@@ -104,37 +107,38 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
 #define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
-static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    KlWriteFn write_fn = NULL;
+    KlHttpResponseWriteFn write_fn = NULL;
     void *wctx = NULL;
-    if (kl_response_begin_stream(res, 200, &write_fn, &wctx) < 0) return;
+    if (kl_http_response_begin_stream(res, 200, &write_fn, &wctx) < 0) return;
     static char chunk[SMOKE_BS_CHUNK];
     memset(chunk, 'S', sizeof(chunk));
     for (int i = 0; i < SMOKE_BS_CHUNKS; i++)
         write_fn(wctx, chunk, sizeof(chunk));
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
-static KlUdp g_udp;
-static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)local; (void)ud;
-    kl_udp_send_to(udp, data, len, src);
+static KlDatagram g_udp;
+static void udp_echo(void *ud, const void *data, size_t len,
+                     const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    KlDatagramMessage m = { .data = data, .len = len, .peer = peer, .tos = -1 };
+    (void)kl_datagram_send((KlDatagram *)ud, &m);
 }
 
 /* Minimal echo HTTP/2 server session (no nghttp2/HPACK) — echoes bytes through the send
  * callback; enough to exercise comp_h2_drive end to end over io_uring completion. */
 typedef struct {
-    KlH2ServerSession   base;
-    KlH2ServerCallbacks cb;
+    KlHttp2ServerSession   base;
+    KlHttp2ServerCallbacks cb;
     void               *cb_ud;
     KlAllocator        *alloc;
     char                pending[256];
     size_t              pending_len;
 } EchoH2;
 
-static kl_ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t echo_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     EchoH2 *e = (EchoH2 *)self;
     if (len > 0) {
         size_t n = len < sizeof(e->pending) ? len : sizeof(e->pending);
@@ -143,23 +147,23 @@ static kl_ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t le
     }
     return (ssize_t)len;
 }
-static int echo_want_write(KlH2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
-static int echo_flush(KlH2ServerSession *self) {
+static int echo_want_write(KlHttp2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
+static int echo_flush(KlHttp2ServerSession *self) {
     EchoH2 *e = (EchoH2 *)self;
     if (e->pending_len > 0) { e->cb.send(e->cb_ud, e->pending, e->pending_len); e->pending_len = 0; }
     return 0;
 }
-static int echo_submit(KlH2ServerSession *self, uint32_t sid, int status,
+static int echo_submit(KlHttp2ServerSession *self, uint32_t sid, int status,
                        const char **hn, const char **hv, int nh, const void *body, size_t bl) {
     (void)self; (void)sid; (void)status; (void)hn; (void)hv; (void)nh; (void)body; (void)bl;
     return 0;
 }
-static int echo_shutdown(KlH2ServerSession *self) { (void)self; return 0; }
-static void echo_destroy(KlH2ServerSession *self) {
+static int echo_shutdown(KlHttp2ServerSession *self) { (void)self; return 0; }
+static void echo_destroy(KlHttp2ServerSession *self) {
     EchoH2 *e = (EchoH2 *)self;
     kl_free(e->alloc, e, sizeof(*e));
 }
-static KlH2ServerSession *echo_factory(KlAllocator *alloc, KlH2ServerCallbacks *cb, void *ud) {
+static KlHttp2ServerSession *echo_factory(KlAllocator *alloc, KlHttp2ServerCallbacks *cb, void *ud) {
     EchoH2 *e = kl_malloc(alloc, sizeof(*e));
     if (!e) return NULL;
     memset(e, 0, sizeof(*e));
@@ -236,7 +240,7 @@ static int keepalive_churn(int n) {
 
 /* Resilience: an abrupt mid-request drop and a malformed request must be cleaned up
  * without crashing/leaking (ASan CI), then a normal request must still succeed. */
-static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
+static int resilience_ok(KlAllocator *alloc, KlHttpClientConfig *ccfg) {
     int cs = connect_client();
     if (cs >= 0) { (void)!write(cs, "GET / HTT", 9); close(cs); }
     cs = connect_client();
@@ -247,16 +251,16 @@ static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
         close(cs);
     }
     nap_ms(50);
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
-    int rc = kl_client_request(alloc, ccfg, "GET", "http://127.0.0.1:18094/",
+    int rc = kl_http_client_request(alloc, ccfg, "GET", "http://127.0.0.1:18094/",
                                NULL, 0, NULL, 0, &resp);
     int ok = (rc == 0 && resp.status == 200);
-    if (rc == 0) kl_client_response_free(&resp);
+    if (rc == 0) kl_http_client_response_free(&resp);
     return ok;
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 /* Async / long-lived streaming over the completion loop (Phase 8g): begin a stream and
  * write the first chunk during dispatch, then SUSPEND on a one-shot timer. The timer fires
@@ -265,8 +269,8 @@ static KlServer g_srv;
  * async-suspend/resume + streaming path drives correctly over a completion backend. */
 typedef struct {
     KlAsyncOp op;
-    KlResponse *res;
-    KlWriteFn write_fn;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn write_fn;
     void *wctx;
 } AsyncStreamCtx;
 
@@ -277,7 +281,7 @@ static void astream_resume(KlAsyncOp *op, void *ud) {
      * inline (through the 8g-0 drain); the second chunk + terminator go out here, and the
      * driver closes the connection once the resume returns. */
     a->write_fn(a->wctx, "chunk-two", 9);
-    kl_response_end_stream(a->res);
+    kl_http_response_end_stream(a->res);
 }
 
 static void astream_timer(void *ud) {
@@ -286,16 +290,16 @@ static void astream_timer(void *ud) {
     free(a);
 }
 
-static void handle_astream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_astream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     AsyncStreamCtx *a = calloc(1, sizeof(*a));
-    if (!a) { kl_response_error(res, 500, "oom"); return; }
+    if (!a) { kl_http_response_error(res, 500, "oom"); return; }
     a->res = res;
-    if (kl_response_begin_stream(res, 200, &a->write_fn, &a->wctx) < 0) { free(a); return; }
+    if (kl_http_response_begin_stream(res, 200, &a->write_fn, &a->wctx) < 0) { free(a); return; }
     a->write_fn(a->wctx, "chunk-one;", 10);
     a->op.on_resume = astream_resume;
     a->op.user_data = a;
-    kl_async_suspend(&g_srv, kl_request_conn(req), &a->op);
+    kl_async_suspend(&g_srv, kl_http_request_conn(req), &a->op);
     kl_timer_add(&g_srv.ev, 20, astream_timer, a);   /* resume after 20 ms */
 }
 
@@ -382,7 +386,7 @@ static int bigstream_no_hol_ok(void) {
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -459,29 +463,29 @@ static int h2_prior_knowledge_roundtrip(void) {
 }
 
 int main(void) {
-    static KlH2ServerConfig h2cfg = { .factory = echo_factory };
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
+    static KlHttp2ServerConfig h2cfg = { .factory = echo_factory };
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iouring(), .h2 = &h2cfg,
                      .read_timeout_ms = 400 };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iouring: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (ssize_t)(sizeof(SMOKE_FILE) - 1)) {
         fprintf(stderr, "smoke-iouring: temp file write failed\n");
         if (wfd >= 0) close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     close(wfd);
@@ -500,39 +504,39 @@ int main(void) {
     if (!bigfile_ok) {
         fprintf(stderr, "smoke-iouring: big temp file write failed\n");
         unlink(SMOKE_FILE_PATH);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
-    KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
+    KlDatagramSocketConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
                          .bind_port = SMOKE_UDP_PORT };
-    int udp_ready = (kl_udp_init(&g_udp, &ucfg) == 0 &&
-                     kl_udp_recv_start(&g_udp, udp_echo, NULL) == 0);
+    int udp_ready = (kl_datagram_socket_init(&g_udp, &ucfg) == 0 &&
+                     kl_datagram_recv_start(&g_udp, udp_echo, &g_udp) == 0);
     if (!udp_ready) fprintf(stderr, "smoke-iouring: udp init/recv_start failed\n");
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-iouring: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024 };
     int ok = 0, last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/",
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/",
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
             last_len = resp.body_len;
             ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body && memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_err = (int)resp.error;
         }
@@ -540,74 +544,74 @@ int main(void) {
 
     int post_ok = 0;
     if (ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "POST", "http://127.0.0.1:18094/echo",
+        int rc = kl_http_client_request(&alloc, &ccfg, "POST", "http://127.0.0.1:18094/echo",
                                    NULL, 0, SMOKE_POST, sizeof(SMOKE_POST) - 1, &resp);
         if (rc == 0) {
             post_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_POST) - 1 &&
                        resp.body && memcmp(resp.body, SMOKE_POST, sizeof(SMOKE_POST) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     int file_ok = 0;
     if (ok && post_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/file",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/file",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             file_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_FILE) - 1 &&
                        resp.body && memcmp(resp.body, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     /* Large file → multi-chunk splice sendfile + short-splice-out re-submit (8f-2). */
     int bigfile_dl_ok = 0;
     if (ok && post_ok && file_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/bigfile",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/bigfile",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             bigfile_dl_ok = (resp.status == 200 && resp.body_len == SMOKE_BIGFILE_LEN &&
                              resp.body && resp.body[0] == 'A' &&
                              resp.body[SMOKE_BIGFILE_LEN - 1] == 'A');
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     int stream_ok = 0;
     if (ok && post_ok && file_ok && bigfile_dl_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/stream",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/stream",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             stream_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_STREAM) - 1 &&
                          resp.body && memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     /* Async / long-lived streaming over completion (8g): body produced across ticks. */
     int astream_ok = 0;
     if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/astream",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/astream",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             astream_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_STREAM) - 1 &&
                           resp.body && memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
@@ -662,19 +666,18 @@ int main(void) {
     int resil_ok = churn_ok ? resilience_ok(&alloc, &ccfg) : 0;
     int big_ok = 0;
     if (resil_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/big",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/big",
                                    NULL, 0, NULL, 0, &resp);
         big_ok = (rc == 0 && resp.status == 200 && resp.body_len == SMOKE_BIG_LEN);
-        if (rc == 0) kl_client_response_free(&resp);
+        if (rc == 0) kl_http_client_response_free(&resp);
     }
 
-    kl_udp_recv_stop(&g_udp);
-    kl_udp_free(&g_udp);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
+    kl_http_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
     unlink(SMOKE_BIGFILE_PATH);
 

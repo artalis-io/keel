@@ -2,7 +2,7 @@
  * async.c — Async suspend/resume with FD watchers
  *
  * Concepts: KlWatcher, KlAsyncOp, kl_async_suspend, kl_async_complete,
- * pipe-based completion signaling, kl_request_conn().
+ * pipe-based completion signaling, kl_http_request_conn().
  *
  * GET /delay/:ms suspends the connection, spawns a thread that sleeps
  * for the requested duration, then signals completion via a pipe.
@@ -30,7 +30,7 @@
 
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     int pipe_fds[2];       /* [0]=read (watcher), [1]=write (thread) */
     int delay_ms;
 } DelayCtx;
@@ -45,8 +45,8 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
                      "{\"delayed_ms\":%d}", ctx->delay_ms);
     if (n < 0) n = 0;
 
-    KlConn *conn = op->conn;
-    kl_response_json(&conn->res, 200, body, (size_t)n);
+    KlHttpConn *conn = op->conn;
+    kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     close(ctx->pipe_fds[0]);
     close(ctx->pipe_fds[1]);
@@ -91,14 +91,14 @@ static void *delay_thread(void *arg) {
 
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
-static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
-    KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlHttpServer *srv = user_data;
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Parse delay from route param */
     size_t ms_len;
-    const char *ms_str = kl_request_param(req, "ms", &ms_len);
+    const char *ms_str = kl_http_request_param(req, "ms", &ms_len);
     int delay_ms = 100;
     if (ms_str) {
         char tmp[16];
@@ -113,7 +113,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     /* Allocate context (freed in on_resume or on_cancel) */
     DelayCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        kl_response_error(res, 500, "Out of memory");
+        kl_http_response_error(res, 500, "Out of memory");
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
@@ -125,7 +125,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     /* Create pipe for signaling */
     if (pipe(ctx->pipe_fds) < 0) {
         free(ctx);
-        kl_response_error(res, 500, "pipe() failed");
+        kl_http_response_error(res, 500, "pipe() failed");
         return;
     }
 
@@ -135,7 +135,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
         close(ctx->pipe_fds[0]);
         close(ctx->pipe_fds[1]);
         free(ctx);
-        kl_response_error(res, 500, "watcher_add failed");
+        kl_http_response_error(res, 500, "watcher_add failed");
         return;
     }
 
@@ -150,7 +150,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
         pthread_attr_destroy(&attr);
         /* Thread creation failed — resume connection with error */
-        kl_response_json(&conn->res, 500,
+        kl_http_response_json(&conn->res, 500,
                          "{\"error\":\"thread create failed\"}", 32);
         kl_async_complete(srv, &ctx->op);
         return;
@@ -158,28 +158,28 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     pthread_attr_destroy(&attr);
 }
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
-    kl_server_route(&s, "GET", "/",          handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/delay/:ms", handle_delay, &s,   NULL);
+    kl_http_server_route(&s, "GET", "/",          handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/delay/:ms", handle_delay, &s,   NULL);
 
     printf("async example listening on :8080\n");
     printf("  curl localhost:8080/delay/200\n");
     printf("  curl localhost:8080/\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

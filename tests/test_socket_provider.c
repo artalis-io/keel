@@ -2,18 +2,19 @@
  * test_socket_provider.c — the internal socket seam + provider vtable
  * (PAL Phase 2). Proves: POSIX default + fast path, provider dispatch, per-op
  * NULL fallback, deterministic fault injection (short write, EWOULDBLOCK,
- * ECONNRESET), a decorator over real socketpair I/O, and that a transport
- * (KlUdp) actually threads ctx->sockets to the seam.
+ * ECONNRESET), a decorator over real socketpair I/O, and that  * (a KlDatagram) actually threads ctx->sockets to the seam.
  */
 #include "utest.h"
 #include "../src/socket.h"
+#include "../src/event_caps.h"   /* kl_event_caps — guard readiness-only provider-seam tests */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/datagram.h>
-#include <keel/udp.h>
-#include <keel/server.h>
-#include <keel/client.h>
+#include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
+#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
+#include <keel/http_server.h>
+#include <keel/http_client.h>
 
 #include <errno.h>
 #include <string.h>
@@ -98,7 +99,7 @@ static const KlSocketOps MOCK_OPS = {
 
 static KlSocketProvider mock_provider(MockSock *m) {
     /* Decorate the stream ops (counted via MockSock); delegate the datagram
-     * data-plane to the built-in default so a KlUdp can run on this provider (its
+     * data-plane to the built-in default so a KlDatagram can run on this provider (its
      * socket lifecycle still threads the mock). */
     KlSocketProvider p = { &MOCK_OPS, m, KL_SOCK_CAP_DATAGRAM, kl_sockdef_dgram() };
     return p;
@@ -213,26 +214,26 @@ UTEST(sockprov, decorator_short_write_real_io) {
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
-/* End-to-end threading: a KlUdp created on a ctx carrying the mock provider
- * routes its setup calls through the mock (proves ctx->sockets reaches the
- * transport, not just the seam in isolation). */
-UTEST(sockprov, udp_transport_threads_provider) {
+/* End-to-end threading: a KlDatagram created on a ctx carrying the mock provider routes its setup calls
+ * through the mock (proves ctx->sockets reaches the datagram construction, not just the seam in
+ * isolation). D2: migrated from the legacy UDP object. */
+UTEST(sockprov, datagram_threads_provider) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
     KlSocketProvider p = mock_provider(&m);
 
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    ctx.sockets = &p;                                /* inject before creating the transport */
+    ctx.sockets = &p;                                /* inject before creating the datagram */
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     ASSERT_TRUE(m.nb_calls >= 1);                    /* set_nonblocking went through the mock */
     ASSERT_TRUE(m.cloexec_calls >= 1);               /* set_cloexec too */
 
-    kl_udp_free(&udp);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 
@@ -267,7 +268,7 @@ static kl_ssize_t mdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
     errno = EAGAIN; return -1;           /* always "drained" */
 }
 static uint32_t mdg_configure(void *ctx, KlSocketHandle fd, int family,
-                              const struct KlUdpConfig *cfg) {
+                              const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)fd; (void)family; (void)cfg;
     g_mdg.configure_calls++;
     return g_mdg.configure_caps;
@@ -286,7 +287,7 @@ static const KlDatagramOps MOCK_DGRAM_OPS = {
 };
 
 /* A provider whose stream ops are the built-in defaults (NULL ops → kl_sockdef_*
- * for the real socket()/bind() a KlUdp needs) but whose datagram data-plane is the
+ * for the real socket()/bind() a KlDatagram needs) but whose datagram data-plane is the
  * mock above. */
 static const KlSocketOps DGRAM_STREAM_OPS = { .name = "dgram-mock" }; /* all NULL → POSIX */
 
@@ -307,16 +308,17 @@ UTEST(dgramprov, configure_caps_negotiated) {
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     ctx.sockets = &p;
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     ASSERT_EQ(1, g_mdg.configure_calls);
-    ASSERT_EQ(1, udp.dg.pktinfo);    /* KL_DGRAM_RX_PKTINFO accepted → stored (raw transport state) */
-    ASSERT_EQ(0, udp.dg.recv_gro);   /* not reported → off */
-    ASSERT_EQ(1, udp.dg.recv_tos);   /* KL_DGRAM_RX_TOS accepted → stored */
+    unsigned rc = kl_datagram_accepted_rx_caps(&dg);
+    ASSERT_TRUE((rc & KL_DGRAM_RX_PKTINFO) != 0);    /* accepted → stored */
+    ASSERT_EQ((unsigned)0, (rc & KL_DGRAM_RX_GRO));  /* not reported → off */
+    ASSERT_TRUE((rc & KL_DGRAM_RX_TOS) != 0);        /* accepted → stored */
 
-    kl_udp_free(&udp);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 
@@ -332,28 +334,41 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     ctx.sockets = &p;
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    /* This asserts the READINESS provider-seam send contract: a synchronous
+     * provider->send that returns EAGAIN is queued, not dropped. On a completion
+     * loop the datagram routes sends through the completion driver on the real
+     * fd (the provider->send op is never consulted), so the mock-seam assertion
+     * does not apply — skip there. */
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) {
+        kl_event_ctx_free(&ctx);
+        UTEST_SKIP("readiness-only mock provider-seam send contract");
+    }
+
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     KlSockAddr dest;
     kl_sockaddr_from_ipv4(&dest, lo, 9999);
 
     /* Success: provider accepts the datagram; nothing left queued. */
-    ASSERT_EQ(0, kl_udp_send_to(&udp, "hello", 5, &dest));
+    KlDatagramMessage m1 = { .data = "hello", .len = 5, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m1));
     ASSERT_EQ(1, g_mdg.send_calls);
     ASSERT_EQ((size_t)5, g_mdg.last_send_len);
-    ASSERT_EQ((size_t)0, kl_udp_send_queued(&udp));
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued_bytes(&dg));
 
-    /* EAGAIN: udp.c queues the datagram for a later writable flush, not a drop. */
+    /* EAGAIN: the send machine QUEUES the datagram for a later writable flush, not a drop. */
     g_mdg.force_send_err = EWOULDBLOCK;
-    ASSERT_EQ(0, kl_udp_send_to(&udp, "world!!", 7, &dest));
-    ASSERT_EQ(2, g_mdg.send_calls);
-    ASSERT_EQ((size_t)7, kl_udp_send_queued(&udp));   /* queued behind backpressure */
-    ASSERT_EQ((uint64_t)0, kl_udp_dropped(&udp));     /* not dropped */
+    KlDatagramMessage m2 = { .data = "world!!", .len = 7, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m2));   /* taken + queued */
+    ASSERT_TRUE(g_mdg.send_calls >= 2);                          /* the provider was attempted (exact count
+                                                                 * is machine-specific: it may retry the head) */
+    ASSERT_EQ((size_t)7, kl_datagram_send_queued_bytes(&dg));   /* queued behind backpressure */
+    ASSERT_EQ((uint64_t)0, kl_datagram_dropped(&dg));           /* not dropped */
 
-    kl_udp_free(&udp);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 
@@ -523,42 +538,42 @@ static const KlSocketOps deco_ops = {
  * guard rejects it (its ops are never invoked). */
 static const KlSocketOps nonnative_ops = { .name = "nonnative" };
 
-static void deco_ok_handler(KlRequest *req, KlResponse *res, void *u) {
+static void deco_ok_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *deco_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *deco_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 /* #1 — the native-fd guard: a non-native provider is rejected at init; a native
  * one (and NULL = built-in) is accepted. */
 UTEST(sockprov, select_native_fd_guard) {
     KlSocketProvider nonnative = { &nonnative_ops, NULL, 0, NULL };  /* no NATIVE_FD */
-    KlServer s;
-    KlConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
-    ASSERT_EQ(-1, kl_server_init(&s, &bad));
+    KlHttpServer s;
+    KlHttpServerConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
+    ASSERT_EQ(-1, kl_http_server_init(&s, &bad));
     ASSERT_EQ(KL_ERR_SOCKET, s.last_error);
 
     Deco d = {0,0,0};
     KlSocketProvider native = { &deco_ops, &d, KL_SOCK_CAP_NATIVE_FD, NULL };
-    KlServer s2;
-    KlConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
-    ASSERT_EQ(0, kl_server_init(&s2, &good));
-    kl_server_free(&s2);
+    KlHttpServer s2;
+    KlHttpServerConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
+    ASSERT_EQ(0, kl_http_server_init(&s2, &good));
+    kl_http_server_free(&s2);
 }
 
 /* #2 — end-to-end selection: a decorator provider on BOTH the server
- * (KlConfig.sockets) and the client (KlClientConfig.sockets), over a real
+ * (KlHttpServerConfig.sockets) and the client (KlHttpClientConfig.sockets), over a real
  * loopback request. The listen socket + accept flow through the server decorator;
  * the client socket + connect flow through the client decorator. (The listen
- * socket is created in kl_server_run, not _init, so this needs a running server.
+ * socket is created in kl_http_server_run, not _init, so this needs a running server.
  * Fixed port, like the smoke tests, to avoid a cross-thread bound_port read.) */
 UTEST(sockprov, provider_selection_end_to_end) {
     Deco sd = {0,0,0}, cd = {0,0,0};
     KlSocketProvider sprov = { &deco_ops, &sd, KL_SOCK_CAP_NATIVE_FD, NULL };
-    KlServer s;
-    KlConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
-    ASSERT_EQ(0, kl_server_init(&s, &scfg));
-    kl_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
+    KlHttpServer s;
+    KlHttpServerConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
+    ASSERT_EQ(0, kl_http_server_init(&s, &scfg));
+    kl_http_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
     pthread_t th;
     ASSERT_EQ(0, pthread_create(&th, NULL, deco_server_thread, &s));
 
@@ -568,18 +583,18 @@ UTEST(sockprov, provider_selection_end_to_end) {
     for (int i = 0; i < 50 && !ok; i++) {
         struct timespec ts = { 0, 30 * 1000000L };
         nanosleep(&ts, NULL);
-        KlClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
-        KlClientResponse resp;
+        KlHttpClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        if (kl_client_request(&a, &ccfg, "GET", "http://127.0.0.1:19099/",
+        if (kl_http_client_request(&a, &ccfg, "GET", "http://127.0.0.1:19099/",
                               NULL, 0, NULL, 0, &resp) == 0) {
             ok = (resp.status == 200);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
-    kl_server_stop(&s);
+    kl_http_server_stop(&s);
     pthread_join(th, NULL);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 
     ASSERT_TRUE(ok);
     ASSERT_GT(sd.socket_calls, 0);   /* server listen socket via its provider */

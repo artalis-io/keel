@@ -2,7 +2,7 @@
  * socket_efi_udp4.h — the datagram half of the unified EFI socket provider (6.4b).
  *
  * Adds an EFI_UDP4 datagram data-plane to the EFI provider so the STOCK freestanding
- * dns_resolver.c resolves over KlUdp-over-EFI_UDP4 on bare firmware. It is the
+ * dns_resolver.c resolves over KlDatagram-over-EFI_UDP4 on bare firmware. It is the
  * datagram sibling of socket_efi_tcp4.c: the SAME single KlSocketProvider serves both
  * SOCK_STREAM (EFI_TCP4 child) and SOCK_DGRAM (EFI_UDP4 child), because KlEventCtx.sockets
  * is singular and a UEFI HTTP client resolves (UDP) then connects (TCP) on one ctx.
@@ -17,13 +17,13 @@
  * `generation` stale-guard (in slot storage, read from STABLE memory) protects backend ops
  * that CAPTURED the generation at post — NOT arbitrary reused caller handles (same
  * caller-owns-close contract as EFI_TCP4). A datagram completion recovers the KEEL owner
- * (KlUdp) via the B.6 stable token (ev->life), and validates the EFI child via this
+ * (the datagram core) via the B.6 stable token (ev->life), and validates the EFI child via this
  * captured-generation guard — two independent guards.
  *
  * ── I/O model (FROZEN #1) ─────────────────────────────────────────────────────────
  * COMPLETION-native. event_efi.c's post_dgram_recv/_send drive the primitives below
  * (post one EFI_UDP4 Receive/Transmit token; drain Polls+CheckEvents them); the KlDatagramOps
- * vtable supplies only `configure` (mandatory at kl_udp_init) plus a sync `send` fallback
+ * vtable supplies only `configure` (mandatory at kl_datagram_socket_init) plus a sync `send` fallback
  * for the source-pinned/TOS path the completion fast-path skips — `recv` is NULL (a sync
  * Receive would be a second receive machine violating one-in-flight).
  *
@@ -76,6 +76,10 @@ int  kl_uefi_udp_provider_init(EFI_BOOT_SERVICES *bs, EFI_HANDLE image);
 /* Free the ServiceBinding handle buffer + clear the file-scope ctx (mirrors the TCP reset).
  * Does NOT close live datagram sockets. Safe on an un-inited provider. */
 void kl_uefi_udp_provider_reset(void);
+
+/* TEST SUPPORT ONLY: reclaim the entire UDP slot pool (incl. quarantined slots the production reset
+ * preserves) so host-mock quarantine tests don't exhaust the small fixed pool. Never used on firmware. */
+void kl_uefi_udp_test_reset_pool(void);
 
 /* The datagram data-plane vtable (KlSocketProvider.dgram). `configure` maps to
  * EFI_UDP4.Configure (unconnected); `send` is the sync source-pin/TOS fallback (independent
@@ -151,7 +155,7 @@ KlUefiUdpOpResult kl_uefi_udp_op_state(KlSocketHandle fd, unsigned long long gen
  *   poll_send  → resolve {fd,@generation} (same stale rule): 0 = pending; 1 = terminal
  *                (out_bytes + out_ok, or out_ok=0 on stale); -1 = not a datagram handle.
  *
- * CANCEL (close / kl_udp_free while a token is outstanding):
+ * CANCEL (close / datagram teardown while a token is outstanding):
  *   cancel_recv / cancel_send → resolve {fd,@generation}; Cancel(token) + bounded drain.
  *                1 = retired (recycle a signalled RxData) or already-stale; 0 = UNCONFIRMED →
  *                the caller quarantines. */

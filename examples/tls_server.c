@@ -17,9 +17,9 @@
 #include <keel_tls_mbedtls.h>
 #include <stdio.h>
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello over TLS\"}", 23);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello over TLS\"}", 23);
 }
 
 int main(int argc, char **argv) {
@@ -45,22 +45,22 @@ int main(int argc, char **argv) {
         .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
     };
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8443,
         .tls  = &tls_cfg,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) {
+    if (kl_http_server_init(&s, &cfg) < 0) {
         kl_tls_mbedtls_ctx_destroy(tls_ctx);
         return 1;
     }
 
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     printf("tls example listening on :8443 (HTTPS)\n");
     printf("  curl -k https://localhost:8443/hello\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

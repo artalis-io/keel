@@ -64,7 +64,7 @@ cc app.c \
 
 ```c
 KlTlsCtx *ctx = kl_tls_mbedtls_ctx_create("cert.pem", "key.pem", NULL, 0, &alloc);
-KlConfig config = {
+KlHttpServerConfig config = {
     .tls = &(KlTlsConfig){
         .ctx = ctx,
         .factory = kl_tls_mbedtls_create,

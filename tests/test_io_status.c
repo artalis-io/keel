@@ -14,8 +14,8 @@
 #include "utest.h"
 #include "../src/socket.h"
 
-#include <keel/client.h>
-#include <keel/server.h>
+#include <keel/http_client.h>
+#include <keel/http_server.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
@@ -163,16 +163,16 @@ static KlResolver g_iod_resolver = {
     .resolve = iod_resolve, .cancel = iod_res_cancel, .destroy = iod_res_destroy,
 };
 
-static void iod_handler(KlRequest *req, KlResponse *res, void *u) {
+static void iod_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *iod_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *iod_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 typedef struct { int done, status; } IodCtx;
-static void iod_done(KlClient *cl, void *ud) {
+static void iod_done(KlHttpClient *cl, void *ud) {
     IodCtx *x = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     x->status = r ? r->status : -1;
     x->done = 1;
 }
@@ -180,10 +180,10 @@ static void iod_done(KlClient *cl, void *ud) {
 UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     memset(&g_cdeco, 0, sizeof(g_cdeco));
 
-    KlServer srv;
-    KlConfig scfg = { .port = 0, .max_connections = 8, .bind_addr = "127.0.0.1" };
-    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
-    kl_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig scfg = { .port = 0, .max_connections = 8, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
+    kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, iod_server_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -194,13 +194,13 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
 
-    KlClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlHttpClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &g_iod_resolver;
     cfg.timeout_ms = 2000;
     cfg.sockets = &cprov;
 
     IodCtx x = { 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, iod_done, &x);
     ASSERT_TRUE(c != NULL);
     for (int i = 0; i < 300 && !x.done; i++) {
@@ -215,11 +215,11 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
      * on recv while draining) — it never read errno itself. */
     ASSERT_GT(g_cdeco.io_status_calls, 0);
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST_MAIN();

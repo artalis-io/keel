@@ -1,9 +1,9 @@
 /*
  * body_readers.c — Buffer and multipart body readers
  *
- * Concepts: kl_body_reader_buffer, kl_body_reader_multipart,
- * KlBufReader, kl_multipart_next streaming iterator,
- * KlMultipartConfig, per-route body reader factories.
+ * Concepts: kl_http_body_reader_buffer, kl_http_body_reader_multipart,
+ * KlHttpBufReader, kl_http_multipart_next streaming iterator,
+ * KlHttpMultipartConfig, per-route body reader factories.
  *
  * Build:  make examples
  * Run:    ./examples/body_readers
@@ -13,13 +13,13 @@
  */
 
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <stdio.h>
 #include <string.h>
 
 #define MAX_BODY_SIZE  (1 << 20)   /* 1 MB */
 
-static KlMultipartConfig mp_config = {
+static KlHttpMultipartConfig mp_config = {
     .max_part_size  = 4 << 20,     /* 4 MB per part */
     .max_total_size = 16 << 20,    /* 16 MB total */
     .max_parts      = 8,
@@ -28,7 +28,7 @@ static KlMultipartConfig mp_config = {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 /* HTML form with text input + file upload */
-static void handle_index(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_index(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *html =
         "<h2>Body Readers</h2>"
@@ -43,38 +43,38 @@ static void handle_index(KlRequest *req, KlResponse *res, void *ctx) {
         "  <input name='file' type='file'><br>"
         "  <button>Upload</button>"
         "</form>";
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/html");
-    kl_response_body_borrow(res, html, strlen(html));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/html");
+    kl_http_response_body_borrow(res, html, strlen(html));
 }
 
 /* POST /echo — buffer reader echoes body back */
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) {
-        kl_response_error(res, 400, "Request body required");
+        kl_http_response_error(res, 400, "Request body required");
         return;
     }
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_borrow(res, br->data, br->len);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
 /* POST /upload — multipart streaming iterator parses form-data.
  *
- * Drives kl_multipart_next() to walk the events. The full body has
+ * Drives kl_http_multipart_next() to walk the events. The full body has
  * been received by the time the handler runs, so NEED_DATA never
  * fires here (it would in a handler that yields mid-stream). */
-static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBodyReader *br = req->body_reader;
+    KlHttpBodyReader *br = req->body_reader;
     if (!br) {
-        kl_response_error(res, 400, "No reader");
+        kl_http_response_error(res, 400, "No reader");
         return;
     }
 
-    /* Static so the slice handed to kl_response_body_borrow outlives the
+    /* Static so the slice handed to kl_http_response_body_borrow outlives the
      * handler return. Capped at 8 parts for the demo. */
     static char  body[1024];
     static char  names[8][128];
@@ -83,12 +83,12 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     static int   has_filename[8];
     int parts = 0;
 
-    KlMultipartPartMeta meta;
+    KlHttpMultipartPartMeta meta;
     const char *d = NULL;
     size_t      dn = 0;
     for (;;) {
-        KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
-        if (e == KL_MP_EVT_PART_BEGIN) {
+        KlHttpMultipartEvent e = kl_http_multipart_next(br, &meta, &d, &dn);
+        if (e == KL_HTTP_MP_EVT_PART_BEGIN) {
             if (parts < 8) {
                 size_t n = meta.name_len < sizeof(names[0]) - 1
                                ? meta.name_len : sizeof(names[0]) - 1;
@@ -106,17 +106,17 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
             parts++;
             continue;
         }
-        if (e == KL_MP_EVT_PART_DATA) {
+        if (e == KL_HTTP_MP_EVT_PART_DATA) {
             if (parts > 0 && parts <= 8) sizes[parts - 1] += dn;
             continue;
         }
-        if (e == KL_MP_EVT_PART_END) continue;
-        if (e == KL_MP_EVT_DONE)     break;
-        kl_response_error(res, 400, "Parse error");
+        if (e == KL_HTTP_MP_EVT_PART_END) continue;
+        if (e == KL_HTTP_MP_EVT_DONE)     break;
+        kl_http_response_error(res, 400, "Parse error");
         return;
     }
     if (parts == 0) {
-        kl_response_error(res, 400, "No parts received");
+        kl_http_response_error(res, 400, "No parts received");
         return;
     }
 
@@ -139,32 +139,32 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                         has_filename[i] ? ")" : "");
     }
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, body, (size_t)off);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, body, (size_t)off);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
-    kl_server_route(&s, "GET",  "/",       handle_index,  NULL, NULL);
-    kl_server_route(&s, "POST", "/echo",   handle_echo,
-                    (void *)(size_t)MAX_BODY_SIZE, kl_body_reader_buffer);
-    kl_server_route(&s, "POST", "/upload", handle_upload,
-                    &mp_config, kl_body_reader_multipart);
+    kl_http_server_route(&s, "GET",  "/",       handle_index,  NULL, NULL);
+    kl_http_server_route(&s, "POST", "/echo",   handle_echo,
+                    (void *)(size_t)MAX_BODY_SIZE, kl_http_body_reader_buffer);
+    kl_http_server_route(&s, "POST", "/upload", handle_upload,
+                    &mp_config, kl_http_body_reader_multipart);
 
     printf("body_readers example listening on :8080\n");
     printf("  curl -X POST -d 'hello world' localhost:8080/echo\n");
     printf("  curl -F 'name=Alice' -F 'file=@photo.jpg' localhost:8080/upload\n");
     printf("  open http://localhost:8080\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

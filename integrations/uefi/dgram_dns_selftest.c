@@ -2,7 +2,7 @@
  * dgram_dns_selftest.c — 6.4c acceptance self-test (UEFI EFI application).
  *
  * The on-real-firmware validation for the EFI_UDP4 datagram provider (6.4b): the STOCK
- * src/dns_resolver.c resolves a hostname over KlUdp-over-EFI_UDP4 — the unified EFI socket
+ * src/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
  * wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token) — with NO bespoke
  * dns_uefi.c on the path. (The retired U-5 build used the one-shot dns_uefi.c behind
@@ -42,7 +42,7 @@
 #include <keel/timer.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/error.h>
 
 #include <stdint.h>
@@ -85,11 +85,11 @@ static void print_int(int v) {
 /* ── async GET completion ─────────────────────────────────────────────────────── */
 typedef struct { int done; int status; KlError err; } DoneCtx;
 
-static void on_done(KlClient *cl, void *ud) {
+static void on_done(KlHttpClient *cl, void *ud) {
     DoneCtx *d = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     d->status = r ? r->status : -1;
-    d->err = kl_client_last_error(cl);
+    d->err = kl_http_client_last_error(cl);
     d->done = 1;
 }
 
@@ -101,7 +101,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== 6.4c stock dns_resolver over KlUdp-over-EFI_UDP4 → GET ===");
+    print_line("=== 6.4c stock dns_resolver over KlDatagram-over-EFI_UDP4 → GET ===");
     print("6.4c: target = "); print(TARGET_URL);
     print(" nameserver = "); print_line(KL_U9_NAMESERVER);
 
@@ -119,7 +119,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto done;
     }
     /* The unified EFI provider serves BOTH SOCK_STREAM (EFI_TCP4) and SOCK_DGRAM (EFI_UDP4):
-     * the resolver's KlUdp rides its .dgram data-plane; the GET rides its stream ops. */
+     * the resolver's KlDatagram rides its .dgram data-plane; the GET rides its stream ops. */
     ev.sockets = kl_uefi_socket_provider(bs, image_handle);
     if (!ev.sockets) { print_line("6.4c: no EFI socket provider (no network stack?)"); kl_event_ctx_free(&ev); goto done; }
     print_line("6.4c: event ctx up (efi completion) + unified socket provider");
@@ -132,14 +132,14 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     KlResolver *res = kl_dns_resolver_create(&ev, &dcfg);
     if (!res) { print_line("6.4c: kl_dns_resolver_create failed"); kl_event_ctx_free(&ev); goto done; }
-    print_line("6.4c: stock resolver created (KlUdp over EFI_UDP4, completion)");
+    print_line("6.4c: stock resolver created (KlDatagram over EFI_UDP4, completion)");
 
     /* Inject the stock resolver: kl_client resolves KL_U9_HOSTNAME over EFI_UDP4 (A+AAAA,
      * RFC 8305) then connects to the resolved address over EFI_TCP4 and GETs. */
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.timeout_ms = 30000;   /* generous: DNS RTT + TCG + SLIRP */
-    cfg.resolver = res;       /* borrowed — destroyed below after kl_client_free */
+    cfg.resolver = res;       /* borrowed — destroyed below after kl_http_client_free */
 
     print("6.4c: resolving "); print(KL_U9_HOSTNAME); print(" via "); print(KL_U9_NAMESERVER);
     print_line(" over EFI_UDP4, then GET over EFI_TCP4 ...");
@@ -153,7 +153,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
      * dropped, both legs would only settle KL_ERR_DNS after the ≥6000 ms leg timeout. The
      * elapsed marker below therefore distinguishes response-driven settlement from a timeout. */
     uint64_t t0 = kl_monotonic_ms();
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
                                   NULL, 0, NULL, 0, on_done, &d);
     if (c) {
         for (int tick = 0; tick < 400000 && !d.done; tick++) {
@@ -162,7 +162,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         }
         if (!d.done) { d.status = -1; d.err = KL_ERR_TIMEOUT; }
     } else {
-        print_line("6.4c: kl_client_start failed");
+        print_line("6.4c: kl_http_client_start failed");
         d.done = 1; d.status = -1; d.err = KL_ERR_DNS;
     }
     uint64_t elapsed = kl_monotonic_ms() - t0;
@@ -177,9 +177,9 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     if (d.err == KL_ERR_DNS)     print_line("6.4c: resolve-error = KL_ERR_DNS");
     if (d.err == KL_ERR_TIMEOUT) print_line("6.4c: resolve-error = KL_ERR_TIMEOUT");
 
-    /* Teardown BEFORE the live-count assertion: the resolver's KlUdp (EFI_UDP4 child) must
+    /* Teardown BEFORE the live-count assertion: the resolver's KlDatagram (EFI_UDP4 child) must
      * be reaped and no slot leaked/quarantined on the happy path (frozen §9.3). */
-    if (c) kl_client_free(c);
+    if (c) kl_http_client_free(c);
     res->destroy(res);
     kl_event_ctx_free(&ev);
 

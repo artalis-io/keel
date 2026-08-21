@@ -8,7 +8,7 @@
  * a Keel server/client carries so a non-POSIX stack (Winsock, lwIP) — or a
  * fault-injection mock — can replace the socket syscalls. This is the authoring
  * surface: to bring your own stack, implement KlSocketOps and hand Keel a
- * KlSocketProvider (via KlConfig.sockets / KlClientConfig.sockets / KlEventCtx.
+ * KlSocketProvider (via KlHttpServerConfig.sockets / KlHttpClientConfig.sockets / KlEventCtx.
  * sockets). The built-in providers (kl_socket_provider_posix/winsock) are the
  * default.
  *
@@ -62,7 +62,9 @@ typedef enum {
     KL_IO_PENDING,       /* EINPROGRESS — async connect in progress */
     KL_IO_CLOSED,        /* peer closed / EPIPE */
     KL_IO_RESET,         /* ECONNRESET — peer reset */
-    KL_IO_FATAL          /* any other error */
+    KL_IO_FATAL,         /* any other error */
+    KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP — op unavailable on this fd (e.g. UDP GSO); caller may
+                          * fall back. Appended (datagram M5.1) — values above are unchanged. */
 } KlIoStatus;
 
 /* Upper bound on scatter-gather segments a provider must handle in one writev.
@@ -150,7 +152,7 @@ typedef struct KlSocketProvider {
 /* Capability flags. A provider advertises what it supports; Keel falls back for
  * anything it does not (e.g. serialize when WRITEV is absent). A native-fd
  * provider's handle is a real OS descriptor the readiness event loop can poll —
- * required for the server (see KlConfig.sockets). */
+ * required for the server (see KlHttpServerConfig.sockets). */
 #define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
 #define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* vectored writev usable on this fd */
 #define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* zero-copy sendfile usable on this fd */

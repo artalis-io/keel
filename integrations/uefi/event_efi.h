@@ -2,8 +2,8 @@
  * event_efi.h — a completion-axis KlEventProvider over EFI_TCP4 tokens (U-3 client, S-3..S-7 server).
  *
  * The event/completion half of the real EFI provider. Together with the U-2 socket
- * provider (socket_efi_tcp4.c) it lets a STOCK freestanding libkeel async KlClient AND a
- * freestanding KlServer run HTTP(S) on bare UEFI firmware: no epoll/kqueue/io_uring, no
+ * provider (socket_efi_tcp4.c) it lets a STOCK freestanding libkeel async KlHttpClient AND a
+ * freestanding KlHttpServer run HTTP(S) on bare UEFI firmware: no epoll/kqueue/io_uring, no
  * OS sockets, no errno — just EFI_TCP4 completion tokens pumped by the firmware event
  * services.
  *
@@ -18,7 +18,7 @@
  *     send/recv ride the drain WATCHER RELAY (KL_COMP_WATCHER) over the U-2 provider's
  *     synchronous ops — the emulated-readiness model of tests/freestanding_harness.c.
  *   - SERVER: completion-NATIVE accept/recv/send. The generic completion server
- *     (completion_server.c) posts prime_accepts/post_recv/post_send directly, surfaced by
+ *     (completion_http_server.c) posts prime_accepts/post_recv/post_send directly, surfaced by
  *     drain as KL_COMP_ACCEPT / KL_COMP_READ / KL_COMP_WRITE. Accept arming is
  *     capacity-gated (kl_uefi_socket_accept_arm, backpressure). No heap in the send path
  *     (the response iovec is snapshotted into a fixed inline op buffer).

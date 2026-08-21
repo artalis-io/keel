@@ -9,10 +9,10 @@
  *     DEFAULT-provider fallbacks. The EFI_TCP4 provider always supplies these ops, so
  *     the kl_sockdef_* else-branch of the seam inline is never taken — but the symbol
  *     must still resolve under -nostdlib (the compiler emits the reference). Fail-closed.
- *   - the file-response platform hooks (response.c's kl_response_send/reset/free). The
- *     EFI server serves only in-memory (borrowed) bodies — no kl_response_file — so
+ *   - the file-response platform hooks (http_response.c's kl_http_response_send/reset/free). The
+ *     EFI server serves only in-memory (borrowed) bodies — no kl_http_response_file — so
  *     these never run; fail-closed.
- *   - _fltused: the PE/COFF floating-point marker the backend emits for connection.c's
+ *   - _fltused: the PE/COFF floating-point marker the backend emits for http_connection.c's
  *     access-log double. The CRT/EDK2 supplies it on a real target; here a plain int.
  *
  * A later phase (S-6 file responses / S-7 teardown) can promote any of these to real
@@ -45,11 +45,11 @@ int  kl_plat_file_pread(int fd, void *buf, size_t count, long long offset) {
 void kl_plat_file_close(int fd) { (void)fd; }
 
 /* ── stop-wakeup self-pipe hook (S-7) — never reached on a freestanding EFI server ──
- * kl_server_free's self-pipe teardown references kl_plat_wakeup_close, but a freestanding
+ * kl_http_server_free's self-pipe teardown references kl_plat_wakeup_close, but a freestanding
  * server has no self-pipe (stop_wake_rd stays KL_INVALID_SOCKET — the wakeup init is
  * #ifndef KEEL_FREESTANDING), so the block is skipped and this stub is never called. It
  * only has to resolve the link. */
 void kl_plat_wakeup_close(KlPlatWakeup *w) { (void)w; }
 
-/* ── PE/COFF floating-point marker (connection.c access-log double) ── */
+/* ── PE/COFF floating-point marker (http_connection.c access-log double) ── */
 int _fltused = 0;

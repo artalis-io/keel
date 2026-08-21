@@ -3,9 +3,9 @@
  * backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for LC-2 (docs/phase10_lwip_raw_client_design.md §8 LC-2): the SAME single-loop model
- * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlServer and a raw async
- * KlClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
- * Happy-Eyeballs layer (src/client.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
+ * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
+ * KlHttpClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
+ * Happy-Eyeballs layer (src/http_client_async.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
  * natively. The winning pcb is adopted; every losing/connecting pcb is aborted (kl_comp_cancel ->
  * kl_lwr_tcp_abort) and its glue slot freed — the new memory-safety surface this test hardens.
@@ -112,22 +112,22 @@ static HeResolver g_res_blackhole = { { he_resolve, he_cancel, he_destroy }, { N
 /* ── server handler: a known, non-trivial body (byte-exactness proof) ────────── */
 #define WANT_BODY "{\"lc2\":true,\"raw\":\"happy-eyeballs\",\"n\":67890}"
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
 }
 
 /* ── per-case client state (all fields touched only on the loop thread) ───────── */
 typedef struct {
-    KlServer   *srv;
+    KlHttpServer   *srv;
     const char *url;
     KlResolver *resolver;
     int         connect_delay_ms;   /* Connection-Attempt-Delay to configure */
     int         timeout_ms;         /* overall deadline */
     int         expect_ok;          /* 1 = expect 200+body; 0 = expect a clean terminal error */
-    KlClient   *client;
+    KlHttpClient   *client;
     atomic_int  done;
     atomic_int  pass;
     uint64_t    start_ms;           /* wall clock at client start (deadline-elapsed proof) */
@@ -140,20 +140,20 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
-static void on_done(KlClient *client, void *ud) {
+static void on_done(KlHttpClient *client, void *ud) {
     HeCase *cc = ud;
     cc->finish_ms = now_ms();
-    int err = kl_client_error(client);
+    int err = kl_http_client_error(client);
     if (cc->expect_ok) {
         int ok = 0;
         if (err == 0) {
-            const KlClientResponse *r = kl_client_response(client);
+            const KlHttpClientResponse *r = kl_http_client_response(client);
             ok = (r && r->status == 200 && r->body_len == sizeof(WANT_BODY) - 1 &&
                   r->body && memcmp(r->body, WANT_BODY, sizeof(WANT_BODY) - 1) == 0);
             if (!ok && r) printf("   [diag] status=%d body_len=%zu\n", r->status, r->body_len);
         } else {
             printf("   [diag] unexpected client error=%d last_error=%d\n",
-                   err, (int)kl_client_last_error(client));
+                   err, (int)kl_http_client_last_error(client));
         }
         atomic_store(&cc->pass, ok);
     } else {
@@ -162,43 +162,43 @@ static void on_done(KlClient *client, void *ud) {
         atomic_store(&cc->pass, err != 0);
     }
     atomic_store(&cc->done, 1);
-    kl_server_stop(cc->srv);
+    kl_http_server_stop(cc->srv);
 }
 
-/* Fired on the loop thread: start the async KlClient on the server's shared ctx (== the one lwIP
+/* Fired on the loop thread: start the async KlHttpClient on the server's shared ctx (== the one lwIP
  * mainloop). Its connect racing, its data-plane watcher relay, and its HE timers are all serviced
- * by kl_server_run's completion tick — single-thread NO_SYS=1 discipline. */
+ * by kl_http_server_run's completion tick — single-thread NO_SYS=1 discipline. */
 static void start_client(void *ud) {
     HeCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
     alloc = kl_allocator_default();
-    KlClientConfig ccfg = {
+    KlHttpClientConfig ccfg = {
         .timeout_ms = cc->timeout_ms,
         .resolver = cc->resolver,
         .connect_attempt_delay_ms = cc->connect_delay_ms,
     };
     cc->start_ms = now_ms();
-    cc->client = kl_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
+    cc->client = kl_http_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
                                  NULL, 0, NULL, 0, on_done, cc);
     if (!cc->client) {
         atomic_store(&cc->pass, cc->expect_ok ? 0 : 1);
         atomic_store(&cc->done, 1);
-        kl_server_stop(cc->srv);
+        kl_http_server_stop(cc->srv);
     }
 }
 
-static void *server_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
-/* Run one case: raw server on GOOD_PORT (kl_server_run on a bg thread) + a raw KlClient started on
+/* Run one case: raw server on GOOD_PORT (kl_http_server_run on a bg thread) + a raw KlHttpClient started on
  * the server's shared ctx via a loop-thread timer; a bounded watchdog stops a hang. `max_wait_ms`
  * bounds the watchdog (deadline cases need to outlast the client's own timeout). */
 static int run_case(const char *label, HeResolver *resolver, int connect_delay_ms, int timeout_ms,
                     int expect_ok, int max_wait_ms) {
-    KlConfig cfg = { .port = GOOD_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = GOOD_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };
-    KlServer srv;
-    if (kl_server_init(&srv, &cfg) != 0) { printf("LC-2 FAIL: server_init (%s)\n", label); return 1; }
-    kl_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, &cfg) != 0) { printf("LC-2 FAIL: server_init (%s)\n", label); return 1; }
+    kl_http_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
 
     HeCase cc;
     memset(&cc, 0, sizeof(cc));
@@ -215,14 +215,14 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
 
     pthread_t srv_th;
     if (pthread_create(&srv_th, NULL, server_thread, &srv) != 0) {
-        printf("LC-2 FAIL: pthread_create (%s)\n", label); kl_server_free(&srv); return 1;
+        printf("LC-2 FAIL: pthread_create (%s)\n", label); kl_http_server_free(&srv); return 1;
     }
     int ticks = max_wait_ms / 10;
     for (int i = 0; i < ticks && !atomic_load(&cc.done); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(&cc.done)) { kl_server_stop(&srv); }   /* hang guard */
+    if (!atomic_load(&cc.done)) { kl_http_server_stop(&srv); }   /* hang guard */
     pthread_join(srv_th, NULL);
 
     int rc = 0;
@@ -241,8 +241,8 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
         }
     }
 
-    if (cc.client) kl_client_free(cc.client);
-    kl_server_free(&srv);
+    if (cc.client) kl_http_client_free(cc.client);
+    kl_http_server_free(&srv);
     return rc;
 }
 

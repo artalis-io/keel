@@ -12,7 +12,7 @@
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
-#include <keel/connection.h>           /* KlConn — server post_recv/post_send targets (S-4) */
+#include <keel/http_connection.h>           /* KlHttpConn — server post_recv/post_send targets (S-4) */
 #include "../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 
@@ -24,10 +24,9 @@
  * is an optional transport, and the two do not link together unless asked. */
 #ifdef KEEL_UEFI_DATAGRAM
 #include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
-#include <keel/udp.h>                  /* KlUdpTransport layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
 #include "../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
 #endif
-#include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
+#include <keel/http_server.h>               /* KlHttpServer.pool — accept backpressure (S-3) */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -55,7 +54,7 @@
  * (QUARANTINED/INVALID) — see el_drain.
  *
  * SEND SERIALIZATION (review-High): EFI_UDP4 allows only ONE outstanding Transmit token per socket, but
- * KlUdp's completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
+ * The datagram completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
  * synchronously). So the SEND ops form a per-socket PENDING QUEUE at THIS layer: el_post_dgram_send always
  * ACCEPTS (copies the payload+dest — the caller may free them right after), and only ONE send per fd is
  * posted to the substrate at a time; when it retires, the drain pumps the next queued send for that fd.
@@ -115,7 +114,7 @@ typedef struct {
 typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 
 /* A posted server-side recv or send on an accepted child (S-4). The client rides the
- * watcher relay; the SERVER completion driver (completion_server.c) posts recv/send as
+ * watcher relay; the SERVER completion driver (completion_http_server.c) posts recv/send as
  * completion-native ops. drain services each via the U-2 SYNC socket provider and
  * surfaces KL_COMP_READ / KL_COMP_WRITE. The captured generation is the stale guard: an
  * op for a child that closed (generation bumped) or whose slot was reused (magic
@@ -148,8 +147,8 @@ typedef struct {
     unsigned long long dgram_seq;                    /* monotonic send-acceptance counter (FIFO) */
 #endif
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
-     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
-    struct KlServer   *server;
+     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlHttpConn-pool backpressure. */
+    struct KlHttpServer   *server;
     KlSocketHandle     listen_fd;
     int                accept_primed;
 } EfiLoop;
@@ -216,9 +215,9 @@ static int el_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 }
 /* el_close (S-7 review): retire ALL outstanding records so nothing dangles after the
  * event ctx is freed (kl_event_ctx_free calls this before the conn pool is freed in
- * kl_server_free). No heap is owned now (server send iovecs are inline snapshots — no
+ * kl_http_server_free). No heap is owned now (server send iovecs are inline snapshots — no
  * kl_malloc), so this clears state only: connect ops, watches, server I/O ops, and the
- * latched server/listener. Prevents a stale KlConn / watcher pointer from surviving into
+ * latched server/listener. Prevents a stale KlHttpConn / watcher pointer from surviving into
  * a later run and closes the (former) leak window a pending send buffer could open. */
 static void el_close(KlEventLoop *loop) {
     (void)loop;
@@ -307,7 +306,7 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
  * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
  * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
  * KlListener is installed and the server re-calls this each tick to top the gate up. */
-static int el_prime_accepts(struct KlServer *s) {
+static int el_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     g_efi.server = s;
     g_efi.listen_fd = s->listen_fd;
@@ -327,7 +326,7 @@ static int el_prime_accepts(struct KlServer *s) {
 
 /* post_accept: re-arm after the generic server consumed a slot. Identical to prime — the
  * arming is capacity-gated, so this just re-evaluates free capacity and tops up. */
-static int el_post_accept(struct KlServer *s) {
+static int el_post_accept(struct KlHttpServer *s) {
     return el_prime_accepts(s);
 }
 
@@ -582,7 +581,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
 
     /* Accept relay (S-3): hand back each child the S-2 Accept-token pool has ready as
      * KL_COMP_ACCEPT (peer already neutralized by efi_sock_accept via GetModeData).
-     * Backpressure — stop when the server's KlConn pool is full (don't accept into a
+     * Backpressure — stop when the server's KlHttpConn pool is full (don't accept into a
      * drop; the completion analogue of reducing readiness interest, Goal 8). The
      * socket-axis efi_sock_accept re-arms each consumed Accept token internally. */
     if (g_efi.accept_primed && g_efi.server && kl_handle_valid(g_efi.listen_fd)) {
@@ -835,7 +834,7 @@ static const KlCompletionOps EFI_COMP_OPS = {
     /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
      * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as
      * KL_COMP_WATCHER (post_connect + the drain watch loop); the datagram ops above serve
-     * KlUdp/dns_resolver over the completion axis without changing the stream client path. */
+     * the datagram resolver over the completion axis without changing the stream client path. */
 };
 
 static const KlEventOps EFI_EVENT_OPS = {

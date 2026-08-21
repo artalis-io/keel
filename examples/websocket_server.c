@@ -1,7 +1,7 @@
 /*
  * websocket_server.c — WebSocket echo server
  *
- * Concepts: kl_server_ws, KlWsServerConfig, on_open/on_message/on_close callbacks.
+ * Concepts: kl_http_server_ws_upgrade, KlWsServerConfig, on_open/on_message/on_close callbacks.
  *
  * Build:  make examples
  * Run:    ./examples/websocket_server [port]
@@ -47,12 +47,12 @@ int main(int argc, char **argv) {
         port = (int)val;
     }
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = port,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     KlWsServerConfig ws_cfg;
     kl_ws_server_config_init(&ws_cfg);
@@ -60,10 +60,10 @@ int main(int argc, char **argv) {
     ws_cfg.callbacks.on_message = on_message;
     ws_cfg.callbacks.on_close = on_close;
 
-    kl_server_ws(&s, "/ws", &ws_cfg);
+    kl_http_server_ws_upgrade(&s, "/ws", &ws_cfg);
 
     printf("WebSocket echo server on ws://localhost:%d/ws\n", port);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

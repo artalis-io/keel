@@ -3,7 +3,7 @@
  *
  * The PUBLIC KlDatagram facade (keel/datagram.h) over EFI_UDP4 on bare OVMF firmware —
  * the end-to-end gate the host-mock cannot provide. Unlike dgram_dns_selftest.c (which
- * drives KlUdp via the stock dns_resolver), this exercises the public kl_datagram_*
+ * drives a KlDatagram via the stock dns_resolver), this exercises the public kl_datagram_*
  * surface directly: init → recv_start → send → (round-trip) → graceful close → DETACHED.
  *
  * It is the runtime proof for 7B-9 (the confirmed-detachment close): at close the armed
@@ -45,7 +45,6 @@
 #include <keel/timer.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>   /* opt-in KlDatagram layout — stack-allocate the handle */
-#include <keel/udp.h>               /* KlUdpConfig for the provider configure() */
 #include <keel/sockaddr.h>
 #include <keel/error.h>
 
@@ -155,7 +154,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) { print_line("7b9: kl_uefi_udp_socket failed"); kl_event_ctx_free(&ev); goto done; }
     {
-        KlUdpConfig ucfg;
+        KlDatagramSocketConfig ucfg;
         { unsigned char *p = (unsigned char *)&ucfg; for (size_t i = 0; i < sizeof(ucfg); i++) p[i] = 0; }
         (void)kl_uefi_udp_dgram_ops()->configure(NULL, fd, AF_INET, &ucfg);   /* DHCP default */
     }

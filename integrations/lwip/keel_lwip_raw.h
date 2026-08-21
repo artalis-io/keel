@@ -15,7 +15,7 @@
  *   KlEventCtx ctx;
  *   kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw());
  *
- * or, for a KlServer, KlConfig.event_provider = kl_event_provider_lwip_raw(). Its
+ * or, for a KlHttpServer, KlHttpServerConfig.event_provider = kl_event_provider_lwip_raw(). Its
  * native_provider() returns kl_socket_provider_lwip_raw(), so the ctx/server auto-wires
  * the matching overlapped socket provider on the completion loop.
  *
@@ -25,8 +25,8 @@
  * ── Supported / Unsupported (this is the API-facing capability statement) ──────────────
  *
  * SUPPORTED:
- *   - IPv4 TCP *server* (KlServer): accept/recv/send over the loopback netif.
- *   - IPv4 TCP *client* (KlClient): outbound connect via the COMPLETION connect primitive
+ *   - IPv4 TCP *server* (KlHttpServer): accept/recv/send over the loopback netif.
+ *   - IPv4 TCP *client* (KlHttpClient): outbound connect via the COMPLETION connect primitive
  *     (kl_comp_post_connect → tcp_connect), plaintext HTTP/1.1 (LC-1), Happy-Eyeballs address
  *     racing (LC-2), and HTTPS (LC-4). The client's send/recv ride an emulated readiness
  *     watcher over the raw loop.
@@ -35,14 +35,14 @@
  *     kl_socket_provider_lwip_raw() (kl_sock_send/recv → tcp_write/read), and the server over
  *     the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no
  *     TLS file/stream body). BYO mbedTLS.
- *   - UDP (KlUdp / udp_server): the provider exposes datagram ops (.dgram != NULL), so
- *     kl_udp_init() over the raw completion loop succeeds (LC-3a).
- *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlUdp-on-raw (LC-3) —
+ *   - UDP (KlDatagram / udp_server): the provider exposes datagram ops (.dgram != NULL), so
+ *     kl_datagram_socket_init() over the raw completion loop succeeds (LC-3a).
+ *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlDatagram-on-raw (LC-3) —
  *     one DNS path, no lwIP dns_gethostbyname.
  *   - Buffered, streaming, and file responses of UNBOUNDED size (transmit memory is bounded
  *     by a fixed per-conn window — the response/file size is not).
  *   - Request bodies with bounded per-conn receive flow-control (ERR_MEM backpressure).
- *   - The server-path modules that ride KlServer: router, middleware, CORS, SSE, body
+ *   - The server-path modules that ride KlHttpServer: router, middleware, CORS, SSE, body
  *     readers, compression.
  *   - Multiple SEQUENTIAL event contexts (create → destroy → create).
  *

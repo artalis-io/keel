@@ -1,7 +1,7 @@
 #include <keel/compress.h>
 #include <string.h>
 
-int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
+int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
                                const char *data, size_t len) {
     if (!res || !cfg || !cfg->factory) return -1;
     if (len > 0 && !data) return -1;
@@ -10,7 +10,7 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
 
     /* Empty body — just set empty buffer body */
     if (len == 0) {
-        res->body_mode = KL_BODY_BUFFER;
+        res->body_mode = KL_HTTP_BODY_BUFFER;
         res->body = "";
         res->body_len = 0;
         return 0;
@@ -33,14 +33,14 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
     if (out_len >= len) {
         kl_free(alloc, out, out_len);
         comp->destroy(comp);
-        kl_response_body_borrow(res, data, len);
+        kl_http_response_body_borrow(res, data, len);
         return 0;
     }
 
     /* Set Content-Encoding and Vary headers */
     const char *enc = comp->encoding(comp);
-    if (kl_response_header(res, "Content-Encoding", enc) < 0 ||
-        kl_response_header(res, "Vary", "Accept-Encoding") < 0) {
+    if (kl_http_response_header(res, "Content-Encoding", enc) < 0 ||
+        kl_http_response_header(res, "Vary", "Accept-Encoding") < 0) {
         kl_free(alloc, out, out_len);
         comp->destroy(comp);
         return -1;
@@ -52,7 +52,7 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
     }
     res->body_owned = out;
     res->body_owned_size = out_len;
-    res->body_mode = KL_BODY_BUFFER;
+    res->body_mode = KL_HTTP_BODY_BUFFER;
     res->body = res->body_owned;
     res->body_len = out_len;
 
@@ -62,7 +62,7 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
 
 /* Emit callback for streaming: forwards compressed data to chunked stream */
 static int stream_emit(void *ctx, const char *data, size_t len) {
-    KlCompressStream *cs = ctx;
+    KlHttpCompressStream *cs = ctx;
     if (cs->error) return -1;
     if (len == 0) return 0;
     if (cs->write_fn(cs->write_ctx, data, len) < 0) {
@@ -72,8 +72,8 @@ static int stream_emit(void *ctx, const char *data, size_t len) {
     return 0;
 }
 
-int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
-                              int status, KlCompressStream *cs) {
+int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
+                              int status, KlHttpCompressStream *cs) {
     if (!res || !cfg || !cfg->factory || !cs) return -1;
 
     KlAllocator *alloc = res->alloc;
@@ -85,16 +85,16 @@ int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
 
     /* Set Content-Encoding and Vary headers */
     const char *enc = comp->encoding(comp);
-    if (kl_response_header(res, "Content-Encoding", enc) < 0 ||
-        kl_response_header(res, "Vary", "Accept-Encoding") < 0) {
+    if (kl_http_response_header(res, "Content-Encoding", enc) < 0 ||
+        kl_http_response_header(res, "Vary", "Accept-Encoding") < 0) {
         comp->destroy(comp);
         return -1;
     }
 
     /* Start chunked stream */
-    KlWriteFn write_fn;
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    if (kl_response_begin_stream(res, status, &write_fn, &write_ctx) < 0) {
+    if (kl_http_response_begin_stream(res, status, &write_fn, &write_ctx) < 0) {
         comp->destroy(comp);
         return -1;
     }
@@ -108,7 +108,7 @@ int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
     return 0;
 }
 
-int kl_compress_stream_write(KlCompressStream *cs, const char *data,
+int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
                               size_t len) {
     if (!cs || !cs->comp) return -1;
     if (cs->error) return -1;
@@ -122,7 +122,7 @@ int kl_compress_stream_write(KlCompressStream *cs, const char *data,
     return 0;
 }
 
-int kl_compress_stream_end(KlCompressStream *cs) {
+int kl_http_compress_stream_end(KlHttpCompressStream *cs) {
     if (!cs || !cs->comp) return -1;
 
     int rc = 0;
@@ -143,7 +143,7 @@ int kl_compress_stream_end(KlCompressStream *cs) {
 
     /* End chunked stream */
     if (rc == 0) {
-        if (kl_response_end_stream(cs->res) < 0)
+        if (kl_http_response_end_stream(cs->res) < 0)
             rc = -1;
     }
 

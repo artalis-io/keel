@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_u3.sh — build the U-3 KlClient-over-EFI_TCP4 self-test into BOOTX64.EFI.
+# build_u3.sh — build the U-3 KlHttpClient-over-EFI_TCP4 self-test into BOOTX64.EFI.
 #
 # Links libkeel_freestanding_selfcontained.a (mem*/strlen + kl_sockaddr_*/client/
 # llhttp in-archive, `make freestanding-lib-selfcontained`) with:

@@ -1,7 +1,7 @@
 /*
  * h2_client.c — HTTP/2 client demo with mock session
  *
- * Demonstrates the KlH2ClientSession vtable interface using a stub
+ * Demonstrates the KlHttp2ClientSession vtable interface using a stub
  * session. In a real deployment, replace StubH2ClientSession with
  * an nghttp2-based wrapper.
  *
@@ -17,21 +17,21 @@
 /* ── Stub H2 Client Session ──────────────────────────────────────── */
 
 typedef struct {
-    KlH2ClientSession base;
+    KlHttp2ClientSession base;
     KlAllocator *alloc;
     int32_t next_stream_id;
 } StubH2ClientSession;
 
-static int stub_recv(KlH2ClientSession *self, const char *data, size_t len) {
+static int stub_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
     (void)self; (void)data; (void)len;
     /* A real implementation would parse HTTP/2 frames here */
     return 0;
 }
 
-static int32_t stub_submit_request(KlH2ClientSession *self,
+static int32_t stub_submit_request(KlHttp2ClientSession *self,
                                     const char *method, const char *path,
                                     const char *authority,
-                                    const KlH2ClientHeader *hdrs, int n,
+                                    const KlHttp2ClientHeader *hdrs, int n,
                                     const char *body, size_t body_len) {
     StubH2ClientSession *s = (StubH2ClientSession *)self;
     (void)hdrs; (void)n; (void)body; (void)body_len;
@@ -56,17 +56,17 @@ static int32_t stub_submit_request(KlH2ClientSession *self,
     return stream_id;
 }
 
-static int stub_flush(KlH2ClientSession *self) {
+static int stub_flush(KlHttp2ClientSession *self) {
     (void)self;
     return 0;
 }
 
-static void stub_destroy(KlH2ClientSession *self) {
+static void stub_destroy(KlHttp2ClientSession *self) {
     StubH2ClientSession *s = (StubH2ClientSession *)self;
     kl_free(s->alloc, s, sizeof(*s));
 }
 
-static KlH2ClientSession *stub_client_factory(KlAllocator *alloc) {
+static KlHttp2ClientSession *stub_client_factory(KlAllocator *alloc) {
     StubH2ClientSession *s = kl_malloc(alloc, sizeof(*s));
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));
@@ -81,15 +81,15 @@ static KlH2ClientSession *stub_client_factory(KlAllocator *alloc) {
 
 /* ── Callbacks ───────────────────────────────────────────────────── */
 
-static void on_response(KlH2ClientConn *c, int32_t stream_id,
-                        const KlH2ClientResponse *resp, void *ud) {
+static void on_response(KlHttp2ClientConn *c, int32_t stream_id,
+                        const KlHttp2ClientResponse *resp, void *ud) {
     (void)c; (void)ud;
     printf("Response on stream %d: status=%d body=%.*s\n",
            stream_id, resp->status,
            (int)resp->body_len, resp->body ? resp->body : "");
 }
 
-static void on_error(KlH2ClientConn *c, const char *msg, void *ud) {
+static void on_error(KlHttp2ClientConn *c, const char *msg, void *ud) {
     (void)c; (void)ud;
     fprintf(stderr, "Error: %s\n", msg);
 }
@@ -102,14 +102,14 @@ int main(void) {
         return 1;
     }
 
-    KlH2ClientConfig cfg = {
+    KlHttp2ClientConfig cfg = {
         .session = stub_client_factory,
     };
 
     printf("HTTP/2 client demo (mock session)\n");
     printf("Connecting to http://localhost:8080 ...\n");
 
-    KlH2ClientConn *c = kl_h2_client_connect(&ev, &alloc, &cfg,
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &alloc, &cfg,
                                                "http://localhost:8080",
                                                on_error, NULL);
     if (!c) {
@@ -120,12 +120,12 @@ int main(void) {
 
     /* Submit two multiplexed requests */
     printf("Submitting requests:\n");
-    kl_h2_client_request(c, "GET", "/api/hello", NULL, 0, NULL, 0,
+    kl_http2_client_request(c, "GET", "/api/hello", NULL, 0, NULL, 0,
                           on_response, NULL);
-    kl_h2_client_request(c, "GET", "/api/world", NULL, 0, NULL, 0,
+    kl_http2_client_request(c, "GET", "/api/world", NULL, 0, NULL, 0,
                           on_response, NULL);
 
-    kl_h2_client_free(c);
+    kl_http2_client_free(c);
     kl_event_ctx_free(&ev);
     printf("Done.\n");
     return 0;

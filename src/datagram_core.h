@@ -16,7 +16,7 @@
  * The core is provider-NEUTRAL: it takes explicit adapter hooks (send submit, recv arm/disarm/pull,
  * cancel, retire classify) rather than a KlSocketProvider — 7B binds those to a real provider +
  * completion loop; a test scripts them. This is NOT the public API (no kl_datagram_* / ABI here) and
- * does NOT touch KlUdp (its byte-budget transport is untouched — D-COMPAT).
+ * is self-contained: no external transport is coupled to it.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */
@@ -44,8 +44,13 @@ typedef struct {
     int          completion;   /* 1 = completion (submit posts; recv arm posts) / 0 = readiness (sync). */
     size_t       send_slots;   /* outbound slot count (count-based backpressure). */
     size_t       send_slot_cap;/* per outbound slot payload capacity. */
+    size_t       send_byte_budget;/* M1: 0 = SLOT policy; >0 = BOTH byte-gate budget (bytes). */
     size_t       recv_cap;     /* inbound slot payload capacity. */
     unsigned     caps;         /* KL_DGRAM_CAP_* for UNSUPPORTED mapping on send. */
+    int          connected;    /* D1: initial connected state for peerless-send admission (0 = fresh; the
+                                * facade sets it via kl_datagram_connect). Applied to the send machine at init. */
+    unsigned     accepted_rx_caps;/* M5.1: enabled-per-socket KL_DGRAM_RX_* mask (already masked by the
+                                * facade). Stored for the GRO-activation predicate; no wiring in M5.1. */
 
     /* send */
     KlDgramSubmitFn submit; void *submit_ctx;      /* copy-before-accept is the submit adapter's job. */
@@ -103,6 +108,22 @@ typedef struct KlDgramCore {   /* tagged so <keel/datagram_detail.h> can forward
      * (releasing the rx storage on DETACHED, or leaving it pinned on QUARANTINE) before forwarding. */
     KlDgramCloseFn user_on_close; void *user_close_ctx;
     int            inited;
+    /* M5.1 scaffolding (no wiring yet). `ext` = the core-adopted batch extension (KlDgramBatchExt*,
+     * opaque here; NULL when no batch attached — the single-flight paths run untouched). `gso_unsupported`
+     * = the per-fd first-use GSO latch (§6.3). `accepted_rx_caps` = the enabled-per-socket KL_DGRAM_RX_*
+     * mask (masked by the facade) for the GRO-activation predicate. */
+    void          *ext;
+    int            gso_unsupported;
+    unsigned       accepted_rx_caps;
+    /* Owner-destruction (abandon) reclamation (docs/datagram_sync_teardown_design.md §4a). When
+     * `abandoning`, the coordinator's SILENT terminal (deferred to the outermost busy-frame leave) skips
+     * user_on_close and instead runs `abandon_reclaim` as its destructive tail — the facade frees the
+     * object-owned machines + this heap core + memsets the handle, then invokes `abandon_owner` to free
+     * the embedding owner (e.g. the resolver). All of this runs at the outermost leave, so it is
+     * reentrancy-safe when kl_datagram_teardown is called from within on_recv/on_writable/on_drain. */
+    int            abandoning;
+    void         (*abandon_reclaim)(void *ctx); void *abandon_reclaim_ctx;   /* facade: free core + handle */
+    void         (*abandon_owner)(void *ctx);   void *abandon_owner_ctx;     /* owner: free the container */
 } KlDgramCore;
 
 /* Assemble the core over the prepared transport + neutral adapters. Overflow-/failure-safe: on any
@@ -127,6 +148,11 @@ int  kl_dgram_core_recv_on_readable(KlDgramCore *core);
 void kl_dgram_core_pause(KlDgramCore *core);
 int  kl_dgram_core_resume(KlDgramCore *core);
 void kl_dgram_core_recv_stop(KlDgramCore *core);
+void kl_dgram_core_set_view_pull(KlDgramCore *core, KlDgramRecvViewFn view_pull, void *ctx);   /* M5.3 */
+int  kl_dgram_core_recv_started(const KlDgramCore *core);   /* M5.3: recv_start latched (attach refused) */
+static inline unsigned kl_dgram_core_accepted_rx_caps(const KlDgramCore *core) {
+    return core ? core->accepted_rx_caps : 0u;   /* M5.3: the GRO two-part-gate half stored at init */
+}
 int  kl_dgram_core_recv_held(const KlDgramCore *core);      /* 1 = a paused completion datagram is held */
 
 /* Close (graceful/abortive) + progress hook + terminal classification. */
@@ -136,9 +162,40 @@ int  kl_dgram_core_close_retry(KlDgramCore *core);
 KlDgramCloseState     kl_dgram_core_close_state(const KlDgramCore *core);
 KlDatagramCloseResult kl_dgram_core_close_result(const KlDgramCore *core);
 
+/* Owner-destruction SILENT teardown (docs/datagram_sync_teardown_design.md, Option A + §4a). Requests a
+ * forced SILENT terminal via the close coordinator's existing busy handshake: mark dead → cancel/close
+ * backend → release owner ref → run `reclaim` (the facade's free-core-and-handle) → `owner` (free the
+ * container). If no busy frame is active it all runs synchronously before returning; if invoked from
+ * within a send/recv delivery frame (on_recv/on_writable/on_drain) the terminal + reclamation are
+ * DEFERRED to the outermost leave — still within the same top-level dispatch, so no caller pump is
+ * needed and no machine state is freed under an active frame. The rx holder + any in-flight/EFI-
+ * quarantined op's ref outlive, reclaimed at the token's final release. The ordinary confirmed-detachment
+ * close (begin/cancel + free) is UNCHANGED. `reclaim`/`owner` may be NULL. 0 / -1. */
+int  kl_dgram_core_abandon(KlDgramCore *core,
+                           void (*reclaim)(void *), void *reclaim_ctx,
+                           void (*owner)(void *),   void *owner_ctx);
+
+/* Free the OBJECT-owned machines (close + send-via-abandon + slots). Used by the abandon reclaim as its
+ * destructive tail; does NOT touch the life-owned rx holder or the heap core block. */
+void kl_dgram_core_free_object_owned(KlDgramCore *core);
+
+/* Frame bracket for a DISPATCHER that runs send/recv ops then touches the owning handle afterwards (the
+ * readiness watcher). Hold on entry, release as the LAST action: a teardown requested from within a
+ * delivery callback then defers to `dispatch_end` instead of freeing the handle mid-dispatch. `dispatch_end`
+ * may run the (abandon) terminal and free the core — so it must be the caller's last touch of the core. */
+void kl_dgram_core_dispatch_begin(KlDgramCore *core);
+void kl_dgram_core_dispatch_end(KlDgramCore *core);
+
 /* Registered send edges (optional). */
 void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
+void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx);   /* M5.2a recoverable drop */
+void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx);   /* M5.2b GSO */
+/* D1: the ACTUAL connected state on the send machine (set after a successful connect); governs
+ * peerless-send admission uniformly across the single / batch / GSO paths. */
+void kl_dgram_core_set_connected(KlDgramCore *core, int on);
+int  kl_dgram_core_connected(const KlDgramCore *core);
 
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);

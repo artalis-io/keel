@@ -122,14 +122,14 @@ UTEST(tls, mock_handshake_ok) {
     mock_tls_init(&m);
     m.handshake_result = 0;
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.tls = &m.base;
-    c.state = KL_CONN_TLS_HANDSHAKE;
+    c.state = KL_HTTP_CONN_TLS_HANDSHAKE;
 
-    KlConnState st = kl_conn_on_handshake(&c);
-    ASSERT_EQ((int)st, (int)KL_CONN_READING);
+    KlHttpConnState st = kl_http_conn_on_handshake(&c);
+    ASSERT_EQ((int)st, (int)KL_HTTP_CONN_READING);
     ASSERT_EQ(c.tls_want, 0);
 }
 
@@ -138,14 +138,14 @@ UTEST(tls, mock_handshake_want_read) {
     mock_tls_init(&m);
     m.handshake_result = 1;
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.tls = &m.base;
-    c.state = KL_CONN_TLS_HANDSHAKE;
+    c.state = KL_HTTP_CONN_TLS_HANDSHAKE;
 
-    KlConnState st = kl_conn_on_handshake(&c);
-    ASSERT_EQ((int)st, (int)KL_CONN_TLS_HANDSHAKE);
+    KlHttpConnState st = kl_http_conn_on_handshake(&c);
+    ASSERT_EQ((int)st, (int)KL_HTTP_CONN_TLS_HANDSHAKE);
     ASSERT_EQ(c.tls_want, (int)KL_EVENT_READ);
 }
 
@@ -154,14 +154,14 @@ UTEST(tls, mock_handshake_want_write) {
     mock_tls_init(&m);
     m.handshake_result = 2;
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.tls = &m.base;
-    c.state = KL_CONN_TLS_HANDSHAKE;
+    c.state = KL_HTTP_CONN_TLS_HANDSHAKE;
 
-    KlConnState st = kl_conn_on_handshake(&c);
-    ASSERT_EQ((int)st, (int)KL_CONN_TLS_HANDSHAKE);
+    KlHttpConnState st = kl_http_conn_on_handshake(&c);
+    ASSERT_EQ((int)st, (int)KL_HTTP_CONN_TLS_HANDSHAKE);
     ASSERT_EQ(c.tls_want, (int)KL_EVENT_WRITE);
 }
 
@@ -170,26 +170,26 @@ UTEST(tls, mock_handshake_error) {
     mock_tls_init(&m);
     m.handshake_result = 3;
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.tls = &m.base;
-    c.state = KL_CONN_TLS_HANDSHAKE;
+    c.state = KL_HTTP_CONN_TLS_HANDSHAKE;
 
-    KlConnState st = kl_conn_on_handshake(&c);
-    ASSERT_EQ((int)st, (int)KL_CONN_CLOSED);
+    KlHttpConnState st = kl_http_conn_on_handshake(&c);
+    ASSERT_EQ((int)st, (int)KL_HTTP_CONN_CLOSED);
 }
 
 UTEST(tls, handshake_null_tls_closes) {
-    /* kl_conn_on_handshake with tls=NULL should return CLOSED */
-    KlConn c;
+    /* kl_http_conn_on_handshake with tls=NULL should return CLOSED */
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.tls = NULL;
-    c.state = KL_CONN_TLS_HANDSHAKE;
+    c.state = KL_HTTP_CONN_TLS_HANDSHAKE;
 
-    KlConnState st = kl_conn_on_handshake(&c);
-    ASSERT_EQ((int)st, (int)KL_CONN_CLOSED);
+    KlHttpConnState st = kl_http_conn_on_handshake(&c);
+    ASSERT_EQ((int)st, (int)KL_HTTP_CONN_CLOSED);
 }
 
 /* ── Mock I/O tests ──────────────────────────────────────────────── */
@@ -233,16 +233,16 @@ UTEST(tls, mock_pending) {
 
 UTEST(tls, plaintext_null_tls) {
     /* When tls is NULL, conn_read/conn_write should use raw read/write.
-     * We test this indirectly: a KlConn with tls=NULL should have
+     * We test this indirectly: a KlHttpConn with tls=NULL should have
      * NULL tls field by default. */
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     ASSERT_TRUE(c.tls == NULL);
 }
 
 UTEST(tls, config_null_means_plaintext) {
-    /* KlConfig with tls=NULL (default zero-init) works as before */
-    KlConfig cfg;
+    /* KlHttpServerConfig with tls=NULL (default zero-init) works as before */
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     ASSERT_TRUE(cfg.tls == NULL);
 
@@ -277,8 +277,8 @@ UTEST(tls, response_send_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Use a pipe for conn_fd (writev_all needs a valid fd for the
      * plaintext codepath, but TLS path ignores it — the mock captures
@@ -288,11 +288,11 @@ UTEST(tls, response_send_through_mock) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_json(&res, 200, "{\"tls\":true}", 12);
+    kl_http_response_json(&res, 200, "{\"tls\":true}", 12);
 
     /* Buffer body sends may return 1 (partial) via try_writev — loop */
     int r;
-    do { r = kl_response_send(&res); } while (r == 1);
+    do { r = kl_http_response_send(&res); } while (r == 1);
     ASSERT_EQ(r, 0);
 
     /* Verify the mock captured the full response */
@@ -306,7 +306,7 @@ UTEST(tls, response_send_through_mock) {
 
     kl_test_closesock(pipefd[0]);
     kl_test_closesock(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(tls, response_stream_through_mock) {
@@ -315,24 +315,24 @@ UTEST(tls, response_stream_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int pipefd[2];
     ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_header(&res, "Content-Type", "text/plain");
+    kl_http_response_header(&res, "Content-Type", "text/plain");
 
-    KlWriteFn write_fn;
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    ASSERT_EQ(kl_response_begin_stream(&res, 200, &write_fn, &write_ctx), 0);
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &write_fn, &write_ctx), 0);
 
     write_fn(write_ctx, "hello", 5);
     write_fn(write_ctx, " world", 6);
 
-    ASSERT_EQ(kl_response_end_stream(&res), 0);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
 
     /* Verify chunked encoding in mock buffer */
     m.write_buf[m.write_len] = '\0';
@@ -343,7 +343,7 @@ UTEST(tls, response_stream_through_mock) {
 
     kl_test_closesock(pipefd[0]);
     kl_test_closesock(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 #if !defined(_WIN32)   /* mkstemp + hardcoded /tmp path — POSIX-specific */
@@ -353,8 +353,8 @@ UTEST(tls, response_file_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Create a temp file with known content */
     char tmppath[] = "/tmp/keel_test_tls_XXXXXX";
@@ -369,10 +369,10 @@ UTEST(tls, response_file_through_mock) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (uint64_t)file_len);
+    kl_http_response_file(&res, tmpfd, (uint64_t)file_len);
 
     /* Send headers + file */
-    int r = kl_response_send(&res);
+    int r = kl_http_response_send(&res);
     ASSERT_EQ(r, 0);
 
     /* Verify the mock captured headers and file content */
@@ -383,19 +383,19 @@ UTEST(tls, response_file_through_mock) {
     close(pipefd[0]);
     close(pipefd[1]);
     /* tmpfd is owned by res, closed by response_free */
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     unlink(tmppath);
 }
 
 UTEST(tls, file_send_yields_on_want_write) {
     /* Mock that returns 0 (WANT_WRITE) on first write of file data
-     * should cause kl_response_send to return 1 (more to send) */
+     * should cause kl_http_response_send to return 1 (more to send) */
     MockTls m;
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Create a temp file */
     char tmppath[] = "/tmp/keel_test_tls_yield_XXXXXX";
@@ -410,10 +410,10 @@ UTEST(tls, file_send_yields_on_want_write) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (uint64_t)data_len);
+    kl_http_response_file(&res, tmpfd, (uint64_t)data_len);
 
     /* First send: headers go through, file send starts */
-    int r = kl_response_send(&res);
+    int r = kl_http_response_send(&res);
     /* Should complete since our mock has space */
     ASSERT_EQ(r, 0);
 
@@ -422,7 +422,7 @@ UTEST(tls, file_send_yields_on_want_write) {
 
     close(pipefd[0]);
     close(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     unlink(tmppath);
 }
 #endif /* !_WIN32 */
@@ -434,17 +434,17 @@ UTEST(tls, response_reset_preserves_tls) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
     res.tls = &m.base;
     res.conn_fd = 42;
 
     /* Add some headers to make the response non-empty */
-    kl_response_header(&res, "X-Test", "value");
+    kl_http_response_header(&res, "X-Test", "value");
     ASSERT_TRUE(res.hdr_len > 0);
 
     /* Reset for keep-alive */
-    kl_response_reset(&res);
+    kl_http_response_reset(&res);
 
     /* TLS pointer must survive the reset */
     ASSERT_EQ(res.tls, &m.base);
@@ -455,32 +455,32 @@ UTEST(tls, response_reset_preserves_tls) {
     /* Status reset */
     ASSERT_EQ(res.status, 200);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 /* ── Shutdown WANT_WRITE retry ───────────────────────────────────── */
 
 #if !defined(_WIN32)   /* open("/dev/null") — POSIX-specific device path */
 UTEST(tls, shutdown_retries_want_write) {
-    /* kl_conn_release should retry shutdown on WANT_WRITE */
+    /* kl_http_conn_release should retry shutdown on WANT_WRITE */
     MockTls m;
     mock_tls_init(&m);
     m.shutdown_want_writes = 2;  /* return WANT_WRITE twice, then OK */
 
     KlAllocator a = kl_allocator_default();
-    KlConnPool pool;
-    ASSERT_EQ(kl_conn_pool_init(&pool, 1, &a), 0);
-    pool.conns[0].parser = kl_parser_llhttp(&a);
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 1, &a), 0);
+    pool.conns[0].parser = kl_http1_parser_llhttp(&a);
     pool.conns[0].tls = &m.base;
 
     /* Acquire with a real fd so the shutdown path is taken (fd >= 0) */
     int devnull = open("/dev/null", O_RDONLY);
     ASSERT_TRUE(devnull >= 0);
-    KlConn *c = kl_conn_acquire(&pool, devnull);
+    KlHttpConn *c = kl_http_conn_acquire(&pool, devnull);
     ASSERT_TRUE(c != NULL);
 
     /* Release triggers shutdown */
-    kl_conn_release(&pool, c);
+    kl_http_conn_release(&pool, c);
 
     /* Shutdown should have been called 3 times: 2 WANT_WRITE + 1 OK */
     ASSERT_EQ(m.shutdown_count, 3);
@@ -488,7 +488,7 @@ UTEST(tls, shutdown_retries_want_write) {
 
     /* Clean up — prevent double-destroy since mock is stack-allocated */
     pool.conns[0].tls = NULL;
-    kl_conn_pool_free(&pool);
+    kl_http_conn_pool_free(&pool);
 }
 
 UTEST(tls, shutdown_gives_up_after_max_retries) {
@@ -498,24 +498,24 @@ UTEST(tls, shutdown_gives_up_after_max_retries) {
     m.shutdown_want_writes = 100;  /* always returns WANT_WRITE */
 
     KlAllocator a = kl_allocator_default();
-    KlConnPool pool;
-    ASSERT_EQ(kl_conn_pool_init(&pool, 1, &a), 0);
-    pool.conns[0].parser = kl_parser_llhttp(&a);
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 1, &a), 0);
+    pool.conns[0].parser = kl_http1_parser_llhttp(&a);
     pool.conns[0].tls = &m.base;
 
     int devnull = open("/dev/null", O_RDONLY);
     ASSERT_TRUE(devnull >= 0);
-    KlConn *c = kl_conn_acquire(&pool, devnull);
+    KlHttpConn *c = kl_http_conn_acquire(&pool, devnull);
     ASSERT_TRUE(c != NULL);
 
-    kl_conn_release(&pool, c);
+    kl_http_conn_release(&pool, c);
 
     /* 1 initial + 4 retries = 5 total calls */
     ASSERT_EQ(m.shutdown_count, 5);
     ASSERT_TRUE(m.reset_called);
 
     pool.conns[0].tls = NULL;
-    kl_conn_pool_free(&pool);
+    kl_http_conn_pool_free(&pool);
 }
 
 /* ── Pool free calls shutdown + destroy ──────────────────────────── */
@@ -525,9 +525,9 @@ UTEST(tls, pool_free_calls_shutdown_and_destroy) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlConnPool pool;
-    ASSERT_EQ(kl_conn_pool_init(&pool, 1, &a), 0);
-    pool.conns[0].parser = kl_parser_llhttp(&a);
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 1, &a), 0);
+    pool.conns[0].parser = kl_http1_parser_llhttp(&a);
     pool.conns[0].tls = &m.base;
 
     /* Give the slot a valid-looking fd so shutdown path is taken.
@@ -536,9 +536,9 @@ UTEST(tls, pool_free_calls_shutdown_and_destroy) {
     int devnull = open("/dev/null", 0);
     ASSERT_TRUE(devnull >= 0);
     pool.conns[0].stream.fd = devnull;
-    pool.conns[0].state = KL_CONN_READING;
+    pool.conns[0].state = KL_HTTP_CONN_READING;
 
-    kl_conn_pool_free(&pool);
+    kl_http_conn_pool_free(&pool);
 
     /* Verify shutdown was called before destroy */
     ASSERT_TRUE(m.shutdown_called);

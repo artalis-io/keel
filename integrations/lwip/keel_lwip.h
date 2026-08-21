@@ -4,9 +4,9 @@
  * A bring-your-own lwIP platform: a matched pair of a KlSocketProvider (over the
  * lwIP BSD socket API) and a KlEventProvider (over lwip_poll), so Keel's server
  * and client run on an lwIP TCP/IP stack with no kernel sockets and no core
- * recompile. Install both on a KlConfig / KlEventCtx:
+ * recompile. Install both on a KlHttpServerConfig / KlEventCtx:
  *
- *   KlConfig cfg = {
+ *   KlHttpServerConfig cfg = {
  *       .port = 8080, .bind_addr = "127.0.0.1",
  *       .sockets        = kl_socket_provider_lwip(),
  *       .event_provider = kl_event_provider_lwip(),
@@ -32,10 +32,10 @@
 extern "C" {
 #endif
 
-/** @brief The lwIP socket provider (KlConfig.sockets / KlEventCtx.sockets). */
+/** @brief The lwIP socket provider (KlHttpServerConfig.sockets / KlEventCtx.sockets). */
 const KlSocketProvider *kl_socket_provider_lwip(void);
 
-/** @brief The lwIP readiness event backend (KlConfig.event_provider). Pairs with
+/** @brief The lwIP readiness event backend (KlHttpServerConfig.event_provider). Pairs with
  *  kl_socket_provider_lwip(); its native_provider() returns that provider. */
 const KlEventProvider *kl_event_provider_lwip(void);
 

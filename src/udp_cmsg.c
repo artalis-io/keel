@@ -72,3 +72,123 @@ int kl_udp_parse_gro(struct msghdr *msg) {
 #endif
     return 0;
 }
+
+/* Read the received TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS cmsg), or -1 if none present. Mirrors
+ * the readiness provider's dgram_parse_tos (socket_dgram_posix.c) so the two event models stay
+ * byte-identical. A 1-byte or int-sized cmsg payload is accepted (platforms differ). */
+int kl_udp_parse_tos(struct msghdr *msg) {
+#if defined(IP_TOS) || defined(IPV6_TCLASS)
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
+        int is_tos = 0;
+#if defined(IP_TOS)
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS) is_tos = 1;
+#endif
+#if defined(IPV6_TCLASS)
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS) is_tos = 1;
+#endif
+        if (is_tos) {
+            if (cm->cmsg_len >= CMSG_LEN(sizeof(int))) {
+                int v; memcpy(&v, CMSG_DATA(cm), sizeof(v)); return v & 0xff;
+            }
+            if (cm->cmsg_len >= CMSG_LEN(1)) return CMSG_DATA(cm)[0];
+        }
+    }
+#else
+    (void)msg;
+#endif
+    return -1;
+}
+
+/* Overflow-safe capacity check: does a `space`-byte cmsg record fit after `used` bytes in `bufsz`?
+ * `used` is a parameter (not a constant here) so the subtraction is guarded without a `0 > bufsz`
+ * comparison — `bufsz - used` is evaluated only once `used <= bufsz` holds (short-circuit). */
+static int ctrl_fits(size_t used, size_t space, size_t bufsz) {
+    return used <= bufsz && space <= bufsz - used;
+}
+
+int kl_udp_build_control(unsigned char *buf, size_t bufsz,
+                         const struct sockaddr *src, int tos, int family, size_t *out_len) {
+    *out_len = 0;
+    size_t used = 0;   /* bytes written so far; the next cmsg starts at buf + used (CMSG_SPACE-aligned) */
+
+    if (src) {                                           /* source-pin REQUESTED (family from src) */
+#if defined(IP_PKTINFO) || defined(IPV6_PKTINFO)
+        int ok = 0;
+#if defined(IP_PKTINFO)
+        if (src->sa_family == AF_INET) {
+            size_t space = CMSG_SPACE(sizeof(struct in_pktinfo));
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            struct cmsghdr *cm = (struct cmsghdr *)(buf + used);
+            cm->cmsg_level = IPPROTO_IP; cm->cmsg_type = IP_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+            struct in_pktinfo pi; memset(&pi, 0, sizeof(pi));
+            pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
+            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+            used += space; ok = 1;
+        }
+#endif
+#if defined(IPV6_PKTINFO)
+        if (src->sa_family == AF_INET6) {
+            size_t space = CMSG_SPACE(sizeof(struct in6_pktinfo));
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            struct cmsghdr *cm = (struct cmsghdr *)(buf + used);
+            cm->cmsg_level = IPPROTO_IPV6; cm->cmsg_type = IPV6_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+            struct in6_pktinfo pi; memset(&pi, 0, sizeof(pi));
+            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
+            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+            used += space; ok = 1;
+        }
+#endif
+        if (!ok) return -1;                              /* unknown family */
+#else
+        return -1;                                       /* no pktinfo support compiled */
+#endif
+    }
+
+    if (tos >= 0) {                                      /* TOS REQUESTED (family from the CALLER) */
+#if defined(IP_TOS) || defined(IPV6_TCLASS)
+        int v = tos & 0xff, ok = 0;
+        size_t space = CMSG_SPACE(sizeof(int));
+#if defined(IP_TOS)
+        if (family == AF_INET) {
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            struct cmsghdr *cm = (struct cmsghdr *)(buf + used);
+            cm->cmsg_level = IPPROTO_IP; cm->cmsg_type = IP_TOS;
+            cm->cmsg_len = CMSG_LEN(sizeof(int));
+            memcpy(CMSG_DATA(cm), &v, sizeof(v));
+            used += space; ok = 1;
+        }
+#endif
+#if defined(IPV6_TCLASS)
+        if (family == AF_INET6) {
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            struct cmsghdr *cm = (struct cmsghdr *)(buf + used);
+            cm->cmsg_level = IPPROTO_IPV6; cm->cmsg_type = IPV6_TCLASS;
+            cm->cmsg_len = CMSG_LEN(sizeof(int));
+            memcpy(CMSG_DATA(cm), &v, sizeof(v));
+            used += space; ok = 1;
+        }
+#endif
+        if (!ok) return -1;                              /* unknown family */
+#else
+        return -1;                                       /* no TOS support compiled */
+#endif
+    }
+    *out_len = used;
+    return 0;
+}
+
+int kl_udp_send_family(int fd, const struct sockaddr *dest, const struct sockaddr *src) {
+    if (dest && (dest->sa_family == AF_INET || dest->sa_family == AF_INET6))
+        return dest->sa_family;
+    if (src && (src->sa_family == AF_INET || src->sa_family == AF_INET6))
+        return src->sa_family;
+    struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
+    socklen_t sl = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &sl) == 0 &&
+        (ss.ss_family == AF_INET || ss.ss_family == AF_INET6))
+        return (int)ss.ss_family;
+    return -1;   /* undeterminable — caller fails the send rather than guessing IPv4 */
+}

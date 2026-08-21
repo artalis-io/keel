@@ -64,6 +64,8 @@ typedef struct {
     int          detaching;    /* reentrancy guard while the terminal logic runs */
     int          recv_cancel_requested, send_cancel_requested;
     int          backend_retired;   /* backend-close/retirement step ran (exactly once) */
+    int          abandon;           /* owner-destruction: force a SILENT terminal even with in-flight ops,
+                                     * deferred to the outermost leave by the busy handshake (§4a) */
     KlDgramCancelFn cancel_recv, cancel_send; void *cancel_ctx;
     KlDgramBackendCloseFn backend_close; void *backend_ctx;   /* fd close + transport retirement, once */
     KlDgramRetireFn retire; void *retire_ctx;   /* per-op backend classifier (NULL → always DETACHED) */
@@ -81,14 +83,13 @@ int  kl_dgram_close_set_cancel(KlDgramClose *c, KlDgramCancelFn cancel_recv,
                                KlDgramCancelFn cancel_send, void *ctx);
 
 /* Backend per-op retirement classifier (§4.3). Frozen once close begins. If unset, every op is
- * treated as confirmed RETIRED → the terminal result is DETACHED (the readiness/pure-machine model,
- * and KlUdp's legacy path). 0 / -1. */
+ * treated as confirmed RETIRED → the terminal result is DETACHED (X * and the readiness/pure-machine model). 0 / -1. */
 int  kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ctx);
 
 /* Backend retirement + fd-close hook (§4.1), run EXACTLY ONCE once the outbound queue has drained
  * (graceful) or been discarded (abortive) — regardless of recv state, since a datagram recv has no
  * natural EOF and this step is what retires it. Owns the physical fd close. Frozen once close begins.
- * If unset (KlUdp's legacy path, or a coordinator driven purely by machine retirements), no fd is
+ * If unset (a coordinator driven purely by machine retirements), no fd is
  * closed here. 0 / -1. */
 int  kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn, void *ctx);
 
@@ -96,6 +97,25 @@ int  kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn,
  * graceful may later escalate via cancel. 0 / -1. */
 int  kl_dgram_close_begin(KlDgramClose *c);
 int  kl_dgram_close_cancel(KlDgramClose *c);
+
+/* Owner-destruction SILENT abandon (docs/datagram_sync_teardown_design.md §4a). Reach CLOSED WITHOUT
+ * running the ordinary confirmed-detachment terminal: on_close is NEVER invoked (so a user callback
+ * cannot free the owner mid-teardown) and NO public terminal is reported. Stops new sends, stops
+ * receiving, discards queued output, requests cancellation of any in-flight op, and closes the fd
+ * EXACTLY ONCE unconditionally (a submitted send's payload is a backend-owned copy per §2.5.1, so
+ * closing cannot strand a referenced buffer). The caller (kl_dgram_core_abandon) must have marked the
+ * life token dead FIRST so late completions drop, and must free the object-owned send/slots afterwards.
+ * After this: state == CLOSED, notified set. Idempotent. 0 / -1. The ordinary begin/cancel path is
+ * UNCHANGED — this is an additional owner-destruction entry, never a substitute. */
+int  kl_dgram_close_abandon(KlDgramClose *c);
+
+/* Public frame bracket (busy handshake) for a dispatcher that runs send/recv ops then touches the owning
+ * handle: hold on entry, release as the LAST action. A teardown requested from within a delivery callback
+ * then defers its terminal to `release` instead of firing inside the inner op leave. `release` may run the
+ * terminal (and free the object on an abandon), so nothing reachable through this close machine may be
+ * touched after it. */
+void kl_dgram_close_hold(KlDgramClose *c);
+void kl_dgram_close_release(KlDgramClose *c);
 
 /* Re-evaluate the terminal classification (the backend-drain PROGRESS hook). The machine gate
  * (close_fully_retired) can hold while the §4.3 classifier still returns PENDING — the send/recv

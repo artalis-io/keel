@@ -5,7 +5,7 @@
  * they satisfy the freestanding archive's undefined platform/allocator hooks,
  * by:
  *   1. linking against libkeel_freestanding_selfcontained.a and REFERENCING the
- *      client public API (kl_client_start &co) so the archive objects — which
+ *      client public API (kl_http_client_start &co) so the archive objects — which
  *      reference kl_monotonic_ms / kl_plat_random / kl_resolve_sync — are pulled
  *      into the image and their undefined seams resolved by our shims;
  *   2. exercising the allocator (malloc/realloc-preserve/free + a huge-alloc
@@ -27,7 +27,7 @@
 #include "platform_uefi.h"
 
 #include <keel/allocator.h>   /* kl_malloc / kl_realloc / kl_free */
-#include <keel/client.h>      /* referenced only to pull the archive objects */
+#include <keel/http_client.h>      /* referenced only to pull the archive objects */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -78,12 +78,12 @@ static UINTN u64_to_dec(UINT64 v, char *dst, UINTN cap) {
  * bounded stack — data-only anchoring keeps it strictly link-time.) */
 __attribute__((used))
 static void *const g_client_refs[] = {
-    (void *)&kl_client_start,
-    (void *)&kl_client_start_s,
-    (void *)&kl_client_response,
-    (void *)&kl_client_error,
-    (void *)&kl_client_cancel,
-    (void *)&kl_client_free,
+    (void *)&kl_http_client_start,
+    (void *)&kl_http_client_start_s,
+    (void *)&kl_http_client_response,
+    (void *)&kl_http_client_error,
+    (void *)&kl_http_client_cancel,
+    (void *)&kl_http_client_free,
 };
 
 /* ── allocator round-trip over one size ────────────────────────────────────

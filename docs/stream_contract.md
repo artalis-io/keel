@@ -472,7 +472,7 @@ ExitBootServices).
   firmware.
 - `close`/`cancel` **inside a callback** are legal (recorded; applied after the callback returns).
 - **Synchronous parent teardown drives detachment; it does not merely wait for it (Finding 6).**
-  `close` is deferred, but `kl_server_free`/`kl_listener_free`/any parent destructor is a *blocking*
+  `close` is deferred, but `kl_http_server_free`/`kl_listener_free`/any parent destructor is a *blocking*
   call that must not return while a stream can still reference the pool it is about to release. It
   reconciles the two by **driving** detachment to completion rather than passively waiting:
   - **Backends with outstanding case-(2)/(3) ops (io_uring/IOCP plaintext reads; lwIP write pins)** —
@@ -569,8 +569,8 @@ no `on_accept`.
 
 - **Retyped ops:** `prime_accepts(KlListener*)` / `post_accept(KlListener*)`; the completion event
   identifies its target as `KL_COMP_ACCEPT.target = KlListener*`. *(Phase A implemented this retype
-  with a transitional server-owned `KlAcceptTarget` — a `{ KlServer *server; }` accept-routing
-  adapter embedded in `KlServer`; Phase B renames it to the real `KlListener` once its lifecycle,
+  with a transitional server-owned `KlAcceptTarget` — a `{ KlHttpServer *server; }` accept-routing
+  adapter embedded in `KlHttpServer`; Phase B renames it to the real `KlListener` once its lifecycle,
   credit/reservation, and callback contract exist.)*
 - **Multiple listeners share one `KlEventCtx`** — each carries its own target + credit; the drain
   routes each `KL_COMP_ACCEPT` to the listener named in `target`.
@@ -581,7 +581,7 @@ no `on_accept`.
   completion merely **consumes** what was already reserved. So at any moment **armed accepts ≤
   min(reservable slots, backend arming capacity)**, and a completed accept can never fail to find
   backing storage. This generalizes today's server-pool backpressure floor + the EFI capacity-gated
-  arming (currently `KlServer`-scoped).
+  arming (currently `KlHttpServer`-scoped).
 - **On each completed accept:** bind the `KlStream` to the **already-reserved** slot, initialize it,
   then invoke `on_accept(listener, stream)` (an ownership handoff; §7 rules govern the stream from
   there). Because the slot was reserved at arm time, acquisition never fails *here*.
@@ -661,7 +661,7 @@ no `on_accept`.
      live, and no slot is leaked.
   The invariant the release obeys: **the slot always comes back; the credit update is best-effort and
   guarded by a non-null (live) listener target.** Discipline (1) ships in Phase A/B (the current
-  `KlServer`-owns-pool model); (2) is the general form for a standalone `KlListener`. (A simpler Tier-1
+  `KlHttpServer`-owns-pool model); (2) is the general form for a standalone `KlListener`. (A simpler Tier-1
   option — *forbid accepted streams outliving the listener* — is also legal but less generic; the
   split-lease model is preferred so a standalone listener works.)
 - **Credit return:** on close a live-listener stream returns its lease's credit (step 2.2), letting the

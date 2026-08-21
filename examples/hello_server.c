@@ -1,7 +1,7 @@
 /*
  * hello_server.c — Minimal KEEL HTTP server
  *
- * Concepts: KlServer, KlConfig, single route, JSON response.
+ * Concepts: KlHttpServer, KlHttpServerConfig, single route, JSON response.
  *
  * Build:  make examples
  * Run:    ./examples/hello_server [port]
@@ -12,9 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
 int main(int argc, char **argv) {
@@ -29,17 +29,17 @@ int main(int argc, char **argv) {
         port = (int)val;
     }
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = port,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     printf("hello example listening on :%d\n", port);
     printf("  curl localhost:%d/hello\n", port);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

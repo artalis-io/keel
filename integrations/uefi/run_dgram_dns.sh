@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_dgram_dns.sh — 6.4c harness: the STOCK dns_resolver over KlUdp-over-EFI_UDP4 on real
+# run_dgram_dns.sh — 6.4c harness: the STOCK dns_resolver over KlDatagram-over-EFI_UDP4 on real
 # firmware, to the FROZEN acceptance (docs/phase10_efi_udp4_provider_design.md §9). Runs
 # inside the Ubuntu 24.04 container. Two QEMU/OVMF boots of one EFI image:
 #

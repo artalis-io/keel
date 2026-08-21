@@ -12,9 +12,8 @@
  */
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/server.h>
-#include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
+#include <keel/http_server.h>
+#include <keel/http_connection.h>
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -52,7 +51,7 @@ typedef struct KlIocpWatch {
  * client's connect op aborted before the client frees its (detached) watcher + closes the
  * socket — the aborted completion is then dropped in the drain instead of dispatching
  * against freed memory. (The IOCP backend doesn't otherwise track conn ops; connect is the
- * one op with no KlConn owner.) */
+ * one op with no KlHttpConn owner.) */
 typedef struct KlIocpConnect {
     struct KlIocpConnect *next;
     SOCKET                fd;
@@ -97,7 +96,7 @@ typedef struct KlIocpOp {
     KlAllocator  *alloc;
     KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at post
-     * so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is in
+     * so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is in
      * flight). The recv buffer + capacity + pktinfo flag are COPIED at post (buf/buflen/dg_pktinfo) so
      * the completion touches only the op; op_sock already carries the socket (CancelIoEx / GetOverlappedResult). */
     KlDgramLife  *life;
@@ -110,7 +109,9 @@ typedef struct KlIocpOp {
     int           src_len;                     /* UDP_RECV: source addr length */
     WSAMSG        umsg;                         /* UDP_RECV: WSARecvMsg header (name + buf + control) */
     WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into dg->recv_buf */
-    char          uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP_RECV: pktinfo control buffer (local addr) */
+    /* _Alignas: typed WSACMSGHDR accesses (recv pktinfo parse + send control build) require WSACMSGHDR
+     * alignment; a plain char[] is only byte-aligned. Dual-use (recv pktinfo / send source-pin+TOS). */
+    _Alignas(WSACMSGHDR) char uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP recv pktinfo / send cmsg buffer */
     int           via_recvmsg;                 /* UDP_RECV: 1 = WSARecvMsg (has control), 0 = WSARecvFrom */
     char         *sendbuf;                     /* WRITE/SENDFILE: contiguous response (head) copy */
     size_t        send_total, send_done;       /* WRITE: partial-send tracking; SENDFILE: head len */
@@ -372,7 +373,7 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
     return 0;
 }
 
-static int iocp_comp_post_accept(struct KlServer *s) {
+static int iocp_comp_post_accept(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
@@ -461,9 +462,9 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
     return 0;
 }
 
-static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iocp_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
@@ -497,7 +498,7 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
 
 /* Post one overlapped UDP receive on the completion loop (8b-4c). Prefers WSARecvMsg
  * (WSAID_WSARECVMSG) so an IP_PKTINFO control message yields the datagram's local
- * (destination) address (KlCompletionEvent.local, used by kl_udp_send_to_from reply-from) —
+ * (destination) address (KlCompletionEvent.local, used for source-pinned reply-from) —
  * the Winsock analogue of the io_uring/pollcomp recvmsg path, sharing the fetch + parse with
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
@@ -567,14 +568,48 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
     op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }  /* life unset → caller releases */
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
-    /* Marshal the neutral dest to a Winsock sockaddr for the overlapped WSASendTo. */
+    /* Marshal the neutral dest to a Winsock sockaddr (op->src holds the send dest here). */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
         op->src_len = (int)kl_sockaddr_to_native(sop->dest, &op->src);
+    /* The WSABUF lives in the op — overlapped WSASend calls retain the buffer array until completion. */
+    op->ubuf.len = (ULONG)sop->len;
+    op->ubuf.buf = op->sendbuf;
 
-    WSABUF buf = { (ULONG)sop->len, op->sendbuf };
+    /* Source-pin / per-packet TOS → overlapped WSASendMsg with a control message; ALL descriptor objects
+     * (WSAMSG, WSABUF, name, control) live in the op and survive until the terminal completion (§1b).
+     * Plain sends keep overlapped WSASendTo. */
+    int want_ctrl = (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0;
+    LPFN_WSASENDMSG fn = want_ctrl ? kl_udp_win_get_sendmsg((SOCKET)sop->fd) : NULL;
+    /* A REQUESTED control send with no WSASendMsg extension must FAIL — never fall back to WSASendTo and
+     * silently drop the source-pin/TOS (§P1; the seam must be correct for custom providers / runtime
+     * extension failure, not just the capability-gated built-in provider). */
+    if (want_ctrl && !fn) { iocp_op_free(op); return -1; }
     DWORD sent = 0;
-    int rc = WSASendTo((SOCKET)sop->fd, &buf, 1, &sent, 0,
+    int rc;
+    if (fn) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC && kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_win_send_family((SOCKET)sop->fd,
+                                         op->src_len ? (struct sockaddr *)&op->src : NULL, src_sa);
+        if (fam < 0) { iocp_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        ULONG clen;
+        if (kl_udp_win_build_control((unsigned char *)op->uctrl, sizeof(op->uctrl),
+                                     src_sa, sop->tos, fam, &clen) != 0) {
+            iocp_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+        memset(&op->umsg, 0, sizeof(op->umsg));
+        op->umsg.name = op->src_len ? (SOCKADDR *)&op->src : NULL;
+        op->umsg.namelen = op->src_len;
+        op->umsg.lpBuffers = &op->ubuf;
+        op->umsg.dwBufferCount = 1;
+        if (clen) { op->umsg.Control.buf = op->uctrl; op->umsg.Control.len = clen; }
+        rc = fn((SOCKET)sop->fd, &op->umsg, 0, &sent, &op->ov, NULL);
+    } else {
+        rc = WSASendTo((SOCKET)sop->fd, &op->ubuf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
+    }
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);                      /* life unset → caller releases */
         return -1;
@@ -705,7 +740,7 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
  * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
  * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
  * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
-static int iocp_comp_prime_accepts(struct KlServer *s) {
+static int iocp_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
@@ -872,7 +907,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
             /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op.
              * Transfer the token ref op → event (released after dispatch); NULL op->life so
-             * iocp_op_free does not double-release. Never dereference KlUdpTransport. */
+             * iocp_op_free does not double-release. Never dereference the transport owner. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_RECV;
             out[count].life = op->life; op->life = NULL;
@@ -890,6 +925,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                                                          (size_t)xfer, mflags, MSG_TRUNC,
                                                          op->buflen);
             out[count].ok = cl.ok;
+            out[count].tos = -1;   /* M6.0a: IOCP does not yet capture the RX TOS cmsg (a later
+                                    * increment) — surface "none" explicitly, never a bogus 0. */
             if (cl.ok) {
                 out[count].bytes = (DWORD)cl.bytes;
                 out[count].truncated = cl.truncated;
@@ -1008,7 +1045,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 static void iocp_quiesce_port_for_close(KlIocpState *st) {
     /* Cancel EVERY outstanding op (the global registry covers conn READ/WRITE/SENDFILE + UDP too,
      * not just watch/connect/accept) on its owning socket, so all their completions post. The
-     * conn/udp sockets are still open at this point (kl_conn_pool_free runs after), so CancelIoEx
+     * conn/udp sockets are still open at this point (kl_http_conn_pool_free runs after), so CancelIoEx
      * reaches them; the listen socket is already closed (its AcceptEx are completing regardless). */
     for (KlIocpOp *op = st->ops; op; op = op->g_next)
         CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);
@@ -1048,7 +1085,7 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
  * DEQUEUES every completion (accept OR read/write/udp/watcher) before freeing it (no OVERLAPPED is
  * freed while the kernel may still be writing → no use-after-free) and routes each ordinarily (no
  * completion lost); accept completions untrack + retire the listener. Nothing more to force here. */
-static int iocp_shutdown_accepts(struct KlServer *s) {
+static int iocp_shutdown_accepts(struct KlHttpServer *s) {
     KlIocpState *st = s->ev.loop._backend;
     st->quiescing = 1;   /* from now, iocp_comp_drain frees fired watchers instead of re-posting */
     return 0;

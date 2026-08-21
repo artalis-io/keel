@@ -22,7 +22,6 @@
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
-#include <keel/udp.h>
 #include <keel/datagram.h>
 #include <keel/sockaddr.h>
 
@@ -124,7 +123,7 @@ static kl_ssize_t dg_recv(void *c, KlSocketHandle f, void *buf, size_t buflen,
     g.last_status = KL_IO_WOULD_BLOCK;            /* drained */
     return -1;
 }
-static uint32_t dg_configure(void *c, KlSocketHandle f, int fam, const struct KlUdpConfig *cfg) {
+static uint32_t dg_configure(void *c, KlSocketHandle f, int fam, const struct KlDatagramSocketConfig *cfg) {
     (void)c; (void)f; (void)fam; (void)cfg; return 0;   /* no capture caps */
 }
 

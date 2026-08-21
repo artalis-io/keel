@@ -14,18 +14,18 @@ make examples
 
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
-| `hello_server` | 8080 (configurable) | Minimal JSON server | `KlServer`, `KlConfig`, `kl_response_json` |
-| `rest_api_server` | 8080 | REST API with route params, POST body | `:id` params, `KlBufReader`, `kl_body_reader_buffer` |
-| `middleware` | 8080 | Pre/post-body middleware, CORS, auth | `kl_server_use`, `kl_server_use_post`, `kl_cors_middleware` |
-| `static_files` | 8080 | Static file server with sendfile | `kl_response_file`, MIME detection, path traversal guard |
-| `streaming` | 8080 | Chunked streaming responses | `kl_response_begin_stream`, `KlWriteFn` |
-| `sse` | 8080 | Server-Sent Events streaming | `KlSse`, `kl_sse_begin`, `kl_sse_event`, `kl_sse_comment` |
-| `body_readers` | 8080 | Buffer + multipart body readers | `KlBufReader`, `KlMultipartReader`, `kl_body_reader_multipart` |
+| `hello_server` | 8080 (configurable) | Minimal JSON server | `KlHttpServer`, `KlHttpServerConfig`, `kl_http_response_json` |
+| `rest_api_server` | 8080 | REST API with route params, POST body | `:id` params, `KlHttpBufReader`, `kl_http_body_reader_buffer` |
+| `middleware` | 8080 | Pre/post-body middleware, CORS, auth | `kl_http_server_use`, `kl_http_server_use_post`, `kl_http_cors_middleware` |
+| `static_files` | 8080 | Static file server with sendfile | `kl_http_response_file`, MIME detection, path traversal guard |
+| `streaming` | 8080 | Chunked streaming responses | `kl_http_response_begin_stream`, `KlHttpResponseWriteFn` |
+| `sse` | 8080 | Server-Sent Events streaming | `KlHttpSse`, `kl_http_sse_begin`, `kl_http_sse_event`, `kl_http_sse_comment` |
+| `body_readers` | 8080 | Buffer + multipart body readers | `KlHttpBufReader`, `KlHttpMultipartReader`, `kl_http_body_reader_multipart` |
 | `async` | 8080 | Async suspend/resume with FD watchers | `KlWatcher`, `KlAsyncOp`, `kl_async_suspend/complete` |
 | `thread_pool` | 8080 | Blocking work on worker threads | `KlThreadPool`, `KlWorkItem`, `work_fn/done_fn/cancel_fn` |
 | `async_thread_pool` | 8080 | Thread pool + async with deadlines | `KlThreadPool` + `KlAsyncOp` together |
-| `websocket_server` | 8080 (configurable) | WebSocket echo server | `kl_server_ws`, `KlWsServerConfig`, `on_message` |
-| `h2_server` | 8080 (configurable) | HTTP/2 server with stub session | `KlH2ServerSession`, pluggable vtable, h2c |
+| `websocket_server` | 8080 (configurable) | WebSocket echo server | `kl_http_server_ws_upgrade`, `KlWsServerConfig`, `on_message` |
+| `h2_server` | 8080 (configurable) | HTTP/2 server with stub session | `KlHttp2ServerSession`, pluggable vtable, h2c |
 
 ### Running Server Examples
 
@@ -87,13 +87,13 @@ websocat ws://localhost:8080/ws
 
 | Example | Requires | Description | Key APIs |
 |---------|----------|-------------|----------|
-| `client` | `hello_server` on :8080 | Sync + async HTTP client | `kl_client_request`, `kl_client_start`, `KlClientResponse` |
-| `streaming_client` | `hello_server` on :8080 | Response + request body streaming | `kl_client_request_s`, `KlClientStreamCfg`, `KlClientBodyFn`, `KlClientReadFn` |
-| `async_client` | `hello_server` on :8080 | Concurrent async requests (fan-out) | `kl_client_start`, `KlEventCtx` standalone loop |
+| `client` | `hello_server` on :8080 | Sync + async HTTP client | `kl_http_client_request`, `kl_http_client_start`, `KlHttpClientResponse` |
+| `streaming_client` | `hello_server` on :8080 | Response + request body streaming | `kl_http_client_request_s`, `KlHttpClientStreamCfg`, `KlHttpClientBodyFn`, `KlHttpClientReadFn` |
+| `async_client` | `hello_server` on :8080 | Concurrent async requests (fan-out) | `kl_http_client_start`, `KlEventCtx` standalone loop |
 | `websocket_client` | `websocket_server` on :8080 | WebSocket echo client | `KlWsClientConn`, `KlWsClientCallbacks` |
-| `h2_client` | — | HTTP/2 client with mock session | `KlH2ClientConn`, `KlH2ClientSession` vtable |
-| `redirect_client` | — (self-contained) | Redirect following: 301, chain, 303 POST→GET | `kl_redirect_request`, `kl_redirect_start`, `KlRedirectConfig` |
-| `proxy_client` | — (self-contained) | HTTP proxy: forwarding + CONNECT tunnel | `KlProxyConfig`, `kl_client_request`, `kl_client_start` |
+| `h2_client` | — | HTTP/2 client with mock session | `KlHttp2ClientConn`, `KlHttp2ClientSession` vtable |
+| `redirect_client` | — (self-contained) | Redirect following: 301, chain, 303 POST→GET | `kl_http_redirect_request`, `kl_http_redirect_start`, `KlHttpRedirectConfig` |
+| `proxy_client` | — (self-contained) | HTTP proxy: forwarding + CONNECT tunnel | `KlHttpProxyConfig`, `kl_http_client_request`, `kl_http_client_start` |
 
 ### Running Client Examples
 
@@ -119,7 +119,7 @@ websocat ws://localhost:8080/ws
 | Example | Description | Key APIs |
 |---------|-------------|----------|
 | `custom_allocator` | Tracking allocator + URL parsing | `KlAllocator` vtable, `kl_url_parse` |
-| `connection_pool` | Connection pool internals | `kl_conn_pool_init`, `kl_conn_acquire/release` |
+| `connection_pool` | Connection pool internals | `kl_http_conn_pool_init`, `kl_http_conn_acquire/release` |
 | `url_parser` | URL parsing (schemes, IPv6, CRLF guard) | `kl_url_parse`, `KlUrl` |
 | `timer` | One-shot + repeating timers, cancellation | `kl_timer_add`, `kl_timer_cancel`, `KlEventCtx` |
 
@@ -140,10 +140,10 @@ make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
 
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
-| `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_response_body_compress`, `KlCompressStream` |
+| `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_http_response_body_compress`, `KlHttpCompressStream` |
 | `decompress_client` | — (self-contained) | Compress → decompress round-trip | `KlDecompressConfig`, `kl_decompress_body`, `KlDecompressStream` |
 
-Set `KlClientConfig.decompress` to automatically decompress gzip responses from servers.
+Set `KlHttpClientConfig.decompress` to automatically decompress gzip responses from servers.
 
 ```bash
 # Self-contained round-trip (no server needed):
@@ -168,7 +168,7 @@ make examples KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
 | `tls_server` | 8443 | HTTPS server | `KlTlsConfig`, `KlTls` vtable, cert/key loading |
-| `tls_client` | — | HTTPS client | `kl_client_request` with TLS, CA skip for self-signed |
+| `tls_client` | — | HTTPS client | `kl_http_client_request` with TLS, CA skip for self-signed |
 
 ```bash
 # Generate self-signed cert:

@@ -12,7 +12,7 @@
  *         emits exactly ONE terminal (no duplicate); ref accounting is LSan-clean.
  *
  * The 7B-8 glue fix (a cancelled armed recv → a context-owned pending terminal the drain surfaces as an
- * ok=0 completion) is what lets the KlDatagram close coordinator retire recv_inflight; KlUdp never calls
+ * ok=0 completion) is what lets the KlDatagram close coordinator retire recv_inflight; the removed UDP object never used
  * cancel_dgram, so its path (raw_udp_test T1-T7) is unchanged.
  */
 
@@ -21,7 +21,6 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
-#include <keel/udp.h>       /* KlUdpConfig — the provider configure() arg */
 
 #include "keel_lwip_raw.h"  /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"  /* T3 drives the glue directly (kl_lwr_udp_* / kl_lwr_ctx_*) */
@@ -33,11 +32,10 @@
 /* KlDgramLife API (forward-declared to drive the glue directly, as raw_udp_test does; resolves against
  * libkeel's datagram_life.o without pulling the internal src/ header). */
 typedef struct KlDgramLife KlDgramLife;
-typedef enum { KL_DGRAM_OWNER_UDP = 0, KL_DGRAM_OWNER_DATAGRAM } KlDgramOwnerKind;
 struct KlCompletionEvent;
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
-                                  KlDgramOwnerKind kind, KlDgramDispatchFn dispatch);
+                                  KlDgramDispatchFn dispatch);
 void         kl_dgram_life_release(KlDgramLife *l);
 
 static int fail(const char *msg) { printf("7B-8 FAIL: %s\n", msg); return 1; }
@@ -66,7 +64,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, int do_bind, uint16_t 
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     if (sp && sp->dgram && sp->dgram->configure) (void)sp->dgram->configure(sp->context, fd, AF_INET, &ucfg);
     if (do_bind) {
         KlSockAddr b; kl_sockaddr_parse(&b, "127.0.0.1", 0);
@@ -144,7 +142,7 @@ static int t3_glue_cancel_semantics(void) {
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     void *rx = kl_lwr_udp_new();
     if (!rx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 bind"); }
-    KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, (KlDgramDispatchFn)0);
     if (!l) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 token"); }
 
     int rc = 0;
@@ -196,7 +194,7 @@ static int t4_saturation_reuse(void) {
         void *p = kl_lwr_udp_new();
         if (!p) break;                          /* slot table full */
         if (n >= 16) { rc = fail("T4 slot count > 16"); break; }
-        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, (KlDgramDispatchFn)0);
         if (!l || kl_lwr_udp_bind(p, lo, 0) != 0 || kl_lwr_udp_post_recv(lwrctx, p, l) != 0) {
             kl_dgram_life_release(l); kl_lwr_udp_close(lwrctx, p); rc = fail("T4 arm"); break;
         }

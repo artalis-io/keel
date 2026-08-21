@@ -18,8 +18,8 @@
  */
 #include "utest.h"
 #include <keel/keel.h>
-#include <keel/client.h>
-#include <keel/h2_client.h>
+#include <keel/http_client.h>
+#include <keel/http2_client.h>
 #include <keel/websocket_client.h>
 #include <keel/tls.h>
 #include "net_compat.h"
@@ -124,22 +124,22 @@ UTEST(tls_hostname_fail, sync_client_aborts)
 
     KlAllocator a = kl_allocator_default();
     KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
-    KlClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
+    KlHttpClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
 
     char url[128];
     make_url(url, sizeof(url), "https", l.port, "/");
 
     mock_tls_set_hostname_fail = 1;   /* set_hostname() returns -1 */
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
-    int rc = kl_client_request(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &resp);
+    int rc = kl_http_client_request(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &resp);
     mock_tls_set_hostname_fail = 0;
 
     /* Must fail — never a successful handshake / 200 (which the listener would
      * otherwise deliver over the passthrough TLS). */
     ASSERT_EQ(rc, -1);
     ASSERT_NE(resp.status, 200);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
     listener_stop(&l);
 }
@@ -148,11 +148,11 @@ UTEST(tls_hostname_fail, sync_client_aborts)
 
 typedef struct { int done; int error; int status; } AsyncCtx;
 
-static void async_on_done(KlClient *client, void *ud)
+static void async_on_done(KlHttpClient *client, void *ud)
 {
     AsyncCtx *c = ud;
-    c->error = kl_client_error(client);
-    const KlClientResponse *r = kl_client_response(client);
+    c->error = kl_http_client_error(client);
+    const KlHttpClientResponse *r = kl_http_client_response(client);
     c->status = (c->error == 0 && r) ? r->status : -1;
     c->done = 1;
 }
@@ -168,14 +168,14 @@ UTEST(tls_hostname_fail, async_client_aborts)
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
 
     KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
-    KlClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
+    KlHttpClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
 
     char url[128];
     make_url(url, sizeof(url), "https", l.port, "/");
 
     AsyncCtx ctx = {0};
     mock_tls_set_hostname_fail = 1;
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
                                   async_on_done, &ctx);
     ASSERT_TRUE(c != NULL);
 
@@ -187,7 +187,7 @@ UTEST(tls_hostname_fail, async_client_aborts)
     ASSERT_NE(ctx.error, 0);     /* connection aborted */
     ASSERT_NE(ctx.status, 200);  /* never the 200 the listener would deliver */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     listener_stop(&l);
 }
@@ -206,14 +206,14 @@ UTEST(tls_hostname_fail, async_control_succeeds_when_hostname_ok)
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
 
     KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
-    KlClientConfig cfg = { .timeout_ms = 2000, .tls = &tls_cfg };
+    KlHttpClientConfig cfg = { .timeout_ms = 2000, .tls = &tls_cfg };
 
     char url[128];
     make_url(url, sizeof(url), "https", l.port, "/");
 
     AsyncCtx ctx = {0};
     mock_tls_set_hostname_fail = 0;   /* succeeds */
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
                                   async_on_done, &ctx);
     ASSERT_TRUE(c != NULL);
 
@@ -224,7 +224,7 @@ UTEST(tls_hostname_fail, async_control_succeeds_when_hostname_ok)
     ASSERT_EQ(ctx.error, 0);      /* got past TLS + a full response */
     ASSERT_EQ(ctx.status, 200);
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     listener_stop(&l);
 }
@@ -232,20 +232,20 @@ UTEST(tls_hostname_fail, async_control_succeeds_when_hostname_ok)
 /* ── HTTP/2 client ─────────────────────────────────────────────────── */
 
 /* Minimal H2 session factory (never reached when set_hostname fails). */
-typedef struct { KlH2ClientSession b; KlAllocator *a; } H2Sess;
+typedef struct { KlHttp2ClientSession b; KlAllocator *a; } H2Sess;
 
-static int   h2s_recv(KlH2ClientSession *s, const char *d, size_t n) { (void)s; (void)d; (void)n; return 0; }
-static int32_t h2s_submit(KlH2ClientSession *s, const char *m, const char *p, const char *au,
-                          const KlH2ClientHeader *h, int n, const char *b, size_t bl)
+static int   h2s_recv(KlHttp2ClientSession *s, const char *d, size_t n) { (void)s; (void)d; (void)n; return 0; }
+static int32_t h2s_submit(KlHttp2ClientSession *s, const char *m, const char *p, const char *au,
+                          const KlHttp2ClientHeader *h, int n, const char *b, size_t bl)
 { (void)s; (void)m; (void)p; (void)au; (void)h; (void)n; (void)b; (void)bl; return 1; }
-static int   h2s_flush(KlH2ClientSession *s) { (void)s; return 0; }
-static void  h2s_destroy(KlH2ClientSession *s)
+static int   h2s_flush(KlHttp2ClientSession *s) { (void)s; return 0; }
+static void  h2s_destroy(KlHttp2ClientSession *s)
 {
     H2Sess *hs = (H2Sess *)s;
     kl_free(hs->a, hs, sizeof(*hs));
 }
 
-static KlH2ClientSession *h2_factory(KlAllocator *alloc)
+static KlHttp2ClientSession *h2_factory(KlAllocator *alloc)
 {
     H2Sess *s = kl_malloc(alloc, sizeof(*s));
     if (!s) return NULL;
@@ -259,7 +259,7 @@ static KlH2ClientSession *h2_factory(KlAllocator *alloc)
 }
 
 typedef struct { int errored; } H2Ctx;
-static void h2_on_error(KlH2ClientConn *c, const char *msg, void *ud)
+static void h2_on_error(KlHttp2ClientConn *c, const char *msg, void *ud)
 {
     (void)c; (void)msg;
     ((H2Ctx *)ud)->errored = 1;
@@ -275,14 +275,14 @@ UTEST(tls_hostname_fail, h2_client_aborts)
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
 
     KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
-    KlH2ClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg, .session = h2_factory };
+    KlHttp2ClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg, .session = h2_factory };
 
     char url[128];
     make_url(url, sizeof(url), "https", l.port, "/");
 
     H2Ctx ctx = {0};
     mock_tls_set_hostname_fail = 1;
-    KlH2ClientConn *c = kl_h2_client_connect(&ev, &a, &cfg, url, h2_on_error, &ctx);
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &a, &cfg, url, h2_on_error, &ctx);
     /* connect returns a handle; the abort surfaces via on_error during the loop. */
     for (int i = 0; i < 500 && !ctx.errored; i++)
         kl_event_ctx_run(&ev, 16, 10);
@@ -290,7 +290,7 @@ UTEST(tls_hostname_fail, h2_client_aborts)
 
     ASSERT_TRUE(ctx.errored);   /* connection aborted (fail closed) */
 
-    if (c) kl_h2_client_free(c);
+    if (c) kl_http2_client_free(c);
     kl_event_ctx_free(&ev);
     listener_stop(&l);
 }

@@ -61,7 +61,7 @@ mdir -i "$ESP" ::/EFI/BOOT/
 
 # ---- 4. host HTTP responder ----
 mkdir -p wwwroot
-printf 'U-3 KlClient responder OK\n' > wwwroot/index.html
+printf 'U-3 KlHttpClient responder OK\n' > wwwroot/index.html
 ( cd wwwroot && python3 -m http.server "$TARGET_PORT" --bind 0.0.0.0 ) >/tmp/httpd_u3.log 2>&1 &
 HTTPD_PID=$!
 sleep 1

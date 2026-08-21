@@ -1,8 +1,8 @@
 /*
  * tls_client.c — HTTPS client using mbedTLS backend
  *
- * Concepts: kl_client_request with TLS, kl_tls_mbedtls_client_ctx_create,
- * KlClientConfig.tls, HTTPS GET.
+ * Concepts: kl_http_client_request with TLS, kl_tls_mbedtls_client_ctx_create,
+ * KlHttpClientConfig.tls, HTTPS GET.
  *
  * Build:  make examples KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
  * Run:    ./examples/tls_client [url]
@@ -34,14 +34,14 @@ int main(int argc, char **argv) {
         .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
     };
 
-    KlClientConfig cfg = {
+    KlHttpClientConfig cfg = {
         .timeout_ms = 5000,
         .tls        = &tls_cfg,
     };
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
     printf("HTTPS GET %s\n", url);
-    int rc = kl_client_request(&alloc, &cfg, "GET", url,
+    int rc = kl_http_client_request(&alloc, &cfg, "GET", url,
                                 NULL, 0, NULL, 0, &resp);
     if (rc < 0) {
         fprintf(stderr, "request failed\n");
@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
     printf("  status: %d\n", resp.status);
     printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     kl_tls_mbedtls_ctx_destroy(tls_ctx);
     return 0;
 }

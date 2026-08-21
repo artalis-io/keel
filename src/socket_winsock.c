@@ -231,7 +231,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     WSABUF *bufs = stackbufs;
     if (iovcnt > (int)(sizeof(stackbufs) / sizeof(stackbufs[0]))) {
         /* Only the response header+body vectors reach here (<= a few, capped at
-         * iov[7] by response.c). Fail loud rather than silently dropping the
+         * iov[7] by http_response.c). Fail loud rather than silently dropping the
          * overflow vectors, which would truncate/corrupt the payload. */
         errno = EINVAL;
         return -1;
@@ -452,6 +452,11 @@ KlIoStatus kl_sockdef_io_status(void) {
             return KL_IO_CLOSED;
         case ECONNRESET:
             return KL_IO_RESET;
+        case EOPNOTSUPP:
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+        case ENOTSUP:
+#endif
+            return KL_IO_UNSUPPORTED;   /* datagram M5.1: e.g. UDP GSO unavailable → caller falls back */
         default:
             return KL_IO_FATAL;
     }

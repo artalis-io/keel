@@ -6,7 +6,7 @@
  * drives it ~20 times via kl_event_ctx_run (each run = one lwIP mainloop tick), and frees
  * cleanly. Prints "P9-1 PASS".
  *
- * P9-2 (retained): a RAW-BACKED KlServer answers GET / over loopback. A real KlServer is
+ * P9-2 (retained): a RAW-BACKED KlHttpServer answers GET / over loopback. A real KlHttpServer is
  * pinned to the lwIP-raw completion backend + its overlapped socket provider; the connection
  * state machine runs over the tcp_accept/tcp_recv/tcp_sent callbacks surfaced as
  * KL_COMP_ACCEPT/READ/WRITE. A raw-API test client (in the glue, like raw_loopback_spike.c)
@@ -18,12 +18,12 @@
  *              until it has the full Content-Length, then asserts body length + an additive
  *              checksum + first/last byte match. This spans many tcp_sent rounds and hits
  *              tcp_sndbuf-full (ERR_MEM) backpressure, resumed on tcp_sent. → "P9-3 PASS (buffered)"
- *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_response_file
+ *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_http_response_file
  *              (FILE mode → kl_comp_post_sendfile → the glue preads it into the send buffer +
  *              reuses the send-pump). Client verifies the whole file body. → "P9-3 PASS (file)"
  *
  * SINGLE-THREADED lwIP discipline: NO_SYS=1 raw lwIP is not thread-safe and must run on ONE
- * thread. kl_server_run() blocks, so the server runs on a pthread that owns the lwIP tick —
+ * thread. kl_http_server_run() blocks, so the server runs on a pthread that owns the lwIP tick —
  * and EVERY lwIP-touching client call (start + response poll) is scheduled onto THAT thread
  * via KEEL timers (kl_timer_add fires on the loop thread). The main thread only waits. So all
  * tcp_* calls (server + client) execute on the single tick thread; no lwIP data race.
@@ -102,13 +102,13 @@ static size_t pattern_checksum(size_t len) {
 #define P9_2_REQUEST    "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 #define P9_2_BODY       "{\"ok\":true}"
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 static atomic_int g_done;       /* client saw "200" */
 static atomic_int g_srv_stop;   /* stop signal for the server thread */
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
+    kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
 
 /* Fired on the tick thread once the server is bound + listening: start the raw client. */
@@ -120,12 +120,12 @@ static void start_client_cb(void *ud) {
 
 /* Repeating check (tick thread): has the client captured a "200" response yet? */
 static void poll_client_cb(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
     char buf[1024];
     size_t n = kl_lwr_client_response(buf, sizeof(buf));
     if (n > 0 && strstr(buf, "200") && strstr(buf, P9_2_BODY)) {
         atomic_store(&g_done, 1);
-        kl_server_stop(s);
+        kl_http_server_stop(s);
         return;
     }
     if (atomic_load(&g_srv_stop)) return;   /* timed out — stop re-arming */
@@ -135,11 +135,11 @@ static void poll_client_cb(void *ud) {
 static void *server_thread(void *arg) {
     (void)arg;
     /* Schedule the client start + response polling onto THIS (tick) thread. The timers fire
-     * from kl_server_run's completion loop, so all lwIP raw calls stay single-threaded.
+     * from kl_http_server_run's completion loop, so all lwIP raw calls stay single-threaded.
      * Start slightly after the loop begins ticking so the listener is primed. */
     kl_timer_add(&g_srv.ev, 20, start_client_cb, NULL);
     kl_timer_add(&g_srv.ev, 40, poll_client_cb, &g_srv);
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -147,18 +147,18 @@ static int run_p9_2(void) {
     /* RC-3: inject the lwip-raw completion backend at runtime on a STOCK libkeel. Setting
      * only event_provider lets the server auto-wire the paired overlapped socket provider
      * from the loop's native_provider() (kl_socket_provider_lwip_raw). */
-    KlConfig cfg = { .port = P9_2_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = P9_2_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };
-    if (kl_server_init(&g_srv, &cfg) != 0) {
-        printf("P9-2 FAIL: kl_server_init (err=%d)\n", g_srv.last_error);
+    if (kl_http_server_init(&g_srv, &cfg) != 0) {
+        printf("P9-2 FAIL: kl_http_server_init (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_root, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_root, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         printf("P9-2 FAIL: pthread_create\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -169,15 +169,15 @@ static int run_p9_2(void) {
     }
     if (!atomic_load(&g_done)) {
         atomic_store(&g_srv_stop, 1);
-        kl_server_stop(&g_srv);
+        kl_http_server_stop(&g_srv);
     }
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!atomic_load(&g_done)) {
         char buf[1024];
         size_t n = kl_lwr_client_response(buf, sizeof(buf));
-        printf("P9-2 FAIL: raw-backed KlServer did not answer GET / with 200 over loopback"
+        printf("P9-2 FAIL: raw-backed KlHttpServer did not answer GET / with 200 over loopback"
                " (client got %zu bytes: \"%s\")\n", n, buf);
         return 1;
     }
@@ -195,8 +195,8 @@ static int run_p9_2(void) {
 #define P9_3_REQ_FILE       "GET /file HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 #define P9_3_CLI_CAP        (P9_3_BODY_LEN + 4096u)   /* body + headers headroom */
 
-static KlServer g_srv3;
-/* Two cases run inside ONE kl_server_run (a single lwIP-raw loop can't be re-run cleanly,
+static KlHttpServer g_srv3;
+/* Two cases run inside ONE kl_http_server_run (a single lwIP-raw loop can't be re-run cleanly,
  * and the glue's listen pcb + test client are process singletons). A small state machine
  * in the poll callback drives: buffered → file → done. */
 enum { P3_BUFFERED = 0, P3_FILE = 1, P3_DONE = 2 };
@@ -207,26 +207,26 @@ static atomic_int g_p3_finished;/* both cases resolved (pass or fail) */
 
 static char g_file_path[256];   /* temp file path for the /file route (created in main) */
 
-static void handle_big(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    /* Build the 64 KB body on the stack; kl_response_body_copy takes an owned copy. */
+    /* Build the 64 KB body on the stack; kl_http_response_body_copy takes an owned copy. */
     static unsigned char body[P9_3_BODY_LEN];   /* static: 64 KB is large for a stack frame */
     fill_pattern(body, sizeof(body));
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_copy(res, (const char *)body, sizeof(body));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_copy(res, (const char *)body, sizeof(body));
 }
 
-static void handle_file(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     int fd = open(g_file_path, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     off_t sz = (off_t)P9_3_BODY_LEN;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
     /* FILE mode → the completion driver posts kl_comp_post_sendfile. The response layer
-     * OWNS closing fd (kl_response_reset/free) — we do NOT close it here. */
-    kl_response_file(res, fd, sz);
+     * OWNS closing fd (kl_http_response_reset/free) — we do NOT close it here. */
+    kl_http_response_file(res, fd, sz);
 }
 
 /* Verify the accumulated response body against the known pattern. Runs on the tick thread. */
@@ -258,7 +258,7 @@ static void p3_start_stage(void) {
 static int g_p3_awaiting_close;   /* /big passed; waiting for its conn to fully close before /file */
 
 static void p3_poll_cb(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
 
     /* Between the two cases: the accumulating client is a single-slot peer, so /file must not
      * open until the /big connection is FULLY closed (server FIN seen) — otherwise the two
@@ -284,13 +284,13 @@ static void p3_poll_cb(void *ud) {
             g_p3_awaiting_close = 1;          /* wait for /big to close, then start /file */
         } else {
             atomic_store(&g_p3_finished, 1);
-            kl_server_stop(s);
+            kl_http_server_stop(s);
             return;
         }
     } else if (v < 0) {
         atomic_store(&g_p3_fail, 1);
         atomic_store(&g_p3_finished, 1);
-        kl_server_stop(s);
+        kl_http_server_stop(s);
         return;
     }
     if (atomic_load(&g_p3_finished)) return;
@@ -306,7 +306,7 @@ static void *p3_server_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_srv3.ev, 20, p3_start_cb, NULL);
     kl_timer_add(&g_srv3.ev, 40, p3_poll_cb, &g_srv3);
-    kl_server_run(&g_srv3);
+    kl_http_server_run(&g_srv3);
     return NULL;
 }
 
@@ -334,15 +334,15 @@ static int run_p9_3(void) {
         return 1;
     }
 
-    KlConfig cfg = { .port = P9_3_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = P9_3_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
-    if (kl_server_init(&g_srv3, &cfg) != 0) {
-        printf("P9-3 FAIL: kl_server_init (err=%d)\n", g_srv3.last_error);
+    if (kl_http_server_init(&g_srv3, &cfg) != 0) {
+        printf("P9-3 FAIL: kl_http_server_init (err=%d)\n", g_srv3.last_error);
         unlink(g_file_path);
         return 1;
     }
-    kl_server_route(&g_srv3, "GET", "/big",  handle_big,  NULL, NULL);
-    kl_server_route(&g_srv3, "GET", "/file", handle_file, NULL, NULL);
+    kl_http_server_route(&g_srv3, "GET", "/big",  handle_big,  NULL, NULL);
+    kl_http_server_route(&g_srv3, "GET", "/file", handle_file, NULL, NULL);
 
     atomic_store(&g_p3_stage, P3_BUFFERED);
     atomic_store(&g_p3_pass, 0);
@@ -352,7 +352,7 @@ static int run_p9_3(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, p3_server_thread, NULL) != 0) {
         printf("P9-3 FAIL: pthread_create\n");
-        kl_server_free(&g_srv3);
+        kl_http_server_free(&g_srv3);
         unlink(g_file_path);
         return 1;
     }
@@ -363,11 +363,11 @@ static int run_p9_3(void) {
     }
     if (!atomic_load(&g_p3_finished)) {
         atomic_store(&g_p3_finished, 1);
-        kl_server_stop(&g_srv3);
+        kl_http_server_stop(&g_srv3);
     }
     pthread_join(th, NULL);
 
-    kl_server_free(&g_srv3);
+    kl_http_server_free(&g_srv3);
     kl_lwr_client_release();
     unlink(g_file_path);
 
@@ -401,7 +401,7 @@ static int run_p9_3(void) {
 }
 
 /* ── P9-4 — close / cancel / idle-timeout LIFETIME + MEMORY SAFETY ──────────────
- * All four cases run inside ONE kl_server_run over ONE lwIP-raw loop (a raw NO_SYS=1 loop +
+ * All four cases run inside ONE kl_http_server_run over ONE lwIP-raw loop (a raw NO_SYS=1 loop +
  * the glue's listen pcb + test client are process singletons — like P9-3). A state machine in
  * the poll callback drives them sequentially on the tick thread. Cases:
  *   C1 many-short-lived  — N (>> 8) sequential open/serve/close roundtrips to GET / : all get
@@ -424,7 +424,7 @@ static int run_p9_3(void) {
 #define P9_4_PARTIAL_READ   2048u         /* bytes the partial-read client takes before tearing down */
 #define P9_4_CLI_CAP        (P9_3_BODY_LEN + 4096u)
 
-static KlServer g_srv4;
+static KlHttpServer g_srv4;
 enum { P4_MANY = 0, P4_CWO = 1, P4_RST = 2, P4_IDLE = 3, P4_DONE = 4 };
 static atomic_int g_p4_stage;
 static atomic_int g_p4_pass;            /* bitmask of passed cases */
@@ -432,17 +432,17 @@ static atomic_int g_p4_fail;
 static atomic_int g_p4_finished;
 static int        g_p4_many_started;    /* how many roundtrips in C1 have been kicked */
 
-static void handle4_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle4_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
+    kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
-static void handle4_big(KlRequest *req, KlResponse *res, void *ud) {
+static void handle4_big(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     static unsigned char body[P9_3_BODY_LEN];
     fill_pattern(body, sizeof(body));
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_copy(res, (const char *)body, sizeof(body));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_copy(res, (const char *)body, sizeof(body));
 }
 
 static const uint8_t g_lo4[4] = { 127, 0, 0, 1 };
@@ -453,7 +453,7 @@ static void p4_pass(int stage, const char *name) {
 }
 
 static void p4_poll_cb(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
     int stage = atomic_load(&g_p4_stage);
 
     if (stage == P4_MANY) {
@@ -509,7 +509,7 @@ static void p4_poll_cb(void *ud) {
             p4_pass(P4_IDLE, "idle-timeout/kl_comp_cancel");
             atomic_store(&g_p4_stage, P4_DONE);
             atomic_store(&g_p4_finished, 1);
-            kl_server_stop(s);
+            kl_http_server_stop(s);
             return;
         }
     }
@@ -519,27 +519,27 @@ static void p4_poll_cb(void *ud) {
     return;
 stop:
     atomic_store(&g_p4_finished, 1);
-    kl_server_stop(s);
+    kl_http_server_stop(s);
 }
 
 static void *p4_server_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_srv4.ev, 40, p4_poll_cb, &g_srv4);
-    kl_server_run(&g_srv4);
+    kl_http_server_run(&g_srv4);
     return NULL;
 }
 
 static int run_p9_4(void) {
     /* Short read timeout so the idle-timeout case (C4) fires quickly. */
-    KlConfig cfg = { .port = P9_4_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = P9_4_PORT, .bind_addr = "127.0.0.1",
                      .read_timeout_ms = 200,
                      .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
-    if (kl_server_init(&g_srv4, &cfg) != 0) {
-        printf("P9-4 FAIL: kl_server_init (err=%d)\n", g_srv4.last_error);
+    if (kl_http_server_init(&g_srv4, &cfg) != 0) {
+        printf("P9-4 FAIL: kl_http_server_init (err=%d)\n", g_srv4.last_error);
         return 1;
     }
-    kl_server_route(&g_srv4, "GET", "/",    handle4_root, NULL, NULL);
-    kl_server_route(&g_srv4, "GET", "/big", handle4_big,  NULL, NULL);
+    kl_http_server_route(&g_srv4, "GET", "/",    handle4_root, NULL, NULL);
+    kl_http_server_route(&g_srv4, "GET", "/big", handle4_big,  NULL, NULL);
 
     atomic_store(&g_p4_stage, P4_MANY);
     atomic_store(&g_p4_pass, 0);
@@ -550,7 +550,7 @@ static int run_p9_4(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, p4_server_thread, NULL) != 0) {
         printf("P9-4 FAIL: pthread_create\n");
-        kl_server_free(&g_srv4);
+        kl_http_server_free(&g_srv4);
         return 1;
     }
     /* Watchdog: ~30s for all four cases (many-conns dominates). */
@@ -560,10 +560,10 @@ static int run_p9_4(void) {
     }
     if (!atomic_load(&g_p4_finished)) {
         atomic_store(&g_p4_finished, 1);
-        kl_server_stop(&g_srv4);
+        kl_http_server_stop(&g_srv4);
     }
     pthread_join(th, NULL);
-    kl_server_free(&g_srv4);
+    kl_http_server_free(&g_srv4);
 
     int pass = atomic_load(&g_p4_pass);
     int all = (1 << P4_MANY) | (1 << P4_CWO) | (1 << P4_RST) | (1 << P4_IDLE);

@@ -110,7 +110,7 @@ static void close_run_terminal(KlDgramClose *c) {
      * (cancel_recv) and the fd is closed; for EFI closing the child is also what CLASSIFIES the ops.
      * The busy/detaching handshake makes a synchronous recv retirement inside these hooks re-enter
      * safely (deferred to this frame). */
-    if (!c->backend_retired && close_send_drained(c)) {
+    if (!c->backend_retired && (close_send_drained(c) || c->abandon)) {
         c->backend_retired = 1;
         if (c->recv && kl_dgram_recv_inflight(c->recv) &&
             c->cancel_recv && !c->recv_cancel_requested) {
@@ -120,10 +120,18 @@ static void close_run_terminal(KlDgramClose *c) {
         if (c->backend_close) c->backend_close(c->backend_ctx);   /* close fd exactly once */
     }
     /* Machine-level gate (no op physically outstanding), THEN classify the outcome. A classifier
-     * still reporting PENDING yields NONE → stay CLOSING; the next retirement re-runs this. */
+     * still reporting PENDING yields NONE → stay CLOSING; the next retirement re-runs this.
+     * OWNER-DESTRUCTION (abandon, §4a): FORCE the terminal even with an in-flight op — the op is
+     * harmless (recv buffer is life-token-owned + outlives; send payload is a backend-owned copy) and the
+     * token is marked dead in the terminal so late completions drop. Honour the classifier for QUARANTINE
+     * (the op's ref stays retained / pinned); a still-PENDING op is abandoned as DETACHED. */
     KlDatagramCloseResult res = KL_DGRAM_CLOSE_NONE;
-    if (close_fully_retired(c))
+    if (c->abandon) {
         res = close_join_result(c);
+        if (res == KL_DGRAM_CLOSE_NONE) res = KL_DGRAM_DETACHED;
+    } else if (close_fully_retired(c)) {
+        res = close_join_result(c);
+    }
     c->detaching = 0;
     if (res != KL_DGRAM_CLOSE_NONE) close_detach(c, res);   /* destructive tail */
 }
@@ -138,6 +146,15 @@ static void close_activity(void *ctx, int delta) {
     if (delta > 0) close_enter(c);
     else           close_leave(c);
 }
+
+/* Public frame bracket for a caller (the readiness dispatch) that runs send/recv ops AND then touches the
+ * owning handle afterwards: holding the frame keeps `busy > 0` for the whole dispatch, so a teardown
+ * requested from within a delivery callback defers its terminal to `kl_dgram_close_release` — the LAST
+ * action — instead of firing inside the inner recv/send leave (which would free the handle mid-dispatch).
+ * `release` may run the terminal (and, for an abandon, free the object), so it must be the caller's last
+ * touch of any state reachable through this close machine. */
+void kl_dgram_close_hold(KlDgramClose *c)    { if (c) close_enter(c); }
+void kl_dgram_close_release(KlDgramClose *c) { if (c) close_leave(c); }
 
 int kl_dgram_close_init(KlDgramClose *c, KlDgramSend *send, KlDgramRecv *recv,
                         KlDgramCloseFn on_close, void *close_ctx) {
@@ -199,6 +216,18 @@ static int close_common(KlDgramClose *c, int abort) {
 
 int kl_dgram_close_begin(KlDgramClose *c)  { return close_common(c, /*abort=*/0); }
 int kl_dgram_close_cancel(KlDgramClose *c) { return close_common(c, /*abort=*/1); }
+
+/* Owner-destruction abandon (see datagram_close.h §4a). Arms the `abandon` flag, then requests the
+ * terminal through close_common — reusing the busy handshake so the forced (silent) terminal fires
+ * immediately if no frame is active, or is DEFERRED to the outermost leave if invoked from within a
+ * delivery frame. No machine state is freed here (the terminal's destructive-tail reclaim does that at
+ * the safe point). */
+int kl_dgram_close_abandon(KlDgramClose *c) {
+    if (!c) return -1;
+    if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already terminal — idempotent */
+    c->abandon = 1;
+    return close_common(c, /*abort=*/1);   /* stop/cancel/discard, then close_leave → (deferred) terminal */
+}
 
 /* Backend-drain PROGRESS hook (§4.3): re-run the terminal logic when a PENDING op's retirement may
  * have resolved out-of-band. Uses the busy handshake so it composes with any in-flight frame (a

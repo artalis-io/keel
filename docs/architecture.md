@@ -1,12 +1,80 @@
 # KEEL — Architecture
 
-Deep technical documentation of KEEL's internal design.
+The current-state entry point to KEEL's design. Start with the three-axis model below; the rest of
+this document is the HTTP-server internals reference (state machines, memory model, zero-copy, TLS).
+The *rules* those internals must preserve are in
+[architecture_invariants.md](architecture_invariants.md); the dated verification history is in
+[audits/README.md](audits/README.md); the consolidation plan is
+[keel_improvement_roadmap.md](keel_improvement_roadmap.md).
+
+## Architecture at a glance — Transport / Engine / Provider
+
+KEEL's networking is three **orthogonal, independently replaceable axes**. Protocols sit above all
+three and touch no platform socket API or event engine directly.
+
+```text
+        application  →  protocols (HTTP/1.1, HTTP/2, WebSocket, SSE, DNS, TLS-above-stream)
+                            │
+                            ▼
+   Transport   KlListener        KlStream          KlDatagram        ← semantic contracts (Tier-1)
+   (semantics) (accept path)     (raw byte stream) (bounded message)
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                            ▼
+   Engine     readiness  |  completion     Provider   POSIX | Winsock | lwIP | EFI
+   (model)    epoll/kqueue/  io_uring/      (stack)    sockets        raw    EFI_*
+              WSAPoll/poll   IOCP/pollcomp
+```
+
+- **Transport axis** — the three **Tier-1 semantic primitives**, each a `STABLE` public API whose
+  *function + ownership contract* is committed and whose struct layout is opt-in/unstable
+  (`*_detail.h`):
+  - [`KlListener`](../include/keel/listener.h) — accept-path state machine (credit reservation,
+    lease handoff, confirmed-detachment close). Contract: [transport_surface.md](transport_surface.md).
+  - [`KlStream`](../include/keel/stream.h) — raw byte transport (bounded write queue, strict
+    read pause/resume, graceful/abortive close). Contract: [stream_contract.md](stream_contract.md).
+  - [`KlDatagram`](../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
+    message boundaries, source/local metadata). Contract: [datagram_contract.md](datagram_contract.md).
+    `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast) —
+    which API to use, and how their semantics intentionally differ (slot-budget vs byte-budget), is
+    [datagram_vs_udp.md](datagram_vs_udp.md).
+- **Engine axis** — readiness ([event.h](../include/keel/event.h): register interest → wait →
+  re-arm) and completion ([completion.h](../src/completion.h): submit owned op → track → retire) are
+  *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)). The **production**
+  backends preserve their native model (epoll/kqueue/WSAPoll/poll are readiness; io_uring/IOCP are
+  completion) — neither is emulated in terms of the other. The sole deliberate exception is
+  **pollcomp**, a portable *test double* that implements the completion contract over `poll()` so the
+  completion driver can run under ASan on any POSIX host; it is a CI/testing backend, not a
+  production one. Details: [event_provider_design.md](event_provider_design.md).
+- **Provider axis** — the network stack behind [socket.h](../src/socket.h)
+  (`KlSocketProvider`): POSIX [socket_posix.c](../src/socket_posix.c), Winsock, and the
+  `integrations/` adapters (lwIP, EFI). Providers are transport-mechanical — no protocol knowledge.
+
+**Dependency direction (one way).** New protocols depend *downward* only:
+`protocol → Tier-1 transport → driver/adapter → engine + provider`. A protocol TU reaches the
+network through `KlListener`/`KlStream`/`KlDatagram` and the socket/event abstractions — never by
+including a platform networking/event header or the raw completion seam, and never by calling an
+engine directly. A lower seam is used only when a missing semantic is documented and reviewed. This
+is invariant I10, enforced by `make check-tier1-boundary` (the complement of `check-sockaddr-neutral`).
+The gate is **default-deny**: every `src`/`parsers` TU is governed except an allowlisted `TIER1_INFRA`
+layer (event backends, socket providers, platform glue, the completion driver/adapters, the transport
+machines, and the run-loop/async-connect drivers `http_server.c` / `http_client_async.c`) — so a newly added
+protocol TU is covered automatically, and only infrastructure may include a backend header.
+
+Every combination's runtime status is the compatibility matrix in
+[capability_matrix.md](capability_matrix.md) and the axis audit's matrix in
+[keel_axis_audit.md](keel_axis_audit.md). The invariants that keep the axes separate — and keep
+completion lifetimes safe — are enumerated in [architecture_invariants.md](architecture_invariants.md).
+
+> The diagrams and sections below predate the three-axis vocabulary and describe the **HTTP server
+> data path** specifically (readiness/POSIX). They remain accurate for that path; read them as the
+> protocol-layer detail beneath the Transport axis.
 
 ## System Overview
 
 ```
   ┌────────────────────────── Server Side ──────────────────────────────────┐
-  │                           KlServer                                      │
+  │                           KlHttpServer                                      │
   │  ┌──────────────────────────────────────────────────────┐              │
   │  │                KlEventCtx (s.ev)                      │              │
   │  │  ┌──────────┐   ┌──────────┐   ┌──────────────┐     │              │
@@ -36,13 +104,13 @@ Deep technical documentation of KEEL's internal design.
 
   ┌───────────── Client Side (standalone or embedded) ─────────────────────┐
   │                                                                         │
-  │  KlClient (async)          kl_client_request (sync, blocking)          │
+  │  KlHttpClient (async)          kl_http_client_request (sync, blocking)          │
   │  ┌──────────────────┐     ┌────────────────────────────────┐          │
   │  │ KlEventCtx *     │     │ socket → connect → send →     │          │
   │  │ state machine:   │     │ recv → parse → return          │          │
   │  │  CONNECTING →    │     └────────────────────────────────┘          │
   │  │  TLS_HANDSHAKE → │                                                  │
-  │  │  SENDING →       │     KlResponseParser (llhttp vtable)            │
+  │  │  SENDING →       │     KlHttp1ResponseParser (llhttp vtable)            │
   │  │  RECEIVING →     │     KlUrl (URL parser, CRLF guard)              │
   │  │  DONE            │                                                  │
   │  └──────────────────┘                                                  │
@@ -51,11 +119,11 @@ Deep technical documentation of KEEL's internal design.
 
 **Server request flow**: socket → event loop (readiness) → connection (read) → **TLS decrypt** → request parser (headers) → router (match) → body reader (data) → handler → response (send) → **TLS encrypt** → socket
 
-**Client request flow**: `kl_url_parse` → socket (non-blocking connect) → **TLS handshake** → send request → receive response → response parser → `KlClientResponse`
+**Client request flow**: `kl_url_parse` → socket (non-blocking connect) → **TLS handshake** → send request → receive response → response parser → `KlHttpClientResponse`
 
 ### KlEventCtx — Composable Event Context
 
-`KlEventCtx` contains the event loop, allocator, and watcher list. It is embedded in `KlServer` via `s.ev`, but can also be used standalone — the async HTTP client and thread pool only need `KlEventCtx`, not a full server. This enables client-only programs that share the same event loop.
+`KlEventCtx` contains the event loop, allocator, and watcher list. It is embedded in `KlHttpServer` via `s.ev`, but can also be used standalone — the async HTTP client and thread pool only need `KlEventCtx`, not a full server. This enables client-only programs that share the same event loop.
 
 ## Event Loop Abstraction
 
@@ -126,11 +194,11 @@ The server processes up to `KL_EVENTS_PER_TICK` (64) events per `kl_event_wait` 
 
 **State transitions in detail:**
 
-- **READING → READING_BODY**: Parser returns `KL_PARSE_HEADERS_OK`. Route is matched. If the route has a body reader factory and the request has a body (Content-Length > 0 or chunked), the factory is called to create a reader. Any remaining data in the read buffer is fed to the body reader immediately.
+- **READING → READING_BODY**: Parser returns `KL_HTTP1_PARSE_HEADERS_OK`. Route is matched. If the route has a body reader factory and the request has a body (Content-Length > 0 or chunked), the factory is called to create a reader. Any remaining data in the read buffer is fed to the body reader immediately.
 
-- **READING → PROCESSING**: Parser returns `KL_PARSE_OK` (complete message, no body). Route is matched, handler is called directly.
+- **READING → PROCESSING**: Parser returns `KL_HTTP1_PARSE_OK` (complete message, no body). Route is matched, handler is called directly.
 
-- **READING_BODY → PROCESSING**: Parser returns `KL_PARSE_OK` (body complete). `on_complete` is called on the body reader. Handler is invoked.
+- **READING_BODY → PROCESSING**: Parser returns `KL_HTTP1_PARSE_OK` (body complete). `on_complete` is called on the body reader. Handler is invoked.
 
 - **PROCESSING → SENDING**: Handler returns. Response is assembled and send begins. For buffer responses, `writev` sends headers + body atomically. For file responses, headers are sent first, then `sendfile`. For streaming, the handler already wrote via the write callback.
 
@@ -146,32 +214,32 @@ Headers are parsed first, then the body — separately. This is critical because
 
 1. **Routing needs headers.** The path and method must be known before the body arrives to select the right handler and body reader factory.
 
-2. **Header pointers point into read_buf.** `KlRequest.path`, `KlRequest.method`, and all header name/value pointers are direct pointers into the connection's `read_buf`. No allocation, no copying. These pointers are valid as long as the read buffer isn't overwritten.
+2. **Header pointers point into read_buf.** `KlHttpRequest.path`, `KlHttpRequest.method`, and all header name/value pointers are direct pointers into the connection's `read_buf`. No allocation, no copying. These pointers are valid as long as the read buffer isn't overwritten.
 
-3. **Body reading may overwrite read_buf.** For bodies larger than `KL_READ_BUF_SIZE` (8192 bytes), the connection reuses the read buffer as a sliding window. Once body reading starts, the header region of read_buf may be overwritten. This is why the body reader factory receives the request while header pointers are still valid — it can extract Content-Type, Content-Length, etc. during construction.
+3. **Body reading may overwrite read_buf.** For bodies larger than `KL_HTTP_CONN_READ_BUF_SIZE` (8192 bytes), the connection reuses the read buffer as a sliding window. Once body reading starts, the header region of read_buf may be overwritten. This is why the body reader factory receives the request while header pointers are still valid — it can extract Content-Type, Content-Length, etc. during construction.
 
-The parser vtable signals this with `KL_PARSE_HEADERS_OK` (headers complete, body pending) vs `KL_PARSE_OK` (entire message complete).
+The parser vtable signals this with `KL_HTTP1_PARSE_HEADERS_OK` (headers complete, body pending) vs `KL_HTTP1_PARSE_OK` (entire message complete).
 
 ## Body Reader Vtable
 
 ```c
-struct KlBodyReader {
-    int  (*on_data)(KlBodyReader *self, const char *data, size_t len);
-    void (*on_complete)(KlBodyReader *self);
-    void (*on_error)(KlBodyReader *self);
-    void (*destroy)(KlBodyReader *self);
+struct KlHttpBodyReader {
+    int  (*on_data)(KlHttpBodyReader *self, const char *data, size_t len);
+    void (*on_complete)(KlHttpBodyReader *self);
+    void (*on_error)(KlHttpBodyReader *self);
+    void (*destroy)(KlHttpBodyReader *self);
 };
 ```
 
 **Factory pattern:**
 
 ```c
-typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
-                                              KlRequest *req,
+typedef KlHttpBodyReader *(*KlHttpBodyReaderFactory)(KlAllocator *alloc,
+                                              KlHttpRequest *req,
                                               void *user_data);
 ```
 
-The factory is called after `KL_PARSE_HEADERS_OK`, while header pointers are valid. It inspects the request (Content-Type, Content-Length) and either:
+The factory is called after `KL_HTTP1_PARSE_HEADERS_OK`, while header pointers are valid. It inspects the request (Content-Type, Content-Length) and either:
 - Returns a reader — body data will be fed to `on_data`
 - Returns NULL — KEEL sends 415 Unsupported Media Type
 
@@ -189,8 +257,8 @@ If `on_data` returns `-1`, the parse is aborted and KEEL sends 413 Payload Too L
 
 | Reader | Factory | user_data | Behavior |
 |--------|---------|-----------|----------|
-| `KlBufReader` | `kl_body_reader_buffer` | `(void *)(size_t)max_size` | Accumulates into growable buffer. 0 = unlimited. |
-| `KlMultipartReader` | `kl_body_reader_multipart` | `KlMultipartConfig *` | RFC 2046 multipart/form-data parser. NULL = defaults. |
+| `KlHttpBufReader` | `kl_http_body_reader_buffer` | `(void *)(size_t)max_size` | Accumulates into growable buffer. 0 = unlimited. |
+| `KlHttpMultipartReader` | `kl_http_body_reader_multipart` | `KlHttpMultipartConfig *` | RFC 2046 multipart/form-data parser. NULL = defaults. |
 
 ## Multipart State Machine
 
@@ -223,7 +291,7 @@ If `on_data` returns `-1`, the parse is aborted and KEEL sends 413 Payload Too L
 
 **Overlap buffer algorithm:** Boundaries can span across `on_data` calls. The reader keeps the last `delimiter_len - 1` bytes from each `on_data` call in an overlap buffer. On the next call, the overlap + new data are scanned together for the boundary. This handles the worst case: a boundary split at any byte position across chunks.
 
-**Part metadata extraction:** When entering HEADERS state, part headers are accumulated in a 2048-byte header buffer. On `\r\n\r\n`, the reader parses `Content-Disposition: form-data; name="..."; filename="..."` and `Content-Type: ...` into the `KlMultipartPart` struct.
+**Part metadata extraction:** When entering HEADERS state, part headers are accumulated in a 2048-byte header buffer. On `\r\n\r\n`, the reader parses `Content-Disposition: form-data; name="..."; filename="..."` and `Content-Type: ...` into the `KlHttpMultipartPart` struct.
 
 **Configurable limits:**
 
@@ -237,18 +305,18 @@ If `on_data` returns `-1`, the parse is aborted and KEEL sends 413 Payload Too L
 
 ```c
 typedef enum {
-    KL_BODY_NONE,      /* no body (HEAD, 204, 304) */
-    KL_BODY_BUFFER,    /* body in memory — writev(headers + body) */
-    KL_BODY_FILE,      /* body is a file — sendfile(2) */
-    KL_BODY_STREAM     /* chunked transfer encoding */
-} KlBodyMode;
+    KL_HTTP_BODY_NONE,      /* no body (HEAD, 204, 304) */
+    KL_HTTP_BODY_BUFFER,    /* body in memory — writev(headers + body) */
+    KL_HTTP_BODY_FILE,      /* body is a file — sendfile(2) */
+    KL_HTTP_BODY_STREAM     /* chunked transfer encoding */
+} KlHttpBodyMode;
 ```
 
-### Buffer mode (`kl_response_body`)
+### Buffer mode (`kl_http_response_body`)
 
 Headers and body are sent in a single `writev(2)` call — one syscall for the entire response. The response builder formats headers into a growable buffer, then `writev` sends `[header_iov, body_iov]` atomically.
 
-### File mode (`kl_response_file`)
+### File mode (`kl_http_response_file`)
 
 1. Headers are sent via `write(2)`
 2. On Linux: `TCP_CORK` is set, then `sendfile(2)`, then `TCP_CORK` is cleared — coalescing headers and file data into minimum packets
@@ -257,10 +325,10 @@ Headers and body are sent in a single `writev(2)` call — one syscall for the e
 
 The caller passes an open `fd` and file size. KEEL manages the fd lifetime — it closes the fd when the response is freed.
 
-### Stream mode (`kl_response_begin_stream` / `kl_response_end_stream`)
+### Stream mode (`kl_http_response_begin_stream` / `kl_http_response_end_stream`)
 
 1. `begin_stream` sends headers with `Transfer-Encoding: chunked`
-2. Returns a `KlWriteFn` callback — each call formats data as an HTTP chunk (`<hex-len>\r\n<data>\r\n`) and writes it to the socket
+2. Returns a `KlHttpResponseWriteFn` callback — each call formats data as an HTTP chunk (`<hex-len>\r\n<data>\r\n`) and writes it to the socket
 3. `end_stream` sends the terminating `0\r\n\r\n` chunk
 
 The write function signature `int (*)(void *ctx, const char *data, size_t len)` is designed to be passed directly to JSON serializers or any streaming encoder.
@@ -289,17 +357,17 @@ The default allocator wraps stdlib `malloc`/`realloc`/`free`, ignoring the size 
 
 ## Router Design
 
-The router uses a flat array of `KlRoute` structs, scanned linearly on each request:
+The router uses a flat array of `KlHttpRoute` structs, scanned linearly on each request:
 
 ```c
-int kl_router_match(KlRouter *r,
+int kl_http_router_match(KlHttpRouter *r,
                     const char *method, size_t method_len,
                     const char *path, size_t path_len,
-                    KlRoute **matched,
-                    KlParam *params, int *num_params);
+                    KlHttpRoute **matched,
+                    KlHttpParam *params, int *num_params);
 ```
 
-Matching is segment-based (split on `/`). Each segment is compared with `memcmp` (exact) or captured as a parameter (`:name` prefix). Up to `KL_MAX_PARAMS` (16) parameters are extracted.
+Matching is segment-based (split on `/`). Each segment is compared with `memcmp` (exact) or captured as a parameter (`:name` prefix). Up to `KL_HTTP_ROUTER_MAX_PARAMS` (16) parameters are extracted.
 
 **Return values:**
 - `200` — match found, `*matched` set, params populated
@@ -333,15 +401,15 @@ Matching is segment-based (split on `/`). Each segment is compared with `memcmp`
 ### Pre-allocated connection pool
 
 ```c
-KlConnPool {
-    KlConn *conns;      /* array of max_connections KlConn structs */
-    KlConn *free_list;  /* singly-linked free list through next_free */
+KlHttpConnPool {
+    KlHttpConn *conns;      /* array of max_connections KlHttpConn structs */
+    KlHttpConn *free_list;  /* singly-linked free list through next_free */
 }
 ```
 
-All connections are allocated at server init. `kl_conn_acquire` pops from the free list, `kl_conn_release` pushes back. No `malloc` during request handling. If the pool is exhausted, new connections are rejected at `accept(2)`.
+All connections are allocated at server init. `kl_http_conn_acquire` pops from the free list, `kl_http_conn_release` pushes back. No `malloc` during request handling. If the pool is exhausted, new connections are rejected at `accept(2)`.
 
-Each `KlConn` contains an 8KB `read_buf` inline — no separate allocation for the read buffer.
+Each `KlHttpConn` contains an 8KB `read_buf` inline — no separate allocation for the read buffer.
 
 ### Sliding window read buffer
 
@@ -356,16 +424,16 @@ This means header pointers are invalidated once the body exceeds the initial rea
 
 ### Response header buffer
 
-The response builds headers into a growable buffer (initial capacity 512 bytes). For typical responses with 3-5 headers, this never needs to grow. The buffer is reused across keep-alive requests via `kl_response_reset`.
+The response builds headers into a growable buffer (initial capacity 512 bytes). For typical responses with 3-5 headers, this never needs to grow. The buffer is reused across keep-alive requests via `kl_http_response_reset`.
 
 ## Zero-Copy Techniques
 
-1. **Header pointers into read buffer** — `KlRequest` fields are direct pointers into `read_buf`, not copied strings
+1. **Header pointers into read buffer** — `KlHttpRequest` fields are direct pointers into `read_buf`, not copied strings
 2. **sendfile(2)** — file responses bypass userspace entirely, kernel copies file→socket
 3. **writev(2) batching** — headers + body sent as a single scatter-gather I/O, one syscall
 4. **TCP_CORK** — on Linux, coalesces headers + sendfile data into minimum TCP segments
 5. **Streaming writes** — chunked transfer encoding writes directly to the socket fd, no intermediate buffer
-6. **Route parameter capture** — `KlParam` values point into `read_buf`, not allocated strings
+6. **Route parameter capture** — `KlHttpParam` values point into `read_buf`, not allocated strings
 
 ## TLS Transport Layer
 
@@ -391,7 +459,7 @@ The `set_hostname` function enables SNI (Server Name Indication) for outbound TL
 
 ### Handshake state
 
-New connections with TLS enter `KL_CONN_TLS_HANDSHAKE` instead of `KL_CONN_READING`. The handshake is non-blocking — it returns `WANT_READ` or `WANT_WRITE` to indicate which event to wait for. The event loop re-arms accordingly. On `KL_TLS_OK`, the connection transitions to `KL_CONN_READING` and proceeds normally.
+New connections with TLS enter `KL_HTTP_CONN_TLS_HANDSHAKE` instead of `KL_HTTP_CONN_READING`. The handshake is non-blocking — it returns `WANT_READ` or `WANT_WRITE` to indicate which event to wait for. The event loop re-arms accordingly. On `KL_TLS_OK`, the connection transitions to `KL_HTTP_CONN_READING` and proceeds normally.
 
 ### Pending drain
 
@@ -404,7 +472,7 @@ Edge-triggered event loops fire once per readiness transition. TLS may decrypt m
 ### Connection lifecycle
 
 - **Init**: TLS sessions are pre-allocated (one per connection slot) via the factory
-- **Accept**: If TLS configured, state starts at `KL_CONN_TLS_HANDSHAKE`
+- **Accept**: If TLS configured, state starts at `KL_HTTP_CONN_TLS_HANDSHAKE`
 - **Keep-alive**: TLS session persists across HTTP requests (no re-handshake)
 - **Release**: `tls->shutdown()` (close_notify) → `tls->reset()` → `close(fd)`
 - **Pool free**: `tls->destroy()` frees all session resources

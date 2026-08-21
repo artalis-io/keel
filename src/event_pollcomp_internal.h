@@ -39,7 +39,7 @@ const struct KlSocketProvider *kl_pollcomp_ev_native_provider(const KlEventLoop 
  * kl_comp_ops_builtin (compiled-in path). */
 extern const KlCompletionOps kl_pollcomp_completion_ops;
 
-/* The runtime provider factory — hand to KlConfig.event_provider / KlEventCtx to inject
+/* The runtime provider factory — hand to KlHttpServerConfig.event_provider / KlEventCtx to inject
  * pollcomp's completion axis into an otherwise-default libkeel. Internal/test-facing
  * (pollcomp is the completion test double), not the public keel/event.h surface. */
 const KlEventProvider *kl_event_provider_pollcomp(void);

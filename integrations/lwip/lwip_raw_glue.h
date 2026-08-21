@@ -19,7 +19,7 @@
  * fixed g_recs completion ring, the glue now owns a per-context KlLwrCtx (opaque here) that
  * holds a KlAllocator, the listen pcb, the loop netif, and a conn_cap-sized array of
  * per-connection slots. The backend creates ONE ctx (kl_lwr_ctx_create, taking the
- * allocator + conn_cap derived from KlConfig.max_connections) and threads its opaque handle
+ * allocator + conn_cap derived from KlHttpServerConfig.max_connections) and threads its opaque handle
  * through every entry point. Under NO_SYS=1 the lwIP core (single loop netif + one timer
  * wheel) is a process-global singleton, so at most one raw ctx can be live at a time: a
  * second concurrent kl_lwr_ctx_create is rejected (returns NULL); sequential
@@ -51,7 +51,7 @@
 
 /* Create the per-context backend state. `alloc` is used for ALL glue-owned Stage-A
  * allocations (the slot array); `conn_cap` sizes the per-conn slot table (the authoritative
- * Keel capacity, KlConfig.max_connections). Also brings up NO_SYS=1 lwIP (once per process)
+ * Keel capacity, KlHttpServerConfig.max_connections). Also brings up NO_SYS=1 lwIP (once per process)
  * and attaches the loopback netif; the returned opaque handle carries the loop netif.
  *
  * Returns an opaque KlLwrCtx* on success, or NULL on failure OR if a raw ctx is already
@@ -69,7 +69,7 @@ void *kl_lwr_ctx_loopif(void *lwrctx);
 void *kl_lwr_active_ctx(void);
 
 /* Ensure the ctx's slot table holds at least `conn_cap` slots (grow if smaller). Called by the
- * backend at prime time, once the AUTHORITATIVE Keel capacity (KlConfig.max_connections) is
+ * backend at prime time, once the AUTHORITATIVE Keel capacity (KlHttpServerConfig.max_connections) is
  * known — unifying arm/slot capacity on that single limit. Safe only before any accept (no live
  * slots to relocate). Returns 0 on success, -1 on allocation failure. A no-op if already >=. */
 int kl_lwr_ctx_ensure_cap(void *lwrctx, int conn_cap);
@@ -92,26 +92,26 @@ typedef enum {
     KL_LWR_ACCEPT,   /* a new connection was accepted */
     KL_LWR_WRITE,    /* a posted send completed (ok=1) OR a terminal close (ok=0, nbytes=0) */
     KL_LWR_CONNECT,  /* an outbound connect finished (LC-1): ok=1 connected, ok=0 failed. `owner`
-                      * carries the tagged KlWatcher udata the client registered (NOT a KlConn*);
+                      * carries the tagged KlWatcher udata the client registered (NOT a KlHttpConn*);
                       * the backend routes it to KL_COMP_CONNECT against that watcher, mask-encoded
                       * (KL_EVENT_WRITE = connected, 0 = failed). See docs/phase10_...design.md LC-1. */
 } KlLwrKind;
 
 /* One finished ACCEPT/WRITE (or terminal) op, emitted by kl_lwr_drain and translated into a
- * KlCompletionEvent. `pcb`/`accepted` are opaque tcp_pcb*; `owner` is the KlConn* the backend
+ * KlCompletionEvent. `pcb`/`accepted` are opaque tcp_pcb*; `owner` is the KlHttpConn* the backend
  * stored via kl_lwr_set_owner. Addresses are raw IPv4 bytes + host-order port (peer). */
 typedef struct {
     KlLwrKind kind;
     void     *pcb;         /* the connection pcb (WRITE / terminal) */
     void     *accepted;    /* ACCEPT: the newly accepted pcb */
-    void     *owner;       /* KlConn* set via kl_lwr_set_owner (WRITE / terminal) */
+    void     *owner;       /* KlHttpConn* set via kl_lwr_set_owner (WRITE / terminal) */
     size_t    nbytes;      /* WRITE: bytes acked */
     int       ok;          /* WRITE ok flag (0 = terminal close) */
     uint8_t   peer_ip[4];  /* ACCEPT: peer IPv4 (network order) */
     uint16_t  peer_port;   /* ACCEPT: peer port (host order) */
 } KlLwrRecord;
 
-/* ── LC-3a: UDP datagram completion path (KlUdp over raw) ──────────────────────────
+/* ── LC-3a: UDP datagram completion path (datagram over raw) ──────────────────────────
  * The datagram counterpart of the tcp_* path: a udp_pcb is created + bound + recv-armed via the
  * glue, and its inbound datagrams / completed sends surface as KlLwrUdpRecord's the backend
  * translates into KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND. All lwIP contact stays in the glue;
@@ -126,7 +126,7 @@ typedef enum {
  * valid until the NEXT kl_lwr_udp_drain on that ctx (the backend delivers it inline before then).
  * `life` is the stable-liveness token (KlDgramLife*) the op retained at post; the drain TRANSFERS it
  * to the completion event (ev->life), so the backend recovers the owner through the token and never
- * dereferences the possibly-freed KlUdpTransport. See src/datagram_life.h + docs/datagram_contract.md §6. */
+ * dereferences the possibly-freed transport owner. See src/datagram_life.h + docs/datagram_contract.md §6. */
 typedef struct {
     KlLwrUdpKind kind;
     void        *life;        /* KlDgramLife* — token ref transferred op → event */
@@ -165,7 +165,7 @@ int   kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max);
  * longer complete) and moves it to a CONTEXT-owned pending-terminal record that SURVIVES kl_lwr_udp_close
  * — the drain later emits ONE terminal KL_LWR_DGRAM_RECV (terminal=1) transferring the arm's token ref,
  * so a KlDatagram completion-close retires recv_inflight. No allocation. Idempotent (a second call, or a
- * life with no armed recv, is a no-op — no duplicate terminal). Only KlDatagram calls this; KlUdp never
+ * life with no armed recv, is a no-op — no duplicate terminal). Only KlDatagram calls this (the removed UDP object never did).
  * does, so its close/teardown path is unchanged. */
 void  kl_lwr_udp_cancel_recv(void *lwrctx, void *life);
 /* 7B-8: 1 while a pending recv terminal is queued for `life` (retire → PENDING), 0 once it has drained
@@ -263,7 +263,7 @@ void  kl_lwr_tcp_abort(void *lwrctx, void *pcb);
  * yield a second terminal event (defence against a double comp_close). Idempotent. */
 void  kl_lwr_mark_terminated(void *lwrctx, void *pcb);
 
-/* Associate a KlConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag their
+/* Associate a KlHttpConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag their
  * completions with it, and (re)arm tcp_recv/tcp_sent/tcp_err on that pcb. */
 void  kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner);
 

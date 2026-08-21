@@ -75,8 +75,8 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 
 **Keel** — per-route handlers with pattern matching:
 ```c
-kl_server_route(&s, "GET", "/users/:id", handle_user, NULL, NULL);
-kl_server_use(&s, "*", "/api/*", auth_middleware, &auth);
+kl_http_server_route(&s, "GET", "/users/:id", handle_user, NULL, NULL);
+kl_http_server_use(&s, "*", "/api/*", auth_middleware, &auth);
 ```
 
 **Mongoose** — single event handler, DIY dispatch:
@@ -97,9 +97,9 @@ MHD_start_daemon(MHD_USE_EPOLL, 8080, NULL, NULL, &handler, NULL,
 
 **Keel:**
 ```c
-kl_response_status(res, 200);
-kl_response_header(res, "Content-Type", "application/json");
-kl_response_body(res, data, len);
+kl_http_response_status(res, 200);
+kl_http_response_header(res, "Content-Type", "application/json");
+kl_http_response_body(res, data, len);
 ```
 
 **Mongoose:**
@@ -121,7 +121,7 @@ MHD_destroy_response(resp);
 **Keel** — runtime vtable:
 ```c
 KlAllocator alloc = { .malloc_fn = my_malloc, .realloc_fn = my_realloc, .free_fn = my_free };
-KlConfig cfg = { .alloc = &alloc };
+KlHttpServerConfig cfg = { .alloc = &alloc };
 ```
 
 **Mongoose** — compile-time macros:

@@ -26,7 +26,7 @@
 #include "allocator_uefi.h"
 #include "lifecycle_uefi.h"
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/error.h>
@@ -70,11 +70,11 @@ static void print_int(int v) {
 }
 
 typedef struct { int done; int status; KlError err; } DoneCtx;
-static void on_done(KlClient *cl, void *ud) {
+static void on_done(KlHttpClient *cl, void *ud) {
     DoneCtx *d = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     d->status = r ? r->status : -1;
-    d->err = kl_client_last_error(cl);
+    d->err = kl_http_client_last_error(cl);
     d->done = 1;
 }
 
@@ -101,15 +101,15 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto park;
     }
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.timeout_ms = 20000;
     DoneCtx d;
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
                                   NULL, 0, NULL, 0, on_done, &d);
-    if (!c) { print_line("U-7: kl_client_start failed"); kl_event_ctx_free(&ev); goto park; }
+    if (!c) { print_line("U-7: kl_http_client_start failed"); kl_event_ctx_free(&ev); goto park; }
     print_line("U-7: client started; pumping...");
     for (int tick = 0; tick < 200000 && !d.done; tick++) {
         kl_event_ctx_run(&ev, 16, 10);
@@ -118,7 +118,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     if (d.done) { print("U-7: status = "); print_int(d.status); print_line(""); }
     else        print_line("U-7: did not complete");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 
     /* ── the U-7 payload: clean boot-services teardown, observably proven ── */

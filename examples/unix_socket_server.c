@@ -1,8 +1,8 @@
 /*
  * unix_socket_server.c — Serving HTTP over a UNIX domain socket
  *
- * Concepts: KL_TRANSPORT_UNIX, socket activation (inherited fd via
- * kl_systemd_listen_fd), and peer-credential access (kl_request_peer_cred).
+ * Concepts: KL_HTTP_SERVER_TRANSPORT_UNIX, socket activation (inherited fd via
+ * kl_systemd_listen_fd), and peer-credential access (kl_http_request_peer_cred).
  *
  * Build:  make examples
  *
@@ -20,13 +20,13 @@
 #include <string.h>
 
 /* Report the connecting peer's credentials (UNIX-socket only). */
-static void handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_whoami(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlPeerCred cred;
     char body[160];
     int n;
 
-    if (kl_request_peer_cred(req, &cred) == 0) {
+    if (kl_http_request_peer_cred(req, &cred) == 0) {
         if (cred.has_pid)
             n = snprintf(body, sizeof(body),
                          "{\"uid\":%ld,\"gid\":%ld,\"pid\":%ld}",
@@ -38,12 +38,12 @@ static void handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
         n = snprintf(body, sizeof(body),
                      "{\"error\":\"peer credentials unavailable\"}");
     }
-    kl_response_json(res, 200, body, (size_t)n);
+    kl_http_response_json(res, 200, body, (size_t)n);
 }
 
 int main(int argc, char **argv) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .max_connections = 64,
         .install_signal_handlers = 1,
     };
@@ -64,11 +64,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (kl_server_init(&s, &cfg) < 0) {
+    if (kl_http_server_init(&s, &cfg) < 0) {
         fprintf(stderr, "init failed: %s\n", kl_strerror(s.last_error));
         return 1;
     }
-    kl_server_route(&s, "GET", "/whoami", handle_whoami, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/whoami", handle_whoami, NULL, NULL);
 
     if (activated_fd > 0)
         printf("unix_socket_server listening on inherited fd %d\n", activated_fd);
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
         printf("unix_socket_server listening on unix:%s\n  curl --unix-socket %s http://localhost/whoami\n",
                argv[1], argv[1]);
 
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

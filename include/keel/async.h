@@ -4,8 +4,8 @@
 #include <keel/event_ctx.h>
 #include <stdint.h>
 
-typedef struct KlServer KlServer;
-typedef struct KlConn KlConn;
+typedef struct KlHttpServer KlHttpServer;
+typedef struct KlHttpConn KlHttpConn;
 
 /* ── KlAsyncOp — connection suspension ────────────────────────────── */
 
@@ -38,7 +38,7 @@ typedef void (*KlAsyncFn)(KlAsyncOp *op, void *user_data);
  * completion) can never double-fire a callback, double-release, or use-after-free.
  */
 struct KlAsyncOp {
-    KlConn *conn;              /**< Suspended connection */
+    KlHttpConn *conn;              /**< Suspended connection */
     uint64_t deadline_ms;      /**< Absolute deadline (0 = no deadline) */
     KlAsyncFn on_resume;       /**< Called by kl_async_complete */
     KlAsyncFn on_deadline;     /**< Called when deadline_ms reached */
@@ -51,7 +51,7 @@ struct KlAsyncOp {
 /**
  * @brief Suspend a connection for an async operation.
  *
- * Sets conn->state to KL_CONN_SUSPENDED, removes the client FD from
+ * Sets conn->state to KL_HTTP_CONN_SUSPENDED, removes the client FD from
  * the event loop, and adds the op to the server's active ops list.
  * The connection is exempt from idle timeouts while suspended.
  *
@@ -60,7 +60,7 @@ struct KlAsyncOp {
  * @param op   Caller-owned async op (must remain valid until completion).
  * @return 0 on success, -1 on failure.
  */
-int  kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op);
+int  kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op);
 
 /**
  * @brief Complete an async operation and resume the connection.
@@ -76,7 +76,7 @@ int  kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op);
  * @param s  Server instance.
  * @param op Async op to complete (removed from active list).
  */
-void kl_async_complete(KlServer *s, KlAsyncOp *op);
+void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
 
 /**
  * @brief Cancel an async operation without resuming the connection.
@@ -92,6 +92,6 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op);
  * @param s  Server instance.
  * @param op Async op to cancel.
  */
-void kl_async_cancel(KlServer *s, KlAsyncOp *op);
+void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op);
 
 #endif

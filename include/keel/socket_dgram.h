@@ -20,8 +20,8 @@
  * socket I/O — stream and datagram — so a foreign stack (lwIP, …) supplies a single
  * provider with no separately-linked datagram artifact to keep in sync (axis-audit
  * A2). Every op takes the provider ctx + a KlSocketHandle and speaks KlSockAddr —
- * never KlUdp — so the provider holds no UDP machine state; the send-queue walk,
- * delivery, backpressure, and interest tracking all stay in udp.c.
+ * never the datagram core — so the provider holds no datagram machine state; the send-queue walk,
+ * delivery, backpressure, and interest tracking all stay in the datagram core.
  *
  * This is the PROVIDER data-plane axis (KlSocketProvider.dgram). It was split out of
  * <keel/datagram.h> in 7B-1b so the public fixed-slot KlDatagram API can take that
@@ -30,10 +30,10 @@
  * internal concern in src/io_engine.h — not here.
  */
 
-struct KlUdpConfig;   /* keel/udp.h — datagram socket-option config (borrowed) */
+struct KlDatagramSocketConfig;   /* keel/datagram.h — datagram socket-option config (borrowed) */
 
 /* Per-datagram receive-capture options a provider enabled during configure(),
- * returned so udp.c stores the matching state (kernel may reject any of them). */
+ * returned so the datagram core stores the matching state (kernel may reject any of them). */
 #define KL_DGRAM_RX_PKTINFO  (1u << 0)  /* local (dest) address via pktinfo */
 #define KL_DGRAM_RX_GRO      (1u << 1)  /* UDP_GRO receive coalescing */
 #define KL_DGRAM_RX_TOS      (1u << 2)  /* per-datagram TOS/Traffic-Class */
@@ -59,7 +59,7 @@ typedef struct {
     KlDgramRxMeta meta;
 } KlDgramRxSlot;
 
-/* One datagram to place in a send batch (built by udp.c from the send queue).
+/* One datagram to place in a send batch (built by the datagram core from the send queue).
  * dest UNSPEC = connected send; src UNSPEC = no source-pin; tos -1 = no mark. */
 typedef struct {
     const void *data;
@@ -70,7 +70,7 @@ typedef struct {
 } KlDgramTxDesc;
 
 typedef struct KlDatagramOps {
-    /* One datagram out. Returns bytes sent, or -1 (errno set) — udp.c decides
+    /* One datagram out. Returns bytes sent, or -1 (errno set) — the datagram core decides
      * queue-on-EAGAIN vs drop. */
     kl_ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                        const KlSockAddr *dest, const KlSockAddr *src, int tos);
@@ -81,7 +81,7 @@ typedef struct KlDatagramOps {
                        KlSockAddr *src, KlDgramRxMeta *meta);
 
     /* One-syscall UDP GSO. Optional (NULL) — or return -1/EOPNOTSUPP where GSO is
-     * unavailable, and udp.c falls back to per-segment send(). */
+     * unavailable, and the datagram core falls back to per-segment send(). */
     kl_ssize_t (*send_gso)(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                            uint16_t seg, const KlSockAddr *dest);
 
@@ -89,29 +89,37 @@ typedef struct KlDatagramOps {
      * before bind: address-reuse + kernel socket buffers, broadcast + default TOS +
      * multicast TTL/LOOP/IF, and enabling per-datagram pktinfo/GRO/TOS capture.
      * Returns the bitmask of KL_DGRAM_RX_* capture options the kernel accepted
-     * (udp.c stores the corresponding flags). */
+     * (the datagram core stores the corresponding flags). */
     uint32_t (*configure)(void *ctx, KlSocketHandle fd, int family,
-                          const struct KlUdpConfig *cfg);
+                          const struct KlDatagramSocketConfig *cfg);
     /* Set the outgoing TOS/DSCP/ECN mark (dynamic, post-init). 0 / -1. */
     int (*set_tos)(void *ctx, KlSocketHandle fd, int family, int tos);
     /* Join (join=1) / leave (join=0) an any-source multicast group. 0 / -1. */
     int (*mcast_membership)(void *ctx, KlSocketHandle fd, int family,
                             const char *group, unsigned iface_index, int join);
 
+    /* KL_DGRAM_CAP_* the provider can honor on THIS fd — accounting for the fd's actual address family
+     * (M2). Optional (NULL ⇒ the facade grants no optional caps). Family-AWARE but takes no `family`
+     * param: the provider inspects the fd (e.g. getsockname) or reports the cross-family intersection;
+     * it MUST NOT report a capability the fd's family cannot use (e.g. BROADCAST on an IPv6 fd).
+     * NOTE: appending this member is an intentional pre-consumer ABI revision — a provider compiled
+     * against the older KlDatagramOps must be rebuilt (see docs/datagram_m2_capability_design.md §7). */
+    unsigned (*caps)(void *ctx, KlSocketHandle fd);
+
     /* ── Optional mmsg batching (Linux) — data-oriented, no callbacks ───────── */
-    /* All NULL on a provider without recvmmsg/sendmmsg → udp.c uses send/recv in a
-     * loop. The batch block is provider-allocated but KlUdp-owned (opaque here). */
+    /* All NULL on a provider without recvmmsg/sendmmsg → the datagram core uses send/recv in a
+     * loop. The batch block is provider-allocated but core-owned (opaque here). */
     void *(*rx_batch_new)(KlAllocator *a, int n, size_t bufsz);
     void *(*tx_batch_new)(KlAllocator *a, int n);
     void  (*rx_batch_free)(KlAllocator *a, void *rx_batch);
     void  (*tx_batch_free)(KlAllocator *a, void *tx_batch);
     /* Drain one recvmmsg into rx_batch and fill up to `max` slots (each pointing at
      * the batch's payload storage). Returns datagrams received (>=0), or -1 (errno;
-     * EAGAIN = drained). udp.c iterates the slots and delivers. */
+     * EAGAIN = drained). the datagram core iterates the slots and delivers. */
     int   (*recv_batch)(void *ctx, KlSocketHandle fd, void *rx_batch,
                         KlDgramRxSlot *slots, int max);
     /* Send `n` datagrams from `descs` in one sendmmsg (staged through tx_batch).
-     * Returns datagrams sent (>=0), or -1 (errno; EAGAIN = would block). udp.c
+     * Returns datagrams sent (>=0), or -1 (errno; EAGAIN = would block). the datagram core
      * drops that many from the queue front. */
     int   (*send_batch)(void *ctx, KlSocketHandle fd, void *tx_batch,
                         const KlDgramTxDesc *descs, int n);

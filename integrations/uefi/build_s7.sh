@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_s7.sh — build the S-7 KlServer-over-EFI_TCP4 self-test into BOOTX64.EFI.
+# build_s7.sh — build the S-7 KlHttpServer-over-EFI_TCP4 self-test into BOOTX64.EFI.
 #
 # Links libkeel_freestanding_server_selfcontained.a (the model-blind server core +
 # protocol layer + mem*/strlen in-archive, `make freestanding-lib-server-selfcontained`)

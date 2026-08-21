@@ -13,17 +13,17 @@
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
 static void *server_thread_fn(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
@@ -88,13 +88,13 @@ UTEST(tls_integration, hello_request) {
         .ctx     = NULL,
         .factory = mock_tls_create,
     };
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .tls  = &tls_cfg,
     };
-    KlServer srv;
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -115,9 +115,9 @@ UTEST(tls_integration, hello_request) {
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(tls_integration, keep_alive) {
@@ -125,13 +125,13 @@ UTEST(tls_integration, keep_alive) {
         .ctx     = NULL,
         .factory = mock_tls_create,
     };
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .tls  = &tls_cfg,
     };
-    KlServer srv;
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -159,9 +159,9 @@ UTEST(tls_integration, keep_alive) {
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(tls_integration, concurrent) {
@@ -169,13 +169,13 @@ UTEST(tls_integration, concurrent) {
         .ctx     = NULL,
         .factory = mock_tls_create,
     };
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .tls  = &tls_cfg,
     };
-    KlServer srv;
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -204,9 +204,9 @@ UTEST(tls_integration, concurrent) {
         kl_test_closesock(fds[i]);
     }
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST_MAIN();

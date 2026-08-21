@@ -2,7 +2,7 @@
  * custom_socket_provider.c — bring-your-own socket stack (PAL Phase 4).
  *
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
- * and selecting a provider via KlConfig.sockets (server) + KlClientConfig.sockets
+ * and selecting a provider via KlHttpServerConfig.sockets (server) + KlHttpClientConfig.sockets
  * (client). This provider is a *decorator*: it wraps the built-in provider
  * (kl_socket_provider_posix) and counts sockets + bytes, forwarding each op it
  * intercepts to the wrapped provider. Ops it does not implement are left NULL —
@@ -14,7 +14,7 @@
  */
 
 #include <keel/keel.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,12 +60,12 @@ static const KlSocketOps counting_ops = {
 
 /* ── A tiny server to exercise the provider ────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *u) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     static const char body[] = "{\"msg\":\"hello via decorated provider\"}";
-    kl_response_json(res, 200, body, sizeof(body) - 1);
+    kl_http_response_json(res, 200, body, sizeof(body) - 1);
 }
-static void *run_server(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *run_server(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 #define DEMO_PORT 18099
 
@@ -77,21 +77,21 @@ int main(void) {
     CountingCtx srv = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
     KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD, NULL };
 
-    KlServer s;
-    KlConfig cfg = { .port = DEMO_PORT, .bind_addr = "127.0.0.1", .sockets = &srv_prov };
-    if (kl_server_init(&s, &cfg) < 0) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = { .port = DEMO_PORT, .bind_addr = "127.0.0.1", .sockets = &srv_prov };
+    if (kl_http_server_init(&s, &cfg) < 0) {
         fprintf(stderr, "server init failed\n");
         return 1;
     }
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, run_server, &s) != 0) {
-        kl_server_free(&s);
+        kl_http_server_free(&s);
         return 1;
     }
 
-    /* Client through its OWN counting decorator, selected via KlClientConfig. */
+    /* Client through its OWN counting decorator, selected via KlHttpClientConfig. */
     CountingCtx cli = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
     KlSocketProvider cli_prov = { &counting_ops, &cli, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator alloc = kl_allocator_default();
@@ -100,23 +100,23 @@ int main(void) {
     for (int i = 0; i < 50 && !ok; i++) {
         struct timespec ts = { 0, 30 * 1000000L };
         nanosleep(&ts, NULL);
-        KlClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cli_prov };
-        KlClientResponse resp;
+        KlHttpClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cli_prov };
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        if (kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18099/hello",
+        if (kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18099/hello",
                               NULL, 0, NULL, 0, &resp) == 0) {
             if (resp.status == 200) {
                 ok = 1;
                 printf("--- response ---\n  status: %d\n  body:   %.*s\n\n",
                        resp.status, (int)resp.body_len, resp.body);
             }
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
 
-    kl_server_stop(&s);
+    kl_http_server_stop(&s);
     pthread_join(th, NULL);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 
     printf("--- server provider stats ---\n");
     printf("  sockets created: %d\n  accepts:         %d\n", srv.sockets, srv.accepts);

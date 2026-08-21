@@ -1,5 +1,141 @@
 # KEEL Networking Architecture Axis Audit
 
+> **Historical, append-only evidence log — newest pass first.** Each pass records what was verified
+> on its date; verify any specific claim against current code before acting on it. Current-state
+> docs: [architecture.md](architecture.md), [architecture_invariants.md](architecture_invariants.md).
+> Index: [audits/README.md](audits/README.md).
+
+## Twelfth pass — the public `KlDatagram` STABLE facade (datagram Phase B) preserves the three-axis separation (2026-08-17)
+
+**Verdict: architecturally sound — the datagram transport consolidation (Phase B, Step 7B) added
+the largest new axis surface since the eleventh pass and it EXEMPLIFIES the three-axis design
+rather than eroding it.** Fresh `/axis-audit` over the merged branch (`186691f`, now in
+`origin/main` as PR #240 + dependabot follow-ups). The new public `kl_datagram_*` API is a pure
+seam-level adapter that runs, model-blind, over all five completion/readiness backends.
+
+### Audit target
+
+- Working tree = `transport/datagram-phase-b` @ `186691f`, confirmed an ancestor of `origin/main`
+  (merged). This is the shipped tree.
+- New since the eleventh pass: the whole Phase B datagram arc — `KlUdp` → `KlUdpServer` →
+  built-in `dns_resolver` → the internal `KlDgramCore` → the **public `KlDatagram` fixed-slot
+  facade** (`include/keel/datagram.h`, `src/datagram.c`) wired live to pollcomp, io_uring,
+  readiness (epoll/kqueue/poll), IOCP, and lwIP-raw + EFI_UDP4.
+
+### Mechanical independence (Goal 4) — PASS
+
+- **Protocol + datagram TUs name no platform networking header or event-engine symbol.** grep over
+  `connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `websocket_client.c`, `sse.c`,
+  `response.c`, `router.c`, `server.c`, `server_core.c`, `udp_server.c`, `dns_resolver.c`,
+  `parsers/*` for `<sys/epoll.h>`/`<sys/event.h>`/`<liburing.h>`/`<winsock2.h>`/`io_uring_`/
+  `epoll_*`/`kevent`/`WSA*`/`CreateIoCompletionPort`/`OVERLAPPED` → **empty**.
+- **The new facade `src/datagram.c` is seam-only.** Its includes are exclusively Keel headers
+  (`keel/datagram.h`, `keel/datagram_detail.h`, `keel/event_ctx.h`, `keel/event.h`,
+  `datagram_core.h`, `completion.h`, `io_engine.h`, `socket.h`, `event_caps.h`, `datagram_life.h`,
+  `<string.h>`). It selects completion-vs-readiness purely on `kl_event_caps(...) &
+  KL_EVENT_CAP_COMPLETION`; the backend mechanisms (`CreateIoCompletionPort`, io_uring inert
+  `kl_event_add`) appear only in *comments*, never as code.
+- **`make check-sockaddr-neutral` → OK (16 protocol TUs are KlSockAddr-only).** The address ABI
+  seam remains intact across the datagram additions.
+
+### The datagram facade is a textbook axis adapter (Goals 1–3, 7, 8, 12)
+
+`src/datagram.c` holds **two adapter tables selected by capability**, both feeding the *same*
+model-blind `KlDgramCore` state machine (`kl_dgram_core_recv_on_complete` /
+`kl_dgram_core_send_on_complete` / inbound-slot) — i.e. semantic consistency ABOVE the axis,
+native mechanism BELOW:
+
+| Concern | Completion (`dg_comp_*`) | Readiness (`dg_rdy_*`) |
+|---|---|---|
+| Send | build by-value `KlDgramSendOp` → `kl_comp_post_dgram_send` (retain-transfer-on-success / release-on-failure) → `INFLIGHT` | `dg_ops->send` (all-or-nothing) → `DONE`, or `WOULD_BLOCK`→`WOULDBLOCK` |
+| Recv arm | post `KlDgramRecvOp` (inbound slot buffer) → completion routed by the B.6 token to `kl_datagram_comp_dispatch` | `want_mask |= READ`; `dg_reconcile` one watcher; `dg_rdy_pull` a delivered slot |
+| Backpressure | interest rides the posted op (no watcher) | `dg_reconcile_write` toggles the WRITE bit from send-queue depth |
+| Registration vs submission | one op = one in-flight submission (Goal 12 preserved) | one persistent watcher spanning many ops |
+
+Completion never dereferences a transport object — the neutral `KlDgramSendOp`/`KlDgramRecvOp`
+descriptors (7B-2b) carry everything by value; the B.6 token routes each completion back to the
+live `KlDgramCore` (NULL once dead) so a stale wrapper is never touched.
+
+### Operation lifetime + ownership (Goal 6) — the invariant that got amended this arc
+
+- **`KlCompletionEvent.retain_life` is single-sourced across all three release sites** —
+  `completion_core.c` (router no-handler fallback), `datagram.c` (`kl_datagram_comp_dispatch`),
+  `udp.c` (`kl_udp_comp_dispatch`) each release the borrowed life ref *iff* `!retain_life`. This
+  is a deliberate, documented amendment to the completion release invariant so the EFI QUARANTINE
+  case (an abandoned firmware RxToken that may still write the inbound buffer) can keep its ref
+  fail-closed while every other backend passes `retain_life=0` (memset default) unchanged.
+- **Retain-transfer-on-success / release-on-failure** is applied uniformly in both `dg_comp_submit`
+  and `dg_comp_arm` — the op takes the ref only when the post succeeds.
+- **A real operation-lifetime bug was found and fixed this arc (IOCP):** a send-only `KlUdp`
+  socket (`kl_udp_send_to` with no `kl_udp_recv_start`) was never associated with the completion
+  port, so its `WSASendTo` completion never posted and teardown hung forever. Fixed by associating
+  at `kl_udp_init()` (completion mode), covering send-only + recv — the general lesson (a
+  completion socket must be port-associated at CREATE, not lazily at first-recv) is exactly the
+  Goal-6 "close-while-outstanding / shutdown ordering" class this audit targets, and it is now
+  proven on real Windows IOCP CI.
+
+### Validation run this pass
+
+- **Native completion-driver double** — `make smoke-pollcomp-asan`: GET/POST/file/stream/UDP/h2c/
+  WebSocket/async/client/TLS over the `poll()` completion facade, **ASan+UBSan+LSan clean**.
+- **Production completion backend** — in the Apple `container` Linux VM (kernel 6.18):
+  `make smoke-iouring-asan` → **ASan/UBSan clean** (GET/POST/file/bigfile-splice/stream/astream/
+  bigstream/UDP/h2c/h2-pk/idle/keepalive/resilience/large + async/thread-pool + KlClient). The
+  curated `test-iouring` completion gate (56/56) was validated at this exact commit earlier in the
+  branch's history; re-running it in the same tree hit only the documented ASan-archive
+  contamination gotcha (plain build linking a leftover `-fsanitize` `libkeel.a`), not a regression.
+- **Readiness axis** — native default (kqueue) `make smoke-pollcomp-asan` peer + the
+  `test_datagram_live` loopback round-trip adapt to the build backend (pollcomp/io_uring/readiness)
+  via `kl_event_ctx_init`, proving one facade over both models.
+
+### Findings — 0 new critical / high / medium
+
+| # | Severity | Area | Note |
+|---|----------|------|------|
+| — | informational | `src/socket_dgram_posix.c:500-504` | `pdg_rx_batch_new` computes `(size_t)n * sizeof(...)` for the `recvmmsg` batch without an explicit overflow guard on `n`. **This is a socket-layer robustness nit, not an axis issue** — `n` is the app-set `mmsg_batch` config knob (not network input) and is 64-bit-safe; batch-then-check + free-on-error is otherwise correct. Cross-referenced from the same-day `/c-audit` (L1). |
+
+All prior-pass informational items (per-server event-loop state for the declined Finding 2, etc.)
+remain as previously dispositioned. No axis regression introduced by the datagram arc.
+
+### Compatibility matrix (datagram row added; ⚙ = firmware-only, no host CI e2e)
+
+| Backend combo | Stream (HTTP) | `KlUdp` datagram | Public `KlDatagram` |
+|---|---|---|---|
+| Darwin sockets + kqueue (readiness) | ✅ tested | ✅ tested | ✅ live (`test_datagram_live`) |
+| Linux sockets + epoll (readiness) | ✅ tested | ✅ tested | ✅ live (container) |
+| POSIX + poll (readiness fallback) | ✅ tested | ✅ tested | ✅ live |
+| Linux sockets + io_uring (completion) | ✅ tested | ✅ tested | ✅ live (container, ASan) |
+| pollcomp double (completion) | ✅ tested | ✅ tested | ✅ live + public mock |
+| Winsock + WSAPoll (readiness) | ✅ CI | ✅ CI smoke-udp | ✅ CI smoke-datagram |
+| Winsock + IOCP (completion) | ✅ CI | ✅ CI (assoc-at-create fix) | ✅ CI smoke-datagram |
+| lwIP-raw (completion provider) | ✅ container | ✅ container | ✅ container (raw_datagram_test) |
+| EFI_UDP4 (completion provider) | ✅ QEMU/OVMF | ✅ QEMU (dns harness) | ⚙ host-mock only¹ |
+
+¹ EFI public-`KlDatagram` is host-mock + design-note validated (7B-9); the one deferred item is a
+QEMU/OVMF public-`KlDatagram` e2e (the firmware dgram-DNS harness exercises `KlUdp`, not the
+public facade). All other cells are runtime-tested, not merely present.
+
+### Contract (unchanged + one amendment)
+
+The socket-ownership / loop-affinity / completion-delivery / cancellation / close / backpressure
+contract from prior passes stands. **Amendment (this arc):** a completion terminal may set
+`KlCompletionEvent.retain_life=1` to signal that the life ref is BORROWED (not transferred) — the
+dispatch handler retires the op's state machine but abandons the ref (fail-closed for
+abandoned-token backends). Backends that don't need it leave it 0. The terminal-result rule
+(exactly one terminal per op; late/duplicate events discarded via the B.6 generation token)
+is unchanged.
+
+### Roadmap
+
+1. *Deferred (not blocking):* a QEMU/OVMF **public-`KlDatagram`** e2e to promote the EFI facade
+   cell from ⚙ to firm ✅ (the transport is already proven via the `KlUdp`-based dgram-DNS harness).
+2. *Optional hardening:* an explicit `mmsg_batch` cap or overflow guard at `pdg_rx_batch_new`
+   (informational; 64-bit-safe today).
+
+No code changes were made in this pass — it is a re-verification; the architecture is sound.
+
+---
+
 ## Eleventh pass — orchestration-layer refactors re-verify the three-axis separation (2026-08-08)
 
 **Verdict: architecturally sound — the client/server orchestration refactors (this session's

@@ -2,7 +2,7 @@
 #define KEEL_COMPRESS_H
 
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <stddef.h>
 
 /**
@@ -76,7 +76,7 @@ typedef KlCompress *(*KlCompressFactory)(KlCompressCtx *ctx,
                                           KlAllocator *alloc);
 
 /**
- * @brief Compression configuration for KlConfig.
+ * @brief Compression configuration for KlHttpServerConfig.
  */
 typedef struct KlCompressConfig {
     KlCompressCtx     *ctx;         /**< Shared context — user-owned */
@@ -88,17 +88,17 @@ typedef struct KlCompressConfig {
  * @brief Compressed streaming handle.
  *
  * Wraps a chunked streaming response with compression.
- * Like KlSse, this is a caller-owned struct initialized by
- * kl_compress_stream_begin.
+ * Like KlHttpSse, this is a caller-owned struct initialized by
+ * kl_http_compress_stream_begin.
  */
 typedef struct {
     KlCompress  *comp;       /**< Compression session (owned) */
-    KlWriteFn    write_fn;   /**< Underlying chunked stream write */
+    KlHttpResponseWriteFn    write_fn;   /**< Underlying chunked stream write */
     void        *write_ctx;  /**< Underlying chunked stream context */
-    KlResponse  *res;        /**< Response (for end_stream) */
+    KlHttpResponse  *res;        /**< Response (for end_stream) */
     KlAllocator *alloc;      /**< For destroying comp */
     int          error;      /**< Sticky error flag */
-} KlCompressStream;
+} KlHttpCompressStream;
 
 /**
  * @brief Compress a buffer body and set it on the response.
@@ -113,7 +113,7 @@ typedef struct {
  * @param len  Body data length.
  * @return 0 on success, -1 on error.
  */
-int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
+int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
                                const char *data, size_t len);
 
 /**
@@ -128,8 +128,8 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
  * @param cs     Compress stream handle to initialize (caller-owned).
  * @return 0 on success, -1 on error.
  */
-int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
-                              int status, KlCompressStream *cs);
+int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
+                              int status, KlHttpCompressStream *cs);
 
 /**
  * @brief Write data to a compressed stream.
@@ -142,7 +142,7 @@ int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
  * @param len  Data length.
  * @return 0 on success, -1 on error.
  */
-int kl_compress_stream_write(KlCompressStream *cs, const char *data,
+int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
                               size_t len);
 
 /**
@@ -154,6 +154,6 @@ int kl_compress_stream_write(KlCompressStream *cs, const char *data,
  * @param cs  Compress stream handle.
  * @return 0 on success, -1 on error.
  */
-int kl_compress_stream_end(KlCompressStream *cs);
+int kl_http_compress_stream_end(KlHttpCompressStream *cs);
 
 #endif /* KEEL_COMPRESS_H */

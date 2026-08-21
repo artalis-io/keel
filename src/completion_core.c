@@ -5,14 +5,14 @@
  * loop and route each finished op. The GENERIC kinds are handled here directly —
  * KL_COMP_WATCHER / KL_COMP_CONNECT relay to kl_event_dispatch (client + generic
  * watcher path), and due timers fire via kl_timer_fire. The NON-generic kinds
- * (ACCEPT/READ/WRITE → the server; UDP_RECV/UDP_SEND → the udp stack) are routed
- * through two opaque KlEventCtx hooks (comp_conn_dispatch / comp_udp_dispatch), set by
- * the server / kl_udp_init when those features are used and NULL otherwise.
+ * (ACCEPT/READ/WRITE → the server; DGRAM_RECV/DGRAM_SEND → the datagram stack) are routed
+ * through the opaque KlEventCtx conn-dispatch hook (comp_conn_dispatch), set by the server when
+ * those features are used and NULL otherwise (datagram completions route by the token's own dispatch).
  *
  * The point of the split (from the old completion_driver.c): this TU references NEITHER
- * comp_on_accept/read/write NOR kl_udp_comp_on_recv/send, so a client-only completion
- * build — which uses only CONNECT/WATCHER + timers — links neither the server nor the
- * UDP stack. The hook implementations live in completion_server.c / udp.c.
+ * comp_on_accept/read/write NOR the datagram completion dispatch, so a client-only completion
+ * build — which uses only CONNECT/WATCHER + timers — links neither the server nor the datagram
+ * stack. The hook implementations live in completion_http_server.c.
  * See docs/keel_axis_audit.md ("no hidden global event-loop state" — the hooks live on
  * the per-loop KlEventCtx, not a file-scope global).
  */
@@ -30,8 +30,19 @@
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
     if (max > KL_COMP_MAX_EVENTS) max = KL_COMP_MAX_EVENTS;
     KlCompletionEvent ev[KL_COMP_MAX_EVENTS];
+
+    /* R3b-W: open the batch bracket BEFORE draining, so an overflow refusal consumes no events
+     * (already-dequeued completions must not be dropped — that would leak transferred datagram life
+     * refs and starve stream/accept/connect state machines of physical retirement). The bracket
+     * defers mid-batch watcher frees so a stale KL_COMP_WATCHER/CONNECT can't be misdelivered via
+     * address reuse. begin → drain → dispatch → end on every exit. */
+    if (kl_event_ctx_dispatch_begin(ctx) < 0)
+        return -1;
     int n = kl_comp_drain(ctx, ev, max, timeout_ms);
-    if (n < 0) return -1;
+    if (n < 0) {
+        kl_event_ctx_dispatch_end(ctx);
+        return -1;
+    }
 
     for (int i = 0; i < n; i++) {
         switch (ev[i].kind) {
@@ -44,7 +55,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
                 ctx->comp_conn_dispatch(ctx, &ev[i]);
             break;
         /* Datagram completions → the owner named by the token (7B-2a): type-safe routing via the
-         * token's own dispatch handler (KlUdp or, from 7B-3, KlDatagram), NOT a ctx-global hook or an
+         * token's own dispatch handler (KlDatagram's kl_datagram_comp_dispatch), NOT a ctx-global hook or an
          * untyped downcast of kl_dgram_life_target(). A dead token yields a NULL target the handler
          * drops; a token with no handler (or ev->life NULL) still has its transferred ref released. */
         case KL_COMP_DGRAM_RECV:
@@ -60,7 +71,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             break;
         }
         case KL_COMP_CONNECT:
-            /* An outbound connect finished (LC-0). The consumer is the async KlClient, not
+            /* An outbound connect finished (LC-0). The consumer is the async KlHttpClient, not
              * the server driver — so route it exactly like KL_COMP_WATCHER: the backend has
              * done the native connect and left the socket so getsockopt(SO_ERROR) reports
              * the truth, then relayed the result against the client's tagged connect watcher.
@@ -77,6 +88,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         }
         }
     }
+    kl_event_ctx_dispatch_end(ctx);     /* R3b-W: outermost close reclaims deferred watcher nodes */
 
     /* Fire expired timers — the completion tick's counterpart to the readiness
      * kl_event_ctx_run's kl_timer_fire(). Without this, timer-driven async work stalls

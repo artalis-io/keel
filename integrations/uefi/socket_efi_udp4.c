@@ -18,7 +18,7 @@
 #include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
 
 #include <keel/handle.h>
-#include <keel/udp.h>                 /* struct KlUdpConfig (configure signature) */
+#include <keel/datagram.h>            /* struct KlDatagramSocketConfig (configure signature) */
 
 /* ── constants (mirror the TCP TU; datagram-local names) ─────────────────────────── */
 #define KL_EFI_UDP_EVT_TOKEN     0            /* bare CheckEvent-polled token event */
@@ -221,6 +221,16 @@ void kl_uefi_udp_provider_reset(void) {
     if (!g_uctx.created) return;
     if (g_uctx.sb_handles && g_uctx.bs) g_uctx.bs->FreePool(g_uctx.sb_handles);
     u_zero(&g_uctx, sizeof(g_uctx));
+}
+
+/* TEST SUPPORT ONLY: forcibly reclaim the ENTIRE UDP slot pool, INCLUDING quarantined slots — which the
+ * production kl_uefi_udp_provider_reset intentionally PRESERVES (a quarantined slot is leaked to firmware
+ * and must never be reused on real hardware). The host-mock harness calls this between tests so that
+ * accumulated by-design quarantine leaks do not exhaust the small fixed pool (KL_EFI_MAX_UDP). Never
+ * called on real firmware. */
+void kl_uefi_udp_test_reset_pool(void) {
+    for (int i = 0; i < KL_EFI_MAX_UDP; i++)
+        u_zero(&g_udp_conns[i], sizeof(g_udp_conns[i]));
 }
 
 int kl_uefi_udp_provider_live_count(void) {
@@ -618,14 +628,13 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
  * NULL and EVERY subsequent op on the socket fails. The point at which that failure SURFACES
  * differs, and is a documented, narrowed acceptance:
  *   - BOUND socket (cfg->bind_addr): the single Configure is done by kl_uefi_udp_bind(), whose
- *     -1 return kl_udp_init() checks (src/udp.c) → kl_udp_init() FAILS. (Nothing is configured
+ *     -1 return kl_datagram_socket_init() checks → it FAILS. (Nothing is configured
  *     here — see the single-Configure note below.)
- *   - UNBOUND / DHCP-default socket (the DNS resolver): kl_udp_init() makes no further provider
+ *   - UNBOUND / DHCP-default socket (the DNS resolver): kl_datagram_socket_init() makes no further provider
  *     call after configure(), so it still RETURNS SUCCESS on a fail-closed slot. The failure
- *     instead surfaces at the FIRST OPERATION — kl_udp_recv_start()'s post_dgram_recv (or a
+ *     instead surfaces at the FIRST OPERATION — kl_datagram_recv_start()'s post_dgram_recv (or a
  *     send) returns -1 on the dead slot. The stock resolver handles this cleanly:
- *     kl_dns_resolver_create() checks kl_udp_recv_start() and tears down (returns NULL). A raw
- *     KlUdp user who never starts receiving holds a socket whose every op fails (safe, not
+ *     kl_dns_resolver_create() checks kl_datagram_recv_start() and tears down (returns NULL).  *     datagram user who never starts receiving holds a socket whose every op fails (safe, not
  *     silently-wrong). This deferred-surface path is covered by the mock state-machine tests.
  *
  * SINGLE Configure per child (a second Configure on an already-started child returns
@@ -633,7 +642,7 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
  * bind_addr is DEFERRED to kl_uefi_udp_bind() (the only Configure for a bound socket); the
  * unbound/default case is configured here (no bind() follows). */
 static uint32_t dg_configure(void *ctx, KlSocketHandle fd, int family,
-                             const struct KlUdpConfig *cfg) {
+                             const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)family;
     KlUefiUdp *u = udp_of(fd);
     if (!u) return 0;

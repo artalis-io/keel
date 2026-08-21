@@ -32,7 +32,7 @@
 #define LWIP_POSIX_SOCKETS_IO_NAMES 0
 #define LWIP_NETIF_API              1
 #define LWIP_TCP                    1
-#define LWIP_UDP                    1   /* KlUdp / udp_server / DNS transport */
+#define LWIP_UDP                    1   /* datagram / udp_server / DNS transport */
 #define LWIP_DNS                    1   /* resolve_sync_lwip.c (lwip_getaddrinfo) */
 #define LWIP_IGMP                   1   /* IPv4 multicast join/leave (udp_io_lwip) */
 #define SO_REUSE                    1   /* SO_REUSEADDR (bind reuse) */
@@ -75,7 +75,7 @@
 
 #define MEMP_NUM_TCP_PCB            64             /* TUNE: max concurrent established conns */
 #define MEMP_NUM_TCP_PCB_LISTEN     8              /* listening sockets */
-#define MEMP_NUM_UDP_PCB            16             /* UDP sockets (KlUdp + DNS) */
+#define MEMP_NUM_UDP_PCB            16             /* UDP sockets (datagram + DNS) */
 #define MEMP_NUM_NETCONN            (MEMP_NUM_TCP_PCB + MEMP_NUM_TCP_PCB_LISTEN + MEMP_NUM_UDP_PCB)
 
 #define TCP_MSS                     1460

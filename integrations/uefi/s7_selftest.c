@@ -1,11 +1,11 @@
 /*
- * s7_selftest.c — S-7 acceptance: clean KlServer teardown + EFI ExitBootServices lifetime.
+ * s7_selftest.c — S-7 acceptance: clean KlHttpServer teardown + EFI ExitBootServices lifetime.
  *
- * The server mirror of U-7. A freestanding KlServer serves ONE plaintext GET / -> 200
+ * The server mirror of U-7. A freestanding KlHttpServer serves ONE plaintext GET / -> 200
  * over EFI_TCP4, then tears itself down cleanly from the archive alone and releases the
  * EFI network stack before (a real app would) ExitBootServices:
  *
- *   kl_server_free(&s)                     → closes the listener + every accepted child
+ *   kl_http_server_free(&s)                     → closes the listener + every accepted child
  *                                            (draining their EFI_TCP4 tokens), frees the
  *                                            pool/router — the S-7 freestanding carve.
  *   kl_uefi_socket_provider_live_count()   → MUST be 0 now (every socket closed) — the
@@ -30,10 +30,10 @@
 #include "allocator_uefi.h"
 #include "lifecycle_uefi.h"            /* kl_uefi_shutdown */
 
-#include <keel/server.h>
-#include <keel/router.h>
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_server.h>
+#include <keel/http_router.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/sockaddr.h>
@@ -49,7 +49,7 @@
 #define S7_BACKLOG     4
 #define S7_DRAIN_TICKS 3000            /* grace ticks after serving: flush the 200, let curl close */
 
-extern int kl_server_run_completion_loop(KlServer *s);
+extern int kl_http_server_run_completion_loop(KlHttpServer *s);
 
 /* ── tiny ASCII console (no libc) ─────────────────────────────────────────────── */
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_out;
@@ -74,11 +74,11 @@ static void print_int(int v) {
 
 /* ── the request handler ──────────────────────────────────────────────────────── */
 static int g_served = 0;
-static void s7_handler(KlRequest *req, KlResponse *res, void *user_data) {
+static void s7_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)req; (void)user_data;
     static const char body[] = "hello from KEEL on UEFI (S-7 teardown test)\n";
-    kl_response_status(res, 200);
-    kl_response_body_borrow(res, body, sizeof(body) - 1);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, body, sizeof(body) - 1);
     if (!g_served) { g_served = 1; print_line("S-7: GO — served GET / (200)"); }
 }
 
@@ -90,7 +90,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== S-7 KlServer clean teardown + ExitBootServices lifetime ===");
+    print_line("=== S-7 KlHttpServer clean teardown + ExitBootServices lifetime ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
         print_line("S-7: (warn) platform_init failed — clock stuck, continuing");
@@ -100,7 +100,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     KlAllocator alloc = kl_uefi_allocator(bs);
 
-    KlConfig cfg;
+    KlHttpServerConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.port            = S7_BIND_PORT;
     cfg.bind_addr       = "0.0.0.0";
@@ -108,15 +108,15 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     cfg.alloc           = &alloc;
     cfg.event_provider  = ep;
 
-    KlServer s;
-    if (kl_server_init(&s, &cfg) != 0) {
-        print("S-7: kl_server_init failed (err="); print_int((int)s.last_error); print_line(")");
+    KlHttpServer s;
+    if (kl_http_server_init(&s, &cfg) != 0) {
+        print("S-7: kl_http_server_init failed (err="); print_int((int)s.last_error); print_line(")");
         print_line("S-7: NO-GO-YET (needs network-enabled OVMF)");
         goto park;
     }
     print_line("S-7: server up (efi-tcp4-completion)");
 
-    if (kl_server_route(&s, "GET", "/", s7_handler, NULL, NULL) != 0) {
+    if (kl_http_server_route(&s, "GET", "/", s7_handler, NULL, NULL) != 0) {
         print_line("S-7: route registration failed"); goto park;
     }
     KlSockAddr bind_sa;
@@ -138,7 +138,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
      * fully flushed and curl can close, and break to the clean-teardown path. */
     int drain = 0;
     for (long tick = 0; tick < 100000000L; tick++) {
-        if (kl_server_run_completion_loop(&s) < 0) {
+        if (kl_http_server_run_completion_loop(&s) < 0) {
             print_line("S-7: completion loop reported fatal error"); break;
         }
         kl_timer_fire(&s.ev);
@@ -146,11 +146,11 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
 
     /* ── clean teardown (the S-7 acceptance) ──────────────────────────────────── */
-    print_line("S-7: tearing down — kl_server_free (close listener + children) ...");
-    kl_server_free(&s);
+    print_line("S-7: tearing down — kl_http_server_free (close listener + children) ...");
+    kl_http_server_free(&s);
 
     int live = kl_uefi_socket_provider_live_count();
-    print("S-7: live sockets after kl_server_free = "); print_int(live); print_line("");
+    print("S-7: live sockets after kl_http_server_free = "); print_int(live); print_line("");
 
     print_line("S-7: releasing EFI network stack (kl_uefi_shutdown) ...");
     kl_uefi_shutdown();

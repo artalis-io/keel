@@ -13,15 +13,15 @@
  *   K2  bind() with a non-IPv4 (IPv6) address -> -1 (the loopif is IPv4; IPv6 unsupported).
  *   K3  bind() with an IPv4 address -> 0 (the supported family still works — a control case).
  *   K4  UDP is SUPPORTED (LC-3a): the raw socket provider now exposes datagram ops
- *         (.dgram != NULL), so kl_udp_init() on a ctx wired to this provider SUCCEEDS — KlUdp runs
- *         over the raw completion loop. (This FLIPPED at LC-3a; previously UDP was unsupported.)
+ *         (.dgram != NULL), so kl_datagram_socket_init() on a ctx wired to this provider SUCCEEDS —
+ *         KlDatagram runs over the raw completion loop. (This FLIPPED at LC-3a; previously unsupported.)
  *
  * (The second-simultaneous-ctx rejection + sequential-ctx cases are covered in raw_recv_test.c;
  * they are not duplicated here.)
  *
  * These are pure provider-seam assertions — no server, no lwIP mainloop thread. K4 wires a
- * KlEventCtx's sockets to the raw provider (the same auto-wire a KlServer does via the loop's
- * native_provider()) and confirms kl_udp_init accepts it.
+ * KlEventCtx's sockets to the raw provider (the same auto-wire a KlHttpServer does via the loop's
+ * native_provider()) and confirms kl_datagram_socket_init accepts it.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -30,7 +30,8 @@
 #include <keel/allocator.h>
 #include <keel/socket.h>
 #include <keel/sockaddr.h>
-#include <keel/udp.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>   /* complete KlDatagram type — stack instance in K4b */
 
 #include "keel_lwip_raw.h"
 
@@ -90,10 +91,10 @@ static int test_bind_family(void) {
     return 0;
 }
 
-/* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_udp_init succeeds.
- * `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly as a
- * KlServer does via the loop's native_provider(). kl_udp_init now creates a udp_pcb through the
- * provider's datagram data-plane (udp_dg() non-NULL). */
+/* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_datagram_socket_init
+ * succeeds. `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly
+ * as a KlHttpServer does via the loop's native_provider(). kl_datagram_socket_init now creates a udp_pcb
+ * through the provider's datagram data-plane (udp_dg() non-NULL). */
 static int test_udp_supported(KlEventCtx *ctx) {
     const KlSocketProvider *p = kl_socket_provider_lwip_raw();
     if (!p) return fail("no raw provider");
@@ -106,15 +107,21 @@ static int test_udp_supported(KlEventCtx *ctx) {
     printf("PASS K4a (raw provider .dgram != NULL + KL_SOCK_CAP_DATAGRAM — datagram data-plane)\n");
 
     ctx->sockets = kl_socket_provider_lwip_raw();
-    KlUdp udp;
-    KlUdpConfig ucfg;
+    KlDatagram dg;
+    KlDatagramSocketConfig ucfg;
     memset(&ucfg, 0, sizeof(ucfg));
     ucfg.ctx = ctx;
-    int rc = kl_udp_init(&udp, &ucfg);
+    int rc = kl_datagram_socket_init(&dg, &ucfg);
     if (rc != 0)
-        return fail("kl_udp_init failed on the raw provider (UDP must be supported at LC-3a)");
-    kl_udp_free(&udp);
-    printf("PASS K4b (kl_udp_init accepted on the raw provider)\n");
+        return fail("kl_datagram_socket_init failed on the raw provider (UDP must be supported at LC-3a)");
+    /* No armed recv / pending send — abortive close reaches CLOSED promptly; pump to confirm + free. */
+    (void)kl_datagram_close_cancel(&dg);
+    for (int i = 0; i < 200 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(ctx, 16, 5);
+    if (kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED)
+        return fail("K4b close did not reach CLOSED");
+    kl_datagram_free(&dg);
+    printf("PASS K4b (kl_datagram_socket_init accepted on the raw provider)\n");
     return 0;
 }
 

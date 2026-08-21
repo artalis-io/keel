@@ -42,8 +42,8 @@ struct KlSocketProvider;
  * @brief Composable event loop context.
  *
  * Contains the platform event loop, allocator, and watcher list.
- * Embedded in KlServer via composition. Can also be used standalone
- * (e.g. by KlClient, KlThreadPool) without requiring a full server.
+ * Embedded in KlHttpServer via composition. Can also be used standalone
+ * (e.g. by KlHttpClient, KlThreadPool) without requiring a full server.
  */
 typedef struct KlEventCtx {
     KlEventLoop loop;             /**< Platform event loop */
@@ -59,17 +59,25 @@ typedef struct KlEventCtx {
     /* Internal: socket provider for transports created on this ctx (opaque;
      * NULL = POSIX). Set by tests / future providers, not public API. */
     const struct KlSocketProvider *sockets;
-    /* Internal completion-dispatch hooks (opaque; set by the server / kl_udp_init when
-     * those features are used, NULL otherwise). kl_comp_run routes the non-generic
-     * completion kinds through these so a client-only build links neither the server nor
-     * the UDP stack. The event arg is a const KlCompletionEvent* (opaque here, exactly as
-     * KlEventOps.completion). Additive — appended after `sockets`, do not reorder. */
+    /* Internal completion-dispatch hook (opaque; set by the server when its features are used,
+     * NULL otherwise). kl_comp_run routes the non-generic connection completion kinds through it
+     * so a client-only build links neither the server nor the datagram stack. The event arg is a
+     * const KlCompletionEvent* (opaque here, exactly as KlEventOps.completion). Additive — appended
+     * after `sockets`, do not reorder. */
     void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
+    /* R3b-W (watcher pointer-reuse ABA remedy). `dispatch_depth` counts nested
+     * kl_event_ctx_dispatch_begin/end brackets; `retired` chains watcher nodes deleted DURING a
+     * bracketed batch (threaded through KlWatcher.next), so a freed node's address cannot be reused
+     * by a mid-batch kl_watcher_add before the batch's remaining events are dispatched. Reclaimed
+     * when the outermost bracket closes (depth → 0). Appended fields: an ADDITIVE pre-release layout
+     * change — consumers of KlEventCtx must recompile. */
+    int         dispatch_depth;
+    KlWatcher  *retired;
     /* 7B-2a removed the datagram completion hook `comp_udp_dispatch` that sat here: datagram completions
-     * (UDP_RECV/UDP_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch), so a
-     * KlUdp coexists with a public KlDatagram on one ctx. This is an INTENTIONAL pre-release ABI break —
-     * the datagram API is being reshaped in this branch and no released consumer holds this slot — so the
-     * field is dropped outright rather than kept as dead reserved clutter. */
+     * (DGRAM_RECV/DGRAM_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch),
+     * not a ctx-global hook. This is an INTENTIONAL pre-release ABI break — the datagram API was
+     * reshaped in this branch and no released consumer holds this slot — so the field is dropped
+     * outright rather than kept as dead reserved clutter. */
 } KlEventCtx;
 
 /**
@@ -86,7 +94,7 @@ int  kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc);
  * Like kl_event_ctx_init, but installs @p event_provider (e.g. lwIP) as the
  * loop's backend instead of the compiled-in default. A NULL provider is
  * identical to kl_event_ctx_init. The provider must be paired with a compatible
- * socket provider (KlEventCtx.sockets / KlConfig.sockets) that it can poll.
+ * socket provider (KlEventCtx.sockets / KlHttpServerConfig.sockets) that it can poll.
  *
  * @param ctx            Event context to initialize.
  * @param alloc          Allocator (borrowed — must outlive ctx).
@@ -101,7 +109,7 @@ int  kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
  */
 void kl_event_ctx_free(KlEventCtx *ctx);
 
-/* ── Watcher API (operates on KlEventCtx, not KlServer) ──────────── */
+/* ── Watcher API (operates on KlEventCtx, not KlHttpServer) ──────────── */
 
 /**
  * @brief Register a file descriptor with the event loop.
@@ -145,6 +153,16 @@ int  kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd);
  * If the tag is clear (connection, listen socket, etc.) returns 0 —
  * the caller handles it.
  *
+ * BATCH CONTRACT (watcher ABA safety, R3b-W). A single kl_event_dispatch call — one event, not part
+ * of a drained batch — is always safe: a watcher deleted in its callback is freed immediately (no
+ * sibling event can reference it). A caller that drains MULTIPLE events (kl_event_wait /
+ * kl_comp_drain) and dispatches them one-by-one MUST bracket the dispatch loop with
+ * kl_event_ctx_dispatch_begin/end. The bracket defers freeing of watchers deleted mid-batch until
+ * the batch ends, so a deleted node's address cannot be reused by a mid-batch kl_watcher_add and
+ * then matched by a later stale event's pointer scan (which would misdeliver it to the new watcher).
+ * Keel's own loops (kl_event_ctx_run, kl_comp_run, the server readiness loop) do this internally;
+ * external custom batch dispatchers are responsible for the brackets.
+ *
  * @return 1 if a watcher was dispatched, 0 otherwise.
  */
 static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
@@ -175,6 +193,22 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
         kl_watcher_rearm(ctx, wfd);
     return 1;
 }
+
+/**
+ * @brief Open/close a batch-dispatch bracket (watcher ABA remedy, R3b-W).
+ *
+ * Bracket a loop that drains and dispatches multiple events. `begin` increments the nesting depth;
+ * `end` decrements it and, when the OUTERMOST bracket closes (depth returns to 0), reclaims every
+ * watcher node deleted during the batch. Nesting (a callback that runs its own tick) is supported —
+ * reclamation happens only at depth 0. `end` guards against underflow (an unmatched end is a no-op).
+ * A single unbatched kl_event_dispatch needs no bracket. See the kl_event_dispatch batch contract.
+ *
+ * `begin` RETURN CONTRACT: 0 on success (the batch may be dispatched); -1 if the maximum nesting
+ * depth is reached (pathological/unbalanced nesting). On -1 the caller MUST NOT dispatch the batch
+ * and MUST NOT call `end` — the depth was not incremented. This makes the increment overflow-safe.
+ */
+int  kl_event_ctx_dispatch_begin(KlEventCtx *ctx);
+void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
 
 /**
  * @brief Run one tick of the event loop, dispatching all watcher events.

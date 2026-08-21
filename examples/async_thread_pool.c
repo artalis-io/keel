@@ -26,7 +26,7 @@
 
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     KlThreadPool *pool;
     int work_ms;
     int result;
@@ -47,8 +47,8 @@ static void done_fn(void *user_data) {
                      ctx->work_ms, ctx->result);
     if (n < 0) n = 0;
 
-    KlConn *conn = ctx->op.conn;
-    kl_response_json(&conn->res, 200, body, (size_t)n);
+    KlHttpConn *conn = ctx->op.conn;
+    kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     kl_async_complete(ctx->server, &ctx->op);
     free(ctx);
@@ -70,19 +70,19 @@ static void cancel_fn(void *user_data) {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    KlServer *server;
+    KlHttpServer *server;
     KlThreadPool *pool;
 } AppCtx;
 
-static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
+static void handle_work(KlHttpRequest *req, KlHttpResponse *res, void *user_data,
                          int work_ms) {
     (void)res;
     AppCtx *app = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     WorkCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        kl_response_error(res, 500, "Out of memory");
+        kl_http_response_error(res, 500, "Out of memory");
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
@@ -101,56 +101,56 @@ static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
         .user_data = ctx,
     };
     if (kl_thread_pool_submit(app->pool, &item) < 0) {
-        kl_response_error(res, 503, "Server busy");
+        kl_http_response_error(res, 503, "Server busy");
         kl_async_complete(app->server, &ctx->op);
         free(ctx);
     }
 }
 
-static void handle_fast(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_fast(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     handle_work(req, res, user_data, 10);
 }
 
-static void handle_slow(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_slow(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     handle_work(req, res, user_data, 200);
 }
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     KlThreadPoolConfig pool_cfg = {.num_workers = 4};
     KlThreadPool *pool = kl_thread_pool_create(&s.ev, &pool_cfg);
     if (!pool) {
         fprintf(stderr, "thread pool creation failed\n");
-        kl_server_free(&s);
+        kl_http_server_free(&s);
         return 1;
     }
 
     AppCtx app = {.server = &s, .pool = pool};
 
-    kl_server_route(&s, "GET", "/",     handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/fast", handle_fast,  &app, NULL);
-    kl_server_route(&s, "GET", "/slow", handle_slow,  &app, NULL);
+    kl_http_server_route(&s, "GET", "/",     handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/fast", handle_fast,  &app, NULL);
+    kl_http_server_route(&s, "GET", "/slow", handle_slow,  &app, NULL);
 
     printf("async_thread_pool example listening on :8080\n");
     printf("  curl localhost:8080/fast   # 10ms work\n");
     printf("  curl localhost:8080/slow   # 200ms work\n");
     printf("  curl localhost:8080/       # immediate\n");
-    kl_server_run(&s);
+    kl_http_server_run(&s);
 
     kl_thread_pool_free(pool);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     return 0;
 }

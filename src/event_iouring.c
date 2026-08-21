@@ -44,9 +44,8 @@
 #endif
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/server.h>
-#include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
+#include <keel/http_server.h>
+#include <keel/http_connection.h>
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
@@ -100,12 +99,13 @@ typedef struct KlIouOp {
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (IOU_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is
+     * post so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is
      * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
      * dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    int            dg_tos;                /* UDP_RECV: capture received TOS byte (M6.0a) */
     void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;
     char          *sendbuf;               /* WRITE/UDP_SEND: owned copy.
@@ -122,7 +122,9 @@ typedef struct KlIouOp {
     size_t         sent_total;            /* total bytes to report on WRITE completion */
     struct msghdr  msgh;                  /* UDP: recvmsg/sendmsg header */
     struct iovec   msgiov;                /* UDP: single iovec */
-    unsigned char  udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP_RECV: cmsg buffer (pktinfo local addr) */
+    /* _Alignas: typed struct cmsghdr accesses (recv pktinfo parse + send control build) require
+     * cmsghdr alignment; a plain unsigned char[] is only byte-aligned. Dual-use (recv + send). */
+    _Alignas(struct cmsghdr) unsigned char udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP recv pktinfo / send cmsg */
     struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) / CONNECT dest */
     socklen_t      peer_len;
     union {
@@ -547,7 +549,7 @@ static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
 
 /* Fallback for kernels without IORING_OP_SPLICE: pread the file body into a malloc'd send
  * buffer after the head, and send it as a plain WRITE (the 8f-1 mechanism). The response
- * owns file_fd and closes it (response.c), so pread is ownership-neutral. */
+ * owns file_fd and closes it (http_response.c), so pread is ownership-neutral. */
 static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVec *head_iov,
                                   int head_n, size_t head_total, int file_fd, uint64_t count) {
     KlIouOp *op = iou_op_alloc(stream->alloc);
@@ -581,9 +583,9 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
 /* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
  * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
  * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
-static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iou_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     KlIouState *st = iou_state(stream);
     if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2)
         return -1;                                   /* overflow guard */
@@ -618,7 +620,7 @@ static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
     return 0;
 }
 
-static int iou_comp_post_accept(struct KlServer *s) {
+static int iou_comp_post_accept(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIouState *st = s->ev.loop._backend;
     if (st->accept_pending) return 0;                /* one accept outstanding is enough */
@@ -649,6 +651,7 @@ static int iou_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp 
     op->buflen     = rop->cap;
     op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
     op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
+    op->dg_tos     = (rop->capture & KL_DGRAM_RX_TOS)     != 0;
     op->msgiov.iov_base = op->buf;
     op->msgiov.iov_len = op->buflen;
     op->msgh.msg_name = &op->peer;
@@ -689,6 +692,23 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     op->msgiov.iov_len = sop->len;
     op->msgh.msg_iov = &op->msgiov;
     op->msgh.msg_iovlen = 1;
+    /* Source-pin (src) / per-packet TOS control message — built into the op's control buffer (COPIED
+     * before post returns; the overlapped sendmsg carries it, so no synchronous fallthrough / watcher). */
+    if ((sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC &&
+            kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_send_family((int)op->fd,
+                                     op->peer_len ? (struct sockaddr *)&op->peer : NULL, src_sa);
+        if (fam < 0) { iou_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        size_t clen;
+        if (kl_udp_build_control(op->udp_ctrl, sizeof(op->udp_ctrl), src_sa, sop->tos, fam, &clen) != 0) {
+            iou_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+        if (clen) { op->msgh.msg_control = op->udp_ctrl; op->msgh.msg_controllen = clen; }
+    }
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { iou_op_free(op); return -1; }       /* life unset → caller releases */
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);
@@ -753,7 +773,7 @@ static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int iou_comp_prime_accepts(struct KlServer *s) {
+static int iou_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIouState *st = s->ev.loop._backend;
     if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
@@ -877,7 +897,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     case IOU_DGRAM_RECV:
         /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
          * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
-         * double-release. Never dereference KlUdpTransport. */
+         * double-release. Never dereference the transport owner. */
         ev->kind = KL_COMP_DGRAM_RECV;
         ev->life = op->life; op->life = NULL;
         ev->ok = (res >= 0);
@@ -893,9 +913,12 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                 (void)kl_sockaddr_from_native(&ev->local,
                                               (struct sockaddr *)&local_ss, local_len);
         }
+        ev->tos = -1;                            /* M6.0a: default "none"; parse only if requested */
         if (res >= 0) {
             if (op->dg_gro)                      /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
+            if (op->dg_tos)                      /* received TOS/Traffic-Class byte */
+                ev->tos = kl_udp_parse_tos(&op->msgh);
             if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }
@@ -1010,7 +1033,7 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
  * for each even under SQ pressure (iou_sqe flushes + retries; one more submit+get as a backstop),
  * then flushes. Returns 0, or -1 if a cancel SQE genuinely could not be obtained (the server then
  * skips the reap loop rather than block forever). */
-static int iou_shutdown_accepts(struct KlServer *s) {
+static int iou_shutdown_accepts(struct KlHttpServer *s) {
     KlIouState *st = s->ev.loop._backend;
     for (KlIouOp *o = st->ops; o; o = o->next) {
         if (o->type != IOU_ACCEPT) continue;

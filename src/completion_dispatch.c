@@ -13,13 +13,12 @@
  *
  * These definitions OWN the public kl_comp_* names; each completion backend renames its
  * own impls (static) and exposes them through kl_comp_ops_builtin(). The generic driver
- * (completion_driver.c) and the completion callers (async.c / server.c / udp.c) call
+ * (completion_driver.c) and the completion callers (async.c / http_server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
-#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlServer/KlConn/KlUdp reach the loop */
-#include <keel/server.h>      /* struct KlServer (->ev.loop) */
-#include <keel/connection.h>  /* struct KlConn (->ctx->loop) */
-#include <keel/udp.h>         /* struct KlUdp (->ctx->loop) */
+#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlHttpServer/KlHttpConn reach the loop */
+#include <keel/http_server.h>      /* struct KlHttpServer (->ev.loop) */
+#include <keel/http_connection.h>  /* struct KlHttpConn (->ctx->loop) */
 #include "completion.h"
 #include "io_engine.h"        /* kl_completion_axis_available */
 
@@ -38,11 +37,11 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     return kl_comp_ops(&ctx->loop)->drain(ctx, out, max, timeout_ms);
 }
 
-int kl_comp_prime_accepts(struct KlServer *s) {
+int kl_comp_prime_accepts(struct KlHttpServer *s) {
     return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
-int kl_comp_shutdown_accepts(struct KlServer *s) {
+int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
     const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
     /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
      * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
@@ -51,8 +50,8 @@ int kl_comp_shutdown_accepts(struct KlServer *s) {
 }
 
 /* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
- * _send/_sendfile (KlConn form) live in completion_server.c and call these; the backend
- * behind the vtable does raw I/O only and never sees a KlConn. */
+ * _send/_sendfile (KlHttpConn form) live in completion_http_server.c and call these; the backend
+ * behind the vtable does raw I/O only and never sees a KlHttpConn. */
 int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap) {
     return kl_comp_ops(&stream->ctx->loop)->post_recv(stream, buf, cap);
 }
@@ -61,11 +60,11 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
     return kl_comp_ops(&stream->ctx->loop)->post_send(stream, iov, iovcnt, total);
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+int kl_comp_post_accept(struct KlHttpServer *s) {
     return kl_comp_ops(&s->ev.loop)->post_accept(s);
 }
 
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     return kl_comp_ops(&c->stream.ctx->loop)->post_sendfile(c, head_iov, head_n, head_total,
                                                             file_fd, count);

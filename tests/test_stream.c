@@ -3,7 +3,7 @@
  * Exercised in isolation with mock readiness-writer + completion-submit hooks (no live sockets).
  */
 #include "utest.h"
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
 #include "../src/stream_write.h"
 #include "../src/drain_reserve.h"   /* low-water knobs for the write-during-writable test */

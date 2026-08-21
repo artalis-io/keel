@@ -9,10 +9,10 @@
 #include <stdint.h>
 
 /**
- * dns_resolver.h — Built-in async DNS resolver over KlUdp.
+ * dns_resolver.h — Built-in async DNS resolver over KlDatagram.
  *
  * Implements the KlResolver vtable using non-blocking UDP DNS queries, so it
- * drops into KlClientConfig.resolver and replaces the blocking getaddrinfo
+ * drops into KlHttpClientConfig.resolver and replaces the blocking getaddrinfo
  * fallback. Queries A then AAAA (or the reverse with prefer_ipv6), retransmits
  * on timeout, and chases the first matching address record in the response.
  *
@@ -42,7 +42,7 @@ typedef struct {
  *
  * @param ctx Event context (borrowed — must outlive the resolver).
  * @param cfg Configuration (may be NULL for all defaults).
- * @return A KlResolver* to plug into KlClientConfig.resolver, or NULL on error.
+ * @return A KlResolver* to plug into KlHttpClientConfig.resolver, or NULL on error.
  *         Free via the vtable's destroy().
  */
 KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *cfg);

@@ -4,16 +4,20 @@
  *
  * Split out of async.c in the freestanding phase (F0): this is the CLIENT-usable
  * half of the old async.c — it references only the event/timer/socket-provider
- * seams (no KlServer / KlConn / connection state machine), so a completion HTTP
+ * seams (no KlHttpServer / KlHttpConn / connection state machine), so a completion HTTP
  * client can link it WITHOUT dragging in the server connection driver. The
  * server-side connection-suspension API (kl_async_suspend/complete/cancel) stays
- * in async.c, which references kl_conn_on_writable / kl_server_conn_release /
+ * in async.c, which references kl_http_conn_on_writable / kl_http_server_conn_release /
  * kl_io_engine_resume_completion — the exact server symbols that must not leak
  * into the freestanding client archive.
  */
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <stdint.h>
+#include <limits.h>            /* INT_MAX — dispatch-depth overflow guard (R3b-W) */
+#ifndef KEEL_FREESTANDING
+#include <assert.h>            /* debug precondition in kl_event_ctx_free (hosted only) */
+#endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
 #include "event_caps.h"
 #include "io_engine.h"   /* kl_comp_run — the generic completion tick */
@@ -36,6 +40,8 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->alloc = alloc;
     ctx->watchers = NULL;
     ctx->dispatch_dirty = 0;
+    ctx->dispatch_depth = 0;          /* R3b-W: batch-dispatch reclamation */
+    ctx->retired = NULL;
     ctx->last_error = KL_ERR_NONE;
     ctx->timers = NULL;
     ctx->timer_count = 0;
@@ -62,12 +68,30 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
 
 void kl_event_ctx_free(KlEventCtx *ctx) {
     if (!ctx) return;
+    /* R3b-W: freeing a ctx DURING batch dispatch is a CALLER BUG — captured events on the live
+     * dispatch stack may still reference retired nodes. Precondition: dispatch_depth == 0. Assert
+     * loudly in hosted debug builds; in non-assert (and freestanding) builds FAIL CLOSED — return
+     * before touching anything, so a precondition violation does not leave a partially destroyed
+     * context (timers/watchers freed, loop closed, retired leaked). Checked FIRST, before any free. */
+#ifndef KEEL_FREESTANDING
+    assert(ctx->dispatch_depth == 0);
+#endif
+    if (ctx->dispatch_depth != 0)
+        return;
+
     if (ctx->timers)
         kl_free(ctx->alloc, ctx->timers,
                 (size_t)ctx->timer_cap * sizeof(KlTimerEntry));
     ctx->timers = NULL;
     ctx->timer_count = 0;
     ctx->timer_cap = 0;
+    /* At depth 0 the retired list is normally already empty (drained when the outermost bracket
+     * closed); defensively reclaim any stragglers. */
+    while (ctx->retired) {
+        KlWatcher *w = ctx->retired;
+        ctx->retired = w->next;
+        kl_free(ctx->alloc, w, sizeof(KlWatcher));
+    }
     while (ctx->watchers) {
         KlWatcher *w = ctx->watchers;
         ctx->watchers = w->next;
@@ -214,12 +238,49 @@ void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
             KlWatcher *w = *pp;
             *pp = w->next;
             kl_event_del(&ctx->loop, fd);
-            kl_free(a, w, sizeof(KlWatcher));
+            if (ctx->dispatch_depth > 0) {
+                /* R3b-W: deleted DURING a batch — defer the free so this node's address cannot be
+                 * reused by a mid-batch kl_watcher_add before the batch's remaining events are
+                 * dispatched (that reuse would let a stale event's pointer scan match the new
+                 * watcher). Thread onto `retired` via the node's own next link; reclaimed when the
+                 * outermost dispatch bracket closes. */
+                w->next = ctx->retired;
+                ctx->retired = w;
+            } else {
+                kl_free(a, w, sizeof(KlWatcher));
+            }
             ctx->dispatch_dirty = 1;  /* suppress auto-rearm */
             return;
         }
         pp = &(*pp)->next;
     }
+}
+
+/* ── batch-dispatch reclamation (R3b-W watcher pointer-reuse ABA remedy) ─── */
+
+/* Free every watcher node deferred during a batch (chained through KlWatcher.next). */
+static void kl_ctx_reclaim_retired(KlEventCtx *ctx) {
+    while (ctx->retired) {
+        KlWatcher *w = ctx->retired;
+        ctx->retired = w->next;
+        kl_free(ctx->alloc, w, sizeof(KlWatcher));
+    }
+}
+
+/* Returns 0 on success (batch may be dispatched), -1 if the maximum nesting depth is reached
+ * (pathological/unbalanced nesting). On -1 the caller MUST NOT dispatch the batch and MUST NOT call
+ * kl_event_ctx_dispatch_end (the depth was not incremented). Guards against signed-overflow UB. */
+int kl_event_ctx_dispatch_begin(KlEventCtx *ctx) {
+    if (!ctx) return -1;
+    if (ctx->dispatch_depth == INT_MAX) return -1;   /* refuse to overflow — do not dispatch */
+    ctx->dispatch_depth++;
+    return 0;
+}
+
+void kl_event_ctx_dispatch_end(KlEventCtx *ctx) {
+    if (!ctx || ctx->dispatch_depth == 0) return;   /* underflow guard: an unmatched end is a no-op */
+    if (--ctx->dispatch_depth == 0)                 /* reclaim only when the OUTERMOST bracket closes */
+        kl_ctx_reclaim_retired(ctx);
 }
 
 /* ── kl_event_ctx_run ──────────────────────────────────────────────── */
@@ -248,6 +309,15 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
         if (!events) return -1;
     }
 
+    /* R3b-W: open the batch bracket BEFORE kl_event_wait so the whole acquire→dispatch→cleanup
+     * window is covered and an overflow refusal consumes no events. begin → wait → dispatch →
+     * cleanup → end on every exit. */
+    if (kl_event_ctx_dispatch_begin(ctx) < 0) {
+        if (events != stack_buf)
+            kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
+        return -1;   /* consumes no events (no wait yet) */
+    }
+
     int n = kl_event_wait(&ctx->loop, events, max_events, timeout_ms);
     if (n > 0) {
         for (int i = 0; i < n; i++)
@@ -256,6 +326,8 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
 
     if (events != stack_buf)
         kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
+
+    kl_event_ctx_dispatch_end(ctx);   /* end after cleanup — reclaims deferred watcher nodes */
 
     /* Fire expired timers */
     kl_timer_fire(ctx);

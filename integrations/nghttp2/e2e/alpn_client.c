@@ -10,19 +10,19 @@
  */
 #include <keel/keel.h>
 #include <keel_tls_mbedtls.h>
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 
 #include <stdio.h>
 #include <string.h>
 
 typedef struct { int done, status, err; } Probe;
 
-static void on_response(KlH2ClientConn *c, int32_t sid,
-                        const KlH2ClientResponse *resp, void *ud) {
+static void on_response(KlHttp2ClientConn *c, int32_t sid,
+                        const KlHttp2ClientResponse *resp, void *ud) {
     (void)c; (void)sid;
     Probe *p = ud; p->status = resp->status; p->done = 1;
 }
-static void on_error(KlH2ClientConn *c, const char *msg, void *ud) {
+static void on_error(KlHttp2ClientConn *c, const char *msg, void *ud) {
     (void)c; Probe *p = ud;
     fprintf(stderr, "client error: %s\n", msg);
     p->err = 1; p->done = 1;
@@ -44,20 +44,20 @@ int main(int argc, char **argv) {
 
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) < 0) { kl_tls_mbedtls_ctx_destroy(ctx); return 2; }
-    KlH2ClientConfig cfg = { .tls = &tls, .session = kl_h2_nghttp2_client_session };
+    KlHttp2ClientConfig cfg = { .tls = &tls, .session = kl_http2_nghttp2_client_session };
 
     Probe p = {0};
-    KlH2ClientConn *c = kl_h2_client_connect(&ev, &alloc, &cfg, url, on_error, &p);
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &alloc, &cfg, url, on_error, &p);
     if (!c) { fprintf(stderr, "connect\n"); kl_event_ctx_free(&ev); kl_tls_mbedtls_ctx_destroy(ctx); return 2; }
 
     int32_t sid = -1;
     for (int i = 0; i < 800 && !p.done; i++) {
         if (sid < 0 && !p.err)
-            sid = kl_h2_client_request(c, "GET", "/", NULL, 0, NULL, 0, on_response, &p);
+            sid = kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, on_response, &p);
         if (kl_event_ctx_run(&ev, 16, 20) < 0) break;
     }
 
-    kl_h2_client_free(c);
+    kl_http2_client_free(c);
     kl_event_ctx_free(&ev);
     kl_tls_mbedtls_ctx_destroy(ctx);
 

@@ -58,17 +58,17 @@ static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc)
 
 /* ── Target server (runs in background thread) ───────────────────── */
 
-static KlServer target_srv;
+static KlHttpServer target_srv;
 static int target_port;
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200,
+    kl_http_response_json(res, 200,
         "{\"message\":\"hello via proxy\"}", 28);
 }
 
 static void *target_thread(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
@@ -250,15 +250,15 @@ static void *proxy_thread(void *arg) {
 static int sync_http_demo(void) {
     printf("--- Sync HTTP (forwarding) ---\n");
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = {
+    KlHttpProxyConfig proxy = {
         .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL
     };
-    KlClientConfig cfg = { .timeout_ms = 5000, .proxy = &proxy };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = 5000, .proxy = &proxy };
+    KlHttpClientResponse resp;
     char url[256];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", target_port);
 
-    if (kl_client_request(&alloc, &cfg, "GET", url,
+    if (kl_http_client_request(&alloc, &cfg, "GET", url,
                           NULL, 0, NULL, 0, &resp) != 0) {
         printf("  ERROR: %s\n", kl_strerror(resp.error));
         return -1;
@@ -267,7 +267,7 @@ static int sync_http_demo(void) {
     printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
     int ok = (resp.status == 200 &&
               strstr(resp.body, "hello via proxy") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return ok ? 0 : -1;
 }
 
@@ -276,19 +276,19 @@ static int sync_http_demo(void) {
 static int async_result;
 static int async_done;
 
-static void on_async_done(KlClient *client, void *user_data) {
+static void on_async_done(KlHttpClient *client, void *user_data) {
     (void)user_data;
-    if (kl_client_error(client) == 0) {
-        const KlClientResponse *r = kl_client_response(client);
+    if (kl_http_client_error(client) == 0) {
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         printf("  status: %d\n", r->status);
         printf("  body:   %.*s\n", (int)r->body_len, r->body);
         async_result = (r->status == 200 &&
                         strstr(r->body, "hello via proxy") != NULL) ? 0 : -1;
     } else {
-        printf("  ERROR: %s\n", kl_strerror(kl_client_last_error(client)));
+        printf("  ERROR: %s\n", kl_strerror(kl_http_client_last_error(client)));
         async_result = -1;
     }
-    kl_client_free(client);
+    kl_http_client_free(client);
     async_done = 1;
 }
 
@@ -298,16 +298,16 @@ static int async_http_demo(void) {
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) < 0) return -1;
 
-    KlProxyConfig proxy = {
+    KlHttpProxyConfig proxy = {
         .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL
     };
-    KlClientConfig cfg = { .timeout_ms = 5000, .proxy = &proxy };
+    KlHttpClientConfig cfg = { .timeout_ms = 5000, .proxy = &proxy };
     char url[256];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", target_port);
 
     async_done = 0;
     async_result = -1;
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", url,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", url,
                                    NULL, 0, NULL, 0,
                                    on_async_done, NULL);
     if (!c) { kl_event_ctx_free(&ev); return -1; }
@@ -324,18 +324,18 @@ static int async_http_demo(void) {
 static int sync_https_demo(void) {
     printf("\n--- Sync HTTPS (CONNECT tunnel) ---\n");
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = {
+    KlHttpProxyConfig proxy = {
         .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL
     };
     KlTlsConfig tls_cfg = { .factory = pt_factory };
-    KlClientConfig cfg = {
+    KlHttpClientConfig cfg = {
         .timeout_ms = 5000, .tls = &tls_cfg, .proxy = &proxy
     };
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     char url[256];
     snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", target_port);
 
-    if (kl_client_request(&alloc, &cfg, "GET", url,
+    if (kl_http_client_request(&alloc, &cfg, "GET", url,
                           NULL, 0, NULL, 0, &resp) != 0) {
         printf("  ERROR: %s\n", kl_strerror(resp.error));
         return -1;
@@ -344,7 +344,7 @@ static int sync_https_demo(void) {
     printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
     int ok = (resp.status == 200 &&
               strstr(resp.body, "hello via proxy") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return ok ? 0 : -1;
 }
 
@@ -356,11 +356,11 @@ static int async_https_demo(void) {
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) < 0) return -1;
 
-    KlProxyConfig proxy = {
+    KlHttpProxyConfig proxy = {
         .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL
     };
     KlTlsConfig tls_cfg = { .factory = pt_factory };
-    KlClientConfig cfg = {
+    KlHttpClientConfig cfg = {
         .timeout_ms = 5000, .tls = &tls_cfg, .proxy = &proxy
     };
     char url[256];
@@ -368,7 +368,7 @@ static int async_https_demo(void) {
 
     async_done = 0;
     async_result = -1;
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", url,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", url,
                                    NULL, 0, NULL, 0,
                                    on_async_done, NULL);
     if (!c) { kl_event_ctx_free(&ev); return -1; }
@@ -386,9 +386,9 @@ int main(void) {
     printf("HTTP proxy client example\n\n");
 
     /* Start target server */
-    KlConfig cfg = { .port = 0, .max_connections = 8, .max_body_size = 4096 };
-    kl_server_init(&target_srv, &cfg);
-    kl_server_route(&target_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8, .max_body_size = 4096 };
+    kl_http_server_init(&target_srv, &cfg);
+    kl_http_server_route(&target_srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t srv_tid;
     pthread_create(&srv_tid, NULL, target_thread, &target_srv);
@@ -400,9 +400,9 @@ int main(void) {
     proxy_listen_fd = proxy_make_listener();
     if (proxy_listen_fd < 0) {
         fprintf(stderr, "proxy listener failed\n");
-        kl_server_stop(&target_srv);
+        kl_http_server_stop(&target_srv);
         pthread_join(srv_tid, NULL);
-        kl_server_free(&target_srv);
+        kl_http_server_free(&target_srv);
         return 1;
     }
 
@@ -419,9 +419,9 @@ int main(void) {
     /* Cleanup */
     close(proxy_listen_fd);
     pthread_join(proxy_tid, NULL);
-    kl_server_stop(&target_srv);
+    kl_http_server_stop(&target_srv);
     pthread_join(srv_tid, NULL);
-    kl_server_free(&target_srv);
+    kl_http_server_free(&target_srv);
 
     printf("\nDone. (%d/4 passed)\n", 4 - failures);
     return failures ? 1 : 0;

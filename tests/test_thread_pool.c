@@ -9,19 +9,19 @@
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
-static void init_test_server(KlServer *s) {
+static void init_test_server(KlHttpServer *s) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
     s->alloc_storage = kl_allocator_default();
     s->ev.alloc = &s->alloc_storage;
 }
 
-static void cleanup_test_server(KlServer *s) {
+static void cleanup_test_server(KlHttpServer *s) {
     kl_event_ctx_free(&s->ev);
 }
 
 /* Pump the event loop until done_count reaches target or timeout */
-static void pump_until(KlServer *s, atomic_int *done_count, int target, int timeout_ms) {
+static void pump_until(KlHttpServer *s, atomic_int *done_count, int target, int timeout_ms) {
     int elapsed = 0;
     while (atomic_load(done_count) < target && elapsed < timeout_ms) {
         kl_event_ctx_run(&s->ev, 16, 10);
@@ -32,7 +32,7 @@ static void pump_until(KlServer *s, atomic_int *done_count, int target, int time
 /* ── Test: create and free with no work ───────────────────────────── */
 
 UTEST(thread_pool, create_and_free) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -59,7 +59,7 @@ static void single_done_fn(void *ud) {
 }
 
 UTEST(thread_pool, submit_single) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -95,7 +95,7 @@ static void slow_work_fn(void *ud) {
 static void noop_done_fn(void *ud) { (void)ud; }
 
 UTEST(thread_pool, submit_fills_queue) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -139,7 +139,7 @@ static void capture_tid_work(void *ud) {
 }
 
 UTEST(thread_pool, work_executes_on_worker) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -180,7 +180,7 @@ static void capture_done_tid(void *ud) {
 }
 
 UTEST(thread_pool, done_runs_on_main) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -218,7 +218,7 @@ static void fifo_work_fn(void *ud) {
 }
 
 UTEST(thread_pool, ordering_fifo) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -260,7 +260,7 @@ static void multi_done_fn(void *ud) {
 }
 
 UTEST(thread_pool, multiple_workers) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -301,7 +301,7 @@ static void blocking_work_fn(void *ud) {
 }
 
 UTEST(thread_pool, shutdown_cancels_pending) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -355,7 +355,7 @@ static void slow_complete_work(void *ud) {
 }
 
 UTEST(thread_pool, shutdown_waits_for_running) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -386,7 +386,7 @@ UTEST(thread_pool, shutdown_waits_for_running) {
 /* ── Test: null cancel_fn doesn't crash ───────────────────────────── */
 
 UTEST(thread_pool, null_cancel_fn) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -432,7 +432,7 @@ static void stress_done_fn(void *ud) {
 }
 
 UTEST(thread_pool, stress_many_items) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -468,7 +468,7 @@ UTEST(thread_pool, stress_many_items) {
 /* ── Test: default config (NULL) ──────────────────────────────────── */
 
 UTEST(thread_pool, default_config) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 

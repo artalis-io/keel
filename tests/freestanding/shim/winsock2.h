@@ -1,7 +1,7 @@
 /* freestanding shim <winsock2.h> — types + AF_/SOCK_ constants only.
  * See ../README.md. sockcompat.h's _WIN32 branch pulls this; the freestanding
  * client passes addresses as the neutral KlSockAddr and never touches a native
- * struct sockaddr, so only the family/type constants client_async.c maps to are
+ * struct sockaddr, so only the family/type constants http_client_async.c maps to are
  * needed. A real UEFI build supplies these from the EFI socket protocols. */
 #ifndef KEEL_FS_SHIM_WINSOCK2_H
 #define KEEL_FS_SHIM_WINSOCK2_H

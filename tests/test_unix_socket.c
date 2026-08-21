@@ -22,15 +22,15 @@ static char       g_captured_label[256];
 static int        g_label_rc = -2;
 static int        g_addr_rc = -2;
 
-static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_whoami(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     char ip[64];
     uint16_t port = 0;
-    g_cred_rc = kl_request_peer_cred(req, &g_captured_cred);
-    g_label_rc = kl_request_peer_label(req, g_captured_label,
+    g_cred_rc = kl_http_request_peer_cred(req, &g_captured_cred);
+    g_label_rc = kl_http_request_peer_label(req, g_captured_label,
                                        sizeof(g_captured_label));
-    g_addr_rc = kl_request_peer_addr(req, ip, sizeof(ip), &port);
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    g_addr_rc = kl_http_request_peer_addr(req, ip, sizeof(ip), &port);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* WS server-side peer-cred capture (set in on_open, post-upgrade). */
@@ -72,11 +72,11 @@ typedef struct {
     size_t body_len;
 } UnixAsyncCtx;
 
-static void unix_async_done(KlClient *client, void *user_data) {
+static void unix_async_done(KlHttpClient *client, void *user_data) {
     UnixAsyncCtx *ctx = user_data;
-    ctx->error = kl_client_error(client);
+    ctx->error = kl_http_client_error(client);
     if (ctx->error == 0) {
-        const KlClientResponse *resp = kl_client_response(client);
+        const KlHttpClientResponse *resp = kl_http_client_response(client);
         if (resp) {
             ctx->status = resp->status;
             if (resp->body && resp->body_len > 0) {
@@ -99,23 +99,23 @@ static int unix_run_until_done(KlEventCtx *ev, UnixAsyncCtx *ctx, int timeout_ms
     return ctx->done ? 0 : -1;
 }
 
-static void unix_handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req;
     (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 static void *unix_server_thread(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
 /* 302 → relative /hello (redirect-over-unix). */
-static void unix_handle_redirect(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_redirect(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 302);
-    kl_response_header(res, "Location", "/hello");
-    kl_response_body_borrow(res, "moved", 5);
+    kl_http_response_status(res, 302);
+    kl_http_response_header(res, "Location", "/hello");
+    kl_http_response_body_borrow(res, "moved", 5);
 }
 
 /* WebSocket echo callbacks (server side). */
@@ -234,15 +234,15 @@ UTEST(unix_socket, serves_http_over_unix_stream_socket) {
     test_sock_path(path, sizeof(path), "serve");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 8,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(srv.config.transport, KL_TRANSPORT_UNIX);
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(srv.config.transport, KL_HTTP_SERVER_TRANSPORT_UNIX);
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -264,9 +264,9 @@ UTEST(unix_socket, serves_http_over_unix_stream_socket) {
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
     close(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     ASSERT_NE(0, access(path, F_OK));
 }
 
@@ -279,16 +279,16 @@ UTEST(unix_socket, existing_path_fails_without_unlink) {
     ASSERT_TRUE(f != NULL);
     fclose(f);
 
-    KlServer srv;
-    KlConfig cfg = {
-        .transport = KL_TRANSPORT_UNIX,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
         .unix_socket_path = path,
         .unix_socket_unlink = 0,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_BIND);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 
     unlink(path);
 }
@@ -302,16 +302,16 @@ UTEST(unix_socket, unlink_option_rejects_non_socket_path) {
     ASSERT_TRUE(f != NULL);
     fclose(f);
 
-    KlServer srv;
-    KlConfig cfg = {
-        .transport = KL_TRANSPORT_UNIX,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_BIND);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     ASSERT_EQ(0, access(path, F_OK));
     unlink(path);
 }
@@ -325,14 +325,14 @@ UTEST(unix_socket, unlink_option_replaces_stale_socket_path) {
     ASSERT_TRUE(stale_fd >= 0);
     close(stale_fd);
 
-    KlServer srv;
-    KlConfig cfg = {
-        .transport = KL_TRANSPORT_UNIX,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -341,9 +341,9 @@ UTEST(unix_socket, unlink_option_replaces_stale_socket_path) {
     ASSERT_TRUE(fd >= 0);
     close(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     ASSERT_NE(0, access(path, F_OK));
 }
 
@@ -353,15 +353,15 @@ UTEST(unix_socket, too_long_path_is_invalid) {
     path[0] = '/';
     path[sizeof(path) - 1] = '\0';
 
-    KlServer srv;
-    KlConfig cfg = {
-        .transport = KL_TRANSPORT_UNIX,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
         .unix_socket_path = path,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, socket_mode_is_applied) {
@@ -369,14 +369,14 @@ UTEST(unix_socket, socket_mode_is_applied) {
     test_sock_path(path, sizeof(path), "mode");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .unix_socket_mode = 0660,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -389,9 +389,9 @@ UTEST(unix_socket, socket_mode_is_applied) {
     ASSERT_EQ(0, stat(path, &st));
     ASSERT_EQ((mode_t)0660, (mode_t)(st.st_mode & 0777));
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, peer_credentials_available) {
@@ -400,14 +400,14 @@ UTEST(unix_socket, peer_credentials_available) {
     unlink(path);
     g_cred_rc = -2;
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -421,9 +421,9 @@ UTEST(unix_socket, peer_credentials_available) {
     ASSERT_TRUE(read_unix_response(fd, buf, sizeof(buf)) > 0);
     close(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 
     ASSERT_EQ(0, g_cred_rc);
     ASSERT_EQ((long)getuid(), g_captured_cred.uid);
@@ -448,13 +448,13 @@ UTEST(unix_socket, adopts_inherited_listen_fd) {
     ASSERT_TRUE(lfd >= 0);
     ASSERT_EQ(0, listen(lfd, 16));
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .listen_fd = lfd,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -470,13 +470,13 @@ UTEST(unix_socket, adopts_inherited_listen_fd) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     close(fd);
 
-    /* A completed round-trip means kl_server_run finished adopting the fd,
+    /* A completed round-trip means kl_http_server_run finished adopting the fd,
      * so reading the (now-stable) transport here is race-free. */
-    ASSERT_EQ(KL_TRANSPORT_UNIX, srv.config.transport);
+    ASSERT_EQ(KL_HTTP_SERVER_TRANSPORT_UNIX, srv.config.transport);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     /* Adopted socket path is not unlinked by KEEL (supervisor owns it). */
     unlink(path);
 }
@@ -534,14 +534,14 @@ UTEST(unix_socket, client_connects_over_http_unix) {
     test_sock_path(path, sizeof(path), "clientunix");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -556,29 +556,29 @@ UTEST(unix_socket, client_connects_over_http_unix) {
     snprintf(url, sizeof(url), "http+unix://%s/hello", enc);
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&a, NULL, "GET", url,
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&a, NULL, "GET", url,
                                NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL &&
                 strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
     /* Pooled path bypasses the pool for UNIX and still serves the request. */
-    KlClientResponse resp2;
-    KlClientPool pool;
-    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, NULL));
-    ASSERT_EQ(0, kl_client_request_pooled(&pool, &a, NULL, "GET", url,
+    KlHttpClientResponse resp2;
+    KlHttpClientPool pool;
+    ASSERT_EQ(0, kl_http_client_pool_init(&pool, NULL, &a, NULL));
+    ASSERT_EQ(0, kl_http_client_request_pooled(&pool, &a, NULL, "GET", url,
                                           NULL, 0, NULL, 0, &resp2));
     ASSERT_EQ(200, resp2.status);
     ASSERT_TRUE(resp2.body != NULL && strstr(resp2.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp2);
-    kl_cpool_free(&pool);
+    kl_http_client_response_free(&resp2);
+    kl_http_client_pool_free(&pool);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, async_client_connects_over_http_unix) {
@@ -586,14 +586,14 @@ UTEST(unix_socket, async_client_connects_over_http_unix) {
     test_sock_path(path, sizeof(path), "asyncunix");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -613,32 +613,32 @@ UTEST(unix_socket, async_client_connects_over_http_unix) {
     /* Async, non-pooled. */
     UnixAsyncCtx actx;
     memset(&actx, 0, sizeof(actx));
-    KlClient *c = kl_client_start(&ev, &a, NULL, "GET", url,
+    KlHttpClient *c = kl_http_client_start(&ev, &a, NULL, "GET", url,
                                   NULL, 0, NULL, 0, unix_async_done, &actx);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(0, unix_run_until_done(&ev, &actx, 3000));
     ASSERT_EQ(0, actx.error);
     ASSERT_EQ(200, actx.status);
     ASSERT_TRUE(strstr(actx.body, "\"ok\":true") != NULL);
-    kl_client_free(c);
+    kl_http_client_free(c);
 
     /* Async pooled path bypasses the pool for UNIX too. */
-    KlClientPool pool;
-    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, &ev));
+    KlHttpClientPool pool;
+    ASSERT_EQ(0, kl_http_client_pool_init(&pool, NULL, &a, &ev));
     UnixAsyncCtx pctx;
     memset(&pctx, 0, sizeof(pctx));
-    KlClient *pc = kl_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
+    KlHttpClient *pc = kl_http_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
                                           NULL, 0, NULL, 0, unix_async_done, &pctx);
     ASSERT_TRUE(pc != NULL);
     ASSERT_EQ(0, unix_run_until_done(&ev, &pctx, 3000));
     ASSERT_EQ(200, pctx.status);
-    kl_client_free(pc);
-    kl_cpool_free(&pool);
+    kl_http_client_free(pc);
+    kl_http_client_pool_free(&pool);
 
     kl_event_ctx_free(&ev);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, redirect_follows_over_http_unix) {
@@ -646,15 +646,15 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
     test_sock_path(path, sizeof(path), "redir");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
-    kl_server_route(&srv, "GET", "/go", unix_handle_redirect, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    kl_http_server_route(&srv, "GET", "/go", unix_handle_redirect, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -668,19 +668,19 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
     snprintf(url, sizeof(url), "http+unix://%s/go", enc);
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     /* /go → 302 → relative /hello → 200; redirect resolution keeps the
      * http+unix authority. */
-    int rc = kl_redirect_request(&a, NULL, NULL, "GET", url,
+    int rc = kl_http_redirect_request(&a, NULL, NULL, "GET", url,
                                  NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, websocket_connects_over_ws_unix) {
@@ -688,20 +688,20 @@ UTEST(unix_socket, websocket_connects_over_ws_unix) {
     test_sock_path(path, sizeof(path), "wsunix");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
 
     g_ws_srv_cred_rc = -2;
     KlWsServerConfig ws_cfg;
     kl_ws_server_config_init(&ws_cfg);
     ws_cfg.callbacks.on_open = ws_srv_on_open;
     ws_cfg.callbacks.on_message = ws_srv_on_message;
-    ASSERT_EQ(0, kl_server_ws(&srv, "/ws", &ws_cfg));
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&srv, "/ws", &ws_cfg));
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -742,9 +742,9 @@ UTEST(unix_socket, websocket_connects_over_ws_unix) {
 
     kl_ws_client_free(ws);
     kl_event_ctx_free(&ev);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, tls_over_https_unix) {
@@ -753,15 +753,15 @@ UTEST(unix_socket, tls_over_https_unix) {
     unlink(path);
 
     KlTlsConfig srv_tls = { .factory = mock_tls_create };
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
         .tls = &srv_tls,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -777,21 +777,21 @@ UTEST(unix_socket, tls_over_https_unix) {
     /* Client speaks TLS (passthrough) over the UNIX socket; SNI defaults to
      * "localhost". Exercises the https+unix connect + handshake path. */
     KlTlsConfig cli_tls = { .factory = mock_tls_create };
-    KlClientConfig ccfg;
+    KlHttpClientConfig ccfg;
     memset(&ccfg, 0, sizeof(ccfg));
     ccfg.tls = &cli_tls;
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&a, &ccfg, "GET", url, NULL, 0, NULL, 0, &resp);
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&a, &ccfg, "GET", url, NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, socket_group_is_applied) {
@@ -805,15 +805,15 @@ UTEST(unix_socket, socket_group_is_applied) {
     test_sock_path(path, sizeof(path), "grp");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .unix_socket_group = grpname,   /* our own group — allowed unprivileged */
         .unix_socket_mode = 0660,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -826,9 +826,9 @@ UTEST(unix_socket, socket_group_is_applied) {
     ASSERT_EQ(getgid(), st.st_gid);
     ASSERT_EQ((mode_t)0660, (mode_t)(st.st_mode & 0777));
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST(unix_socket, unknown_owner_rejected) {
@@ -836,17 +836,17 @@ UTEST(unix_socket, unknown_owner_rejected) {
     test_sock_path(path, sizeof(path), "badowner");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .unix_socket_owner = "keel_no_such_user_zzz9",
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     ASSERT_NE(0, access(path, F_OK));   /* socket unlinked on failure */
     unlink(path);
 }
@@ -856,17 +856,17 @@ UTEST(unix_socket, unknown_group_rejected) {
     test_sock_path(path, sizeof(path), "badgroup");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .unix_socket_group = "keel_no_such_group_zzz9",
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     unlink(path);
 }
 
@@ -875,13 +875,13 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
     test_sock_path(path, sizeof(path), "cloexec");
     unlink(path);
 
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
         .max_connections = 4,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -893,9 +893,9 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
     ASSERT_TRUE(fdflags >= 0);
     ASSERT_TRUE((fdflags & FD_CLOEXEC) != 0);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST_MAIN();

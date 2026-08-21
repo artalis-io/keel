@@ -34,7 +34,7 @@
   #endif
 
   /* Windows has no <sys/uio.h>; provide a POSIX-layout struct iovec so the seam
-   * and response.c keep using it unchanged. The Winsock writev provider converts
+   * and http_response.c keep using it unchanged. The Winsock writev provider converts
    * struct iovec[] -> WSABUF[] internally. */
   #ifndef KL_HAVE_STRUCT_IOVEC
     #define KL_HAVE_STRUCT_IOVEC

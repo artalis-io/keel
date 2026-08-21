@@ -33,7 +33,7 @@
  * freestanding surface, not a hosted libc.
  */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -43,10 +43,10 @@
 #include "../src/event_builtin.h" /* kl_event_*_builtin */
 #include "../src/completion.h"    /* KlCompletionOps + kl_comp_ops_builtin */
 #ifdef KEEL_FS_LINK_DGRAM
-#include <keel/udp.h>              /* 6.4a-1 composition probe: also pull the datagram archive layer */
+#include <keel/datagram.h>          /* 6.4a-1 composition probe: pull the datagram archive layer */
 #endif
 #ifdef KEEL_FS_LINK_DNS
-#include <keel/udp.h>
+#include <keel/datagram.h>
 #include <keel/dns_resolver.h>     /* 6.4a-2 composition probe: pull the DNS layer (which rides the datagram layer) */
 #endif
 
@@ -54,8 +54,8 @@
 #include <stdint.h>
 
 /* ── EFI-style entry: pull the client objects, then return. ─────────────────
- * References a handful of public client APIs so the linker pulls client_async.c
- * / client_common.c (and their transitive archive objects) into the image. The
+ * References a handful of public client APIs so the linker pulls http_client_async.c
+ * / http_client_common.c (and their transitive archive objects) into the image. The
  * body never runs; it only needs to REFERENCE these symbols so they are not
  * dead-stripped before the link closure is checked. */
 int efi_main(void *image_handle, void *system_table);
@@ -66,13 +66,13 @@ int efi_main(void *image_handle, void *system_table) {
     /* Take the address of the client entry points so the archive objects that
      * define them (and everything they reference) participate in the link. */
     void *refs[] = {
-        (void *)&kl_client_start,
-        (void *)&kl_client_start_s,
-        (void *)&kl_client_response,
-        (void *)&kl_client_error,
-        (void *)&kl_client_last_error,
-        (void *)&kl_client_cancel,
-        (void *)&kl_client_free,
+        (void *)&kl_http_client_start,
+        (void *)&kl_http_client_start_s,
+        (void *)&kl_http_client_response,
+        (void *)&kl_http_client_error,
+        (void *)&kl_http_client_last_error,
+        (void *)&kl_http_client_cancel,
+        (void *)&kl_http_client_free,
         (void *)&kl_event_ctx_init,
     };
     /* Defeat dead-strip: derive the return from the refs without calling them. */
@@ -80,12 +80,12 @@ int efi_main(void *image_handle, void *system_table) {
     for (unsigned i = 0; i < sizeof(refs) / sizeof(refs[0]); i++)
         acc |= (uintptr_t)refs[i];
 #ifdef KEEL_FS_LINK_DGRAM
-    /* Composition probe (6.4a-1 review): also reference the KlUdp entry points so the datagram archive
-     * layer participates in the link — proving the client + datagram freestanding archives compose with
+    /* Composition probe (6.4a-1 review): also reference the KlDatagram entry points so the datagram
+     * archive layer participates in the link — proving the client + datagram freestanding archives compose with
      * NO duplicate or unresolved symbol across their overlapping base objects (allocator / event_ctx /
      * sockaddr / completion_*). */
     void *dgram_refs[] = {
-        (void *)&kl_udp_init, (void *)&kl_udp_free, (void *)&kl_udp_recv_start,
+        (void *)&kl_datagram_socket_init, (void *)&kl_datagram_recv_start, (void *)&kl_datagram_send,
     };
     for (unsigned i = 0; i < sizeof(dgram_refs) / sizeof(dgram_refs[0]); i++)
         acc |= (uintptr_t)dgram_refs[i];
@@ -96,7 +96,7 @@ int efi_main(void *image_handle, void *system_table) {
      * client + DNS freestanding archives compose with NO duplicate or unresolved symbol across
      * their overlapping base objects (allocator / event_ctx / sockaddr / completion_* / kl_cstr). */
     void *dns_refs[] = {
-        (void *)&kl_dns_resolver_create, (void *)&kl_udp_init, (void *)&kl_udp_free,
+        (void *)&kl_dns_resolver_create, (void *)&kl_datagram_socket_init, (void *)&kl_datagram_send,
     };
     for (unsigned i = 0; i < sizeof(dns_refs) / sizeof(dns_refs[0]); i++)
         acc |= (uintptr_t)dns_refs[i];
@@ -129,9 +129,9 @@ ssize_t kl_sockdef_send(KlSocketHandle f, const void *b, size_t n) { (void)f;(vo
 ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 #if defined(KEEL_FS_LINK_DGRAM) || defined(KEEL_FS_LINK_DNS)
-/* Datagram-path socket seams referenced by udp.c (a client-only link never binds / reads the local
- * addr / needs the datagram data-plane, so these live under the composition-probe guard). The DNS
- * layer rides KlUdp, so its probe needs them too. */
+/* Datagram-path socket seams referenced by the datagram core (a client-only link never binds / reads
+ * the local addr / needs the datagram data-plane, so these live under the composition-probe guard). The
+ * DNS layer rides KlDatagram, so its probe needs them too. */
 void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
 int  kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a; return -1; }
 int  kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f;(void)a; return -1; }

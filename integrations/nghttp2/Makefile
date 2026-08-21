@@ -1,6 +1,6 @@
 # integrations/nghttp2 — standalone build of the nghttp2 HTTP/2 session adapters.
 #
-# Produces libkeel_h2_nghttp2.a (client + server KlH2*Session vtables over
+# Produces libkeel_http2_nghttp2.a (client + server KlHttp2*Session vtables over
 # nghttp2). Bring-your-own nghttp2 (>= 1.57 for the size_t "*2" API); nothing is
 # vendored or downloaded. The core `make` / `make test` never build this.
 #
@@ -10,7 +10,7 @@
 #
 # Link into a consumer:
 #   cc app.c -I<keel>/include -Iintegrations/nghttp2 \
-#            -L<keel> -lkeel -Lintegrations/nghttp2 -lkeel_h2_nghttp2 \
+#            -L<keel> -lkeel -Lintegrations/nghttp2 -lkeel_http2_nghttp2 \
 #            $(pkg-config --libs libnghttp2)
 
 KEEL_ROOT ?= ../..
@@ -32,17 +32,17 @@ CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
 # macro under -std=c11 on glibc (Apple libc exposes it without one).
 CFLAGS += -D_DEFAULT_SOURCE -I$(KEEL_ROOT)/include -I. $(NGHTTP2_CFLAGS)
 
-LIB = libkeel_h2_nghttp2.a
-OBJ = h2_nghttp2_client.o h2_nghttp2_server.o
+LIB = libkeel_http2_nghttp2.a
+OBJ = http2_nghttp2_client.o http2_nghttp2_server.o
 
 all: $(LIB)
 
 $(LIB): $(OBJ)
 	$(AR) rcs $@ $^
 
-h2_nghttp2_client.o: h2_nghttp2_client.c keel_h2_nghttp2.h
+http2_nghttp2_client.o: http2_nghttp2_client.c keel_http2_nghttp2.h
 	$(CC) $(CFLAGS) -c -o $@ $<
-h2_nghttp2_server.o: h2_nghttp2_server.c keel_h2_nghttp2.h
+http2_nghttp2_server.o: http2_nghttp2_server.c keel_http2_nghttp2.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Functional roundtrip: pairs the client + server sessions in memory (no sockets,
@@ -51,17 +51,17 @@ h2_nghttp2_server.o: h2_nghttp2_server.c keel_h2_nghttp2.h
 test: $(LIB) e2e
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/test_roundtrip e2e/test_roundtrip.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
 	./e2e/test_roundtrip
 	@echo "integrations/nghttp2: roundtrip OK"
 
 # End-to-end over a real loopback socket + KEEL event loop: KEEL nghttp2 client
-# (kl_h2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlConfig.h2,
+# (kl_http2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlHttpServerConfig.h2,
 # h2c prior-knowledge). Exercises both adapters through the real driver paths.
 e2e: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/e2e_socket e2e/e2e_socket.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./e2e/e2e_socket
 	@echo "integrations/nghttp2: e2e (real socket) OK"
 
@@ -71,7 +71,7 @@ interop-curl: $(LIB)
 	@command -v curl >/dev/null || { echo "curl not found"; exit 1; }
 	@curl -V | grep -q HTTP2 || { echo "curl lacks HTTP2 support"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./e2e/interop_server & echo $$! > /tmp/keel_h2_interop.pid; sleep 1; \
 	  out=$$(curl -s --http2-prior-knowledge http://127.0.0.1:18478/hello); rc=$$?; \
 	  kill $$(cat /tmp/keel_h2_interop.pid) 2>/dev/null; rm -f /tmp/keel_h2_interop.pid; \
@@ -88,7 +88,7 @@ INTEROP_PORT ?= 18478
 h2spec: $(LIB)
 	@command -v h2spec >/dev/null || { echo "h2spec not found (brew install h2spec)"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./e2e/interop_server & echo $$! > /tmp/keel_h2_h2spec.pid; sleep 1; \
 	  h2spec -h 127.0.0.1 -p $(INTEROP_PORT); rc=$$?; \
 	  kill $$(cat /tmp/keel_h2_h2spec.pid) 2>/dev/null; rm -f /tmp/keel_h2_h2spec.pid; \
@@ -100,7 +100,7 @@ h2spec: $(LIB)
 h2load: $(LIB)
 	@command -v h2load >/dev/null || { echo "h2load not found (brew install nghttp2)"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./e2e/interop_server & echo $$! > /tmp/keel_h2_load.pid; sleep 1; \
 	  h2load -n 10000 -c 8 -m 20 http://127.0.0.1:$(INTEROP_PORT)/hello; rc=$$?; \
 	  kill $$(cat /tmp/keel_h2_load.pid) 2>/dev/null; rm -f /tmp/keel_h2_load.pid; \
@@ -111,7 +111,7 @@ h2load: $(LIB)
 interop-nghttpd: $(LIB)
 	@command -v nghttpd >/dev/null || { echo "nghttpd not found (brew install nghttp2)"; exit 1; }
 	$(CC) $(CFLAGS) -o e2e/client_probe e2e/client_probe.c \
-	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	@d=$$(mktemp -d); echo '{"ok":true}' > $$d/index.html; \
 	  nghttpd --no-tls -d $$d 18479 & echo $$! > /tmp/keel_ngd.pid; sleep 1; \
 	  ./e2e/client_probe 127.0.0.1 18479 /; rc=$$?; \
@@ -130,11 +130,11 @@ alpn-interop: $(LIB)
 	@command -v curl >/dev/null && curl -V | grep -q HTTP2 || { echo "curl with HTTP2 not found"; exit 1; }
 	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
 	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_server e2e/alpn_server.c \
-	  -L. -lkeel_h2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	  -L. -lkeel_http2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
 	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_client e2e/alpn_client.c \
-	  -L. -lkeel_h2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	  -L. -lkeel_http2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
 	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	./e2e/alpn_server & echo $$! >/tmp/keel_alpn.pid; sleep 1; \
@@ -157,7 +157,7 @@ alpn-interop: $(LIB)
 	  echo "integrations/nghttp2: ALPN interop OK (external + KEEL client, h2 + http/1.1, one shared handler)"
 
 clean:
-	rm -f $(LIB) $(OBJ) h2_nghttp2_client.d h2_nghttp2_server.d \
+	rm -f $(LIB) $(OBJ) http2_nghttp2_client.d http2_nghttp2_server.d \
 	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server e2e/client_probe \
 	      e2e/alpn_server e2e/alpn_client link_smoke
 

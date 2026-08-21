@@ -4,7 +4,7 @@
  * Wires the built machines into one lifecycle: an OBJECT-owned outbound pool + send machine, a
  * LIFE-token-owned rx holder (inbound + recv, freed by on_final so it outlives a posted op AND the
  * caller-owned core), and the confirmed-detachment close coordinator with the §4.3 retirement seam.
- * Mirrors udp.c's proven rx-lifetime + interest wiring, but over neutral adapters (no provider/KlUdp).
+ * Mirrors the proven rx-lifetime + interest wiring over neutral adapters (no provider or transport coupling).
  */
 #include "datagram_core.h"
 
@@ -47,6 +47,14 @@ static void core_on_close(void *ctx, KlDatagramCloseResult result) {
         kl_dgram_life_mark_dead(life);   /* completions after this see a dead token → dropped */
         kl_dgram_life_release(life);      /* owner ref; runs core_rx_final iff no posted op holds one */
     }
+    if (core->abandoning) {
+        /* Owner-destruction (§4a): SILENT — do NOT invoke user_on_close (it could free the owner). Run
+         * the facade reclaim as the DESTRUCTIVE TAIL: it frees the object-owned machines + this heap
+         * core + the handle + the owner. The hook + its ctx are read as call args (before it runs), and
+         * nothing accesses `core` after this returns. */
+        if (core->abandon_reclaim) core->abandon_reclaim(core->abandon_reclaim_ctx);
+        return;
+    }
     if (core->user_on_close) core->user_on_close(core->user_close_ctx, result);
 }
 
@@ -84,7 +92,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
      * (7B-3) installs kl_datagram_comp_dispatch so the driver routes this token via life->dispatch;
      * NULL (neutral-adapter tests) means completions are driven directly (kl_dgram_core_*_on_complete). */
     KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx,
-                                             KL_DGRAM_OWNER_DATAGRAM, cfg->dispatch);
+                                             cfg->dispatch);
     if (!life) {
         kl_dgram_inbound_free(&rx->inbound);
         kl_free(a, rx, sizeof(*rx));
@@ -97,11 +105,14 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         return -1;
     }
     if (kl_dgram_send_init(&core->send, &core->out, a, cfg->completion, cfg->caps,
-                           cfg->submit, cfg->submit_ctx) != 0) {
+                           cfg->send_byte_budget, cfg->submit, cfg->submit_ctx) != 0) {
         kl_dgram_slots_free(&core->out);
         kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
         return -1;
     }
+    /* D1: initial connected state (0 for a fresh facade datagram — kl_datagram_connect sets it later;
+     * non-zero only when adopting an already-connected fd). Governs peerless-send admission uniformly. */
+    kl_dgram_send_set_connected(&core->send, cfg->connected);
     if (kl_dgram_close_init(&core->close, &core->send, &rx->recv, core_on_close, core) != 0) {
         kl_dgram_send_free(&core->send);
         kl_dgram_slots_free(&core->out);
@@ -131,11 +142,57 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     core->transport_ctx    = cfg->transport_ctx;
     core->completion   = cfg->completion ? 1 : 0;
     core->caps         = cfg->caps;
+    core->accepted_rx_caps = cfg->accepted_rx_caps;   /* M5.1: enabled-per-socket RX mask (facade-masked) */
+    core->ext          = NULL;                          /* M5.1: no batch attached */
+    core->gso_unsupported  = 0;                         /* M5.1: GSO latch clear */
     core->rx           = rx;
     core->life         = life;
     core->user_on_close    = cfg->on_close;
     core->user_close_ctx   = cfg->close_ctx;
     core->inited       = 1;
+    return 0;
+}
+
+void kl_dgram_core_dispatch_begin(KlDgramCore *core) {
+    if (core && core->inited) kl_dgram_close_hold(&core->close);
+}
+void kl_dgram_core_dispatch_end(KlDgramCore *core) {
+    if (core && core->inited) kl_dgram_close_release(&core->close);   /* may run the terminal + free `core` */
+}
+
+void kl_dgram_core_free_object_owned(KlDgramCore *core) {
+    if (!core) return;
+    /* send_abandon skips the inflight_n guard (safe: dead token + §2.5.1 copy-at-submit); close_free
+     * requires CLOSED (the silent abandon set it); slots_free reclaims the whole outbound pool block
+     * (incl. any still-occupied in-flight slot — its payload copy lives in the backend op). None of these
+     * touch the life-owned rx holder or the heap core block. */
+    kl_dgram_close_free(&core->close);
+    kl_dgram_send_abandon(&core->send);
+    kl_dgram_slots_free(&core->out);
+}
+
+int kl_dgram_core_abandon(KlDgramCore *core,
+                          void (*reclaim)(void *), void *reclaim_ctx,
+                          void (*owner)(void *),   void *owner_ctx) {
+    if (!core || !core->inited)
+        return -1;
+    /* Idempotent while ALREADY abandoning (§4b): a second request during the DEFERRED window — reachable
+     * via a nested cancellation callback, not only direct repetition — must be a no-op success that
+     * PRESERVES the first request's reclaim/owner callbacks. Overwriting them here would drop (or NULL
+     * out → leak) the original owner reclaim before the terminal fires. */
+    if (core->abandoning)
+        return 0;
+    /* Arm the silent-abandon terminal, then request it through the close coordinator. The coordinator's
+     * busy handshake decides WHEN it runs: immediately (no active frame) or deferred to the outermost
+     * leave (invoked from within a delivery frame). Either way, core_on_close (abandon branch) does
+     * mark-dead + owner-ref-release, then runs `reclaim` as the destructive tail. mark_dead/release are
+     * NOT done here — they belong in the terminal so they run at the SAME safe point as the free. */
+    core->abandoning          = 1;
+    core->abandon_reclaim      = reclaim;
+    core->abandon_reclaim_ctx  = reclaim_ctx;
+    core->abandon_owner        = owner;
+    core->abandon_owner_ctx    = owner_ctx;
+    kl_dgram_close_abandon(&core->close);   /* silent forced terminal, deferred by the busy handshake */
     return 0;
 }
 
@@ -185,6 +242,12 @@ int kl_dgram_core_resume(KlDgramCore *core) {
 void kl_dgram_core_recv_stop(KlDgramCore *core) {
     if (core && core->inited && core->rx) kl_dgram_recv_stop(&core->rx->recv);
 }
+void kl_dgram_core_set_view_pull(KlDgramCore *core, KlDgramRecvViewFn view_pull, void *ctx) {
+    if (core && core->inited && core->rx) kl_dgram_recv_set_view_pull(&core->rx->recv, view_pull, ctx);
+}
+int kl_dgram_core_recv_started(const KlDgramCore *core) {
+    return (core && core->inited && core->rx) ? kl_dgram_recv_started(&core->rx->recv) : 0;
+}
 int kl_dgram_core_recv_held(const KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_recv_held(&core->rx->recv) : 0;
 }
@@ -205,6 +268,20 @@ void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ct
 }
 void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx) {
     if (core && core->inited) kl_dgram_send_set_drain_cb(&core->send, cb, ctx);
+}
+void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx) {
+    if (core && core->inited) kl_dgram_send_set_drop_cb(&core->send, cb, ctx);
+}
+void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx) {
+    if (core && core->inited)
+        kl_dgram_send_set_gso_cbs(&core->send, submit_gso, submit_ctx, on_gso_done, done_ctx);
+}
+void kl_dgram_core_set_connected(KlDgramCore *core, int on) {   /* D1 */
+    if (core && core->inited) kl_dgram_send_set_connected(&core->send, on);
+}
+int kl_dgram_core_connected(const KlDgramCore *core) {
+    return (core && core->inited) ? kl_dgram_send_connected(&core->send) : 0;
 }
 
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core) {

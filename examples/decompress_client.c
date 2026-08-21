@@ -2,7 +2,7 @@
  * decompress_client.c — Client-side response decompression with miniz
  *
  * Concepts: KlDecompressConfig, kl_decompress_miniz_create, automatic
- * Content-Encoding: gzip decompression in KlClientConfig.
+ * Content-Encoding: gzip decompression in KlHttpClientConfig.
  *
  * Demonstrates:
  *   1. One-shot compress → decompress round-trip (via vtable)
@@ -153,7 +153,7 @@ int main(void) {
 
     printf("\nClient integration:\n");
     printf("  KlDecompressConfig decomp = { .ctx, .factory, .ctx_destroy };\n");
-    printf("  KlClientConfig cfg = { .decompress = &decomp };\n");
+    printf("  KlHttpClientConfig cfg = { .decompress = &decomp };\n");
     printf("  // Responses with Content-Encoding: gzip are auto-decompressed\n");
 
     /* Cleanup */

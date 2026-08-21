@@ -60,16 +60,38 @@ typedef int  (*KlDgramRecvPullFn)(void *ctx, size_t *out_len);
 typedef void (*KlDgramRecvDeliverFn)(void *ctx, const void *data, size_t len,
                                      const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
 
+/* M5.3 — borrowed-view delivery (the batch/GRO receive seam). A logical datagram yielded from the
+ * batch cursor: `data`/`len` point into the ext rx-batch storage (valid ONLY for the delivery call),
+ * NOT the owned inbound slot — so a GRO-coalesced buffer is delivered un-clamped by recv_cap
+ * (truncation comes from the provider meta, carried in `flags`). `peer` is MANDATORY; `local` is valid
+ * iff KL_DGRAM_HAS_LOCAL is set in `flags`. */
+typedef struct {
+    const void *data;
+    size_t      len;
+    KlSockAddr  peer;
+    KlSockAddr  local;
+    unsigned    flags;     /* KL_DGRAM_TRUNCATED / KL_DGRAM_HAS_LOCAL */
+} KlDgramRxView;
+
+/* Readiness batch mode: yield ONE logical datagram into `*v` from the batch cursor. When `allow_refill`
+ * and the cursor is drained, refill via one recv_batch / single recv; when NOT allow_refill (the resume
+ * held-drain, §5.3), yield ONLY already-buffered datagrams and return 0 once the cursor is empty (no
+ * kernel read). Returns 1 = a datagram, 0 = drained (would-block / cursor empty), -1 = fatal. When set
+ * (kl_dgram_recv_set_view_pull), the readiness readable loop + resume drive this INSTEAD of `pull`. */
+typedef int  (*KlDgramRecvViewFn)(void *ctx, KlDgramRxView *v, int allow_refill);
+
 typedef struct {
     KlDgramInbound     *inbound;      /* borrowed — the dedicated inbound slot (life-token-ownable) */
     int                 completion;   /* 1 = completion (post/on_complete); 0 = readiness (arm/pull) */
     KlDgramRecvArmFn    arm;
     KlDgramRecvDisarmFn disarm;       /* required for readiness */
     KlDgramRecvPullFn   pull;         /* required for readiness */
-    void               *hook_ctx;     /* arm/disarm/pull share this */
+    KlDgramRecvViewFn   view_pull;    /* M5.3: readiness batch mode (borrowed-view); NULL = inbound-slot */
+    void               *hook_ctx;     /* arm/disarm/pull/view_pull share this */
     KlDgramRecvDeliverFn deliver; void *deliver_ctx;
     /* state */
     int    inited;
+    int    started;                   /* M5.3: kl_dgram_recv_start was called (regardless of callback) */
     int    paused;
     int    stopped;                   /* logical stop (no future delivery/re-arm) */
     int    error;                     /* a failed/contract-violating receive (exposed to step 4) */
@@ -93,6 +115,11 @@ int  kl_dgram_recv_init(KlDgramRecv *r, KlDgramInbound *inbound, int completion,
                         KlDgramRecvDeliverFn deliver, void *deliver_ctx,
                         KlDgramRecvArmFn arm, KlDgramRecvDisarmFn disarm,
                         KlDgramRecvPullFn pull, void *hook_ctx);
+
+/* M5.3 — enable the readiness borrowed-view batch mode: the readable loop + resume yield logical
+ * datagrams via `view_pull` (from the batch cursor) instead of the inbound slot. Readiness only; NULL
+ * reverts to the inbound-slot path. Set BEFORE kl_dgram_recv_start (at batch attach). */
+void kl_dgram_recv_set_view_pull(KlDgramRecv *r, KlDgramRecvViewFn view_pull, void *ctx);
 
 /* Begin receiving (arm the first receive). 0 / -1. */
 int  kl_dgram_recv_start(KlDgramRecv *r);
@@ -123,6 +150,7 @@ void kl_dgram_recv_set_activity_cb(KlDgramRecv *r, void (*cb)(void *ctx, int del
  * completion op / armed readiness interest references the inbound slot). */
 int  kl_dgram_recv_free(KlDgramRecv *r);
 
+static inline int kl_dgram_recv_started(const KlDgramRecv *r)  { return (r && r->started) ? 1 : 0; }
 static inline int kl_dgram_recv_held(const KlDgramRecv *r)     { return (r && r->held) ? 1 : 0; }
 static inline int kl_dgram_recv_inflight(const KlDgramRecv *r) { return (r && r->recv_inflight) ? 1 : 0; }
 /* 1 once a receive FAILED (provider error) or a delivery violated the contract (peer absent) — the

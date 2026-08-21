@@ -1,7 +1,7 @@
 /*
  * async_client.c — Multiple concurrent async HTTP requests
  *
- * Concepts: kl_client_start (async), KlEventCtx standalone event loop,
+ * Concepts: kl_http_client_start (async), KlEventCtx standalone event loop,
  * watcher-based completion, parallel request fan-out, error handling.
  *
  * Build:  make examples
@@ -24,19 +24,19 @@ static const char *urls[NUM_REQUESTS] = {
     "http://localhost:8080/hello",
 };
 
-static void on_done(KlClient *client, void *user_data) {
+static void on_done(KlHttpClient *client, void *user_data) {
     int idx = *(int *)user_data;
     printf("[%d] %s -> ", idx, urls[idx]);
 
-    if (kl_client_error(client) < 0) {
+    if (kl_http_client_error(client) < 0) {
         printf("ERROR\n");
     } else {
-        const KlClientResponse *r = kl_client_response(client);
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         printf("status=%d body=%.*s\n", r->status,
                (int)r->body_len, r->body);
     }
 
-    kl_client_free(client);
+    kl_http_client_free(client);
     completed++;
 }
 
@@ -50,14 +50,14 @@ int main(void) {
         return 1;
     }
 
-    KlClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
     int indices[NUM_REQUESTS];
     completed = 0;
 
     /* Fire all requests concurrently */
     for (int i = 0; i < NUM_REQUESTS; i++) {
         indices[i] = i;
-        KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", urls[i],
+        KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", urls[i],
                                         NULL, 0, NULL, 0, on_done, &indices[i]);
         if (!c) {
             fprintf(stderr, "[%d] failed to start request\n", i);

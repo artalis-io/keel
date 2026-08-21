@@ -104,6 +104,13 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-async
 
+      # R3b-T1: single-shot completion contract for KlStream over the REAL pollcomp seam (the
+      # deterministic oracle — post one recv/send, exactly one completion, no re-fire after more
+      # peer activity). Also enrolled natively under io_uring (test-iouring) and IOCP (test-win-iocp).
+      - name: Stream single-shot contract (pollcomp oracle)
+        timeout-minutes: 5
+        run: make BACKEND=pollcomp tests/test_stream_single_shot && ./tests/test_stream_single_shot
+
       # Linux ASan has leak detection (macOS does not) — run BOTH completion smokes
       # (plaintext + TLS-via-mock), the pollcomp op-table, and the TLS/h2 buffers under
       # ASan+UBSan with leak checking.
@@ -204,10 +211,6 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-tcp
 
-      - name: Link + UDP datagram roundtrip smoke test
-        timeout-minutes: 3
-        run: make OS=windows CC=gcc smoke-udp
-
       - name: Link + public KlDatagram roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-datagram
@@ -269,14 +272,6 @@ jobs:
       - name: End-to-end async/thread-pool-over-IOCP roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
-
-      # Datagram-over-IOCP: smoke_udp drives a real UDP roundtrip + teardown over the default
-      # (IOCP) loop, so this is the runtime gate for event_iocp.c's datagram completion path —
-      # WSARecvMsg/WSASendTo posts and, per phase-B.6.3, the stable-token retain/transfer/release
-      # (in-flight teardown frees the receive storage without touching the freed KlDatagram).
-      - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
-        timeout-minutes: 3
-        run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
 
       # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
       # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
@@ -366,10 +361,22 @@ jobs:
       - name: Address-neutrality gate (protocol TUs are KlSockAddr-only)
         run: make check-sockaddr-neutral
 
+      - name: Tier-1 boundary gate (protocol TUs stay above KlListener/KlStream/KlDatagram)
+        run: make check-tier1-boundary
+
+      - name: Documentation-reference gate (living-architecture doc links resolve)
+        run: make check-doc-refs
+
+      - name: Stale-name gate (deleted KlUdp object API does not reappear)
+        run: make check-no-kludp
+
+      - name: Stale-name gate (renamed HTTP taxonomy — no legacy KlServer/KlClient/KlH2/... names)
+        run: make check-no-httplegacy
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
-      - name: Freestanding datagram gate (KlUdp + Tier-1 machine; compile + header + symbol)
+      - name: Freestanding datagram gate (KlDatagram + Tier-1 machine; compile + header + symbol)
         run: make freestanding-dgram
 
       - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)
@@ -398,8 +405,8 @@ jobs:
           # the flag column (RW / RWE / R) is on the same line as the
           # segment name. Without -W, flags wrap to a second line and
           # grep cannot correlate them with GNU_STACK.
-          make tests/test_router
-          STACK_LINE=$(readelf -lW tests/test_router | awk '/GNU_STACK/ {print; exit}')
+          make tests/test_http_router
+          STACK_LINE=$(readelf -lW tests/test_http_router | awk '/GNU_STACK/ {print; exit}')
           echo "GNU_STACK: $STACK_LINE"
           if echo "$STACK_LINE" | grep -qE ' RWE '; then
             echo "FAIL: GNU_STACK is executable (RWE)"
@@ -409,11 +416,11 @@ jobs:
             echo "FAIL: GNU_STACK missing RW flag"
             exit 1
           fi
-          if ! readelf -d tests/test_router | grep -q 'BIND_NOW'; then
+          if ! readelf -d tests/test_http_router | grep -q 'BIND_NOW'; then
             echo "FAIL: BIND_NOW not present (no full RELRO)"
             exit 1
           fi
-          if ! readelf -lW tests/test_router | grep -q 'GNU_RELRO'; then
+          if ! readelf -lW tests/test_http_router | grep -q 'GNU_RELRO'; then
             echo "FAIL: GNU_RELRO segment missing"
             exit 1
           fi

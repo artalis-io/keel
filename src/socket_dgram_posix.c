@@ -2,8 +2,8 @@
  * socket_dgram_posix.c — the POSIX datagram data-plane (KlDatagramOps) for the
  * built-in POSIX socket provider. This is the primitive-only form of what used to
  * live in udp_io_posix.c: every op takes (ctx, fd, …) and speaks KlSockAddr, with
- * no KlUdp machine state — the send-queue walk, delivery, and interest tracking
- * stay in udp.c, which dispatches through KlSocketProvider.dgram.
+ * no datagram machine state — the send-queue walk, delivery, and interest tracking
+ * stay in the datagram core, which dispatches through KlSocketProvider.dgram.
  *
  * The recvmsg path always attaches a control buffer and parses opportunistically:
  * the kernel only fills the cmsgs that configure() enabled, so the primitive needs
@@ -17,10 +17,10 @@
 #define __APPLE_USE_RFC_3542
 #endif
 
-#include <keel/datagram.h>
+#include <keel/datagram.h>     /* KlDatagramSocketConfig (configure) + KlDatagramOps */
 #include <keel/socket.h>
-#include <keel/udp.h>          /* KlUdpConfig */
 #include "sockaddr_native.h"   /* KlSockAddr <-> host sockaddr at the boundary */
+#include "udp_cmsg.h"          /* kl_udp_build_control / kl_udp_send_family — shared send cmsg builder */
 /* Self-contained: the pktinfo/GRO cmsg parsers are dup'd static below rather than
  * shared through a separate seam TU, so a foreign stack can link-override the whole
  * datagram data-plane by supplying its own KlSocketProvider.dgram. */
@@ -55,66 +55,12 @@
 
 /* ── cmsg build/parse (primitive helpers) ─────────────────────────────── */
 
-/* Build per-datagram control messages: source-pin pktinfo (when src) + a TOS mark
- * (when tos >= 0). `family` selects the IP level for the TOS cmsg. */
-static size_t dgram_build_control(unsigned char *buf, size_t bufsz,
-                                  const struct sockaddr *src, int tos, int family) {
-    struct msghdr tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.msg_control = buf;
-    tmp.msg_controllen = bufsz;
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&tmp);
-    size_t used = 0;
-
-    if (src && cm) {
-#if defined(IP_PKTINFO)
-        if (src->sa_family == AF_INET) {
-            cm->cmsg_level = IPPROTO_IP;
-            cm->cmsg_type = IP_PKTINFO;
-            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
-            struct in_pktinfo pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
-            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-            used += CMSG_SPACE(sizeof(struct in_pktinfo));
-            cm = CMSG_NXTHDR(&tmp, cm);
-        } else
-#endif
-        if (src->sa_family == AF_INET6) {
-            cm->cmsg_level = IPPROTO_IPV6;
-            cm->cmsg_type = IPV6_PKTINFO;
-            cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-            struct in6_pktinfo pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
-            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-            used += CMSG_SPACE(sizeof(struct in6_pktinfo));
-            cm = CMSG_NXTHDR(&tmp, cm);
-        }
-    }
-
-    if (tos >= 0 && cm) {
-        if (family == AF_INET) {
-#if defined(IP_TOS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IP;
-            cm->cmsg_type = IP_TOS;
-            cm->cmsg_len = CMSG_LEN(sizeof(int));
-            memcpy(CMSG_DATA(cm), &v, sizeof(v));
-            used += CMSG_SPACE(sizeof(int));
-#endif
-        } else if (family == AF_INET6) {
-#if defined(IPV6_TCLASS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IPV6;
-            cm->cmsg_type = IPV6_TCLASS;
-            cm->cmsg_len = CMSG_LEN(sizeof(int));
-            memcpy(CMSG_DATA(cm), &v, sizeof(v));
-            used += CMSG_SPACE(sizeof(int));
-#endif
-        }
-    }
-    return used;
+/* Build per-datagram send control messages — delegates to the shared builder (udp_cmsg.c) so the
+ * provider send and the POSIX completion backends share one implementation (no drift). Returns 0 with
+ * *out set, or -1 if a REQUESTED cmsg could not be built (caller fails the send). */
+static int dgram_build_control(unsigned char *buf, size_t bufsz,
+                               const struct sockaddr *src, int tos, int family, size_t *out) {
+    return kl_udp_build_control(buf, bufsz, src, tos, family, out);
 }
 
 /* Read the received TOS / Traffic-Class byte from control messages, or -1. */
@@ -208,13 +154,18 @@ static kl_ssize_t pdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     const struct sockaddr *dsa = dest_len ? (const struct sockaddr *)&ds : NULL;
 
     if (src_len || tos >= 0) {
-        unsigned char control[DGRAM_TX_CMSG_SPACE];
+        /* _Alignas: the builder makes typed struct cmsghdr accesses into this buffer, which requires
+         * cmsghdr alignment — a plain unsigned char[] is only byte-aligned. */
+        _Alignas(struct cmsghdr) unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        /* Family for the TOS cmsg level: from the dest, else the source-pin, else v4. */
-        int family = dest_len ? dsa->sa_family
-                   : (src_len ? ((struct sockaddr *)&ss)->sa_family : AF_INET);
-        size_t clen = dgram_build_control(control, sizeof(control),
-                                          src_len ? (struct sockaddr *)&ss : NULL, tos, family);
+        /* Family for the TOS cmsg level: dest, else src, else getsockname — never defaulted to v4. */
+        int family = kl_udp_send_family(s, dsa, src_len ? (struct sockaddr *)&ss : NULL);
+        if (family < 0) { errno = EINVAL; return -1; }
+        size_t clen;
+        if (dgram_build_control(control, sizeof(control),
+                                src_len ? (struct sockaddr *)&ss : NULL, tos, family, &clen) != 0) {
+            errno = EINVAL; return -1;   /* requested source-pin/TOS could not be built → fail the send */
+        }
         struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
         struct msghdr msg;
         memset(&msg, 0, sizeof(msg));
@@ -299,7 +250,7 @@ static kl_ssize_t pdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, s
 /* ── Socket options (configure folds the three init-time setups) ──────── */
 
 static uint32_t pdg_configure(void *ctx, KlSocketHandle fd, int family,
-                              const struct KlUdpConfig *cfg) {
+                              const struct KlDatagramSocketConfig *cfg) {
     (void)ctx;
     int s = (int)fd;
     uint32_t caps = 0;
@@ -460,7 +411,7 @@ static int pdg_mcast(void *ctx, KlSocketHandle fd, int family,
     return -1;
 }
 
-/* ── mmsg batching (Linux; NULL ops elsewhere → udp.c per-datagram loop) ── */
+/* ── mmsg batching (Linux; NULL ops elsewhere → the datagram core per-datagram loop) ── */
 
 #if defined(__linux__)
 typedef struct {
@@ -587,10 +538,16 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
             struct sockaddr_storage src_ss;
             socklen_t src_len = have_src ? kl_sockaddr_to_native(&descs[i].src, &src_ss) : 0;
             unsigned char *ctrl = b->ctrl + (size_t)i * b->ctrl_sz;
-            int fam = dest_len ? (int)b->dst[i].ss_family : AF_INET;
-            size_t clen = dgram_build_control(ctrl, b->ctrl_sz,
-                                              src_len ? (struct sockaddr *)&src_ss : NULL,
-                                              descs[i].tos, fam);
+            int fam = kl_udp_send_family((int)fd, dest_len ? (struct sockaddr *)&b->dst[i] : NULL,
+                                         src_len ? (struct sockaddr *)&src_ss : NULL);
+            size_t clen = 0;
+            /* A descriptor whose requested source-pin/TOS cannot be built (undeterminable family or the
+             * cmsg doesn't fit) FAILS the batch — never transmit without the requested metadata. */
+            if (fam < 0 ||
+                dgram_build_control(ctrl, b->ctrl_sz, src_len ? (struct sockaddr *)&src_ss : NULL,
+                                    descs[i].tos, fam, &clen) != 0) {
+                errno = EINVAL; return -1;
+            }
             if (clen) { m->msg_control = ctrl; m->msg_controllen = clen; }
         }
         b->msgs[i].msg_len = 0;
@@ -604,6 +561,63 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
 
 /* ── The ops table ────────────────────────────────────────────────────── */
 
+/* M2: report ONLY the caps whose implementation is actually compiled in FOR THIS fd's family. Each bit
+ * is gated on the exact macro the corresponding op uses (build_control source-pin, IP_TOS/IPV6_TCLASS,
+ * IP_ADD_MEMBERSHIP/IPV6_JOIN_GROUP, SO_BROADCAST) so a bit never over-reports a silently-absent op
+ * (e.g. IPv4 without IP_PKTINFO emits no source-pin cmsg → SOURCE_PIN is NOT granted). Connected-mode
+ * send is always available. If the family cannot be determined, grant nothing (fail-loud). */
+static unsigned pdg_caps(void *ctx, KlSocketHandle fd) {
+    (void)ctx;
+    struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
+    socklen_t sl = sizeof(ss);
+    if (getsockname((int)fd, (struct sockaddr *)&ss, &sl) != 0)
+        return 0;
+    unsigned caps = KL_DGRAM_CAP_CONNECTED;   /* connect()+send: no family-specific compile guard */
+    if (ss.ss_family == AF_INET) {
+#if defined(IP_PKTINFO)
+        caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IP_TOS)
+        caps |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IP_ADD_MEMBERSHIP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+#if defined(SO_BROADCAST)
+        caps |= KL_DGRAM_CAP_BROADCAST;   /* IPv4-only */
+#endif
+    } else if (ss.ss_family == AF_INET6) {
+#if defined(IPV6_PKTINFO)
+        caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IPV6_TCLASS)
+        caps |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IPV6_JOIN_GROUP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+        /* no broadcast on IPv6 */
+    }
+    /* M5 high-throughput SUPPORT. Family-INDEPENDENT in mechanism, but only meaningful for IP datagram
+     * sockets — so gate on AF_INET/AF_INET6 to preserve M2's exact-fd truthfulness (a non-IP fd, e.g.
+     * AF_UNIX SOCK_DGRAM, must NOT be told it has UDP batch/GSO/GRO). RX/TX batch = recvmmsg/sendmmsg
+     * ops compiled in (Linux); GSO = the send_gso op can attempt UDP_SEGMENT (advisory — first use may
+     * EOPNOTSUPP); GRO = the provider can capture UDP_GRO (per-socket activation also needs accepted_rx). */
+    if (ss.ss_family == AF_INET || ss.ss_family == AF_INET6) {
+#if defined(__linux__)
+        caps |= KL_DGRAM_CAP_RX_BATCH | KL_DGRAM_CAP_TX_BATCH;
+#endif
+#if defined(UDP_SEGMENT)
+        caps |= KL_DGRAM_CAP_GSO;
+#endif
+#if defined(UDP_GRO)
+        caps |= KL_DGRAM_CAP_GRO;
+#endif
+    }
+    return caps;
+}
+
 const KlDatagramOps kl_socket_posix_dgram_ops = {
     .send             = pdg_send,
     .recv             = pdg_recv,
@@ -611,6 +625,7 @@ const KlDatagramOps kl_socket_posix_dgram_ops = {
     .configure        = pdg_configure,
     .set_tos          = pdg_set_tos,
     .mcast_membership = pdg_mcast,
+    .caps             = pdg_caps,
 #if defined(__linux__)
     .rx_batch_new     = pdg_rx_batch_new,
     .tx_batch_new     = pdg_tx_batch_new,

@@ -11,7 +11,7 @@
  * while closing, idempotence, and graceful→abortive escalation.
  */
 #include "utest.h"
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
 #include "../src/stream_write.h"
 #include "../src/stream_read.h"

@@ -5,8 +5,8 @@
  * cover: the KL_IOCP_TLS_RECV op (WSARecv ciphertext into the op buffer), kl_comp_drain
  * feeding it to the engine (tls->feed_input) before surfacing a READ, and the overlapped
  * WSASend of the drained response ciphertext. It uses the portable identity mock TLS
- * (mock_tls.h) so no mbedTLS is needed — a KlServer pinned to the IOCP completion loop
- * with the mock TLS, hit by the sync KlClient using the same mock over loopback.
+ * (mock_tls.h) so no mbedTLS is needed — a KlHttpServer pinned to the IOCP completion loop
+ * with the mock TLS, hit by the sync KlHttpClient using the same mock over loopback.
  *
  * Windows-only (references the internal IOCP provider); the Windows-IOCP CI job runs it.
  * Sibling of smoke_iocp.c (plaintext) and smoke_pollcomp_tls.c (POSIX/pollcomp).
@@ -31,85 +31,85 @@
 #define FPATH  "smoke_iocp_tls_file.tmp"
 #define STREAMB "iocp-tls-one;iocp-tls-two"
 
-static void h_ok(KlRequest *q, KlResponse *r, void *c) {
+static void h_ok(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
-    kl_response_json(r, 200, BODY, sizeof(BODY) - 1);
+    kl_http_response_json(r, 200, BODY, sizeof(BODY) - 1);
 }
-static void h_echo(KlRequest *q, KlResponse *r, void *c) {
+static void h_echo(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)c;
-    KlBufReader *br = (KlBufReader *)q->body_reader;
-    if (!br || br->len == 0) { kl_response_error(r, 400, "body required"); return; }
-    kl_response_status(r, 200);
-    kl_response_body_borrow(r, br->data, br->len);
+    KlHttpBufReader *br = (KlHttpBufReader *)q->body_reader;
+    if (!br || br->len == 0) { kl_http_response_error(r, 400, "body required"); return; }
+    kl_http_response_status(r, 200);
+    kl_http_response_body_borrow(r, br->data, br->len);
 }
-static void h_file(KlRequest *q, KlResponse *r, void *c) {
+static void h_file(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
     int fd = _open(FPATH, _O_RDONLY | _O_BINARY);
-    if (fd < 0) { kl_response_error(r, 500, "open"); return; }
+    if (fd < 0) { kl_http_response_error(r, 500, "open"); return; }
     long sz = _lseek(fd, 0, SEEK_END);
     _lseek(fd, 0, SEEK_SET);
-    kl_response_status(r, 200);
-    kl_response_file(r, (KlSocketHandle)fd, (off_t)sz);
+    kl_http_response_status(r, 200);
+    kl_http_response_file(r, (KlSocketHandle)fd, (off_t)sz);
 }
-static void h_stream(KlRequest *q, KlResponse *r, void *c) {
+static void h_stream(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
-    KlWriteFn w = NULL;
+    KlHttpResponseWriteFn w = NULL;
     void *wc = NULL;
-    if (kl_response_begin_stream(r, 200, &w, &wc) < 0) return;
+    if (kl_http_response_begin_stream(r, 200, &w, &wc) < 0) return;
     w(wc, "iocp-tls-one;", 13);
     w(wc, "iocp-tls-two", 12);
-    kl_response_end_stream(r);
+    kl_http_response_end_stream(r);
 }
 
-static KlServer g_srv;
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
-static int req(KlAllocator *alloc, KlClientConfig *ccfg, const char *method,
+static int req(KlAllocator *alloc, KlHttpClientConfig *ccfg, const char *method,
                const char *path, const char *reqbody, size_t reqlen,
                const char *want, size_t wantlen) {
     char url[128];
     snprintf(url, sizeof(url), "https://127.0.0.1:%d%s", PORT, path);
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
-    int rc = kl_client_request(alloc, ccfg, method, url, NULL, 0, reqbody, reqlen, &resp);
+    int rc = kl_http_client_request(alloc, ccfg, method, url, NULL, 0, reqbody, reqlen, &resp);
     if (rc != 0) return 0;
     int ok = (resp.status == 200 && resp.body_len == wantlen &&
               resp.body && memcmp(resp.body, want, wantlen) == 0);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return ok;
 }
 
 int main(void) {
     KlTlsConfig srv_tls = { .ctx = NULL, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iocp(), .tls = &srv_tls };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iocp-tls: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", h_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", h_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", h_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", h_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", h_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", h_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", h_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", h_stream, NULL, NULL);
 
     int wfd = _open(FPATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
     if (wfd < 0 || _write(wfd, FDATA, sizeof(FDATA) - 1) != (int)(sizeof(FDATA) - 1)) {
         fprintf(stderr, "smoke-iocp-tls: temp file write failed\n");
         if (wfd >= 0) _close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     _close(wfd);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
     KlAllocator alloc = kl_allocator_default();
     KlTlsConfig cli_tls = { .ctx = NULL, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024,
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024,
                             .tls = &cli_tls };
 
     int get_ok = 0;
@@ -124,9 +124,9 @@ int main(void) {
     int stream_ok = file_ok && req(&alloc, &ccfg, "GET", "/stream", NULL, 0,
                                    STREAMB, sizeof(STREAMB) - 1);
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     _unlink(FPATH);
 
     if (!get_ok)    { fprintf(stderr, "smoke-iocp-tls: GET (buffered) FAILED\n");   return 1; }

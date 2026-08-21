@@ -1,8 +1,8 @@
 #include "utest.h"
 #include <keel/file_io.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/event.h>
 #include <string.h>
 #include <unistd.h>
@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 
-/* File I/O phase constants (mirror connection.c) */
+/* File I/O phase constants (mirror http_connection.c) */
 #define FILE_IO_IDLE       0
 #define FILE_IO_READING    1
 #define FILE_IO_WRITING    2
@@ -101,11 +101,11 @@ UTEST(file_io, submit_called) {
     mock_file_io_init(&mock);
 
     KlAllocator a = kl_allocator_default();
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = 42;
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
@@ -115,7 +115,7 @@ UTEST(file_io, submit_called) {
 
     /* Set up response as file body with headers already sent */
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 1000;
     c.res.file_offset = 0;
@@ -123,8 +123,8 @@ UTEST(file_io, submit_called) {
     c.res.head_request = 0;
     c.res.file_fd = 10;
 
-    KlConnState state = kl_conn_on_writable(&c);
-    ASSERT_EQ(state, KL_CONN_SENDING);
+    KlHttpConnState state = kl_http_conn_on_writable(&c);
+    ASSERT_EQ(state, KL_HTTP_CONN_SENDING);
     ASSERT_EQ(mock.submitted, 1);
     ASSERT_EQ(mock.last_file_fd, 10);
     ASSERT_EQ(mock.last_sock_fd, 42);
@@ -137,17 +137,17 @@ UTEST(file_io, submit_called) {
 
 UTEST(file_io, headers_first) {
     /* Headers must be sent before file read is submitted.
-     * When headers_sent is 0, on_writable should call kl_response_send
+     * When headers_sent is 0, on_writable should call kl_http_response_send
      * first. Since we don't have a real fd, we just verify the logic path. */
     MockFileIO mock;
     mock_file_io_init(&mock);
 
     KlAllocator a = kl_allocator_default();
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = -1;  /* invalid fd — send will fail */
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
@@ -155,16 +155,16 @@ UTEST(file_io, headers_first) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 0;  /* headers not sent yet */
     c.res.conn_fd = -1;
 
     /* response_send will fail on invalid fd — that's expected */
-    KlConnState state = kl_conn_on_writable(&c);
+    KlHttpConnState state = kl_http_conn_on_writable(&c);
     /* Should close due to send failure, no file I/O submitted */
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
     ASSERT_EQ(mock.submitted, 0);
 
     kl_free(&a, c.stream.read_buf, 8192);
@@ -185,11 +185,11 @@ UTEST(file_io, complete_writes) {
     /* Make write end non-blocking */
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
@@ -200,17 +200,17 @@ UTEST(file_io, complete_writes) {
     memcpy(c.stream.read_buf, "hello world", 11);
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 11;
     c.res.file_offset = 0;
     c.res.headers_sent = 1;
 
     /* Deliver completion: 11 bytes read */
-    KlConnState state = kl_conn_on_file_complete(&c, 11, 0);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, 11, 0);
 
     /* File fully sent — should complete (CLOSED since keep_alive=0) */
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
     ASSERT_EQ(c.res.file_offset, (uint64_t)11);
 
     /* Read from the other end to verify */
@@ -240,11 +240,11 @@ UTEST(file_io, partial_write) {
     memset(fill, 'X', sizeof(fill));
     while (write(fds[0], fill, sizeof(fill)) > 0) {}
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
@@ -253,15 +253,15 @@ UTEST(file_io, partial_write) {
     memcpy(c.stream.read_buf, "test data here", 14);
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 14;
     c.res.file_offset = 0;
     c.res.headers_sent = 1;
 
-    KlConnState state = kl_conn_on_file_complete(&c, 14, 0);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, 14, 0);
     /* Socket full → EAGAIN → stays SENDING in WRITING phase */
-    ASSERT_EQ(state, KL_CONN_SENDING);
+    ASSERT_EQ(state, KL_HTTP_CONN_SENDING);
     ASSERT_EQ(c.file_io_phase, FILE_IO_WRITING);
 
     kl_free(&a, c.stream.read_buf, 8192);
@@ -279,11 +279,11 @@ UTEST(file_io, multi_chunk) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
 
     size_t bufcap = 100;
@@ -291,15 +291,15 @@ UTEST(file_io, multi_chunk) {
     c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 250;  /* larger than buffer */
     c.res.file_offset = 0;
     c.res.headers_sent = 1;
 
     /* First: submit read */
-    KlConnState state = kl_conn_on_writable(&c);
-    ASSERT_EQ(state, KL_CONN_SENDING);
+    KlHttpConnState state = kl_http_conn_on_writable(&c);
+    ASSERT_EQ(state, KL_HTTP_CONN_SENDING);
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
     ASSERT_EQ(mock.submitted, 1);
     ASSERT_EQ(mock.last_len, (size_t)100);  /* capped to read_cap */
@@ -307,7 +307,7 @@ UTEST(file_io, multi_chunk) {
 
     /* Complete first chunk */
     memset(c.stream.read_buf, 'A', 100);
-    state = kl_conn_on_file_complete(&c, 100, 0);
+    state = kl_http_conn_on_file_complete(&c, 100, 0);
 
     /* After writing 100 bytes, offset advances, submits next read */
     ASSERT_EQ(c.res.file_offset, (uint64_t)100);
@@ -317,14 +317,14 @@ UTEST(file_io, multi_chunk) {
 
     /* Complete second chunk */
     memset(c.stream.read_buf, 'B', 100);
-    state = kl_conn_on_file_complete(&c, 100, 0);
+    state = kl_http_conn_on_file_complete(&c, 100, 0);
     ASSERT_EQ(c.res.file_offset, (uint64_t)200);
     ASSERT_EQ(mock.submitted, 3);
     ASSERT_EQ(mock.last_len, (size_t)50);  /* remaining = 50 */
 
     /* Complete final chunk */
     memset(c.stream.read_buf, 'C', 50);
-    state = kl_conn_on_file_complete(&c, 50, 0);
+    state = kl_http_conn_on_file_complete(&c, 50, 0);
     ASSERT_EQ(c.res.file_offset, (uint64_t)250);
 
     /* Drain the data from the read end (non-blocking) */
@@ -348,11 +348,11 @@ UTEST(file_io, cancel_on_timeout) {
     mock_file_io_init(&mock);
     KlAllocator a = kl_allocator_default();
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = 99;
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
@@ -371,11 +371,11 @@ UTEST(file_io, cancel_cqe) {
     mock_file_io_init(&mock);
     KlAllocator a = kl_allocator_default();
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = 99;
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_CANCELLING;
 
@@ -383,8 +383,8 @@ UTEST(file_io, cancel_cqe) {
     c.stream.read_cap = 8192;
 
     /* Cancel CQE arrives with -ECANCELED */
-    KlConnState state = kl_conn_on_file_complete(&c, -125, 0);  /* -ECANCELED */
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, -125, 0);  /* -ECANCELED */
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
     ASSERT_EQ(c.file_io_phase, FILE_IO_IDLE);
 
     kl_free(&a, c.stream.read_buf, 8192);
@@ -399,11 +399,11 @@ UTEST(file_io, tls_fallback) {
     /* Create a fake TLS pointer (just non-NULL to trigger TLS path) */
     int fake_tls = 1;
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = -1;
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
     c.tls = (KlTls *)(void *)&fake_tls;  /* non-NULL = TLS active */
@@ -412,14 +412,14 @@ UTEST(file_io, tls_fallback) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 1;
     c.res.conn_fd = -1;
 
     /* on_writable with TLS should NOT use file_io, should use response_send */
-    (void)kl_conn_on_writable(&c);
+    (void)kl_http_conn_on_writable(&c);
     /* Will fail due to invalid fd, but should NOT have called submit */
     ASSERT_EQ(mock.submitted, 0);
 
@@ -436,11 +436,11 @@ UTEST(file_io, head_request) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
@@ -448,17 +448,17 @@ UTEST(file_io, head_request) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 1;
     c.res.head_request = 1;  /* HEAD request */
 
-    KlConnState state = kl_conn_on_writable(&c);
+    KlHttpConnState state = kl_http_conn_on_writable(&c);
     /* HEAD: no file read submitted, should complete */
     ASSERT_EQ(mock.submitted, 0);
     /* Connection should be done (CLOSED since keep_alive=0) */
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
 
     kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
@@ -469,25 +469,25 @@ UTEST(file_io, read_error) {
     /* Negative result from file I/O → close connection */
     KlAllocator a = kl_allocator_default();
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = -1;
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io_phase = FILE_IO_READING;
 
     c.stream.read_buf = kl_malloc(&a, 8192);
     c.stream.read_cap = 8192;
 
-    KlConnState state = kl_conn_on_file_complete(&c, -5, 0);
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, -5, 0);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
     ASSERT_EQ(c.file_io_phase, FILE_IO_IDLE);
 
     /* Zero-byte read also closes */
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io_phase = FILE_IO_READING;
-    state = kl_conn_on_file_complete(&c, 0, 0);
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    state = kl_http_conn_on_file_complete(&c, 0, 0);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
 
     kl_free(&a, c.stream.read_buf, 8192);
 }
@@ -502,11 +502,11 @@ UTEST(file_io, zero_copy_skips_write) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
@@ -514,21 +514,21 @@ UTEST(file_io, zero_copy_skips_write) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 500;
     c.res.file_offset = 0;
     c.res.headers_sent = 1;
 
     /* Simulate zero-copy completion of 500 bytes */
-    KlConnState state = kl_conn_on_file_complete(&c, 500, 1);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, 500, 1);
 
     /* File fully sent — offset advanced, should complete */
     ASSERT_EQ(c.res.file_offset, (uint64_t)500);
     /* No WRITING phase — file_io_phase should NOT be FILE_IO_WRITING */
     ASSERT_NE(c.file_io_phase, FILE_IO_WRITING);
     /* Connection done (CLOSED since keep_alive=0) */
-    ASSERT_EQ(state, KL_CONN_CLOSED);
+    ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
 
     kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
@@ -545,11 +545,11 @@ UTEST(file_io, zero_copy_multi_chunk) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
 
     size_t bufcap = 100;
@@ -557,7 +557,7 @@ UTEST(file_io, zero_copy_multi_chunk) {
     c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 250;
     c.res.file_offset = 0;
@@ -565,20 +565,20 @@ UTEST(file_io, zero_copy_multi_chunk) {
 
     /* First chunk: zero-copy 100 bytes */
     c.file_io_phase = FILE_IO_READING;
-    KlConnState state = kl_conn_on_file_complete(&c, 100, 1);
+    KlHttpConnState state = kl_http_conn_on_file_complete(&c, 100, 1);
     ASSERT_EQ(c.res.file_offset, (uint64_t)100);
-    ASSERT_EQ(state, KL_CONN_SENDING);
+    ASSERT_EQ(state, KL_HTTP_CONN_SENDING);
     ASSERT_EQ(mock.submitted, 1);  /* next read submitted */
 
     /* Second chunk: zero-copy 100 bytes */
     c.file_io_phase = FILE_IO_READING;
-    state = kl_conn_on_file_complete(&c, 100, 1);
+    state = kl_http_conn_on_file_complete(&c, 100, 1);
     ASSERT_EQ(c.res.file_offset, (uint64_t)200);
     ASSERT_EQ(mock.submitted, 2);
 
     /* Final chunk: zero-copy 50 bytes */
     c.file_io_phase = FILE_IO_READING;
-    state = kl_conn_on_file_complete(&c, 50, 1);
+    state = kl_http_conn_on_file_complete(&c, 50, 1);
     ASSERT_EQ(c.res.file_offset, (uint64_t)250);
     /* File done */
 
@@ -615,11 +615,11 @@ UTEST(file_io, splice_fallback) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
     c.stream.fd = fds[0];
-    c.state = KL_CONN_SENDING;
+    c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
@@ -627,7 +627,7 @@ UTEST(file_io, splice_fallback) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.file_offset = 0;
@@ -635,8 +635,8 @@ UTEST(file_io, splice_fallback) {
 
     /* on_writable triggers conn_file_submit_read:
      * splice (buf=NULL) fails → falls back to buffered read (buf=read_buf) */
-    KlConnState state = kl_conn_on_writable(&c);
-    ASSERT_EQ(state, KL_CONN_SENDING);
+    KlHttpConnState state = kl_http_conn_on_writable(&c);
+    ASSERT_EQ(state, KL_HTTP_CONN_SENDING);
     ASSERT_EQ(mock.submitted, 1);
     ASSERT_EQ(mock.last_buf, c.stream.read_buf);  /* buffered path used */
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);

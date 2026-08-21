@@ -23,16 +23,16 @@ Every PR should be checked for:
 - [ ] **TLS shutdown** — Connections must call tls->shutdown() before close(fd)
 - [ ] **Pending drain** — After TLS reads, tls->pending() must be checked to drain internal buffers
 - [ ] **Async safety** — `kl_async_complete()` only called from event loop thread, never from workers
-- [ ] **Watcher API** — All `kl_watcher_*` calls use `KlEventCtx *` (via `&server->ev` or standalone), never raw `KlServer *`
+- [ ] **Watcher API** — All `kl_watcher_*` calls use `KlEventCtx *` (via `&server->ev` or standalone), never raw `KlHttpServer *`
 - [ ] **Thread pool callbacks** — `work_fn` must not touch connection/event loop state; `done_fn` runs on event loop thread
-- [ ] **Thread pool creation** — `kl_thread_pool_create` takes `KlEventCtx *` (not `KlServer *`)
-- [ ] **Thread pool shutdown** — `kl_thread_pool_free` called before `kl_server_free` or event loop teardown
-- [ ] **Client response lifetime** — `KlClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
-- [ ] **Client async cleanup** — `kl_client_cancel()` + `kl_client_free()` called on error/deadline paths
-- [ ] **URL injection** — URLs passed to `kl_url_parse()` / `kl_client_request()` are validated (CRLF rejection)
+- [ ] **Thread pool creation** — `kl_thread_pool_create` takes `KlEventCtx *` (not `KlHttpServer *`)
+- [ ] **Thread pool shutdown** — `kl_thread_pool_free` called before `kl_http_server_free` or event loop teardown
+- [ ] **Client response lifetime** — `KlHttpClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
+- [ ] **Client async cleanup** — `kl_http_client_cancel()` + `kl_http_client_free()` called on error/deadline paths
+- [ ] **URL injection** — URLs passed to `kl_url_parse()` / `kl_http_client_request()` are validated (CRLF rejection)
 - [ ] **Proxy buffer cleanup** — connect_buf and proxy_recv freed on all error/success paths
 - [ ] **Proxy auth isolation** — Proxy-Authorization header not forwarded to target after CONNECT
-- [ ] **Pool proxy key** — kl_cpool_acquire/release include proxy_host/proxy_port for cache isolation
+- [ ] **Pool proxy key** — kl_http_client_pool_acquire/release include proxy_host/proxy_port for cache isolation
 
 ## Security Audit Patterns
 
@@ -81,7 +81,7 @@ KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worke
 
 ### Graceful degradation
 
-- **No built-in 503**: `kl_server_stats()` exposes `active_connections` / `max_connections` / `async_suspended` / `listen_paused` — users implement load shedding as middleware (threshold, `Retry-After`, etc. are policy decisions)
+- **No built-in 503**: `kl_http_server_stats()` exposes `active_connections` / `max_connections` / `async_suspended` / `listen_paused` — users implement load shedding as middleware (threshold, `Retry-After`, etc. are policy decisions)
 - **No global memory monitoring**: allocator is pluggable, so the framework can't reliably track total memory; existing caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors
 - **No automatic 503 or adaptive load shedding**: too opinionated for a transport library; users know their workload
 
@@ -154,11 +154,11 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 
 ## Adding a New Body Reader
 
-1. Implement the `KlBodyReader` vtable (4 functions: `on_data`, `on_complete`, `on_error`, `destroy`)
-2. Define a concrete struct embedding `KlBodyReader base` as the first field
-3. Write a factory function: `KlBodyReader *kl_body_reader_<name>(KlAllocator *alloc, KlRequest *req, void *user_data)`
+1. Implement the `KlHttpBodyReader` vtable (4 functions: `on_data`, `on_complete`, `on_error`, `destroy`)
+2. Define a concrete struct embedding `KlHttpBodyReader base` as the first field
+3. Write a factory function: `KlHttpBodyReader *kl_http_body_reader_<name>(KlAllocator *alloc, KlHttpRequest *req, void *user_data)`
 4. The factory inspects headers (Content-Type, Content-Length) to validate — return NULL to reject (triggers 415)
-5. Register per-route: `kl_server_route(&s, method, pattern, handler, user_data, kl_body_reader_<name>)`
+5. Register per-route: `kl_http_server_route(&s, method, pattern, handler, user_data, kl_http_body_reader_<name>)`
 6. Create header in `include/keel/body_reader_<name>.h`, source in `src/body_reader_<name>.c`
 7. Add to `CORE_SRC` in Makefile, include in `keel.h`
 
@@ -178,10 +178,10 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 
 ## Adding a New Middleware
 
-Middleware uses the `KlMiddleware` function signature — return `0` to continue, non-zero to short-circuit:
+Middleware uses the `KlHttpMiddleware` function signature — return `0` to continue, non-zero to short-circuit:
 
 ```c
-int my_middleware(KlRequest *req, KlResponse *res, void *user_data) {
+int my_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     /* Inspect request, optionally modify response or req->ctx */
     /* Return 0 to continue, non-zero to short-circuit */
     return 0;
@@ -191,7 +191,7 @@ int my_middleware(KlRequest *req, KlResponse *res, void *user_data) {
 ### Pass-through middleware (logging, metrics)
 
 ```c
-int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int log_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)res; (void)ctx;
     fprintf(stderr, "[req] %.*s %.*s\n",
             (int)req->method_len, req->method,
@@ -199,7 +199,7 @@ int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
     return 0;  /* always continue */
 }
 
-kl_server_use(&s, "*", "/*", log_middleware, NULL);
+kl_http_server_use(&s, "*", "/*", log_middleware, NULL);
 ```
 
 ### Short-circuit middleware (auth, rate limiting)
@@ -207,27 +207,27 @@ kl_server_use(&s, "*", "/*", log_middleware, NULL);
 ```c
 typedef struct { const char *api_key; } AuthConfig;
 
-int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int auth_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     AuthConfig *cfg = ctx;
     size_t key_len;
-    const char *key = kl_request_header_len(req, "X-API-Key", &key_len);
+    const char *key = kl_http_request_header_len(req, "X-API-Key", &key_len);
     size_t expect_len = strlen(cfg->api_key);
     if (!key || key_len != expect_len ||
         memcmp(key, cfg->api_key, expect_len) != 0) {
-        kl_response_error(res, 401, "Unauthorized");
+        kl_http_response_error(res, 401, "Unauthorized");
         return 1;  /* short-circuit — stop chain, send response */
     }
     return 0;
 }
 
 AuthConfig auth = {.api_key = "secret-key-123"};
-kl_server_use(&s, "*", "/api/*", auth_middleware, &auth);
+kl_http_server_use(&s, "*", "/api/*", auth_middleware, &auth);
 ```
 
 ### Context-setting middleware (user lookup)
 
 ```c
-int user_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int user_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)res; (void)ctx;
     req->ctx = my_user_lookup(req);  /* handler reads req->ctx */
     return 0;
@@ -244,9 +244,9 @@ int user_middleware(KlRequest *req, KlResponse *res, void *ctx) {
 ### Registration
 
 ```c
-kl_server_use(&s, method, pattern, fn, user_data);
+kl_http_server_use(&s, method, pattern, fn, user_data);
 // Or directly on the router:
-kl_router_use(&r, method, pattern, fn, user_data);
+kl_http_router_use(&r, method, pattern, fn, user_data);
 ```
 
 Middleware runs in registration order, after route matching, before body reading.
@@ -256,7 +256,7 @@ Middleware runs in registration order, after route matching, before body reading
 1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol` and `set_hostname` (NULL if not supported)
 2. Create a `KlTlsCtx` struct for shared state (certificates, keys, ciphers)
 3. Write a factory function: `KlTls *my_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)`
-4. Register via `KlTlsConfig` in `KlConfig`:
+4. Register via `KlTlsConfig` in `KlHttpServerConfig`:
 
 ```c
 KlTlsConfig tls = {
@@ -264,7 +264,7 @@ KlTlsConfig tls = {
     .factory = my_tls_factory,
     .ctx_destroy = my_ctx_free,
 };
-KlConfig cfg = { .port = 8443, .tls = &tls };
+KlHttpServerConfig cfg = { .port = 8443, .tls = &tls };
 ```
 
 The factory is called once per connection slot at server init. Each `KlTls` session is reused across keep-alive requests via `reset()`.

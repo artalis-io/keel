@@ -26,11 +26,11 @@
  * freestanding consumer that never includes the full umbrella can still query
  * the linked-library version. They are kept in sync with <keel/keel.h>.
  *
- * DELIBERATELY OUT (and why): resolver.h, udp*.h, server.h, client_pool.h has a
- * subtlety — client_pool.h IS part of the freestanding client archive, but it is
+ * DELIBERATELY OUT (and why): resolver.h, udp*.h, http_server.h, http_client_pool.h has a
+ * subtlety — http_client_pool.h IS part of the freestanding client archive, but it is
  * NOT in the header gate (it exposes a native socket fd type in its public API),
  * so it is not re-exported here; a freestanding pool consumer includes it
- * directly. connection.h / net.h / proxy_protocol.h expose native socket
+ * directly. http_connection.h / net.h / proxy_protocol.h expose native socket
  * addresses for excluded features and stay out.
  */
 
@@ -57,15 +57,15 @@ int         kl_version_number(void);
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/url.h>
-#include <keel/parser.h>
-#include <keel/request.h>
-#include <keel/body_reader.h>
-#include <keel/chunked.h>
+#include <keel/http1_parser.h>
+#include <keel/http_request.h>
+#include <keel/http_body_reader.h>
+#include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>
-#include <keel/h2.h>
-#include <keel/h2_client.h>
-#include <keel/response.h>
+#include <keel/http2.h>
+#include <keel/http2_client.h>
+#include <keel/http_response.h>
 #include <keel/file_io.h>
 
 #endif /* KEEL_FREESTANDING_H */

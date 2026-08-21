@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/error.h>
-#include <keel/server.h>
-#include <keel/client.h>
+#include <keel/http_server.h>
+#include <keel/http_client.h>
 #include <limits.h>
 #include <string.h>
 #include "net_compat.h"
@@ -33,22 +33,22 @@ UTEST(error, strerror_out_of_range) {
     ASSERT_STREQ(kl_strerror((KlError)9999), "unknown error");
 }
 
-/* ── KlServer.last_error ─────────────────────────────────────────── */
+/* ── KlHttpServer.last_error ─────────────────────────────────────────── */
 
 UTEST(error, server_init_success) {
-    KlServer s;
-    KlConfig cfg;
+    KlHttpServer s;
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0;  /* unused — we won't run */
-    ASSERT_EQ(kl_server_init(&s, &cfg), 0);
+    ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
     ASSERT_EQ(s.last_error, KL_ERR_NONE);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 }
 
 UTEST(error, server_init_null) {
-    KlServer s;
+    KlHttpServer s;
     memset(&s, 0, sizeof(s));
-    ASSERT_EQ(kl_server_init(&s, NULL), -1);
+    ASSERT_EQ(kl_http_server_init(&s, NULL), -1);
     ASSERT_EQ(s.last_error, KL_ERR_INVALID_ARG);
 }
 
@@ -71,25 +71,25 @@ UTEST(error, server_run_bind_in_use) {
     int port = ntohs(addr.sin_port);
 
     /* Try to bind keel on the same port */
-    KlServer s;
-    KlConfig cfg;
+    KlHttpServer s;
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.port = port;
     cfg.bind_addr = "127.0.0.1";
-    ASSERT_EQ(kl_server_init(&s, &cfg), 0);
-    ASSERT_EQ(kl_server_run(&s), -1);
+    ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
+    ASSERT_EQ(kl_http_server_run(&s), -1);
     ASSERT_EQ(s.last_error, KL_ERR_BIND);
 
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     kl_test_closesock(sock);
 }
 
-/* ── KlClientResponse.error (sync) ──────────────────────────────── */
+/* ── KlHttpClientResponse.error (sync) ──────────────────────────────── */
 
 UTEST(error, sync_client_bad_url) {
     KlAllocator alloc = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&alloc, NULL, "GET", "not-a-url",
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&alloc, NULL, "GET", "not-a-url",
                                 NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(resp.error, KL_ERR_URL);
@@ -97,8 +97,8 @@ UTEST(error, sync_client_bad_url) {
 
 UTEST(error, sync_client_https_no_tls) {
     KlAllocator alloc = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&alloc, NULL, "GET", "https://example.com",
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&alloc, NULL, "GET", "https://example.com",
                                 NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(resp.error, KL_ERR_URL);
@@ -106,11 +106,11 @@ UTEST(error, sync_client_https_no_tls) {
 
 UTEST(error, sync_client_dns_fail) {
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.timeout_ms = 1000;
-    KlClientResponse resp;
-    int rc = kl_client_request(&alloc, &cfg, "GET",
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&alloc, &cfg, "GET",
                                 "http://this-host-does-not-exist.invalid/",
                                 NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(rc, -1);
@@ -119,12 +119,12 @@ UTEST(error, sync_client_dns_fail) {
 
 UTEST(error, sync_client_connect_refused) {
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.timeout_ms = 1000;
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     /* Port 1 is unlikely to have anything listening */
-    int rc = kl_client_request(&alloc, &cfg, "GET",
+    int rc = kl_http_client_request(&alloc, &cfg, "GET",
                                 "http://127.0.0.1:1/",
                                 NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(rc, -1);

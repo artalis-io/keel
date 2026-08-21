@@ -33,9 +33,8 @@
  */
 #include <keel/event.h>
 #include "event_pollcomp_internal.h"
-#include <keel/server.h>
-#include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
+#include <keel/http_server.h>
+#include <keel/http_connection.h>
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -63,11 +62,12 @@ typedef struct KlPcOp {
     KlSocketHandle fd;                    /* the descriptor this op polls */
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (PC_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlUdpTransport afterwards. The recv buffer + capture flags are
+     * post so the op NEVER dereferences the transport owner afterwards. The recv buffer + capture flags are
      * COPIED at post (into buf/buflen/dg_pktinfo/dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    int            dg_tos;                /* UDP_RECV: capture received TOS byte (M6.0a) */
     void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;                /* READ / UDP_RECV: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
@@ -76,6 +76,10 @@ typedef struct KlPcOp {
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
     struct sockaddr_storage dest;         /* UDP_SEND / CONNECT destination */
     socklen_t      dest_len;
+    /* _Alignas: the builder makes typed struct cmsghdr accesses into this buffer (cmsghdr alignment
+     * required); a plain unsigned char[] is only byte-aligned. */
+    _Alignas(struct cmsghdr) unsigned char send_ctrl[KL_UDP_TX_CTRL_SIZE]; /* UDP_SEND source-pin/TOS cmsg */
+    size_t         send_ctrllen;          /* 0 = no control → plain sendto */
     union {
         void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
     };
@@ -275,9 +279,9 @@ static int pc_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, s
     return 0;
 }
 
-static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int pc_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     KlPcState *st = stream->ctx->loop._backend;
     KlPcOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
@@ -300,7 +304,7 @@ static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
-static int pc_comp_post_accept(struct KlServer *s) {
+static int pc_comp_post_accept(struct KlHttpServer *s) {
     if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
     /* One accept op suffices: on completion the driver refills. Avoid stacking
@@ -331,6 +335,7 @@ static int pc_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *
     op->buflen     = rop->cap;
     op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
     op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
+    op->dg_tos     = (rop->capture & KL_DGRAM_RX_TOS)     != 0;
     op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     pc_op_push(st, op);
     return 0;
@@ -348,9 +353,23 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
     op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → caller releases */
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
-    /* Marshal the neutral dest to a host sockaddr for the sendto at drain time. */
+    /* Marshal the neutral dest to a host sockaddr for the send at drain time. */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
         op->dest_len = kl_sockaddr_to_native(sop->dest, &op->dest);
+    /* Source-pin / per-packet TOS control message — COPIED into the op at post (§2.5.1); the drain uses
+     * sendmsg with it (the sendto fast path stays for plain sends). */
+    if ((sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC && kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_send_family((int)op->fd, op->dest_len ? (struct sockaddr *)&op->dest : NULL, src_sa);
+        if (fam < 0) { pc_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        if (kl_udp_build_control(op->send_ctrl, sizeof(op->send_ctrl), src_sa, sop->tos, fam,
+                                 &op->send_ctrllen) != 0) {
+            pc_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+    }
     op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     pc_op_push(st, op);
     return 0;
@@ -408,7 +427,7 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int pc_comp_prime_accepts(struct KlServer *s) {
+static int pc_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
     if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
@@ -452,7 +471,7 @@ static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
     /* Datagram: transfer the token reference op → event (released after dispatch); the op no longer
-     * owns it, so pc_op_free must not release it. Never touch KlUdpTransport. */
+     * owns it, so pc_op_free must not release it. Never touch the transport owner. */
     case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->life = op->life; op->life = NULL; return 1;
     case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->life = op->life; op->life = NULL; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
@@ -579,18 +598,32 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 (void)kl_sockaddr_from_native(&ev->local,
                                               (struct sockaddr *)&local_ss, local_len);
         }
+        ev->tos = -1;                              /* M6.0a: default "none"; parse only if requested */
         if (n >= 0) {
             if (op->dg_gro)                       /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
+            if (op->dg_tos)                        /* received TOS/Traffic-Class byte */
+                ev->tos = kl_udp_parse_tos(&msg);
             if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }
         return 1;
     }
     case PC_DGRAM_SEND: {
-        ssize_t n = sendto(op->fd, op->sendbuf, op->send_total, 0,
-                           op->dest_len ? (struct sockaddr *)&op->dest : NULL,
-                           op->dest_len);
+        ssize_t n;
+        if (op->send_ctrllen) {                    /* source-pin / TOS → sendmsg with the copied cmsg */
+            struct iovec iov = { .iov_base = op->sendbuf, .iov_len = op->send_total };
+            struct msghdr msg;
+            memset(&msg, 0, sizeof(msg));
+            msg.msg_name = op->dest_len ? (void *)&op->dest : NULL;
+            msg.msg_namelen = op->dest_len;
+            msg.msg_iov = &iov; msg.msg_iovlen = 1;
+            msg.msg_control = op->send_ctrl; msg.msg_controllen = op->send_ctrllen;
+            n = sendmsg(op->fd, &msg, 0);
+        } else {
+            n = sendto(op->fd, op->sendbuf, op->send_total, 0,
+                       op->dest_len ? (struct sockaddr *)&op->dest : NULL, op->dest_len);
+        }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
         ev->kind = KL_COMP_DGRAM_SEND;
@@ -724,7 +757,7 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
  * drain (kl_comp_run) so every dequeued op gets its normal routing. This only marks each posted
  * accept aborted, so the next pc_comp_drain's abort pass (pc_emit_abort) emits a KL_COMP_ACCEPT
  * ok=0 that retires the listener. Synchronous → always succeeds. */
-static int pc_shutdown_accepts(struct KlServer *s) {
+static int pc_shutdown_accepts(struct KlHttpServer *s) {
     KlPcState *st = s->ev.loop._backend;
     for (KlPcOp *o = st->ops; o; o = o->next)
         if (o->type == PC_ACCEPT) o->aborted = 1;
@@ -747,7 +780,7 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
 
 /* ── Runtime event provider (RC-2) ────────────────────────────────────────
  * The pure-runtime form: KlEventOps carrying the completion sub-vtable via .completion,
- * wrapped in a named KlEventProvider. Handed to KlConfig.event_provider to INJECT the
+ * wrapped in a named KlEventProvider. Handed to KlHttpServerConfig.event_provider to INJECT the
  * pollcomp completion axis into an otherwise-default (epoll/kqueue) libkeel — the RC-2
  * proof. No kl_event_*_builtin / kl_comp_ops_builtin appear in THIS TU, so it never
  * clashes with the default backend's compiled-in symbols. Mirrors event_lwip.c. */

@@ -36,7 +36,7 @@ one mechanism serve opposite semantics (see the `KlAsyncOp` doc in `async.h`).
 3. **A cancel racing a completion is safe.** Whichever runs first retires the op;
    the other is a no-op. No double release, no use-after-free, no callback after
    the owner has torn down.
-4. **No silent loss.** `kl_server_free()` cancels every still-pending op
+4. **No silent loss.** `kl_http_server_free()` cancels every still-pending op
    (`kl_async_cancel` on each), so `on_cancel` runs and the caller's async
    context is always cleaned up.
 5. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the

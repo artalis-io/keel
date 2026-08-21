@@ -9,7 +9,7 @@
  *     socket/bind/listen/accept/recv/send/close/set_nonblocking/set_reuseaddr;
  *   - the event loop:   kl_watcher_add/mod/del + kl_event_ctx_run (readiness);
  *   - backpressure:     KlDrain (buffered writes, flush on writability).
- * No KlServer, no router, no request/response, no kl_* internal headers.
+ * No KlHttpServer, no router, no request/response, no kl_* internal headers.
  *
  * A raw-socket client drives it: several frames (tiny, medium, and one larger
  * than the socket buffer to force drain buffering + a writable-driven flush),

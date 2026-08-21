@@ -11,7 +11,7 @@
  *   - readiness builds link the stub in io_engine.c (never called — the server only
  *     enters the completion branch when the loop advertises COMPLETION);
  *   - the IOCP build links the real tick in event_iocp.c.
- * KlServer is used by-pointer only, so an opaque forward declaration keeps this
+ * KlHttpServer is used by-pointer only, so an opaque forward declaration keeps this
  * header free of any other dependency. See docs/phase8_iocp_design.md.
  */
 #ifndef KEEL_SRC_IO_ENGINE_H
@@ -22,15 +22,14 @@
 #include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
 #include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
 
-struct KlServer;
+struct KlHttpServer;
 struct KlEventCtx;
-struct KlUdpTransport;   /* legacy datagram transport (KlUdp's) — the CALLER, not passed to the seam */
 struct sockaddr;
 
 /* ── Neutral datagram completion-op descriptors (7B-2b) ───────────────────────────────────────
- * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so BOTH the
- * legacy KlUdpTransport (via udp.c) and the public KlDatagram/KlDgramCore (7B-3) build them from their
- * own state — the backend never dereferences a transport object. OWNERSHIP (frozen §2.5.1): the caller
+ * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so the public
+ * KlDatagram/KlDgramCore (7B-3) builds them from its own state — the backend never dereferences a
+ * transport object. OWNERSHIP (frozen §2.5.1): the caller
  * retains one `life` ref and TRANSFERS it into the op ONLY on a SUCCESSFUL post; on failure the post
  * takes nothing and the CALLER releases its ref (the backend must not retain/release it). A send op's
  * payload AND dest/src/tos are COPIED before a successful return; a recv op's `buf` is LENT (the
@@ -63,17 +62,17 @@ int kl_completion_axis_available(void);
 
 /* Run one completion-loop tick for the server: prime accepts, then drive one
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
-int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
+int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms);
 
 /* Teardown accept quiescence (6B-3 2b review): force every posted accept to completion, then reap to
  * confirmed KlListener detachment with a TEARDOWN-SPECIFIC dispatcher that routes ONLY ACCEPT and
  * drops all other completions WITHOUT dispatch — so no HTTP step, application/consumer callback, or
  * timer runs against logically destroyed state (async ops / file_io already torn down). Called once
- * from kl_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
+ * from kl_http_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
  * -1 if the force could not be guaranteed (caller leaves the backend close as the physical backstop).
- * The impl (completion_server.c) owns the completion dispatch hook + the listener; server_core.c
+ * The impl (completion_http_server.c) owns the completion dispatch hook + the listener; http_server_core.c
  * stays decoupled from the internal completion vtable. Aborting stub under KEEL_NO_COMPLETION. */
-int kl_io_engine_quiesce_accepts(struct KlServer *s);
+int kl_io_engine_quiesce_accepts(struct KlHttpServer *s);
 
 /* The generic completion tick: drain the ctx's completion loop and route each op to
  * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and
@@ -94,20 +93,20 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
 /* Resume a suspended connection on a completion loop after an async op completed (8e-2).
- * kl_async_complete's readiness path re-arms the fd + drives kl_conn_on_writable; on a
+ * kl_async_complete's readiness path re-arms the fd + drives kl_http_conn_on_writable; on a
  * completion loop the resume instead drives the completion send path. Defined in
  * completion_driver.c (runs comp_after_state on the conn's post-resume state); stubbed in
  * io_engine.c on readiness builds, where kl_async_complete never calls it (it branches on
  * KL_EVENT_CAP_COMPLETION). Keeps the async API free of any event-axis awareness. */
-struct KlConn;
-void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
+struct KlHttpConn;
+void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *conn);
 
 /* Re-arm a body read on a completion loop after read-side flow control resumes
- * (kl_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
+ * (kl_http_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
  * interest directly (kl_event_mod) and never calls this. Defined in completion_driver.c
  * (kl_comp_post_recv); stubbed in io_engine.c on readiness builds, where it is never reached
  * (resume branches on KL_EVENT_CAP_COMPLETION). Keeps the request API event-axis-agnostic. */
-void kl_io_engine_post_read(struct KlConn *conn);
+void kl_io_engine_post_read(struct KlHttpConn *conn);
 
 /* Post one overlapped datagram receive on a completion loop from a neutral descriptor (7B-2b). The
  * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in io_engine.c on non-completion builds. */
@@ -133,7 +132,7 @@ KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramL
                                          KlDgramOpKind kind, int *transport_err);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the
- * async KlClient created and owns; `addr` is the destination; `watcher_udata` is the tagged
+ * async KlHttpClient created and owns; `addr` is the destination; `watcher_udata` is the tagged
  * KlWatcher the client already registered on `fd` (kl_watcher_add). The backend performs the
  * native connect (pollcomp: connect()+POLLOUT+SO_ERROR; io_uring: IORING_OP_CONNECT; IOCP:
  * ConnectEx) and, on completion, surfaces a KL_COMP_CONNECT event targeting `watcher_udata`

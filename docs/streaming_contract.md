@@ -7,7 +7,7 @@ enforcing symbol is named.
 
 ## Write side (response streaming / outbound)
 
-Producers (`kl_response_stream_write`, SSE `kl_sse_write`, chunked, WebSocket server frames, a
+Producers (`kl_http_response_stream_write`, SSE `kl_http_sse_write`, chunked, WebSocket server frames, a
 handler writing a body) write into the per-connection **outbound buffer** (`KlDrain`), never a
 socket or event engine.
 
@@ -24,25 +24,25 @@ never borrows or takes ownership of the caller's write buffer.
 - *error* — allocation or transport failure.
 
 There is **one** writable/drain notification: the drain empties → the producer may write more. On
-the completion axis the overlapped flush keeps ≤1 send in flight (`KlResponse.stream_inflight`) and
+the completion axis the overlapped flush keeps ≤1 send in flight (`KlHttpResponse.stream_inflight`) and
 re-pumps from the WRITE completion (`comp_stream_pump`); on readiness it flushes on writability.
 Both surface the same "buffer drained, resume producing" signal — no parallel callbacks with
 divergent meaning.
 
 ## Read side (request-body streaming / inbound)
 
-A body reader (`KlBodyReader`: `on_data` / `on_complete` / `on_error` / `destroy`) receives body
+A body reader (`KlHttpBodyReader`: `on_data` / `on_complete` / `on_error` / `destroy`) receives body
 chunks. `on_data` returns `0` to continue or `-1` to **abort** (→ 413 / connection teardown).
 
 **Flow control — continue / pause / abort:**
 - *continue* — `on_data` returns 0.
-- *pause* — `kl_request_pause_body(req)`: stop reading more body bytes off the connection, bounding
+- *pause* — `kl_http_request_pause_body(req)`: stop reading more body bytes off the connection, bounding
   accumulation, without aborting. Idempotent; loop-thread only; callable from `on_data` or later
   (a watcher/timer/thread-pool completion when a downstream sink drains). Readiness drops READ
   interest immediately; completion stops posting the next recv — the one already-submitted recv may
   still deliver ≤1 more chunk (bounded). A paused conn holds no unbounded buffer: unread bytes stay
   in the kernel socket buffer, and the parser retains only its partial frame.
-- *resume* — `kl_request_resume_body(req)`: re-enable reading. Idempotent (a no-op unless a pause is
+- *resume* — `kl_http_request_resume_body(req)`: re-enable reading. Idempotent (a no-op unless a pause is
   in effect). Readiness re-arms READ; completion posts a fresh recv (`kl_io_engine_post_read`).
 - *abort* — `on_data` → -1.
 
@@ -64,7 +64,7 @@ normal completion/close path (no dangling op, no double release — verified und
 
 ## Lifecycle & reentrancy
 
-- The `KlRequest`/`KlConn` (and thus `kl_request_pause_body`/`resume_body`) are valid throughout the
+- The `KlHttpRequest`/`KlHttpConn` (and thus `kl_http_request_pause_body`/`resume_body`) are valid throughout the
   body-read callbacks. `pause`/`resume` may be called from inside `on_data`.
 - The body reader object is owned by Keel and destroyed after `on_complete`/`on_error`; do not use
   it afterward. Recording results into caller-owned state (not the reader) survives destruction.

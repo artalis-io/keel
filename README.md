@@ -29,18 +29,18 @@ make clean              # remove artifacts
 ```c
 #include <keel/keel.h>
 
-void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {.port = 8080};
-    kl_server_init(&s, &cfg);
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {.port = 8080};
+    kl_http_server_init(&s, &cfg);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
 }
 ```
 
@@ -49,8 +49,8 @@ int main(void) {
 Set `unix_socket_path` to serve the same HTTP routes over a UNIX domain stream socket instead of TCP. `unix_socket_unlink` removes a stale socket file before binding and removes the socket path again when the server is freed after a successful bind. It refuses to unlink non-socket files; place socket paths in an application-owned directory rather than a shared writable directory.
 
 ```c
-KlServer s;
-KlConfig cfg = {
+KlHttpServer s;
+KlHttpServerConfig cfg = {
     .unix_socket_path = "/run/myapp/keel.sock",
     .unix_socket_unlink = 1,
     .unix_socket_mode = 0660,       /* optional; 0 leaves umask/default */
@@ -58,10 +58,10 @@ KlConfig cfg = {
     .unix_socket_owner = NULL,      /* optional; chown to this user (needs root) */
 };
 
-kl_server_init(&s, &cfg);
-kl_server_route(&s, "GET", "/health", handle_health, NULL, NULL);
-kl_server_run(&s);
-kl_server_free(&s);
+kl_http_server_init(&s, &cfg);
+kl_http_server_route(&s, "GET", "/health", handle_health, NULL, NULL);
+kl_http_server_run(&s);
+kl_http_server_free(&s);
 ```
 
 `unix_socket_group` / `unix_socket_owner` name a group / user to `chown` the
@@ -69,10 +69,10 @@ socket to — the classic "only members of group X may connect" pattern (pair wi
 `unix_socket_mode = 0660`). Ownership is applied *before* `listen()`, so the
 socket is never reachable with the wrong owner/group. Setting the group to one
 the process belongs to works unprivileged; changing the owner to a different
-user needs `CAP_CHOWN`/root. Unknown names fail `kl_server_run` with
+user needs `CAP_CHOWN`/root. Unknown names fail `kl_http_server_run` with
 `KL_ERR_INVALID_ARG`.
 
-`KlConfig.transport = KL_TRANSPORT_UNIX` is also available when you want to be explicit. TCP remains the zero-initialized default.
+`KlHttpServerConfig.transport = KL_HTTP_SERVER_TRANSPORT_UNIX` is also available when you want to be explicit. TCP remains the zero-initialized default.
 
 ### Peer credentials
 
@@ -80,31 +80,31 @@ On a UNIX socket you can identify the connecting process from a handler:
 
 ```c
 KlPeerCred cred;
-if (kl_request_peer_cred(req, &cred) == 0) {
+if (kl_http_request_peer_cred(req, &cred) == 0) {
     /* cred.uid, cred.gid always available; cred.pid when cred.has_pid
      * (Linux SO_PEERCRED, macOS LOCAL_PEERPID). */
 }
 ```
 
 Related accessors:
-- `kl_request_peer_addr(req, ip, sizeof ip, &port)` — the client's IP/port for
-  any request (TCP/TLS); `-1` for UNIX sockets. Also `kl_request_peer_sockaddr`
+- `kl_http_request_peer_addr(req, ip, sizeof ip, &port)` — the client's IP/port for
+  any request (TCP/TLS); `-1` for UNIX sockets. Also `kl_http_request_peer_sockaddr`
   for the raw address.
 
 Behind an L4 load balancer, set `proxy_trusted_cidrs` to recover the real client
 address from a PROXY protocol (v1/v2) header:
 
 ```c
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .proxy_trusted_cidrs = "10.0.0.0/8,::1/128",  /* honor PROXY only from these */
 };
 ```
 The header is parsed only when the connection originates from a trusted CIDR (so
 an untrusted peer can't spoof its IP); from other sources it's ignored and the
-socket address is used. `kl_request_peer_addr` then returns the real client.
+socket address is used. `kl_http_request_peer_addr` then returns the real client.
 - `kl_ws_server_peer_cred(ws, &cred)` — same, for a live WebSocket connection
-  *after* the HTTP upgrade (when there's no longer a `KlRequest`).
-- `kl_request_peer_label(req, buf, sizeof buf)` — the peer's SELinux/AppArmor
+  *after* the HTTP upgrade (when there's no longer a `KlHttpRequest`).
+- `kl_http_request_peer_label(req, buf, sizeof buf)` — the peer's SELinux/AppArmor
   security label (Linux `SO_PEERSEC`; `-1` elsewhere).
 - `kl_peer_cred_fd(fd, &cred)` — the building block, for any connected fd.
 
@@ -115,13 +115,13 @@ the verified client identity:
 
 ```c
 KlPeerCert pc;
-if (kl_request_peer_cert(req, &pc) == 0 && pc.verified) {
+if (kl_http_request_peer_cert(req, &pc) == 0 && pc.verified) {
     /* pc.subject_cn, pc.san, pc.issuer_cn, pc.fingerprint_sha256,
      * pc.not_before/not_after, pc.der/der_len — the raw DER. */
 }
 ```
 
-`kl_request_peer_cert` returns `-1` for a plaintext connection, when the client
+`kl_http_request_peer_cert` returns `-1` for a plaintext connection, when the client
 presented no certificate, or on a TLS backend without client-cert support.
 `pc.verified` reports whether the certificate passed CA-chain validation — a
 certificate can be *present* but *unverified* under optional client auth, so
@@ -139,13 +139,13 @@ auto-detected from the fd, and KEEL never unlinks an adopted UNIX socket.
 
 ```c
 int fd = kl_systemd_listen_fd();          /* -1 if not socket-activated */
-KlConfig cfg = { .listen_fd = fd > 0 ? fd : 0,
+KlHttpServerConfig cfg = { .listen_fd = fd > 0 ? fd : 0,
                  .unix_socket_path = fd > 0 ? NULL : "/run/myapp/keel.sock" };
 ```
 
 For a unit passing several sockets, `kl_systemd_listen_fds(&count)` reports how
 many were passed (fds 3 … 3+count-1) and `kl_systemd_listen_fd_by_name("https")`
-selects one by its `FileDescriptorName`. Adopt one per `KlServer`.
+selects one by its `FileDescriptorName`. Adopt one per `KlHttpServer`.
 
 ### Connecting a client over UNIX
 
@@ -154,20 +154,20 @@ scheme, where the authority is the percent-encoded socket path:
 
 ```c
 /* GET /v1/ping over /run/app.sock */
-kl_client_request(&alloc, NULL, "GET",
+kl_http_client_request(&alloc, NULL, "GET",
                   "http+unix://%2Frun%2Fapp.sock/v1/ping",
                   NULL, 0, NULL, 0, &resp);
 ```
 
-Both the synchronous (`kl_client_request`) and asynchronous (`kl_client_start`)
-clients support it. The pooled variants (`kl_client_request_pooled` /
-`kl_client_start_pooled`) accept `http+unix://` too but bypass the connection
+Both the synchronous (`kl_http_client_request`) and asynchronous (`kl_http_client_start`)
+clients support it. The pooled variants (`kl_http_client_request_pooled` /
+`kl_http_client_start_pooled`) accept `http+unix://` too but bypass the connection
 pool — UNIX sockets have no host:port to key on, and a local-socket connect is
 cheap. Proxying is incompatible with UNIX targets.
 
 The WebSocket and HTTP/2 clients speak UNIX too:
 `ws+unix://` / `wss+unix://` (`kl_ws_client_connect`) and `http+unix://` /
-`https+unix://` (`kl_h2_client_connect`). Redirects are followed over UNIX
+`https+unix://` (`kl_http2_client_connect`). Redirects are followed over UNIX
 (relative `Location` values keep the `http+unix` authority). In every case the
 `Host` / `:authority` defaults to `localhost`.
 
@@ -183,7 +183,7 @@ See `examples/unix_socket_server.c` for a server demonstrating all three.
   multiple workers on one UNIX socket, use socket activation / fd passing (bind
   once, share the fd) rather than each worker binding the same path.
 - **`kl_systemd_listen_fds(&count)`** reports how many fds were passed
-  (consecutive from fd 3); `KlConfig.listen_fd` adopts one at a time.
+  (consecutive from fd 3); `KlHttpServerConfig.listen_fd` adopts one at a time.
 
 ## Custom socket provider
 
@@ -210,9 +210,9 @@ Ctx ctx = { .base = kl_socket_provider_posix() };
 KlSocketProvider prov = { &ops, &ctx, KL_SOCK_CAP_NATIVE_FD };
 
 /* Select it — server: */
-KlConfig cfg = { .port = 8080, .sockets = &prov };
+KlHttpServerConfig cfg = { .port = 8080, .sockets = &prov };
 /* ...or client: */
-KlClientConfig ccfg = { .sockets = &prov };
+KlHttpClientConfig ccfg = { .sockets = &prov };
 ```
 
 Portability contract: the API exposes no platform-only types — sizes are
@@ -221,7 +221,7 @@ provider translates to its native shapes (`struct iovec`/`WSABUF`/`off_t`)
 internally. A provider advertises what it supports via `KL_SOCK_CAP_*`
 (`NATIVE_FD`, `WRITEV`, `SENDFILE`) and KEEL falls back for anything it lacks —
 except the **server requires `KL_SOCK_CAP_NATIVE_FD`** (the readiness event loop
-polls real descriptors; a non-native provider is rejected at `kl_server_init`).
+polls real descriptors; a non-native provider is rejected at `kl_http_server_init`).
 Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Features
@@ -229,7 +229,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Two event axes, six backends** — **readiness** (epoll edge-triggered, kqueue edge-triggered, WSAPoll, poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
 - **Three orthogonal axes** — the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
 - **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
-- **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
+- **Pluggable HTTP parser** — ships with llhttp, swap via `KlHttpServerConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
 - **Pluggable body readers** — vtable interface for request body processing
 - **Per-route middleware** — pattern-matched middleware chain with short-circuit support
@@ -241,11 +241,11 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
 - **Access logging** — pluggable callback after each response, zero overhead when disabled
 - **Async server handlers** — suspend connections via `KlAsyncOp`, resume later from watchers or thread pool workers — no stalling the event loop
-- **HTTP client (sync + async)** — blocking `kl_client_request()` for simple use cases, event-driven `kl_client_start()` for non-blocking I/O, both with TLS support
-- **Composable event context** — `KlEventCtx` decouples the event loop from the server, enabling standalone clients and thread pools without a `KlServer`
+- **HTTP client (sync + async)** — blocking `kl_http_client_request()` for simple use cases, event-driven `kl_http_client_start()` for non-blocking I/O, both with TLS support
+- **Composable event context** — `KlEventCtx` decouples the event loop from the server, enabling standalone clients and thread pools without a `KlHttpServer`
 - **Thread pool** — submit blocking work from event loop, execute on workers, resume via pipe wakeup
 - **Generic FD watchers** — register any file descriptor for event-driven callbacks via `KlWatcher`
-- **Server-Sent Events** — zero-alloc SSE framing (`kl_sse_event`, `kl_sse_comment`) over chunked streaming
+- **Server-Sent Events** — zero-alloc SSE framing (`kl_http_sse_event`, `kl_http_sse_comment`) over chunked streaming
 - **Response compression** — pluggable compression vtable; ships with miniz gzip backend
 - **Client decompression** — automatic `Content-Encoding: gzip` response decompression
 - **Client connection pool** — keep-alive reuse keyed by (host, port, is_tls, proxy) with idle timers
@@ -254,10 +254,10 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Backpressure write buffer** — `KlDrain` buffers unsent data on would-block, flushes on write-readiness
 - **Timer scheduling** — one-shot timers on the event loop via min-heap
 - **Error diagnostics** — sqlite3-style per-struct error codes with `kl_strerror()`
-- **UDP datagrams** — `KlUdp` non-blocking datagram sockets (source + local/destination address via pktinfo, capped whole-datagram send queue with on-drain backpressure, source-pinned sends, multicast/broadcast, transparent `recvmmsg`/`sendmmsg` batching, UDP GSO/GRO offload, ECN/TOS/DSCP marking), plus the **STABLE** fixed-slot `KlDatagram` API (`<keel/datagram.h>`): a caller-owned, single-threaded datagram primitive with confirmed-detachment close, validated **live across every event backend** — readiness (epoll/kqueue/poll/WSAPoll) and completion (pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4). Its function+type contract is ABI-stable; the struct layout is opt-in via `<keel/datagram_detail.h>`. Foundation for `KlUdpServer`, the built-in DNS resolver, and future QUIC/HTTP-3
+- **UDP datagrams** — the **STABLE** fixed-slot `KlDatagram` API (`<keel/datagram.h>`): the Tier-1 datagram primitive — a caller-owned, single-threaded handle over a prepared UDP fd with one-call socket create/configure/bind/adopt, provider-neutral connect, async per-datagram receive (source + local/destination address via pktinfo), a fixed-slot whole-datagram send queue with on-drain backpressure, source-pinned sends + per-packet TOS/ECN, multicast/broadcast, transparent `recvmmsg`/`sendmmsg` batching, UDP GSO/GRO offload, ECN/TOS/DSCP marking, and confirmed-detachment close. Validated **live across every event backend** — readiness (epoll/kqueue/poll/WSAPoll) and completion (pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4). Its function+type contract is ABI-stable; the struct layout is opt-in via `<keel/datagram_detail.h>`. The built-in DNS resolver is built on `KlDatagram`; it is the base intended for new portable message protocols (a future QUIC/HTTP-3, mDNS/CoAP)
 - **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper), with caching decorator; ships a built-in async resolver (dual-family A+AAAA, RFC 8305)
 - **Happy Eyeballs client connect** — async client races the resolved address list (RFC 8305): configurable Connection Attempt Delay, first handshake wins, overall request deadline
-- **Server load introspection** — `kl_server_stats()` for connection counts, enabling user-space load-shedding middleware
+- **Server load introspection** — `kl_http_server_stats()` for connection counts, enabling user-space load-shedding middleware
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **Pluggable socket provider** — a platform-neutral socket seam (`KlSocketProvider`): POSIX and Winsock built in, lwIP shipped (both a BSD-socket layer and a raw NO_SYS callback stack with no OS sockets), and a freestanding EFI_TCP4/UDP4 provider for UEFI firmware. Capability-gated (readiness vs overlapped), selectable per server/client. See [Custom socket provider](#custom-socket-provider) and [Frontier providers](#frontier-providers-bare-metal--firmware)
@@ -266,11 +266,11 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Architecture
 
-Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others:
+Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others. For the full model — the Tier-1 semantic transports (`KlListener`/`KlStream`/`KlDatagram`), the engine/provider split, and the rules that keep them separate — see [`docs/architecture.md`](docs/architecture.md) and the enforceable [`docs/architecture_invariants.md`](docs/architecture_invariants.md).
 
 - **Event axis** (`event.h` + `completion.h`) — how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
 - **Socket axis** (`socket.h` — the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`) — where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.
-- **Protocol axis** (`connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `response.c`) — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/keel_axis_audit.md` audits this separation mechanically.
+- **Protocol axis** (`http_connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `http_response.c`) — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/keel_axis_audit.md` audits this separation mechanically.
 
 Below the axes sit orthogonal, independently testable modules:
 
@@ -280,31 +280,31 @@ Below the axes sit orthogonal, independently testable modules:
 | **event** | `event.h` + `completion.h` | Readiness (epoll / kqueue / WSAPoll / poll) + completion (io_uring / IOCP) behind one interface |
 | **socket** | `socket.h` | Platform-neutral socket seam (`KlSocketProvider`): POSIX / Winsock built in, lwIP + UEFI shipped |
 | **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
-| **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
+| **request** | `http_request.h` | Parsed HTTP request struct (header-only, zero alloc) |
 | **parser** | `parser.h` | Pluggable request/response parser vtables |
-| **response** | `response.h` | Response builder: buffered, sendfile, or streaming chunked |
-| **router** | `router.h` | Route matching with `:param` capture + middleware chain |
-| **connection** | `connection.h` | Pre-allocated connection pool + state machine |
-| **server** | `server.h` | Top-level glue: TCP/UNIX bind, async event loop, stop |
-| **body_reader** | `body_reader.h` | Pluggable body reader vtable + buffer reader |
-| **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
+| **response** | `http_response.h` | Response builder: buffered, sendfile, or streaming chunked |
+| **router** | `http_router.h` | Route matching with `:param` capture + middleware chain |
+| **connection** | `http_connection.h` | Pre-allocated connection pool + state machine |
+| **server** | `http_server.h` | Top-level glue: TCP/UNIX bind, async event loop, stop |
+| **body_reader** | `http_body_reader.h` | Pluggable body reader vtable + buffer reader |
+| **body_reader_multipart** | `http_body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
-| **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
+| **cors** | `http_cors.h` | Built-in CORS middleware with configurable origins |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
 | **async** | `async.h` | Connection suspension for async operations |
 | **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
 | **url** | `url.h` | URL parser (http/https/ws/wss, IPv6, CRLF injection guard) |
-| **client** | `client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
+| **client** | `http_client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
 | **websocket** | `websocket.h` + `websocket_server.h` | RFC 6455 WebSocket server (shared frame parser + server API) |
 | **websocket_client** | `websocket_client.h` | RFC 6455 WebSocket client (masked frames, async handshake) |
-| **h2** | `h2.h` + `h2_server.h` | HTTP/2 server (pluggable session vtable) |
-| **h2_client** | `h2_client.h` | HTTP/2 client (multiplexed streams, pluggable session) |
+| **h2** | `http2.h` + `http2_server.h` | HTTP/2 server (pluggable session vtable) |
+| **h2_client** | `http2_client.h` | HTTP/2 client (multiplexed streams, pluggable session) |
 | **resolver** | `resolver.h` | Pluggable async DNS resolver vtable |
-| **sse** | `sse.h` | Server-Sent Events: line framing over chunked streaming (zero alloc) |
+| **sse** | `http_sse.h` | Server-Sent Events: line framing over chunked streaming (zero alloc) |
 | **error** | `error.h` | Diagnostic error codes (KlError enum) + kl_strerror() |
 | **timer** | `timer.h` | One-shot timer scheduling on KlEventCtx (min-heap) |
-| **client_pool** | `client_pool.h` | HTTP client connection pool with keep-alive reuse |
-| **redirect** | `redirect.h` | Automatic 3xx redirect following (RFC 7231/7538) |
+| **client_pool** | `http_client_pool.h` | HTTP client connection pool with keep-alive reuse |
+| **redirect** | `http_redirect.h` | Automatic 3xx redirect following (RFC 7231/7538) |
 | **compress** | `compress.h` | Pluggable response compression vtable (buffer + streaming) |
 | **decompress** | `decompress.h` | Pluggable response decompression vtable (client-side) |
 | **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
@@ -316,7 +316,7 @@ Below the axes sit orthogonal, independently testable modules:
 - **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker), and Python asyncio. No mutexes, no lock contention, no data races — the entire connection state machine is lock-free by construction. `KlThreadPool` offloads blocking work to workers; multi-core scaling is horizontal via `SO_REUSEPORT` with multiple processes.
 - **O(n) router** — Linear scan over routes per request. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O syscalls. A trie or radix tree would add complexity to param extraction and middleware pattern matching for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per event loop tick. At `max_connections` = 256 (default), this is a tight loop over a contiguous array well within L1 cache.
-- **No built-in 503 / load shedding** — `kl_server_stats()` exposes connection counts for user-space middleware to make load-shedding decisions. Thresholds and `Retry-After` policy belong in application code, not the framework.
+- **No built-in 503 / load shedding** — `kl_http_server_stats()` exposes connection counts for user-space middleware to make load-shedding decisions. Thresholds and `Retry-After` policy belong in application code, not the framework.
 - **No global memory monitoring** — The allocator is pluggable, so the framework can't reliably track total memory. Existing per-resource caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors; OS-level OOM handling covers the rest.
 
 ## Request Body Handling
@@ -326,26 +326,26 @@ KEEL uses a vtable-based body reader interface. Register a body reader factory p
 **Built-in buffer reader** — accumulates the body into a growable buffer:
 
 ```c
-void handle_post(KlRequest *req, KlResponse *res, void *ctx) {
+void handle_post(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) {
-        kl_response_error(res, 400, "Request body required");
+        kl_http_response_error(res, 400, "Request body required");
         return;
     }
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_borrow(res, br->data, br->len);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
 /* Register with size limit (1 MB) */
-kl_server_route(&s, "POST", "/api/data", handle_post,
-                (void *)(size_t)(1 << 20), kl_body_reader_buffer);
+kl_http_server_route(&s, "POST", "/api/data", handle_post,
+                (void *)(size_t)(1 << 20), kl_http_body_reader_buffer);
 ```
 
 Pass `NULL` as the body reader factory for routes that don't accept a body. If a request with a body arrives on a route with no reader, KEEL discards the body. If the reader factory returns NULL, KEEL sends 415 Unsupported Media Type.
 
-**Custom readers** — implement the `KlBodyReader` vtable (`on_data`, `on_complete`, `on_error`, `destroy`) and provide a factory function.
+**Custom readers** — implement the `KlHttpBodyReader` vtable (`on_data`, `on_complete`, `on_error`, `destroy`) and provide a factory function.
 
 ## Middleware
 
@@ -354,26 +354,26 @@ Register middleware that runs before handlers. Middleware can inspect/modify the
 ### Built-in CORS middleware
 
 ```c
-KlCorsConfig cors;
-kl_cors_init(&cors);
-kl_cors_add_origin(&cors, "https://app.example.com");
-kl_cors_add_origin(&cors, "https://staging.example.com");
+KlHttpCorsConfig cors;
+kl_http_cors_init(&cors);
+kl_http_cors_add_origin(&cors, "https://app.example.com");
+kl_http_cors_add_origin(&cors, "https://staging.example.com");
 // Or parse from an environment variable:
-// kl_cors_parse_origins(&cors, getenv("ALLOWED_ORIGINS"));
+// kl_http_cors_parse_origins(&cors, getenv("ALLOWED_ORIGINS"));
 
-kl_server_use(&s, "*", "/*", kl_cors_middleware, &cors);
+kl_http_server_use(&s, "*", "/*", kl_http_cors_middleware, &cors);
 ```
 
 Handles `Access-Control-Allow-Origin`, `Allow-Credentials`, and automatically responds to OPTIONS preflight requests with 204 + all required CORS headers.
 
 ### Writing custom middleware {#writing-custom-middleware}
 
-Middleware uses the same `(KlRequest *, KlResponse *, void *)` signature. Return 0 to continue, non-zero to short-circuit:
+Middleware uses the same `(KlHttpRequest *, KlHttpResponse *, void *)` signature. Return 0 to continue, non-zero to short-circuit:
 
 **Logging middleware:**
 
 ```c
-int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int log_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)res; (void)ctx;
     fprintf(stderr, "[req] %.*s %.*s\n",
             (int)req->method_len, req->method,
@@ -381,7 +381,7 @@ int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
     return 0;  /* continue to next middleware / handler */
 }
 
-kl_server_use(&s, "*", "/*", log_middleware, NULL);
+kl_http_server_use(&s, "*", "/*", log_middleware, NULL);
 ```
 
 **Auth middleware:**
@@ -389,34 +389,34 @@ kl_server_use(&s, "*", "/*", log_middleware, NULL);
 ```c
 typedef struct { const char *api_key; } AuthConfig;
 
-int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int auth_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     AuthConfig *cfg = ctx;
     size_t key_len;
-    const char *key = kl_request_header_len(req, "X-API-Key", &key_len);
+    const char *key = kl_http_request_header_len(req, "X-API-Key", &key_len);
     size_t expect_len = strlen(cfg->api_key);
     if (!key || key_len != expect_len ||
         memcmp(key, cfg->api_key, expect_len) != 0) {
-        kl_response_error(res, 401, "Unauthorized");
+        kl_http_response_error(res, 401, "Unauthorized");
         return 1;  /* short-circuit — response already written */
     }
     return 0;  /* continue */
 }
 
 AuthConfig auth = {.api_key = "secret-key-123"};
-kl_server_use(&s, "*", "/api/*", auth_middleware, &auth);
+kl_http_server_use(&s, "*", "/api/*", auth_middleware, &auth);
 ```
 
 **Request context passing (middleware → handler):**
 
 ```c
-int user_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+int user_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)res; (void)ctx;
     /* Validate token, look up user, set context for handler */
     req->ctx = my_user_lookup(req);
     return 0;
 }
 
-void handle_profile(KlRequest *req, KlResponse *res, void *ctx) {
+void handle_profile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     User *user = req->ctx;  /* set by middleware */
     /* ... */
@@ -434,29 +434,29 @@ void handle_profile(KlRequest *req, KlResponse *res, void *ctx) {
 ## Multipart Uploads
 
 ```c
-static KlMultipartConfig mp_config = {
+static KlHttpMultipartConfig mp_config = {
     .max_part_size  = 4 << 20,   /* 4 MB per part */
     .max_total_size = 16 << 20,  /* 16 MB total */
     .max_parts      = 8,
 };
 
-void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
+void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlMultipartReader *mr = (KlMultipartReader *)req->body_reader;
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)req->body_reader;
     if (!mr || mr->num_parts == 0) {
-        kl_response_error(res, 400, "No parts received");
+        kl_http_response_error(res, 400, "No parts received");
         return;
     }
     for (int i = 0; i < mr->num_parts; i++) {
-        KlMultipartPart *p = &mr->parts[i];
+        KlHttpMultipartPart *p = &mr->parts[i];
         printf("  %s: %zu bytes (filename=%s)\n",
                p->name, p->data_len, p->filename ? p->filename : "n/a");
     }
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-kl_server_route(&s, "POST", "/upload", handle_upload,
-                &mp_config, kl_body_reader_multipart);
+kl_http_server_route(&s, "POST", "/upload", handle_upload,
+                &mp_config, kl_http_body_reader_multipart);
 ```
 
 ```bash
@@ -488,11 +488,11 @@ static KlWsServerConfig ws_config = {
 };
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {.port = 8080};
-    kl_server_init(&s, &cfg);
-    kl_server_ws(&s, "/ws", &ws_config);
-    kl_server_run(&s);
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {.port = 8080};
+    kl_http_server_init(&s, &cfg);
+    kl_http_server_ws_upgrade(&s, "/ws", &ws_config);
+    kl_http_server_run(&s);
 }
 ```
 
@@ -503,9 +503,9 @@ The WebSocket server module handles frame parsing, masking, and protocol details
 Server handlers can be **sync** (return immediately with a response set) or **async** (suspend the connection for later resumption). KEEL provides two primitives for async handlers: **KlWatcher** (generic FD callbacks) and **KlAsyncOp** (connection suspension). Together they allow handlers to park a connection, perform work asynchronously, and resume when done — without stalling the event loop.
 
 ```c
-void handle_async(KlRequest *req, KlResponse *res, void *user_data) {
-    KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
+    KlHttpServer *srv = user_data;
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Allocate context for the async operation */
     MyCtx *ctx = ...;
@@ -561,36 +561,36 @@ Thread safety is guaranteed by construction — workers never touch the event lo
 
 ## HTTP Client
 
-KEEL includes both **sync** (blocking) and **async** (event-driven) HTTP/1.1 clients with TLS support. The sync client is a single function call for simple use cases. The async client uses `KlEventCtx` (not `KlServer`), so it works standalone — no server required.
+KEEL includes both **sync** (blocking) and **async** (event-driven) HTTP/1.1 clients with TLS support. The sync client is a single function call for simple use cases. The async client uses `KlEventCtx` (not `KlHttpServer`), so it works standalone — no server required.
 
 **Sync (blocking):**
 
 ```c
 KlAllocator alloc = kl_allocator_default();
-KlClientResponse resp;
-if (kl_client_request(&alloc, NULL, "GET", "http://api.example.com/data",
+KlHttpClientResponse resp;
+if (kl_http_client_request(&alloc, NULL, "GET", "http://api.example.com/data",
                        NULL, 0, NULL, 0, &resp) == 0) {
     printf("status=%d body=%.*s\n", resp.status, (int)resp.body_len, resp.body);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 ```
 
 **Async (event-driven):**
 
 ```c
-static void on_done(KlClient *client, void *user_data) {
-    if (kl_client_error(client) == 0) {
-        const KlClientResponse *r = kl_client_response(client);
+static void on_done(KlHttpClient *client, void *user_data) {
+    if (kl_http_client_error(client) == 0) {
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         printf("status=%d\n", r->status);
     }
-    kl_client_free(client);
+    kl_http_client_free(client);
 }
 
-/* Works with standalone KlEventCtx — no KlServer needed */
+/* Works with standalone KlEventCtx — no KlHttpServer needed */
 KlAllocator alloc = kl_allocator_default();
 KlEventCtx ev;
 kl_event_ctx_init(&ev, &alloc);
-kl_client_start(&ev, &alloc, NULL, "GET", "http://example.com/", NULL, 0, NULL, 0, on_done, NULL);
+kl_http_client_start(&ev, &alloc, NULL, "GET", "http://example.com/", NULL, 0, NULL, 0, on_done, NULL);
 /* pump ev.loop ... */
 kl_event_ctx_free(&ev);
 ```
@@ -602,22 +602,22 @@ The URL parser (`kl_url_parse`) handles `http://`, `https://`, `ws://`, `wss://`
 Zero-copy file responses via `sendfile(2)`:
 
 ```c
-void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
+void handle_static(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     if (memmem(req->path, req->path_len, "..", 2) != NULL) {
-        kl_response_error(res, 403, "Forbidden");
+        kl_http_response_error(res, 403, "Forbidden");
         return;
     }
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "./public%.*s",
              (int)req->path_len, req->path);
     int fd = open(filepath, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 404, "Not Found"); return; }
+    if (fd < 0) { kl_http_response_error(res, 404, "Not Found"); return; }
     struct stat st;
     fstat(fd, &st);
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/html");
-    kl_response_file(res, fd, st.st_size);  /* zero-copy sendfile */
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/html");
+    kl_http_response_file(res, fd, st.st_size);  /* zero-copy sendfile */
 }
 ```
 
@@ -628,27 +628,27 @@ Uses `sendfile(2)` on Linux and macOS, with TCP_CORK coalescing on Linux for opt
 Write directly to the socket via chunked transfer encoding — zero intermediate buffering:
 
 ```c
-void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
-    kl_response_header(res, "Content-Type", "application/json");
+void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    kl_http_response_header(res, "Content-Type", "application/json");
 
-    KlWriteFn write_fn;
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    kl_response_begin_stream(res, 200, &write_fn, &write_ctx);
+    kl_http_response_begin_stream(res, 200, &write_fn, &write_ctx);
 
     write_fn(write_ctx, "{\"data\":", 8);
     // ... write as much as you want, each call becomes a chunk ...
     write_fn(write_ctx, "}", 1);
 
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 ```
 
-The `KlWriteFn` signature (`int (*)(void *ctx, const char *data, size_t len)`) is designed to be compatible with streaming JSON writers.
+The `KlHttpResponseWriteFn` signature (`int (*)(void *ctx, const char *data, size_t len)`) is designed to be compatible with streaming JSON writers.
 
 ## Route Parameters
 
 ```c
-kl_server_route(&s, "GET", "/users/:id/posts/:pid", handler, NULL, NULL);
+kl_http_server_route(&s, "GET", "/users/:id/posts/:pid", handler, NULL, NULL);
 // Params extracted from path — no allocation, pointers into read buffer
 ```
 
@@ -657,7 +657,7 @@ The router returns 200 (match), 405 (path matched, wrong method), or 404 (not fo
 ## Connection Timeouts
 
 ```c
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .port = 8080,
     .read_timeout_ms = 15000,   /* 15 seconds (default: 30000) */
 };
@@ -668,7 +668,7 @@ KEEL stamps each connection with a monotonic clock on every I/O event. A periodi
 ## Access Logging
 
 ```c
-void my_logger(const KlRequest *req, int status,
+void my_logger(const KlHttpRequest *req, int status,
                size_t body_bytes, double duration_ms, void *user_data) {
     fprintf(stderr, "%.*s %.*s %d %zu %.1fms\n",
             (int)req->method_len, req->method,
@@ -676,20 +676,20 @@ void my_logger(const KlRequest *req, int status,
             status, body_bytes, duration_ms);
 }
 
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .port = 8080,
     .access_log = my_logger,       /* NULL = disabled (default) */
     .access_log_data = NULL,       /* passed as user_data */
 };
 ```
 
-Set a callback in `KlConfig` and KEEL calls it after each response is fully sent. The callback receives the full request (method, path, headers), response status, body size, and wall-clock duration in milliseconds. Users implement their own formatting (JSON, CLF, custom). `NULL` = no logging, zero overhead.
+Set a callback in `KlHttpServerConfig` and KEEL calls it after each response is fully sent. The callback receives the full request (method, path, headers), response status, body size, and wall-clock duration in milliseconds. Users implement their own formatting (JSON, CLF, custom). `NULL` = no logging, zero overhead.
 
 ## Custom Allocator
 
 ```c
 KlAllocator arena = my_arena_allocator();
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .port = 8080,
     .alloc = &arena,
 };
@@ -699,16 +699,16 @@ The allocator interface passes `size` to `free` and `old_size` to `realloc` — 
 
 ## Pluggable Parser
 
-Ships with llhttp (default). Swap by setting `KlConfig.parser`:
+Ships with llhttp (default). Swap by setting `KlHttpServerConfig.parser`:
 
 ```c
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .port = 8080,
-    .parser = kl_parser_pico,  // use picohttpparser instead
+    .parser = kl_http1_parser_pico,  // use picohttpparser instead
 };
 ```
 
-Implement the 3-function `KlRequestParser` vtable (`parse`, `reset`, `destroy`) for any backend. The response parser (`KlResponseParser`) uses the same pattern for the HTTP client.
+Implement the 3-function `KlHttp1RequestParser` vtable (`parse`, `reset`, `destroy`) for any backend. The response parser (`KlHttp1ResponseParser`) uses the same pattern for the HTTP client.
 
 ## Pluggable TLS
 
@@ -721,7 +721,7 @@ KlTlsConfig tls = {
     .factory = my_bearssl_factory,
     .ctx_destroy = my_bearssl_ctx_free,
 };
-KlConfig cfg = {
+KlHttpServerConfig cfg = {
     .port = 8443,
     .tls = &tls,
 };
@@ -739,18 +739,18 @@ KEEL deliberately does **not** own your sandbox policy — that's an application
 #include <keel/keel.h>
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {.port = 8080};
-    kl_server_init(&s, &cfg);    // binds socket — needs inet, rpath
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {.port = 8080};
+    kl_http_server_init(&s, &cfg);    // binds socket — needs inet, rpath
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     // --- Sandbox boundary ---
     unveil("/var/www", "r");     // only serve files from here
     unveil(NULL, NULL);          // lock it down
     pledge("stdio inet rpath", NULL);
 
-    kl_server_run(&s);           // enters event loop — sandboxed
-    kl_server_free(&s);
+    kl_http_server_run(&s);           // enters event loop — sandboxed
+    kl_http_server_free(&s);
 }
 ```
 
@@ -770,7 +770,7 @@ The benchmark suite runs 4 endpoints against a dedicated bench server:
 | `GET /hello` | **Baseline** — minimal JSON, no routing params, no middleware |
 | `GET /users/:id` | **Router** — param extraction + snprintf response |
 | `GET /mw/hello` | **Middleware** — same response through 2 pass-through middleware |
-| `POST /echo` | **Body reading** — KlBufReader + echo body back |
+| `POST /echo` | **Body reading** — KlHttpBufReader + echo body back |
 
 Sample results (Apple M1 Max, single thread, 100 connections, kqueue):
 
@@ -813,9 +813,9 @@ The socket + completion axes are abstract enough to host stacks that have **no O
 |----------|-----------|----------|
 | **lwIP BSD sockets** | Keel over lwIP's POSIX-compatible socket layer (`integrations/lwip`, `event_lwip.c`) | Shipped, BYO |
 | **lwIP raw (`NO_SYS`)** | Keel over lwIP's raw callback API — a completion provider (`event_lwip_raw.c`) that runs the whole HTTP stack with **no OS sockets, no threads**. Serves HTTP over loopback, ASan/UBSan/LSan-clean, CI-gated | Shipped, BYO |
-| **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/uefi`) that runs a stock async `KlClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/phase10_uefi_server_design.md`) |
+| **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/uefi`) that runs a stock async `KlHttpClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/phase10_uefi_server_design.md`) |
 
-The through-line: `KlClient` is genuinely model-blind — the **same** client code runs unchanged over io_uring, IOCP, the pollcomp double, lwIP raw, and EFI tokens (including TLS via the socket-BIO seam and DNS via the built-in resolver). Adding a provider is a socket-axis + completion-axis exercise; the protocol code does not change. This validates the axis separation the way nothing else can — by hosting the stack somewhere with no operating system underneath it.
+The through-line: `KlHttpClient` is genuinely model-blind — the **same** client code runs unchanged over io_uring, IOCP, the pollcomp double, lwIP raw, and EFI tokens (including TLS via the socket-BIO seam and DNS via the built-in resolver). Adding a provider is a socket-axis + completion-axis exercise; the protocol code does not change. This validates the axis separation the way nothing else can — by hosting the stack somewhere with no operating system underneath it.
 
 ## Testing
 
@@ -902,7 +902,7 @@ KEEL is a transport library — it handles sockets, parsing, routing, and respon
 
 - **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model. *Hull provides a validation module with schema-based input checking.*
 
-- **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_request_header()` / `kl_response_header()` for the headers; your application handles 304 logic. *Hull handles conditional responses for static assets.*
+- **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_http_request_header()` / `kl_http_response_header()` for the headers; your application handles 304 logic. *Hull handles conditional responses for static assets.*
 
 - **Static file serving** — MIME types, path traversal protection, directory listing are application decisions. See `examples/static_files.c` for the pattern. *Hull auto-serves embedded or filesystem static assets with MIME detection.*
 

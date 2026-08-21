@@ -177,6 +177,15 @@ int kl_sockaddr_is_loopback(const KlSockAddr *a) {
     return 0;
 }
 
+int kl_sockaddr_is_multicast(const KlSockAddr *a) {
+    if (!a) return 0;
+    if (a->family == KL_AF_INET)
+        return (a->u.ip[0] & 0xF0u) == 0xE0u;         /* 224.0.0.0/4 */
+    if (a->family == KL_AF_INET6)
+        return a->u.ip[0] == 0xFFu;                   /* ff00::/8 */
+    return 0;
+}
+
 /* ── IPv6 presentation (RFC 5952): longest zero-run -> "::", lowercase hex ─── */
 static int fmt_ipv6(const uint8_t ip[16], char *buf, size_t n) {
     uint16_t g[8];

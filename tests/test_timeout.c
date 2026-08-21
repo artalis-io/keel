@@ -8,18 +8,18 @@
 /* Short timeout for fast tests */
 #define TEST_TIMEOUT_MS 200
 
-static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* Static server shared by server_thread. Each test uses a unique port
  * and does init/stop/free, so sequential utest execution is safe. */
-static KlServer timeout_server;
+static KlHttpServer timeout_server;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&timeout_server);
+    kl_http_server_run(&timeout_server);
     return NULL;
 }
 
@@ -50,17 +50,17 @@ static ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
 }
 
 /* Wait for server to bind (max 2s) */
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
 UTEST(timeout, idle_connection) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -79,18 +79,18 @@ UTEST(timeout, idle_connection) {
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, partial_headers) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -111,19 +111,19 @@ UTEST(timeout, partial_headers) {
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, partial_body) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "POST", "/echo", handle_ok,
-                    NULL, kl_body_reader_buffer);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
+                    NULL, kl_http_body_reader_buffer);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -149,18 +149,18 @@ UTEST(timeout, partial_body) {
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, active_not_affected) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -190,9 +190,9 @@ UTEST(timeout, active_not_affected) {
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -200,14 +200,14 @@ UTEST(timeout, active_not_affected) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(timeout, body_timeout) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = 2000,     /* generous header timeout */
         .body_timeout_ms = TEST_TIMEOUT_MS, /* tight body timeout */
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "POST", "/echo", handle_ok,
-                    NULL, kl_body_reader_buffer);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
+                    NULL, kl_http_body_reader_buffer);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -234,19 +234,19 @@ UTEST(timeout, body_timeout) {
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, fast_large_body) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = 2000,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "POST", "/echo", handle_ok,
-                    NULL, kl_body_reader_buffer);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
+                    NULL, kl_http_body_reader_buffer);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -284,18 +284,18 @@ UTEST(timeout, fast_large_body) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, keepalive_idle_timeout) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -331,18 +331,18 @@ UTEST(timeout, keepalive_idle_timeout) {
     }
 
     kl_test_closesock(fd);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST(timeout, concurrent_timeouts) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
-    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
-    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -370,9 +370,9 @@ UTEST(timeout, concurrent_timeouts) {
 
     kl_test_closesock(fd1);
     kl_test_closesock(fd2);
-    kl_server_stop(&timeout_server);
+    kl_http_server_stop(&timeout_server);
     pthread_join(tid, NULL);
-    kl_server_free(&timeout_server);
+    kl_http_server_free(&timeout_server);
 }
 
 UTEST_MAIN();

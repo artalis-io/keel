@@ -115,7 +115,7 @@ void kl_plat_random(void *buf, size_t len) {
  * 1c. kl_resolve_sync — NUMERIC-ONLY reference resolver (never blocking DNS).
  * ══════════════════════════════════════════════════════════════════════
  * WHY MOCKED, NOT TRIMMED. The archive references kl_resolve_sync (undefined,
- * whitelisted): client_async.c's sync-DNS FALLBACK path — reached when
+ * whitelisted): http_client_async.c's sync-DNS FALLBACK path — reached when
  * client_pick_resolver returns NULL — still calls it, and under KEEL_FREESTANDING
  * client_pick_resolver DOES return NULL (the built-in DNS-over-UDP resolver is
  * out of the minimal archive, §8). So the symbol is a genuine link dependency of
@@ -123,7 +123,7 @@ void kl_plat_random(void *buf, size_t len) {
  * EXECUTES it.
  *
  * Trimming it would mean #ifdef-ing out both call sites AND their surrounding
- * fallback blocks in client_async.c — a real src change — and would leave a
+ * fallback blocks in http_client_async.c — a real src change — and would leave a
  * freestanding client unable to dial a NUMERIC address literal without a
  * resolver (numeric IPs also flow through this path in the fallback). The design
  * (§F-0) deliberately keeps kl_resolve_sync on the whitelist as "the tiny

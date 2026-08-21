@@ -126,6 +126,9 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {
     slot->len   = 0;
     slot->tos   = -1;
     slot->flags = 0;
+    slot->recoverable = 0;
+    slot->gso_ext = NULL; slot->gso_head = 0; slot->gso_last = 0;   /* M5.2b: clear GSO group state */
+    slot->gso_mode = 0; slot->gso_total = 0; slot->gso_seg = 0; slot->gso_owner = NULL;
     slot->in_use = 1;
     memset(&slot->peer,  0, sizeof(slot->peer));
     memset(&slot->local, 0, sizeof(slot->local));
