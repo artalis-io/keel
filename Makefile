@@ -176,7 +176,7 @@ ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c
 else
   COMPLETION_CORE = src/completion_core.c protocols/http/completion_http_server.c \
-                    protocols/http2/completion_http2.c src/completion_ws.c src/completion_dispatch.c
+                    protocols/http2/completion_http2.c protocols/websocket/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
@@ -188,7 +188,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            protocols/http/http_connection.c protocols/http/http_server.c protocols/http/http_server_core.c protocols/http/http_server_activation.c protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c protocols/http/async.c src/timer.c \
            protocols/http/http_body_reader_buffer.c \
            protocols/http/http_body_reader_multipart.c protocols/http/http1_chunked.c protocols/http/http_cors.c \
-           src/websocket.c src/http_server_ws.c src/websocket_client.c \
+           protocols/websocket/websocket.c protocols/websocket/http_server_ws.c protocols/websocket/websocket_client.c \
            protocols/http2/http2_server.c protocols/http2/http2_client.c src/thread_pool.c src/url.c \
            protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
            protocols/http/http_client_proxy.c \
@@ -281,10 +281,10 @@ endif
 	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
 
 protocols/%.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
-# INTERIM: TUs still resident in src/ that consume the moved HTTP-family seam headers in
-# protocols/http/ — the WebSocket upgrade + completion adapter (move R2c) and the PROXY parser that
-# registers a proto-hook (moves R2e). Each exception is removed when its family moves out of src/.
-src/completion_ws.o src/http_server_ws.o src/proxy_protocol.o: EXTRA_INC = -Isrc -Iprotocols/http
+# INTERIM: the PROXY parser (proxy_protocol.c) still resides in src/ and registers a proto-hook, so it
+# consumes the moved HTTP seam header http_proto_hooks.h in protocols/http/. This exception is removed
+# when the PROXY protocol moves to protocols/proxy_protocol/ (R2e).
+src/proxy_protocol.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 # The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
@@ -353,7 +353,7 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -394,7 +394,7 @@ WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
 tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -789,7 +789,7 @@ clean:
 	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
-	rm -f src/completion_core.o src/completion_server.o src/completion_h2.o src/completion_ws.o
+	rm -f src/completion_core.o protocols/http/completion_http_server.o protocols/http2/completion_http2.o protocols/websocket/completion_ws.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
 	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe
@@ -869,8 +869,8 @@ analyze:
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
                  protocols/http/http_client_proxy.c \
-                 protocols/http2/http2_client.c src/websocket_client.c \
-                 protocols/http/http_connection.c protocols/http/http_server.c protocols/http2/http2_server.c src/websocket.c src/http_server_ws.c \
+                 protocols/http2/http2_client.c protocols/websocket/websocket_client.c \
+                 protocols/http/http_connection.c protocols/http/http_server.c protocols/http2/http2_server.c protocols/websocket/websocket.c protocols/websocket/http_server_ws.c \
                  protocols/http/http_sse.c protocols/http/http_response.c protocols/http/http_redirect.c protocols/http/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
@@ -903,7 +903,7 @@ check-sockaddr-neutral:
 # they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard protocols/websocket/completion_*.c) $(wildcard src/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
               src/event_ctx.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/http_server.c protocols/http/http_client_async.c
@@ -1070,7 +1070,7 @@ cppcheck:
 	  --suppress=constParameterCallback:src/event_iouring.c \
 	  --suppress=constParameterCallback:src/event_pollcomp.c \
 	  -UKEEL_PLATFORM_LWIP \
-	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Iprotocols/http -Iprotocols/http2 src/ protocols/
+	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket src/ protocols/
 
 # Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
 # the raw KlStream (&conn->stream) as udata, not a bare KlHttpConn. Pointer equality (stream is the
@@ -1123,7 +1123,7 @@ FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
 	$(CC) $(FUZZ_INSTR_CFLAGS) $(EXTRA_INC) -c -o $@ $<
 # Protocol + interim-src fuzz objects need the same seam includes as their plain-object twins.
 protocols/%.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
-src/completion_ws.fuzz.o src/http_server_ws.fuzz.o src/proxy_protocol.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http
+src/proxy_protocol.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 $(FUZZ_LIB): $(FUZZ_LIB_OBJ)
 	$(AR) rcs $@ $^

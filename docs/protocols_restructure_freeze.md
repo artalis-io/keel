@@ -95,7 +95,11 @@ http_proto_hooks.h, **completion_internal.h** (§4.7 seam — D4).
 
 ### 2.4 `protocols/websocket/` (stays `KlWs*`)
 **`.c`:** websocket.c, websocket_client.c, completion_ws.c, **http_server_ws.c** (WS-upgrade bridge — D7).
-**`.h`:** base64.h, sha1.h, utf8.h (RFC 6455 handshake utils; included only by WS TUs — verified).
+**`.h`:** (none WS-owned.) **Correction (R2c):** base64.h/sha1.h/utf8.h were listed here in rev 1–3
+but per §0.1 they are **generic** utilities (Base64 encoding, SHA-1, UTF-8 validation) — classified by
+*nature*, not by their sole current consumer (the RFC 6455 handshake). They **stay in substrate `src/`**;
+the WS TUs reach them via `-Isrc`. (Original rev-1 "included only by WS TUs" was a classify-by-consumer
+error, superseded by the governing principle.)
 
 ### 2.5 `protocols/dns/`
 **`.c`:** dns_resolver.c, dns_sys_posix.c, dns_sys_win.c. **`.h`:** dns_sys.h.
@@ -140,7 +144,7 @@ files `src/stream_io.h`, `include/keel/clock.h`, `protocols/http/http_compress.c
 |---|---|
 | protocols/http/ | http_body_reader_buffer.c http_body_reader_multipart.c http_client_async.c http_client_common.c http_client_pool.c http_client_proxy.c http_client_sync.c http_connection.c http_cors.c http_proto_hooks.c http_redirect.c http_response.c http_router.c http_server_activation.c http_server_core.c http_server_plat_posix.c http_server_plat_win.c http_server.c http_sse.c http1_chunked.c completion_http_server.c async.c http1_parser_llhttp.c http1_response_parser_llhttp.c http_compress.c(NEW) http_internal.h(from internal.h) http_client_internal.h http_client_proxy.h http_conn_internal.h http_response_internal.h http_server_plat.h http_proto_hooks.h completion_internal.h |
 | protocols/http2/ | http2_client.c http2_server.c completion_http2.c http2_internal.h(+seam decls) |
-| protocols/websocket/ | websocket.c websocket_client.c completion_ws.c http_server_ws.c base64.h sha1.h utf8.h |
+| protocols/websocket/ | websocket.c websocket_client.c completion_ws.c http_server_ws.c (base64.h/sha1.h/utf8.h STAY in src/ — generic, §2.4 correction) |
 | protocols/dns/ | dns_resolver.c dns_sys_posix.c dns_sys_win.c dns_sys.h |
 | protocols/proxy_protocol/ | proxy_protocol.c |
 | integrations/codec/miniz/ | compress_miniz.c decompress_miniz.c (from src/) |
