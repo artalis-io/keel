@@ -8,7 +8,7 @@
  * unavailable (some macOS configs), so they still pass on CI (Linux) where the
  * stall is deterministic.
  */
-#include "../vendor/utest.h"
+#include "utest.h"
 #include <keel/http_client.h>
 #include <keel/resolver.h>
 #include <keel/event_ctx.h>
@@ -22,7 +22,7 @@
 
 /* Internal layout — the retirement/detachment assertions (6C review) inspect the embedded
  * KlConnectOp + conn_racing directly. INTERNAL/UNSTABLE, test-only. */
-#include "../protocols/http/http_client_internal.h"
+#include "http_client_internal.h"
 #include <keel/connect_op.h>
 
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending

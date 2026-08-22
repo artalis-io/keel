@@ -78,7 +78,7 @@ authority identically over both protocols (HTTP/1.1 `Host` and HTTP/2
 
 ## Tests (regression guards)
 
-- **`tests/test_alpn.c`** (core `make test`, deterministic, no crypto): drives
+- **`tests/protocols/http/test_alpn.c`** (core `make test`, deterministic, no crypto): drives
   `kl_http_conn_on_handshake` with a mock TLS whose negotiated ALPN is configurable and
   asserts the connection enters exactly the right adapter for `h2` / `http/1.1` /
   no-ALPN / unsupported / `h2`-without-h2-config; and drives an HTTP/2 request

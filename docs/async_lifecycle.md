@@ -53,7 +53,7 @@ in `CLAUDE.md`.
 
 ## Tests
 
-`tests/test_async.c` covers the guarantees directly: double `kl_async_complete`
+`tests/protocols/http/test_http_async.c` covers the guarantees directly: double `kl_async_complete`
 fires `on_resume` once; `kl_async_cancel` is idempotent; cancel-after-complete
 and complete-after-cancel are both no-ops; and a re-suspend after a terminal makes
 the op pending again. The completion-axis resume path is exercised by

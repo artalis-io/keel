@@ -408,8 +408,8 @@ jobs:
           # the flag column (RW / RWE / R) is on the same line as the
           # segment name. Without -W, flags wrap to a second line and
           # grep cannot correlate them with GNU_STACK.
-          make tests/test_http_router
-          STACK_LINE=$(readelf -lW tests/test_http_router | awk '/GNU_STACK/ {print; exit}')
+          make tests/protocols/http/test_http_router
+          STACK_LINE=$(readelf -lW tests/protocols/http/test_http_router | awk '/GNU_STACK/ {print; exit}')
           echo "GNU_STACK: $STACK_LINE"
           if echo "$STACK_LINE" | grep -qE ' RWE '; then
             echo "FAIL: GNU_STACK is executable (RWE)"
@@ -419,11 +419,11 @@ jobs:
             echo "FAIL: GNU_STACK missing RW flag"
             exit 1
           fi
-          if ! readelf -d tests/test_http_router | grep -q 'BIND_NOW'; then
+          if ! readelf -d tests/protocols/http/test_http_router | grep -q 'BIND_NOW'; then
             echo "FAIL: BIND_NOW not present (no full RELRO)"
             exit 1
           fi
-          if ! readelf -lW tests/test_http_router | grep -q 'GNU_RELRO'; then
+          if ! readelf -lW tests/protocols/http/test_http_router | grep -q 'GNU_RELRO'; then
             echo "FAIL: GNU_RELRO segment missing"
             exit 1
           fi

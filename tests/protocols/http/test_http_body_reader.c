@@ -5,7 +5,7 @@
 /*
  * Buffer-reader tests only.
  *
- * Multipart streaming tests live in tests/test_http_multipart_stream.c.
+ * Multipart streaming tests live in tests/protocols/http/test_http_multipart_stream.c.
  */
 
 UTEST(buf, create_destroy) {

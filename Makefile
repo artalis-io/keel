@@ -396,9 +396,9 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   http_server_stats thread_pool timer websocket_client \
                   error proxy_protocol resolver_cache http_request timeout \
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
-                  async http_client_pool cross_module event_ctx event_caps \
+                  async http_async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  tls tls_integration peer_cert
+                  tls http_tls tls_integration peer_cert
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -443,10 +443,10 @@ test-win-iocp: $(WIN_IOCP_TEST_BIN)
 # Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone
 # (not a utest suite), so it needs -lpthread explicitly (Windows LDFLAGS omits it).
-SMOKE_BIN = tests/smoke_tcp$(EXE)
+SMOKE_BIN = tests/protocols/http/smoke_tcp$(EXE)
 smoke-tcp: $(SMOKE_BIN)
 	./$(SMOKE_BIN)
-$(SMOKE_BIN): tests/smoke_tcp.c $(LIB)
+$(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
@@ -681,7 +681,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async http_body_reader http1_chunked http_client http_client_happy_eyeballs http_client_pool \
+IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chunked http_client http_client_happy_eyeballs http_client_pool \
                           http_client_stream compress http_connection http_cors cross_module \
                           datagram_batch datagram_life datagram_public datagram_live datagram_socket datagram_multicast \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
@@ -689,7 +689,7 @@ IOURING_TEST_SUITES = allocator alpn async http_body_reader http1_chunked http_c
                           http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser peer_addr peer_cert http_client_proxy \
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
-                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration \
+                          stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
                           udp_cmsg unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
@@ -796,7 +796,7 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
-	rm -f tests/smoke_tcp tests/smoke_tcp.exe \
+	rm -f tests/protocols/http/smoke_tcp tests/protocols/http/smoke_tcp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
