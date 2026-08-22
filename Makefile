@@ -1824,12 +1824,12 @@ freestanding-dns-harness:
 # compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references — the boundary that keeps
 # U-3/U-4/U-7 + S-4/S-6/S-7 (which link event_efi.c but not the UDP provider) building. The gate
 # proves BOTH configs compile, both arches. socket_efi_udp4.c is datagram-only (no TCP-only pass).
-UEFI_DGRAM_TU     = integrations/uefi/socket_efi_tcp4.c integrations/uefi/socket_efi_udp4.c \
-                    integrations/uefi/event_efi.c
-UEFI_TCPONLY_TU   = integrations/uefi/socket_efi_tcp4.c integrations/uefi/event_efi.c
+UEFI_DGRAM_TU     = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/socket_efi_udp4.c \
+                    integrations/platform/uefi/event_efi.c
+UEFI_TCPONLY_TU   = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/event_efi.c
 UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-builtin -std=c11 \
                          -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
-                         -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/uefi -Ispikes/uefi \
+                         -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/platform/uefi \
                          -Wall -Wextra -Wpedantic -Werror
 # UEFI_GATE_STRICT (set by CI, .github/workflows/ci.yml): every FREESTANDING_TARGETS arch MUST compile —
 # no toolchain-absence SKIP is allowed to green-pass. Locally it is unset, so a dev without the clang PE

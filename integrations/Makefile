@@ -92,6 +92,8 @@ clean:
 	-$(MAKE) -C tls/boringssl clean 2>/dev/null || true
 	-$(MAKE) -C tls/libressl clean 2>/dev/null || true
 	-$(MAKE) -C http2/nghttp2 clean
+	-$(MAKE) -C platform/lwip clean
+	-$(MAKE) -C platform/uefi clean
 
 .PHONY: all test clean mbedtls mbedtls-test openssl openssl-test boringssl \
         libressl libressl-test nghttp2 nghttp2-test lwip

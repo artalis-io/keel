@@ -10,8 +10,8 @@ keel_freestanding*.lib
 
 # Integration test/smoke binaries (extensionless; sources are .c)
 integrations/tls/*/tests/link_smoke
-integrations/uefi/mock_efi_test
-integrations/uefi/host_map_test
+integrations/platform/uefi/tests/mock_efi_test
+integrations/platform/uefi/tests/host_map_test
 integrations/http2/nghttp2/tests/test_roundtrip
 integrations/http2/nghttp2/tests/e2e_socket
 integrations/http2/nghttp2/tests/interop_server

@@ -176,7 +176,7 @@ of releasing and risking a UAF.
 - **Anchor:** the borrowed-ref path in [completion.h](../src/completion.h) (`retain_life=1`) and the
   `KL_DGRAM_RETIRE_QUARANTINED` classifier; design in
   [datagram_step7b9_efi_close_design.md](datagram_step7b9_efi_close_design.md).
-- **Enforced by:** the EFI host-mock quarantine tests (`integrations/uefi/mock_efi_test.c`); the
+- **Enforced by:** the EFI host-mock quarantine tests (`integrations/platform/uefi/tests/mock_efi_test.c`); the
   release invariant in I5 honors `retain_life` uniformly.
 
 ### I10 — Protocols depend downward only through the Tier-1 transports
