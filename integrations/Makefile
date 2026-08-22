@@ -5,8 +5,9 @@
 # `make all` / `make test` here are safe with only some libraries available.
 #
 # Prefer driving these from the repo root (`make integrations`, etc.), which
-# passes MBEDTLS_DIR / NGHTTP2_DIR through. Each leaf Makefile's default
-# KEEL_ROOT=../.. resolves to the repo root under `-C`, so no override is needed.
+# passes MBEDTLS_DIR / NGHTTP2_DIR through. Each leaf Makefile derives its own
+# default KEEL_ROOT depth for its nesting level, resolving to the repo root under
+# `-C`, so no override is needed.
 
 all: mbedtls openssl libressl nghttp2 lwip
 test: mbedtls-test openssl-test libressl-test nghttp2-test
@@ -75,14 +76,14 @@ nghttp2:
 ifndef NGHTTP2_DIR
 	@echo "integrations: skipping nghttp2 (set NGHTTP2_DIR to build)"
 else
-	$(MAKE) -C nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR)
+	$(MAKE) -C http2/nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR)
 endif
 
 nghttp2-test:
 ifndef NGHTTP2_DIR
 	@echo "integrations: skipping nghttp2 test (set NGHTTP2_DIR)"
 else
-	$(MAKE) -C nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR) test
+	$(MAKE) -C http2/nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR) test
 endif
 
 clean:
@@ -90,7 +91,7 @@ clean:
 	-$(MAKE) -C tls/openssl clean
 	-$(MAKE) -C tls/boringssl clean 2>/dev/null || true
 	-$(MAKE) -C tls/libressl clean 2>/dev/null || true
-	-$(MAKE) -C nghttp2 clean
+	-$(MAKE) -C http2/nghttp2 clean
 
 .PHONY: all test clean mbedtls mbedtls-test openssl openssl-test boringssl \
         libressl libressl-test nghttp2 nghttp2-test lwip

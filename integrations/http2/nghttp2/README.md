@@ -41,7 +41,7 @@ is required.
 ```sh
 make integration-nghttp2 NGHTTP2_DIR=$(brew --prefix libnghttp2)   # from repo root
 # or directly:
-cd integrations/nghttp2 && make NGHTTP2_DIR=$(brew --prefix libnghttp2)
+cd integrations/http2/nghttp2 && make NGHTTP2_DIR=$(brew --prefix libnghttp2)
 ```
 
 Produces `libkeel_http2_nghttp2.a` (both client + server adapter objects).
@@ -50,8 +50,8 @@ Produces `libkeel_http2_nghttp2.a` (both client + server adapter objects).
 
 ```sh
 cc app.c \
-   -Iinclude -Iintegrations/nghttp2 \
-   -L. -lkeel -Lintegrations/nghttp2 -lkeel_http2_nghttp2 \
+   -Iinclude -Iintegrations/http2/nghttp2 \
+   -L. -lkeel -Lintegrations/http2/nghttp2 -lkeel_http2_nghttp2 \
    $(pkg-config --libs libnghttp2)
 ```
 
@@ -79,20 +79,20 @@ h2c cleartext is out of scope for this adapter).
 
 ```sh
 make integration-nghttp2 NGHTTP2_DIR=... && \
-  (cd integrations/nghttp2 && make test NGHTTP2_DIR=...)   # roundtrip + e2e
+  (cd integrations/http2/nghttp2 && make test NGHTTP2_DIR=...)   # roundtrip + e2e
 ```
 
-Three levels of coverage, all under [`e2e/`](e2e/):
+Three levels of coverage, all under [`tests/`](tests/):
 
-1. **`e2e/test_roundtrip.c`** — pairs the client and server sessions **in memory**
+1. **`tests/test_roundtrip.c`** — pairs the client and server sessions **in memory**
    (no sockets, no Keel event loop), feeding each side's `on_send` output into the
    other's `recv`, so a full `GET / → 200`+body is exercised through real nghttp2
    framing. Validates both adapters against each other.
-2. **`e2e/e2e_socket.c`** (`make e2e`) — end-to-end over a **real loopback socket +
+2. **`tests/e2e_socket.c`** (`make e2e`) — end-to-end over a **real loopback socket +
    Keel event loop**: the Keel nghttp2 **client** (`kl_http2_client_connect`,
    cleartext h2c) against the Keel nghttp2 **server** (`KlHttpServerConfig.h2`, entered via
    h2c prior-knowledge). Drives both adapters through the actual Keel driver paths.
-3. **`make interop-curl`** (`e2e/interop_server.c`) — third-party interop: stands
+3. **`make interop-curl`** (`tests/interop_server.c`) — third-party interop: stands
    up the Keel nghttp2 server and hits it with `curl --http2-prior-knowledge`.
    Requires a curl built with HTTP2 (`curl -V`).
 
@@ -154,9 +154,9 @@ leak/UAF coverage:
 container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
   apt-get update && apt-get install -y build-essential libnghttp2-dev pkg-config
   cd /src && cc -g -O1 -fsanitize=address,undefined \
-    -Iinclude -Iintegrations/nghttp2 $(pkg-config --cflags libnghttp2) \
-    integrations/nghttp2/http2_nghttp2_client.c integrations/nghttp2/http2_nghttp2_server.c \
-    integrations/nghttp2/e2e/test_roundtrip.c src/allocator.c \
+    -Iinclude -Iintegrations/http2/nghttp2 $(pkg-config --cflags libnghttp2) \
+    integrations/http2/nghttp2/http2_nghttp2_client.c integrations/http2/nghttp2/http2_nghttp2_server.c \
+    integrations/http2/nghttp2/tests/test_roundtrip.c src/allocator.c \
     $(pkg-config --libs libnghttp2) -o /tmp/rt && ASAN_OPTIONS=detect_leaks=1 /tmp/rt'
 ```
 

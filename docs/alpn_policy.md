@@ -84,7 +84,7 @@ authority identically over both protocols (HTTP/1.1 `Host` and HTTP/2
   no-ALPN / unsupported / `h2`-without-h2-config; and drives an HTTP/2 request
   through the real h2 path to assert it uses the **same** router + middleware +
   handler an HTTP/1.1 request would, with `:authority` converged onto `host`.
-- **`make -C integrations/nghttp2 alpn-interop MBEDTLS_DIR=... NGHTTP2_DIR=...`**
+- **`make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR=... NGHTTP2_DIR=...`**
   (BYO, real TLS): a Keel server advertising `{h2, http/1.1}` verified with
   `openssl s_client -alpn …`, `curl --http2`, `curl --http1.1`, **and** the Keel
   HTTP/2 client over TLS — all four negotiation directions land on one shared

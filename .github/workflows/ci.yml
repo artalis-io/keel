@@ -509,17 +509,17 @@ jobs:
 
       - name: nghttp2 adapter — roundtrip + real-socket e2e
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 test
+        run: make -C integrations/http2/nghttp2 test
 
       - name: nghttp2 conformance — h2spec
         timeout-minutes: 5
         # h2spec exits non-zero on ANY failure; Keel's expected result is ~136/146
         # (the residual ~10 are nghttp2 library behavior — nghttpd fails the same
-        # cases; see integrations/nghttp2/README.md). Gate on a pass-count floor so
+        # cases; see integrations/http2/nghttp2/README.md). Gate on a pass-count floor so
         # the result stays visible and a real regression fails the job, without
         # tripping on the known nghttp2-parity failures.
         run: |
-          out="$(make -C integrations/nghttp2 h2spec 2>&1 || true)"
+          out="$(make -C integrations/http2/nghttp2 h2spec 2>&1 || true)"
           echo "$out" | grep -aE "[0-9]+ tests," || true
           passed="$(echo "$out" | grep -aoE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1)"
           echo "h2spec passed=${passed:-0} (floor 130)"
@@ -527,17 +527,17 @@ jobs:
 
       - name: nghttp2 load — h2load
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 h2load
+        run: make -C integrations/http2/nghttp2 h2load
 
       - name: nghttp2 interop — curl + nghttpd
         timeout-minutes: 5
         run: |
-          make -C integrations/nghttp2 interop-curl
-          PATH="$PATH:/usr/sbin" make -C integrations/nghttp2 interop-nghttpd
+          make -C integrations/http2/nghttp2 interop-curl
+          PATH="$PATH:/usr/sbin" make -C integrations/http2/nghttp2 interop-nghttpd
 
       - name: ALPN e2e — mbedTLS + nghttp2 + openssl + curl + Keel client
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
+        run: make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
 
       - name: mbedTLS adapter — real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
