@@ -1,3 +1,5 @@
+tests/protocols/dns/smoke_dns.c
+tests/protocols/dns/test_dns_resolver.c
 tests/protocols/http/smoke_tcp.c
 tests/protocols/http/test_alpn.c
 tests/protocols/http/test_compress.c
@@ -44,7 +46,6 @@ tests/protocols/websocket/test_websocket_client_hostname_fail.c
 tests/protocols/websocket/test_websocket_overflow.c
 tests/smoke_completion_inject.c
 tests/smoke_datagram.c
-tests/smoke_dns.c
 tests/smoke_iocp.c
 tests/smoke_iocp_async.c
 tests/smoke_iocp_tls.c
@@ -74,7 +75,6 @@ tests/test_dgram_recv.c
 tests/test_dgram_recv_classify.c
 tests/test_dgram_send.c
 tests/test_dgram_slots.c
-tests/test_dns_resolver.c
 tests/test_drain.c
 tests/test_error.c
 tests/test_event.c

@@ -711,10 +711,10 @@ $(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(LIB)
 
 # DNS resolver link + init/resolve smoke test — the Windows CI gate for
 # dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
-SMOKE_DNS_BIN = tests/smoke_dns$(EXE)
+SMOKE_DNS_BIN = tests/protocols/dns/smoke_dns$(EXE)
 smoke-dns: $(SMOKE_DNS_BIN)
 	./$(SMOKE_DNS_BIN)
-$(SMOKE_DNS_BIN): tests/smoke_dns.c $(LIB)
+$(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
 # TLS handshake smoke test — a real mbedTLS handshake + request/response over
@@ -797,7 +797,7 @@ keel.pc: keel.pc.in
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f tests/protocols/http/smoke_tcp tests/protocols/http/smoke_tcp.exe \
-	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
+	      tests/protocols/dns/smoke_dns tests/protocols/dns/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
 	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles

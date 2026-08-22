@@ -16,9 +16,9 @@
 
 /* D-DNS-3 send-backpressure tests use a socket provider that wraps the built-in POSIX provider and can
  * force datagram sends to WOULD_BLOCK on demand (real fds so the readiness loop still polls writability). */
-#include "../src/socket.h"       /* KlSocketProvider / KlDatagramOps / kl_socket_provider_posix */
-#include "../src/event_caps.h"   /* kl_event_caps — skip the readiness-only gate on completion backends */
-#include "../src/platform.h"     /* kl_monotonic_ms — portable monotonic clock (no raw clock_gettime) */
+#include "socket.h"       /* KlSocketProvider / KlDatagramOps / kl_socket_provider_posix */
+#include "event_caps.h"   /* kl_event_caps — skip the readiness-only gate on completion backends */
+#include "platform.h"     /* kl_monotonic_ms — portable monotonic clock (no raw clock_gettime) */
 
 /* ── A canned A-record response for a.com → 1.2.3.4, id 0x1234 ────────── */
 static const uint8_t A_RESP[] = {
