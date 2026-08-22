@@ -58,7 +58,7 @@ So **both axes are runtime-injectable**: the event backend (`KlEventProvider`) a
 the socket/address provider (`KlSocketProvider` + `KlSockAddr`). No library
 recompile.
 
-`lwip_loopback_test.c` is the proof — the server, client, and datagram axes on
+`tests/lwip_loopback_test.c` is the proof — the server, client, and datagram axes on
 lwIP, linked against a **stock** `libkeel`:
 - a raw lwIP client → the Keel **server** (`200 OK`),
 - a Keel async **client** on the lwIP providers → the same server (`200`), with
@@ -68,7 +68,7 @@ lwIP, linked against a **stock** `libkeel`:
   (the datagram ops on `socket_lwip.c`).
 
 ```sh
-make -C ../..                       # stock libkeel.a (any backend)
+make -C ../../..                    # stock libkeel.a (any backend)
 make loopback LWIP_DIR=/path/to/lwip
 # -> keel: listening on 127.0.0.1:8080
 #    lwIP loopback: raw client -> Keel server replied 200 OK (correct)
@@ -123,8 +123,9 @@ Two lwIP integrations ship:
    mainloop (`sys_check_timeouts()` + `netif_poll()`; raw `tcp_*` callbacks feed the completion
    driver). A raw-backed `KlHttpServer` serves HTTP over the loopback netif — accept/recv/send,
    backpressure, file responses, and full close/cancel/idle-timeout lifetime — all in-process (no
-   tap, no root), CI-gated (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean.
-   `make raw-spike` is the minimal foundation spike. Notably this needed **zero** changes to
+   tap, no root), CI-gated (`make -C integrations/platform/lwip loopback-raw`) and ASan+UBSan+LSan-clean.
+   The NO_SYS=1 raw lwIP archive (`liblwip_raw.a`, built from `lwipopts_raw.h`) is the shared
+   foundation these tests run on. Notably this needed **zero** changes to
    `completion_driver.c` or any `src/` — a third completion backend (beyond io_uring/IOCP) on the
    model-blind completion axis. The raw backend now also does the full **client** axis (plaintext
    + Happy-Eyeballs + DNS + HTTPS) and **UDP** — **IPv4-only** — see the capability matrix below.

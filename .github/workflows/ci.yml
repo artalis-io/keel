@@ -577,20 +577,16 @@ jobs:
 
       - name: lwIP loopback — stock libkeel + lwIP providers (server + client + UDP echo)
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback LWIP_DIR="$HOME/lwip"
 
       - name: lwIP HTTPS loopback — mbedTLS BIO routed through the lwIP socket provider
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
-
-      - name: lwIP raw-API spike — NO_SYS=1 tcp_* callbacks over loopback (Phase 9 foundation)
-        timeout-minutes: 5
-        run: make -C integrations/lwip raw-spike LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
 
       - name: lwIP raw completion backend — P9 cases via runtime injection on STOCK libkeel (RC-3)
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback-raw LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-raw LWIP_DIR="$HOME/lwip"
 
       - name: lwIP raw completion backend — P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
         timeout-minutes: 8
-        run: make -C integrations/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"

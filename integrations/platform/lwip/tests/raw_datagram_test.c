@@ -24,7 +24,7 @@
 
 #include "keel_lwip_raw.h"  /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"  /* T3 drives the glue directly (kl_lwr_udp_* / kl_lwr_ctx_*) */
-#include "../../src/socket.h"  /* kl_sock_socket / _bind / _set_nonblocking / _get_local_addr / _close */
+#include "../../../../src/socket.h"  /* kl_sock_socket / _bind / _set_nonblocking / _get_local_addr / _close */
 
 #include <stdio.h>
 #include <string.h>

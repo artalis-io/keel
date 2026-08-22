@@ -811,7 +811,7 @@ The socket + completion axes are abstract enough to host stacks that have **no O
 
 | Provider | What it is | Maturity |
 |----------|-----------|----------|
-| **lwIP BSD sockets** | Keel over lwIP's POSIX-compatible socket layer (`integrations/lwip`, `event_lwip.c`) | Shipped, BYO |
+| **lwIP BSD sockets** | Keel over lwIP's POSIX-compatible socket layer (`integrations/platform/lwip`, `event_lwip.c`) | Shipped, BYO |
 | **lwIP raw (`NO_SYS`)** | Keel over lwIP's raw callback API — a completion provider (`event_lwip_raw.c`) that runs the whole HTTP stack with **no OS sockets, no threads**. Serves HTTP over loopback, ASan/UBSan/LSan-clean, CI-gated | Shipped, BYO |
 | **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/uefi`) that runs a stock async `KlHttpClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/phase10_uefi_server_design.md`) |
 

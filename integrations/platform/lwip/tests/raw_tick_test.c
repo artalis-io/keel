@@ -9,8 +9,8 @@
  * P9-2 (retained): a RAW-BACKED KlHttpServer answers GET / over loopback. A real KlHttpServer is
  * pinned to the lwIP-raw completion backend + its overlapped socket provider; the connection
  * state machine runs over the tcp_accept/tcp_recv/tcp_sent callbacks surfaced as
- * KL_COMP_ACCEPT/READ/WRITE. A raw-API test client (in the glue, like raw_loopback_spike.c)
- * connects to 127.0.0.1:PORT, writes "GET / HTTP/1.1...", and captures the response.
+ * KL_COMP_ACCEPT/READ/WRITE. A raw-API test client (lwip_raw_testclient.c, driven from the
+ * tick thread) connects to 127.0.0.1:PORT, writes "GET / HTTP/1.1...", and captures the response.
  *
  * P9-3 (this stage): full-payload send + backpressure + file send. Two cases FORCE multi-
  * round send (a response WELL larger than tcp_sndbuf ≈ 8*TCP_MSS ≈ 11-12 KB):

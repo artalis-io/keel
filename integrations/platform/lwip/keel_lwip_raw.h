@@ -20,7 +20,7 @@
  * the matching overlapped socket provider on the completion loop.
  *
  * lwIP is NOT vendored — build against your own lwIP (LWIP_DIR) with the NO_SYS=1
- * lwipopts_raw.h. See integrations/lwip/Makefile (loopback-raw target).
+ * lwipopts_raw.h. See integrations/platform/lwip/Makefile (loopback-raw target).
  *
  * ── Supported / Unsupported (this is the API-facing capability statement) ──────────────
  *

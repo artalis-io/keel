@@ -1,6 +1,6 @@
 # KEEL — UEFI integration (U-1: platform + allocator shims)
 
-A **bring-your-own** integration (like `integrations/lwip/`, `integrations/tls/mbedtls/`):
+A **bring-your-own** integration (like `integrations/platform/lwip/`, `integrations/tls/mbedtls/`):
 nothing here is wired into the root `Makefile` or into `src/`/`include/`. It
 supplies the freestanding platform + allocator seams a UEFI-hosted KEEL client
 needs, and proves them in QEMU/OVMF.

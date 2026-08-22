@@ -8,7 +8,7 @@
  * pure lwIP target (no host libc resolver). Numeric literals work without LWIP_DNS;
  * name resolution additionally needs LWIP_DNS=1 in lwipopts.h.
  *
- * Bring-your-own lwIP (LWIP_DIR); see integrations/lwip/README.md.
+ * Bring-your-own lwIP (LWIP_DIR); see integrations/platform/lwip/README.md.
  */
 #define KEEL_PLATFORM_LWIP 1
 #include "resolve_sync.h"      /* kl_resolve_sync decl + KlSockAddr */

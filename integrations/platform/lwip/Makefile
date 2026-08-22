@@ -1,4 +1,4 @@
-# integrations/lwip — Keel on the lwIP TCP/IP stack (socket + event providers).
+# integrations/platform/lwip — Keel on the lwIP TCP/IP stack (socket + event providers).
 #
 # Bring-your-own lwIP: NOT vendored. Point LWIP_DIR at an lwIP checkout that also
 # carries contrib/ports/unix (the host arch/sys port), e.g.:
@@ -11,8 +11,8 @@
 # `test` builds a small lwIP (core + unix port) and runs a real Keel server +
 # client over lwIP's loopback netif. lwIP is readiness-only (lwip_poll).
 
-KEEL_ROOT ?= ../..
-LWIP_DIR  ?= ../../../lwip
+KEEL_ROOT ?= ../../..
+LWIP_DIR  ?= ../../../../lwip
 CC        ?= cc
 
 LWIP_INC = -I$(LWIP_DIR)/src/include -I$(LWIP_DIR)/contrib/ports/unix/port/include
@@ -29,7 +29,7 @@ CFLAGS  += -D_DEFAULT_SOURCE
 
 # ── build-gate: providers compile against public Keel API + lwIP headers ──────
 check: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o
-	@echo "integrations/lwip: providers compile against $(LWIP_DIR) (public API sufficient)"
+	@echo "integrations/platform/lwip: providers compile against $(LWIP_DIR) (public API sufficient)"
 
 # socket_lwip now carries the datagram data-plane too (KlDatagramOps folded onto the
 # provider — Stage 3 of the A2 refactor), so it uses only public Keel headers; there
@@ -50,7 +50,7 @@ platform_wakeup_lwip.o: platform_wakeup_lwip.c lwipopts.h
 # KlSockAddr neutralization (docs/keel_sockaddr_design.md) core speaks KlSockAddr
 # only; socket_lwip.c marshals KlSockAddr <-> lwIP sockaddr at the provider
 # boundary and server bind parses the numeric address via kl_sockaddr_parse, so no
-# host-layout sockaddr ever reaches lwIP. `make -C ../.. && make loopback LWIP_DIR=...`
+# host-layout sockaddr ever reaches lwIP. `make -C ../../.. && make loopback LWIP_DIR=...`
 # builds the stock lib, a minimal lwIP (core+IPv4+api+unix port), and runs the test.
 KEEL_LIB ?= $(KEEL_ROOT)/libkeel.a
 LWIP_SRCS = $(wildcard $(LWIP_DIR)/src/core/*.c) \
@@ -65,14 +65,14 @@ liblwip.a: $(LWIP_SRCS)
 
 loopback: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o liblwip.a
 	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
-	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -o lwip_loopback_test lwip_loopback_test.c \
+	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -o tests/lwip_loopback_test tests/lwip_loopback_test.c \
 	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o \
 	  liblwip.a "$(KEEL_LIB)" -lpthread
-	./lwip_loopback_test
-	@echo "integrations/lwip: loopback runtime test OK (stock libkeel + lwIP provider)"
+	./tests/lwip_loopback_test
+	@echo "integrations/platform/lwip: loopback runtime test OK (stock libkeel + lwIP provider)"
 
 # ── optional HTTPS phase: TLS over lwIP (mbedTLS BIO → lwIP socket provider) ───
-# Builds the mbedTLS adapter (../tls/mbedtls) and links it into the loopback with
+# Builds the mbedTLS adapter (../../tls/mbedtls) and links it into the loopback with
 # -DLWT_TLS, so the test adds a genuine TLS handshake + request over lwIP — proving
 # the mbedTLS socket-BIO routed through kl_socket_provider_lwip() (no lwIP-specific
 # TLS code). BYO mbedTLS via MBEDTLS_DIR (a source tree or a system prefix):
@@ -84,19 +84,19 @@ MBEDTLS_LIB  = $(if $(MBEDTLS_DIR),-L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib
 
 loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o liblwip.a
 	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
-	$(MAKE) -C ../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
-	$(CC) $(CFLAGS) -DLWT_TLS -I../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/src \
-	  -o lwip_loopback_test lwip_loopback_test.c \
+	$(MAKE) -C ../../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) $(CFLAGS) -DLWT_TLS -I../../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/src \
+	  -o tests/lwip_loopback_test tests/lwip_loopback_test.c \
 	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o \
-	  ../tls/mbedtls/libkeel_mbedtls.a liblwip.a "$(KEEL_LIB)" $(MBEDTLS_LIB) -lpthread
-	./lwip_loopback_test
-	@echo "integrations/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"
+	  ../../tls/mbedtls/libkeel_mbedtls.a liblwip.a "$(KEEL_LIB)" $(MBEDTLS_LIB) -lpthread
+	./tests/lwip_loopback_test
+	@echo "integrations/platform/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"
 
-# ── Phase 9 spike: raw (tcp_*) callback API, NO_SYS=1, over loopback ──────────
-# Proves the raw+loopback+NO_SYS mainloop works in-process (no tap, no root) —
-# the foundation a KEEL raw/completion provider would build on. This is a
-# STANDALONE spike: it does NOT link libkeel, only a NO_SYS=1 lwIP built from
-# lwipopts_raw.h.
+# ── NO_SYS=1 raw (tcp_*) lwIP archive: shared foundation for the raw provider ──
+# Builds a NO_SYS=1 lwIP (liblwip_raw.a) from lwipopts_raw.h — the base the KEEL
+# lwIP-raw completion provider + its raw_*_test suite (loopback-raw, below) run
+# on, entirely in-process (no tap, no root). (The original standalone feasibility
+# proof, raw_loopback_spike.c, was retired once the provider suite subsumed it.)
 #
 # The trick to make the raw build pick up lwipopts_raw.h (lwIP's opt.h does an
 # unconditional `#include "lwipopts.h"`): compile in a scratch dir (raw_build/)
@@ -156,12 +156,6 @@ liblwip_raw.a: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) $(RAW_SRCS)
 	@$(CC) -w -std=c11 -O2 -D_DEFAULT_SOURCE $(RAW_INC) -c $(RAW_SRCS)
 	@$(AR) rcs $@ $(notdir $(RAW_SRCS:.c=.o))
 
-raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
-	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE $(RAW_INC) \
-	  -o raw_loopback_spike raw_loopback_spike.c liblwip_raw.a
-	./raw_loopback_spike
-	@echo "integrations/lwip: raw+loopback+NO_SYS spike OK"
-
 # ── Phase 9 / RC-3: lwIP raw COMPLETION backend as a RUNTIME PROVIDER on a STOCK libkeel ──
 # The completion counterpart of `loopback` (which rides a STOCK libkeel over the readiness
 # lwIP provider) — and now built the SAME way. RC-3 retired BACKEND=lwipraw: event_lwip_raw.c
@@ -172,7 +166,7 @@ raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
 #
 # Steps:
 #   1. Build the NO_SYS=1 lwIP archive (liblwip_raw.a) + the raw_build scratch dir
-#      (lwipopts.h forwarder + arch/cc.h) — reusing the raw-spike mechanism.
+#      (lwipopts.h forwarder + arch/cc.h) — reusing the NO_SYS raw-build mechanism.
 #   2. Build a STOCK libkeel (the DEFAULT readiness backend — epoll/kqueue; always carries
 #      the completion driver + dispatch from RC-1). NO BACKEND= override.
 #   3. Compile the lwip-raw PROVIDER objects (event_lwip_raw.o + lwip_raw_glue.o) against
@@ -182,7 +176,7 @@ raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
 # raw_tick_test injects the provider at runtime: kl_event_ctx_init_ex(.., kl_event_provider_
 # lwip_raw()) for P9-1, and KlHttpServerConfig.event_provider = kl_event_provider_lwip_raw() for the
 # server cases (P9-2/3/4) — the server auto-wires the paired overlapped socket provider from
-# the loop's native_provider(). Existing readiness targets (loopback/loopback-tls/raw-spike)
+# the loop's native_provider(). Existing readiness targets (loopback/loopback-tls)
 # are untouched.
 LWIPRAW_KEEL_LIB = $(KEEL_ROOT)/libkeel.a
 # The lwip-raw provider objects. event_lwip_raw.c is OUR code (no lwIP headers) — build it
@@ -197,76 +191,76 @@ event_lwip_raw.o: event_lwip_raw.c keel_lwip_raw.h lwip_raw_glue.h
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o $@ $<
 
 lwip_raw_glue.o: lwip_raw_glue.c lwip_raw_glue.h $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
-	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE $(RAW_INC) -Iintegrations/lwip -I. \
+	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE $(RAW_INC) -I. \
 	  -I$(KEEL_ROOT)/include -c -o $@ $<
 
-lwip_raw_testclient.o: lwip_raw_testclient.c lwip_raw_testclient.h $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
-	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE $(RAW_INC) -Iintegrations/lwip -I. -c -o $@ $<
+tests/lwip_raw_testclient.o: tests/lwip_raw_testclient.c tests/lwip_raw_testclient.h $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
+	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE $(RAW_INC) -I. -c -o $@ $<
 
 # raw_tick_test (lifetime/close/cancel) + raw_recv_test (Stage A: receive/concurrency/saturation/
 # context) + raw_send_test (Stage B: bounded send/file) + raw_caps_test (Stage C: fail-early
 # connect/bind/UDP capability contract). All use the public API + two internal seams (event_caps.h
 # for the compatibility negotiation; the glue/testclient headers) — hence -Isrc alongside -I. for
 # keel_lwip_raw.h.
-LWIPRAW_OBJS = event_lwip_raw.o lwip_raw_glue.o lwip_raw_testclient.o
+LWIPRAW_OBJS = event_lwip_raw.o lwip_raw_glue.o tests/lwip_raw_testclient.o
 loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	@echo "building STOCK libkeel (default readiness backend + completion driver/dispatch) ..."
 	$(MAKE) -C $(KEEL_ROOT)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_tick_test raw_tick_test.c \
+	  -o tests/raw_tick_test tests/raw_tick_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_recv_test raw_recv_test.c \
+	  -o tests/raw_recv_test tests/raw_recv_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_send_test raw_send_test.c \
+	  -o tests/raw_send_test tests/raw_send_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_caps_test raw_caps_test.c \
+	  -o tests/raw_caps_test tests/raw_caps_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_client_test raw_client_test.c \
+	  -o tests/raw_client_test tests/raw_client_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_he_test raw_he_test.c \
+	  -o tests/raw_he_test tests/raw_he_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_udp_test raw_udp_test.c \
+	  -o tests/raw_udp_test tests/raw_udp_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_dns_test raw_dns_test.c \
+	  -o tests/raw_dns_test tests/raw_dns_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_datagram_test raw_datagram_test.c \
+	  -o tests/raw_datagram_test tests/raw_datagram_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
-	./raw_tick_test
-	./raw_recv_test
-	./raw_send_test
-	./raw_caps_test
-	./raw_client_test
-	./raw_he_test
-	./raw_udp_test
-	./raw_dns_test
-	./raw_datagram_test
-	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK (runtime injection on stock libkeel)"
+	./tests/raw_tick_test
+	./tests/raw_recv_test
+	./tests/raw_send_test
+	./tests/raw_caps_test
+	./tests/raw_client_test
+	./tests/raw_he_test
+	./tests/raw_udp_test
+	./tests/raw_dns_test
+	./tests/raw_datagram_test
+	@echo "integrations/platform/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK (runtime injection on stock libkeel)"
 
 # ASan+UBSan+LSan variant — the lifetime/close/cancel + Stage-A receive/context cases need it.
 # Builds a STOCK DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + tests.
@@ -276,69 +270,69 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	$(MAKE) -C $(KEEL_ROOT) debug
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
-	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -I$(KEEL_ROOT)/include \
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -I. -I$(KEEL_ROOT)/include \
 	  -c -o lwip_raw_glue.o lwip_raw_glue.c
-	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -c -o lwip_raw_testclient.o \
-	  lwip_raw_testclient.c
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -I. -c -o tests/lwip_raw_testclient.o \
+	  tests/lwip_raw_testclient.c
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_tick_test raw_tick_test.c \
+	  -o tests/raw_tick_test tests/raw_tick_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_recv_test raw_recv_test.c \
+	  -o tests/raw_recv_test tests/raw_recv_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_send_test raw_send_test.c \
+	  -o tests/raw_send_test tests/raw_send_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_caps_test raw_caps_test.c \
+	  -o tests/raw_caps_test tests/raw_caps_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_client_test raw_client_test.c \
+	  -o tests/raw_client_test tests/raw_client_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_he_test raw_he_test.c \
+	  -o tests/raw_he_test tests/raw_he_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_udp_test raw_udp_test.c \
+	  -o tests/raw_udp_test tests/raw_udp_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_dns_test raw_dns_test.c \
+	  -o tests/raw_dns_test tests/raw_dns_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_datagram_test raw_datagram_test.c \
+	  -o tests/raw_datagram_test tests/raw_datagram_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
-	ASAN_OPTIONS=detect_leaks=1 ./raw_tick_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_recv_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_send_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_caps_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_client_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_he_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_udp_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_dns_test
-	ASAN_OPTIONS=detect_leaks=1 ./raw_datagram_test
-	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK under ASan+UBSan+LSan"
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_tick_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_recv_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_send_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_caps_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_client_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_he_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_udp_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_dns_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_datagram_test
+	@echo "integrations/platform/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
 # ── LC-4: HTTPS (TLS) over the lwIP-raw COMPLETION backend (BYO mbedTLS, out of CI) ──
 # The TLS counterpart of loopback-raw. Combines how loopback-tls (non-raw) links the mbedTLS adapter
-# (../tls/mbedtls/libkeel_mbedtls.a + $(MBEDTLS_LIB)) with how loopback-raw builds the raw provider
+# (../../tls/mbedtls/libkeel_mbedtls.a + $(MBEDTLS_LIB)) with how loopback-raw builds the raw provider
 # objects ($(LWIPRAW_OBJS) + liblwip_raw.a on a STOCK libkeel). No lwip-raw TLS code exists — TLS
 # rides two existing generic legs (client socket-BIO through the raw socket provider; server
 # memory-BIO through completion_driver.c). See docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4.
@@ -348,36 +342,39 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 loopback-raw-tls: $(LWIPRAW_OBJS) liblwip_raw.a
 	@echo "building STOCK libkeel (default readiness backend + completion driver/dispatch) ..."
 	$(MAKE) -C $(KEEL_ROOT)
-	$(MAKE) -C ../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(MAKE) -C ../../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
-	  -I. -I../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_tls_test raw_tls_test.c \
+	  -I. -I../../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o tests/raw_tls_test tests/raw_tls_test.c \
 	  $(LWIPRAW_OBJS) \
-	  ../tls/mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
-	./raw_tls_test
-	@echo "integrations/lwip: LC-4 HTTPS over lwIP raw completion OK (stock libkeel + lwIP raw + mbedTLS)"
+	  ../../tls/mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
+	./tests/raw_tls_test
+	@echo "integrations/platform/lwip: LC-4 HTTPS over lwIP raw completion OK (stock libkeel + lwIP raw + mbedTLS)"
 
 # ASan+UBSan+LSan variant — the TLS handshake + memory-BIO drain path is the new memory surface.
 loopback-raw-tls-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
 	$(MAKE) -C $(KEEL_ROOT) debug
-	$(MAKE) -C ../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(MAKE) -C ../../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
-	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -I$(KEEL_ROOT)/include \
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -I. -I$(KEEL_ROOT)/include \
 	  -c -o lwip_raw_glue.o lwip_raw_glue.c
-	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -c -o lwip_raw_testclient.o \
-	  lwip_raw_testclient.c
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -I. -c -o tests/lwip_raw_testclient.o \
+	  tests/lwip_raw_testclient.c
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
-	  -I. -I../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
-	  -o raw_tls_test raw_tls_test.c \
+	  -I. -I../../tls/mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o tests/raw_tls_test tests/raw_tls_test.c \
 	  $(LWIPRAW_OBJS) \
-	  ../tls/mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
-	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./raw_tls_test
-	@echo "integrations/lwip: LC-4 HTTPS over lwIP raw completion OK under ASan+UBSan+LSan"
+	  ../../tls/mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./tests/raw_tls_test
+	@echo "integrations/platform/lwip: LC-4 HTTPS over lwIP raw completion OK under ASan+UBSan+LSan"
 
 clean:
-	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test raw_udp_test raw_dns_test raw_datagram_test raw_tls_test
-	rm -rf $(RAW_BUILD)
+	rm -f *.o *.a tests/*.o
+	rm -f tests/lwip_loopback_test tests/raw_tick_test tests/raw_recv_test tests/raw_send_test \
+	      tests/raw_caps_test tests/raw_client_test tests/raw_he_test tests/raw_udp_test \
+	      tests/raw_dns_test tests/raw_datagram_test tests/raw_tls_test
+	rm -rf tests/*.dSYM $(RAW_BUILD)
 
-.PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan loopback-raw-tls loopback-raw-tls-asan clean
+.PHONY: check loopback loopback-tls loopback-raw loopback-raw-asan loopback-raw-tls loopback-raw-tls-asan clean

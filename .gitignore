@@ -25,6 +25,12 @@ integrations/tls/boringssl/tests/e2e_boringssl
 integrations/*/*.dSYM
 integrations/tls/*/tests/*.dSYM
 integrations/http2/nghttp2/tests/*.dSYM
+# lwIP: many extensionless test binaries + .o/.dSYM under tests/; keep .c/.h sources.
+integrations/platform/lwip/tests/*
+!integrations/platform/lwip/tests/*.c
+!integrations/platform/lwip/tests/*.h
+# lwIP NO_SYS=1 raw-build scratch dir (generated lwipopts.h forwarder + arch/)
+integrations/platform/lwip/raw_build/
 
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*

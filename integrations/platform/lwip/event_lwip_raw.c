@@ -59,7 +59,7 @@
  * goes through lwip_raw_glue.h (opaque void* pcb/netif + neutral KlLwrRecord), whose
  * implementation (lwip_raw_glue.c) is the lwIP-only TU.
  *
- * BYO lwIP (LWIP_DIR), NO_SYS=1 build (lwipopts_raw.h). See integrations/lwip/Makefile.
+ * BYO lwIP (LWIP_DIR), NO_SYS=1 build (lwipopts_raw.h). See integrations/platform/lwip/Makefile.
  *
  * SPDX-License-Identifier: MIT
  */

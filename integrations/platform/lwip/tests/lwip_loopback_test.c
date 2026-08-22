@@ -153,7 +153,7 @@ static int keel_udp_on_lwip(void) {
  * per-ctx call needed) — so a genuine TLS handshake + request runs over lwIP with
  * zero lwIP-specific TLS code. Embedded
  * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
- * the same test-only material as tests/smoke_tls.c. */
+ * the same test-only material as integrations/tls/mbedtls/tests/smoke_tls.c. */
 static const char CERT_PEM[] =
 "-----BEGIN CERTIFICATE-----\n"
 "MIIBmjCCAUGgAwIBAgIUOugIDeF4cZCY5f4MN+sk1xFwncIwCgYIKoZIzj0EAwIw\n"

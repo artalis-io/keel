@@ -285,10 +285,10 @@ endif
 
 src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 
-# The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
+# The lwIP-raw completion backend (integrations/platform/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
 # the core lib (BACKEND=lwipraw was retired in RC-3). Its object build rules live in
-# integrations/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
+# integrations/platform/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
 
 # Vendor code — relaxed warnings
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c

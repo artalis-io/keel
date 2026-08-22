@@ -25,7 +25,7 @@
  *
  * Case: a raw HTTPS KlHttpClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
  * 200 + body BYTE-EXACT. Embedded self-signed EC cert (CN=127.0.0.1); the client skips CA
- * verification. Same test-only cert material as tests/smoke_tls.c / lwip_loopback_test.c.
+ * verification. Same test-only cert material as integrations/tls/mbedtls/tests/smoke_tls.c / lwip_loopback_test.c.
  *
  * Buffered HTTP/1.1 over TLS only (the 8b-5 subset, §6 caveat): small buffered body, no
  * file/stream body, no ALPN-h2.
@@ -78,7 +78,7 @@ static NumResolver g_numres = {
     { num_resolve, num_cancel, num_destroy }, { NULL }
 };
 
-/* ── test-only self-signed EC cert (CN=127.0.0.1) — same material as tests/smoke_tls.c ── */
+/* ── test-only self-signed EC cert (CN=127.0.0.1) — same material as integrations/tls/mbedtls/tests/smoke_tls.c ── */
 static const char CERT_PEM[] =
 "-----BEGIN CERTIFICATE-----\n"
 "MIIBmjCCAUGgAwIBAgIUOugIDeF4cZCY5f4MN+sk1xFwncIwCgYIKoZIzj0EAwIw\n"

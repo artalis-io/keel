@@ -13,12 +13,12 @@ all: mbedtls openssl libressl nghttp2 lwip
 test: mbedtls-test openssl-test libressl-test nghttp2-test
 
 # lwIP: build-gate only (compile the providers against your lwIP). A running Keel
-# server on lwIP needs a PLATFORM=lwip build of libkeel — see lwip/README.md.
+# server on lwIP needs a PLATFORM=lwip build of libkeel — see platform/lwip/README.md.
 lwip:
 ifndef LWIP_DIR
 	@echo "integrations: skipping lwip (set LWIP_DIR to build-gate)"
 else
-	$(MAKE) -C lwip check LWIP_DIR=$(LWIP_DIR)
+	$(MAKE) -C platform/lwip check LWIP_DIR=$(LWIP_DIR)
 endif
 
 mbedtls:
