@@ -1,4 +1,4 @@
-# integrations/mbedtls — standalone build of the mbedTLS KlTls adapter.
+# integrations/tls/mbedtls — standalone build of the mbedTLS KlTls adapter.
 #
 # Produces libkeel_mbedtls.a, a static archive containing just the adapter
 # object. Bring-your-own mbedTLS (3.x); nothing here is vendored or downloaded.
@@ -13,9 +13,9 @@
 #            -L$(MBEDTLS_DIR)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 #
 # Include from a consumer:
-#   cc -I<keel>/include -Iintegrations/mbedtls ...   #  <keel_tls_mbedtls.h>
+#   cc -I<keel>/include -Iintegrations/tls/mbedtls ...   #  <keel_tls_mbedtls.h>
 
-KEEL_ROOT ?= ../..
+KEEL_ROOT ?= ../../..
 CC        ?= cc
 
 # MBEDTLS_DIR: a source tree (include/ + library/) OR a system prefix
@@ -43,11 +43,11 @@ tls_mbedtls.o: tls_mbedtls.c keel_tls_mbedtls.h
 MBEDTLS_LDPATH = $(if $(MBEDTLS_DIR),-L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib,)
 test: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(CFLAGS) -o link_smoke link_smoke.c \
+	$(CC) $(CFLAGS) -o tests/link_smoke tests/link_smoke.c \
 	  -L. -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
 	  $(MBEDTLS_LDPATH) -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
-	./link_smoke
-	@echo "integrations/mbedtls: link smoke OK"
+	./tests/link_smoke
+	@echo "integrations/tls/mbedtls: link smoke OK"
 
 # End-to-end: both transport axes (socket-BIO + memory-BIO), ALPN, peer_cert,
 # clean-shutdown at_eof, plus a hardening/regression suite. Built with ASan+UBSan;
@@ -57,12 +57,12 @@ E2E_CFLAGS = -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werro
              -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I. $(MBEDTLS_INC)
 e2e: $(OBJ)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(E2E_CFLAGS) -o e2e/tls_e2e e2e/tls_e2e.c tls_mbedtls.c \
+	$(CC) $(E2E_CFLAGS) -o tests/tls_e2e tests/tls_e2e.c tls_mbedtls.c \
 	  -L$(KEEL_ROOT) -lkeel $(MBEDTLS_LDPATH) -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
-	./e2e/tls_e2e
+	./tests/tls_e2e
 
 clean:
-	rm -f $(LIB) $(OBJ) tls_mbedtls.d link_smoke e2e/tls_e2e
-	rm -rf e2e/tls_e2e.dSYM
+	rm -f $(LIB) $(OBJ) tls_mbedtls.d tests/link_smoke tests/tls_e2e
+	rm -rf tests/*.dSYM
 
 .PHONY: all test e2e clean

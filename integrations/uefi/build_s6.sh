@@ -30,7 +30,7 @@ fi
 
 SHIM="$KEEL_ROOT/tests/freestanding/shim"
 LOCAL_SHIM="./mbedtls_shim"
-MBEDTLS_ADAPTER="$KEEL_ROOT/integrations/mbedtls"
+MBEDTLS_ADAPTER="$KEEL_ROOT/integrations/tls/mbedtls"
 : "${ARCHIVE:=$KEEL_ROOT/libkeel_freestanding_server_selfcontained_x86_64.a}"
 if [ ! -f "$ARCHIVE" ]; then ARCHIVE="$KEEL_ROOT/libkeel_freestanding_server_selfcontained.a"; fi
 if [ ! -f "$ARCHIVE" ]; then

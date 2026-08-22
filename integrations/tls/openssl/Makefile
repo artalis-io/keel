@@ -1,8 +1,8 @@
-# integrations/openssl — standalone build of the OpenSSL/BoringSSL KlTls adapter.
+# integrations/tls/openssl — standalone build of the OpenSSL/BoringSSL KlTls adapter.
 #
 # Produces libkeel_openssl.a, a static archive containing the shared adapter
 # object (tls_openssl.c). Bring-your-own OpenSSL 3.x (or BoringSSL — see
-# integrations/boringssl/, which compiles THIS source against a BoringSSL
+# integrations/tls/boringssl/, which compiles THIS source against a BoringSSL
 # prefix). Nothing here is vendored or downloaded. The core `make` / `make test`
 # never build this — it is opt-in.
 #
@@ -16,9 +16,9 @@
 #            -L$(OPENSSL_DIR)/lib -lssl -lcrypto
 #
 # Include from a consumer:
-#   cc -I<keel>/include -Iintegrations/openssl ...   #  <keel_tls_openssl.h>
+#   cc -I<keel>/include -Iintegrations/tls/openssl ...   #  <keel_tls_openssl.h>
 
-KEEL_ROOT ?= ../..
+KEEL_ROOT ?= ../../..
 CC        ?= cc
 
 # OPENSSL_DIR: a system prefix (include/ + lib/), e.g. Homebrew openssl@3.
@@ -46,11 +46,11 @@ tls_openssl.o: tls_openssl.c keel_tls_openssl.h
 # OpenSSL. Requires the core lib to be built first (repo root `make`).
 test: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(CFLAGS) -o link_smoke link_smoke.c \
+	$(CC) $(CFLAGS) -o tests/link_smoke tests/link_smoke.c \
 	  -L. -lkeel_openssl -L$(KEEL_ROOT) -lkeel \
 	  $(OPENSSL_LDPATH) -lssl -lcrypto
-	./link_smoke
-	@echo "integrations/openssl: link smoke OK"
+	./tests/link_smoke
+	@echo "integrations/tls/openssl: link smoke OK"
 
 # End-to-end: both transport axes (socket-BIO + memory-BIO), ALPN, mTLS peer_cert,
 # clean-shutdown at_eof. Built with ASan+UBSan; links the adapter + core + OpenSSL.
@@ -59,12 +59,12 @@ E2E_CFLAGS = -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werro
              -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I. $(OPENSSL_INC)
 e2e: $(OBJ)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(E2E_CFLAGS) -o e2e/tls_e2e e2e/tls_e2e.c tls_openssl.c \
+	$(CC) $(E2E_CFLAGS) -o tests/tls_e2e tests/tls_e2e.c tls_openssl.c \
 	  -L$(KEEL_ROOT) -lkeel $(OPENSSL_LDPATH) -lssl -lcrypto
-	./e2e/tls_e2e
+	./tests/tls_e2e
 
 clean:
-	rm -f $(LIB) $(OBJ) tls_openssl.d link_smoke e2e/tls_e2e
-	rm -rf e2e/tls_e2e.dSYM link_smoke.dSYM
+	rm -f $(LIB) $(OBJ) tls_openssl.d tests/link_smoke tests/tls_e2e
+	rm -rf tests/*.dSYM
 
 .PHONY: all test e2e clean

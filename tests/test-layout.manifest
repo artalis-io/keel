@@ -57,8 +57,6 @@ tests/smoke_pollcomp.c
 tests/smoke_pollcomp_async.c
 tests/smoke_pollcomp_client.c
 tests/smoke_pollcomp_tls.c
-tests/smoke_tls.c
-tests/smoke_tls_completion.c
 tests/test_allocator.c
 tests/test_async.c
 tests/test_connect_op.c

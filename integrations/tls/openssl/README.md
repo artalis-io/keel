@@ -6,7 +6,7 @@ A first-party adapter implementing Keel's `KlTls` transport vtable
 [LibreSSL](https://www.libressl.org/) and
 [BoringSSL](https://boringssl.googlesource.com/boringssl/) — the handful of API
 divergences are gated with `#if defined(...)` and driven from
-`integrations/libressl/` and `integrations/boringssl/` (see their READMEs).
+`integrations/tls/libressl/` and `integrations/tls/boringssl/` (see their READMEs).
 Provides TLS 1.2/1.3 server support (with optional mTLS client-cert verification)
 and client support.
 
@@ -34,16 +34,16 @@ If `OPENSSL_DIR` is unset, the compiler's default search paths are used.
 ### Version matrix
 
 This one adapter source (`tls_openssl.c`) is shared by three integration dirs —
-`integrations/openssl/`, `integrations/boringssl/`, `integrations/libressl/` — which
+`integrations/tls/openssl/`, `integrations/tls/boringssl/`, `integrations/tls/libressl/` — which
 just compile it against their respective library. The public API is the
 `kl_tls_openssl_*` names for all three (the name denotes the adapter family).
 
 | Library | Status | Notes |
 |---------|--------|-------|
 | OpenSSL 3.x | Verified (e2e, both axes) | Primary target; validated on 3.6.x. |
-| LibreSSL | Verified (e2e, both axes) | Validated on 4.3.2 (Homebrew). See `integrations/libressl/`. |
+| LibreSSL | Verified (e2e, both axes) | Validated on 4.3.2 (Homebrew). See `integrations/tls/libressl/`. |
 | OpenSSL 1.1.x | Supported | The peer-cert accessor guard covers `< 3.0.0` (`SSL_get_peer_certificate`); `ASN1_TIME_to_tm` is 1.1.1+. |
-| BoringSSL | Same adapter; build-gated | One `OPENSSL_IS_BORINGSSL` guard; see `integrations/boringssl/`. |
+| BoringSSL | Same adapter; build-gated | One `OPENSSL_IS_BORINGSSL` guard; see `integrations/tls/boringssl/`. |
 
 > Uses OpenSSL 3.x non-deprecated APIs (`SSL_get1_peer_certificate`,
 > `X509_get0_notBefore`, `SSL_set1_host`, `ASN1_TIME_to_tm`, `EVP_*`).
@@ -53,15 +53,15 @@ just compile it against their respective library. The public API is the
 **Standalone `libkeel_openssl.a`** (core stays pure; link the adapter alongside):
 
 ```sh
-cd integrations/openssl && make OPENSSL_DIR=$(brew --prefix openssl@3)
+cd integrations/tls/openssl && make OPENSSL_DIR=$(brew --prefix openssl@3)
 ```
 
 ## Link
 
 ```sh
 cc app.c \
-   -Iinclude -Iintegrations/openssl \
-   -L. -lkeel -Lintegrations/openssl -lkeel_openssl \
+   -Iinclude -Iintegrations/tls/openssl \
+   -L. -lkeel -Lintegrations/tls/openssl -lkeel_openssl \
    -L$OPENSSL_DIR/lib -lssl -lcrypto
 ```
 
@@ -120,7 +120,7 @@ make test OPENSSL_DIR=$(brew --prefix openssl@3)
 make e2e  OPENSSL_DIR=$(brew --prefix openssl@3)
 ```
 
-`make e2e` builds and runs `e2e/tls_e2e.c`, which generates a self-signed CA +
+`make e2e` builds and runs `tests/tls_e2e.c`, which generates a self-signed CA +
 server + client leaf at runtime (OpenSSL library API, no files, no CLI) and
 proves:
 

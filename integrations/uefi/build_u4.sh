@@ -5,7 +5,7 @@
 # Extends build_u3.sh with a FREESTANDING mbedTLS build:
 #   - compile ALL mbedTLS library/*.c with the EFI freestanding CFLAGS + the U-4
 #     config (mbedtls_config_uefi.h), warnings relaxed (-w, like vendor code).
-#   - compile the Keel mbedTLS adapter (integrations/mbedtls/tls_mbedtls.c) + the
+#   - compile the Keel mbedTLS adapter (integrations/tls/mbedtls/tls_mbedtls.c) + the
 #     U-4 platform TU (mbedtls_platform_uefi.c: EFI heap/entropy + libc residuals).
 #   - the U-1/U-2/U-3 TUs (allocator/platform/socket/event/resolve/link-stubs).
 #   - u4_selftest.c (entry).
@@ -38,7 +38,7 @@ fi
 
 SHIM="$KEEL_ROOT/tests/freestanding/shim"
 LOCAL_SHIM="./mbedtls_shim"
-MBEDTLS_ADAPTER="$KEEL_ROOT/integrations/mbedtls"
+MBEDTLS_ADAPTER="$KEEL_ROOT/integrations/tls/mbedtls"
 : "${ARCHIVE:=$KEEL_ROOT/libkeel_freestanding_selfcontained_x86_64.a}"
 if [ ! -f "$ARCHIVE" ]; then ARCHIVE="$KEEL_ROOT/libkeel_freestanding_selfcontained.a"; fi
 if [ ! -f "$ARCHIVE" ]; then

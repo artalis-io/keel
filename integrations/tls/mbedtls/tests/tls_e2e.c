@@ -17,7 +17,7 @@
  * Certificates (a self-signed CA + a server leaf) are generated at runtime with
  * the mbedTLS library API — no filesystem, no `openssl` CLI.
  *
- * This mirrors the OpenSSL suite (integrations/openssl/e2e/tls_e2e.c) in
+ * This mirrors the OpenSSL suite (integrations/tls/openssl/tests/tls_e2e.c) in
  * structure and style, adapted to the mbedTLS adapter's PUBLIC API surface.
  * The mbedTLS adapter has NO client-cert setter, NO insecure ctor and NO
  * truncation toggle, so those OpenSSL scenarios are intentionally absent — see

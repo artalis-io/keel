@@ -2,7 +2,7 @@
 
 BoringSSL is API-compatible enough with OpenSSL that the **same** Keel adapter
 source serves both. This directory contains **no adapter source** — it compiles
-the shared adapter, `integrations/openssl/tls_openssl.c`, against a BoringSSL
+the shared adapter, `integrations/tls/openssl/tls_openssl.c`, against a BoringSSL
 prefix. That is the whole point: it demonstrates the identical `KlTls`
 implementation works against BoringSSL, with only a few call sites gated by
 `#if defined(OPENSSL_IS_BORINGSSL)` (a macro BoringSSL's `<openssl/base.h>`
@@ -66,7 +66,7 @@ make test BORINGSSL_DIR=...                            # link smoke
 ## Verified
 
 BoringSSL was built from source (`master`, `-O1`) in a Linux container and the
-shared adapter was exercised end to end against it. `../openssl/e2e/tls_e2e.c`
+shared adapter was exercised end to end against it. `../openssl/tests/tls_e2e.c`
 (the same unmodified test) passes **both** `KlTls` transport axes:
 
 - **Readiness / socket-BIO**: handshake over a `socketpair`, ALPN (h2), app-data

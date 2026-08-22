@@ -3,8 +3,8 @@
  *
  * ONE adapter TU serving both OpenSSL 3.x and BoringSSL: the API is shared, the
  * few divergences are guarded with `#if defined(OPENSSL_IS_BORINGSSL)`. Builds
- * integrations/openssl/libkeel_openssl.a (OpenSSL) and, from
- * integrations/boringssl/, the same source against a BoringSSL prefix.
+ * integrations/tls/openssl/libkeel_openssl.a (OpenSSL) and, from
+ * integrations/tls/boringssl/, the same source against a BoringSSL prefix.
  *
  * Implements server-side TLS (with optional mTLS) and client-side TLS. Two
  * transport modes over one custom BIO_METHOD:

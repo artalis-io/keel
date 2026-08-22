@@ -128,13 +128,13 @@ alpn-interop: $(LIB)
 	@test -n "$(MBEDTLS_DIR)" || { echo "set MBEDTLS_DIR (and NGHTTP2_DIR)"; exit 1; }
 	@command -v openssl >/dev/null || { echo "openssl not found"; exit 1; }
 	@command -v curl >/dev/null && curl -V | grep -q HTTP2 || { echo "curl with HTTP2 not found"; exit 1; }
-	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
-	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_server e2e/alpn_server.c \
-	  -L. -lkeel_http2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	$(MAKE) -C ../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) $(CFLAGS) -I../tls/mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_server e2e/alpn_server.c \
+	  -L. -lkeel_http2_nghttp2 -L../tls/mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
 	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
-	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_client e2e/alpn_client.c \
-	  -L. -lkeel_http2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	$(CC) $(CFLAGS) -I../tls/mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_client e2e/alpn_client.c \
+	  -L. -lkeel_http2_nghttp2 -L../tls/mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
 	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	./e2e/alpn_server & echo $$! >/tmp/keel_alpn.pid; sleep 1; \

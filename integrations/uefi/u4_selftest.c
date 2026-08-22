@@ -3,7 +3,7 @@
  *
  * The TLS culmination of Phase 10: a STOCK libkeel_freestanding.a async KlHttpClient
  * performs an HTTPS GET over the EFI_TCP4 completion backend on bare UEFI firmware.
- * TLS is the mbedTLS adapter (integrations/mbedtls/tls_mbedtls.c) built FREESTANDING
+ * TLS is the mbedTLS adapter (integrations/tls/mbedtls/tls_mbedtls.c) built FREESTANDING
  * for the EFI target. mbedTLS's ciphertext BIO routes through the U-2 EFI socket
  * provider (kl_http_client_start sets ev_ctx->sockets = the EFI native provider, and
  * src/http_client_async.c auto-wires it into the TLS session via set_socket_provider).

@@ -1,4 +1,4 @@
-# integrations/boringssl — build the SHARED OpenSSL/BoringSSL KlTls adapter
+# integrations/tls/boringssl — build the SHARED OpenSSL/BoringSSL KlTls adapter
 # against a BoringSSL prefix.
 #
 # There is no BoringSSL-specific source: this compiles ../openssl/tls_openssl.c
@@ -19,7 +19,7 @@
 #
 # See README.md for how to obtain/build BoringSSL.
 
-KEEL_ROOT     ?= ../..
+KEEL_ROOT     ?= ../../..
 CC            ?= cc
 ADAPTER_SRC   := ../openssl/tls_openssl.c
 
@@ -54,11 +54,11 @@ tls_boringssl.o: $(ADAPTER_SRC) ../openssl/keel_tls_openssl.h keel_tls_boringssl
 
 test: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(CFLAGS) -o link_smoke link_smoke.c \
+	$(CC) $(CFLAGS) -o tests/link_smoke tests/link_smoke.c \
 	  -L. -lkeel_boringssl -L$(KEEL_ROOT) -lkeel \
 	  -L$(BORINGSSL_LIBDIR) -lssl -lcrypto -lpthread $(BORINGSSL_EXTRA_LIBS)
-	./link_smoke
-	@echo "integrations/boringssl: link smoke OK"
+	./tests/link_smoke
+	@echo "integrations/tls/boringssl: link smoke OK"
 
 # Full both-axes end-to-end handshake + hardening suite (reuses the OpenSSL e2e —
 # pure OpenSSL API). BoringSSL is C++, so add BORINGSSL_EXTRA_LIBS (-lstdc++).
@@ -67,11 +67,12 @@ E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werr
               -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I../openssl $(BORINGSSL_INC)
 e2e:
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(E2E_CFLAGS) -o e2e_boringssl ../openssl/e2e/tls_e2e.c $(ADAPTER_SRC) \
+	$(CC) $(E2E_CFLAGS) -o tests/e2e_boringssl ../openssl/tests/tls_e2e.c $(ADAPTER_SRC) \
 	  -L$(KEEL_ROOT) -lkeel -L$(BORINGSSL_LIBDIR) -lssl -lcrypto -lpthread $(BORINGSSL_EXTRA_LIBS)
-	./e2e_boringssl
+	./tests/e2e_boringssl
 
 clean:
-	rm -f $(LIB) $(OBJ) link_smoke e2e_boringssl
+	rm -f $(LIB) $(OBJ) tests/link_smoke tests/e2e_boringssl
+	rm -rf tests/*.dSYM
 
 .PHONY: all test e2e clean

@@ -47,15 +47,15 @@ make KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls
 ```sh
 make integration-mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls)      # from repo root
 # or directly:
-cd integrations/mbedtls && make MBEDTLS_DIR=$(brew --prefix mbedtls)
+cd integrations/tls/mbedtls && make MBEDTLS_DIR=$(brew --prefix mbedtls)
 ```
 
 ## Link
 
 ```sh
 cc app.c \
-   -Iinclude -Iintegrations/mbedtls \
-   -L. -lkeel -Lintegrations/mbedtls -lkeel_mbedtls \
+   -Iinclude -Iintegrations/tls/mbedtls \
+   -L. -lkeel -Lintegrations/tls/mbedtls -lkeel_mbedtls \
    -L$MBEDTLS_DIR/lib -lmbedtls -lmbedx509 -lmbedcrypto
 ```
 
@@ -78,7 +78,7 @@ KlHttpServerConfig config = {
 
 ```sh
 make integration-mbedtls MBEDTLS_DIR=... && \
-  (cd integrations/mbedtls && make test MBEDTLS_DIR=...)   # link/relocation smoke
+  (cd integrations/tls/mbedtls && make test MBEDTLS_DIR=...)   # link/relocation smoke
 make KEEL_TLS=mbedtls MBEDTLS_DIR=... smoke-tls            # real loopback handshake
 ```
 

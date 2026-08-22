@@ -9,7 +9,7 @@ keel_freestanding*.efi
 keel_freestanding*.lib
 
 # Integration test/smoke binaries (extensionless; sources are .c)
-integrations/*/link_smoke
+integrations/tls/*/tests/link_smoke
 integrations/uefi/mock_efi_test
 integrations/uefi/host_map_test
 integrations/nghttp2/e2e/test_roundtrip
@@ -18,11 +18,12 @@ integrations/nghttp2/e2e/interop_server
 integrations/nghttp2/e2e/client_probe
 integrations/nghttp2/e2e/alpn_server
 integrations/nghttp2/e2e/alpn_client
-integrations/openssl/e2e/tls_e2e
-integrations/mbedtls/e2e/tls_e2e
-integrations/libressl/e2e_libressl
-integrations/boringssl/e2e_boringssl
+integrations/tls/openssl/tests/tls_e2e
+integrations/tls/mbedtls/tests/tls_e2e
+integrations/tls/libressl/tests/e2e_libressl
+integrations/tls/boringssl/tests/e2e_boringssl
 integrations/*/*.dSYM
+integrations/tls/*/tests/*.dSYM
 
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*
@@ -44,6 +45,10 @@ tests/protocols/*/smoke_*
 # variants), incl. .exe and macOS .dSYM bundles. Sources (.c) stay tracked.
 tests/smoke_*
 !tests/smoke_*.c
+
+# Integration test binaries (§10: integrations/<role>/<backend>/tests/) — sources .c stay tracked.
+integrations/tls/mbedtls/tests/smoke_tls*
+!integrations/tls/mbedtls/tests/smoke_tls*.c
 
 # Freestanding host mock harness binaries (sources .c stay tracked; make rm's them post-run)
 tests/freestanding_harness

@@ -209,18 +209,18 @@ LLHTTP_SRC = src/protocols/http/http1_parser_llhttp.c src/protocols/http/http1_r
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
-# now lives in integrations/mbedtls/ (out of the dependency-light core); it still
+# now lives in integrations/tls/mbedtls/ (out of the dependency-light core); it still
 # builds on POSIX and Windows (its BIO I/O goes through the socket seam). Point
 # MBEDTLS_DIR at a source tree (include/ + library/) OR a system prefix (include/ +
 # lib/, e.g. `MBEDTLS_DIR=$(brew --prefix mbedtls)`); if unset, the compiler's
 # default search paths are used (e.g. MSYS2 /mingw64).
 #   make KEEL_TLS=mbedtls [MBEDTLS_DIR=/path]
-# `make integration-mbedtls` builds the adapter standalone (integrations/mbedtls/).
+# `make integration-mbedtls` builds the adapter standalone (integrations/tls/mbedtls/).
 ifdef KEEL_TLS
 ifeq ($(KEEL_TLS),mbedtls)
   # -Isrc: the adapter includes the internal socket seam ("socket.h").
-  # -Iintegrations/mbedtls: its public header <keel_tls_mbedtls.h>.
-  CFLAGS  += -Isrc -Iintegrations/mbedtls
+  # -Iintegrations/tls/mbedtls: its public header <keel_tls_mbedtls.h>.
+  CFLAGS  += -Isrc -Iintegrations/tls/mbedtls
   ifdef MBEDTLS_DIR
     CFLAGS  += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
     LDFLAGS += -L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib
@@ -229,8 +229,8 @@ ifeq ($(KEEL_TLS),mbedtls)
     CFLAGS += -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"$(MBEDTLS_CONFIG_FILE)"'
   endif
   LDFLAGS += -lmbedtls -lmbedx509 -lmbedcrypto   # after -lkeel in the link line
-  TLS_MBEDTLS_SRC = integrations/mbedtls/tls_mbedtls.c
-  TLS_MBEDTLS_OBJ = integrations/mbedtls/tls_mbedtls.o
+  TLS_MBEDTLS_SRC = integrations/tls/mbedtls/tls_mbedtls.c
+  TLS_MBEDTLS_OBJ = integrations/tls/mbedtls/tls_mbedtls.o
 endif
 endif
 TLS_MBEDTLS_OBJ ?=
@@ -726,30 +726,30 @@ $(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
 # KEEL_TLS=mbedtls (else tls_mbedtls.o isn't in the lib). Standalone → -lpthread
 # explicitly (Windows LDFLAGS omits it); mbedTLS libs ride in LDFLAGS.
 #   make KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls
-SMOKE_TLS_BIN = tests/smoke_tls$(EXE)
+SMOKE_TLS_BIN = integrations/tls/mbedtls/tests/smoke_tls$(EXE)
 smoke-tls: $(SMOKE_TLS_BIN)
 	./$(SMOKE_TLS_BIN)
-$(SMOKE_TLS_BIN): tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Buffered-BIO (completion-mode) TLS validation for 8b-5 — a full mbedTLS handshake
 # + app data via feed_input/drain_output, no socket. Local/BYO gate (KEEL_TLS=mbedtls).
-SMOKE_TLS_COMP_BIN = tests/smoke_tls_completion$(EXE)
+SMOKE_TLS_COMP_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion$(EXE)
 smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
 	./$(SMOKE_TLS_COMP_BIN)
-$(SMOKE_TLS_COMP_BIN): tests/smoke_tls_completion.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_COMP_BIN): integrations/tls/mbedtls/tests/smoke_tls_completion.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end real-mbedTLS over a completion event loop + real socket (broadens the in-memory
 # smoke-tls-completion above): smoke_tls.c with the server pinned to the completion provider.
 # Build against a completion backend so kl_socket_provider_pollcomp() links:
 #   make BACKEND=pollcomp KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls-completion-e2e
 # Local/BYO gate (mbedTLS out of CI).
-SMOKE_TLS_E2E_BIN = tests/smoke_tls_completion_e2e$(EXE)
+SMOKE_TLS_E2E_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion_e2e$(EXE)
 smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
 	./$(SMOKE_TLS_E2E_BIN)
-$(SMOKE_TLS_E2E_BIN): tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_E2E_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Optional first-party integrations (integrations/) — bring-your-own libraries,
 # never required by `make` / `make test`. Each target skips with a notice when
@@ -800,7 +800,10 @@ keel.pc: keel.pc.in
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f tests/protocols/http/smoke_tcp tests/protocols/http/smoke_tcp.exe \
-	      tests/protocols/dns/smoke_dns tests/protocols/dns/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
+	      tests/protocols/dns/smoke_dns tests/protocols/dns/smoke_dns.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls integrations/tls/mbedtls/tests/smoke_tls.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls_completion integrations/tls/mbedtls/tests/smoke_tls_completion.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls_completion_e2e integrations/tls/mbedtls/tests/smoke_tls_completion_e2e.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
 	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles
@@ -825,7 +828,7 @@ clean:
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
-	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
+	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/tls/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
 	rm -f libkeel_freestanding_server*.a

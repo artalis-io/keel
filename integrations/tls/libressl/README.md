@@ -2,7 +2,7 @@
 
 LibreSSL is API-compatible enough with OpenSSL that the **same** Keel adapter
 source serves it. This directory contains **no adapter source** — it compiles the
-shared adapter, `integrations/openssl/tls_openssl.c`, against a LibreSSL prefix.
+shared adapter, `integrations/tls/openssl/tls_openssl.c`, against a LibreSSL prefix.
 That is the point: it demonstrates the identical `KlTls` implementation works
 against LibreSSL, with only the peer-cert accessor gated by
 `#if defined(LIBRESSL_VERSION_NUMBER)`.

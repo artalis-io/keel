@@ -2,7 +2,7 @@
  * keel_tls_libressl.h — LibreSSL backend for Keel's KlTls vtable.
  *
  * LibreSSL is API-compatible enough with OpenSSL that the SAME adapter TU
- * (integrations/openssl/tls_openssl.c) serves it too. There is therefore NO
+ * (integrations/tls/openssl/tls_openssl.c) serves it too. There is therefore NO
  * separate LibreSSL source: this header re-exports the OpenSSL adapter's public
  * API. The `kl_tls_openssl_*` names denote the adapter family, not the linked
  * library.
@@ -10,7 +10,7 @@
  * The adapter guards the few LibreSSL/OpenSSL divergences with
  * `#if defined(LIBRESSL_VERSION_NUMBER)` (a macro LibreSSL's <openssl/opensslv.h>
  * defines) — currently just SSL_get_peer_certificate vs OpenSSL 3.x's
- * SSL_get1_peer_certificate. Build integrations/openssl/tls_openssl.c against a
+ * SSL_get1_peer_certificate. Build integrations/tls/openssl/tls_openssl.c against a
  * LibreSSL prefix via this directory's Makefile (LIBRESSL_DIR=...).
  *
  * SPDX-License-Identifier: MIT

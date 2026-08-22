@@ -1,4 +1,4 @@
-# integrations/libressl — build the SHARED OpenSSL/BoringSSL/LibreSSL KlTls adapter
+# integrations/tls/libressl — build the SHARED OpenSSL/BoringSSL/LibreSSL KlTls adapter
 # against a LibreSSL prefix.
 #
 # There is no LibreSSL-specific source: this compiles ../openssl/tls_openssl.c
@@ -19,7 +19,7 @@
 #
 # See README.md.
 
-KEEL_ROOT   ?= ../..
+KEEL_ROOT   ?= ../../..
 CC          ?= cc
 ADAPTER_SRC := ../openssl/tls_openssl.c
 
@@ -50,11 +50,11 @@ tls_libressl.o: $(ADAPTER_SRC) ../openssl/keel_tls_openssl.h keel_tls_libressl.h
 
 test: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(CFLAGS) -o link_smoke link_smoke.c \
+	$(CC) $(CFLAGS) -o tests/link_smoke tests/link_smoke.c \
 	  -L. -lkeel_libressl -L$(KEEL_ROOT) -lkeel \
 	  -L$(LIBRESSL_LIBDIR) -lssl -lcrypto -lpthread
-	./link_smoke
-	@echo "integrations/libressl: link smoke OK"
+	./tests/link_smoke
+	@echo "integrations/tls/libressl: link smoke OK"
 
 # Full both-axes end-to-end handshake (reuses the OpenSSL e2e — pure OpenSSL API).
 E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
@@ -62,11 +62,12 @@ E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werr
               -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I../openssl $(LIBRESSL_INC)
 e2e:
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(E2E_CFLAGS) -o e2e_libressl ../openssl/e2e/tls_e2e.c $(ADAPTER_SRC) \
+	$(CC) $(E2E_CFLAGS) -o tests/e2e_libressl ../openssl/tests/tls_e2e.c $(ADAPTER_SRC) \
 	  -L$(KEEL_ROOT) -lkeel -L$(LIBRESSL_LIBDIR) -lssl -lcrypto -lpthread
-	./e2e_libressl
+	./tests/e2e_libressl
 
 clean:
-	rm -f $(LIB) $(OBJ) link_smoke e2e_libressl
+	rm -f $(LIB) $(OBJ) tests/link_smoke tests/e2e_libressl
+	rm -rf tests/*.dSYM
 
 .PHONY: all test e2e clean
