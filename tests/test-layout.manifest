@@ -37,6 +37,9 @@ tests/protocols/http2/test_http2.c
 tests/protocols/http2/test_http2_client.c
 tests/protocols/http2/test_http2_client_hostname_fail.c
 tests/protocols/http2/test_http2_overflow.c
+tests/protocols/websocket/smoke_pollcomp_ws.c
+tests/protocols/websocket/test_websocket.c
+tests/protocols/websocket/test_websocket_client.c
 tests/protocols/websocket/test_websocket_client_hostname_fail.c
 tests/protocols/websocket/test_websocket_overflow.c
 tests/smoke_completion_inject.c
@@ -52,7 +55,6 @@ tests/smoke_pollcomp.c
 tests/smoke_pollcomp_async.c
 tests/smoke_pollcomp_client.c
 tests/smoke_pollcomp_tls.c
-tests/smoke_pollcomp_ws.c
 tests/smoke_tls.c
 tests/smoke_tls_completion.c
 tests/test_allocator.c
@@ -103,5 +105,3 @@ tests/test_unix_socket.c
 tests/test_url.c
 tests/test_version.c
 tests/test_watcher_aba.c
-tests/test_websocket.c
-tests/test_websocket_client.c

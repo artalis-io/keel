@@ -8,7 +8,7 @@
  * that plumbing end to end. No dependency on the async kl_ws_client.
  */
 #include <keel/keel.h>
-#include "../src/socket.h"     /* internal kl_socket_provider_pollcomp() */
+#include "socket.h"     /* internal kl_socket_provider_pollcomp() */
 
 #include <pthread.h>
 #include <string.h>

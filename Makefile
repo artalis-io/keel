@@ -494,11 +494,11 @@ $(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # WebSocket-over-completion roundtrip on POSIX via pollcomp — runs comp_ws_drive (8e-1).
-SMOKE_POLLCOMP_WS_BIN = tests/smoke_pollcomp_ws$(EXE)
+SMOKE_POLLCOMP_WS_BIN = tests/protocols/websocket/smoke_pollcomp_ws$(EXE)
 smoke-pollcomp-ws: $(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_WS_BIN)
-$(SMOKE_POLLCOMP_WS_BIN): tests/smoke_pollcomp_ws.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_WS_BIN): tests/protocols/websocket/smoke_pollcomp_ws.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Async/thread-pool handler over completion via pollcomp — runs the watcher relay + async
 # resume (8e-2b): a thread-pool wakeup watcher fires on the completion loop and resumes.
@@ -535,8 +535,8 @@ smoke-pollcomp-asan:
 	      -o $(SMOKE_POLLCOMP_BIN) tests/smoke_pollcomp.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_TLS_BIN) tests/smoke_pollcomp_tls.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
-	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/smoke_pollcomp_ws.c -L. -lkeel -lpthread
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/protocols/websocket/smoke_pollcomp_ws.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_ASYNC_BIN) tests/smoke_pollcomp_async.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
@@ -818,7 +818,7 @@ clean:
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
-	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
+	rm -f tests/protocols/websocket/smoke_pollcomp_ws tests/protocols/websocket/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o

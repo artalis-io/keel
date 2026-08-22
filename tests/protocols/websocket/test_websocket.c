@@ -8,9 +8,9 @@
 #include "net_compat.h"
 
 /* Pull in internal headers for direct testing */
-#include "../src/sha1.h"
-#include "../src/base64.h"
-#include "../src/utf8.h"
+#include "sha1.h"
+#include "base64.h"
+#include "utf8.h"
 
 /* ═══════════════════════════════════════════════════════════════════
  * SHA-1 tests
