@@ -45,13 +45,22 @@ moves.
 
 ```
 src/                         # substrate: transport + runtime + generic codec
+src/protocols/{http,http2,websocket,dns,proxy_protocol}/   # first-party protocol impls (see NOTE)
 include/keel/                # ALL public headers, flat (+ new clock.h, http_compress.h)
-protocols/{http,http2,websocket,dns,proxy_protocol}/
+tests/protocols/{http,http2,websocket,dns,proxy_protocol}/ # protocol tests (§9 — NOT under src/)
 integrations/{platform/{lwip,uefi}, tls/{openssl,mbedtls,boringssl,libressl}, http2/nghttp2, codec/miniz}
 # no transports/quic/ (reserved, no impl). integrations/codec/miniz/ holds Keel's miniz ADAPTER TUs
-# (compress_miniz.c/decompress_miniz.c) — backend-specific integration files (§2.7, §0.1 rule 5).
-# The miniz LIBRARY itself stays external BYO (MINIZ_DIR); its public adapter headers stay flat.
+# (compress_miniz.c/decompress_miniz.c) AND their adapter headers (compress_miniz.h/decompress_miniz.h) —
+# backend-specific integration files (§2.7, §0.1 rule 5). The miniz LIBRARY itself stays external BYO
+# (MINIZ_DIR); only the GENERIC compress.h/decompress.h stay flat in include/keel/ (§10.1 P2 — supersedes
+# the earlier "adapter headers stay flat" wording).
 ```
+> **NOTE (taxonomy correction, reviewer — post-T-\*):** the frozen source home for protocol impls is
+> **`src/protocols/<family>/`**, NOT a top-level `protocols/<family>/`. R2a–R2f landed them at the interim
+> top-level `protocols/` path; the relocation `protocols/ → src/protocols/` is a dedicated behavior-neutral
+> increment sequenced with the source-layout work (§10.0), before/during R3, so top-level `protocols/` is
+> never permanent. The **test** layout is unaffected: protocol tests stay at **`tests/protocols/<family>/`**
+> (§9) — they do NOT move under `src/`.
 
 ## 2. Classification inventory
 
@@ -129,7 +138,10 @@ implement the `KlCompress`/`KlDecompress` vtables for that one backend). Under �
 `integrations/codec/miniz/`, not `src/`. They reach core **only** through the public headers
 `<keel/compress_miniz.h>` / `<keel/decompress_miniz.h>` (→ `<keel/compress.h>`/`<keel/decompress.h>`) +
 external `<miniz.h>` — verified: no internal `src/` seam include, so they need **no** G3 allowlist entry.
-Their public adapter headers stay flat in `include/keel/`. **Build model preserved (behavior-neutral):**
+Their adapter headers `compress_miniz.h`/`decompress_miniz.h` move **into `integrations/codec/miniz/`**
+alongside the TUs (§10.1 P2; supersedes this ruling's original "stay flat" placement — consistent with the
+TLS/nghttp2 adapter headers); only the generic `<keel/compress.h>`/`<keel/decompress.h>` stay flat.
+**Build model preserved (behavior-neutral):**
 the root Makefile keeps conditionally compiling them into `libkeel.a` when `KEEL_COMPRESS=miniz`, from the
 new path (§5). A standalone integration Makefile/archive (KEEL_ROOT pattern like siblings) is an OPTIONAL
 R3 refinement, not required for the move and deferred to avoid a build-model change.
@@ -378,6 +390,17 @@ backend vtable and splits the absent stub.
 
 ## 5. Build / CI / test / fuzz / integration reference inventory
 
+> **⚠ INTERIM (R2-era) MECHANICS — superseded by §10 for all source/integration paths.** This section was
+> written for the R2a–R2f moves into the **interim top-level `protocols/`** and the pre-role
+> `integrations/<backend>/`. Every `protocols/…` token, `-Iprotocols/*`, `protocols/*/*.c` scan root,
+> `find protocols … ` clean glob, and integration path-depth (e.g. "`mock_efi_test.c` → `../../../src/`")
+> below is **HISTORICAL**: the FINAL contracts are **§10.0** (`protocols/ → src/protocols/` + the mandatory
+> pattern-rule/cppcheck/clean sweep), **§10.1–10.3** (integrations by role + the exact UEFI classification
+> and path depth — a test TU under `integrations/platform/uefi/tests/` reaches root `src/` via
+> **`../../../../src/`**, not `../../../src/`), and **§6.2** (the FINAL `src/protocols/` gate contracts).
+> Where this section and §10/§6.2 disagree, §10/§6.2 governs. The R2a–R2e mechanics already executed against
+> the interim path are accepted history and are not rewritten.
+
 Line numbers approximate (verify at edit time).
 
 **Makefile — repoint `src/…`→`protocols/<fam>/…`:** `CORE_SRC` (~L187–200, all HTTP/HTTP2/WS/DNS/PROXY
@@ -432,20 +455,25 @@ G1–G5 may mature incrementally across R2–R4, but they never substitute for k
 current within each move commit. R2a is the first commit to apply this (it moves the HTTP files AND
 repoints those gates together).
 
-### 6.2 New gates (mature across R2–R4)
+### 6.2 New gates (mature across R2–R4) — FINAL `src/protocols/` layout (§10)
 Mirror the existing token/path gates (default-deny, self-canary, BSD+GNU, `-I` binary skip, `file:line`,
-no whole-line allowlist masking):
-- **G1 `check-substrate-purity`** — no `src/*.{c,h}` may include a protocol header (`protocols/**` or a
-  protocol-owned basename). Default-deny over `src/`.
-- **G2 `check-protocol-no-integration`** — no `protocols/*/*.{c,h}` may include an integration impl header.
+no whole-line allowlist masking). **These are the FINAL gate contracts against the corrected `src/protocols/`
+tree (§10.0); they do NOT scan the interim top-level `protocols/`.** The protocol layer is now
+`src/protocols/**` (nested under `src/`), so the substrate scan must EXCLUDE it:
+- **G1 `check-substrate-purity`** — no substrate TU (`src/**` **excluding `src/protocols/**`**) may include a
+  protocol header (a `src/protocols/**` path or a protocol-owned basename). Default-deny over `src/` minus
+  `src/protocols/`.
+- **G2 `check-protocol-no-integration`** — no `src/protocols/*/*.{c,h}` may include an integration impl header.
 - **G3 `check-integration-seam`** — integrations reach core only through PUBLIC `include/keel/*.h` OR a
-  **frozen allowlist of substrate internal seam headers** (§6.3), never a moved protocol impl `.c`/private
-  `.h`. Integration-local headers are unrestricted.
-- **G4 `check-protocol-home`** — a first-party protocol impl basename (frozen §3 list) may exist only
-  under its `protocols/<fam>/` home, never re-added to `src/`. **Explicit carve-out:** this does NOT
+  **frozen allowlist of substrate internal seam headers** (§6.3), never a `src/protocols/**` protocol impl
+  `.c`/private `.h`. Integration-local headers (incl. the miniz adapter headers now in
+  `integrations/codec/miniz/`, §10.1 P2) are unrestricted.
+- **G4 `check-protocol-home`** — a first-party protocol impl basename (frozen §3 list) may exist only under
+  its **`src/protocols/<fam>/`** home, never re-added to bare `src/`. **Explicit carve-out:** this does NOT
   restrict same-role TLS adapter source reuse under `integrations/tls/` (§6.4).
-- **G5** — old `src/<proto>.c` / `parsers/http1_*.c` paths cannot reappear (path-qualified deleted refs;
-  allow the new `protocols/…` paths). Fold into / sibling of `check-no-httplegacy`.
+- **G5** — old `src/<proto>.c` / `parsers/http1_*.c` **and the interim top-level `protocols/…`** paths cannot
+  reappear (path-qualified deleted refs; allow only the final `src/protocols/…` source paths — and the
+  UNRELATED retained `tests/protocols/…` test paths, §9). Fold into / sibling of `check-no-httplegacy`.
 
 ### 6.3 G3 — frozen integration→internal-seam allowlist (EXACT header names, no wildcards)
 Integrations legitimately consume these SUBSTRATE provider/platform seam headers — the **exact,
@@ -453,11 +481,14 @@ enumerated** current set (no `*` patterns, so no future private header is silent
 `socket.h`, `platform.h`, `completion_io.h`, `event_caps.h`, `event_builtin.h`, `completion.h`,
 `sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
 `datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`. **This exact list is the allowlist.** (`datagram_life.h`
-← lwIP raw provider; `datagram_open.h` ← EFI host-mock via `"../../src/datagram_open.h"`.) All are
-substrate; none is a protocol header. **A new seam must be added to this list individually, by exact
-name, with a rationale** — never via a wildcard. G3 forbids any integration including a `protocols/**`
-header or a moved protocol private header/`.c`. (The miniz codec adapters need no entry — they reach core
-only through PUBLIC `<keel/compress_miniz.h>`/`<keel/decompress_miniz.h>`.)
+← lwIP raw provider; `datagram_open.h` ← EFI host-mock — the include is `"../../src/datagram_open.h"` today
+and becomes **`"../../../../src/datagram_open.h"`** once `mock_efi_test.c` moves to
+`integrations/platform/uefi/tests/`, §10.2.) All are substrate; none is a protocol header. **A new seam
+must be added to this list individually, by exact name, with a rationale** — never via a wildcard. G3
+forbids any integration including a `src/protocols/**` header or a moved protocol private header/`.c`. (The
+miniz codec adapters need no entry — they reach core only through the GENERIC PUBLIC
+`<keel/compress.h>`/`<keel/decompress.h>` + their own integration-local adapter headers now in
+`integrations/codec/miniz/`, §10.1 P2.)
 
 ### 6.4 G4 — same-role TLS adapter source reuse (explicit permission)
 `integrations/tls/boringssl/` and `integrations/tls/libressl/` **recompile the sibling
@@ -782,3 +813,195 @@ H2-internals suite; §9.8 ruling).
   **neutral completion-connect path**, despite using `KlHttpClient` as the driver.
 - **Freestanding harness set + shared support (group H) stay flat in `tests/`.** Do **not** introduce a
   `tests/support/` dir.
+
+## 10. Source-layout correction + R3 integration-role restructuring (design)
+
+Two source-layout phases follow the accepted test-layout series (§9). Both are behavior-neutral file
+relocations (no API/ABI/state-machine change); each is its own reviewed, independently-green increment.
+
+### 10.0 R2g — `protocols/ → src/protocols/` (taxonomy correction, §1 NOTE)
+
+**Why.** The frozen home for first-party protocol impls is `src/protocols/<family>/`; R2a–R2f landed them at
+the interim top-level `protocols/`. This dedicated increment corrects that so top-level `protocols/` is not
+permanent. **Tests are unaffected** — `tests/protocols/<family>/` (§9) stays exactly as-is (it mirrors the
+protocol *families*, not the `src/` prefix).
+
+**The move (mechanical).** `git mv protocols/<fam> src/protocols/<fam>` for all five families. No `#include`
+lines change — the intra-family bare includes (`"http_internal.h"`, `"http2_internal.h"`, …) resolve through
+the **include-path flags**, which is where the edit lands:
+- Makefile: `-Iprotocols/http`→`-Isrc/protocols/http`, `-Iprotocols/http2`→`-Isrc/protocols/http2`,
+  `-Iprotocols/websocket`→`-Isrc/protocols/websocket` (the `EXTRA_INC` block + the `tests/%`/`tests/protocols/%`
+  test recipes + any custom smoke recipe that adds `-Iprotocols/*`).
+- **Makefile TARGET-SPECIFIC pattern rules (MANDATORY — reviewer P1).** Two `EXTRA_INC` rules exist
+  precisely because GNU Make 3.81 + command-line `CFLAGS` overrides otherwise defeat the protocol include
+  paths (the generic `%.o` recipe carries empty `EXTRA_INC`). Their **target pattern** must be RENAMED, not
+  just their value — if the pattern stays `protocols/%`, the moved objects fall through to the generic rule
+  with empty `EXTRA_INC` and cannot find their intra-family headers (`http_internal.h`, …):
+  `protocols/%.o: EXTRA_INC = …` → **`src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2`**
+  and `protocols/%.fuzz.o: EXTRA_INC = …` → **`src/protocols/%.fuzz.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2`**
+  (current Makefile L283 + L1176).
+- Makefile source lists: `CORE_SRC`, `LLHTTP_SRC`, `AXIS_PROTO_TUS`, `COMPLETION_CORE`, the
+  `FREESTANDING_*` exact object lists, fuzz inputs — every `protocols/…` path → `src/protocols/…`.
+- Gates: `check-tier1-boundary` scans `src/*.c protocols/*/*.c` → `src/*.c src/protocols/*/*.c`; the
+  `TIER1_INFRA` wildcards (`$(wildcard protocols/http/completion_*.c)` …) → `src/protocols/…`; the G3/§6.3
+  seam lists and any `protocols/` path in `check-doc-refs`/`check-no-httplegacy` self-canaries.
+- **Non-`CORE_SRC` hardcoded Makefile paths (MANDATORY explicit sweep — reviewer P1; these are NOT derived
+  from `CORE_SRC`, so they must be named):**
+  - **`cppcheck`** — the scan roots `src/ protocols/` → **`src/`** alone (protocols nest beneath it) + the
+    `-Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket` → `-Isrc/protocols/…`; and the per-file
+    **suppressions** `--suppress=…:protocols/dns/dns_resolver.c` → `…:src/protocols/dns/dns_resolver.c`.
+  - **`clean`** — the explicit object removals `rm -f … protocols/http/completion_http_server.o
+    protocols/http2/completion_http2.o protocols/websocket/completion_ws.o …` → `src/protocols/…`.
+  - **`analyze`** (`scan-build … make clean all`) inherits the above via the build; verify no literal
+    `protocols/` in its recipe.
+- Living docs/scripts + integration references (e.g. lwIP/UEFI harness `-Iprotocols/*` or
+  `../protocols/<fam>/…` include of a protocol internal header) → `src/protocols/…`.
+- `include/keel/` public headers stay flat (unchanged). `tests/protocols/…` stays (unchanged).
+- **Completeness requirement:** R2g performs a **complete `protocols/` token sweep** of the Makefile, CI
+  workflows, `docs/`, integration `Makefile`s/scripts, and `.gitignore`, changing every **top-level source**
+  `protocols/…` token to `src/protocols/…` while explicitly **preserving `tests/protocols/…`** (the retained
+  test tree, §9). A post-R2g `grep -rn '\bprotocols/' — excluding src/protocols and tests/protocols` must
+  return nothing outside intentional prose history.
+
+**Sequencing.** Runs as its own increment **before R3** (so R3 operates on the corrected tree). It does not
+touch `integrations/`; R3 does not touch `src/protocols/`, so the two are independent and could be reordered
+if the reviewer prefers — but §1's NOTE requires the correction land with the source-layout work, not later.
+
+### 10.1 R3 — integrations regrouped by ROLE (target §1)
+
+Current `integrations/<backend>/` (flat) → `integrations/<role>/<backend>/`:
+
+| current | → role home |
+|---|---|
+| `integrations/lwip/` | `integrations/platform/lwip/` |
+| `integrations/uefi/` | `integrations/platform/uefi/` |
+| `integrations/mbedtls/` | `integrations/tls/mbedtls/` |
+| `integrations/openssl/` | `integrations/tls/openssl/` |
+| `integrations/boringssl/` | `integrations/tls/boringssl/` |
+| `integrations/libressl/` | `integrations/tls/libressl/` |
+| `integrations/nghttp2/` | `integrations/http2/nghttp2/` |
+| miniz adapters (`compress_miniz.c`/`decompress_miniz.c`, currently `src/`; **+ the adapter headers**, P2) | `integrations/codec/miniz/` (freeze §M / §2.7; own step or folded into R3) |
+
+Each backend dir moves via `git mv integrations/<backend> integrations/<role>/<backend>`. A pure-impl
+backend (the four TLS backends, nghttp2) moves **whole** (all `.c/.h/Makefile/README.md/e2e`); the
+**platform backends (lwIP, UEFI) additionally split their tests into a nested `tests/` subdir** (§10.2), so
+they are NOT a single whole-dir move.
+
+**Path-depth (reviewer P1 — "gain one path level" is insufficient once tests nest one deeper):**
+- backend `Makefile` at `integrations/platform/uefi/` (was `integrations/uefi/`): its `KEEL_ROOT ?= ../..`
+  (repo-root) becomes **`../../..`** (one level deeper).
+- scripts/harnesses under `integrations/platform/uefi/tests/` (was flat in `integrations/uefi/`): repo-root
+  becomes **`../../../..`** (two levels deeper — role + tests); and they reference **backend TUs via `../`**
+  (up from `tests/` to the backend root), while their test-local entries/stubs use **local names** (same
+  dir). The backend Makefile that invokes a harness calls it as `./tests/<script>` (or the script is invoked
+  from the tests/ dir with `KEEL_ROOT=../../../..`).
+
+**P2 — miniz adapter headers.** `include/keel/compress_miniz.h` + `include/keel/decompress_miniz.h` move
+**with** their impl TUs into `integrations/codec/miniz/` (consistent with the TLS/nghttp2 integrations, whose
+adapter headers live beside their backends, e.g. `integrations/mbedtls/keel_tls_mbedtls.h`); only the GENERIC
+`include/keel/compress.h` + `decompress.h` stay flat. Repoint the impl TUs' includes, the `examples/`
+(`compress_server.c`/`decompress_client.c`) `<keel/…miniz.h>` → the integration path + a `-Iintegrations/codec/miniz`
+on those example builds. (If flat install of optional adapter headers were an intended packaging policy it
+would be recorded as an explicit exception applied to ALL integrations — it is not; miniz is corrected to
+match.)
+
+### 10.2 Integration tests/harnesses → `integrations/<role>/<backend>/tests/`
+
+Move each backend's test/harness TUs into a `tests/` subdir of its (new) role home (§9 rule 4). Notably:
+- **`smoke_tls.c` + `smoke_tls_completion.c`** (currently flat in `tests/`, §9.8 ruling) →
+  `integrations/tls/mbedtls/tests/` — both explicitly validate the mbedTLS backend. Their root Makefile
+  smoke recipes/`SMOKE_*`/clean paths + the smoke-pollcomp-asan recipe that names `smoke_tls_completion`
+  repoint accordingly; and the §9 `tests/test-layout.manifest` + `check-test-layout` **stop tracking them**
+  (they leave the `tests/` tree — the gate scopes to `tests/**`, so removal is simply a manifest delete).
+- **lwIP → `integrations/platform/lwip/tests/`:** `lwip_loopback_test.c`, `lwip_raw_testclient.{c,h}`,
+  `raw_caps_test.c`, `raw_client_test.c`, `raw_datagram_test.c`, `raw_dns_test.c`, `raw_he_test.c`,
+  `raw_recv_test.c`, `raw_send_test.c`, `raw_tick_test.c`, `raw_tls_test.c`, `raw_udp_test.c`. The
+  `integrations/lwip/Makefile` targets (`loopback-raw`, …) + root-Makefile lwIP hooks repoint.
+  **`raw_loopback_spike.c` does NOT auto-move** — see §10.4 (audit-then-delete; it does not exercise Keel).
+- **UEFI — EXACT classification (reviewer P1).** The self-test builds pull test-only link stubs + paired
+  runners, so the move set is enumerated, not "the `*_selftest.c` + `build_*.sh`":
+  - **STAYS in `integrations/platform/uefi/` (backend implementation):** `event_efi.{c,h}`,
+    `socket_efi_tcp4.{c,h}`, `socket_efi_udp4.{c,h}`, `resolve_uefi.{c,h}`, `platform_uefi.{c,h}`,
+    `allocator_uefi.{c,h}`, `civil_time.{c,h}`, `clock_snapshot.{c,h}`, `lifecycle_uefi.{c,h}`,
+    `time_uefi.{c,h}`, `wallclock_uefi.{c,h}`, `entropy_uefi.c`, `errno_uefi.c`, `efi_uefi.h`,
+    `mbedtls_config_uefi.h`, `mbedtls_platform_uefi.{c,h}`, `mbedtls_shim/*`, `Makefile`, `README.md`,
+    `.gitignore` — plus the **promoted** `efi_min.h`/`efi_tcp4.h`/`efi_udp4.h` (§10.4).
+  - **MOVES to `integrations/platform/uefi/tests/` (test machinery):** every self-test entry
+    (`s4_selftest.c`, `s6_selftest.c`, `s7_selftest.c`, `u1_selftest.c`, `u2_selftest.c`, `u3_selftest.c`,
+    `u4_selftest.c`, `u7_selftest.c`, `dgram_dns_selftest.c`, `dgram_public_selftest.c`, `host_map_test.c`,
+    `mock_efi_test.c`); every **link stub** (`u1_link_stubs.c`, `s4_link_stubs.c`, `dgram_link_stubs.c`);
+    every **build script** (`build.sh` = the U-1 harness, `build_s4/s6/s7/u2/u3/u4/u7.sh`,
+    `build_dgram_dns/public.sh`, `build_host_map_test.sh`, `build_mock_efi_test.sh`); every **run script**
+    (`run.sh`, `run_s4/s6/s7/u2/u3/u4/u7.sh`, `run_dgram_dns/public.sh`); and **`startup.nsh`** — it is
+    referenced by ALL the run scripts + both dgram self-tests, i.e. shared QEMU support → moves to `tests/`.
+  - **`wwwroot/` is GENERATED, not a tracked fixture (reviewer P1):** the run scripts create it at runtime
+    (`mkdir -p` + generated `index.html`) — it is ignored build/runtime residue, NOT a `git mv`. After the
+    move the scripts run from `tests/` and create `tests/wwwroot/`; the UEFI `.gitignore` + the backend/test
+    clean rules ignore/remove that generated dir at its new location. (Do not classify it as a static fixture.)
+  - **Reference repoints:** `build_mock_efi_test.sh` (the host-mock CI gate — invoked as `CC=cc bash
+    integrations/platform/uefi/tests/build_mock_efi_test.sh`), root-Makefile `UEFI_DGRAM_TU` +
+    freestanding-server EFI link-stub lists (the stub TUs are now under `tests/`), and every CI job naming a
+    `build_*.sh`/`run_*.sh`. Path depth per §10.1 (Makefile `../../..`; `tests/` scripts `../../../..`,
+    backend TUs via `../`).
+  - **Test-TU white-box include depth (reviewer P1).** The self-test/mock `.c`s that white-box-include a
+    core `src/` header (`mock_efi_test.c`, `host_map_test.c`, `dgram_*_selftest.c` — e.g.
+    `"../../src/datagram_open.h"`/`"../../src/completion.h"`) gain **two** levels once they land in
+    `integrations/platform/uefi/tests/`: `../../src/…` → **`../../../../src/…`** (NOT `../../../src/…`, which
+    would be correct only for the role nesting alone). Their include of a promoted EFI header
+    (`"../../spikes/uefi/efi_udp4.h"`) becomes **`"../efi_udp4.h"`** (§10.4 promotes it to the backend root,
+    one level up from `tests/`).
+- **nghttp2 → `integrations/http2/nghttp2/`:** the adapter TUs (`http2_nghttp2_{client,server}.c`,
+  `keel_http2_nghttp2.h`, `Makefile`, `README.md`) stay at the backend root; the existing `e2e/*`
+  (`test_roundtrip.c`, `alpn_client.c`, `alpn_server.c`, `interop_server.c`, `client_probe.c`,
+  `e2e_socket.c`) move to **`integrations/http2/nghttp2/tests/`** — the e2e files sit **directly beneath**
+  `tests/` (RULED: no extra `tests/e2e/` layer; they are all integration tests, so a second category dir adds
+  no distinction unless another test category appears).
+- **TLS backends → `integrations/tls/<backend>/`:** each backend's adapter TU + `keel_tls_<backend>.h` +
+  `Makefile`/`README.md` stay at the backend root; `e2e/tls_e2e.c` (mbedtls/openssl) + `link_smoke.c` (all
+  four) → the role home's `tests/`.
+
+### 10.3 Affected references (repoint in the same increment)
+
+Root `Makefile`: `TLS_MBEDTLS_SRC`/`_OBJ` + `-Iintegrations/mbedtls` (L212–233), the lwIP-raw hooks
+(L285–288), `UEFI_DGRAM_TU` (L1821) + all link-stub/freestanding-server EFI lists, the integration clean
+line (L825), `integration-mbedtls` + any `integration-*` targets, `SMOKE_TLS*`/smoke recipes. `.github/
+workflows/ci.yml`: every job that `cd`s into or names an `integrations/<backend>/` path (TLS e2e, lwIP
+loopback, UEFI QEMU/host-mock, nghttp2 interop). The G3/§6.3 allowlist is path-agnostic (exact header
+names) but its prose references to `integrations/<backend>/` update. Living docs under `docs/` that cite an
+integration path; each backend's own `README.md`/`Makefile` relative paths.
+
+### 10.4 `spikes/` cleanup — no active production deps under `spikes/` (reviewer P1)
+
+`spikes/uefi/` currently holds THREE headers — `efi_min.h`, `efi_tcp4.h`, `efi_udp4.h` — that are **live
+production dependencies** of the UEFI provider: `event_efi.c`, `socket_efi_tcp4.h`, `socket_efi_udp4.h`,
+`efi_uefi.h`, several self-tests (`u2/u7/s7`, `host_map_test`), and `build_mock_efi_test.sh` include them.
+The restructure must not leave production code depending on a `spikes/` path. As part of R3 (with the UEFI
+move):
+1. **Promote** `spikes/uefi/efi_min.h`, `efi_tcp4.h`, `efi_udp4.h` → `integrations/platform/uefi/` (they are
+   the EFI protocol/ABI headers the provider is built on).
+2. **Repoint** every includer + the host-mock (`build_mock_efi_test.sh`) + any `-Ispikes/uefi` build flag to
+   the new `integrations/platform/uefi/` location.
+3. **Delete** the obsolete **U-0 spike** — `spikes/uefi/tcp4_get.c` + its `build.sh`/`run.sh`/`startup.nsh`/
+   `README.md`/`.gitignore` (superseded by the EFI provider + its self-tests).
+4. **Remove `spikes/`** once its reference count reaches zero (verify no remaining includer/`-I`/script/doc).
+
+**`raw_loopback_spike.c`** (currently `integrations/lwip/`) is **NOT** an automatic test move: it is a
+raw-lwIP loopback proof that **does not exercise Keel at all** and appears superseded by the raw-provider
+suite (`raw_*_test.c`). Freeze it as **"audit then delete if it has no unique coverage"** — compare its
+raw-loopback assertions against the current provider suite; move to `tests/` only if it proves something the
+suite does not (default expectation: delete).
+
+### 10.5 Sequencing (frozen)
+
+1. **This revision — docs-only. Pause for review.**
+2. **R2g** — `protocols/ → src/protocols/` (§10.0), one behavior-neutral increment. Validate + pause.
+3. **R3** — integrations by role (§10.1–10.3) + the `spikes/` cleanup (§10.4), one increment per role or per
+   backend as practical (`git mv` dirs + repoint that backend's build/CI/scripts + move its tests + update
+   the test-layout manifest where a `tests/`-tree smoke leaves). The UEFI increment promotes the three EFI
+   headers out of `spikes/` + retires the U-0 spike; `smoke_tls*` move with mbedTLS. Validate each, pause.
+4. **R4** — finalize recursive discovery, the ownership + stale-path + boundary gates against the final
+   `src/protocols/` + `integrations/<role>/` tree, clean rules, `spikes/`-removed, and doc reconciliation.
+
+**Validation matrix unchanged** (§ existing): the full backend matrix + gates run per increment; the
+integration-specific gates (EFI host-mock, lwIP loopback-raw-asan, container iouring/pollcomp, MinGW/IOCP,
+freestanding, TLS e2e where a real backend is present) run when their integration moves.
