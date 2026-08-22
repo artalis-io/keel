@@ -39,6 +39,7 @@ tests/protocols/http2/test_http2.c
 tests/protocols/http2/test_http2_client.c
 tests/protocols/http2/test_http2_client_hostname_fail.c
 tests/protocols/http2/test_http2_overflow.c
+tests/protocols/proxy_protocol/test_proxy_protocol.c
 tests/protocols/websocket/smoke_pollcomp_ws.c
 tests/protocols/websocket/test_websocket.c
 tests/protocols/websocket/test_websocket_client.c
@@ -87,7 +88,6 @@ tests/test_iocp_engine.c
 tests/test_kl_cstr.c
 tests/test_kl_cstr_builtin.c
 tests/test_listener.c
-tests/test_proxy_protocol.c
 tests/test_resolver_cache.c
 tests/test_sockaddr.c
 tests/test_socket_provider.c
