@@ -16,7 +16,7 @@
 
 #include <keel/http_compress.h>
 #include <keel/keel.h>
-#include <keel/compress_miniz.h>
+#include "compress_miniz.h"
 #include <stdio.h>
 #include <string.h>
 

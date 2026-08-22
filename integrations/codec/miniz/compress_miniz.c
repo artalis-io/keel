@@ -1,4 +1,4 @@
-#include <keel/compress_miniz.h>
+#include "compress_miniz.h"
 #include <string.h>
 
 /* miniz public API — included via -I$(MINIZ_DIR) */

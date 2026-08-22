@@ -239,10 +239,13 @@ TLS_MBEDTLS_OBJ ?=
 ifdef KEEL_COMPRESS
 ifeq ($(KEEL_COMPRESS),miniz)
   MINIZ_DIR ?= ../miniz
-  MINIZ_CFLAGS = -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
+  # -Iintegrations/codec/miniz: the adapter TUs + examples reach the miniz ADAPTER headers
+  # (compress_miniz.h/decompress_miniz.h, now beside the adapter TUs — R3.1/§10.1 P2) via a bare
+  # include; -I$(MINIZ_DIR): the external BYO <miniz.h>.
+  MINIZ_CFLAGS = -Iintegrations/codec/miniz -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
   CFLAGS += $(MINIZ_CFLAGS)
-  COMPRESS_MINIZ_SRC = src/compress_miniz.c src/decompress_miniz.c
-  COMPRESS_MINIZ_OBJ = src/compress_miniz.o src/decompress_miniz.o
+  COMPRESS_MINIZ_SRC = integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c
+  COMPRESS_MINIZ_OBJ = integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 endif
 endif
 COMPRESS_MINIZ_OBJ ?=
@@ -822,7 +825,7 @@ clean:
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
-	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
+	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
 	rm -f libkeel_freestanding_server*.a
@@ -839,7 +842,7 @@ clean:
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	-$(MAKE) -C integrations clean
 	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
-	find protocols -name '*.o' -delete 2>/dev/null || true
+	find src/protocols -name '*.o' -delete 2>/dev/null || true
 	find . -name '*.d' -delete
 	rm -f keel.pc
 	rm -f coverage.info
@@ -1202,7 +1205,7 @@ fuzz/fuzz_url: fuzz/fuzz_url.c $(FUZZ_LIB)
 # Decompression fuzzer needs the miniz backend compiled into FUZZ_LIB:
 #   make fuzz-decompress KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz CC=clang
 fuzz/fuzz_decompress: fuzz/fuzz_decompress.c $(FUZZ_LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+	$(CC) $(FUZZ_CFLAGS) $(MINIZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 fuzz-decompress: fuzz/fuzz_decompress
 
 fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \

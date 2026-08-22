@@ -1,4 +1,4 @@
-#include <keel/decompress_miniz.h>
+#include "decompress_miniz.h"
 #include <stdlib.h>
 #include <string.h>
 
