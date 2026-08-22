@@ -13,7 +13,7 @@
  * The generic byte-in/byte-out codec vtable lives in <keel/compress.h>; this
  * header is the HTTP-specific adapter that drives it against a KlHttpResponse
  * (single-shot body compression + chunked compressed streaming, with
- * Content-Encoding/Vary handling). Implementation: protocols/http/http_compress.c.
+ * Content-Encoding/Vary handling). Implementation: src/protocols/http/http_compress.c.
  */
 
 /**

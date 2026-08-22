@@ -5,7 +5,7 @@
 #include "utest.h"
 #include <keel/http2.h>
 #include <keel/http2_server.h>
-#include "http2_internal.h"   /* KlHttp2ServerStream body (via -Iprotocols/http2) */
+#include "http2_internal.h"   /* KlHttp2ServerStream body (via -Isrc/protocols/http2) */
 #include <stddef.h>
 #include <stdint.h>
 

@@ -1,5 +1,5 @@
 /*
- * raw_dns_test.c — LC-3: KEEL's OWN async DNS resolver (protocols/dns/dns_resolver.c) resolving a name
+ * raw_dns_test.c — LC-3: KEEL's OWN async DNS resolver (src/protocols/dns/dns_resolver.c) resolving a name
  * over the lwIP-raw completion backend, then a plaintext KlHttpClient GET / -> 200. In-process over
  * the loopback netif (NO_SYS=1, single-thread).
  *
@@ -7,7 +7,7 @@
  * built-in DNS resolver rides KEEL's OWN canonical KlDatagram — the same datagram path that LC-3a
  * (#194) made work over lwip-raw. So there is ONE UDP/DNS path everywhere. kl_dns_resolver_create(ctx,
  * cfg) on a ctx whose ctx.sockets = kl_socket_provider_lwip_raw() resolves names over lwIP with NO
- * changes to protocols/dns/dns_resolver.c: the resolver's KlDatagram query socket becomes a udp_pcb,
+ * changes to src/protocols/dns/dns_resolver.c: the resolver's KlDatagram query socket becomes a udp_pcb,
  * kl_datagram_send -> udp_sendto over loopif, the reply lands in the glue's udp recv ring and surfaces
  * as KL_COMP_DGRAM_RECV, and dns_on_recv parses it with KEEL's own kl_dns_parse_response. The TCP
  * fallback (RFC 7766) would ride ctx->sockets' SOCK_STREAM connect (LC-1) too, but a small UDP answer
@@ -29,7 +29,7 @@
  *   B1  a full KlHttpClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
  *         byte-exact body: resolve over raw + Happy-Eyeballs connect over raw + request/response.
  *
- * protocols/dns/dns_resolver.c is UNCHANGED — only the raw provider + glue (from LC-1/LC-3a) supply the
+ * src/protocols/dns/dns_resolver.c is UNCHANGED — only the raw provider + glue (from LC-1/LC-3a) supply the
  * transport. Prints "LC-3 PASS". Must be ASan+UBSan+LSan-clean.
  *
  * SPDX-License-Identifier: MIT

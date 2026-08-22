@@ -11,7 +11,7 @@
  * CONSUMER seam over it.)
  *
  * The HTTP run-loop orchestration that used to live here (the four former io-engine run-loop symbols)
- * moved to protocols/http/completion_http.h and was renamed kl_http_comp_* (R2f;
+ * moved to src/protocols/http/completion_http.h and was renamed kl_http_comp_* (R2f;
  * docs/protocols_restructure_freeze.md §4.8). Each neutral op below is defined per-backend, selected by
  * the Makefile (no #ifdef in shared code): a readiness build links the completion_readiness_stub.c stub
  * (never called — the server enters the completion branch only when the loop advertises

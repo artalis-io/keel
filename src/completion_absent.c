@@ -14,7 +14,7 @@
  * kl_comp_*_raw dispatchers + kl_completion_axis_available) and completion_core.c (kl_comp_run) —
  * selected by the Makefile (COMPLETION_CORE = src/completion_absent.c under KEEL_NO_COMPLETION). The
  * HTTP-typed completion surface (the KlHttpServer/KlHttpConn wrappers + the kl_http_comp_* run-loop
- * orchestration) is stubbed separately in protocols/http/completion_http_absent.c, mirroring the hosted
+ * orchestration) is stubbed separately in src/protocols/http/completion_http_absent.c, mirroring the hosted
  * split (substrate dispatch vs completion_http_server.c) so this substrate TU names NO HTTP type (R2f;
  * docs/protocols_restructure_freeze.md §4.8). No completion backend, driver, or dispatch is compiled in
  * this configuration; kl_comp_ops_builtin is not referenced (completion_dispatch.c is absent).

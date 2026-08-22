@@ -2,7 +2,7 @@
  * dgram_dns_selftest.c — 6.4c acceptance self-test (UEFI EFI application).
  *
  * The on-real-firmware validation for the EFI_UDP4 datagram provider (6.4b): the STOCK
- * protocols/dns/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
+ * src/protocols/dns/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
  * wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token) — with NO bespoke
  * dns_uefi.c on the path. (The retired U-5 build used the one-shot dns_uefi.c behind
@@ -148,7 +148,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
     /* Time the whole resolve→GET. On the TC leg the stock resolver fails PROMPTLY (no TCP
-     * fallback, no retransmit — protocols/dns/dns_resolver.c header §"TC-settles-clean"), so completion
+     * fallback, no retransmit — src/protocols/dns/dns_resolver.c header §"TC-settles-clean"), so completion
      * lands far below the per-leg timeout (dcfg.timeout_ms). If instead the TC responses were
      * dropped, both legs would only settle KL_ERR_DNS after the ≥6000 ms leg timeout. The
      * elapsed marker below therefore distinguishes response-driven settlement from a timeout. */

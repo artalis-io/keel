@@ -5,7 +5,7 @@
  * that shared HTTP TUs reference but that is never reached on a readiness loop (the completion
  * branches are gated behind KL_EVENT_CAP_COMPLETION). It mirrors the hosted split — where
  * completion_http_server.c defines these over the neutral kl_comp_*_raw seam — so that under
- * KEEL_NO_COMPLETION the HTTP-typed surface stays in protocols/http/ and the substrate stub
+ * KEEL_NO_COMPLETION the HTTP-typed surface stays in src/protocols/http/ and the substrate stub
  * (src/completion_absent.c) names NO HTTP type. Selected by the Makefile alongside completion_absent.c
  * (COMPLETION_CORE, KEEL_NO_COMPLETION). See docs/protocols_restructure_freeze.md §4.8.
  *

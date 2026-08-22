@@ -3,7 +3,7 @@
 
 /*
  * http_internal.h — HTTP-family internal seam: TLS-aware connection I/O over the
- * embedded KlStream + HTTP-server cross-TU forward decls. Owned by protocols/http/;
+ * embedded KlStream + HTTP-server cross-TU forward decls. Owned by src/protocols/http/;
  * the http2/websocket completion adapters include it for conn_read/conn_write
  * (permitted HTTP-family coordination seam). Substrate stream I/O lives in
  * src/stream_io.h (reached via -Isrc).

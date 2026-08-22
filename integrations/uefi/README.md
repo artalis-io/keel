@@ -28,7 +28,7 @@ vendored-llhttp `abort`/`fprintf`/`stderr` residual, the PE `__chkstk`) are **no
 U-1's job; the self-test defines fail-closed link stubs for them in
 `u1_link_stubs.c` purely so the image links (they never run — U-1 issues no
 request). U-2/U-3 replace the socket + event/completion seams with real EFI
-providers; DNS is now the async stock `protocols/dns/dns_resolver.c` running over the
+providers; DNS is now the async stock `src/protocols/dns/dns_resolver.c` running over the
 EFI_UDP4 socket provider (6.4c), not a sync seam.
 
 ## Files

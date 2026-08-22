@@ -8,7 +8,7 @@
  * recv/send/peek + io-status classification via the socket seam. Generic
  * transport primitives — no protocol knowledge. The TLS-aware connection I/O
  * (conn_read/conn_write on a KlHttpConn) is an HTTP adapter ABOVE these and
- * lives in protocols/http/http_internal.h.
+ * lives in src/protocols/http/http_internal.h.
  */
 
 #include <keel/stream.h>

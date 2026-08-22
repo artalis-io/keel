@@ -23,7 +23,7 @@
 /* ── HTTP/2 server drive + output-writer seam (moved from internal.h in R2a) ────
  * The HTTP/2-specific cross-TU decls the HTTP core / completion driver call: the
  * plaintext-feed entry and the per-connection output writer. HTTP coordinates HTTP/2
- * through this seam (protocols/http/ → protocols/http2/, per the frozen §147 rule). */
+ * through this seam (src/protocols/http/ → src/protocols/http2/, per the frozen §147 rule). */
 
 /* Drive the HTTP/2 server session with already-received plaintext: parse frames +
  * flush produced output. Returns the next KlHttpConnState. Defined in http2_server.c. */

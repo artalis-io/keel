@@ -2,7 +2,7 @@
 #define KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H
 
 /*
- * completion_http.h — the HTTP leg of the completion axis (R2f). Owned by protocols/http/.
+ * completion_http.h — the HTTP leg of the completion axis (R2f). Owned by src/protocols/http/.
  *
  * The substrate completion axis (src/completion.h) is protocol-neutral: its vtable +
  * `kl_comp_*_raw` entry points speak only KlEventCtx / KlStream / KlSocketHandle. This

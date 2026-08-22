@@ -57,10 +57,10 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
-  SERVER_PLAT_SRC = protocols/http/http_server_plat_win.c
+  SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
-  DNS_SYS_SRC = protocols/dns/dns_sys_win.c
+  DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
@@ -150,7 +150,7 @@ VENDOR_CFLAGS += -MMD -MP
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
-SERVER_PLAT_SRC ?= protocols/http/http_server_plat_posix.c
+SERVER_PLAT_SRC ?= src/protocols/http/http_server_plat_posix.c
 # The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
 # the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
@@ -161,7 +161,7 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # DNS config discovery (nameservers/hosts/search): POSIX resolv.conf/hosts; the
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
-DNS_SYS_SRC ?= protocols/dns/dns_sys_posix.c
+DNS_SYS_SRC ?= src/protocols/dns/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
 # (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
@@ -173,10 +173,10 @@ DNS_SYS_SRC ?= protocols/dns/dns_sys_posix.c
 # backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs — the neutral surface in
 # completion_absent.c + the HTTP surface in completion_http_absent.c (R2f) — the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
-  COMPLETION_CORE = src/completion_absent.c protocols/http/completion_http_absent.c
+  COMPLETION_CORE = src/completion_absent.c src/protocols/http/completion_http_absent.c
 else
-  COMPLETION_CORE = src/completion_core.c protocols/http/completion_http_server.c \
-                    protocols/http2/completion_http2.c protocols/websocket/completion_ws.c src/completion_dispatch.c
+  COMPLETION_CORE = src/completion_core.c src/protocols/http/completion_http_server.c \
+                    src/protocols/http2/completion_http2.c src/protocols/websocket/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
@@ -184,18 +184,18 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) protocols/http/http_response.c protocols/http/http_router.c \
-           protocols/http/http_connection.c protocols/http/http_server.c protocols/http/http_server_core.c protocols/http/http_server_activation.c protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c protocols/http/async.c src/timer.c \
-           protocols/http/http_body_reader_buffer.c \
-           protocols/http/http_body_reader_multipart.c protocols/http/http1_chunked.c protocols/http/http_cors.c \
-           protocols/websocket/websocket.c protocols/websocket/http_server_ws.c protocols/websocket/websocket_client.c \
-           protocols/http2/http2_server.c protocols/http2/http2_client.c src/thread_pool.c src/url.c \
-           protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
-           protocols/http/http_client_proxy.c \
-           protocols/http/http_client_pool.c protocols/http/http_redirect.c protocols/http/http_sse.c \
-           src/resolver_cache.c protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
-           protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
-           protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
+           src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
+           src/protocols/http/http_body_reader_buffer.c \
+           src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
+           src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c src/protocols/websocket/websocket_client.c \
+           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c src/url.c \
+           src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
+           src/protocols/http/http_client_proxy.c \
+           src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \
+           src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
+           src/protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
+           src/protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
@@ -205,7 +205,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
 # needed here.
 
 # Default parser backend (llhttp)
-LLHTTP_SRC = protocols/http/http1_parser_llhttp.c protocols/http/http1_response_parser_llhttp.c \
+LLHTTP_SRC = src/protocols/http/http1_parser_llhttp.c src/protocols/http/http1_response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
@@ -272,15 +272,15 @@ endif
 
 # $(EXTRA_INC) is an empty-by-default per-target include add-on. Protocol objects reach the substrate
 # internal seams (socket.h, stream_io.h, http2_internal.h, ...) via -Isrc and the HTTP-family
-# coordination seam (http_internal.h, http_proto_hooks.h, completion_internal.h) via -Iprotocols/http.
+# coordination seam (http_internal.h, http_proto_hooks.h, completion_internal.h) via -Isrc/protocols/http.
 # Substrate recipes get NEITHER (empty EXTRA_INC), keeping the boundary honest (check-substrate-purity).
 # EXTRA_INC (target-specific, never a command-line var) survives builds that OVERRIDE CFLAGS on the
 # sub-make command line (debug/asan/coverage) — unlike a target-specific `CFLAGS +=`, and portably
-# across GNU Make 3.81 (macOS) which does not prefer the more-specific `protocols/%.o` pattern.
+# across GNU Make 3.81 (macOS) which does not prefer the more-specific `src/protocols/%.o` pattern.
 %.o: %.c
 	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
 
-protocols/%.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
+src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 
 # The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
@@ -366,7 +366,7 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -407,11 +407,11 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
 tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 # Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
 # so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
 tests/protocols/%$(EXE): tests/protocols/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -811,7 +811,7 @@ clean:
 	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
-	rm -f src/completion_core.o protocols/http/completion_http_server.o protocols/http2/completion_http2.o protocols/websocket/completion_ws.o
+	rm -f src/completion_core.o src/protocols/http/completion_http_server.o src/protocols/http2/completion_http2.o src/protocols/websocket/completion_ws.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
 	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe
@@ -889,11 +889,11 @@ analyze:
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
-AXIS_PROTO_TUS = protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
-                 protocols/http/http_client_proxy.c \
-                 protocols/http2/http2_client.c protocols/websocket/websocket_client.c \
-                 protocols/http/http_connection.c protocols/http/http_server.c protocols/http2/http2_server.c protocols/websocket/websocket.c protocols/websocket/http_server_ws.c \
-                 protocols/http/http_sse.c protocols/http/http_response.c protocols/http/http_redirect.c protocols/http/http_client_pool.c \
+AXIS_PROTO_TUS = src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
+                 src/protocols/http/http_client_proxy.c \
+                 src/protocols/http2/http2_client.c src/protocols/websocket/websocket_client.c \
+                 src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http2/http2_server.c src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c \
+                 src/protocols/http/http_sse.c src/protocols/http/http_response.c src/protocols/http/http_redirect.c src/protocols/http/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
 	@bad=0; \
@@ -926,17 +926,17 @@ check-sockaddr-neutral:
 # they drive the loop / async connect via the Keel completion tick (completion_io.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard protocols/websocket/completion_*.c) $(wildcard protocols/dns/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard src/protocols/http/http_server_plat_*.c) $(wildcard src/protocols/http/completion_*.c) $(wildcard src/protocols/http2/completion_*.c) $(wildcard src/protocols/websocket/completion_*.c) $(wildcard src/protocols/dns/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
-              src/event_ctx.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/http_server.c protocols/http/http_client_async.c
+              src/event_ctx.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/http_server.c src/protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
 # and the socket-ADDRESS headers, plus the internal completion.h / completion_io.h / completion_http.h seams.
 TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|completion_io|completion_http)\.h"
 check-tier1-boundary:
 	@bad=0; \
-	for f in src/*.c protocols/*/*.c; do \
+	for f in src/*.c src/protocols/*/*.c; do \
 	  case " $(TIER1_INFRA) " in *" $$f "*) continue ;; esac; \
 	  if grep -nE '$(TIER1_FORBIDDEN_RE)' "$$f"; then \
 	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
@@ -948,7 +948,7 @@ check-tier1-boundary:
 	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \
 	done; \
-	echo "check-tier1-boundary: OK (default-deny: every src/ + protocols/ TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
+	echo "check-tier1-boundary: OK (default-deny: every src/ + src/protocols/ TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate
@@ -1115,13 +1115,13 @@ cppcheck:
 	  --suppress=toomanyconfigs --suppress=staticFunction \
 	  --suppress=normalCheckLevelMaxBranches \
 	  --suppress=unmatchedSuppression \
-	  --suppress=unusedStructMember:protocols/dns/dns_resolver.c \
-	  --suppress=knownConditionTrueFalse:protocols/dns/dns_resolver.c \
+	  --suppress=unusedStructMember:src/protocols/dns/dns_resolver.c \
+	  --suppress=knownConditionTrueFalse:src/protocols/dns/dns_resolver.c \
 	  --suppress=constParameterCallback:src/event_iocp.c \
 	  --suppress=constParameterCallback:src/event_iouring.c \
 	  --suppress=constParameterCallback:src/event_pollcomp.c \
 	  -UKEEL_PLATFORM_LWIP \
-	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Iprotocols/http -Iprotocols/http2 -Iprotocols/websocket src/ protocols/
+	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket src/
 
 # Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
 # the raw KlStream (&conn->stream) as udata, not a bare KlHttpConn. Pointer equality (stream is the
@@ -1130,7 +1130,7 @@ cppcheck:
 # completion accept path (completion_http_server.c) still registers KlHttpConn until 6B-3 and is excluded.
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
-	     protocols/http/http_server.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/completion_http_server.c \
+	     src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/completion_http_server.c \
 	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
@@ -1173,7 +1173,7 @@ FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
 %.fuzz.o: %.c
 	$(CC) $(FUZZ_INSTR_CFLAGS) $(EXTRA_INC) -c -o $@ $<
 # Protocol + interim-src fuzz objects need the same seam includes as their plain-object twins.
-protocols/%.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
+src/protocols/%.fuzz.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 
 $(FUZZ_LIB): $(FUZZ_LIB_OBJ)
 	$(AR) rcs $@ $^
@@ -1323,9 +1323,9 @@ FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
-    protocols/http/http_client_common.c protocols/http/http_client_async.c protocols/http/http_client_proxy.c protocols/http/http_client_pool.c src/decompress.c \
+    src/protocols/http/http_client_common.c src/protocols/http/http_client_async.c src/protocols/http/http_client_proxy.c src/protocols/http/http_client_pool.c src/decompress.c \
     src/connect_op.c \
-    protocols/http/http1_response_parser_llhttp.c \
+    src/protocols/http/http1_response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
@@ -1435,11 +1435,11 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c protocols/http/completion_http_server.c \
+    src/completion_dispatch.c src/completion_core.c src/protocols/http/completion_http_server.c \
     src/listener.c src/stream.c \
-    protocols/http/http_connection.c protocols/http/http_response.c protocols/http/http_router.c protocols/http/http1_chunked.c src/drain.c \
-    protocols/http/http_body_reader_buffer.c protocols/http/http_server_core.c protocols/http/http_proto_hooks.c \
-    protocols/http/http1_parser_llhttp.c \
+    src/protocols/http/http_connection.c src/protocols/http/http_response.c src/protocols/http/http_router.c src/protocols/http/http1_chunked.c src/drain.c \
+    src/protocols/http/http_body_reader_buffer.c src/protocols/http/http_server_core.c src/protocols/http/http_proto_hooks.c \
+    src/protocols/http/http1_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 freestanding-lib-server:
@@ -1542,7 +1542,7 @@ freestanding-dgram-link:
 	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
 
 # ── Freestanding DNS layer (6.4a-2) ───────────────────────────────────────────
-# The stock async resolver (protocols/dns/dns_resolver.c) freestanding-enabled: it rides the
+# The stock async resolver (src/protocols/dns/dns_resolver.c) freestanding-enabled: it rides the
 # datagram layer (KlUdp over a freestanding provider) for UDP-only Do53 against an
 # EXPLICIT cfg->nameserver. dns_resolver.c compiles its three hosted-only surfaces
 # out under KEEL_FREESTANDING — RFC 7766 TCP fallback, /etc/hosts, resolv.conf
@@ -1551,7 +1551,7 @@ freestanding-dgram-link:
 # errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
 # EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c was
 # retired against it separately (2026-08).
-FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) protocols/dns/dns_resolver.c
+FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/protocols/dns/dns_resolver.c
 
 freestanding-lib-dns:
 	@echo "== freestanding DNS archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
@@ -1656,7 +1656,7 @@ freestanding-lib-server-selfcontained:
 	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
 # Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
-# (udp + datagram_* + completion) + the STOCK protocols/dns/dns_resolver.c + in-archive mem*/
+# (udp + datagram_* + completion) + the STOCK src/protocols/dns/dns_resolver.c + in-archive mem*/
 # strlen (kl_cstr_builtin.c), for a bare EFI target with no libc/EDK2 BaseMemoryLib.
 # Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
 # the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links

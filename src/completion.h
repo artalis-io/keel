@@ -26,7 +26,7 @@
 
 /* This axis is protocol-NEUTRAL: it names KlEventCtx / KlStream / KlSocketHandle only — never an HTTP
  * type. The HTTP wrappers over the accept/sendfile/recv/send ops (KlHttpServer/KlHttpConn form) live in
- * protocols/http/completion_http.h; see docs/protocols_restructure_freeze.md §4.8. */
+ * src/protocols/http/completion_http.h; see docs/protocols_restructure_freeze.md §4.8. */
 
 /* Platform-independent completion op kinds. */
 typedef enum {
