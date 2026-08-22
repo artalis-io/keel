@@ -33,6 +33,8 @@ tests/protocols/http/test_read_flow_control.c
 tests/protocols/http/test_timeout.c
 tests/protocols/http/test_tls_integration.c
 tests/protocols/http/test_tls_vtable.c
+tests/protocols/http2/test_http2.c
+tests/protocols/http2/test_http2_client.c
 tests/protocols/http2/test_http2_client_hostname_fail.c
 tests/protocols/http2/test_http2_overflow.c
 tests/protocols/websocket/test_websocket_client_hostname_fail.c
@@ -78,8 +80,6 @@ tests/test_event_caps.c
 tests/test_event_ctx.c
 tests/test_event_provider.c
 tests/test_file_io.c
-tests/test_http2.c
-tests/test_http2_client.c
 tests/test_io_status.c
 tests/test_iocp_engine.c
 tests/test_kl_cstr.c

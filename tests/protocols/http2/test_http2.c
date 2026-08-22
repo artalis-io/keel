@@ -2,7 +2,7 @@
 #include <keel/keel.h>
 #include <keel/http2.h>
 #include <keel/http2_server.h>
-#include "../protocols/http2/http2_internal.h"
+#include "http2_internal.h"
 #include <keel/http_connection.h>
 #include <keel/http_router.h>
 #include <keel/http_body_reader.h>
