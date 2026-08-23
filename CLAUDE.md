@@ -26,8 +26,8 @@ make clean        # remove all build artifacts
 ## Project Structure
 
 - `include/keel/` — Public headers. Each module is a `.h` file. `keel.h` is the umbrella.
-- `src/` — Core source. Each module is a `.c` file.
-- `parsers/` — Pluggable parser backends (`http1_parser_llhttp.c`, `http1_response_parser_llhttp.c`).
+- `src/` — Generic substrate source (event/completion driver, sockets, datagram machine, allocator, timer, …). Each module is a `.c` file.
+- `src/protocols/<family>/` — Protocol implementations, one dir per family: `http/` (incl. the llhttp parser backends `http1_parser_llhttp.c`/`http1_response_parser_llhttp.c`), `http2/`, `websocket/`, `dns/`, `proxy_protocol/`. Their unit tests mirror at `tests/protocols/<family>/`. Substrate never includes a protocol header (gate G1).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
 - `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, unix_socket_server, compress_server, decompress_client).
@@ -42,7 +42,7 @@ make clean        # remove all build artifacts
 - **Socket axis** — `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlHttpServerConfig.sockets` / `KlHttpClientConfig.sockets`.
 - **Protocol axis** — `http_connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `sse.c`, the `KlTls` vtable, body readers, `http_response.c`. These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
 
-`integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged: `lwip/` (BSD sockets + a raw NO_SYS completion provider), `uefi/` (a freestanding EFI_TCP4/UDP4 provider — stock async `KlHttpClient` on bare firmware; see `docs/phase10_uefi_feasibility_design.md`), `mbedtls/` (TLS), `nghttp2/` (HTTP/2 session).
+`integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged, grouped by role under `integrations/<role>/<backend>/`: `platform/lwip/` (BSD sockets + a raw NO_SYS completion provider), `platform/uefi/` (a freestanding EFI_TCP4/UDP4 provider — stock async `KlHttpClient` on bare firmware; see `docs/phase10_uefi_feasibility_design.md`), `tls/{mbedtls,openssl,boringssl,libressl}/` (TLS), `http2/nghttp2/` (HTTP/2 session), `codec/miniz/` (compression). Each backend's own tests live in `integrations/<role>/<backend>/tests/`. An integration reaches core only through the public `include/keel/*.h` surface or the frozen substrate-seam allowlist — never a protocol header (gates G2/G3).
 
 Below the axes, orthogonal modules, each independently testable:
 

@@ -1105,6 +1105,61 @@ check-no-httplegacy:
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-no-httplegacy: OK (types/constants/functions/filenames -- no legacy HTTP name or deleted-module path in code or living docs)"
 
+# ── R4 boundary gates (frozen §6.2) — FINAL src/protocols/ + integrations/<role>/<backend>/ layout ──
+# Permanently enforce the three-axis ownership split. Default-deny, self-canaried, file:line, binary-
+# skip, BSD+GNU-portable. G1–G3 classify EVERY #include token (both <...> and "...") against
+# inventories DERIVED FROM THE TREE (tools/check_boundaries.sh), so neither an include-search-path
+# escape (<http_internal.h>) nor a newly named header can slip past a fixed regex. G4 is a committed
+# ownership manifest (src/substrate-tus.manifest) so a NEW bare-src .c fails until it is declared
+# substrate or moved under src/protocols/<fam>/ — the case dynamic derivation cannot decide.
+#   G1 check-substrate-purity        — src/*.{c,h} (substrate) may not include a protocol header
+#   G2 check-protocol-no-integration — src/protocols/**/*.{c,h} may not include an integration adapter header
+#   G3 check-integration-seam        — integrations reach src/ only via the frozen §6.3 seam allowlist; never a protocol header
+#   G4 check-protocol-home           — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/
+check-substrate-purity:
+	@sh tools/check_boundaries.sh G1
+
+check-protocol-no-integration:
+	@sh tools/check_boundaries.sh G2
+
+check-integration-seam:
+	@sh tools/check_boundaries.sh G3
+
+check-protocol-home:
+	@bad=0; \
+	git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort > /tmp/keel_g4_tracked; \
+	grep -vE '^[[:space:]]*(#|$$)' src/substrate-tus.manifest | LC_ALL=C sort > /tmp/keel_g4_manifest; \
+	if grep -qxF 'src/http_router.c' /tmp/keel_g4_manifest; then \
+	  echo "check-protocol-home: SELF-TEST FAILED — manifest unexpectedly declares a protocol .c (src/http_router.c) as substrate"; rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; exit 1; fi; \
+	unclassified=`grep -vxFf /tmp/keel_g4_manifest /tmp/keel_g4_tracked`; \
+	if [ -n "$$unclassified" ]; then echo "$$unclassified"; echo "check-protocol-home: FAILED (G4) — bare-src .c not declared in src/substrate-tus.manifest (unclassified addition — declare it substrate there OR move it under src/protocols/<fam>/)"; bad=1; fi; \
+	stale=`grep -vxFf /tmp/keel_g4_tracked /tmp/keel_g4_manifest`; \
+	if [ -n "$$stale" ]; then echo "$$stale"; echo "check-protocol-home: FAILED (G4) — src/substrate-tus.manifest lists a bare-src .c that no longer exists"; bad=1; fi; \
+	rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-protocol-home: OK (G4 — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/)"
+
+# G5 check-no-interim-paths (frozen §6.2) — the deleted layouts cannot reappear: the interim
+# top-level protocols/<fam>/ (R2g moved it under src/) and parsers/http1_*.c (now under
+# src/protocols/http/). Only the FINAL src/protocols/… source paths and the UNRELATED retained
+# tests/protocols/… test paths are allowed. Per-token (grep -o) so a src/protocols/ on the same
+# line cannot mask a bare interim reference. Sibling of check-no-httplegacy (which owns the
+# deleted-module-basename refs); this owns the deleted-DIRECTORY paths.
+R4_INTERIM_RE   = ([A-Za-z0-9_./]*)protocols/(http2|http|websocket|dns|proxy_protocol)/
+R4_INTERIM_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md docs/capability_matrix.md
+check-no-interim-paths:
+	@bad=0; \
+	if ! printf 'protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
+	  echo "check-no-interim-paths: SELF-TEST FAILED — a bare interim protocols/ path is not caught"; exit 1; fi; \
+	if printf 'src/protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
+	  echo "check-no-interim-paths: SELF-TEST FAILED — the final src/protocols/ path was flagged"; exit 1; fi; \
+	interim=`grep -rInoE '$(R4_INTERIM_RE)' $(R4_INTERIM_SCAN) 2>/dev/null | grep -vE '(src|tests)/protocols/[A-Za-z0-9_]+/$$'`; \
+	if [ -n "$$interim" ]; then echo "$$interim"; echo "check-no-interim-paths: FAILED (G5) — a reference to the interim top-level protocols/ layout reappeared (final layout is src/protocols/)"; bad=1; fi; \
+	parsers=`grep -rInE '\bparsers/http1' $(R4_INTERIM_SCAN) 2>/dev/null`; \
+	if [ -n "$$parsers" ]; then echo "$$parsers"; echo "check-no-interim-paths: FAILED (G5) — a reference to the deleted parsers/http1_*.c path reappeared (now src/protocols/http/)"; bad=1; fi; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-no-interim-paths: OK (G5 — no interim top-level protocols/ or deleted parsers/http1 path; final src/protocols/ layout enforced)"
+
 
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
@@ -1879,7 +1934,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-no-interim-paths freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

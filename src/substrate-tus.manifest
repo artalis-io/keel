@@ -1,0 +1,59 @@
+# src/substrate-tus.manifest — the exhaustive set of bare-src/ substrate .c files (G4).
+# Every tracked src/*.c that is NOT under src/protocols/ must be listed here. A new bare-src
+# .c fails check-protocol-home until it is declared substrate here OR moved under
+# src/protocols/<fam>/ — that is the default-deny that stops a protocol impl landing at bare src/.
+# Regenerate intentionally: git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort
+src/allocator.c
+src/allocator_default_stdlib.c
+src/completion_absent.c
+src/completion_core.c
+src/completion_dispatch.c
+src/completion_readiness_stub.c
+src/connect_op.c
+src/datagram.c
+src/datagram_batch.c
+src/datagram_close.c
+src/datagram_core.c
+src/datagram_life.c
+src/datagram_open.c
+src/datagram_recv.c
+src/datagram_send.c
+src/datagram_slots.c
+src/decompress.c
+src/drain.c
+src/error.c
+src/event_ctx.c
+src/event_dispatch.c
+src/event_epoll.c
+src/event_iocp.c
+src/event_iouring.c
+src/event_kqueue.c
+src/event_poll.c
+src/event_pollcomp.c
+src/event_pollcomp_builtin.c
+src/event_wsapoll.c
+src/file_io.c
+src/kl_cstr.c
+src/kl_cstr_builtin.c
+src/listener.c
+src/platform_posix.c
+src/platform_wakeup_posix.c
+src/platform_wakeup_win.c
+src/platform_win.c
+src/resolve_sync.c
+src/resolver_cache.c
+src/sockaddr.c
+src/socket_dgram_posix.c
+src/socket_dgram_win.c
+src/socket_posix.c
+src/socket_winsock.c
+src/stream.c
+src/stream_close.c
+src/stream_read.c
+src/stream_write.c
+src/thread_pool.c
+src/timer.c
+src/udp_cmsg.c
+src/udp_cmsg_win.c
+src/url.c
+src/version.c

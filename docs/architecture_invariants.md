@@ -212,6 +212,31 @@ seam only when a missing semantic is documented and reviewed.
 - **Enforced by:** `make check-tier1-boundary` (found zero defects); the protocol-independence
   inventory in [keel_axis_audit.md](keel_axis_audit.md) (Goal 4).
 
+### I11 — Files own their axis: substrate, protocols, and integrations do not cross
+
+The tree is three disjoint homes, and code only depends *inward*. Generic substrate lives directly
+under `src/`; protocol implementations under `src/protocols/<family>/` (http, http2, websocket, dns,
+proxy_protocol); optional providers/adapters under `integrations/<role>/<backend>/` (tls, http2,
+codec, platform). A substrate TU never includes a protocol header; a protocol TU never includes an
+integration adapter header; an integration reaches core only through the public `include/keel/*.h`
+surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers (`socket.h`,
+`platform.h`, `completion.h`, `completion_io.h`, `event_caps.h`, `event_builtin.h`,
+`sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
+`datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`) — never a protocol header. The deleted layouts
+(the interim top-level `protocols/…` tree, the old flat `parsers/` backend directory, and bare
+`src/<proto>.c` protocol modules) cannot return.
+
+- **Enforced by:** five default-deny, self-canaried gates ([Makefile](../Makefile)), all run in the
+  CI Static-Analysis job. **G1** `make check-substrate-purity`, **G2** `make check-protocol-no-integration`,
+  and **G3** `make check-integration-seam` classify *every* `#include` token — both `<...>` and
+  `"..."` — against inventories derived from the tree (`tools/check_boundaries.sh`), so neither an
+  include-search-path escape nor a newly named header slips past. **G4** `make check-protocol-home`
+  is a committed ownership manifest (`src/substrate-tus.manifest`): a new bare-`src/` `.c` fails until
+  it is declared substrate there or moved under `src/protocols/<fam>/` — the case dynamic derivation
+  cannot decide. **G5** `make check-no-interim-paths` rejects the deleted directory layouts. A new
+  integration→substrate seam is authorized by adding its exact header name to the G3 allowlist (in
+  `tools/check_boundaries.sh`) with a rationale, never a wildcard.
+
 ---
 
 ## Enforcement summary
@@ -228,6 +253,7 @@ seam only when a missing semantic is documented and reviewed.
 | I8 allocation-free hot path | fixed-slot design + sanitizer smokes |
 | I9 quarantine on uncertain retirement | EFI host-mock quarantine tests |
 | I10 protocols depend only through Tier-1 | `make check-tier1-boundary` |
+| I11 substrate/protocol/integration ownership | `make check-substrate-purity` / `-protocol-no-integration` / `-integration-seam` / `-protocol-home` / `-no-interim-paths` (G1–G5) |
 
 Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
 points at a file which no longer exists fails the gate.
