@@ -331,7 +331,7 @@ examples: $(EXAMPLES)
 # kl_socket_provider_iocp) — exclude by default, add back only for that backend.
 # Discovery is recursive over the protocol test dirs (one family level deep — no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
-# (docs/protocols_restructure_freeze.md §9).
+# (docs/archive/freezes/protocols_restructure_freeze.md §9).
 TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
@@ -655,7 +655,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # mock TLS was replaced by the shared completion-capable tests/mock_tls.h (feed_input/drain_output),
 # so comp_on_accept accepts the TLS conn and comp_tls_drive runs — the TLS-over-completion path the
 # smokes already cover, now at unit granularity too (peer_cert installs its canned cert via the
-# mock's mock_tls_peer_cert_fn hook). See docs/keel_axis_audit.md third pass.
+# mock's mock_tls_peer_cert_fn hook). See docs/archive/audits/keel_axis_audit.md third pass.
 #
 # Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3 + the axis-audit third pass):
 # raw kl_event_wait drivers (event, event_ctx — a completion loop has no readiness kl_event_wait,
@@ -894,7 +894,7 @@ analyze:
 # must speak KlSockAddr only — no platform struct sockaddr, no getaddrinfo/inet_*,
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
-# backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
+# backstop for docs/archive/designs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
                  src/protocols/http/http_client_proxy.c \
                  src/protocols/http2/http2_client.c src/protocols/websocket/websocket_client.c \
@@ -925,7 +925,7 @@ check-sockaddr-neutral:
 # http1_chunked.c / http_body_reader_*.c / http1_parser_llhttp.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
 # TIER1_INFRA below, with a reason. Include-based → robust vs the WSA*/overlapped mentions that appear
 # only in explanatory comments (http_connection.c / http_response.c / http_client_sync.c). Backstop for
-# docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
+# docs/architecture/invariants.md I10; mirrors axis-audit Goal 4.
 #
 # TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
 # for the transport machines + run-loop/async drivers). http_server.c / http_client_async.c live here because
@@ -961,8 +961,8 @@ check-tier1-boundary:
 # that has been renamed or deleted. Narrow by construction: only the two living docs are scanned,
 # only markdown links (`](target)`), and each target is resolved relative to the doc's directory
 # (so `../include/keel/stream.h`, `datagram_contract.md`, `audits/README.md` all check). External
-# (http/mailto) and pure `#anchor` links are skipped. Backstop for docs/architecture_invariants.md.
-DOC_REF_FILES = docs/architecture.md docs/architecture_invariants.md
+# (http/mailto) and pure `#anchor` links are skipped. Backstop for docs/architecture/invariants.md.
+DOC_REF_FILES = docs/architecture/overview.md docs/architecture/invariants.md
 check-doc-refs:
 	@bad=0; \
 	for doc in $(DOC_REF_FILES); do \
@@ -1059,9 +1059,10 @@ check-no-kludp:
 #      examples/sse.c and examples/h2_client.c (and the example-only h2_server.c) stay allowed.
 # SCAN SET = code (src include tests examples bench fuzz integrations) + the LIVING docs:
 # README/CLAUDE/AGENTS/CONTRIBUTING, examples' & integrations' READMEs (via their dirs), site/index.html,
-# and the docs/ that describe CURRENT public behavior/API -- the two living-architecture docs plus the
-# contracts/policies/matrices (alpn_policy, async_lifecycle, capability_matrix, comparison, compatibility,
-# roadmap, stream_contract, streaming_contract, transport_surface). OUTSIDE the scan set BY DESIGN (they
+# and the docs/ that describe CURRENT public behavior/API -- the living architecture docs
+# (architecture/overview, architecture/invariants, architecture/public_api) plus the contracts,
+# operations, and roadmap docs (contracts/{alpn_policy,async_lifecycle,compatibility,stream,streaming},
+# operations/capability_matrix, roadmap/roadmap). OUTSIDE the scan set BY DESIGN (they
 # record old names as history): genuine design/audit/phase records under docs/ (phase*/r3*/*_design/*audit,
 # datagram/pal/dns/udp designs), this freeze, the taxonomy prompts, generated docs/api/, untracked
 # site/build/, and the Makefile itself (it DEFINES the regexes+canaries below, so it would self-match --
@@ -1071,7 +1072,7 @@ check-no-kludp:
 HTTPLEGACY_TYPES_RE = \b(KlServerStats|KlServer|KlConfig|KlClientPoolConfig|KlClientPoolConn|KlClientPoolEntry|KlClientPool|KlClientConfig|KlClientResponse|KlClientHeader|KlClientDoneFn|KlClientBodyFn|KlClientHeadersFn|KlClientReadFn|KlClientStreamCfg|KlClientState|KlClientConnectAttempt|KlClient|KlProxyConfig|KlRequestParser|KlRequest|KlResponseParserFactory|KlResponseParser|KlResponse|KlBodyMode|KlWriteFn|KlConnState|KlConnPool|KlConn|KlHandler|KlMiddlewareEntry|KlMiddleware|KlRouter|KlRoute|KlParam|KlBodyReaderFactory|KlCorsConfig|KlBodyReader|KlBufReader|KlMultipartReader|KlMultipartPartMeta|KlMultipartPart|KlMultipartConfig|KlMultipartEvent|KlMultipartErrorCode|KlSse|KlCompressStream|KlRedirectClient|KlRedirectConfig|KlRedirectDoneFn|KlChunkedDecoder|KlChunkedState|KlParserFactory|KlParseResult|KlParser|KlH2ServerSessionFactory|KlH2ServerSession|KlH2ServerConfig|KlH2ServerConn|KlH2ServerCallbacks|KlH2ServerStream|KlH2ServerHooks|KlH2ClientSessionFactory|KlH2ClientSession|KlH2ClientConfig|KlH2ClientConn|KlH2ClientCallbacks|KlH2ClientStream|KlH2ClientResponseFn|KlH2ClientResponse|KlH2ClientHeader|KlH2ClientErrorFn|KlH2Client|KlH2WriteFn|KlH2CompHooks|KlAccessLogFn|KlLogFn|KlTransport)\b
 HTTPLEGACY_CONST_RE = KL_(CONN|BODY|CLIENT|H2|PARSE|CHUNK|MP|CORS|CPOOL|REDIRECT|TRANSPORT|LOG)_|\bKL_READ_BUF_SIZE\b|\bKL_PEER_(SOCKET|PROXY)\b|\bKL_MAX_PARAMS\b|\bKL_DEFAULT_(MAX_CONNS|READ_TIMEOUT|MAX_BODY_SIZE)\b
 HTTPLEGACY_FN_RE = kl_(server|client|request|response|conn|router|cors|body_reader|buf_reader|multipart|sse|redirect|cpool|parser|chunked|h2|comp_h2|compress_stream)_[A-Za-z0-9_]*|\bkl_log(_errno)?\b
-HTTPLEGACY_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
+HTTPLEGACY_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture/overview.md docs/architecture/invariants.md site/index.html docs/contracts/alpn_policy.md docs/contracts/async_lifecycle.md docs/operations/capability_matrix.md docs/contracts/compatibility.md docs/roadmap/roadmap.md docs/contracts/stream.md docs/contracts/streaming.md docs/architecture/public_api.md
 HTTPLEGACY_FILES_RE = \b(body_reader\.h|body_reader_buffer\.c|body_reader_multipart\.c|body_reader_multipart\.h|chunked\.c|client\.h|client_async\.c|client_common\.c|client_internal\.h|client_pool\.c|client_pool\.h|client_proxy\.c|client_proxy\.h|client_sync\.c|completion_h2\.c|completion_server\.c|conn_internal\.h|connection\.c|connection\.h|cors\.c|cors\.h|h2\.h|h2_client\.h|h2_internal\.h|h2_nghttp2_client\.c|h2_nghttp2_server\.c|h2_server\.h|keel_h2_nghttp2\.h|parser_llhttp\.c|proto_hooks\.c|proto_hooks\.h|redirect\.c|redirect\.h|request\.h|response\.c|response\.h|response_internal\.h|response_parser_llhttp\.c|router\.c|router\.h|server\.c|server\.h|server_activation\.c|server_core\.c|server_h2\.c|server_plat\.h|server_plat_posix\.c|server_plat_win\.c|server_ws\.c|sse\.h)\b|\bsrc/(client|h2_client|sse)\.c\b
 check-no-httplegacy:
 	@bad=0; \

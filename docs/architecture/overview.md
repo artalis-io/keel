@@ -3,9 +3,9 @@
 The current-state entry point to KEEL's design. Start with the three-axis model below; the rest of
 this document is the HTTP-server internals reference (state machines, memory model, zero-copy, TLS).
 The *rules* those internals must preserve are in
-[architecture_invariants.md](architecture_invariants.md); the dated verification history is in
-[audits/README.md](audits/README.md); the consolidation plan is
-[keel_improvement_roadmap.md](keel_improvement_roadmap.md).
+[architecture_invariants.md](invariants.md); the dated verification history is in
+[audits/README.md](../archive/audits/README.md); the consolidation plan is
+[keel_improvement_roadmap.md](../roadmap/roadmap.md).
 
 ## Architecture at a glance — Transport / Engine / Provider
 
@@ -29,25 +29,25 @@ three and touch no platform socket API or event engine directly.
 - **Transport axis** — the three **Tier-1 semantic primitives**, each a `STABLE` public API whose
   *function + ownership contract* is committed and whose struct layout is opt-in/unstable
   (`*_detail.h`):
-  - [`KlListener`](../include/keel/listener.h) — accept-path state machine (credit reservation,
-    lease handoff, confirmed-detachment close). Contract: [transport_surface.md](transport_surface.md).
-  - [`KlStream`](../include/keel/stream.h) — raw byte transport (bounded write queue, strict
-    read pause/resume, graceful/abortive close). Contract: [stream_contract.md](stream_contract.md).
-  - [`KlDatagram`](../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
-    message boundaries, source/local metadata). Contract: [datagram_contract.md](datagram_contract.md).
+  - [`KlListener`](../../include/keel/listener.h) — accept-path state machine (credit reservation,
+    lease handoff, confirmed-detachment close). Contract: [transport_surface.md](public_api.md).
+  - [`KlStream`](../../include/keel/stream.h) — raw byte transport (bounded write queue, strict
+    read pause/resume, graceful/abortive close). Contract: [stream_contract.md](../contracts/stream.md).
+  - [`KlDatagram`](../../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
+    message boundaries, source/local metadata). Contract: [datagram_contract.md](../contracts/datagram.md).
     `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast) —
     which API to use, and how their semantics intentionally differ (slot-budget vs byte-budget), is
-    [datagram_vs_udp.md](datagram_vs_udp.md).
-- **Engine axis** — readiness ([event.h](../include/keel/event.h): register interest → wait →
-  re-arm) and completion ([completion.h](../src/completion.h): submit owned op → track → retire) are
-  *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)). The **production**
+    [datagram_vs_udp.md](../archive/designs/datagram_vs_udp.md).
+- **Engine axis** — readiness ([event.h](../../include/keel/event.h): register interest → wait →
+  re-arm) and completion ([completion.h](../../src/completion.h): submit owned op → track → retire) are
+  *peer models*, negotiated by capability ([event_caps.h](../../src/event_caps.h)). The **production**
   backends preserve their native model (epoll/kqueue/WSAPoll/poll are readiness; io_uring/IOCP are
   completion) — neither is emulated in terms of the other. The sole deliberate exception is
   **pollcomp**, a portable *test double* that implements the completion contract over `poll()` so the
   completion driver can run under ASan on any POSIX host; it is a CI/testing backend, not a
-  production one. Details: [event_provider_design.md](event_provider_design.md).
-- **Provider axis** — the network stack behind [socket.h](../src/socket.h)
-  (`KlSocketProvider`): POSIX [socket_posix.c](../src/socket_posix.c), Winsock, and the
+  production one. Details: [event_provider_design.md](../archive/designs/event_provider_design.md).
+- **Provider axis** — the network stack behind [socket.h](../../src/socket.h)
+  (`KlSocketProvider`): POSIX [socket_posix.c](../../src/socket_posix.c), Winsock, and the
   `integrations/` adapters (lwIP, EFI). Providers are transport-mechanical — no protocol knowledge.
 
 **Dependency direction (one way).** New protocols depend *downward* only:
@@ -62,9 +62,9 @@ machines, and the run-loop/async-connect drivers `http_server.c` / `http_client_
 protocol TU is covered automatically, and only infrastructure may include a backend header.
 
 Every combination's runtime status is the compatibility matrix in
-[capability_matrix.md](capability_matrix.md) and the axis audit's matrix in
-[keel_axis_audit.md](keel_axis_audit.md). The invariants that keep the axes separate — and keep
-completion lifetimes safe — are enumerated in [architecture_invariants.md](architecture_invariants.md).
+[capability_matrix.md](../operations/capability_matrix.md) and the axis audit's matrix in
+[keel_axis_audit.md](../archive/audits/keel_axis_audit.md). The invariants that keep the axes separate — and keep
+completion lifetimes safe — are enumerated in [architecture_invariants.md](invariants.md).
 
 > The diagrams and sections below predate the three-axis vocabulary and describe the **HTTP server
 > data path** specifically (readiness/POSIX). They remain accurate for that path; read them as the

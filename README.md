@@ -227,7 +227,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 ## Features
 
 - **Two event axes, six backends** — **readiness** (epoll edge-triggered, kqueue edge-triggered, WSAPoll, poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
-- **Three orthogonal axes** — the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
+- **Three orthogonal axes** — the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/archive/audits/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
 - **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlHttpServerConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
@@ -266,11 +266,11 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Architecture
 
-Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others. For the full model — the Tier-1 semantic transports (`KlListener`/`KlStream`/`KlDatagram`), the engine/provider split, and the rules that keep them separate — see [`docs/architecture.md`](docs/architecture.md) and the enforceable [`docs/architecture_invariants.md`](docs/architecture_invariants.md).
+Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others. For the full model — the Tier-1 semantic transports (`KlListener`/`KlStream`/`KlDatagram`), the engine/provider split, and the rules that keep them separate — see [`docs/architecture/overview.md`](docs/architecture/overview.md) and the enforceable [`docs/architecture/invariants.md`](docs/architecture/invariants.md).
 
 - **Event axis** (`event.h` + `completion.h`) — how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
 - **Socket axis** (`socket.h` — the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`) — where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.
-- **Protocol axis** (`http_connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `http_response.c`) — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/keel_axis_audit.md` audits this separation mechanically.
+- **Protocol axis** (`http_connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `http_response.c`) — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/archive/audits/keel_axis_audit.md` audits this separation mechanically.
 
 Below the axes sit orthogonal, independently testable modules:
 
@@ -803,7 +803,7 @@ The io_uring backend is completion-native: it submits SQEs and reaps CQEs (zero-
 
 The poll backend is a universal POSIX fallback that works on any platform with `poll(2)`. It enables Cosmopolitan C support (Actually Portable Executables that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary). When `CC=cosmocc` is detected, the Makefile automatically selects the poll backend.
 
-For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — their BSD socket compatibility layers provide all the POSIX functions Keel uses (`accept`, `read`, `write`, `close`, `poll`, `getaddrinfo`). Compile with `-DKL_NO_SIGNAL` to disable POSIX signal handling, and exclude `thread_pool.c` from the build if no RTOS is available. See [docs/comparison.md](docs/comparison.md#bare-metal--mcu-support) for details. For environments with **no OS sockets at all** — a raw lwIP `NO_SYS` stack, or UEFI firmware before an OS exists — see [Frontier providers](#frontier-providers-bare-metal--firmware).
+For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — their BSD socket compatibility layers provide all the POSIX functions Keel uses (`accept`, `read`, `write`, `close`, `poll`, `getaddrinfo`). Compile with `-DKL_NO_SIGNAL` to disable POSIX signal handling, and exclude `thread_pool.c` from the build if no RTOS is available. For environments with **no OS sockets at all** — a raw lwIP `NO_SYS` stack, or UEFI firmware before an OS exists — see [Frontier providers](#frontier-providers-bare-metal--firmware).
 
 ## Frontier providers (bare-metal / firmware)
 
@@ -813,7 +813,7 @@ The socket + completion axes are abstract enough to host stacks that have **no O
 |----------|-----------|----------|
 | **lwIP BSD sockets** | Keel over lwIP's POSIX-compatible socket layer (`integrations/platform/lwip`, `event_lwip.c`) | Shipped, BYO |
 | **lwIP raw (`NO_SYS`)** | Keel over lwIP's raw callback API — a completion provider (`event_lwip_raw.c`) that runs the whole HTTP stack with **no OS sockets, no threads**. Serves HTTP over loopback, ASan/UBSan/LSan-clean, CI-gated | Shipped, BYO |
-| **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/platform/uefi`) that runs a stock async `KlHttpClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/phase10_uefi_server_design.md`) |
+| **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/platform/uefi`) that runs a stock async `KlHttpClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/archive/phases/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/archive/phases/phase10_uefi_server_design.md`) |
 
 The through-line: `KlHttpClient` is genuinely model-blind — the **same** client code runs unchanged over io_uring, IOCP, the pollcomp double, lwIP raw, and EFI tokens (including TLS via the socket-BIO seam and DNS via the built-in resolver). Adding a provider is a socket-axis + completion-axis exercise; the protocol code does not change. This validates the axis separation the way nothing else can — by hosting the stack somewhere with no operating system underneath it.
 
@@ -914,7 +914,7 @@ The general principle: if it requires policy decisions that vary between applica
 
 ## Comparison with Alternatives
 
-Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparison.md) for full details with API examples.
+Three embedded C HTTP libraries compared.
 
 | | Keel | [Mongoose](https://github.com/cesanta/mongoose) | [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) |
 |---|------|----------|---------------|

@@ -8,7 +8,7 @@ as a starting point if you want to deploy Keel on an lwIP target.
 **lwIP is a platform Keel runs on top of (like POSIX or Windows/Winsock), not a
 bring-your-own library.** As with those platforms, Keel does not vendor the stack:
 lwIP comes from your target's SDK/firmware (or a checkout). Nothing here is built
-by the default Keel build or CI. See `docs/lwip_platform_design.md` for the design.
+by the default Keel build or CI. See `docs/archive/designs/lwip_platform_design.md` for the design.
 
 ## What's here
 
@@ -46,7 +46,7 @@ target's port). Server/client code is then identical to any other platform —
 select the provider via `KlHttpServerConfig.sockets = kl_socket_provider_lwip()`. That build
 integration is the platform-port **promotion path** (a `PLATFORM=lwip` Makefile
 branch), deliberately out of scope for this opt-in reference — see
-`docs/lwip_platform_design.md` §7.
+`docs/archive/designs/lwip_platform_design.md` §7.
 
 ## Notes / limitations
 

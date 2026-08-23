@@ -43,7 +43,7 @@ build. It is a pure drop-in like the mbedTLS/nghttp2 vtable integrations.
 An earlier pass found a real boundary: `struct sockaddr`'s layout is compile-time
 (lwIP has `sin_len`, Linux doesn't), so a host-built libkeel filled a host-layout
 `sockaddr` that `lwip_bind` misread (`bind: EIO`), and `getaddrinfo` was baked in.
-The **KlSockAddr address-ABI neutralization** (`docs/keel_sockaddr_design.md`)
+The **KlSockAddr address-ABI neutralization** (`docs/archive/designs/keel_sockaddr_design.md`)
 dissolved it:
 
 - Core speaks the Keel-owned, fixed-layout **`KlSockAddr`** everywhere; a platform
@@ -130,9 +130,9 @@ Two lwIP integrations ship:
    model-blind completion axis. The raw backend now also does the full **client** axis (plaintext
    + Happy-Eyeballs + DNS + HTTPS) and **UDP** — **IPv4-only** — see the capability matrix below.
 
-See `docs/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5),
-`docs/phase10_lwip_raw_client_design.md` for the client axis (LC-0..LC-5), and
-`docs/lwip_platform_design.md` for the platform-port shape.
+See `docs/archive/phases/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5),
+`docs/archive/phases/phase10_lwip_raw_client_design.md` for the client axis (LC-0..LC-5), and
+`docs/archive/designs/lwip_platform_design.md` for the platform-port shape.
 
 ## Raw completion backend — capabilities, limits, and memory
 
