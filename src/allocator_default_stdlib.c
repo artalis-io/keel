@@ -1,7 +1,7 @@
 /*
  * allocator_default_stdlib.c — the default KlAllocator backed by the C stdlib.
  *
- * Split out from allocator.c (the dispatch TU) so a bring-your-own-allocator or
+ * Kept in its own TU so a bring-your-own-allocator or
  * freestanding/UEFI build can exclude the hosted heap entirely. A freestanding
  * profile supplies its own default (e.g. AllocatePool over UEFI boot services)
  * or requires the caller to pass an explicit KlAllocator.

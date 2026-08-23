@@ -44,7 +44,7 @@ void kl_plat_random(void *buf, size_t len) {
 #endif
 }
 
-/* kl_plat_wakeup_* moved to platform_wakeup_posix.c — an overridable seam so a
+/* kl_plat_wakeup_* live in platform_wakeup_posix.c — an overridable seam so a
  * foreign stack (lwIP) can swap the wakeup channel without touching this TU. */
 
 int kl_plat_cpu_count(void)

@@ -493,7 +493,7 @@ static int iou_open_pipe(KlIouOp *op) {
     return 0;
 }
 
-/* Phase 1: splice file_fd (at file_off) → pipe_wr, up to one pipe-capacity chunk. flags=0
+/* Splice-in: file_fd (at file_off) → pipe_wr, up to one pipe-capacity chunk. flags=0
  * so io_uring waits asynchronously if the pipe is momentarily full (no busy error). */
 static void iou_prep_splice_in(KlIouState *st, KlIouOp *op) {
     uint64_t chunk = op->file_count - op->file_off;
@@ -506,7 +506,7 @@ static void iou_prep_splice_in(KlIouState *st, KlIouOp *op) {
     op->sf_stage = 1;
 }
 
-/* Phase 2: splice pipe_rd → socket, up to the bytes currently buffered in the pipe.
+/* Splice-out: pipe_rd → socket, up to the bytes currently buffered in the pipe.
  * flags=0 so io_uring waits for socket writability instead of returning EAGAIN. */
 static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
     struct io_uring_sqe *sqe = iou_sqe(st);

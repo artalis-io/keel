@@ -37,7 +37,7 @@ void kl_plat_random(void *buf, size_t len) {
         p[i] = (unsigned char)((uintptr_t)&p[i] ^ (i * 131u));
 }
 
-/* kl_plat_wakeup_* moved to platform_wakeup_win.c — an overridable seam mirroring
+/* kl_plat_wakeup_* live in platform_wakeup_win.c — an overridable seam mirroring
  * platform_wakeup_posix.c. */
 
 int kl_plat_cpu_count(void)
