@@ -1325,10 +1325,17 @@ freestanding-headers:
 # out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
 # deliberately NOT in the manifest — a freestanding build supplies its own
 # provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
+# datagram_life.c is a hard LINK dependency of completion_core.c: the generic
+# completion loop's datagram-completion release site (7B-2a) calls
+# kl_dgram_life_dispatch/target/release. That branch is dead on the client (no
+# KL_COMP_DGRAM_* events ever arrive), but the symbols must resolve — and
+# datagram_life.c is a transport-neutral refcount token (alloc-only, no UDP/DNS
+# I/O, no syscall), so it is completion infrastructure, not the UDP/DNS surface
+# the gate forbids. Every archive carrying completion_core.c must carry it.
 FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c \
+    src/completion_dispatch.c src/completion_core.c src/datagram_life.c \
     src/protocols/http/http_client_common.c src/protocols/http/http_client_async.c src/protocols/http/http_client_proxy.c src/protocols/http/http_client_pool.c src/decompress.c \
     src/connect_op.c \
     src/protocols/http/http1_response_parser_llhttp.c \
