@@ -16,7 +16,7 @@
  * proxy_protocol, udp, the protocol clients, the completion backends' delivered
  * results — speaks `KlSockAddr`. That makes the socket/address ABI runtime-
  * injectable: a stock libkeel + a foreign socket provider (lwIP, …) is enough,
- * with no library recompile. See docs/keel_sockaddr_design.md.
+ * with no library recompile. See docs/archive/designs/keel_sockaddr_design.md.
  *
  * Layout is fixed and identical on every platform. It is ~120 bytes — smaller
  * than the `struct sockaddr_storage` (128 B) it replaces in KlResolveResult.

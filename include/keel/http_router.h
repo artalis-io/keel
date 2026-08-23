@@ -233,9 +233,9 @@ int  kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlH
  * middleware is disabled, no handler is invoked and the caller should
  * read the return value to know what happened.
  *
- * This is the in-process counterpart to the network-driven dispatch in
- * `http_connection.c` / `h2.c`. Hull's test harness uses it; user code can
- * use it for synthetic requests (e.g. agent-API self-calls).
+ * This is the in-process counterpart to the network-driven dispatch in the HTTP/1.1 and HTTP/2
+ * connection handlers (`src/protocols/http/http_connection.c`, `src/protocols/http2/`). Hull's test
+ * harness uses it; user code can use it for synthetic requests (e.g. agent-API self-calls).
  *
  * @param r              Router instance.
  * @param req            Pre-built request (must outlive the call).

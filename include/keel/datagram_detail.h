@@ -2,15 +2,15 @@
 #define KEEL_DATAGRAM_DETAIL_H
 
 /*
- * datagram_detail.h — the OPT-IN, UNSTABLE layout of KlDatagram (Phase B, step 7B-3).
+ * datagram_detail.h — the OPT-IN, UNSTABLE layout of KlDatagram.
  *
  * Include this ONLY to stack-/embed-allocate a KlDatagram by value; you then opt into the layout and
  * MUST recompile when it changes (it is NOT ABI-stable — see the <keel/datagram.h> banner). A consumer
  * that only holds a `KlDatagram *` created behind the API never needs this header.
  *
  * The heavy machine state (KlDgramCore + its slots/send/recv/close/life machines) is heap-allocated
- * behind an OPAQUE `core` pointer (7B-0 review High-1: the full KlDgramCore type is src-only and cannot
- * be installed), so this layout stays tiny: the borrowed handles + facade-only state.
+ * behind an OPAQUE `core` pointer (the full KlDgramCore type is src-only and cannot be installed by
+ * an embedder), so this layout stays tiny: the borrowed handles + facade-only state.
  */
 
 #include <keel/handle.h>     /* KlSocketHandle */
@@ -33,7 +33,7 @@ struct KlDatagram {
     KlSocketHandle          fd;        /* adopted on init success; closed by the close machine (not free) */
     KlDatagramRecvFn        on_recv;   /* facade-only: the user recv callback (deliver adapter forwards) */
     void                   *recv_ud;
-    /* M5.3 batch/GRO receive (facade-only). `on_recv_segments` (+ its ud), when set, receives a
+    /* batch/GRO receive (facade-only). `on_recv_segments` (+ its ud), when set, receives a
      * whole GRO-coalesced buffer instead of the default per-segment split; `recv_seg_size` is the
      * yield adapter's scratch (the coalesced segment size for the current whole-buffer delivery, 0 for
      * a plain/split datagram) — read by the deliver adapter to route on_recv vs on_recv_segments. */
@@ -44,12 +44,12 @@ struct KlDatagram {
     KlDatagramCloseFn       on_close_cb;/* facade-only: user terminal callback (dg_on_close forwards) */
     void                   *close_ud;
     KlError                 last_error;
-    unsigned                provider_caps; /* M2: KL_DGRAM_CAP_* the provider supports on `fd` (kl_datagram_provider_caps) */
+    unsigned                provider_caps; /* KL_DGRAM_CAP_* the provider supports on `fd` (kl_datagram_provider_caps) */
     uint64_t                truncated; /* count of delivered captured-prefix (KL_DGRAM_TRUNCATED) datagrams */
     uint64_t                dropped;   /* RESERVED: 0 until the recv machine surfaces overflow/contract drops */
     int                     completion;/* 1 = completion mode / 0 = readiness mode */
     int                     registered;/* completion: the fd is registered with the loop (kl_event_add) —
-                                        * the generic fd↔loop association step (7B-7): inert on
+                                        * the generic fd↔loop association step: inert on
                                         * io_uring/pollcomp, CreateIoCompletionPort on IOCP */
     int                     read_armed;/* readiness: a watcher is installed on `fd` */
     unsigned                want_mask; /* readiness: desired KlEventMask (READ | WRITE) */

@@ -59,7 +59,7 @@ typedef enum {
     KL_ERR_PROXY,           /**< Proxy CONNECT rejected or protocol error */
 
     /* Capability */
-    KL_ERR_UNSUPPORTED,     /**< A requested capability is not supported by the provider (M2) */
+    KL_ERR_UNSUPPORTED,     /**< A requested capability is not supported by the provider */
 
     KL_ERR__COUNT           /**< Sentinel — not an error code */
 } KlError;

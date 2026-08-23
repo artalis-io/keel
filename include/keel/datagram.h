@@ -2,28 +2,28 @@
 #define KEEL_DATAGRAM_H
 
 /*
- * datagram.h — the public fixed-slot KlDatagram API (Phase B, step 7B-3).
+ * datagram.h — the public fixed-slot KlDatagram API.
  *
  * KlDatagram is THE datagram primitive: a caller-owned, single-threaded, event-loop-driven handle over
- * a prepared UDP fd. It is a thin facade over the internal KlDgramCore assembly (7A) and is the single
+ * a prepared UDP fd. It is a thin facade over the internal KlDgramCore assembly and is the single
  * canonical message transport for portable protocols (batching/GSO/GRO/multicast/source-pin/per-packet
- * TOS all ride this surface). The earlier byte-budget UDP object was consolidated into it and removed.
+ * TOS all ride this surface).
  *
  * This header is also the single home for the public datagram data TYPES (KlDatagramMessage,
  * KlDatagramSendStatus, KlDatagramCloseResult, KlDgramCloseState, KL_DGRAM_CAP_*, KL_DGRAM_HAS_LOCAL/
  * TRUNCATED); the internal machine headers (src/datagram_*.h) include this header for them.
  *
- * STABILITY (STABLE as of 7B-10). The kl_datagram_* FUNCTION + TYPE CONTRACT is STABLE — validated LIVE
- * across every supported event backend: the completion loops pollcomp (7B-4), io_uring (7B-5), Windows
- * IOCP (7B-7), raw lwIP-raw (7B-8), and firmware EFI_UDP4 (7B-9), plus the readiness loops POSIX
- * epoll/kqueue/poll (7B-6) and Windows WSAPoll — each §10-validated (docs/datagram_contract.md). The
+ * STABILITY. The kl_datagram_* FUNCTION + TYPE CONTRACT is STABLE — validated LIVE across every
+ * supported event backend: the completion loops pollcomp, io_uring, Windows IOCP, raw lwIP-raw, and
+ * firmware EFI_UDP4, plus the readiness loops POSIX epoll/kqueue/poll and Windows WSAPoll — each
+ * validated in docs/contracts/datagram.md §10. The
  * struct LAYOUT is NOT ABI-stable: a consumer that stack-/embed-allocates a KlDatagram opts into the
  * layout by including <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only
  * holds a `KlDatagram *` (created behind the API) is insulated from layout.
  *
- * M1 extends the STABLE surface ADDITIVELY: kl_datagram_init_ex is a new function selecting the BOTH
- * (count+byte) send-queue policy; kl_datagram_init and the KlDatagramConfig layout are UNCHANGED (the
- * budget is a parameter, not a struct field), so the extension never modifies the existing contract.
+ * kl_datagram_init_ex additively extends the STABLE surface: it selects the BOTH (count+byte)
+ * send-queue policy; kl_datagram_init and the KlDatagramConfig layout are UNCHANGED (the budget is a
+ * parameter, not a struct field), so the extension never modifies the existing contract.
  *
  * The provider data-plane vtable (KlDatagramOps + KlDgramRx/TxDesc descriptors + KL_DGRAM_RX_ flags)
  * lives on the socket axis in <keel/socket_dgram.h>, re-exported here so `#include <keel/datagram.h>`
@@ -56,16 +56,17 @@ typedef struct KlDatagram KlDatagram;
 #define KL_DGRAM_CAP_SOURCE_PIN  (1u << 0)   /* msg.local source-pin on send */
 #define KL_DGRAM_CAP_TOS         (1u << 1)   /* per-packet TOS/ECN on send */
 #define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
-#define KL_DGRAM_CAP_MULTICAST   (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) — M2 */
-#define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlDatagramSocketConfig — M2 */
-/* Provider SUPPORT for the M5 high-throughput extension (kl_datagram_provider_caps). Directional, and
- * advisory for GSO/GRO: RX_BATCH/TX_BATCH = the provider has recvmmsg/sendmmsg; GSO = the send_gso op
- * exists (first-use may still fail → extension latch); GRO = the provider CAN capture UDP_GRO (per-socket
- * activation ALSO needs KlDatagramConfig.accepted_rx_caps & KL_DGRAM_RX_GRO). See docs/datagram_m5_*. */
-#define KL_DGRAM_CAP_RX_BATCH    (1u << 5)   /* recvmmsg batching — M5 */
-#define KL_DGRAM_CAP_TX_BATCH    (1u << 6)   /* sendmmsg batching — M5 */
-#define KL_DGRAM_CAP_GSO         (1u << 7)   /* UDP GSO segmentation offload (advisory) — M5 */
-#define KL_DGRAM_CAP_GRO         (1u << 8)   /* UDP GRO receive coalescing (provider support) — M5 */
+#define KL_DGRAM_CAP_MULTICAST   (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) */
+#define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlDatagramSocketConfig */
+/* Provider SUPPORT for the optional high-throughput batch extension (kl_datagram_provider_caps).
+ * Directional, and advisory for GSO/GRO: RX_BATCH/TX_BATCH = the provider has recvmmsg/sendmmsg;
+ * GSO = the send_gso op exists (first-use may still fail → extension latch); GRO = the provider CAN
+ * capture UDP_GRO (per-socket activation ALSO needs KlDatagramConfig.accepted_rx_caps &
+ * KL_DGRAM_RX_GRO). See <keel/datagram_batch.h>. */
+#define KL_DGRAM_CAP_RX_BATCH    (1u << 5)   /* recvmmsg batching */
+#define KL_DGRAM_CAP_TX_BATCH    (1u << 6)   /* sendmmsg batching */
+#define KL_DGRAM_CAP_GSO         (1u << 7)   /* UDP GSO segmentation offload (advisory) */
+#define KL_DGRAM_CAP_GRO         (1u << 8)   /* UDP GRO receive coalescing (provider support) */
 
 /* ── TOS / DSCP / ECN helpers (datagram-neutral; compose KlDatagramMessage.tos + kl_datagram_set_tos) ──
  * DSCP class selectors + Expedited Forwarding (RFC 2474 / 4594). Shift into the TOS / Traffic-Class byte
@@ -147,13 +148,13 @@ typedef struct {
     size_t                   recv_cap;      /* inbound slot payload capacity */
     unsigned                 want_caps;     /* KL_DGRAM_CAP_* the consumer REQUIRES (fail-loud: init -1
                                              * with KL_ERR_UNSUPPORTED if the provider lacks any) */
-    /* M6.0a: KL_DGRAM_CAP_* the consumer would LIKE but does not require — granted opportunistically
+    /* KL_DGRAM_CAP_* the consumer would LIKE but does not require — granted opportunistically
      * where the provider supports them, silently dropped otherwise (never an init failure). The granted
      * cap set (kl_datagram_caps) is `want_caps | (optional_caps & provider_caps)`. Lets a consumer
      * request every capability its use may need without regressing reduced/freestanding providers that
      * only support unconnected send_to. 0 = request nothing beyond want_caps. */
     unsigned                 optional_caps;
-    /* M5: the KL_DGRAM_RX_* capture mask the socket actually has ENABLED (from the M0 prep's
+    /* the KL_DGRAM_RX_* capture mask the socket actually has ENABLED (from the prep's
      * KlDatagramPrep.rx_caps) — enabled-per-socket state, SEPARATE from provider support. init masks it
      * to known KL_DGRAM_RX_* bits and stores it; GRO activates only when the provider supports GRO AND
      * this has KL_DGRAM_RX_GRO. 0 = the caller knows of no enabled capture (graceful). */
@@ -221,7 +222,7 @@ typedef struct KlDatagramSocketConfig {   /* named tag: the datagram provider se
     size_t       recv_cap;          /* inbound slot payload BYTES; 0 = 2048 (capped 65535) */
 
     /* ── capabilities ── */
-    unsigned     want_caps;         /* required SEND-side caps (fail-loud, M2 exact-fd) */
+    unsigned     want_caps;         /* required SEND-side caps (fail-loud, exact-fd) */
     unsigned     optional_caps;     /* grant-if-supported; the initializer ALWAYS adds CAP_CONNECTED */
     unsigned     want_rx_caps;      /* required RX-CAPTURE mask (KL_DGRAM_RX_PKTINFO / RX_TOS): init FAILS
                                      * (fd closed once) if the socket did not ACCEPT every bit — the
@@ -276,18 +277,18 @@ void kl_datagram_on_drain(KlDatagram *dg, KlDatagramDrainFn cb, void *ud);
 void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud);
 
 unsigned              kl_datagram_caps(const KlDatagram *dg);          /* granted caps (== want_caps) */
-unsigned              kl_datagram_provider_caps(const KlDatagram *dg); /* caps the provider supports on the fd — M2 */
+unsigned              kl_datagram_provider_caps(const KlDatagram *dg); /* caps the provider supports on the fd */
 
-/* Runtime multicast join/leave (extended-UDP layer, M2). Gated on KL_DGRAM_CAP_MULTICAST. Returns 0, or
+/* Runtime multicast join/leave (extended-UDP layer). Gated on KL_DGRAM_CAP_MULTICAST. Returns 0, or
  * -1 with kl_datagram_last_error(): KL_ERR_UNSUPPORTED (provider lacks multicast), KL_ERR_INVALID_ARG
  * (malformed group literal), KL_ERR_IO (provider/syscall failure — incl. group/socket family mismatch).
  * The address family is derived from the group literal (dotted-quad → IPv4, colon → IPv6). */
 int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned iface_index);
 int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
 
-/* M6.0a: set the socket-DEFAULT outgoing TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS) applied to every
- * send that carries no per-message tos. Compose with KL_TOS() (keel/udp.h). Gated on the per-fd TOS
- * capability (KL_DGRAM_CAP_TOS, M2 exact-fd contract). Returns 0, or -1 with kl_datagram_last_error():
+/* set the socket-DEFAULT outgoing TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS) applied to every
+ * send that carries no per-message tos. Compose with KL_TOS() (keel/datagram.h). Gated on the per-fd
+ * TOS capability (KL_DGRAM_CAP_TOS, exact-fd contract). Returns 0, or -1 with kl_datagram_last_error():
  *   - KL_ERR_INVALID_ARG — bad handle / tos ∉ [0,255] / the fd's local family is not IPv4 or IPv6
  *     (undeterminable family: the call refuses rather than guess a socket-option level);
  *   - KL_ERR_UNSUPPORTED — TOS is unavailable on this fd: EITHER the provider exposes no set_tos op OR
@@ -296,7 +297,7 @@ int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned ifac
  * Distinct from the per-message KlDatagramMessage.tos (which overrides this default on a single send). */
 int kl_datagram_set_tos(KlDatagram *dg, int tos);
 
-/* M6.0a: the received TOS/Traffic-Class byte of the datagram currently being delivered, or -1 if
+/* the received TOS/Traffic-Class byte of the datagram currently being delivered, or -1 if
  * unavailable (RX_TOS capture not enabled on the socket, or none present). Only meaningful while inside
  * the KlDatagramRecvFn / on_recv_segments callback. Requires the socket to have been prepared with TOS
  * capture (KlDatagramSocketConfig.recv_tos) and that bit carried in KlDatagramConfig.accepted_rx_caps. */
@@ -304,7 +305,7 @@ int kl_datagram_recv_tos(const KlDatagram *dg);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */
 size_t   kl_datagram_send_queued(const KlDatagram *dg);         /* occupied send slots (count) */
-size_t   kl_datagram_send_queued_bytes(const KlDatagram *dg);  /* Σ queued+in-flight payload bytes — M6.0a */
+size_t   kl_datagram_send_queued_bytes(const KlDatagram *dg);  /* Σ queued+in-flight payload bytes */
 size_t   kl_datagram_send_inflight(const KlDatagram *dg);
 uint64_t kl_datagram_dropped(const KlDatagram *dg);
 uint64_t kl_datagram_truncated(const KlDatagram *dg);

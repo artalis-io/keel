@@ -2,7 +2,7 @@
 #define KEEL_SOCKET_H
 
 /*
- * keel/socket.h — public socket-provider authoring API (PAL Phase 4).
+ * keel/socket.h — public socket-provider authoring API.
  *
  * A KlSocketProvider is an immutable ops table + context + capability flags that
  * a Keel server/client carries so a non-POSIX stack (Winsock, lwIP) — or a
@@ -64,7 +64,7 @@ typedef enum {
     KL_IO_RESET,         /* ECONNRESET — peer reset */
     KL_IO_FATAL,         /* any other error */
     KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP — op unavailable on this fd (e.g. UDP GSO); caller may
-                          * fall back. Appended (datagram M5.1) — values above are unchanged. */
+                          * fall back. (KlIoStatus is append-only: existing values are stable.) */
 } KlIoStatus;
 
 /* Upper bound on scatter-gather segments a provider must handle in one writev.
@@ -130,8 +130,8 @@ typedef struct KlSocketOps {
      * mapping (kl_sockdef_io_status). A provider that already translates its
      * native errors into `errno` (the built-in POSIX/Winsock providers, and
      * lwIP which maps ERR_MEM→EAGAIN) needs no io_status op; a freestanding
-     * provider with no hosted errno MUST supply it. Appended to the ops table
-     * (additive ABI): older ops tables leave it zero-initialized (NULL). */
+     * provider with no hosted errno MUST supply it. (The KlSocketOps table is
+     * append-only: a zero-initialized/NULL slot means the op is not supplied.) */
     KlIoStatus (*io_status)(void *ctx);
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);

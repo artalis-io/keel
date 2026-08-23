@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /**
- * handle.h — portable socket handle (PAL Phase 5).
+ * handle.h — portable socket handle.
  *
  * A socket handle is `int` on POSIX, but a Winsock `SOCKET` is pointer-width
  * (`UINT_PTR`), and future providers hand out pointers (lwIP raw `tcp_pcb *`,
@@ -20,10 +20,7 @@
  *
  * NOTE: because a Winsock `SOCKET` is UNSIGNED, the POSIX idiom `if (fd < 0)`
  * is unreliable on Windows — always test validity with `kl_handle_valid()` (or
- * `== KL_INVALID_SOCKET`), never `< 0`. The codebase-wide migration of existing
- * `fd < 0` checks + the retyping of the socket-facing API lands with the Winsock
- * provider (Phase 6a), where a native build validates it; this header defines
- * the type up front.
+ * `== KL_INVALID_SOCKET`), never `< 0`.
  */
 typedef intptr_t KlSocketHandle;
 

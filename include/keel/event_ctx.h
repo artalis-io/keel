@@ -62,22 +62,18 @@ typedef struct KlEventCtx {
     /* Internal completion-dispatch hook (opaque; set by the server when its features are used,
      * NULL otherwise). kl_comp_run routes the non-generic connection completion kinds through it
      * so a client-only build links neither the server nor the datagram stack. The event arg is a
-     * const KlCompletionEvent* (opaque here, exactly as KlEventOps.completion). Additive — appended
-     * after `sockets`, do not reorder. */
+     * const KlCompletionEvent* (opaque here, exactly as KlEventOps.completion). */
     void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
-    /* R3b-W (watcher pointer-reuse ABA remedy). `dispatch_depth` counts nested
+    /* Watcher pointer-reuse ABA remedy. `dispatch_depth` counts nested
      * kl_event_ctx_dispatch_begin/end brackets; `retired` chains watcher nodes deleted DURING a
      * bracketed batch (threaded through KlWatcher.next), so a freed node's address cannot be reused
      * by a mid-batch kl_watcher_add before the batch's remaining events are dispatched. Reclaimed
-     * when the outermost bracket closes (depth → 0). Appended fields: an ADDITIVE pre-release layout
-     * change — consumers of KlEventCtx must recompile. */
+     * when the outermost bracket closes (depth → 0). KlEventCtx's struct layout is INTERNAL and not
+     * ABI-stable — embedders recompile when it changes. */
     int         dispatch_depth;
     KlWatcher  *retired;
-    /* 7B-2a removed the datagram completion hook `comp_udp_dispatch` that sat here: datagram completions
-     * (DGRAM_RECV/DGRAM_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch),
-     * not a ctx-global hook. This is an INTENTIONAL pre-release ABI break — the datagram API was
-     * reshaped in this branch and no released consumer holds this slot — so the field is dropped
-     * outright rather than kept as dead reserved clutter. */
+    /* Datagram completions (DGRAM_RECV/DGRAM_SEND) are routed by each token's own KlDgramDispatchFn
+     * (life->dispatch), not a ctx-global hook. */
 } KlEventCtx;
 
 /**
@@ -153,7 +149,7 @@ int  kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd);
  * If the tag is clear (connection, listen socket, etc.) returns 0 —
  * the caller handles it.
  *
- * BATCH CONTRACT (watcher ABA safety, R3b-W). A single kl_event_dispatch call — one event, not part
+ * BATCH CONTRACT (watcher ABA safety). A single kl_event_dispatch call — one event, not part
  * of a drained batch — is always safe: a watcher deleted in its callback is freed immediately (no
  * sibling event can reference it). A caller that drains MULTIPLE events (kl_event_wait /
  * kl_comp_drain) and dispatches them one-by-one MUST bracket the dispatch loop with
@@ -195,7 +191,7 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
 }
 
 /**
- * @brief Open/close a batch-dispatch bracket (watcher ABA remedy, R3b-W).
+ * @brief Open/close a batch-dispatch bracket (watcher ABA remedy).
  *
  * Bracket a loop that drains and dispatches multiple events. `begin` increments the nesting depth;
  * `end` decrements it and, when the OUTERMOST bracket closes (depth returns to 0), reclaims every

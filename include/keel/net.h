@@ -7,7 +7,7 @@
  * The single place Keel's *installed* headers resolve where struct sockaddr /
  * sockaddr_storage / socklen_t come from across platforms. Public headers that
  * expose socket addresses in their API (http_connection.h, resolver.h,
- * proxy_protocol.h, udp.h, udp_server.h) include this instead of <sys/socket.h>,
+ * proxy_protocol.h, datagram.h, socket_dgram.h) include this instead of <sys/socket.h>,
  * so the platform selection lives in one file rather than scattered #ifdefs.
  *
  * This is the public counterpart of the internal src/sockcompat.h (which adds
@@ -24,7 +24,7 @@
   /* lwIP target: the stack provides its own BSD socket types (struct sockaddr,
    * socklen_t, ...) via lwip/sockets.h — do NOT pull the host <sys/socket.h>,
    * which would clash. Inert unless a build/provider defines KEEL_PLATFORM_LWIP
-   * (e.g. the examples/lwip reference). See docs/lwip_platform_design.md. */
+   * (e.g. the examples/lwip reference). See docs/archive/designs/lwip_platform_design.md. */
   #include "lwip/sockets.h"
 #else
   #include <sys/socket.h>

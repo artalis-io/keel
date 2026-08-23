@@ -50,7 +50,7 @@ typedef enum {
 
 typedef struct KlHttpConn {
     KlStream stream;            /**< Raw-transport subset (fd, alloc, ctx, peer_addr,
-                                     read_buf/len/cap, read_paused). Phase A extraction —
+                                     read_buf/len/cap, read_paused).
                                      INTERNAL/UNSTABLE, not a stable field-level API. */
 
     KlHttpConnState state;          /**< Connection state */
@@ -80,8 +80,7 @@ typedef struct KlHttpConn {
     char *comp_cipher;          /**< Completion-mode TLS ciphertext scratch: driver-owned,
                                      stable until the async recv completes. Preallocated at server
                                      init for TLS + completion slots (never in the event-loop hot
-                                     path); NULL otherwise. Interim Phase-A TLS orchestration
-                                     (→ KlTlsStream in Phase C). Freed in pool free.
+                                     path); NULL otherwise. Freed in pool free.
                                      INTERNAL/UNSTABLE. */
     size_t comp_cipher_cap;     /**< Allocated size of comp_cipher (0 if unallocated) — so
                                      alloc/free need no completion-internal size macro. */

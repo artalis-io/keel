@@ -51,8 +51,8 @@ struct KlEventOps {
     /** Reserved: the backend's internal KlCompletionOps* (src/completion.h), or NULL.
      *  Opaque here — no completion type appears in this public header (cf. the opaque
      *  KlEventLoop._backend). A completion backend points this at its completion vtable
-     *  so a runtime-injected provider carries the completion axis too (RC-2); readiness
-     *  backends leave it NULL. MUST stay the last member (appended, no ABI shuffle). */
+     *  so a runtime-injected provider carries the completion axis too; readiness
+     *  backends leave it NULL. MUST stay the last member — no ABI shuffle. */
     const void *completion;
 };
 

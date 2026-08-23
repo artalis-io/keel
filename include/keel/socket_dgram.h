@@ -23,9 +23,8 @@
  * never the datagram core — so the provider holds no datagram machine state; the send-queue walk,
  * delivery, backpressure, and interest tracking all stay in the datagram core.
  *
- * This is the PROVIDER data-plane axis (KlSocketProvider.dgram). It was split out of
- * <keel/datagram.h> in 7B-1b so the public fixed-slot KlDatagram API can take that
- * header; <keel/datagram.h> re-includes this one for source compatibility. The
+ * This is the PROVIDER data-plane axis (KlSocketProvider.dgram); it is separate from the public
+ * fixed-slot KlDatagram API in <keel/datagram.h>, which re-exports this provider surface. The
  * COMPLETION-axis op descriptors (KlDgramSendOp/KlDgramRecvOp) are a separate,
  * internal concern in src/completion_io.h — not here.
  */
@@ -98,12 +97,10 @@ typedef struct KlDatagramOps {
     int (*mcast_membership)(void *ctx, KlSocketHandle fd, int family,
                             const char *group, unsigned iface_index, int join);
 
-    /* KL_DGRAM_CAP_* the provider can honor on THIS fd — accounting for the fd's actual address family
-     * (M2). Optional (NULL ⇒ the facade grants no optional caps). Family-AWARE but takes no `family`
+    /* KL_DGRAM_CAP_* the provider can honor on THIS fd — accounting for the fd's actual address
+     * family. Optional (NULL ⇒ the facade grants no optional caps). Family-AWARE but takes no `family`
      * param: the provider inspects the fd (e.g. getsockname) or reports the cross-family intersection;
-     * it MUST NOT report a capability the fd's family cannot use (e.g. BROADCAST on an IPv6 fd).
-     * NOTE: appending this member is an intentional pre-consumer ABI revision — a provider compiled
-     * against the older KlDatagramOps must be rebuilt (see docs/datagram_m2_capability_design.md §7). */
+     * it MUST NOT report a capability the fd's family cannot use (e.g. BROADCAST on an IPv6 fd). */
     unsigned (*caps)(void *ctx, KlSocketHandle fd);
 
     /* ── Optional mmsg batching (Linux) — data-oriented, no callbacks ───────── */
