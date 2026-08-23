@@ -24,7 +24,7 @@
  *    event and is released after dispatch. Teardown drops the owner ref; the FINAL release runs
  *    on_final (freeing the inbound storage + machine) and frees the token.
  *
- * This is the frozen "backend-owned stable token" mechanism (docs/datagram_contract.md §6), NOT a
+ * This is the frozen "backend-owned stable token" mechanism (docs/contracts/datagram.md §6), NOT a
  * generation check on a freed object. It is transport-neutral: at post time the backend reads the
  * neutral by-value op descriptor to copy the socket/context/buffer/token into the op, and thereafter
  * touches only the token.
@@ -41,12 +41,12 @@ typedef struct KlDgramLife KlDgramLife;
 
 struct KlCompletionEvent;   /* completion.h — the dispatch handler's event (fwd; avoids a header cycle) */
 
-/* Which side of a datagram op a completion-axis cancel/retire query targets (7B-2). Shared by the
+/* Which side of a datagram op a completion-axis cancel/retire query targets. Shared by the
  * completion backend seam (KlCompletionOps.cancel_dgram/retire_dgram) and the close coordinator
  * (datagram_close.h KlDgramRetireFn), so it lives on this transport-neutral token header. */
 typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
 
-/* Per-op retirement classification a completion backend reports to the close coordinator (§4.3).
+/* Per-op retirement classification a completion backend reports to the close coordinator.
  * PENDING keeps the object CLOSING (a cancelled completion op not yet drained); RETIRED = physically
  * done (storage safe to free); QUARANTINED = could NOT be confirmed retired (EFI unconfirmed op →
  * fail-closed, ref abandoned). `transport_err` (out) is 1 iff a terminal transport error occurred on
@@ -71,7 +71,7 @@ KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
                                   void (*on_final)(void *final_ctx), void *final_ctx,
                                   KlDgramDispatchFn dispatch);
 
-/* The token's completion-routing handler (7B-2a). */
+/* The token's completion-routing handler. */
 KlDgramDispatchFn kl_dgram_life_dispatch(const KlDgramLife *l);
 
 /* Take a reference (a backend op, at post time). No-op on NULL. */

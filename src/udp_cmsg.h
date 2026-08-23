@@ -1,12 +1,12 @@
 /*
  * udp_cmsg.h — INTERNAL, POSIX-only. Shared UDP control-message (cmsg) helpers for
- * the POSIX datagram receive paths: the readiness recv (udp_io_posix.c) and the POSIX
+ * the POSIX datagram receive paths: the readiness recv (socket_dgram_posix.c) and the POSIX
  * completion backends (event_iouring.c, event_pollcomp.c). Reusing one parser keeps the
  * two event models byte-identical (no drift).
  *
  * This header is POSIX-only *by inclusion*, not by #ifdef: it is included only from
  * POSIX TUs, so it can name POSIX-native cmsg types (struct msghdr) freely. The Winsock
- * receive path (udp_io_win.c) parses WSAMSG with its own helpers and does not include
+ * receive path (socket_dgram_win.c) parses WSAMSG with its own helpers and does not include
  * this — keeping platform conditionals out of the cross-platform headers.
  *
  * INTERNAL header — not installed, no ABI commitment.
@@ -18,7 +18,7 @@
 
 /* Control-message buffer size for a UDP recvmsg — generously sized for the RX cmsgs the
  * kernel may attach (pktinfo local addr + GRO + TOS). Kept as a plain constant (not tied
- * to the pktinfo struct sizes, which are glibc-gated in udp_io_posix.c) so the completion
+ * to the pktinfo struct sizes, which are glibc-gated in socket_dgram_posix.c) so the completion
  * backends can carry a control buffer without pulling in those platform structs. */
 #define KL_UDP_RX_CTRL_SIZE 256
 
@@ -33,7 +33,7 @@ int kl_udp_parse_gro(struct msghdr *msg);
 
 /* Read the received TOS / Traffic-Class byte (IP_TOS / IPV6_TCLASS cmsg) from a received message's
  * control data, or -1 if none present (or the platform macros are absent). Shared by the POSIX
- * completion backends (event_iouring.c, event_pollcomp.c) — M6.0a receive-TOS. */
+ * completion backends (event_iouring.c, event_pollcomp.c) — receive-TOS. */
 int kl_udp_parse_tos(struct msghdr *msg);
 
 /* Control-message buffer size for a UDP sendmsg — a source-pin pktinfo cmsg + a TOS cmsg. */

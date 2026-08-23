@@ -1,13 +1,12 @@
 /*
- * drain_reserve.h — INTERNAL. Phase-B KlDrain extension: a preallocated,
+ * drain_reserve.h — INTERNAL. KlDrain extension: a preallocated,
  * allocation-free write reservation + a low-water writable notification.
  *
  * This is the bounded-queue substrate the generic KlStream write path is built on
- * (docs/stream_contract.md §2, Findings 3/G): atomic all-or-none acceptance over a
+ * (docs/contracts/stream.md §2): atomic all-or-none acceptance over a
  * capacity that is reserved at init, so kl_drain_reserve_write() performs NO allocation
  * and an oversized write is a permanent KL_DRAIN_TOO_LARGE rather than transient
- * backpressure. Kept internal (not in public <keel/drain.h>) until the Phase-B public
- * KlStream/KlListener surface is finalized. The extra state lives on KlDrain (drain.h),
+ * backpressure. Kept internal (not in public <keel/drain.h>). The extra state lives on KlDrain (drain.h),
  * dormant unless kl_drain_prealloc()/kl_drain_set_low_water() are called.
  */
 #ifndef KEEL_SRC_DRAIN_RESERVE_H

@@ -1,22 +1,21 @@
 /*
- * event_iouring.c — a COMPLETION-native io_uring backend (PAL Phase 8f).
+ * event_iouring.c — a COMPLETION-native io_uring backend.
  *
  * The completion event axis (completion.h) is natively a completion engine's home:
  * post an async op, drain finished ops. io_uring is a completion engine by construction
  * — submit SQEs, reap CQEs — so it is the truest fit for the axis, more than IOCP
  * (per-op OVERLAPPED bookkeeping) or the pollcomp facade (completion faked over poll()).
  *
- * This is the THIRD implementation of the same completion.h contract, after event_iocp.c
+ * This implements the same completion.h contract as event_iocp.c
  * (Windows) and event_pollcomp.c (portable poll facade). It reuses the platform-independent
- * completion driver (completion_driver.c) VERBATIM — no #ifdef, no io_uring symbol leaks
- * into the driver — a third proof the axis is genuinely implementation-independent, and
- * the first PRODUCTION (not test-facade) completion backend that is CI-testable on Linux.
+ * completion driver (completion_core.c) VERBATIM — no #ifdef, no io_uring symbol leaks
+ * into the driver — and is the first PRODUCTION (not test-facade) completion backend that
+ * is CI-testable on Linux.
  *
- * This is the ONLY io_uring backend: BACKEND=iouring selects it. An earlier readiness-
- * adapted io_uring backend (io_uring as a poll-multiplexer: prep_poll_add, loop.fd=-1,
- * advertising KL_EVENT_CAP_READINESS) was retired in 8f-5d — benchmarks put it ~2–2.3×
- * slower than this completion-native path on both x86 and ARM (see
- * docs/phase8f5_iouring_default_migration_design.md).
+ * This is the ONLY io_uring backend: BACKEND=iouring selects it. It is completion-native
+ * (submit SQEs, reap CQEs), which benchmarks ~2–2.3× faster than a readiness-adapted
+ * io_uring poll-multiplexer on both x86 and ARM (see
+ * docs/archive/phases/phase8f5_iouring_default_migration_design.md).
  *
  * Model: each kl_comp_post_* prepares an SQE (recv/send/accept/…) with the op pointer as
  * user_data and queues it; kl_comp_drain submits the batch and waits, then for each CQE
@@ -24,11 +23,11 @@
  * short write) re-prepares the remainder rather than completing. The kernel performs the
  * I/O into the op's buffers — the driver sees only high-level, completed events. A
  * readiness FD watch (kl_event_add with a tagged KlWatcher udata — thread-pool wakeup,
- * timer) is armed as a single-shot IORING_OP_POLL_ADD and surfaced as KL_COMP_WATCHER
- * (8e-2), re-armed on each fire; how a completion backend watches readiness fds alongside
+ * timer) is armed as a single-shot IORING_OP_POLL_ADD and surfaced as KL_COMP_WATCHER,
+ * re-armed on each fire; how a completion backend watches readiness fds alongside
  * its completions is its own business, per the abstract contract.
  *
- * 8f-2 adds two refinements: zero-copy sendfile via IORING_OP_SPLICE (file → pipe →
+ * Two refinements: zero-copy sendfile via IORING_OP_SPLICE (file → pipe →
  * socket, no userspace copy of the body) and a registered send-buffer pool (small responses
  * go out via IORING_OP_WRITE_FIXED from kernel-pinned buffers, avoiding a per-send malloc).
  * Both degrade gracefully — a kernel without SPLICE falls back to pread+SEND, and a failed
@@ -37,14 +36,14 @@
  * Kernel-feature note: single-shot accept + single-shot poll (re-armed) are used so the
  * backend runs on older kernels (multishot accept 5.19+, multishot poll 5.13+); prep_recv/
  * send/accept/cancel are 5.5–5.6+, splice 5.7+, registered buffers 5.1+. See
- * docs/phase8f_iouring_completion_design.md.
+ * docs/archive/phases/phase8f_iouring_completion_design.md.
  */
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE               /* pipe2 / splice (8f-2 zero-copy sendfile) */
+#define _GNU_SOURCE               /* pipe2 / splice (zero-copy sendfile) */
 #endif
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx (R2f) */
+#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
@@ -59,8 +58,8 @@
 #include <sys/socket.h>          /* struct msghdr — UDP recvmsg/sendmsg */
 #include <sys/uio.h>             /* struct iovec */
 #include <sys/resource.h>        /* getrlimit(RLIMIT_MEMLOCK) — gate the registered pool */
-#include <fcntl.h>               /* pipe2, O_NONBLOCK — 8f-2 splice pipe */
-#include <unistd.h>              /* close — 8f-2 splice pipe */
+#include <fcntl.h>               /* pipe2, O_NONBLOCK — splice pipe */
+#include <unistd.h>              /* close — splice pipe */
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>              /* SIZE_MAX — sendfile buffer overflow guard */
@@ -68,13 +67,13 @@
 
 #define KL_IOU_RING_SIZE  1024                /* SQ/CQ depth: 256 conns × ~1 in-flight op + slack */
 
-/* Registered send-buffer pool (8f-2): small responses copy into a pre-registered,
+/* Registered send-buffer pool: small responses copy into a pre-registered,
  * kernel-pinned buffer and go out via IORING_OP_WRITE_FIXED — no per-send malloc, no
  * per-op buffer mapping. Larger responses fall back to a malloc'd buffer + IORING_OP_SEND.
  * The pool is pinned memlock (RLIMIT_MEMLOCK), so keep it modest — 256 KiB covers the common
- * small-response hot path without starving a process that spins up many loops (the 8f-3
- * survey showed an oversized pool made io_uring_queue_init fail for later loops in a test
- * process). Registration failure degrades to malloc + SEND. */
+ * small-response hot path without starving a process that spins up many loops (an oversized
+ * pool makes io_uring_queue_init fail for later loops in a test process). Registration
+ * failure degrades to malloc + SEND. */
 #define KL_IOU_REG_BUFS    16u                /* number of fixed send buffers */
 #define KL_IOU_REG_BUFSZ   (16u * 1024u)      /* size of each fixed send buffer (→ 256 KiB pool) */
 /* Register the pinned send-buffer pool only when RLIMIT_MEMLOCK is at least this generous
@@ -88,7 +87,7 @@
 typedef enum {
     IOU_ACCEPT, IOU_READ, IOU_WRITE, IOU_SENDFILE,
     IOU_DGRAM_RECV, IOU_DGRAM_SEND, IOU_WATCH,
-    IOU_CONNECT   /* outbound connect (LC-0): IORING_OP_CONNECT */
+    IOU_CONNECT   /* outbound connect: IORING_OP_CONNECT */
 } IouOpType;
 
 /* One in-flight async op — its buffers stay valid until the CQE arrives. */
@@ -105,15 +104,15 @@ typedef struct KlIouOp {
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
-    int            dg_tos;                /* UDP_RECV: capture received TOS byte (M6.0a) */
+    int            dg_tos;                /* UDP_RECV: capture received TOS byte */
     void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;
     char          *sendbuf;               /* WRITE/UDP_SEND: owned copy.
                                            * With reg_idx >= 0 it borrows a registered buffer. */
     size_t         sendcap;               /* malloc'd size of sendbuf (0 if borrowed/registered) */
     size_t         send_total, send_done; /* partial-send tracking (<= sendcap) */
-    int            reg_idx;               /* registered send-buffer index, or -1 (8f-2) */
-    /* SENDFILE splice state (8f-2): head SEND, then file→pipe→socket zero-copy. */
+    int            reg_idx;               /* registered send-buffer index, or -1 */
+    /* SENDFILE splice state: head SEND, then file→pipe→socket zero-copy. */
     int            sf_stage;              /* 0 = head, 1 = splice-in, 2 = splice-out */
     int            file_fd;               /* borrowed (response owns/closes it) */
     int            pipe_rd, pipe_wr;      /* per-op pipe (-1 until first splice) */
@@ -133,7 +132,7 @@ typedef struct KlIouOp {
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlIouOp;
 
-/* A registered readiness watch (8e-2). Armed as a single-shot POLL_ADD; re-armed on each
+/* A registered readiness watch. Armed as a single-shot POLL_ADD; re-armed on each
  * fire. Its FIRST field is IOU_WATCH so a poll CQE's user_data is recognised. */
 typedef struct KlIouWatch {
     IouOpType         type;               /* == IOU_WATCH (MUST be first) */
@@ -149,11 +148,11 @@ typedef struct {
     struct io_uring ring;
     KlAllocator    *alloc;
     KlIouOp        *ops;                   /* in-flight op list (for cancel + cleanup) */
-    KlIouWatch     *watches;               /* registered readiness watches (8e-2) */
+    KlIouWatch     *watches;               /* registered readiness watches */
     KlSocketHandle  listen_fd;
     int             accept_pending;        /* one accept op outstanding at a time */
     int             primed;
-    /* Registered send-buffer pool (8f-2) — WRITE_FIXED for small responses. */
+    /* Registered send-buffer pool — WRITE_FIXED for small responses. */
     unsigned char  *reg_block;             /* one contiguous KL_IOU_REG_BUFS × BUFSZ block */
     struct iovec    reg_iov[KL_IOU_REG_BUFS];
     int             reg_free[KL_IOU_REG_BUFS];  /* free-list stack of buffer indices */
@@ -181,7 +180,7 @@ static unsigned iou_poll_mask(KlEventMask mask) {
 
 /* ── KlEventLoop lifecycle ───────────────────────────────────────────── */
 
-/* Register the fixed send-buffer pool + probe splice support (8f-2). Best-effort: on
+/* Register the fixed send-buffer pool + probe splice support. Best-effort: on
  * failure the backend falls back to malloc+SEND / pread+SEND, so this never fails init.
  *
  * The registered pool (WRITE_FIXED fast path for small responses) pins
@@ -239,7 +238,7 @@ int kl_event_init_builtin(KlEventLoop *loop) {
 /* Connection fds are driven by posted ops, not readiness — for those (untagged udata)
  * add/mod/del are inert, as on IOCP/pollcomp. A TAGGED udata is a KlWatcher (thread-pool
  * wakeup, timer, generic FD watcher); register it and arm a single-shot POLL_ADD so
- * kl_comp_drain relays its readiness as a KL_COMP_WATCHER (8e-2). Keys on the shared LSB
+ * kl_comp_drain relays its readiness as a KL_COMP_WATCHER. Keys on the shared LSB
  * watcher tag, not on anything io_uring-specific. */
 /* Arm a single-shot POLL_ADD for the watch. Exactly one poll is outstanding per watch:
  * skip if one already is (a mask change while armed keeps the old poll — acceptable, our
@@ -369,7 +368,7 @@ static KlIouOp *iou_op_alloc(KlAllocator *alloc) {
     return op;
 }
 
-/* Registered send-buffer pool (8f-2): pop/push a buffer index, or -1 if none free. */
+/* Registered send-buffer pool: pop/push a buffer index, or -1 if none free. */
 static int iou_reg_acquire(KlIouState *st) {
     if (!st->reg_ok || st->reg_free_count == 0) return -1;
     return st->reg_free[--st->reg_free_count];
@@ -405,15 +404,15 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     loop->fd = -1;
 }
 
-/* A completion loop over native fds — COMPLETION makes the Phase 7 negotiation require an
+/* A completion loop over native fds — COMPLETION makes the capability negotiation require an
  * OVERLAPPED provider (kl_socket_provider_iouring), which kl_event_native_provider auto-
- * wires so a default-provider server/client is a drop-in (8f-5a). */
+ * wires so a default-provider server/client is a drop-in. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* The overlapped provider this completion loop needs (5a) — so a server/client that
+/* The overlapped provider this completion loop needs — so a server/client that
  * configured no provider auto-wires it and a completion backend is a drop-in. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
@@ -422,7 +421,7 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
 
 /* The overlapped socket provider: reuse the POSIX control-plane ops (close, the direct
  * send comp_tls_flush uses, tcp_nodelay, …) and add the OVERLAPPED capability the
- * negotiation keys on — so completion_driver.c's kl_sock_* calls behave normally while the
+ * negotiation keys on — so completion_core.c's kl_sock_* calls behave normally while the
  * loop advertises completion. io_uring uses real fds + the POSIX control plane. */
 const KlSocketProvider *kl_socket_provider_iouring(void) {
     static KlSocketProvider prov;
@@ -471,7 +470,7 @@ static int iou_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
 
 /* Prepare a send SQE for the unsent tail of a WRITE op. A registered send buffer
  * (reg_idx >= 0) goes out via WRITE_FIXED (kernel-pinned, zero per-op mapping); a malloc'd
- * buffer via plain SEND. Both handle partial sends by re-prep from send_done (8f-2). */
+ * buffer via plain SEND. Both handle partial sends by re-prep from send_done. */
 static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { op->aborted = 1; return; }   /* no slot — surface as error next drain */
@@ -484,7 +483,7 @@ static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     io_uring_sqe_set_data(sqe, op);
 }
 
-/* ── 8f-2 zero-copy sendfile via splice (file → pipe → socket) ────────── */
+/* ── zero-copy sendfile via splice (file → pipe → socket) ────────── */
 
 static int iou_open_pipe(KlIouOp *op) {
     int pfd[2];
@@ -548,7 +547,7 @@ static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
 }
 
 /* Fallback for kernels without IORING_OP_SPLICE: pread the file body into a malloc'd send
- * buffer after the head, and send it as a plain WRITE (the 8f-1 mechanism). The response
+ * buffer after the head, and send it as a plain WRITE. The response
  * owns file_fd and closes it (http_response.c), so pread is ownership-neutral. */
 static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVec *head_iov,
                                   int head_n, size_t head_total, int file_fd, uint64_t count) {
@@ -580,7 +579,7 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
     return 0;
 }
 
-/* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
+/* Post a response-head + file-body send. Zero-copy via splice — send the head, then
  * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
  * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
 static int iou_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int head_n,
@@ -717,7 +716,7 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     return 0;
 }
 
-/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): mark aborted + post an
+/* Cancel the outstanding datagram op(s) of `kind` for `life`: mark aborted + post an
  * IORING_OP_ASYNC_CANCEL SQE (mirrors iou_comp_cancel). The op stays tracked until its (cancelled)
  * CQE drains and releases the token ref — so this is idempotent and does NOT release the ref here. */
 static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
@@ -748,7 +747,7 @@ static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlDgram
     return KL_DGRAM_RETIRE_RETIRED;
 }
 
-/* Post an outbound connect (LC-0) via IORING_OP_CONNECT. The dest is marshalled into the op's
+/* Post an outbound connect via IORING_OP_CONNECT. The dest is marshalled into the op's
  * peer storage (kernel reads it until the CQE), which must stay valid — it lives in the op, so
  * it does. On completion iou_complete surfaces KL_COMP_CONNECT against the client's tagged
  * watcher; the client's he_on_writable re-checks SO_ERROR (getsockopt works after a connect
@@ -775,7 +774,7 @@ static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static int iou_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
     if (!ctx) return -1;
     KlIouState *st = ctx->loop._backend;
-    if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
+    if (st->primed) return 1;              /* setup already done — report the window */
     st->listen_fd = listen_fd;
     st->primed = 1;
     /* Post-driven, window 1: latch the listen fd and let the completion KlListener post the single
@@ -812,11 +811,11 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     case IOU_ACCEPT:
         st->accept_pending = 0;
         ev->kind = KL_COMP_ACCEPT;
-        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
+        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
         /* Key ONLY on res: a cancelled accept usually completes -ECANCELED (res<0, no fd → ok=0),
          * but a cancel that races a successful accept still yields a real fd (res>=0). Deliver that
          * fd even though op->aborted is set, so the completion listener disposes it on its CLOSING
-         * path (total accepted-fd ownership during shutdown, 6B-3 2b-ii) instead of leaking it. */
+         * path (total accepted-fd ownership during shutdown) instead of leaking it. */
         if (res < 0) { ev->ok = 0; return 1; }
         ev->ok = 1;
         ev->accepted_fd = res;
@@ -912,7 +911,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                 (void)kl_sockaddr_from_native(&ev->local,
                                               (struct sockaddr *)&local_ss, local_len);
         }
-        ev->tos = -1;                            /* M6.0a: default "none"; parse only if requested */
+        ev->tos = -1;                            /* default "none"; parse only if requested */
         if (res >= 0) {
             if (op->dg_gro)                      /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
@@ -931,7 +930,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         return 1;
 
     case IOU_CONNECT:
-        /* Connect finished (LC-0). res == 0 → connected; res < 0 → -errno (e.g. -ECONNREFUSED).
+        /* Connect finished. res == 0 → connected; res < 0 → -errno (e.g. -ECONNREFUSED).
          * Surface KL_COMP_CONNECT against the client's tagged watcher (aborted ops are dropped
          * in the drain loop, before this). io_uring reports the result in `res`, and SO_ERROR is
          * NOT reliably preserved after a failed IORING_OP_CONNECT — so encode the result in the
@@ -1004,7 +1003,7 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         }
 
         KlIouOp *op = data;
-        /* An aborted outbound connect (LC-0): the client dropped this attempt (loser / failure
+        /* An aborted outbound connect: the client dropped this attempt (loser / failure
          * / deadline / cancel) via kl_comp_cancel, which marked it aborted + prep_cancel; its
          * (detached) watcher is already gone. This is the -ECANCELED CQE — free the op WITHOUT
          * dispatching against the freed watcher. (The kernel is done with op->peer now.) */
@@ -1024,7 +1023,7 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     return count;
 }
 
-/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap — the server drives the
+/* Teardown accept-side force-completion. Does NOT reap — the server drives the
  * drain (kl_comp_run) so every dequeued CQE gets its normal routing (no completion lost). This only
  * GUARANTEES that every posted accept will complete: it UNCONDITIONALLY submits a cancel for each
  * IOU_ACCEPT (not relying on iou_comp_cancel having obtained an SQE — a full SQ could have skipped
@@ -1055,7 +1054,7 @@ static int iou_shutdown_accepts(struct KlEventCtx *ctx) {
     return 0;
 }
 
-/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+/* ── Completion sub-vtable ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * reaches them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
  * provider (loop->ops->completion). No behavior change — same funcs, one hop away. */

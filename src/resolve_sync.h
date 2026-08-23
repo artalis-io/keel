@@ -6,8 +6,8 @@
  *
  * The ONE place the protocol clients' synchronous / Happy-Eyeballs-fallback path
  * touches getaddrinfo. Kept in a platform TU (resolve_sync.c on POSIX/Winsock; a
- * resolve_sync_lwip.c would wrap lwip_getaddrinfo) so client.c / h2_client.c /
- * websocket_client.c name NO platform struct sockaddr and pull no <netdb.h> —
+ * resolve_sync_lwip.c would wrap lwip_getaddrinfo) so the protocol clients (HTTP/1.1, HTTP/2, WebSocket) name NO platform
+ * struct sockaddr and pull no <netdb.h> —
  * they speak KlSockAddr only. Address plumbing above the seam is neutral.
  *
  * INTERNAL header — not installed, no ABI commitment.

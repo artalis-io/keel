@@ -9,8 +9,8 @@
  * Defines the platform-default socket ops (kl_sockdef_*) the neutral socket.h
  * seam calls when there's no provider op, plus the POSIX provider (thin adapters
  * over those defaults). No raw syscall lives in socket.h — this TU owns them for
- * POSIX. See docs/pal_transformation_design.md and docs/phase6_winsock_design.md
- * §B.0.
+ * POSIX. See docs/archive/designs/pal_transformation_design.md and
+ * docs/archive/phases/phase6_winsock_design.md §B.0.
  */
 
 #ifndef _GNU_SOURCE
@@ -413,7 +413,7 @@ KlIoStatus kl_sockdef_io_status(void) {
 #if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
         case ENOTSUP:
 #endif
-            return KL_IO_UNSUPPORTED;   /* datagram M5.1: e.g. UDP GSO unavailable → caller falls back */
+            return KL_IO_UNSUPPORTED;   /* datagram: e.g. UDP GSO unavailable → caller falls back */
         default:
             return KL_IO_FATAL;
     }

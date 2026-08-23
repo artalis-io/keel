@@ -1,5 +1,5 @@
 /*
- * event_pollcomp_builtin.c — the compiled-in-backend glue for pollcomp (RC-2).
+ * event_pollcomp_builtin.c — the compiled-in-backend glue for pollcomp.
  *
  * Linked ONLY when BACKEND=pollcomp (the Makefile appends it to EVENT_SRC). It adapts
  * the pure-runtime provider in event_pollcomp.c to the compiled-in-default contract:

@@ -1,9 +1,9 @@
 /*
  * socket_dgram_win.c — the Winsock datagram data-plane (KlDatagramOps) for the
- * built-in Winsock socket provider. The primitive-only form of udp_io_win.c: every
- * op takes (ctx, fd, …) and speaks KlSockAddr, with no datagram machine state — the
- * send-queue walk, delivery, and interest tracking stay in the datagram core, which dispatches
- * through KlSocketProvider.dgram.
+ * built-in Winsock socket provider. Primitive-only: every op takes (ctx, fd, …) and
+ * speaks KlSockAddr, with no datagram machine state — the send-queue walk, delivery,
+ * and interest tracking stay in the datagram core, which dispatches through
+ * KlSocketProvider.dgram.
  *
  * Winsock has no recvmmsg/sendmmsg batching, no UDP GSO, and no UDP GRO, so the
  * batch ops are NULL (the datagram core uses the per-datagram loop) and send_gso reports
@@ -314,7 +314,7 @@ static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
     return -1;
 }
 
-/* M2: report ONLY the caps usable on THIS fd. Source-pin AND per-packet TOS both ride WSASendMsg
+/* Report ONLY the caps usable on THIS fd. Source-pin AND per-packet TOS both ride WSASendMsg
  * (wdg_send returns EIO if the extension is absent), so both are gated on a successful runtime probe
  * of WSASendMsg for this socket AND the family's cmsg macro. Multicast/broadcast are gated on their
  * family-specific macros; broadcast is IPv4-only; connected-mode send is always available. If the

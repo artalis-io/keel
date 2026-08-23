@@ -1,12 +1,12 @@
 /*
- * datagram_open.c — M0 provider-neutral datagram socket-preparation helper.
+ * datagram_open.c — the provider-neutral datagram socket-preparation helper.
  *
  * A standalone function that does the datagram socket create/configure/bind prep with per-step error
  * cleanup, but WITHOUT the send/receive machine and WITHOUT the completion-loop association
  * (kl_datagram_init owns that). It is transport INFRASTRUCTURE — it legitimately creates and binds a
  * platform datagram socket through the socket seam, exactly like listener.c / connect_op.c — so it
  * lives below the Tier-1 facade (datagram.c) and is on the TIER1_INFRA allowlist. See
- * src/datagram_open.h for the ownership-handoff contract and docs/datagram_consolidation_design.md §2.
+ * src/datagram_open.h for the ownership-handoff contract and docs/archive/designs/datagram_consolidation_design.md §2.
  */
 
 #include "datagram_open.h"

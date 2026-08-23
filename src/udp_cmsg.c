@@ -3,10 +3,9 @@
  *
  * kl_udp_parse_local / kl_udp_parse_gro are used by the POSIX completion backends
  * (event_iouring.c, event_pollcomp.c) to extract the pktinfo local address and the
- * UDP_GRO segment size from a received msghdr's control data. They used to live in
- * udp_io_posix.c; with the datagram data-plane folded onto the socket providers
- * (KlDatagramOps), the readiness recv path no longer needs a separate seam TU, so
- * these shared parsers live here (always linked on POSIX) instead.
+ * UDP_GRO segment size from a received msghdr's control data. The datagram data-plane
+ * is folded onto the socket providers (KlDatagramOps); these shared parsers live here
+ * (always linked on POSIX).
  */
 
 #ifndef _GNU_SOURCE

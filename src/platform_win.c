@@ -2,7 +2,7 @@
  * platform_win.c — Windows platform services (implements platform.h).
  *
  * One-platform-per-TU (Makefile PLATFORM_SRC), compiled only on Windows. See
- * docs/phase6_winsock_design.md §B.3.
+ * docs/archive/phases/phase6_winsock_design.md §B.3.
  */
 
 #include "platform.h"

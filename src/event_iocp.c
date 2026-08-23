@@ -1,18 +1,18 @@
 /*
- * event_iocp.c — IOCP: the Windows *implementation* of the completion event axis
- * (PAL Phase 8). Compiled ONLY on Windows under `BACKEND=iocp` (Makefile selection).
+ * event_iocp.c — IOCP: the Windows *implementation* of the completion event axis.
+ * Compiled ONLY on Windows under `BACKEND=iocp` (Makefile selection).
  *
- * This TU is now purely the platform layer: the KlEventLoop lifecycle over an IOCP
+ * This TU is purely the platform layer: the KlEventLoop lifecycle over an IOCP
  * port, and the completion.h backend contract — post overlapped AcceptEx/WSARecv/
  * WSASend and drain GetQueuedCompletionStatusEx into platform-independent
  * KlCompletionEvent's. The connection-driving logic lives in the
- * platform-independent completion_driver.c; the Win32/OVERLAPPED/WSA* mechanics
+ * platform-independent completion_core.c; the Win32/OVERLAPPED/WSA* mechanics
  * live only here, so a future io_uring-completion / POSIX-AIO backend implements the
- * same completion.h and reuses the driver unchanged. See docs/phase8b_iocp_breadth_design.md.
+ * same completion.h and reuses the driver unchanged. See docs/archive/phases/phase8b_iocp_breadth_design.md.
  */
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx (R2f) */
+#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
@@ -37,7 +37,7 @@
 #define KL_IOCP_TRANSMITFILE_MAX 0x7FFFFFFEu
 
 struct KlIocpOp;
-/* A registered readiness watch (8e-2c). The completion port cannot readiness-watch an
+/* A registered readiness watch. The completion port cannot readiness-watch an
  * arbitrary fd, but the KlWatcher fds KEEL uses (the thread-pool wakeup) are loopback
  * sockets, so we post a persistent overlapped WSARecv: the wakeup write completes it,
  * surfacing a KL_COMP_WATCHER. Tracked so kl_event_del can cancel it. */
@@ -47,7 +47,7 @@ typedef struct KlIocpWatch {
     struct KlIocpOp    *op;   /* the pending WSARecv op */
 } KlIocpWatch;
 
-/* A tracked in-flight ConnectEx op (LC-0). Tracked so iocp_comp_cancel(fd) can mark the
+/* A tracked in-flight ConnectEx op. Tracked so iocp_comp_cancel(fd) can mark the
  * client's connect op aborted before the client frees its (detached) watcher + closes the
  * socket — the aborted completion is then dropped in the drain instead of dispatching
  * against freed memory. (The IOCP backend doesn't otherwise track conn ops; connect is the
@@ -58,7 +58,7 @@ typedef struct KlIocpConnect {
     struct KlIocpOp      *op;
 } KlIocpConnect;
 
-/* In-flight AcceptEx tracker (6B-3 2b-ii). AcceptEx PRE-creates its accept socket (op->accept_sock)
+/* In-flight AcceptEx tracker. AcceptEx PRE-creates its accept socket (op->accept_sock)
  * before the op completes; tracking every posted accept lets kl_event_close_builtin() forcibly
  * reclaim the ones a (delayed/failed) cancellation never retired — closing the pre-created socket
  * and freeing the op — so teardown never leaks an accept socket or op. Mirrors KlIocpConnect. */
@@ -74,19 +74,19 @@ typedef struct {
     int                       started;
     int                       accept_family;
     SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
-    KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
-    KlIocpConnect            *connects;    /* in-flight ConnectEx ops (LC-0) */
-    KlIocpAccept             *accepts;     /* in-flight AcceptEx ops (6B-3 2b-ii) */
-    struct KlIocpOp          *ops;         /* global registry of ALL outstanding ops (2b review) */
-    int                       quiescing;   /* teardown: drain must not re-post any op (2b review) */
+    KlIocpWatch              *watches;     /* registered readiness watches */
+    KlIocpConnect            *connects;    /* in-flight ConnectEx ops */
+    KlIocpAccept             *accepts;     /* in-flight AcceptEx ops */
+    struct KlIocpOp          *ops;         /* global registry of ALL outstanding ops */
+    int                       quiescing;   /* teardown: drain must not re-post any op */
     KlAllocator              *alloc;
 } KlIocpState;
 
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
     KL_IOCP_DGRAM_RECV, KL_IOCP_DGRAM_SEND,
-    KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket (8e-2c) */
-    KL_IOCP_CONNECT                            /* ConnectEx outbound connect (LC-0) */
+    KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket */
+    KL_IOCP_CONNECT                            /* ConnectEx outbound connect */
 } KlIocpOpType;
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
@@ -122,7 +122,7 @@ typedef struct KlIocpOp {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
     };
     int           watcher_removed;             /* WATCHER: kl_event_del'd — free, don't re-post */
-    /* Global outstanding-op registry (6B-3 2b review): EVERY posted op is linked here so teardown
+    /* Global outstanding-op registry: EVERY posted op is linked here so teardown
      * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
      * — including the otherwise-untracked READ/WRITE/SENDFILE/UDP ops. op_sock is the socket the
      * overlapped I/O runs on (CancelIoEx target). g_link points at the pointer that points to this
@@ -149,11 +149,11 @@ int kl_event_init_builtin(KlEventLoop *loop) {
 }
 
 static void iocp_op_free(KlIocpOp *op);
-static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock);   /* 2b review */
-/* Cancel + dequeue every tracked outstanding overlapped op before free (6B-3 2b review); below. */
+static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock);
+/* Cancel + dequeue every tracked outstanding overlapped op before free; below. */
 static void iocp_quiesce_port_for_close(KlIocpState *st);
 
-/* Post (or re-post) the persistent WSARecv for a watcher socket (8e-2c). */
+/* Post (or re-post) the persistent WSARecv for a watcher socket. */
 static int iocp_watch_post(KlIocpOp *op) {
     WSABUF b = { (ULONG)sizeof(op->accept_buf), op->accept_buf };
     DWORD flags = 0, recvd = 0;
@@ -170,7 +170,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
 
     /* A TAGGED udata is a KlWatcher (thread-pool wakeup etc.). Associate its socket with
      * the port and post a persistent WSARecv, so the wakeup write surfaces a completion
-     * the driver relays as KL_COMP_WATCHER (8e-2c). Untagged = a connection: its posted
+     * the driver relays as KL_COMP_WATCHER. Untagged = a connection: its posted
      * overlapped ops complete on the port; no watch op. Keys on the shared LSB watcher
      * tag, not on any IOCP specific. */
     if ((uintptr_t)udata & 1) {
@@ -225,7 +225,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
 }
 
 int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
-    /* Driven by the completion tick (completion_driver.c) via kl_comp_drain, not
+    /* Driven by the completion tick (completion_core.c) via kl_comp_drain, not
      * this readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
     if (timeout_ms > 0)
@@ -238,7 +238,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     if (st) {
         /* Every tracked op (watch / connect / accept) may still own a kernel OVERLAPPED. Cancel +
          * DEQUEUE each before freeing it — freeing an OVERLAPPED the kernel is still writing is a
-         * use-after-free (6B-3 2b review). iocp_quiesce_port_for_close drains the port until the
+         * use-after-free. iocp_quiesce_port_for_close drains the port until the
          * tracked lists empty (cancelled I/O always completes → terminating). */
         st->quiescing = 1;
         iocp_quiesce_port_for_close(st);
@@ -262,13 +262,13 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 }
 
 /* A completion loop over native OS handles (SOCKETs on the port). COMPLETION makes
- * the Phase 7 negotiation require an OVERLAPPED provider (kl_caps_compatible). */
+ * the capability negotiation require an OVERLAPPED provider (kl_caps_compatible). */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
+/* The overlapped provider this completion loop needs — auto-wired by the server/client
  * when the caller configured none, so the IOCP backend is a source-compatible drop-in. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
@@ -289,7 +289,7 @@ const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 
-/* Register a freshly-allocated + zeroed op in the global outstanding-op registry (6B-3 2b review),
+/* Register a freshly-allocated + zeroed op in the global outstanding-op registry,
  * recording the socket its overlapped I/O runs on (for CancelIoEx at teardown). Call once, right
  * after memset, at every post site. O(1). */
 static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock) {
@@ -495,7 +495,7 @@ static int iocp_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, in
     return 0;
 }
 
-/* Post one overlapped UDP receive on the completion loop (8b-4c). Prefers WSARecvMsg
+/* Post one overlapped UDP receive on the completion loop. Prefers WSARecvMsg
  * (WSAID_WSARECVMSG) so an IP_PKTINFO control message yields the datagram's local
  * (destination) address (KlCompletionEvent.local, used for source-pinned reply-from) —
  * the Winsock analogue of the io_uring/pollcomp recvmsg path, sharing the fetch + parse with
@@ -552,7 +552,7 @@ static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp
     return 0;
 }
 
-/* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
+/* Post one overlapped WSASendTo for a UDP socket. Copies the datagram + its
  * destination into the op (owned until completion); surfaces KL_COMP_DGRAM_SEND. */
 static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
     KlIocpState *st = ctx->loop._backend;
@@ -617,7 +617,7 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
     return 0;
 }
 
-/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): CancelIoEx the matching
+/* Cancel the outstanding datagram op(s) of `kind` for `life`: CancelIoEx the matching
  * overlapped(s) — the forced ERROR_OPERATION_ABORTED completion drains + releases the token ref (the
  * same mechanism the per-fd cancel relies on). Idempotent; NO ref release here. */
 static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
@@ -653,7 +653,7 @@ static LPFN_CONNECTEX iocp_get_connectex(SOCKET s) {
     return fn;
 }
 
-/* Post an outbound connect via ConnectEx (LC-0). ConnectEx requires: (1) the socket bound
+/* Post an outbound connect via ConnectEx. ConnectEx requires: (1) the socket bound
  * (to the wildcard address of the dest's family), (2) the socket associated with the IOCP
  * port so its completion is delivered, and (3) SO_UPDATE_CONNECT_CONTEXT set after success
  * (done in the drain). The dest is marshalled into the op's `src` storage; the completion
@@ -736,7 +736,7 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
  * its address family, and store it. Idempotent — latches on st->started so the server
  * may call it every tick. Server-scoped (needs the listen socket); keeps kl_comp_drain
- * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
+ * ctx-scoped/server-agnostic. Post-driven: returns the AcceptEx window
  * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
  * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
 static int iocp_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
@@ -764,7 +764,7 @@ static int iocp_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen
         st->accept_family = sa.ss_family;
 
     st->started = 1;
-    return KL_IOCP_ACCEPT_BACKLOG;   /* window; the listener posts the AcceptEx ops (6B-3 2b-ii) */
+    return KL_IOCP_ACCEPT_BACKLOG;   /* window; the listener posts the AcceptEx ops */
 }
 
 /* Cancel outstanding overlapped ops on `fd` (idle-timeout sweep). CancelIoEx aborts the
@@ -779,7 +779,7 @@ static int iocp_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen
  * dying fd's ops here is safe. Single-loop-thread, so no cross-thread cancel race. */
 static void iocp_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlIocpState *st = ctx->loop._backend;
-    /* A tracked ConnectEx op on this fd (LC-0): mark it aborted so its (CancelIoEx-forced)
+    /* A tracked ConnectEx op on this fd: mark it aborted so its (CancelIoEx-forced)
      * completion is DROPPED in the drain — the client frees the detached watcher + closes the
      * socket right after this, so the completion must not dispatch against freed memory. */
     for (KlIocpConnect *tr = st->connects; tr; tr = tr->next)
@@ -828,7 +828,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
         if (op->type == KL_IOCP_ACCEPT) {
             SOCKET lst = st->listen_fd;
             /* Whether this AcceptEx actually succeeded — a cancelled one (CancelIoEx on the listen
-             * socket at listener close, 6B-3 2b-ii) completes here with an error status. On failure,
+             * socket at listener close) completes here with an error status. On failure,
              * close the PRE-created accept socket (AcceptEx allocates it up front — no leak) and
              * deliver ok=0 so the completion listener retires this posted accept (returns its
              * credit). The overlapped is associated with the listen socket, so query it there. */
@@ -852,7 +852,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                               (DWORD)KL_IOCP_ADDR_LEN, &local, &llen, &remote, &rlen);
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_ACCEPT;
-            out[count].target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
+            out[count].target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
             out[count].ok = 1;
             out[count].accepted_fd = (KlSocketHandle)op->accept_sock;
             if (rlen > 0 && remote)              /* native → neutral once, at the seam */
@@ -873,7 +873,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_WRITE) {
             op->send_done += bytes;
-            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post (2b review) */
+            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post */
             if (bytes > 0 && op->send_done < op->send_total) {
                 /* Partial send — re-post the remainder; do NOT surface an event
                  * until the whole response is out (the driver sees full writes). */
@@ -924,8 +924,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                                                          (size_t)xfer, mflags, MSG_TRUNC,
                                                          op->buflen);
             out[count].ok = cl.ok;
-            out[count].tos = -1;   /* M6.0a: IOCP does not yet capture the RX TOS cmsg (a later
-                                    * increment) — surface "none" explicitly, never a bogus 0. */
+            out[count].tos = -1;   /* IOCP does not yet capture the RX TOS cmsg — surface
+                                    * "none" explicitly, never a bogus 0. */
             if (cl.ok) {
                 out[count].bytes = (DWORD)cl.bytes;
                 out[count].truncated = cl.truncated;
@@ -950,9 +950,9 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             /* A watcher socket became readable (wakeup write). Surface KL_COMP_WATCHER for
              * the driver to route to kl_event_dispatch, then re-post the WSARecv to keep
              * watching. If kl_event_del'd it (watcher_removed), this is the aborted
-             * completion — just free the op. (8e-2c) */
+             * completion — just free the op. */
             if (op->watcher_removed) { iocp_op_free(op); continue; }
-            /* Teardown (6B-3 2b review): do NOT re-post — a fresh WSARecv would leave this op
+            /* Teardown: do NOT re-post — a fresh WSARecv would leave this op
              * kernel-owned when kl_event_close_builtin frees it (use-after-free). This completion
              * dequeued the op, so it is no longer kernel-owned: unlink it from st->watches and free
              * it now. Not surfaced (the teardown reaper drops non-accept events anyway). */
@@ -973,7 +973,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             if (iocp_watch_post(op) < 0)
                 op->watcher_removed = 1;   /* re-post failed — freed at kl_event_close */
         } else if (op->type == KL_IOCP_CONNECT) {
-            /* ConnectEx finished (LC-0). Untrack it; if the client aborted the attempt
+            /* ConnectEx finished. Untrack it; if the client aborted the attempt
              * (watcher_removed, set by iocp_comp_cancel) drop it silently — the detached
              * watcher is gone. Otherwise apply SO_UPDATE_CONNECT_CONTEXT (required after
              * ConnectEx so getsockopt/shutdown work) and surface KL_COMP_CONNECT against the
@@ -1005,7 +1005,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE — one chunk of a (possibly multi-chunk) TransmitFile. */
             op->file_done += op->file_chunk;
-            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post (2b review) */
+            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post */
             if (bytes > 0 && op->file_done < op->file_total) {
                 /* More file to send — re-post the next offset-advancing chunk (file-only);
                  * do NOT surface until the whole head+file is out (the driver sees full
@@ -1034,7 +1034,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 }
 
 /* Cancel + DEQUEUE every tracked outstanding overlapped op, then free it — so kl_event_close_builtin
- * never frees an OVERLAPPED the kernel still owns (6B-3 2b review). CancelIoEx forces each pending
+ * never frees an OVERLAPPED the kernel still owns. CancelIoEx forces each pending
  * watcher/connect I/O to complete; the listen socket is already closed so AcceptEx are completing
  * too. Then drain the port until the tracked lists empty, freeing each op AFTER its completion is
  * dequeued. Untracked conn read/write completions that happen to arrive are freed too (dequeued →
@@ -1077,7 +1077,7 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
     }
 }
 
-/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap. The server closed the
+/* Teardown accept-side force-completion. Does NOT reap. The server closed the
  * listen socket BEFORE calling this, and closesocket cancels every pending overlapped AcceptEx on
  * it — so all posted accepts are already completing (their completions will post to the port). The
  * server then drives the reap through the NORMAL path (kl_comp_run → iocp_comp_drain), which
@@ -1090,7 +1090,7 @@ static int iocp_shutdown_accepts(struct KlEventCtx *ctx) {
     return 0;
 }
 
-/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+/* ── Completion sub-vtable ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * reaches them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
  * provider (loop->ops->completion). No behavior change — same funcs, one hop away. */

@@ -1,7 +1,7 @@
 /*
- * datagram_slots.c — INTERNAL packet-slot storage for the datagram transport (Phase B).
+ * datagram_slots.c — INTERNAL packet-slot storage for the datagram transport.
  *
- * See datagram_slots.h. 7A-1 storage separation: the OUTBOUND pool (KlDgramSlots — object-owned) and
+ * See datagram_slots.h. Storage separation: the OUTBOUND pool (KlDgramSlots — object-owned) and
  * the INBOUND slot (KlDgramInbound — life-token-ownable) are DISTINCT allocations with distinct
  * owners. One init-time allocation each; all size arithmetic overflow-checked; acquire/release
  * allocation-free.
@@ -127,7 +127,7 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {
     slot->tos   = -1;
     slot->flags = 0;
     slot->recoverable = 0;
-    slot->gso_ext = NULL; slot->gso_head = 0; slot->gso_last = 0;   /* M5.2b: clear GSO group state */
+    slot->gso_ext = NULL; slot->gso_head = 0; slot->gso_last = 0;   /* clear GSO group state */
     slot->gso_mode = 0; slot->gso_total = 0; slot->gso_seg = 0; slot->gso_owner = NULL;
     slot->in_use = 1;
     memset(&slot->peer,  0, sizeof(slot->peer));

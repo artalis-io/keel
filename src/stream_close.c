@@ -1,5 +1,5 @@
 /*
- * stream_close.c — Phase-B KlStream graceful-close / confirmed-detachment lifecycle (step 3).
+ * stream_close.c — the KlStream graceful-close / confirmed-detachment lifecycle.
  * See stream_close.h.
  *
  * The whole module exists to enforce one invariant: on_close (detachment) fires exactly once,
@@ -9,7 +9,7 @@
  * generic on_retire hook it installs at init — so the read/write TUs carry no static dependency
  * on this module.
  *
- * Cancellation obeys the same synchronous-completion discipline as the step-2B arm trampoline:
+ * Cancellation obeys the same synchronous-completion discipline as the read pause/resume arm trampoline:
  * a cancel hook may retire its op inline (calling on_recv/on_write_complete, which fire on_retire
  * → finalize). The in_close_cancel sentinel defers that finalize until the cancel calls unwind,
  * so on_close cannot fire re-entrantly or twice.

@@ -1,5 +1,5 @@
 /*
- * connect_op.c — Phase-B outbound-connect terminal-once state machine (step 4). See connect_op.h.
+ * connect_op.c — the outbound-connect terminal-once state machine. See connect_op.h.
  *
  * Structure mirrors the KlStream read/close discipline: the terminal decision (on_done) is
  * immediate and exactly-once; DETACHMENT (on_detach) is deferred until every outstanding op is

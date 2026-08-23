@@ -1,5 +1,5 @@
 /*
- * event_pollcomp_internal.h — the pollcomp completion backend's dual-role seam (RC-2).
+ * event_pollcomp_internal.h — the pollcomp completion backend's dual-role seam.
  *
  * event_pollcomp.c is a PURE runtime provider: static KlEventOps + KlCompletionOps +
  * a KlEventProvider factory (kl_event_provider_pollcomp), with NO kl_event_*_builtin /
@@ -14,7 +14,7 @@
  * copy of the mechanics and the two roles never both define _builtin.
  *
  * Internal — not part of the public API. See event_lwip.c (the pure-provider template)
- * and completion.h / event_dispatch.c (the RC-1 dispatch mechanism this rides on).
+ * and completion.h / event_dispatch.c (the dispatch mechanism this rides on).
  */
 #ifndef KEEL_SRC_EVENT_POLLCOMP_INTERNAL_H
 #define KEEL_SRC_EVENT_POLLCOMP_INTERNAL_H

@@ -2,7 +2,7 @@
  * platform_posix.c — POSIX platform services (implements platform.h).
  *
  * One-platform-per-TU (Makefile PLATFORM_SRC): the POSIX sibling of
- * platform_win.c. See docs/phase6_winsock_design.md §B.3.
+ * platform_win.c. See docs/archive/phases/phase6_winsock_design.md §B.3.
  */
 
 #include "platform.h"

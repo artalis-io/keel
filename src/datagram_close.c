@@ -1,5 +1,5 @@
 /*
- * datagram_close.c — INTERNAL close/cancel + confirmed-detachment lifecycle (Phase B, step 4).
+ * datagram_close.c — INTERNAL close/cancel + confirmed-detachment lifecycle.
  * See datagram_close.h. Coordinates the borrowed send + recv machines.
  *
  * BUSY HANDSHAKE. The coordinator counts active frames: each send/recv public op brackets itself
@@ -31,7 +31,7 @@ static void close_detach(KlDgramClose *c, KlDatagramCloseResult result) {
 }
 
 /* recv retired + send retired + outbound queue empty (the machine-level gate: no op physically
- * outstanding). Only once this holds does the backend classifier (§4.3) resolve RETIRED vs
+ * outstanding). Only once this holds does the backend classifier resolve RETIRED vs
  * QUARANTINED. */
 static int close_fully_retired(const KlDgramClose *c) {
     if (c->recv && kl_dgram_recv_inflight(c->recv)) return 0;

@@ -3,7 +3,7 @@
 
 /*
  * datagram_close.h — INTERNAL close/cancel + confirmed-detachment lifecycle over KlDgramSend and
- * KlDgramRecv (Phase B, step 4). See docs/datagram_contract.md §6.
+ * KlDgramRecv. See docs/contracts/datagram.md §6.
  *
  * Coordinates the terminal lifecycle of the (borrowed) send + receive machines. Its one invariant:
  * on_close fires EXACTLY ONCE, only after the machine gate holds — recv in-flight 0, send in-flight 0,
@@ -35,13 +35,13 @@
 #include "datagram_send.h"
 #include "datagram_recv.h"
 #include "datagram_life.h"   /* KlDgramOpKind + KlDgramRetireResult (shared with the completion seam) */
-#include <keel/datagram.h>   /* KlDgramCloseState + KlDatagramCloseResult (promoted 7B-3) */
+#include <keel/datagram.h>   /* KlDgramCloseState + KlDatagramCloseResult */
 
-/* KlDgramCloseState (lifecycle phase OPEN/CLOSING/CLOSED) and KlDatagramCloseResult (terminal §4.2
- * classification: NONE sentinel / DETACHED / QUARANTINED / CLOSE_ERROR) are now defined in the public
- * <keel/datagram.h> (promoted 7B-3); this coordinator consumes them. */
+/* KlDgramCloseState (lifecycle phase OPEN/CLOSING/CLOSED) and KlDatagramCloseResult (terminal
+ * classification: NONE sentinel / DETACHED / QUARANTINED / CLOSE_ERROR) are defined in the public
+ * <keel/datagram.h>; this coordinator consumes them. */
 
-/* Per-op retirement classifier the backend reports to the coordinator (§4.3): the coordinator joins
+/* Per-op retirement classifier the backend reports to the coordinator: the coordinator joins
  * only once no op is PENDING. KlDgramRetireResult + KlDgramOpKind now live in datagram_life.h (shared
  * with the completion seam KlCompletionOps.retire_dgram). */
 typedef KlDgramRetireResult (*KlDgramRetireFn)(void *ctx, KlDgramOpKind kind, int *transport_err);
@@ -98,7 +98,7 @@ int  kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn,
 int  kl_dgram_close_begin(KlDgramClose *c);
 int  kl_dgram_close_cancel(KlDgramClose *c);
 
-/* Owner-destruction SILENT abandon (docs/datagram_sync_teardown_design.md §4a). Reach CLOSED WITHOUT
+/* Owner-destruction SILENT abandon (docs/archive/designs/datagram_sync_teardown_design.md §4a). Reach CLOSED WITHOUT
  * running the ordinary confirmed-detachment terminal: on_close is NEVER invoked (so a user callback
  * cannot free the owner mid-teardown) and NO public terminal is reported. Stops new sends, stops
  * receiving, discards queued output, requests cancellation of any in-flight op, and closes the fd

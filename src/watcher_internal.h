@@ -1,5 +1,5 @@
 /*
- * watcher_internal.h — INTERNAL. Completion-connect watcher helpers (LC-0).
+ * watcher_internal.h — INTERNAL. Completion-connect watcher helpers.
  *
  * The async KlHttpClient drives connect over the completion axis (kl_comp_post_connect) when the
  * loop advertises KL_EVENT_CAP_COMPLETION. Unlike the readiness path — which arms a
@@ -14,7 +14,8 @@
  * Once connected, the client switches to the send/recv phase via the ordinary kl_watcher_mod
  * (which registers the real readiness relay on the completion backend), so the detached node
  * seamlessly becomes a normal watcher. Defined in async.c alongside the rest of the watcher
- * API. See docs/phase10_lwip_raw_client_design.md §3/§4 + client.c.
+ * API. See docs/archive/phases/phase10_lwip_raw_client_design.md §3/§4 and the async client
+ * (src/protocols/http/http_client_async.c).
  */
 #ifndef KEEL_SRC_WATCHER_INTERNAL_H
 #define KEEL_SRC_WATCHER_INTERNAL_H

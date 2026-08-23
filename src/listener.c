@@ -1,6 +1,5 @@
 /*
- * listener.c — Phase-B accept-side listener state machine (step 5; counted bounded-accept window
- * added in 6B-3). See listener.h.
+ * listener.c — the accept-side listener state machine. See listener.h.
  *
  * Reserve-before-accept backpressure, sync-completion-safe posting (iterative pump trampoline),
  * guarded reentrant callbacks, cancel-once, total accepted-fd disposal, and confirmed detachment.

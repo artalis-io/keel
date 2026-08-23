@@ -1,9 +1,9 @@
 /*
  * socket_dgram_posix.c — the POSIX datagram data-plane (KlDatagramOps) for the
- * built-in POSIX socket provider. This is the primitive-only form of what used to
- * live in udp_io_posix.c: every op takes (ctx, fd, …) and speaks KlSockAddr, with
- * no datagram machine state — the send-queue walk, delivery, and interest tracking
- * stay in the datagram core, which dispatches through KlSocketProvider.dgram.
+ * built-in POSIX socket provider. Primitive-only: every op takes (ctx, fd, …) and
+ * speaks KlSockAddr, with no datagram machine state — the send-queue walk, delivery,
+ * and interest tracking stay in the datagram core, which dispatches through
+ * KlSocketProvider.dgram.
  *
  * The recvmsg path always attaches a control buffer and parses opportunistically:
  * the kernel only fills the cmsgs that configure() enabled, so the primitive needs
@@ -561,7 +561,7 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
 
 /* ── The ops table ────────────────────────────────────────────────────── */
 
-/* M2: report ONLY the caps whose implementation is actually compiled in FOR THIS fd's family. Each bit
+/* Report ONLY the caps whose implementation is actually compiled in FOR THIS fd's family. Each bit
  * is gated on the exact macro the corresponding op uses (build_control source-pin, IP_TOS/IPV6_TCLASS,
  * IP_ADD_MEMBERSHIP/IPV6_JOIN_GROUP, SO_BROADCAST) so a bit never over-reports a silently-absent op
  * (e.g. IPv4 without IP_PKTINFO emits no source-pin cmsg → SOURCE_PIN is NOT granted). Connected-mode
@@ -599,8 +599,8 @@ static unsigned pdg_caps(void *ctx, KlSocketHandle fd) {
 #endif
         /* no broadcast on IPv6 */
     }
-    /* M5 high-throughput SUPPORT. Family-INDEPENDENT in mechanism, but only meaningful for IP datagram
-     * sockets — so gate on AF_INET/AF_INET6 to preserve M2's exact-fd truthfulness (a non-IP fd, e.g.
+    /* High-throughput SUPPORT. Family-INDEPENDENT in mechanism, but only meaningful for IP datagram
+     * sockets — so gate on AF_INET/AF_INET6 to preserve exact-fd truthfulness (a non-IP fd, e.g.
      * AF_UNIX SOCK_DGRAM, must NOT be told it has UDP batch/GSO/GRO). RX/TX batch = recvmmsg/sendmmsg
      * ops compiled in (Linux); GSO = the send_gso op can attempt UDP_SEGMENT (advisory — first use may
      * EOPNOTSUPP); GRO = the provider can capture UDP_GRO (per-socket activation also needs accepted_rx). */

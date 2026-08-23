@@ -12,7 +12,7 @@
  * sockcompat.h, each including TU gets a copy compiled against *its* sockaddr
  * layout. That is deliberate: an lwIP provider compiled with lwIP's headers gets
  * lwIP-layout marshalling (with sin_len) for free, with no core recompile — this
- * is what makes the address ABI runtime-injectable (docs/keel_sockaddr_design.md).
+ * is what makes the address ABI runtime-injectable (docs/archive/designs/keel_sockaddr_design.md).
  */
 #include <keel/sockaddr.h>
 #include "sockcompat.h"   /* struct sockaddr{,_in,_in6,_un}, AF_*, htons/ntohs */

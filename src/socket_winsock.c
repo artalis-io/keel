@@ -5,7 +5,7 @@
  * Windows (Makefile OS=windows branch), so it uses Winsock directly with no
  * internal #ifdef. Defines the platform-default socket ops (kl_sockdef_*) the
  * neutral socket.h seam calls, plus the Winsock KlSocketProvider. See
- * docs/phase6_winsock_design.md §B.1.
+ * docs/archive/phases/phase6_winsock_design.md §B.1.
  *
  * A SOCKET is pointer-width (UINT_PTR); it round-trips through KlSocketHandle
  * (intptr_t). INVALID_SOCKET == (SOCKET)(~0) == -1 reinterpreted, so it maps to
@@ -249,7 +249,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     return (ssize_t)sent;
 }
 
-/* No TransmitFile yet (an offset-aware OVERLAPPED optimization for 6b); a
+/* No TransmitFile yet (an offset-aware OVERLAPPED optimization); a
  * pread+send loop is correct and cross-compiles. Sends one chunk per call from
  * *offset, advancing it — same one-chunk-per-tick shape as the POSIX fallback. */
 ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
@@ -456,7 +456,7 @@ KlIoStatus kl_sockdef_io_status(void) {
 #if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
         case ENOTSUP:
 #endif
-            return KL_IO_UNSUPPORTED;   /* datagram M5.1: e.g. UDP GSO unavailable → caller falls back */
+            return KL_IO_UNSUPPORTED;   /* datagram: e.g. UDP GSO unavailable → caller falls back */
         default:
             return KL_IO_FATAL;
     }

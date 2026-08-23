@@ -2,12 +2,11 @@
 #define KEEL_SRC_DATAGRAM_SLOTS_H
 
 /*
- * datagram_slots.h — INTERNAL packet-slot storage for the datagram transport (Phase B).
+ * datagram_slots.h — INTERNAL packet-slot storage for the datagram transport.
  *
- * The frozen Tier-1 datagram contract (docs/datagram_contract.md §2/§3) requires bounded,
- * preallocated, allocation-free packet storage. Step-7A-1 (storage separation) splits this into two
- * INDEPENDENTLY-OWNED objects, matching the two lifetime owners the public KlDatagram needs
- * (docs/datagram_step7_public_api_design.md §5):
+ * The frozen Tier-1 datagram contract (docs/contracts/datagram.md §2/§3) requires bounded,
+ * preallocated, allocation-free packet storage. Storage separation splits this into two
+ * INDEPENDENTLY-OWNED objects, matching the two lifetime owners the public KlDatagram needs:
  *
  *   - KlDgramSlots   — the OUTBOUND send pool: a fixed number of equal-capacity slots + a free-list,
  *                      ONE init-time allocation, OBJECT-owned (freed at detachment). The send half is
@@ -25,31 +24,31 @@
 
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
-#include <keel/datagram.h>   /* KL_DGRAM_TRUNCATED / KL_DGRAM_HAS_LOCAL (promoted 7B-3) */
+#include <keel/datagram.h>   /* KL_DGRAM_TRUNCATED / KL_DGRAM_HAS_LOCAL */
 
 #include <stddef.h>
 
 /* Per-datagram metadata flags (KL_DGRAM_TRUNCATED / KL_DGRAM_HAS_LOCAL) are carried in
  * `KlDgramSlot.flags` and passed to the receive delivery callback's `flags`. Providers set the raw
  * hints (a completed WSAMSG.dwFlags MSG_TRUNC / WSAEMSGSIZE on IOCP, msg_flags & MSG_TRUNC on recvmsg,
- * an active pktinfo local); the receive machine (step 5) canonicalizes them per the frozen contract
- * (docs/datagram_contract.md §4/§8). The flag definitions now live in <keel/datagram.h> (public).
- * (1u << 2) _BROADCAST, (1u << 3) _MULTICAST reserved for a later step. */
+ * an active pktinfo local); the receive machine canonicalizes them per the frozen contract
+ * (docs/contracts/datagram.md §4/§8). The flag definitions live in <keel/datagram.h> (public).
+ * (1u << 2) _BROADCAST, (1u << 3) _MULTICAST reserved. */
 
 /* One packet slot: bounded payload storage (data points into the shared pool block) plus the
- * per-packet metadata the contract carries (peer/local addresses, length, flags, TOS). In step 1
- * these fields are STORAGE only — nothing interprets flags/tos yet. */
+ * per-packet metadata the contract carries (peer/local addresses, length, flags, TOS). These
+ * fields are STORAGE only — the send/recv machines interpret flags/tos. */
 typedef struct {
     KlSockAddr     peer;      /* destination (outbound) / source (inbound) */
     KlSockAddr     local;     /* source-pin (outbound) / pktinfo dest (inbound) */
     size_t         len;       /* bytes currently held in `data` (0 when free/unused) */
     size_t         cap;       /* payload capacity of this slot (bytes) */
     int            tos;       /* per-packet TOS/ECN byte, or -1 (none) */
-    unsigned       flags;     /* KL_DGRAM_* flags — storage only in step 1 */
-    int            recoverable;/* M5.2a: outbound provenance — 1 = enqueued via a batch, so a hard send
+    unsigned       flags;     /* KL_DGRAM_* flags */
+    int            recoverable;/* outbound provenance — 1 = enqueued via a batch, so a hard send
                                * error DROPS this datagram (recoverable policy) instead of poisoning the
                                * queue with the sticky error. 0 = an ordinary single send (sticky). */
-    /* M5.2b — GSO queued-group fields (outbound). A GSO request occupies `nseg` contiguous segment
+    /* GSO queued-group fields (outbound). A GSO request occupies `nseg` contiguous segment
      * slots; each references the caller-preallocated batch group buffer via `gso_ext` (NOT the pool
      * `data` — the payload is copied once into the group buffer, referenced until the group retires).
      * The FIRST segment carries the group record (`gso_head` + `gso_total`/`gso_seg`/`gso_mode`); the
@@ -67,7 +66,7 @@ typedef struct {
 
 /* ── Outbound send pool (OBJECT-owned) ─────────────────────────────────────────────────────────
  * `slot_count` equal-capacity outbound slots + a reserve/release free-list, ONE init-time
- * allocation. No inbound slot lives here (7A-1 storage separation). */
+ * allocation. No inbound slot lives here (storage separation). */
 typedef struct {
     KlAllocator   *alloc;      /* borrowed; used only by init/free (never on acquire/release) */
     unsigned char *block;      /* the one allocation: slot array + free-list + outbound payloads */

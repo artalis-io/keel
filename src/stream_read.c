@@ -1,5 +1,5 @@
 /*
- * stream_read.c — Phase-B KlStream strict read pause/resume machinery (step 2B). See
+ * stream_read.c — the KlStream strict read pause/resume machinery. See
  * stream_read.h. Model-agnostic: received bytes land in the stable read_buf; while paused a
  * completed receive (bytes or terminal) is held undelivered until resume, which delivers it
  * exactly once then re-arms — unless the deliver callback paused/closed the stream. No TLS
@@ -175,8 +175,8 @@ void kl_stream_read_close(KlStream *s) {
     }
     /* Completion: a posted recv may still be PHYSICALLY outstanding (kernel/provider owns the
      * buffer + target). Do NOT clear recv_inflight here — retirement happens when its completion
-     * reaches on_recv (dropped), or via the Step-3 cancel-retirement path. This logical/physical
-     * split is what Step-3 detachment builds on. */
+     * reaches on_recv (dropped), or via the close cancel-retirement path. This logical/physical
+     * split is what close detachment builds on. */
 }
 
 int kl_stream_read_held(const KlStream *s) {

@@ -9,7 +9,7 @@
  * only the system-header selection that is genuinely unavoidable for any file
  * referencing socket types on both POSIX and Windows. socket.h (and the per-
  * platform provider TUs) include this so they can stay logic-neutral. See
- * docs/phase6_winsock_design.md §B.0.
+ * docs/archive/phases/phase6_winsock_design.md §B.0.
  */
 
 #if defined(_WIN32)

@@ -10,7 +10,7 @@
  * The caller supplies the platform's completion result: whether the op SUCCEEDED, its error code and
  * that platform's "message too long" sentinel (WSAEMSGSIZE / EMSGSIZE), the bytes transferred, the
  * message flags + that platform's truncation bit (MSG_TRUNC), and the receive buffer size. This
- * encodes the frozen datagram receive contract's provider side (docs/datagram_contract.md §4/§8):
+ * encodes the frozen datagram receive contract's provider side (docs/contracts/datagram.md §4/§8):
  *
  *  - Success, INCLUDING a zero-length datagram (xfer == 0): ok, bytes = xfer, source + control
  *    metadata parsed regardless of byte count, truncated iff the truncation flag is set (so an

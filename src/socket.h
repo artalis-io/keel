@@ -8,7 +8,7 @@
  * capability flags, the provider factories, the query helpers, and
  * kl_sock_errno_to_error — lives in the installed <keel/socket.h>. This internal
  * header adds the two things a *consumer* (http_server.c, http_connection.c, http_response.c,
- * client.c, …) needs but a provider author does not:
+ * the HTTP client, …) needs but a provider author does not:
  *
  *   - kl_sockdef_*  : the built-in platform defaults (raw syscall per op),
  *                     DEFINED per-platform in the provider TU (socket_posix.c /
@@ -25,7 +25,7 @@
 #include <keel/socket.h>      /* public: KlSocketProvider/KlSocketOps/KlIoVec/caps/... */
 #include "sockcompat.h"       /* ssize_t (+ struct sockaddr / socklen_t on both platforms) */
 
-/* Internal socket-provider capability (PAL Phase 8), reserving bit 3 out of the
+/* Internal socket-provider capability, reserving bit 3 out of the
  * public KL_SOCK_CAP_* space (bits 0-2 in <keel/socket.h>). Kept OUT of the public
  * header on purpose: completion-mode I/O is an internal event-axis concern — the
  * provider's data plane is driven by the completion loop's overlapped submit path
@@ -41,7 +41,7 @@ const KlSocketProvider *kl_socket_provider_iocp(void);
 
 /* The overlapped socket provider that pairs with the portable poll() completion
  * backend (defined in event_pollcomp.c, BACKEND=pollcomp only). Reuses the POSIX
- * control-plane ops + the OVERLAPPED capability the Phase 7 negotiation keys on, so
+ * control-plane ops + the OVERLAPPED capability the capability negotiation keys on, so
  * the completion driver can run — and be tested — on Linux/macOS. Internal; declared
  * unconditionally, defined/called only in the pollcomp build. */
 const KlSocketProvider *kl_socket_provider_pollcomp(void);

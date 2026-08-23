@@ -9,10 +9,10 @@
  * thread-pool wakeup. Each is DEFINED per-OS in platform_posix.c / platform_win.c
  * (one selected by the Makefile PLATFORM_SRC branch) — the same one-platform-per-
  * TU pattern as event_epoll.c/event_wsapoll.c and socket_posix.c/socket_winsock.c.
- * See docs/phase6_winsock_design.md §B.0/§B.3.
+ * See docs/archive/phases/phase6_winsock_design.md §B.0/§B.3.
  *
  * Deliberately several narrow functions rather than one KlPlatformOps god-object
- * (per docs/pal_transformation_design.md §6).
+ * (per docs/archive/designs/pal_transformation_design.md §6).
  *
  * INTERNAL header — not installed.
  */
@@ -41,7 +41,7 @@ void kl_plat_random(void *buf, size_t len);
  * the byte count carries no meaning, only "something is ready".
  *
  * POSIX: pipe(2). Windows: a connected loopback TCP socket pair, because WSAPoll
- * can only watch sockets, not pipe HANDLEs (see docs/phase6_winsock_design.md
+ * can only watch sockets, not pipe HANDLEs (see docs/archive/phases/phase6_winsock_design.md
  * §B.3). This is the one platform seam the thread pool needs. */
 typedef struct {
     KlSocketHandle rd;

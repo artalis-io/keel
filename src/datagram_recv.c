@@ -1,6 +1,6 @@
 /*
- * datagram_recv.c — INTERNAL serial receive + strict pause/resume over the dedicated inbound slot
- * (Phase B, step 3). See datagram_recv.h. Mirrors the KlStream read machinery: pre-arm before the
+ * datagram_recv.c — INTERNAL serial receive + strict pause/resume over the dedicated inbound slot.
+ * See datagram_recv.h. Mirrors the KlStream read machinery: pre-arm before the
  * hook, iterative trampoline for synchronous (inline) completion, strict pause with a single held
  * datagram, and paused/stopped re-checked after every delivery.
  */
@@ -8,7 +8,7 @@
 
 #include <string.h>
 
-static void recv_fail(KlDgramRecv *r);   /* defined below; used by the M5.3 view drain */
+static void recv_fail(KlDgramRecv *r);   /* defined below; used by the view drain */
 
 /* Clear the inbound slot's per-datagram metadata before the provider fills it, so a prior packet's
  * source/dest/flags can NEVER survive into the next receive (contract §8: no stale metadata across
@@ -64,7 +64,7 @@ void kl_dgram_recv_set_view_pull(KlDgramRecv *r, KlDgramRecvViewFn view_pull, vo
     if (ctx) r->hook_ctx = ctx;   /* the batch cursor's context (else keep the readiness hook_ctx) */
 }
 
-/* M5.3 — deliver ONE borrowed view (peer-mandatory finalize on the view, NOT the recv_cap clamp; the
+/* Deliver ONE borrowed view (peer-mandatory finalize on the view, NOT the recv_cap clamp; the
  * view carries its own len/flags). Returns 0 delivered, -1 = peer-absent contract violation (fails). */
 static int recv_present_view(KlDgramRecv *r, const KlDgramRxView *v) {
     if (kl_sockaddr_family(&v->peer) == KL_AF_UNSPEC) { recv_fail(r); return -1; }
@@ -76,7 +76,7 @@ static int recv_present_view(KlDgramRecv *r, const KlDgramRxView *v) {
 
 /* The borrowed-view readable drain (batch mode). Same serial contract as the inbound-slot loop: one
  * view_pull → deliver, re-checking paused/stopped each iteration. `allow_refill` = 1 for the readable
- * edge (refill via recv_batch when the cursor drains); 0 for the resume held-drain (§5.3 — deliver only
+ * edge (refill via recv_batch when the cursor drains); 0 for the resume held-drain (deliver only
  * already-buffered datagrams, NEVER read new kernel data). Runs inside a recv_enter/leave bracket. */
 static int recv_drive_view(KlDgramRecv *r, int allow_refill) {
     int ret = 0;
@@ -177,7 +177,7 @@ static void recv_fail(KlDgramRecv *r) {
 int kl_dgram_recv_start(KlDgramRecv *r) {
     if (!r || !r->inited)
         return -1;
-    r->started = 1;   /* M5.3: latched regardless of the arm result / callback — attach is now refused */
+    r->started = 1;   /* latched regardless of the arm result / callback — attach is now refused */
     if (r->paused || r->stopped || r->recv_inflight || r->held)
         return 0;
     recv_enter(r);
@@ -218,7 +218,7 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
         return 0;
     recv_enter(r);
     int ret;
-    if (r->view_pull) {                      /* M5.3 borrowed-view batch mode */
+    if (r->view_pull) {                      /* borrowed-view batch mode */
         ret = recv_drive_view(r, /*allow_refill*/1);
         recv_leave(r);
         return ret;
@@ -266,7 +266,7 @@ int kl_dgram_recv_resume(KlDgramRecv *r) {
     if (r->stopped)
         ret = 0;
     else if (r->view_pull) {
-        /* M5.3 batch mode (§5.3): pause dropped READ interest but the ext CURSOR may hold undelivered
+        /* Batch mode: pause dropped READ interest but the ext CURSOR may hold undelivered
          * logical datagrams. Drain the held cursor FIRST (allow_refill=0 — deliver only buffered data,
          * never read new kernel data), THEN re-arm READ interest if still active. Ordering matters: the
          * held data is delivered even if the re-arm fails, and no new socket data is consumed ahead of
@@ -297,7 +297,7 @@ void kl_dgram_recv_stop(KlDgramRecv *r) {
         r->recv_inflight = 0;
     }
     /* Completion: a posted recv may still be PHYSICALLY outstanding; it retires (dropped) on its
-     * completion. The logical/physical split is what step-4 detachment builds on. */
+     * completion. The logical/physical split is what confirmed-detachment close builds on. */
     recv_leave(r);
 }
 

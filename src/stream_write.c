@@ -1,7 +1,7 @@
 /*
- * stream_write.c — Phase-B KlStream write machinery (step 2A). See stream_write.h.
+ * stream_write.c — KlStream write machinery. See stream_write.h.
  *
- * Model-agnostic atomic write over a bounded, preallocated KlDrain queue (Step 1). Readiness
+ * Model-agnostic atomic write over a bounded, preallocated KlDrain queue. Readiness
  * drains via the queue's write_fn; completion posts one async send at a time via the submit
  * hook and pumps the next on the WRITE completion. TLS is above the raw stream (the adapter's
  * hooks encrypt); no TLS state here.
@@ -74,7 +74,7 @@ static int stream_pump_completion(KlStream *s) {
     s->send_inflight    = 1;
     s->send_cancel_requested = 0;                /* a genuinely new send op — not yet cancel-requested */
     s->inflight_len     = len;
-    s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op (Finding 4) */
+    s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op */
     if (s->inflight_copying)                     /* backend copied — free the queue now, but */
         kl_drain_consume(&s->wq, len);           /* send_inflight still blocks the next submit */
     return 0;
@@ -83,7 +83,7 @@ static int stream_pump_completion(KlStream *s) {
 KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
     if (!s || !s->wq_inited) return KL_STREAM_ERROR;
     if (s->wq_err) return KL_STREAM_ERROR;
-    if (s->wq_closing) return KL_STREAM_CLOSED;   /* close in progress — refuse new writes (step 3) */
+    if (s->wq_closing) return KL_STREAM_CLOSED;   /* close in progress — refuse new writes */
     /* Fail closed if the adapter never installed a transport hook (readiness write_fn or a
      * completion submit) — otherwise the readiness path would call a NULL write_fn. Not sticky:
      * a missing hook is a setup ordering issue, not a permanent stream error. Nothing is taken. */

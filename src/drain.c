@@ -1,5 +1,5 @@
 #include <keel/drain.h>
-#include "drain_reserve.h"   /* Phase-B internal reservation + low-water API */
+#include "drain_reserve.h"   /* internal reservation + low-water API */
 #include <string.h>
 #include <stdint.h>
 
@@ -109,7 +109,7 @@ static int drain_crossed_low_water(const KlDrain *d, size_t prev_len) {
 }
 
 /* Fire AT MOST ONE externally-reentrant callback after state is fully updated, per the
- * sequencing rule (docs/stream_contract.md §4). Precedence: a low-water writable crossing
+ * sequencing rule (docs/contracts/stream.md §4). Precedence: a low-water writable crossing
  * (on_writable) suppresses on_drain for that transition — a caller using both gets the
  * writable signal, not a duplicate empty one. on_writable is a *writable* signal (it may
  * synchronously refill the buffer but must NOT free the drain), so d stays live and the
@@ -184,7 +184,7 @@ void kl_drain_consume(KlDrain *d, size_t n) {
     (void)drain_notify(d, prev_len);
 }
 
-/* ── Phase-B reservation + low-water extension (drain_reserve.h) ─────────────── */
+/* ── reservation + low-water extension (drain_reserve.h) ─────────────── */
 
 void kl_drain_set_low_water(KlDrain *d, size_t low_water) {
     if (!d) return;

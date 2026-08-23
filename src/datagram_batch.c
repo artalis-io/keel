@@ -1,9 +1,9 @@
 /*
- * datagram_batch.c — the batch / GSO / GRO extension object lifecycle (datagram M5.1).
+ * datagram_batch.c — the batch / GSO / GRO extension object lifecycle.
  *
- * M5.1 scope: capability-gated, caller-preallocated batch create/free with overflow-safe allocation,
- * owner/direction binding, the E2 completion-creation rules, and full allocation-failure unwind. No
- * send/recv wiring (M5.2/M5.3). See docs/datagram_m5_batch_extension_design.md.
+ * Scope: capability-gated, caller-preallocated batch create/free with overflow-safe allocation,
+ * owner/direction binding, the E2 completion-creation rules, and full allocation-failure unwind. The
+ * send/recv wiring lives elsewhere.
  *
  * A KlDatagramBatch is layout-neutral (KlSockAddr-free) and touches no platform networking header — it
  * only drives the provider's KlDatagramOps batch-block allocators + the KlAllocator. It reads the
@@ -84,7 +84,7 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
     b->owner = dg; b->dir = dir; b->n_slots = n_slots; b->slot_bufsz = slot_bufsz;
     b->rx_slots_bytes = rx_slots_bytes; b->tx_descs_bytes = tx_descs_bytes; b->gso_bytes = gso_bytes;
     b->alloc = a; b->ops = ops;
-    b->reclaim = batch_destroy;   /* M5.3: the facade's indirect RECV-batch teardown (keeps datagram.c
+    b->reclaim = batch_destroy;   /* the facade's indirect RECV-batch teardown (keeps datagram.c
                                    * free of a static datagram_batch.c reference → freestanding-clean) */
 
     if (want_recv) {
@@ -113,7 +113,7 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
          * send_batch / the portable loop). Always present for a send batch — independent of caps. */
         b->tx_descs = kl_malloc(a, tx_descs_bytes);
         if (!b->tx_descs) { batch_destroy(b); return NULL; }
-        b->gso_buf = kl_malloc(a, gso_bytes);   /* copy-once GSO group buffer (M5.2b) */
+        b->gso_buf = kl_malloc(a, gso_bytes);   /* copy-once GSO group buffer */
         if (!b->gso_buf) { batch_destroy(b); return NULL; }
     }
     return b;
@@ -121,7 +121,7 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
 
 int kl_datagram_batch_free(KlDatagramBatch *b) {
     if (!b) return 0;
-    if (b->gso_busy) return -1;   /* E1: a GSO group still reads b's buffer asynchronously (M5.2b) */
+    if (b->gso_busy) return -1;   /* E1: a GSO group still reads b's buffer asynchronously */
     batch_destroy(b);
     return 0;
 }
