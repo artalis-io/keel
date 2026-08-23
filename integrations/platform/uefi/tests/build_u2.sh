@@ -42,7 +42,7 @@ CFLAGS=(
   -mno-red-zone -std=c11
   -DKEEL_FREESTANDING
   -DTARGET_PORT="$TARGET_PORT"
-  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
+  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src" -I. -I..
   -isystem "$SHIM"
   -Wall -Wextra
   -c

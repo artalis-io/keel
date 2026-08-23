@@ -51,7 +51,7 @@ CFLAGS=(
   -DKEEL_FREESTANDING
   -DTARGET_PORT="$TARGET_PORT"
   -DTARGET_HOST="\"$TARGET_HOST\""
-  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
+  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src" -I. -I..
   -isystem "$SHIM"
   -Wall -Wextra
   -c
