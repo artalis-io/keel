@@ -1382,6 +1382,13 @@ FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar \
                           -fno-stack-protector -fno-builtin -DKEEL_FREESTANDING \
                           -Iinclude -Ivendor/llhttp -Isrc
 FREESTANDING_LIB = libkeel_freestanding.a
+
+# Server-only include dirs — the protocol-internal headers http_connection.c pulls
+# (http_internal.h via source-dir search; http2_internal.h from the sibling http2/
+# dir, which source-dir search cannot reach). Kept OUT of the global flags so the
+# client / datagram / DNS archives never see protocol internals — passed only to the
+# server archive builds (fs_build_and_gate arg 4).
+FREESTANDING_SERVER_INC = -Isrc/protocols/http -Isrc/protocols/http2
 FREESTANDING_LIB_OBJ = $(FREESTANDING_CLIENT_SRC:.c=.freestanding.o)
 
 %.freestanding.o: %.c
@@ -1448,7 +1455,7 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/protocols/http/completion_http_server.c \
+    src/completion_dispatch.c src/completion_core.c src/datagram_life.c src/protocols/http/completion_http_server.c \
     src/listener.c src/stream.c \
     src/protocols/http/http_connection.c src/protocols/http/http_response.c src/protocols/http/http_router.c src/protocols/http/http1_chunked.c src/drain.c \
     src/protocols/http/http_body_reader_buffer.c src/protocols/http/http_server_core.c src/protocols/http/http_proto_hooks.c \
@@ -1458,7 +1465,7 @@ FREESTANDING_SERVER_SRC = \
 freestanding-lib-server:
 	@echo "== freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
 	@rm -f libkeel_freestanding_server.a
-	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,)
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,$(FREESTANDING_SERVER_INC))
 
 # ── Freestanding DATAGRAM archive (Phase 10 6.4a-1: KlUdp + the Tier-1 machine) ──
 # OPT-IN layer — the DNS/UDP surface is deliberately OUT of the minimal client
@@ -1666,7 +1673,7 @@ FREESTANDING_SERVER_SC_LIB = libkeel_freestanding_server_selfcontained.a
 freestanding-lib-server-selfcontained:
 	@echo "== self-contained freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
 	@rm -f $(FREESTANDING_SERVER_SC_LIB)
-	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA) $(FREESTANDING_SERVER_INC))
 
 # Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
 # (udp + datagram_* + completion) + the STOCK src/protocols/dns/dns_resolver.c + in-archive mem*/
