@@ -1,5 +1,5 @@
 /*
- * lifecycle_uefi.c — kl_uefi_shutdown(): release the EFI network stack (U-7).
+ * lifecycle_uefi.c — kl_uefi_shutdown(): release the EFI network stack.
  * See lifecycle_uefi.h. Orchestrates the three provider/platform teardowns in
  * dependency order (sockets + events first, platform clock/EBS last).
  */

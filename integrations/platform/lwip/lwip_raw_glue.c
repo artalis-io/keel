@@ -1,44 +1,39 @@
 /*
- * lwip_raw_glue.c — the lwIP-touching half of the Phase 9 raw completion backend.
+ * lwip_raw_glue.c — the lwIP-touching half of the raw completion backend.
  *
  * This TU includes ONLY lwIP's NO_SYS=1 raw headers — never KEEL's socket/net headers —
  * so lwIP's htons/ntohs macros and its ssize_t typedef cannot clash with the host
  * <sys/socket.h>/<netinet/in.h> that event_lwip_raw.c pulls in through the KEEL socket
  * seam. The two halves meet across lwip_raw_glue.h (opaque void* pcb/netif/lwrctx + neutral
- * KlLwrRecord; no lwIP type escapes). See docs/phase9_lwip_raw_design.md.
+ * KlLwrRecord; no lwIP type escapes).
  *
- * ── Stage A rewrite (this file) ──────────────────────────────────────────────
- * A per-context/per-connection data model that fixes four coupled correctness bugs:
+ * ── Receive data model ──────────────────────────────────────────────
+ * A per-context/per-connection data model with four coupled correctness properties:
  *
- *   #1 receive truncation / ack-before-deliver. The old recv callback copied each pbuf into
- *      a fixed 8 KiB stage buffer, DROPPED the overflow, and immediately tcp_recved()'d the
- *      WHOLE datagram — acking bytes it never delivered. Now each slot owns a bounded RETAINED
+ *   #1 no receive truncation / ack-before-deliver. Each slot owns a bounded RETAINED
  *      pbuf chain (real lwIP flow control): the recv callback either RETAINS the pbuf (no
  *      copy, no ack) or, at the per-conn bound, returns ERR_MEM WITHOUT freeing (lwIP holds it
  *      and re-delivers = backpressure). tcp_recved() is issued ONLY as bytes are copied out
  *      into Keel's read_buf during the drain. No byte is ever acked before it is delivered,
  *      and none is silently dropped.
  *
- *   #2 arm-capacity mismatch. The backend had a separate 8-entry armed table smaller than the
- *      glue's 32-slot conn table, itself smaller than Keel's max_connections (256). Now arm
- *      state lives in the per-conn slot (`armed`), and the slot table is sized to conn_cap =
- *      KlHttpServerConfig.max_connections — ONE authoritative limit. A conn that has a slot always arms.
+ *   #2 arm-capacity match. Arm state lives in the per-conn slot (`armed`), and the slot
+ *      table is sized to conn_cap = KlHttpServerConfig.max_connections — ONE authoritative
+ *      limit. A conn that has a slot always arms.
  *
- *   #4 silent completion-ring drop. A fixed 64-entry global ring (lwr_rec_push) silently
- *      dropped completions when full — a lost terminal = a leaked/never-closed KlHttpConn. Gone:
- *      each slot carries its own pending-completion flags (accept / write / terminal); the
- *      drain SCANS all slots and emits one completion per pending item, bounded by conn_cap.
- *      It cannot overflow, and a terminal is a per-slot flag -> always deliverable.
+ *   #4 no silent completion drop. Each slot carries its own pending-completion flags
+ *      (accept / write / terminal); the drain SCANS all slots and emits one completion per
+ *      pending item, bounded by conn_cap. It cannot overflow, and a terminal is a per-slot
+ *      flag -> always deliverable.
  *
- *   #5 global mutable state. g_conns[]/g_listen_pcb/g_recs are replaced by an opaque
- *      per-context KlLwrCtx (allocated through KlAllocator at ctx create, not in a callback or
- *      hot path). The lwIP CORE (lwip_init) stays a process-global one-time init; a single
- *      file-scope "active ctx" guard enforces the NO_SYS=1 single-stack invariant (rejecting a
- *      2nd simultaneous ctx) and is the ONLY legitimate global — sequential create/destroy/
- *      create works. The raw-API TEST CLIENT moved out to lwip_raw_testclient.c.
+ *   #5 no global mutable state. State lives in an opaque per-context KlLwrCtx (allocated
+ *      through KlAllocator at ctx create, not in a callback or hot path). The lwIP CORE
+ *      (lwip_init) stays a process-global one-time init; a single file-scope "active ctx"
+ *      guard enforces the NO_SYS=1 single-stack invariant (rejecting a 2nd simultaneous ctx)
+ *      and is the ONLY legitimate global — sequential create/destroy/create works.
  *
- * ── Stage B rewrite (this file) ──────────────────────────────────────────────
- * The send + file-response path is redesigned to use BOUNDED, PREALLOCATED per-connection
+ * ── Send + file-response data model ──────────────────────────────────────────────
+ * The send + file-response path uses BOUNDED, PREALLOCATED per-connection
  * transmit state — no per-response malloc, no double-copy of the whole payload, no whole-file
  * read into memory:
  *
@@ -61,7 +56,7 @@
  *     segments into the preallocated TX window, tcp_write(COPY) + tcp_output, advancing sent_off.
  *     ERR_MEM stops (backpressure); tcp_sent advances send_acked and re-pumps. One terminal WRITE
  *     only when send_acked == total. Transmit memory is bounded by KL_LWR_TX_WIN, INDEPENDENT of
- *     response size — so response size is now unbounded-by-design (the old 16 MiB cap is gone).
+ *     response size — so response size is unbounded-by-design (no fixed response-size cap).
  *
  *   - File response (kl_lwr_sendfile_begin): does NOT read the file into memory. The slot stores
  *     the head iov (bounded, snapshotted as above) + file_fd + count + sent_off. The pump sends
@@ -76,14 +71,14 @@
 
 #include "lwip/init.h"
 #include "lwip/tcp.h"
-#include "lwip/udp.h"     /* LC-3a: datagram pcb (udp_new/bind/recv/sendto/remove) */
+#include "lwip/udp.h"     /* datagram pcb (udp_new/bind/recv/sendto/remove) */
 #include "lwip/timeouts.h"
 #include "lwip/netif.h"
 #include "lwip/ip_addr.h"
 #include "lwip/sys.h"
 #include "lwip/pbuf.h"
 
-#include <keel/allocator.h>   /* KlAllocator + kl_malloc/kl_free — the NEW Stage-A state.
+#include <keel/allocator.h>   /* KlAllocator + kl_malloc/kl_free — the per-context state.
                                * Only KlAllocator (a plain vtable of fn ptrs + sizes) crosses;
                                * it pulls NO socket/net type, so the lwIP-header seam holds. */
 
@@ -92,7 +87,7 @@
 #include <stdint.h>   /* SIZE_MAX (sendfile size overflow guard) */
 #include <unistd.h>   /* pread + off_t for the file-send path */
 
-/* NOTE (Stage B): NO <stdlib.h> — the send path no longer uses malloc/free. All glue-owned
+/* NOTE: NO <stdlib.h> — the send path uses no malloc/free. All glue-owned
  * memory (the conn-slot array + the per-slot preallocated TX windows/head buffers) is allocated
  * through KlAllocator at ctx create. The send path is provably zero-allocation. */
 
@@ -115,19 +110,19 @@ u32_t sys_now(void) {
  * chain. At the bound the recv callback returns ERR_MEM (lwIP retains + re-delivers = real
  * backpressure). 64 KiB comfortably spans a large header block or a body chunk while bounding
  * per-conn memory. PER-BACKEND receive memory bound = conn_cap * KL_LWR_RX_MAX (the send
- * buffer is a separate, response-sized Stage-B allocation). Overridable at build time
+ * buffer is a separate transmit allocation). Overridable at build time
  * (-DKL_LWR_RX_MAX=...) so a small-config test can shrink it below TCP_WND to deterministically
  * exercise the ERR_MEM backpressure path. */
 #ifndef KL_LWR_RX_MAX
 #define KL_LWR_RX_MAX (64u * 1024u)
 #endif
 
-/* tcp_write's u16_t len ceiling (Stage B send-pump chunking). */
+/* tcp_write's u16_t len ceiling (send-pump chunking). */
 #define KL_LWR_TCP_WRITE_MAX 0xffffu
 
-/* ── LC-3a / 7A-5: UDP datagram-completion path (datagram over raw) ───────────────────
+/* ── UDP datagram-completion path (datagram over raw) ───────────────────
  * A datagram slot mirrors the TCP conn slot but for a udp_pcb. lwIP's udp_recv callback holds ONE
- * inbound datagram (the ONE-HELD-PACKET contract, docs/datagram_step7_public_api_design.md §3):
+ * inbound datagram (the ONE-HELD-PACKET contract, docs/archive/designs/datagram_step7_public_api_design.md §3):
  * the payload is copied out of the pbuf + source IPv4/port into the slot's single held datagram,
  * which the drain surfaces as KL_COMP_DGRAM_RECV (gated by `rx_armed` — one in-flight recv). A
  * second datagram arriving while one is already held is DROPPED (deterministic UDP loss — a
@@ -135,9 +130,8 @@ u32_t sys_now(void) {
  * op will take). Sends go straight out (udp_sendto) and the drain surfaces the matching
  * KL_COMP_DGRAM_SEND. See the design notes in event_lwip_raw.c and docs.
  *
- * 7A-5 converted the former 16-entry receive ring to this single held slot so the backend matches
- * the KlDgramRecv one-in-flight/one-held contract exactly (no over-buffering that could deliver
- * stale datagrams a paused/slow consumer never posted ops for). */
+ * The single held slot matches the KlDgramRecv one-in-flight/one-held contract exactly (no
+ * over-buffering that could deliver stale datagrams a paused/slow consumer never posted ops for). */
 
 /* Depth of the pending-SEND completion FIFO per udp slot (a burst of udp_sendto between drains).
  * Distinct from receive, which is now a single held datagram (one-held-packet contract). */
@@ -158,7 +152,7 @@ u32_t sys_now(void) {
 #define KL_LWR_UDP_SLOTS 8
 #endif
 
-/* ── Stage B: bounded, preallocated per-connection transmit window ────────────────
+/* ── Bounded, preallocated per-connection transmit window ────────────────
  * KL_LWR_TX_WIN is the fixed staging buffer each slot pumps THROUGH, allocated ONCE at ctx
  * create (a single conn_cap * KL_LWR_TX_WIN block, sliced per slot). The pump copies at most
  * KL_LWR_TX_WIN bytes per round out of the referenced iov segments (buffered) or pread out of
@@ -225,7 +219,7 @@ typedef struct {
     size_t          pend_write_bytes; /* bytes acked for the pending WRITE */
     int             pend_terminal;    /* a terminal (ok=0) completion waiting to be surfaced */
 
-    /* ── outbound client state (LC-1) ─────────────────────────────────────────────
+    /* ── outbound client state ─────────────────────────────────────────────
      * A client slot is created by kl_lwr_connect for a client pcb (tcp_connect). It reuses the
      * SAME retained-recv queue (rx_head/rx_queued) for the RESPONSE (lwr_srv_recv is direction-
      * agnostic). But its completions do NOT flow through the server-side KL_COMP_ACCEPT/READ/WRITE/
@@ -237,7 +231,7 @@ typedef struct {
      *     KL_COMP_WATCHER when the pcb is writable (sndbuf headroom) or readable (rx queued/closed).
      *     The client's kl_sock_send/kl_sock_recv on the pcb are real (kl_lwr_client_send/_recv).
      * No KlHttpConn, no server-side completion path — the seam holds. The request send does NOT use the
-     * Stage-B pump (that surfaces a server KL_COMP_WRITE); the client writes via kl_lwr_client_send. */
+     * send-pump (that surfaces a server KL_COMP_WRITE); the client writes via kl_lwr_client_send. */
     int             is_client;        /* 1 = an outbound client pcb (kl_lwr_connect) */
     int             connected;        /* client: TCP connected (connected_cb fired ERR_OK) */
     int             pend_connect;     /* client: a connect completion is waiting to be surfaced */
@@ -245,10 +239,10 @@ typedef struct {
     void           *watcher_udata;    /* client: the tagged KlWatcher udata (connect + data plane) */
     unsigned        watcher_mask;     /* client: armed readiness mask (KL_LWR_EV_READ/WRITE) */
 
-    /* ── Stage B outgoing send state (BOUNDED, PREALLOCATED — no whole-payload copy) ──
+    /* ── outgoing send state (BOUNDED, PREALLOCATED — no whole-payload copy) ──
      * A send references its source in place (the live KlHttpResponse segments) and pumps THROUGH a
-     * fixed preallocated window. `send_active` = a send is in flight (replaces the old
-     * send_buf!=NULL sentinel). `send_total` = the whole logical payload; `send_off` = bytes
+     * fixed preallocated window. `send_active` = a send is in flight. `send_total` = the whole
+     * logical payload; `send_off` = bytes
      * handed to tcp_write so far; `send_acked` = peer-acked. When send_acked == send_total the
      * terminal WRITE is surfaced (pend_write). No per-response heap buffer exists.
      *
@@ -278,7 +272,7 @@ typedef struct {
     size_t          tx_head_used;
 } KlLwrConn;
 
-/* ── LC-3a / 7A-5: the single held inbound datagram in a udp slot ──────────────────
+/* ── The single held inbound datagram in a udp slot ──────────────────
  * The payload is copied out of the lwIP pbuf at capture (so the pbuf is freed immediately — no
  * pbuf retained past the callback), bounded to KL_LWR_UDP_DGRAM_MAX. src_ip/src_port carry the
  * datagram source (IPv4 network-order bytes + host-order port). One per slot (one-held-packet). */
@@ -291,7 +285,7 @@ typedef struct {
 } KlLwrDgram;
 
 /* Stable-liveness token for datagram completion ops (src/datagram_life.h — the frozen "backend-owned
- * stable token", docs/datagram_contract.md §6). Forward-declared locally so this lwIP-only glue TU
+ * stable token", docs/contracts/datagram.md §6). Forward-declared locally so this lwIP-only glue TU
  * keeps its minimal include set (no src/ header path); the two entrypoints resolve against libkeel's
  * datagram_life.o at link. Each posted udp op (recv arm / pending send) holds ONE ref; the drain
  * transfers it to the completion event, and close/teardown release any op ref not yet drained. */
@@ -299,7 +293,7 @@ typedef struct KlDgramLife KlDgramLife;
 void kl_dgram_life_retain(KlDgramLife *l);
 void kl_dgram_life_release(KlDgramLife *l);
 
-/* ── LC-3a: per-udp-socket slot ───────────────────────────────────────────────────
+/* ── per-udp-socket slot ───────────────────────────────────────────────────
  * One slot per datagram bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
  * token the op retained at post (the drain transfers it to the KL_COMP_DGRAM_RECV/SEND event, so the
  * backend never dereferences the possibly-freed transport owner). The slot holds exactly
@@ -325,25 +319,24 @@ typedef struct {
 } KlLwrUdpSlot;
 
 /* ── per-context backend state (fix #5 — de-globalize) ────────────────────────────
- * Everything that used to be file-scope now lives here, allocated through KlAllocator at ctx
- * create. */
+ * All per-backend raw state lives here, allocated through KlAllocator at ctx create. */
 typedef struct KlLwrCtx {
     KlAllocator    *alloc;
     struct tcp_pcb *listen_pcb;   /* the relocated LISTEN pcb (tcp_listen result), or NULL */
     struct netif   *loopif;       /* the loopback netif */
     KlLwrConn      *conns;        /* conn_cap slots (kl_malloc'd) */
     int             conn_cap;
-    KlLwrUdpSlot    udp[KL_LWR_UDP_SLOTS];   /* LC-3a udp slots (fixed, in-ctx) */
-    /* 7B-8: context-owned pending RECV terminal completions (a cancelled armed recv). Preallocated (one
+    KlLwrUdpSlot    udp[KL_LWR_UDP_SLOTS];   /* udp slots (fixed, in-ctx) */
+    /* Context-owned pending RECV terminal completions (a cancelled armed recv). Preallocated (one
      * per udp slot); SURVIVES the slot teardown so the terminal drains even after the pcb closes. Each
      * non-NULL entry holds ONE transferred arm token ref; the drain emits one terminal + releases it. */
     KlDgramLife    *udp_term[KL_LWR_UDP_SLOTS];   /* NULL = free */
 
-    /* ── Stage B: preallocated transmit memory (kl_malloc'd once, sliced per slot) ──
+    /* ── preallocated transmit memory (kl_malloc'd once, sliced per slot) ──
      * ONE contiguous block of conn_cap * KL_LWR_TX_STRIDE bytes; slot i owns bytes
      * [i*STRIDE, i*STRIDE + KL_LWR_TX_WIN) as its pump window and the following KL_LWR_TX_HEAD
-     * bytes as its head-snapshot buffer. Never grown per-send; the whole point of Stage B is
-     * bounded transmit memory. tx_block_size is kept for the exact kl_free at destroy. */
+     * bytes as its head-snapshot buffer. Never grown per-send; transmit memory is bounded.
+     * tx_block_size is kept for the exact kl_free at destroy. */
     unsigned char  *tx_block;
     size_t          tx_block_size;
 } KlLwrCtx;
@@ -409,7 +402,7 @@ static void lwr_rx_free(KlLwrConn *c) {
     c->rx_queued = 0;
 }
 
-/* Reset the slot's send offsets to "no send in flight". Stage B: nothing to free — the TX
+/* Reset the slot's send offsets to "no send in flight". Nothing to free — the TX
  * window + head-snapshot buffers are preallocated (ctx-owned, index-derived) and reused across
  * sends. A reset slot's send_active is 0; file_fd is set to -1 defensively so no stale fd is
  * ever pread. This is the only send teardown — there is no heap buffer to release. */
@@ -526,7 +519,7 @@ void *kl_lwr_ctx_create(void *alloc_v, int conn_cap) {
     }
     memset(ctx->conns, 0, bytes);
 
-    /* Preallocate the bounded per-conn transmit block (Stage B — zero send-path alloc). A
+    /* Preallocate the bounded per-conn transmit block (zero send-path alloc). A
      * failure here is a clean init failure (frees the slot array + ctx, leaves the active-ctx
      * guard clear so a retry / sequential create can proceed). */
     if (lwr_alloc_tx_block(ctx, conn_cap) != 0) {
@@ -600,7 +593,7 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
         if (tcp_close(lp) != ERR_OK) tcp_abort(lp);
     }
 
-    /* LC-3a: tear down any live udp pcbs (detach the recv cb + free the pcb). The single held
+    /* Tear down any live udp pcbs (detach the recv cb + free the pcb). The single held
      * datagram is inline in the slot (no heap), cleared by the memset below implicitly. A slot
      * still live here means the datagram close / kl_lwr_udp_close never ran (loop torn down before the
      * socket): release its outstanding op token refs so they don't leak (the owner ref may still
@@ -615,7 +608,7 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
             s->pcb = NULL;
         }
     }
-    /* 7B-8: release any pending recv terminal never drained (loop torn down before the drain) — each
+    /* Release any pending recv terminal never drained (loop torn down before the drain) — each
      * holds one transferred arm ref. Symmetric with the arm/send release above. */
     for (int t = 0; t < KL_LWR_UDP_SLOTS; t++)
         if (ctx->udp_term[t]) { kl_dgram_life_release(ctx->udp_term[t]); ctx->udp_term[t] = NULL; }
@@ -623,7 +616,7 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
     size_t bytes = (size_t)ctx->conn_cap * sizeof(KlLwrConn);
     KlAllocator *alloc = ctx->alloc;
     kl_free(alloc, ctx->conns, bytes);
-    kl_free(alloc, ctx->tx_block, ctx->tx_block_size);   /* the preallocated Stage-B TX block */
+    kl_free(alloc, ctx->tx_block, ctx->tx_block_size);   /* the preallocated TX block */
     if (g_active_ctx == ctx) g_active_ctx = NULL;   /* clear the guard — sequential create OK */
     kl_free(alloc, ctx, sizeof(*ctx));
 }
@@ -685,7 +678,7 @@ static err_t lwr_srv_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     return ERR_OK;
 }
 
-/* ── Stage B send-pump: fill the preallocated TX window from the source, then tcp_write ──────
+/* ── send-pump: fill the preallocated TX window from the source, then tcp_write ──────
  * Gather `want` bytes into `dst` (the slot's pump window) starting at the logical payload offset
  * `off`:
  *   - buffered: copy from the referenced iov segments (data in place; small transient segments
@@ -791,11 +784,12 @@ static err_t lwr_srv_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
 /* err callback: the pcb was aborted by the stack (RST/OOM/self-initiated). lwIP has ALREADY
  * FREED the pcb — we MUST NOT dereference it. `arg` is the accepted SLOT (tcp_arg set in
  * lwr_srv_accept, and NOT overwritten by kl_lwr_set_owner), so we resolve the slot directly —
- * even in the accept->post_recv window before the driver adopts the conn. This is the M1 fix:
- * the previous owner-keyed scan dropped the err when owner was still NULL, leaving a dangling
- * pcb + pend_accept that the driver would then adopt (a use-after-free). We free the rx chain +
- * reset the (preallocated) send offsets, mark the slot dead + closed, then either recycle it
- * (aborted before adoption — no KlHttpConn exists to notify) or surface the single terminal. */
+ * even in the accept->post_recv window before the driver adopts the conn. Keying on the slot
+ * (not the owner, which is still NULL in that window) ensures an err there is never dropped,
+ * which would otherwise leave a dangling pcb + pend_accept the driver would then adopt (a
+ * use-after-free). We free the rx chain + reset the (preallocated) send offsets, mark the slot
+ * dead + closed, then either recycle it (aborted before adoption — no KlHttpConn exists to
+ * notify) or surface the single terminal. */
 static void lwr_srv_err(void *arg, err_t err) {
     (void)err;
     KlLwrCtx *ctx = lwr_ctx();
@@ -837,10 +831,10 @@ static err_t lwr_srv_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     tcp_recv(newpcb, lwr_srv_recv);
     tcp_sent(newpcb, lwr_srv_sent);
     tcp_err(newpcb, lwr_srv_err);
-    /* Key the server callbacks on the SLOT from accept onward (M1 fix): lwr_srv_err
+    /* Key the server callbacks on the SLOT from accept onward: lwr_srv_err
      * resolves the slot directly from `arg`, so an abort (RST/OOM) in the window BEFORE
      * the driver adopts the conn (kl_lwr_set_owner) is still routed to its slot instead
-     * of being dropped — which previously left a dangling pcb the driver would then adopt
+     * of being dropped — a dropped err would leave a dangling pcb the driver would then adopt
      * (a use-after-free). lwr_srv_recv/sent ignore `arg` (they find the slot by pcb). */
     tcp_arg(newpcb, cs);
 
@@ -850,9 +844,9 @@ static err_t lwr_srv_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     return ERR_OK;
 }
 
-/* ── outbound client (LC-1): tcp_connect + connected_cb + client teardown ─────────
+/* ── outbound client: tcp_connect + connected_cb + client teardown ─────────
  * A client slot reuses the retained-recv queue (lwr_srv_recv) for the response. Its request send
- * is a direct real kl_lwr_client_send (NOT the Stage-B pump) and its completions surface via the
+ * is a direct real kl_lwr_client_send (NOT the send-pump) and its completions surface via the
  * client's tagged watcher (KL_LWR_CONNECT for connect; KL_COMP_WATCHER relay for the data plane) —
  * never the server-side KL_LWR_WRITE/terminal path (which needs a KlHttpConn the driver owns). So the
  * client uses its OWN err callback (lwr_cli_err), keyed by tcp_arg == the watcher udata. */
@@ -940,7 +934,7 @@ int kl_lwr_connect(void *lwrctx, void *pcb, const uint8_t ip4[4], uint16_t port,
     return 0;
 }
 
-/* ── client data-plane: watcher recording + readiness relay + real send/recv (LC-1) ──────── */
+/* ── client data-plane: watcher recording + readiness relay + real send/recv ──────── */
 
 void kl_lwr_client_watch(void *lwrctx, void *pcb, unsigned mask, void *watcher_udata) {
     KlLwrCtx *ctx = lwrctx;
@@ -1048,7 +1042,7 @@ long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, 
     return (long)chunk;
 }
 
-/* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlDatagram) ──────────────────────────────
+/* ── UDP datagram glue (udp_pcb ↔ KlDatagram) ──────────────────────────────
  * A udp slot is created by kl_lwr_udp_new (lwr_sock_socket for SOCK_DGRAM), bound by
  * kl_lwr_udp_bind, recv-armed (taking a stable-token ref) by kl_lwr_udp_post_recv, and closed by
  * kl_lwr_udp_close. Inbound datagrams land in lwr_udp_recv_cb, which copies the payload out of the
@@ -1067,7 +1061,7 @@ static KlLwrUdpSlot *lwr_udp_find(KlLwrCtx *ctx, const struct udp_pcb *pcb) {
 /* Reserve a free udp slot for a fresh pcb (zero-initialised). NULL if the table is full. */
 static KlLwrUdpSlot *lwr_udp_alloc(KlLwrCtx *ctx, struct udp_pcb *pcb) {
     for (int i = 0; i < KL_LWR_UDP_SLOTS; i++)
-        /* 7B-8: a slot with a pending cancel-terminal (udp_term[i] != NULL) is NOT reusable until that
+        /* A slot with a pending cancel-terminal (udp_term[i] != NULL) is NOT reusable until that
          * terminal drains — the terminal is tied to slot index i, so reusing i would collide with (and
          * silently drop) the queued terminal's ref. This is what keeps udp_term bounded 1:1 to slots. */
         if (ctx->udp[i].pcb == NULL && ctx->udp_term[i] == NULL) {
@@ -1227,7 +1221,7 @@ void kl_lwr_udp_close(void *lwrctx, void *pcb) {
     memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + any held datagram */
 }
 
-/* 7B-8: cancel the armed recv for `life` → a context-owned pending terminal (survives slot teardown).
+/* Cancel the armed recv for `life` → a context-owned pending terminal (survives slot teardown).
  * See lwip_raw_glue.h. No allocation; idempotent. */
 void kl_lwr_udp_cancel_recv(void *lwrctx, void *life) {
     KlLwrCtx *ctx = lwrctx;
@@ -1250,7 +1244,7 @@ void kl_lwr_udp_cancel_recv(void *lwrctx, void *life) {
     /* No armed recv for `life` (already cancelled / drained / never armed) → idempotent no-op. */
 }
 
-/* 7B-8: 1 while a pending recv terminal is queued for `life`, else 0. See lwip_raw_glue.h. */
+/* 1 while a pending recv terminal is queued for `life`, else 0. See lwip_raw_glue.h. */
 int kl_lwr_udp_recv_pending(void *lwrctx, void *life) {
     KlLwrCtx *ctx = lwrctx;
     if (!ctx || !life) return 0;
@@ -1299,7 +1293,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
             r->len = bytes;
         }
     }
-    /* 7B-8: emit context-owned pending recv terminals (cancelled armed recvs). One terminal per entry,
+    /* Emit context-owned pending recv terminals (cancelled armed recvs). One terminal per entry,
      * transferring the token ref → event (the dispatch retires recv_inflight + releases the ref). */
     for (int t = 0; t < KL_LWR_UDP_SLOTS && n < max; t++) {
         if (ctx->udp_term[t] == NULL) continue;
@@ -1426,8 +1420,8 @@ void kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner) {
     KlLwrConn *cs = lwr_conn_find(ctx, p);
     if (cs) cs->owner = owner;
     /* Do NOT tcp_arg(p, owner): the server pcb's arg stays the SLOT (set in lwr_srv_accept),
-     * so lwr_srv_err always resolves its slot even before the owner is set (M1 fix). The
-     * terminal-completion target is cs->owner, tracked here; the err callback no longer needs
+     * so lwr_srv_err always resolves its slot even before the owner is set. The
+     * terminal-completion target is cs->owner, tracked here; the err callback does not need
      * arg to be the owner. */
 }
 
@@ -1516,7 +1510,7 @@ size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap) {
     return got;
 }
 
-/* ── Stage B: bounded, zero-allocation buffered + file send (reference in place) ─────
+/* ── bounded, zero-allocation buffered + file send (reference in place) ─────
  *
  * Store a bounded COPY of the iov ARRAY into the slot (pointers + lengths). Small segments whose
  * data pointer may be transient (the driver's stack Content-Length scratch) are snapshotted into
@@ -1615,7 +1609,7 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
         KlLwrConn *c = &ctx->conns[i];
         if (c->pcb == NULL && !c->dead) continue;   /* free slot */
 
-        /* Client slots (LC-1) surface ONLY the connect completion here; their data plane rides the
+        /* Client slots surface ONLY the connect completion here; their data plane rides the
          * watcher relay (kl_lwr_next_client_ready) + real send/recv, never the server-side
          * ACCEPT/WRITE/terminal path (which needs a KlHttpConn target). */
         if (c->is_client) {

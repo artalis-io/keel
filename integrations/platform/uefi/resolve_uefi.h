@@ -1,6 +1,6 @@
 /*
  * resolve_uefi.h — a NUMERIC-ONLY reference kl_resolve_sync for the freestanding
- * UEFI client (U-3), the pre-DNS resolver seam.
+ * UEFI client, the pre-DNS resolver seam.
  *
  * libkeel_freestanding.a references kl_resolve_sync (the sync-DNS fallback the async
  * client takes when client_pick_resolver() returns NULL — which it always does under
@@ -12,7 +12,7 @@
  * is the PERMANENT contract, not a stopgap. DNS is an ASYNC protocol consumer, not a sync
  * platform-seam capability: a freestanding client that must resolve a hostname injects
  * cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider — proven end-to-end
- * by 6.4c, integrations/platform/uefi/tests/dgram_dns_selftest.c). This keeps the axes clean (EFI_UDP4 =
+ * by integrations/platform/uefi/tests/dgram_dns_selftest.c). This keeps the axes clean (EFI_UDP4 =
  * platform provider; DNS = protocol) and avoids a sync-over-async adapter. Defining
  * KEEL_UEFI_HAVE_RESOLVE when compiling u1_link_stubs.c drops that file's fail-closed
  * kl_resolve_sync in favor of this one.

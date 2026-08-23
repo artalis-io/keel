@@ -9,7 +9,7 @@
  * The notify function bumps a static uint64_t tick counter; kl_monotonic_ms()
  * returns it. This is genuinely MONOTONIC (a free-running count, never wall-
  * clock) — unlike GetTime/EFI_TIME which is RTC wall-clock and can jump
- * backward (finding 8). It is exempt from ExitBootServices concerns for the
+ * backward. It is exempt from ExitBootServices concerns for the
  * pre-boot client lifetime.
  *
  * RESOLUTION: 1 ms nominal. The firmware timer granularity is typically coarser
@@ -44,7 +44,7 @@ static EFI_BOOT_SERVICES *g_bs;
 static EFI_RUNTIME_SERVICES *g_rt;        /* GetTime (cert clock); valid pre- AND post-EBS */
 static EFI_RNG_PROTOCOL  *g_rng;          /* NULL => fail-closed */
 static EFI_EVENT          g_timer_event;
-static EFI_EVENT          g_ebs_event;    /* EVT_SIGNAL_EXIT_BOOT_SERVICES (U-7) */
+static EFI_EVENT          g_ebs_event;    /* EVT_SIGNAL_EXIT_BOOT_SERVICES */
 static volatile UINT64    g_ticks_ms;     /* monotonic millisecond counter */
 static volatile int       g_after_ebs;    /* set by the EBS notify — degrade fail-closed */
 static int                g_inited;
@@ -81,7 +81,7 @@ static VOID EFIAPI uefi_timer_tick(EFI_EVENT event, VOID *context) {
     g_ticks_ms += UEFI_TICK_MS;
 }
 
-/* ExitBootServices notify (U-7): fires once, while boot services are still
+/* ExitBootServices notify: fires once, while boot services are still
  * momentarily usable, when the app calls ExitBootServices(). MUST be minimal — no
  * allocation, no protocol calls — so just latch the degraded state: mark post-EBS
  * (kl_uefi_after_ebs) and drop the RNG pointer (its driver is going away). After
@@ -127,7 +127,7 @@ int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
     else
         g_rng = NULL; /* fail-closed */
 
-    /* ---- ExitBootServices lifetime (U-7): register the EBS notify so networking
+    /* ---- ExitBootServices lifetime: register the EBS notify so networking
      * degrades fail-closed the moment the app leaves boot services. Non-fatal if it
      * can't be created (the shutdown/teardown path is the primary guard). ---- */
     trace("  [plat] CreateEvent(EBS)...\r\n");
@@ -167,13 +167,13 @@ int kl_uefi_have_entropy(void) {
     return g_rng != NULL && !g_after_ebs;
 }
 
-/* U-7: 1 once ExitBootServices() has fired — KEEL's EFI providers must stop calling
+/* 1 once ExitBootServices() has fired — KEEL's EFI providers must stop calling
  * boot services (the TCP4/UDP4 protocols + AllocatePool/events are gone). */
 int kl_uefi_after_ebs(void) {
     return g_after_ebs;
 }
 
-/* Cert validity-time clock (U-8): read the RTC via Runtime Services GetTime and return UTC
+/* Cert validity-time clock: read the RTC via Runtime Services GetTime and return UTC
  * seconds since the Unix epoch. GetTime is a RUNTIME service — valid before AND after
  * ExitBootServices — so this is deliberately NOT gated on kl_uefi_after_ebs().
  *
@@ -203,7 +203,7 @@ int kl_uefi_have_trustworthy_wallclock(void) {
     return kl_uefi_wallclock(&t) == 0;
 }
 
-/* U-7: release the platform's boot-services resources (the periodic timer + the EBS
+/* Release the platform's boot-services resources (the periodic timer + the EBS
  * event). Call BEFORE ExitBootServices for a clean teardown; idempotent. After this,
  * kl_monotonic_ms freezes at its last value and kl_plat_random fail-closes. */
 void kl_uefi_platform_shutdown(void) {

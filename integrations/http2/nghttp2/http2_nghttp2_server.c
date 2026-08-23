@@ -227,7 +227,7 @@ static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 static kl_ssize_t ng_server_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     NgServerSession *s = (NgServerSession *)self;
-    /* Guard against re-entrant send: KEEL's h2.c submits a response + flushes
+    /* Guard against re-entrant send: KEEL's HTTP/2 server adapter submits a response + flushes
      * from within on_stream_end, which nghttp2 invokes inside mem_recv. Calling
      * nghttp2_session_send() re-entrantly there corrupts processing of later
      * frames in the same batch (an illegal trailing DATA/HEADERS would be missed).

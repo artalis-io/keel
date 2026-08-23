@@ -1,7 +1,7 @@
 /*
- * wallclock_uefi.h — EFI_TIME → UTC-seconds decode + the unspecified-timezone policy (U-8).
+ * wallclock_uefi.h — EFI_TIME → UTC-seconds decode + the unspecified-timezone policy.
  *
- * Split out of platform_uefi.c so the GetTime→decode→gate path is host-unit-testable with a
+ * Kept in its own TU so the GetTime→decode→gate path is host-unit-testable with a
  * fabricated EFI_TIME (the mock harness links this TU; platform_uefi.c only supplies the
  * actual GetTime call). Pure apart from the app-configurable timezone offset below.
  *

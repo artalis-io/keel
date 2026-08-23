@@ -1,9 +1,9 @@
 /*
- * mbedtls_shim/errno.h — freestanding <errno.h> for the mbedTLS TUs (U-4).
+ * mbedtls_shim/errno.h — freestanding <errno.h> for the mbedTLS TUs.
  *
  * tls_mbedtls.c's bio_send/bio_recv reference errno + EAGAIN/EWOULDBLOCK, but on
  * the EFI target that BIO runs in memory/socket-pump mode and NEVER hits the
- * would-block branch (the U-2 socket provider is a synchronous pump). So this only
+ * would-block branch (the socket provider is a synchronous pump). So this only
  * needs to make the code COMPILE — the value is irrelevant. `errno` is defined as a
  * real global in mbedtls_platform_uefi.c.
  *

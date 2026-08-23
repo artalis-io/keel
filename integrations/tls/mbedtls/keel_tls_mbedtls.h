@@ -164,7 +164,7 @@ int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname);
  * kl_tls_mbedtls_ctx_create*() / _client_ctx_create*().
  *
  * The negotiated result is read back via the KlTls `alpn_protocol()` vtable
- * method after the handshake completes. See docs/alpn_policy.md.
+ * method after the handshake completes. See docs/contracts/alpn_policy.md.
  *
  * @param ctx    Server or client context.
  * @param protos NULL-terminated, preference-ordered protocol names.
@@ -186,7 +186,7 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * auto-wires each session's provider from `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`
  * via the `KlTls.set_socket_provider` vtable hook (which overrides this ctx default
  * at handshake time). Use this setter for **standalone** KlTls use — driving the
- * vtable directly without http_connection.c/client.c. Set once on the context, before
+ * vtable directly without the HTTP framework (http_connection.c and the client). Set once on the context, before
  * any handshake; every KlTls the factory creates inherits it. Applies only to the
  * synchronous socket-BIO path — the completion (memory-BIO) mode ignores it.
  *

@@ -1,32 +1,32 @@
 /*
- * event_efi.c — completion-axis KlEventProvider over EFI_TCP4 tokens (U-3, F-8).
+ * event_efi.c — completion-axis KlEventProvider over EFI_TCP4 tokens.
  * See event_efi.h for the design. This is the direct real-firmware analogue of the
  * mock completion loop in tests/freestanding_harness.c: connect rides the completion
- * axis (KL_COMP_CONNECT), send/recv ride the U-2 socket provider's SYNC ops driven by
+ * axis (KL_COMP_CONNECT), send/recv ride the socket provider's SYNC ops driven by
  * an emulated-readiness watcher relay (KL_COMP_WATCHER). No libc, no errno.
  */
 
 #include "event_efi.h"
 #include "socket_efi_tcp4.h"          /* kl_uefi_socket_provider + async-connect prims */
-#include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
+#include "platform_uefi.h"            /* kl_uefi_after_ebs (boot-services guard) */
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
-#include <keel/http_connection.h>           /* KlHttpConn — server post_recv/post_send targets (S-4) */
+#include <keel/http_connection.h>           /* KlHttpConn — server post_recv/post_send targets */
 #include "../../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 
 /* Datagram completion (EFI_UDP4) is an OPTIONAL transport capability, gated by
- * KEEL_UEFI_DATAGRAM: only the datagram builds (6.4c image, the mock harness, the strict
- * two-arch datagram gate) define it. A TCP-only EFI build (U-3/U-4/U-7, S-4/S-6/S-7) compiles
+ * KEEL_UEFI_DATAGRAM: only the datagram builds (the datagram image, the mock harness, the strict
+ * two-arch datagram gate) define it. A TCP-only EFI build compiles
  * NONE of the datagram op storage / pumping / teardown / vtable wiring below, and therefore
  * references NO kl_uefi_udp_* / KlDgramLife symbols — completion is the execution model, UDP
  * is an optional transport, and the two do not link together unless asked. */
 #ifdef KEEL_UEFI_DATAGRAM
-#include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
-#include "../../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
+#include "socket_efi_udp4.h"          /* datagram completion primitives + KlUefiUdpOpResult */
+#include "../../../src/datagram_life.h"   /* KlDgramLife retain/release — stable-token transfer */
 #endif
-#include <keel/http_server.h>               /* KlHttpServer.pool — accept backpressure (S-3) */
+#include <keel/http_server.h>               /* KlHttpServer.pool — accept backpressure */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -35,11 +35,11 @@
  * handful of live watches). Small fixed arrays — no allocation in the loop. */
 #define KL_EFI_MAX_CONNECT_OPS 8
 #define KL_EFI_MAX_WATCHES     8
-/* Server completion-native I/O ops (S-4). The accepted-child pool is KL_EFI_MAX_CONNS
+/* Server completion-native I/O ops. The accepted-child pool is KL_EFI_MAX_CONNS
  * (8) and the server completion driver keeps at most one recv OR one send outstanding
  * per conn, so 16 slots leave headroom without allocation in the loop. */
 #define KL_EFI_MAX_IO_OPS   16
-/* Alloc-free server send (S-4/S-7 review): post_send COPIES the whole response into an
+/* Alloc-free server send: post_send COPIES the whole response into an
  * inline per-op buffer — no heap. A copy (not a reference) is required because the send
  * contract lets the caller free its iovec bytes right after posting: comp_tls_post_encrypted
  * frees the encrypted buffer immediately (pollcomp likewise copies), so referencing it
@@ -48,12 +48,12 @@
  * + a small body or one TLS record; larger bodies belong on the (future) sendfile/stream
  * path. Firmware BSS cost: KL_EFI_MAX_IO_OPS * KL_EFI_SNDBUF. */
 #define KL_EFI_SNDBUF       16384
-/* Datagram completion ops (6.4b-3b). DNS drives one Receive + several Transmits per socket; a small
- * fixed pool, no allocation in the loop. Each op holds a B.6 KlDgramLife ref from post until it is
+/* Datagram completion ops. DNS drives one Receive + several Transmits per socket; a small
+ * fixed pool, no allocation in the loop. Each op holds a KlDgramLife ref from post until it is
  * transferred to a completion event (DELIVERED), released (RETIRED/STALE_RETIRED), or RETAINED forever
  * (QUARANTINED/INVALID) — see el_drain.
  *
- * SEND SERIALIZATION (review-High): EFI_UDP4 allows only ONE outstanding Transmit token per socket, but
+ * SEND SERIALIZATION: EFI_UDP4 allows only ONE outstanding Transmit token per socket, but
  * The datagram completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
  * synchronously). So the SEND ops form a per-socket PENDING QUEUE at THIS layer: el_post_dgram_send always
  * ACCEPTS (copies the payload+dest — the caller may free them right after), and only ONE send per fd is
@@ -71,14 +71,14 @@ typedef struct {
     unsigned long long  generation;   /* the op identity (captured when POSTED to the substrate) */
     void               *buf;          /* recv: the captured dg->recv_buf (copy target) */
     size_t              buflen;        /* recv: capacity */
-    struct KlDgramLife *life;          /* B.6 token ref: retained at post; NULLed on transfer/release */
+    struct KlDgramLife *life;          /* stable token ref: retained at post; NULLed on transfer/release */
     /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
     int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
     int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
-    int                 terminal_emitted; /* recv/send: 7B-9 — a QUARANTINE (borrowed) terminal was already
+    int                 terminal_emitted; /* recv/send: a QUARANTINE (borrowed) terminal was already
                                         * emitted for this op; it stays in_use (fail-closed, ref abandoned)
                                         * but must never be re-drained/re-emitted. Gates the drain re-scan. */
-    int                 send_cancelled;   /* send: 7B-9 — a synchronous send-cancel was recorded; the drain
+    int                 send_cancelled;   /* send: a synchronous send-cancel was recorded; the drain
                                         * surfaces its terminal from send_cancel_res (poll_send would report
                                         * PENDING forever after the cancel cleared/left tx_posted). */
     KlUefiUdpOpResult   send_cancel_res;  /* send: the recorded cancel result — RETIRED (transfer+release) vs
@@ -103,7 +103,7 @@ typedef struct {
 } EfiConnectOp;
 
 /* A registered tagged watch (add/mod). drain relays its armed mask as a
- * KL_COMP_WATCHER so the client retries the SYNC send/recv on the U-2 provider. */
+ * KL_COMP_WATCHER so the client retries the SYNC send/recv on the socket provider. */
 typedef struct {
     int             in_use;
     KlSocketHandle  fd;
@@ -113,9 +113,9 @@ typedef struct {
 
 typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 
-/* A posted server-side recv or send on an accepted child (S-4). The client rides the
+/* A posted server-side recv or send on an accepted child. The client rides the
  * watcher relay; the SERVER completion driver (completion_http_server.c) posts recv/send as
- * completion-native ops. drain services each via the U-2 SYNC socket provider and
+ * completion-native ops. drain services each via the SYNC socket provider and
  * surfaces KL_COMP_READ / KL_COMP_WRITE. The captured generation is the stale guard: an
  * op for a child that closed (generation bumped) or whose slot was reused (magic
  * cleared) is dropped, never delivered, mirroring the connect-op discipline. No heap:
@@ -141,13 +141,13 @@ typedef struct {
     int                created;
     EfiConnectOp       connect_ops[KL_EFI_MAX_CONNECT_OPS];
     EfiWatch           watches[KL_EFI_MAX_WATCHES];
-    EfiIoOp            io[KL_EFI_MAX_IO_OPS];   /* S-4 server recv/send ops */
+    EfiIoOp            io[KL_EFI_MAX_IO_OPS];   /* server recv/send ops */
 #ifdef KEEL_UEFI_DATAGRAM
-    EfiDgramOp         dgram[KL_EFI_MAX_DGRAM_OPS];  /* 6.4b-3b datagram recv/send ops */
+    EfiDgramOp         dgram[KL_EFI_MAX_DGRAM_OPS];  /* datagram recv/send ops */
     unsigned long long dgram_seq;                    /* monotonic send-acceptance counter (FIFO) */
 #endif
-    /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
-     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlHttpConn-pool backpressure. */
+    /* Server accept: latched by prime_accepts; drain hands back each ready child
+     * from the Accept-token pool as KL_COMP_ACCEPT, with KlHttpConn-pool backpressure. */
     struct KlHttpServer   *server;
     KlSocketHandle     listen_fd;
     int                accept_primed;
@@ -213,7 +213,7 @@ static int el_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     /* Completion loops drive via kl_comp_run/drain, not this readiness wait. */
     (void)loop; (void)out; (void)max; (void)timeout_ms; return 0;
 }
-/* el_close (S-7 review): retire ALL outstanding records so nothing dangles after the
+/* el_close: retire ALL outstanding records so nothing dangles after the
  * event ctx is freed (kl_event_ctx_free calls this before the conn pool is freed in
  * kl_http_server_free). No heap is owned now (server send iovecs are inline snapshots — no
  * kl_malloc), so this clears state only: connect ops, watches, server I/O ops, and the
@@ -252,7 +252,7 @@ static unsigned el_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_C
 
 static const struct KlSocketProvider *el_native_provider(const KlEventLoop *loop) {
     (void)loop;
-    /* Lazily create the U-2 socket provider over the stashed bs/image (single
+    /* Lazily create the socket provider over the stashed bs/image (single
      * instance — returns the same provider once created). */
     return kl_uefi_socket_provider(g_efi.bs, g_efi.image);
 }
@@ -295,20 +295,20 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
         if (g_efi.watches[i].in_use && g_efi.watches[i].fd == fd)
             g_efi.watches[i].in_use = 0;
     /* Drop any posted server recv/send ops on the fd so a completion cannot fire at an
-     * about-to-be-freed conn (S-4). No heap to release (inline snapshots). */
+     * about-to-be-freed conn. No heap to release (inline snapshots). */
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)
         if (g_efi.io[i].in_use && g_efi.io[i].fd == fd)
             io_op_free(&g_efi.io[i]);
 }
 
 /* prime_accepts: latch the server + its passive listen fd so drain can hand back
- * accepted children. The S-2 listen() already armed the Accept-token pool; this only
- * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
+ * accepted children. listen() already armed the Accept-token pool; this only
+ * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model:
  * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
  * KlListener is installed and the server re-calls this each tick to top the gate up. */
 static int el_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
     if (!ctx) return -1;
-    /* R2f: the accept ops are neutral (KlEventCtx + listen_fd). EFI is an AUTONOMOUS backend whose
+    /* The accept ops are neutral (KlEventCtx + listen_fd). EFI is an AUTONOMOUS backend whose
      * capacity gate needs the pool, so this integration adapter recovers the owning KlHttpServer from
      * its embedded event ctx (containerof — the same trick completion_http_server.c's server_of_ctx
      * uses; integrations may know KlHttpServer, only src/ substrate must not). */
@@ -316,7 +316,7 @@ static int el_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
     g_efi.server = s;
     g_efi.listen_fd = listen_fd;
     g_efi.accept_primed = 1;
-    /* Capacity-gated arming (Goal 8 backpressure): arm at most as many EFI Accept tokens
+    /* Capacity-gated arming (backpressure): arm at most as many EFI Accept tokens
      * as there are FREE Keel pool slots. Runs every completion tick (this is called from
      * kl_http_comp_run), so a freed slot (active_count drops on conn release)
      * re-arms on the next tick — and a full pool arms nothing, so EFI stops accepting
@@ -342,7 +342,7 @@ static EfiIoOp *io_op_alloc(void) {
     return NULL;
 }
 
-/* post_recv (S-4): queue a raw server-side receive on an accepted child into the
+/* post_recv: queue a raw server-side receive on an accepted child into the
  * caller-supplied `buf` (drain does the actual recv, unchanged between post and completion —
  * the conn parks with no other op), surfaced as KL_COMP_READ. No TLS/state knowledge — the
  * HTTP adapter chose the buffer. */
@@ -361,7 +361,7 @@ static int el_post_recv(KlStream *stream, void *buf, size_t cap) {
     return 0;
 }
 
-/* post_send (S-4, alloc-free per the S-7 review): COPY the framed response into the op's
+/* post_send (alloc-free): COPY the framed response into the op's
  * inline sndbuf. A copy is mandatory, not an optimization to avoid — the send contract
  * lets the caller free its iovec bytes right after posting (comp_tls_post_encrypted frees
  * the encrypted buffer immediately), so a reference would be a use-after-free. No heap;
@@ -394,7 +394,7 @@ static int el_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t
 }
 
 #ifdef KEEL_UEFI_DATAGRAM
-/* ── Datagram completion ops (6.4b-3b) — post an EFI_UDP4 Receive/Transmit token, retain a B.6
+/* ── Datagram completion ops — post an EFI_UDP4 Receive/Transmit token, retain a
  *    life ref, and capture the op identity {fd, generation}; el_drain reaps via KlUefiUdpOpResult. */
 static EfiDgramOp *dgram_op_alloc(void) {
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)
@@ -466,7 +466,7 @@ static int el_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) 
     return 0;
 }
 
-/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): request the firmware Cancel on the
+/* Cancel the outstanding datagram op(s) of `kind` for `life`: request the firmware Cancel on the
  * matching POSTED op (a queued/unposted send touched no firmware — nothing to cancel). The return is
  * IGNORED: ref release stays with the drain/el_close op_state classifier (never here), so cancel is
  * idempotent + does not double-release. Confirmed retirement then surfaces via retire_dgram. */
@@ -477,7 +477,7 @@ static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpK
         EfiDgramOp *op = &g_efi.dgram[i];
         if (!op->in_use || op->life != life || op->kind != want) continue;
         if (want == EFI_DG_SEND) {
-            /* 7B-9: RECORD the synchronous cancel result. A posted Transmit is Cancel+drained (RETIRED =
+            /* RECORD the synchronous cancel result. A posted Transmit is Cancel+drained (RETIRED =
              * confirmed, QUARANTINED = unconfirmed); a queued (never-posted) send touched no firmware, so
              * it retires immediately (RETIRED). Either way el_drain surfaces a KL_COMP_DGRAM_SEND terminal
              * so the send MACHINE retires (send_inflight → 0) — WITHOUT it an abortive close can never
@@ -492,7 +492,7 @@ static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpK
         } else {
             /* Cancel + drain the recv token. This retires the SUBSTRATE op (rx_posted→0) but NOT the
              * recv MACHINE — recv_inflight only reaches 0 once el_drain surfaces a KL_COMP_DGRAM_RECV
-             * terminal (7B-9). After backend_close bumps the generation, el_drain observes the op as
+             * terminal. After backend_close bumps the generation, el_drain observes the op as
              * STALE_RETIRED (clean) or QUARANTINED (unconfirmed) and emits that terminal. */
             (void)kl_uefi_udp_cancel_recv(op->fd, op->generation);
         }
@@ -500,7 +500,7 @@ static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpK
     return 0;
 }
 
-/* Classify retirement (§4.3, 7B-2) — the EFI-distinctive path. Mirrors el_close's per-op decision: a
+/* Classify retirement — the EFI-distinctive path. Mirrors el_close's per-op decision: a
  * never-posted send touched no firmware → RETIRED; else consult the substrate — STALE_RETIRED/RETIRED →
  * RETIRED, PENDING/DELIVERED (live, not yet reaped) → PENDING, QUARANTINED/INVALID (unconfirmed) →
  * QUARANTINED (fail-closed, the override no other backend needs). No matching op → already retired. */
@@ -531,7 +531,7 @@ static KlDgramRetireResult el_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *
  * keeps ticking without a 100%-CPU spin. */
 static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     (void)timeout_ms;
-    /* F3: once boot services are gone, the EFI_TCP4 Poll/CheckEvent/connect_poll paths
+    /* Once boot services are gone, the EFI_TCP4 Poll/CheckEvent/connect_poll paths
      * are all invalid — stop driving the loop (fail-closed, no firmware calls). */
     if (kl_uefi_after_ebs()) return 0;
     int count = 0;
@@ -562,7 +562,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         op->in_use = 0;   /* retire: exactly-once terminal result */
     }
 
-    /* Drain-driven readiness relay (U-6): for each armed watch, emit a
+    /* Drain-driven readiness relay: for each armed watch, emit a
      * KL_COMP_WATCHER ONLY when it is actually ready. WRITE stays always-ready —
      * send is a short synchronous Transmit. READ is relayed only when the
      * provider's non-blocking recv can return something now
@@ -585,10 +585,10 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         count++;
     }
 
-    /* Accept relay (S-3): hand back each child the S-2 Accept-token pool has ready as
+    /* Accept relay: hand back each child the Accept-token pool has ready as
      * KL_COMP_ACCEPT (peer already neutralized by efi_sock_accept via GetModeData).
      * Backpressure — stop when the server's KlHttpConn pool is full (don't accept into a
-     * drop; the completion analogue of reducing readiness interest, Goal 8). The
+     * drop; the completion analogue of reducing readiness interest). The
      * socket-axis efi_sock_accept re-arms each consumed Accept token internally. */
     if (g_efi.accept_primed && g_efi.server && kl_handle_valid(g_efi.listen_fd)) {
         while (count < max && g_efi.server->pool.free_list) {
@@ -598,7 +598,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (!kl_handle_valid(a)) break;   /* none ready (would-block) */
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind        = KL_COMP_ACCEPT;
-            out[count].target      = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
+            out[count].target      = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
             out[count].ok          = 1;
             out[count].accepted_fd = a;
             out[count].peer        = peer;
@@ -606,11 +606,11 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         }
     }
 
-    /* Server I/O ops (S-4): service each posted recv/send on an accepted child via the
-     * U-2 SYNC socket provider and surface KL_COMP_READ / KL_COMP_WRITE. Stale-guarded
+    /* Server I/O ops: service each posted recv/send on an accepted child via the
+     * SYNC socket provider and surface KL_COMP_READ / KL_COMP_WRITE. Stale-guarded
      * (a child that closed mid-op is dropped, never delivered). RECV is gated on the
      * non-blocking readiness probe (no blocking recv); SEND transmits synchronously in
-     * bounded fragments (the U-2 model: a short Transmit), leaving the op pending on a
+     * bounded fragments (a short Transmit), leaving the op pending on a
      * would-block to retry next drain. */
     for (int i = 0; i < KL_EFI_MAX_IO_OPS && count < max; i++) {
         EfiIoOp *op = &g_efi.io[i];
@@ -660,18 +660,18 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
     }
 
 #ifdef KEEL_UEFI_DATAGRAM
-    /* Datagram ops (6.4b-3b): poll each posted Receive/Transmit by its {fd, captured_generation}
-     * identity and apply the KlUefiUdpOpResult contract. Every recv terminal (7B-9) emits a
+    /* Datagram ops: poll each posted Receive/Transmit by its {fd, captured_generation}
+     * identity and apply the KlUefiUdpOpResult contract. Every recv terminal emits a
      * KL_COMP_DGRAM_RECV so the recv MACHINE retires (recv_inflight → 0 — required by the
      * confirmed-detachment close for EVERY outcome, not just a delivery):
-     *   DELIVERED / STALE_RETIRED → emit + TRANSFER the B.6 life ref (dispatch releases it, retain_life=0;
+     *   DELIVERED / STALE_RETIRED → emit + TRANSFER the life ref (dispatch releases it, retain_life=0;
      *     the final release runs on_final). STALE_RETIRED is the close path (child cancel-drained + cleanly
      *     closed by backend_close before we polled) → ok=0, no delivery.
      *   QUARANTINED / INVALID → emit a BORROWED terminal (retain_life=1: no site releases it; op stays
      *     in_use, abandoned) so recv_inflight retires but on_final never frees storage the firmware may
      *     still touch. Both are unconfirmed/fail-safe → same handling (retire the machine, keep the ref +
      *     classification).
-     * SEND terminals are SYMMETRIC (7B-9). A normal completion (poll_send DELIVERED/STALE_RETIRED) or a
+     * SEND terminals are SYMMETRIC. A normal completion (poll_send DELIVERED/STALE_RETIRED) or a
      * recorded synchronous cancel result (send_cancelled: RETIRED) TRANSFERS the ref + retires the record;
      * an unconfirmed result (QUARANTINED/INVALID, whether from poll_send or a recorded cancel) emits a
      * BORROWED terminal (retire the send machine, keep the ref + record). The recorded-cancel path is the
@@ -681,7 +681,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS && count < max; i++) {
         EfiDgramOp *op = &g_efi.dgram[i];
         if (!op->in_use) continue;
-        /* 7B-9: a borrowed QUARANTINE terminal (recv OR send) was already surfaced for this op; it stays
+        /* A borrowed QUARANTINE terminal (recv OR send) was already surfaced for this op; it stays
          * in_use (abandoned, ref retained) so retire_dgram keeps reporting QUARANTINED at close-join.
          * Never re-drain/re-emit. */
         if (op->terminal_emitted) continue;
@@ -694,7 +694,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (r == KL_UEFI_UDP_OP_PENDING) continue;
             if (r == KL_UEFI_UDP_OP_DELIVERED || r == KL_UEFI_UDP_OP_STALE_RETIRED) {
                 /* A terminal that RETIRES the recv machine (recv_inflight → 0). DELIVERED may carry a
-                 * real datagram (ok=1) or a signalled-aborted token (ok=0); STALE_RETIRED (7B-9) is the
+                 * real datagram (ok=1) or a signalled-aborted token (ok=0); STALE_RETIRED is the
                  * confirmed-detachment close path — the child was cancel-drained AND cleanly closed by
                  * backend_close (generation bumped) BEFORE we polled, so there is nothing to deliver
                  * (ok=0). Both TRANSFER the ref op → event; dispatch releases it (retain_life=0), whose
@@ -713,7 +713,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 }
                 count++;
                 op->in_use = 0;   /* retire the record (life transferred) */
-            } else {   /* QUARANTINED or INVALID — both UNCONFIRMED / fail-safe (7B-9) */
+            } else {   /* QUARANTINED or INVALID — both UNCONFIRMED / fail-safe */
                 /* QUARANTINE terminal: retire the recv MACHINE (recv_inflight → 0 so the
                  * confirmed-detachment close can classify) WITHOUT releasing the life ref — the
                  * abandoned firmware RxToken may still write op->buf, so on_final must never run and free
@@ -747,7 +747,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 efi_dgram_pump_sends(sfd);   /* let a queued send take the freed Tx token */
                 continue;
             }
-            /* 7B-9: a recorded synchronous send-cancel (abortive close). poll_send would report PENDING
+            /* A recorded synchronous send-cancel (abortive close). poll_send would report PENDING
              * (the cancel left/cleared tx_posted and the slot is not yet stale — backend_close is GATED
              * behind this send retiring), so surface the terminal from the recorded result instead so the
              * send MACHINE retires (send_inflight → 0) and the abortive close can reach backend_close. */
@@ -781,7 +781,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (r == KL_UEFI_UDP_OP_DELIVERED || r == KL_UEFI_UDP_OP_STALE_RETIRED) {
                 (void)nb;
                 /* A terminal that RETIRES the send machine. DELIVERED = the Transmit completed (ok as
-                 * reported); STALE_RETIRED (7B-9, symmetric with recv) = the child was cleanly closed by
+                 * reported); STALE_RETIRED (symmetric with recv) = the child was cleanly closed by
                  * backend_close before we polled → ok=0. Both TRANSFER the ref (dispatch releases it). */
                 for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
                 out[count].kind  = KL_COMP_DGRAM_SEND;
@@ -825,19 +825,19 @@ static const KlCompletionOps EFI_COMP_OPS = {
     .drain = el_drain,
     .post_connect = el_post_connect,
     .cancel = el_cancel,
-    .prime_accepts = el_prime_accepts,   /* S-3: inbound server accept */
+    .prime_accepts = el_prime_accepts,   /* inbound server accept */
     .post_accept = el_post_accept,
-    .post_recv = el_post_recv,           /* S-4: server completion-native recv */
-    .post_send = el_post_send,           /* S-4: server completion-native send */
+    .post_recv = el_post_recv,           /* server completion-native recv */
+    .post_send = el_post_send,           /* server completion-native send */
 #ifdef KEEL_UEFI_DATAGRAM
-    .post_dgram_recv = el_post_dgram_recv,   /* 6.4b-3b: datagram completion recv (EFI_UDP4 Receive) */
-    .post_dgram_send = el_post_dgram_send,   /* 6.4b-3b: datagram completion send (EFI_UDP4 Transmit) */
-    .cancel_dgram    = el_cancel_dgram,      /* 7B-2: request firmware Cancel (release stays with drain/close) */
-    .retire_dgram    = el_retire_dgram,      /* 7B-2: §4.3 classifier — the EFI QUARANTINE override */
+    .post_dgram_recv = el_post_dgram_recv,   /* datagram completion recv (EFI_UDP4 Receive) */
+    .post_dgram_send = el_post_dgram_send,   /* datagram completion send (EFI_UDP4 Transmit) */
+    .cancel_dgram    = el_cancel_dgram,      /* request firmware Cancel (release stays with drain/close) */
+    .retire_dgram    = el_retire_dgram,      /* retirement classifier — the EFI QUARANTINE override */
     /* TCP-only builds leave the datagram ops (post/cancel/retire) NULL — no datagram socket is ever
      * created there, so the completion core never dispatches to them (KEEL_UEFI_DATAGRAM off). */
 #endif
-    /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
+    /* post_sendfile = NULL: file responses are out of scope for the plaintext
      * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as
      * KL_COMP_WATCHER (post_connect + the drain watch loop); the datagram ops above serve
      * the datagram resolver over the completion axis without changing the stream client path. */

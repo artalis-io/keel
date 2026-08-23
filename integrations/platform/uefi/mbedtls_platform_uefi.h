@@ -1,6 +1,6 @@
 /*
  * mbedtls_platform_uefi.h — install the UEFI backing for the freestanding mbedTLS
- * build used by U-4 (heap + entropy).
+ * build (heap + entropy).
  *
  * mbedTLS, built with MBEDTLS_PLATFORM_MEMORY, calls a registered calloc/free pair
  * for ALL its heap. We register a pair backed by EFI AllocatePool(EfiBootServicesData)
@@ -17,7 +17,7 @@
 #include "efi_uefi.h"
 
 /* Bring up the mbedTLS platform: register EFI AllocatePool/FreePool as mbedTLS's calloc/free
- * (borrows @bs; it must outlive every TLS allocation) AND capture the U-8 cert-validity clock
+ * (borrows @bs; it must outlive every TLS allocation) AND capture the cert-validity clock
  * snapshot (the fail-closed gate — see clock_snapshot.h). Call once, AFTER kl_uefi_platform_init()
  * (which installs Runtime Services GetTime). Idempotent after first success.
  *
@@ -31,7 +31,7 @@
  * validity-time enforceable, so a caller MUST treat -1 as "TLS unavailable" and not proceed. */
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs);
 
-/* F5: release the borrowed Boot Services pointer so no subsequent mbedTLS heap call
+/* Release the borrowed Boot Services pointer so no subsequent mbedTLS heap call
  * touches firmware. After this, calloc returns NULL and free is a no-op. Call on the
  * shutdown path AFTER destroying every KlTlsCtx/KlTls and BEFORE ExitBootServices.
  * Idempotent; safe to call even if init was never run. */

@@ -1,6 +1,6 @@
 /*
  * mbedtls_config_uefi.h — a FREESTANDING TLS 1.2 CLIENT mbedTLS config for the
- * U-4 UEFI spike.
+ * UEFI build.
  *
  * Goal: the smallest mbedTLS build that can complete a TLS 1.2 client handshake
  * against a stock openssl `s_server` / python TLS responder and read app data,
@@ -10,9 +10,9 @@
  * ── Deliberate freestanding shape ──────────────────────────────────────────
  *  - NO NET_C / FS_IO         : all BIO I/O goes through Keel's memory/socket BIO
  *                               (tls_mbedtls.c), which routes ciphertext through
- *                               the U-2 EFI_TCP4 socket provider. mbedTLS never
+ *                               the EFI_TCP4 socket provider. mbedTLS never
  *                               touches a host socket or file.
- *  - HAVE_TIME / HAVE_TIME_DATE : ENABLED (U-8). Cert validity (notBefore/notAfter)
+ *  - HAVE_TIME / HAVE_TIME_DATE : ENABLED. Cert validity (notBefore/notAfter)
  *                               IS enforced, over a registered time function backed by
  *                               Runtime Services GetTime (time_uefi.c), fail-closed on an
  *                               untrustworthy RTC. TIMING_C stays off (that is the delay/
@@ -49,7 +49,7 @@
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
 
-/* ── Certificate validity-time (U-8) ────────────────────────────────────────
+/* ── Certificate validity-time ──────────────────────────────────────────────
  * Enforce notBefore/notAfter. There is no libc wall clock, so mbedtls_time is a compile-time
  * MACRO bound to kl_uefi_mbedtls_time (clock_snapshot.c). That returns ONE TLS-platform-lifetime
  * UTC snapshot — captured + validated once INSIDE kl_uefi_mbedtls_platform_init(), shared by all
@@ -76,8 +76,8 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
 /* ── Protocol: TLS 1.2, client + server ─────────────────────────────────────*/
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_CLI_C
-/* Phase 10 UEFI *server* (S-6): the server-side handshake state machine. Additive —
- * the client (U-4) is unaffected; enabling it lets the same freestanding mbedTLS drive
+/* UEFI *server*: the server-side handshake state machine. Additive —
+ * the client is unaffected; enabling it lets the same freestanding mbedTLS drive
  * an inbound HTTPS KlHttpServer (ServerHello/Certificate/ServerKeyExchange + the RSA key
  * operations, all pure crypto — no OS). Without it a server ctx parses but its handshake
  * never progresses. */
@@ -102,7 +102,7 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
 /* PEM + base64: the handshake's server cert arrives as DER (no PEM needed), but a
- * caller-supplied CA bundle (production TLS verify — U-4 prod) is PEM, so decode it. */
+ * caller-supplied CA bundle (production TLS verify) is PEM, so decode it. */
 #define MBEDTLS_PEM_PARSE_C
 #define MBEDTLS_BASE64_C
 

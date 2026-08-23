@@ -1,5 +1,5 @@
 /*
- * mbedtls_platform_uefi.c — the freestanding platform backing the U-4 mbedTLS build
+ * mbedtls_platform_uefi.c — the freestanding platform the mbedTLS build
  * needs beyond what libkeel_freestanding_selfcontained.a (kl_cstr_builtin: the
  * mem-family + strlen) and the EFI shims already supply:
  *
@@ -11,7 +11,7 @@
  * No hosted libc is pulled in; every symbol here is a small freestanding impl or
  * an EFI Boot Services call.
  *
- * ENTROPY POLICY (F4 — fail closed by default):
+ * ENTROPY POLICY (fail closed by default):
  *   - With EFI_RNG_PROTOCOL present, (a) draws real randomness.
  *   - Without it, (a) FAILS CLOSED (returns nonzero, *olen=0) so the CTR_DRBG seed
  *     fails and NO TLS context is created — UNLESS the build explicitly defines
@@ -34,13 +34,13 @@
 #include <ws2tcpip.h>               /* socklen_t (local shim) for inet_ntop */
 
 /* ── (c) errno global ────────────────────────────────────────────────────────
- * MOVED to u1_link_stubs.c (linked by U-3/U-4): the EFI socket provider now
- * WRITES errno=EAGAIN/EIO on its would-block/error -1 returns (U-6), which the
- * plaintext U-3 build — that does NOT link this TU — references too. Defining
+ * The `errno` global lives in u1_link_stubs.c: the EFI socket provider
+ * WRITES errno=EAGAIN/EIO on its would-block/error -1 returns, which the
+ * plaintext build — that does NOT link this TU — references too. Defining
  * it in the shared u1_link_stubs.c gives exactly one `errno` per link set. */
 
 /* ── (c) inert <stdio.h> FILE ops ───────────────────────────────────────────
- * tls_mbedtls.c's read_file (file-based cert loader) references these. U-4 uses the
+ * tls_mbedtls.c's read_file (file-based cert loader) references these. This build uses the
  * *_from_buf ctx creators exclusively, so this path is DEAD — but the symbols must
  * resolve at link. fopen fails-closed (NULL) so the loader short-circuits; the
  * others are unreachable no-ops. `stderr` is defined by u1_link_stubs.c already, so
@@ -57,7 +57,7 @@ static EFI_BOOT_SERVICES *g_bs;   /* borrowed; set by kl_uefi_mbedtls_platform_i
 
 static void *uefi_mbed_calloc(size_t nmemb, size_t size) {
     if (!g_bs) return NULL;
-    /* F5: after ExitBootServices the Boot Services heap is gone — AllocatePool must
+    /* After ExitBootServices the Boot Services heap is gone — AllocatePool must
      * never be called. Fail closed so any post-EBS TLS allocation returns NULL rather
      * than dereferencing g_bs->AllocatePool against a torn-down firmware. */
     if (kl_uefi_after_ebs()) return NULL;
@@ -77,7 +77,7 @@ static void *uefi_mbed_calloc(size_t nmemb, size_t size) {
 
 static void uefi_mbed_free(void *ptr) {
     if (!ptr) return;
-    /* F5: post-EBS FreePool is undefined — the heap it managed no longer exists.
+    /* Post-EBS FreePool is undefined — the heap it managed no longer exists.
      * Skip it. Any live mbedTLS object destroyed after ExitBootServices (e.g. a TLS
      * ctx torn down on the shutdown path) thus becomes a deliberate no-op leak rather
      * than a call into torn-down firmware. The correct contract is to destroy all TLS
@@ -91,7 +91,7 @@ int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
     if (g_bs) return 0;         /* idempotent */
     if (!bs) return -1;         /* the EFI heap needs a valid Boot Services table */
 
-    /* U-8 clock gate + capture (fail-closed, enforced HERE so it never depends on application
+    /* Clock gate + capture (fail-closed, enforced HERE so it never depends on application
      * choreography): validate + snapshot UTC once, for the whole TLS-platform lifetime. If the
      * clock is untrustworthy, TLS platform init FAILS → no KlTlsCtx can be created. mbedtls_time()
      * then reads this one snapshot (monotonic-advanced), never GetTime, and it is never refreshed
@@ -113,12 +113,12 @@ int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
 }
 
 void kl_uefi_mbedtls_platform_shutdown(void) {
-    /* F5: drop the borrowed Boot Services pointer so no later mbedTLS calloc/free can
+    /* Drop the borrowed Boot Services pointer so no later mbedTLS calloc/free can
      * reach firmware. After this, uefi_mbed_calloc returns NULL (no new TLS objects)
      * and uefi_mbed_free is a no-op. Call from the app's shutdown path AFTER every
      * KlTlsCtx/KlTls has been destroyed and BEFORE ExitBootServices. Idempotent. */
     g_bs = NULL;
-    kl_uefi_clock_snapshot_reset();   /* U-8: clear the cert-clock snapshot (lifetime ends here) */
+    kl_uefi_clock_snapshot_reset();   /* clear the cert-clock snapshot (lifetime ends here) */
 }
 
 /* mbedTLS's platform.c initializes its default heap function pointers to `calloc`
@@ -132,9 +132,9 @@ void free(void *ptr);
 void free(void *ptr) { uefi_mbed_free(ptr); }
 
 /* ── (a) entropy: mbedtls_hardware_poll over EFI_RNG (with weak fallback) ──────
- * MOVED to entropy_uefi.c so the host mock-EFI harness can link + test the fail-closed
+ * Lives in entropy_uefi.c so the host mock-EFI harness can link + test the fail-closed
  * contract WITHOUT this TU's libc-clashing residuals (calloc/free/strcmp/snprintf/…).
- * entropy_uefi.c has no mbedTLS dependency; both TUs are compiled by build_u4.sh. */
+ * entropy_uefi.c has no mbedTLS dependency; both TUs are compiled by the mbedTLS build. */
 
 /* ── (c) libc string helpers mbedTLS uses that kl_cstr_builtin does not define ─
  * kl_cstr_builtin.c (in the self-contained archive) provides memcpy/memmove/
@@ -206,7 +206,7 @@ char *strstr(const char *haystack, const char *needle) {
 
 /* ── (c) inet_ntop — inert stub ─────────────────────────────────────────────
  * tls_mbedtls.c references it only from mTLS peer-cert SAN formatting, which the
- * U-4 verify-none client never reaches. Provided so the link resolves. */
+ * verify-none client never reaches. Provided so the link resolves. */
 const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
 const char *inet_ntop(int af, const void *src, char *dst, socklen_t size) {
     (void)af; (void)src;

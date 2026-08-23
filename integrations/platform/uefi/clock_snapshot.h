@@ -1,5 +1,5 @@
 /*
- * clock_snapshot.h — the TLS-platform-lifetime UTC snapshot that backs mbedTLS's clock (U-8).
+ * clock_snapshot.h — the TLS-platform-lifetime UTC snapshot that backs mbedTLS's clock.
  *
  * Rationale (trust boundary): mbedTLS's time callback is GLOBAL and has no per-connection
  * context, and Keel can interleave several async TLS sessions on one event loop. So a snapshot

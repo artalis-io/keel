@@ -67,6 +67,6 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
     /* Non-numeric host: this seam resolves numeric literals only. DNS is an ASYNC protocol
      * consumer, not a sync platform-seam capability — a freestanding client that needs a
      * hostname injects cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider;
-     * see 6.4c dgram_dns_selftest.c). Fail closed here. */
+     * see integrations/platform/uefi/tests/dgram_dns_selftest.c). Fail closed here. */
     return -1;
 }

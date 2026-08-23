@@ -1,5 +1,5 @@
 /*
- * socket_efi_tcp4.c — KlSocketProvider over EFI_TCP4 (U-2, Phase 10 F-8).
+ * socket_efi_tcp4.c — KlSocketProvider over EFI_TCP4.
  *
  * See socket_efi_tcp4.h for the design + the connect-vs-configure split. This TU is
  * the data plane (send/recv over Transmit/Receive + the Poll()+CheckEvent pump) plus
@@ -17,18 +17,18 @@
  * stream+datagram provider (SOCK_DGRAM → EFI_UDP4). A TCP-only build compiles a pure EFI_TCP4
  * stream provider — no socket_efi_udp4 dependency, .dgram = NULL, no DATAGRAM cap. */
 #ifdef KEEL_UEFI_DATAGRAM
-#include "socket_efi_udp4.h"          /* 6.4b: unified stream+datagram provider (tag-dispatched) */
+#include "socket_efi_udp4.h"          /* unified stream+datagram provider (tag-dispatched) */
 #endif
 #include "allocator_uefi.h"           /* kl_uefi_allocator */
-#include "platform_uefi.h"            /* kl_uefi_after_ebs (U-7 boot-services guard) */
+#include "platform_uefi.h"            /* kl_uefi_after_ebs (boot-services guard) */
 #include "../../../src/socket.h"         /* KL_SOCK_CAP_OVERLAPPED / KL_SOCK_CAP_DATAGRAM */
 
 /* ── errno (WRITE-only) ──────────────────────────────────────────────────────
- * U-6 makes recv non-blocking; the mbedTLS BIO (tls_mbedtls.c) detects a
+ * recv is non-blocking; the mbedTLS BIO (tls_mbedtls.c) detects a
  * would-block by reading errno==EAGAIN, so the provider MUST set it on the
  * would-block/error -1 paths (matching the lwip provider contract). We only
  * WRITE errno here; the definition lives in u1_link_stubs.c (linked by every
- * U-3/U-4 build). No libc errno.h — the freestanding shim may lack it —
+ * build). No libc errno.h — the freestanding shim may lack it —
  * so declare the global + the two codes locally. */
 extern int errno;
 #ifndef EAGAIN
@@ -39,7 +39,7 @@ extern int errno;
 #endif
 
 /* Provider-owned receive buffer: big enough to usually hold a whole TCP segment
- * so a single posted Receive satisfies most recv() calls (U-6). */
+ * so a single posted Receive satisfies most recv() calls. */
 #ifndef KL_EFI_RXBUF
 #define KL_EFI_RXBUF 8192
 #endif
@@ -58,26 +58,25 @@ static EFI_GUID g_tcp4_guid    = EFI_TCP4_PROTOCOL_GUID;
 
 /* Token completion events are bare (type 0): EVT_NOTIFY_WAIT/SIGNAL REQUIRE a
  * non-NULL NotifyFunction (UEFI 2.10 §7.1.1) — passing NULL there returns
- * EFI_INVALID_PARAMETER. Type 0 is the correct choice for CheckEvent-polled tokens
- * (U-0 finding #1). */
+ * EFI_INVALID_PARAMETER. Type 0 is the correct choice for CheckEvent-polled tokens. */
 #define EFI_TCP4_EVT_TOKEN 0
 
 /* Bounded per-op pump. Each spin does Poll()+CheckEvent()+Stall(1ms). The overall
  * request deadline is owned above the seam (KlHttpClientConfig.timeout_ms); this bound
  * only stops a wedged single op from spinning forever. */
 #ifndef KL_EFI_PUMP_SPINS
-#define KL_EFI_PUMP_SPINS 60000   /* ~60 s worst case at 1 ms/spin (matches U-0) */
+#define KL_EFI_PUMP_SPINS 60000   /* ~60 s worst case at 1 ms/spin */
 #endif
 #define KL_EFI_PUMP_STALL_US 1000
 
-/* F1: after a pump timeout leaves a token outstanding, Cancel() it and drain its
+/* After a pump timeout leaves a token outstanding, Cancel() it and drain its
  * (now EFI_ABORTED) completion so no firmware token still references our storage.
  * Bounded so even a wedged cancel cannot spin forever. */
 #ifndef KL_EFI_CANCEL_DRAIN_SPINS
 #define KL_EFI_CANCEL_DRAIN_SPINS 2000   /* ~2 s worst case at 1 ms/spin */
 #endif
 
-/* F6: fixed slot pool. KlUefiConn slots are provider-owned static storage — a closed
+/* Fixed slot pool. KlUefiConn slots are provider-owned static storage — a closed
  * slot's memory survives, so kl_uefi_conn_valid_h() reads STABLE storage (no UAF). The
  * client uses 1–2 concurrent conns; 8 is generous. Bump this #define for a server. */
 #ifndef KL_EFI_MAX_CONNS
@@ -85,7 +84,7 @@ static EFI_GUID g_tcp4_guid    = EFI_TCP4_PROTOCOL_GUID;
 #endif
 
 /* Configure()/DHCP settle: retry EFI_NO_MAPPING while the default address binds
- * (U-0 finding #4). Bounded so a network-less run fails rather than hangs. */
+ * Bounded so a network-less run fails rather than hangs. */
 #ifndef KL_EFI_DHCP_RETRIES
 #define KL_EFI_DHCP_RETRIES 40
 #endif
@@ -125,7 +124,7 @@ typedef struct KlUefiConn {
 
     EFI_STATUS            last_status;  /* most-recent op's raw EFI_STATUS (io_status) */
 
-    /* ── U-6 non-blocking receive state ──────────────────────────────────────
+    /* ── Non-blocking receive state ──────────────────────────────────────
      * A Receive token posted into rx_buf is polled (not pumped) by
      * kl_uefi_socket_recv_ready; efi_sock_recv drains rx_buf without blocking.
      *   rx_posted  — a Receive token is outstanding (awaiting completion)
@@ -159,7 +158,7 @@ typedef struct KlUefiConn {
      * socket(). Its stable storage is deliberately leaked until ExitBootServices. */
     int                       quarantined;
 
-    /* ── S-2 server (passive) state ──────────────────────────────────────────
+    /* ── Server (passive) state ──────────────────────────────────────────
      * A listener conn is Configure()d with ActiveFlag=FALSE; bind() records the
      * station port here, listen() arms the Accept-token pool (g_listener). An
      * accepted child is an ordinary KlUefiConn (adopted from the Accept token's
@@ -182,16 +181,15 @@ typedef struct {
 
 static KlUefiSockCtx g_ctx;
 
-/* F6: provider-owned fixed slot pool. A KlUefiConn lives in stable static storage for
+/* Provider-owned fixed slot pool. A KlUefiConn lives in stable static storage for
  * the whole provider lifetime; socket() claims a free slot (magic==0), close() marks it
  * free (magic=0, generation bumped even) but NEVER frees the storage. The KlSocketHandle
  * is (intptr_t)(slot_index + 1) — 0 stays KL_INVALID_SOCKET. Because the slot storage is
  * stable, kl_uefi_conn_valid_h() reading {magic, generation} after a close can never
- * dereference freed memory (the old design freed the conn, so a late completion's read
- * was a UAF). Single-threaded pre-boot env → no locking. */
+ * dereference freed memory. Single-threaded pre-boot env → no locking. */
 static KlUefiConn g_conns[KL_EFI_MAX_CONNS];
 
-/* ── S-2 listener: a single passive Accept-token pool (UEFI is single-threaded pre-boot,
+/* ── Listener: a single passive Accept-token pool (UEFI is single-threaded pre-boot,
  * so one listener / one loop; horizontal scaling is not a pre-boot concern). Each token
  * is armed via EFI_TCP4_PROTOCOL.Accept and, on completion, yields a NewChildHandle. The
  * pool storage is file-scope-stable so a firmware write into a hung Accept token after a
@@ -261,7 +259,7 @@ int kl_efi_ipv4_to_sockaddr(const EFI_IPv4_ADDRESS *ip, UINT16 port, KlSockAddr 
 
 /* ── conn helpers ──────────────────────────────────────────────────────────────── */
 
-/* F6: handle ⇄ slot. The handle is (slot_index + 1) so 0 == KL_INVALID_SOCKET. conn_of
+/* Handle ⇄ slot. The handle is (slot_index + 1) so 0 == KL_INVALID_SOCKET. conn_of
  * bounds-checks the index and returns the slot only if it is LIVE (magic set, not dead)
  * — reading STABLE static storage, never freed memory. */
 static KlUefiConn *conn_of(KlSocketHandle fd) {
@@ -278,16 +276,16 @@ static KlSocketHandle handle_of_slot(int idx) {
     return (KlSocketHandle)(intptr_t)(idx + 1);
 }
 
-/* Validate a {conn, generation} pair — the stale-completion guard U-3 uses. A conn
- * that was closed (generation bumped even) or whose slot was re-claimed by a NEW conn
- * (different generation) is rejected. With F6's fixed slot pool the conn pointer is
+/* Validate a {conn, generation} pair — the stale-completion guard the completion backend
+ * uses. A conn that was closed (generation bumped even) or whose slot was re-claimed by a
+ * NEW conn (different generation) is rejected. With the fixed slot pool the conn pointer is
  * ALWAYS a stable slot address, so this never dereferences freed memory. */
 int kl_uefi_conn_valid(KlUefiConn *c, UINT64 generation);
 int kl_uefi_conn_valid(KlUefiConn *c, UINT64 generation) {
     return c && c->magic == KL_EFI_CONN_MAGIC && c->generation == generation && !c->dead;
 }
 
-/* F6: like conn_of but returns the slot even if it is dead/reused (stable storage),
+/* Like conn_of but returns the slot even if it is dead/reused (stable storage),
  * so the generation/magic check can run against it without a UAF. NULL only for an
  * out-of-range handle. */
 static KlUefiConn *slot_of(KlSocketHandle fd) {
@@ -310,7 +308,7 @@ static int pump_until(KlUefiConn *c, EFI_EVENT ev) {
 }
 
 /*
- * F1 — pump the token's event to completion; on a pump timeout, Cancel() the token and
+ * Pump the token's event to completion; on a pump timeout, Cancel() the token and
  * pump until its (now EFI_ABORTED) event is signaled, so no outstanding token still
  * references our stack/caller storage when we return.
  *
@@ -394,7 +392,7 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
     KlUefiSockCtx *ctx = (KlUefiSockCtx *)cx;
     (void)protocol;
     if (!ctx || !ctx->created || !ctx->sb) return KL_INVALID_SOCKET;
-    /* U-7: refuse new sockets once boot services are gone — EFI_TCP4/CreateChild are
+    /* Refuse new sockets once boot services are gone — EFI_TCP4/CreateChild are
      * invalid after ExitBootServices. The lifetime discipline is kl_uefi_shutdown()
      * BEFORE EBS; this is the fail-closed safety net if that was skipped. */
     if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;
@@ -404,7 +402,7 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
     if (type != SOCK_STREAM) return KL_INVALID_SOCKET;
     (void)domain;
 
-    /* F6: find a free slot (magic == 0). No per-conn kl_malloc — the pool is static. */
+    /* Find a free slot (magic == 0). No per-conn kl_malloc — the pool is static. */
     int idx = -1;
     for (int i = 0; i < KL_EFI_MAX_CONNS; i++)
         if (g_conns[i].magic == 0) { idx = i; break; }
@@ -461,9 +459,9 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
 /*
  * connect(): the SYNC socket op. Per the split (see the header), this does the
  * Configure ONLY — active mode, UseDefaultAddress (DHCP), remote addr/port from the
- * KlSockAddr — tolerating EFI_NO_MAPPING (retry while DHCP settles, U-0 #4). It does
- * NOT issue the Connect token; the actual async connect (Connect + pump) is U-3's
- * completion post_connect (or kl_uefi_socket_connect_now() for the U-2 selftest).
+ * KlSockAddr — tolerating EFI_NO_MAPPING (retry while DHCP settles). It does
+ * NOT issue the Connect token; the actual async connect (Connect + pump) is the
+ * completion post_connect (or kl_uefi_socket_connect_now() for the selftest).
  *
  * A blocking connect is nonsensical over token completions, so — like lwip-raw's
  * ENOTSUP connect — this returns -1 with the conn's io_status set to KL_IO_PENDING
@@ -475,7 +473,7 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
  * completion backend (event_efi.c post_connect) share it. 0 = configured, -1 =
  * failed (c->last_status carries the class). Idempotent once configured. */
 int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a) {
-    if (kl_uefi_after_ebs()) return -1;   /* F3/F5: exposed entry — guard EBS itself */
+    if (kl_uefi_after_ebs()) return -1;   /* exposed entry — guard EBS itself */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return -1;
     if (c->configured) return 0;
@@ -505,7 +503,7 @@ int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a) {
     for (int i = 0; i < KL_EFI_DHCP_RETRIES; i++) {
         st = tcp->Configure(tcp, cfg);
         if (!EFI_ERROR(st)) { c->configured = 1; break; }
-        if (st == EFI_NO_MAPPING) {      /* DHCP not settled — pump + retry (U-0 #4) */
+        if (st == EFI_NO_MAPPING) {      /* DHCP not settled — pump + retry */
             tcp->Poll(tcp);
             c->bs->Stall(KL_EFI_DHCP_STALL_US);
             continue;
@@ -522,7 +520,7 @@ int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a) {
 
 static int efi_sock_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
     (void)cx;
-    if (kl_uefi_after_ebs()) return -1;   /* F3: fail-closed post-EBS */
+    if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return -1;
 
@@ -538,7 +536,7 @@ static int efi_sock_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
 /* connect_post — issue the Connect token WITHOUT pumping (the async counterpart of
  * kl_uefi_socket_connect_now's issue step). 0 = posted, -1 = immediate error. */
 int kl_uefi_socket_connect_post(KlSocketHandle fd) {
-    if (kl_uefi_after_ebs()) return -1;   /* F3/F5: exposed entry — guard EBS itself */
+    if (kl_uefi_after_ebs()) return -1;   /* exposed entry — guard EBS itself */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead || !c->configured || c->quarantined) return -1;
     if (c->connected) return 0;
@@ -554,7 +552,7 @@ int kl_uefi_socket_connect_post(KlSocketHandle fd) {
  * 0 = still pending, -1 = invalid handle. The async counterpart of the pump loop
  * inside kl_uefi_socket_connect_now. */
 int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok) {
-    if (kl_uefi_after_ebs()) return -1;   /* F3: fail-closed post-EBS */
+    if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return -1;
     if (c->connected) { if (out_ok) *out_ok = 1; return 1; }
@@ -577,7 +575,7 @@ unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd) {
     return c ? (unsigned long long)c->generation : 0ULL;
 }
 int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation) {
-    /* F6: read the STABLE slot (slot_of, not conn_of) so a completion delivered after
+    /* Read the STABLE slot (slot_of, not conn_of) so a completion delivered after
      * the conn was closed + freed cannot deref freed memory — the slot storage is
      * static. The magic/generation/dead check inside kl_uefi_conn_valid rejects it. */
     return kl_uefi_conn_valid(slot_of(fd), (UINT64)generation);
@@ -585,8 +583,8 @@ int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation) {
 
 /*
  * kl_uefi_socket_connect_now — issue the Connect token + pump it to completion,
- * synchronously. This is what U-3's completion post_connect will do asynchronously;
- * exposed here so the U-2 selftest (which has no completion backend) can establish
+ * synchronously. This is what the completion post_connect does asynchronously;
+ * exposed here so the selftest (which has no completion backend) can establish
  * the connection inline after efi_sock_connect() has done the Configure. Returns 0
  * on connected, -1 on failure (conn->last_status carries the EFI_STATUS).
  *
@@ -594,7 +592,7 @@ int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation) {
  */
 int kl_uefi_socket_connect_now(KlSocketHandle fd);
 int kl_uefi_socket_connect_now(KlSocketHandle fd) {
-    if (kl_uefi_after_ebs()) return -1;   /* F3: fail-closed post-EBS */
+    if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead || !c->configured) return -1;
     if (c->connected) return 0;
@@ -605,7 +603,7 @@ int kl_uefi_socket_connect_now(KlSocketHandle fd) {
     EFI_STATUS st = tcp->Connect(tcp, &c->conn_tok);
     if (EFI_ERROR(st)) { c->last_status = st; return -1; }
     c->conn_posted = 1;
-    /* F1: on a pump timeout, Cancel+drain the Connect token so no outstanding token
+    /* On a pump timeout, Cancel+drain the Connect token so no outstanding token
      * references c->conn_tok after we return -1 (the failure path). */
     if (!pump_or_cancel(c, &c->conn_tok.CompletionToken)) {
         c->last_status = EFI_TIMEOUT;
@@ -638,7 +636,7 @@ static int send_errno(EFI_STATUS st) {
  */
 static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)cx;
-    /* F3: fail-closed once boot services are gone (EFI_TCP4 is invalid post-EBS). */
+    /* Fail-closed once boot services are gone (EFI_TCP4 is invalid post-EBS). */
     if (kl_uefi_after_ebs()) { errno = EIO; return -1; }
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) { errno = EIO; return -1; }
@@ -667,12 +665,12 @@ static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, si
     EFI_STATUS st = tcp->Transmit(tcp, &c->tx_tok);
     if (EFI_ERROR(st)) { c->last_status = st; errno = send_errno(st); return -1; }
     c->tx_posted = 1;
-    /* F1: on a pump timeout, Cancel+drain the tx token so the firmware no longer
+    /* On a pump timeout, Cancel+drain the tx token so the firmware no longer
      * references the slot's tx_data/tx_buf. */
     if (!pump_or_cancel(c, &c->tx_tok.CompletionToken)) {
         /* Cancel-drain could NOT confirm the token retired: the firmware may still own
          * tx_data/tx_buf. QUARANTINE — never free/reuse this slot; its storage is
-         * retained until EBS. (F1: a bounded wait is fine; freeing afterward is not.) */
+         * retained until EBS. (A bounded wait is fine; freeing afterward is not.) */
         c->last_status = EFI_TIMEOUT;
         c->quarantined = 1;
         c->dead = 1;
@@ -687,7 +685,7 @@ static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, si
 }
 
 /*
- * kl_uefi_socket_recv_ready — the U-6 non-blocking READ-readiness probe the
+ * kl_uefi_socket_recv_ready — the non-blocking READ-readiness probe the
  * completion drain calls. Returns 1 iff recv() can return something now
  * (buffered data, EOF, or a latched error), 0 if still pending. Never pumps.
  *
@@ -705,7 +703,7 @@ static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, si
  *                                rx_ready=1 → 1.
  */
 int kl_uefi_socket_recv_ready(KlSocketHandle fd) {
-    if (kl_uefi_after_ebs()) return 0;   /* F3: fail-closed post-EBS (no readiness) */
+    if (kl_uefi_after_ebs()) return 0;   /* fail-closed post-EBS (no readiness) */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return 0;
 
@@ -746,7 +744,7 @@ int kl_uefi_socket_recv_ready(KlSocketHandle fd) {
     c->last_status = st;
     if (st == EFI_CONNECTION_FIN) { c->rx_eof = 1; return 1; }
     if (EFI_ERROR(st)) { c->rx_err = st; return 1; }
-    /* F4: the firmware-reported DataLength is UNTRUSTED — a broken/hostile provider
+    /* The firmware-reported DataLength is UNTRUSTED — a broken/hostile provider
      * could report a length exceeding the buffer we posted, and rx_consume() would then
      * read past rx_buf. Any impossible length is a fatal protocol/provider error. */
     if (c->rx_data.DataLength > (UINT32)KL_EFI_RXBUF ||
@@ -775,7 +773,7 @@ static kl_ssize_t rx_consume(KlUefiConn *c, void *dst, size_t len) {
 }
 
 /*
- * recv(): NON-BLOCKING (U-6). Serves buffered data first; otherwise probes
+ * recv(): NON-BLOCKING. Serves buffered data first; otherwise probes
  * readiness ONCE (kl_uefi_socket_recv_ready, which posts + polls a Receive
  * without pumping). Returns bytes (>0), 0 on FIN (EOF), or -1 would-block/error.
  * On a would-block -1 sets errno=EAGAIN (mbedTLS BIO would-block detection); on a
@@ -783,7 +781,7 @@ static kl_ssize_t rx_consume(KlUefiConn *c, void *dst, size_t len) {
  */
 static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t len) {
     (void)cx;
-    /* F3: fail-closed once boot services are gone. */
+    /* Fail-closed once boot services are gone. */
     if (kl_uefi_after_ebs()) { errno = EIO; return -1; }
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) { if (c) c->last_status = EFI_INVALID_PARAMETER; errno = EIO; return -1; }
@@ -823,23 +821,22 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
 }
 
 /*
- * close(): teardown per U-0 finding #6 + F2 (token-lifetime reconciliation) + F3
- * (fail-closed post-EBS).
+ * close(): teardown with token-lifetime reconciliation + fail-closed post-EBS.
  *
- * F2: BEFORE any teardown, reconcile every token that may still be outstanding so the
+ * BEFORE any teardown, reconcile every token that may still be outstanding so the
  * firmware cannot later write freed/reused storage:
  *   Cancel(NULL) cancels ALL pending tokens at once → then DRAIN each token that may be
- *   live by pumping its event to signaled: the U-6 Receive (rx_posted), a pending
- *   Connect (configured && !connected). The graceful Close token itself rides the F1
- *   timeout guard (pump_or_cancel), not a bare pump — the review flagged the ignored
- *   close-token timeout.
+ *   live by pumping its event to signaled: the Receive (rx_posted), a pending
+ *   Connect (configured && !connected). The graceful Close token itself rides the
+ *   timeout guard (pump_or_cancel), not a bare pump — the ignored close-token timeout
+ *   would otherwise leak.
  * Order: Cancel(NULL) → drain rx/connect → graceful Close → pump_or_cancel(close) →
  *        close_events → Configure(NULL) → CloseProtocol → DestroyChild → free slot.
  *
- * F3: after ExitBootServices the EFI protocols are GONE — do NOT call
+ * After ExitBootServices the EFI protocols are GONE — do NOT call
  * Cancel/Close/CloseEvent/CloseProtocol/DestroyChild; just mark the slot dead+free.
  *
- * F6: the KlUefiConn lives in a static slot — close() marks it free (magic=0,
+ * The KlUefiConn lives in a static slot — close() marks it free (magic=0,
  * generation bumped even) but NEVER frees the storage, so a late completion's
  * {handle,gen} read is safe (stable storage).
  */
@@ -884,18 +881,18 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
     c->dead = 1;
     c->generation++;                /* even == closed: reject any late {conn,gen} */
 
-    /* F3: post-EBS, the EFI protocols vanished — touch NO boot service. Just free
+    /* Post-EBS, the EFI protocols vanished — touch NO boot service. Just free
      * the slot (magic=0) and return; conn_of() then rejects the handle. */
     if (kl_uefi_after_ebs()) {
         c->magic = 0;
         return 0;
     }
 
-    /* F1: a quarantined conn already leaked its (still-firmware-owned) tokens/buffers.
+    /* A quarantined conn already leaked its (still-firmware-owned) tokens/buffers.
      * Do NOT touch them again; leave the slot occupied-but-dead (never reclaimed). */
     if (c->quarantined) return 0;
 
-    /* S-2: a listener also owns the Accept-token pool — drain/quarantine it before the
+    /* A listener also owns the Accept-token pool — drain/quarantine it before the
      * conn's own teardown. If any Accept token couldn't be retired, the firmware may
      * still write it via this listener's tcp: QUARANTINE the whole conn (never
      * CloseEvent/Configure(NULL)/DestroyChild) — its stable storage is leaked to EBS. */
@@ -907,7 +904,7 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
     EFI_TCP4_PROTOCOL *tcp = c->tcp;
     int drained_ok = 1;   /* every posted token confirmed retired? */
 
-    /* F2/F3: Cancel ALL pending tokens at once, then drain ONLY the tokens that are
+    /* Cancel ALL pending tokens at once, then drain ONLY the tokens that are
      * actually posted (explicit *_posted flags — NEVER a token whose terminal signal was
      * already consumed, which would spin forever on an event that never fires again).
      * Check EACH drain: if one cannot be confirmed retired, the token is still live. */
@@ -926,7 +923,7 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
         c->tx_posted = 0;
     }
 
-    /* Graceful Close — its token also needs a terminal path (F1 guard). */
+    /* Graceful Close — its token also needs a terminal path (the pump_or_cancel guard). */
     if (tcp && c->events_created && c->close_tok.CompletionToken.Event) {
         c->close_tok.AbortOnClose = FALSE;
         c->close_tok.CompletionToken.Status = EFI_NOT_READY;
@@ -938,26 +935,26 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
         }
     }
 
-    /* F1/F3: if ANY token could not be confirmed retired, the firmware may still own this
+    /* If ANY token could not be confirmed retired, the firmware may still own this
      * slot's tokens / buffers / events — QUARANTINE: do NOT CloseEvent, Configure(NULL),
      * CloseProtocol, DestroyChild, or reclaim the slot. Its stable storage is deliberately
      * leaked until ExitBootServices. (A bounded wait is fine; freeing afterward is not.) */
     if (!drained_ok) { c->quarantined = 1; return 0; }
 
     close_events(c);                /* CloseEvent all 4 (exactly once) */
-    if (tcp) tcp->Configure(tcp, NULL);   /* reset config (U-0 #6) */
+    if (tcp) tcp->Configure(tcp, NULL);   /* reset config */
     if (c->child) {
         bs->CloseProtocol(c->child, &g_tcp4_guid, c->image, c->child);
         if (c->sb) c->sb->DestroyChild(c->sb, c->child);
     }
-    c->magic = 0;   /* F6: slot free + reclaimable (all tokens confirmed retired) */
+    c->magic = 0;   /* slot free + reclaimable (all tokens confirmed retired) */
     return 0;
 }
 
 /* get_local_addr(): GetModeData → the DHCP-assigned station address → KlSockAddr. */
 static int efi_sock_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr) {
     (void)cx;
-    if (kl_uefi_after_ebs()) return -1;   /* F3: fail-closed post-EBS */
+    if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead || !addr || !c->tcp) return -1;
 
@@ -982,7 +979,7 @@ static KlIoStatus efi_sock_io_status(void *cx) {
     return kl_efi_status_to_io(g_last_ctx_status);
 }
 
-/* 6.4b: the unified provider's io_status is provider-global (KlSocketOps.io_status has no fd), so the
+/* The unified provider's io_status is provider-global (KlSocketOps.io_status has no fd), so the
  * DATAGRAM side must publish its last op's EFI_STATUS into the SAME channel the (stream) io_status
  * reads — otherwise a synchronous datagram failure (TOS/source-pin reject → EFI_UNSUPPORTED) would be
  * classified from stale TCP state and udp.c could enqueue a packet it should have dropped. Called by
@@ -995,7 +992,7 @@ static int  efi_noop_fd(void *cx, KlSocketHandle fd)          { (void)cx; (void)
 static void efi_void_fd(void *cx, KlSocketHandle fd)          { (void)cx; (void)fd; }
 static int  efi_opt(void *cx, KlSocketHandle fd, int on)      { (void)cx; (void)fd; (void)on; return 0; }
 
-/* ── S-2 server: passive open (bind / listen / accept) ─────────────────────────── */
+/* ── Server: passive open (bind / listen / accept) ─────────────────────────── */
 
 /* Adopt an Accept token's NewChildHandle into a fresh KlUefiConn slot: OpenProtocol
  * the child's EFI_TCP4, create its per-op token events, mark it connected/configured
@@ -1104,7 +1101,7 @@ static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
     c->is_listener = 1;   /* a socket that listened is a listener (bind optional) */
 
     /* Create the Accept-token pool events (backlog clamped to KL_EFI_ACCEPT_BACKLOG) but
-     * do NOT arm them here. Arming is capacity-gated (Goal 8 backpressure): the event
+     * do NOT arm them here. Arming is capacity-gated (backpressure): the event
      * layer calls kl_uefi_socket_accept_arm(fd, free_keel_slots) each completion tick, so
      * EFI never has more armed Accept tokens than Keel has free connection slots — a
      * connection Keel can't service waits in the TCP backlog, not in a firmware child. */
@@ -1123,7 +1120,7 @@ static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
     return 0;
 }
 
-/* Capacity-gated Accept-token arming (S-3 backpressure, the "post_accept" half of the
+/* Capacity-gated Accept-token arming (backpressure, the "post_accept" half of the
  * accept lifecycle, symmetric with kl_uefi_socket_connect_post). Arm unposted,
  * non-quarantined token slots until the posted count reaches min(pool size, `want`),
  * where `want` is the number of FREE Keel connection slots the event layer passes in.
@@ -1297,7 +1294,7 @@ const KlSocketProvider *kl_uefi_socket_provider(EFI_BOOT_SERVICES *bs, EFI_HANDL
     g_provider.dgram        = NULL;
 
 #ifdef KEEL_UEFI_DATAGRAM
-    /* 6.4b: one unified provider serves SOCK_STREAM (EFI_TCP4) AND SOCK_DGRAM (EFI_UDP4) — a UEFI
+    /* One unified provider serves SOCK_STREAM (EFI_TCP4) AND SOCK_DGRAM (EFI_UDP4) — a UEFI
      * client resolves (UDP) then connects (TCP) on one KlEventCtx.sockets. Add the datagram
      * data-plane iff an EFI_UDP4 ServiceBinding is present (tolerated absent — no DATAGRAM cap). */
     if (kl_uefi_udp_provider_init(bs, image) == 0) {
@@ -1312,7 +1309,7 @@ void kl_uefi_socket_provider_reset(void) {
     if (!g_ctx.created) return;
     if (g_ctx.sb_handles && g_ctx.bs) g_ctx.bs->FreePool(g_ctx.sb_handles);
     { unsigned char *p = (unsigned char *)&g_ctx; for (size_t i = 0; i < sizeof(g_ctx); i++) p[i] = 0; }
-    /* F6: DO NOT blanket-zero the pool. A QUARANTINED slot's tokens/buffers may still be
+    /* DO NOT blanket-zero the pool. A QUARANTINED slot's tokens/buffers may still be
      * firmware-owned — zeroing it would let a later socket() reuse storage the firmware
      * writes (corruption). A still-LIVE slot (magic set, not dead) means the caller reset
      * without closing (a lifecycle-contract violation, see lifecycle_uefi.h). Preserve
@@ -1321,11 +1318,11 @@ void kl_uefi_socket_provider_reset(void) {
      * subsequent provider reuses the free slots and skips the occupied ones. */
     g_last_ctx_status = EFI_SUCCESS;
 #ifdef KEEL_UEFI_DATAGRAM
-    kl_uefi_udp_provider_reset();   /* 6.4b: the unified provider owns the datagram side too */
+    kl_uefi_udp_provider_reset();   /* the unified provider owns the datagram side too */
 #endif
 }
 
-/* F6: how many slots are still LIVE (open, not closed) — the lifecycle contract is that
+/* How many slots are still LIVE (open, not closed) — the lifecycle contract is that
  * this is 0 before kl_uefi_shutdown()/EBS. kl_uefi_shutdown() checks it. Declared in
  * socket_efi_tcp4.h. */
 int kl_uefi_socket_provider_live_count(void) {

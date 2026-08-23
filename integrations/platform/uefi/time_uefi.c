@@ -1,5 +1,5 @@
 /*
- * time_uefi.c — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build (U-8).
+ * time_uefi.c — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build.
  *
  * The wall-clock time source (mbedtls_time == MBEDTLS_PLATFORM_TIME_MACRO) is the per-session
  * SNAPSHOT in clock_snapshot.c (which never calls GetTime from the verification callback).

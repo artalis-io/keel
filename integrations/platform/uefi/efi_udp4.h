@@ -1,5 +1,5 @@
 /*
- * efi_udp4.h — minimal EFI_UDP4 + ServiceBinding protocol surface for the U-5 spike.
+ * efi_udp4.h — minimal EFI_UDP4 + ServiceBinding protocol surface.
  *
  * Vendored from the UEFI Specification 2.10, section 30.2 (EFI_UDP4_PROTOCOL) plus
  * the shared §28.1 EFI_SERVICE_BINDING_PROTOCOL / §28.3 EFI_IPv4_ADDRESS types. The
@@ -100,7 +100,7 @@ typedef struct {
 } EFI_UDP4_COMPLETION_TOKEN;
 
 /* ---- UDP4 protocol vtable (UEFI 2.10 §30.2) ----
- * Only Configure / Transmit / Receive / Poll are called by U-5; the rest are declared
+ * Only Configure / Transmit / Receive / Poll are called; the rest are declared
  * so the vtable ABI matches the firmware's expectation. */
 typedef struct _EFI_UDP4_PROTOCOL EFI_UDP4_PROTOCOL;
 

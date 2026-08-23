@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/sal.h — empty MSVC SAL-annotation shim for the U-4 mbedTLS build.
+ * mbedtls_shim/sal.h — empty MSVC SAL-annotation shim for the mbedTLS build.
  *
  * clang --target=x86_64-unknown-windows defines _MSC_VER (MSVC compat) but NOT
  * __GNUC__, so mbedtls/platform_util.h takes its _MSC_VER branch and pulls <sal.h>

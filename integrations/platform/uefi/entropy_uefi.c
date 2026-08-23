@@ -1,15 +1,14 @@
 /*
- * entropy_uefi.c — mbedtls_hardware_poll() over EFI_RNG, split out of
- * mbedtls_platform_uefi.c so it can be UNIT-TESTED without the mbedTLS adapter.
+ * entropy_uefi.c — mbedtls_hardware_poll() over EFI_RNG.
  *
  * This is the entropy source mbedTLS draws from (MBEDTLS_ENTROPY_HARDWARE_ALT). It has
  * NO mbedTLS dependency — only the freestanding platform hooks kl_uefi_have_entropy()
  * (EFI_RNG present?) and kl_plat_random() (EFI_RNG bytes) — so the host mock-EFI harness
- * links it directly and exercises the fail-closed contract (F4) as a real test rather
- * than "by inspection". mbedtls_platform_uefi.c keeps the heap + libc residuals (which
+ * links it directly and exercises the fail-closed contract as a real test rather
+ * than "by inspection". mbedtls_platform_uefi.c carries the heap + libc residuals (which
  * DO clash with a hosted libc and cannot be linked into the host harness).
  *
- * ENTROPY POLICY (F4 — fail closed by default):
+ * ENTROPY POLICY (fail closed by default):
  *   - With EFI_RNG_PROTOCOL present (kl_uefi_have_entropy()==1), draw real randomness.
  *   - Without it, FAIL CLOSED (return nonzero, *olen=0) so the CTR_DRBG seed fails and NO
  *     TLS context is created — UNLESS the build explicitly defines
@@ -57,7 +56,7 @@ int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
     if (olen) *olen = len;
     return 0;
 #else
-    /* F4: FAIL CLOSED by default. The reusable adapter refuses to fabricate entropy —
+    /* FAIL CLOSED by default. The reusable adapter refuses to fabricate entropy —
      * a non-zero return with *olen=0 makes the CTR_DRBG seed FAIL, so no TLS context is
      * created without a real entropy source. A build that wants the insecure demo must
      * define KL_UEFI_INSECURE_TEST_ENTROPY explicitly. */

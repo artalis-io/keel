@@ -1,5 +1,5 @@
 /*
- * efi_tcp4.h — minimal EFI_TCP4 + ServiceBinding protocol surface for the U-0 spike.
+ * efi_tcp4.h — minimal EFI_TCP4 + ServiceBinding protocol surface.
  *
  * Vendored from the UEFI Specification 2.10, sections:
  *   - 28.1  EFI_SERVICE_BINDING_PROTOCOL           (CreateChild / DestroyChild)
@@ -8,7 +8,7 @@
  *   - 28.5  EFI_TCP4_PROTOCOL                       (Configure/Connect/Transmit/Receive/...)
  *
  * gnu-efi's TCP4 protocol coverage is incomplete, so the TCP4/ServiceBinding vtables +
- * token structs are defined here per spec. This is standard practice for a UEFI spike.
+ * token structs are defined here per spec.
  *
  * Depends on efi_min.h already being included (for EFI_STATUS, EFI_EVENT, EFI_GUID,
  * EFI_HANDLE, EFIAPI, BOOLEAN, UINT8/16/32, UINTN, VOID).

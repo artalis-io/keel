@@ -4,7 +4,7 @@
  * BYO / opt-in: lwIP is NOT vendored — build this against your own lwIP
  * (LWIP_DIR) with your lwipopts.h. This is a reference that validates Keel's
  * public provider API (<keel/socket.h>) is sufficient to run Keel on lwIP; it is
- * not a shipped/default platform. See docs/lwip_platform_design.md.
+ * not a shipped/default platform. See docs/archive/designs/lwip_platform_design.md.
  *
  * Uses only the public authoring API — kl_ssize_t / KlIoVec / KlSocketHandle,
  * never internal or host-POSIX types. struct iovec here is lwIP's own (from
@@ -262,7 +262,7 @@ static int lwdg_mcast(void *c, KlSocketHandle fd, int family,
     return -1;
 }
 
-/* M2: lwIP ignores source-pin / per-packet TOS (§4) → NEVER granted (no silent-no-op emulation), and
+/* lwIP ignores source-pin / per-packet TOS (§4) → NEVER granted (no silent-no-op emulation), and
  * has no IPv6 broadcast. Connected-mode send is always available. Multicast is granted ONLY when the
  * fd's family has its multicast subsystem compiled in — LWIP_IGMP (IPv4) / LWIP_IPV6_MLD (IPv6) — the
  * exact guards lwdg_mcast uses; otherwise a join would fail after init granted it. */

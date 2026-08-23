@@ -2,7 +2,7 @@
  * civil_time.h — pure proleptic-Gregorian civil-date ⇄ Unix-seconds conversion.
  *
  * No EFI, no mbedTLS, no libc — just integer math (Howard Hinnant's days_from_civil /
- * civil_from_days). Split out so the error-prone leap-year / epoch arithmetic behind
+ * civil_from_days). Kept in its own TU so the error-prone leap-year / epoch arithmetic behind
  * UEFI cert validity-time (EFI GetTime → mbedTLS notBefore/notAfter checks) is unit-
  * tested exhaustively on the host, independent of firmware. UTC throughout.
  */

@@ -1,5 +1,5 @@
 /*
- * time_uefi.h — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build (U-8).
+ * time_uefi.h — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build.
  *
  * time_uefi.c defines mbedtls_platform_gmtime_r (MBEDTLS_PLATFORM_GMTIME_R_ALT) and
  * mbedtls_ms_time (MBEDTLS_PLATFORM_MS_TIME_ALT). The wall-clock time source

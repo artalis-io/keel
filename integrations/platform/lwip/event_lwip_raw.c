@@ -1,39 +1,37 @@
 /*
- * event_lwip_raw.c — Phase 9 lwIP raw-API COMPLETION event backend.
+ * event_lwip_raw.c — lwIP raw-API COMPLETION event backend.
  *
- * This is the completion-model counterpart of the shipped *readiness* lwIP provider
+ * This is the completion-model counterpart of the *readiness* lwIP provider
  * (event_lwip.c, which polls lwIP's sockets layer via lwip_poll). It drives lwIP's
  * native, lightest interface: the raw `tcp_*` callback API in NO_SYS=1 mode — no
- * tcpip thread, no sockets/netconn. See docs/phase9_lwip_raw_design.md.
+ * tcpip thread, no sockets/netconn.
  *
- * The crux (design doc §"NO_SYS=1"): lwIP's raw callbacks are not thread-safe and
+ * The crux: lwIP's raw callbacks are not thread-safe and
  * must run on a single bare mainloop. KEEL's KlEventCtx run loop IS that mainloop:
  * each completion tick (kl_comp_drain) calls sys_check_timeouts() (retransmit /
  * TIME-WAIT / etc.) + netif_poll(loopif) (drains queued loopback/TX pbufs), and the
  * raw tcp_* callbacks fire inline on that one thread — so no locking is needed and
- * they map cleanly onto the completion driver (completion_driver.c).
+ * they map cleanly onto the completion driver (completion_core.c).
  *
- * RUNTIME PROVIDER over a STOCK libkeel (RC-3): originally this was authored as a
- * compiled-in completion BACKEND (BACKEND=lwipraw). Since RC-1 made the completion axis
- * runtime-dispatchable (completion_dispatch.c honours loop->ops->completion) and RC-2
- * proved the injection path on pollcomp, this TU is now a PURE runtime provider — exactly
- * like the readiness event_lwip.c: static ops grouped in a KlEventProvider, NO
- * kl_event_*_builtin / kl_comp_ops_builtin symbols. It links cleanly next to a STOCK
- * libkeel (whose default backend already defines those _builtin symbols) and is installed
- * at runtime via kl_event_provider_lwip_raw() (KlHttpServerConfig.event_provider /
+ * RUNTIME PROVIDER over a STOCK libkeel: the completion axis is runtime-dispatchable
+ * (completion_dispatch.c honours loop->ops->completion), so this TU is a PURE runtime
+ * provider — exactly like the readiness event_lwip.c: static ops grouped in a
+ * KlEventProvider, NO kl_event_*_builtin / kl_comp_ops_builtin symbols. It links cleanly
+ * next to a STOCK libkeel (whose default backend already defines those _builtin symbols)
+ * and is installed at runtime via kl_event_provider_lwip_raw() (KlHttpServerConfig.event_provider /
  * kl_event_ctx_init_ex). The always-linked driver+dispatch in the stock lib reach this
- * backend's primitives through loop->ops->completion. BACKEND=lwipraw is retired.
+ * backend's primitives through loop->ops->completion.
  *
  * Division of labour (mirrors event_pollcomp.c — the SIMPLEST completion backend):
  *   - THIS TU defines the completion.h/completion_io.h BACKEND primitives:
  *       kl_comp_drain / kl_comp_prime_accepts / kl_comp_post_{recv,send,accept,sendfile}
  *       / kl_comp_cancel / kl_comp_post_udp_{recv,send}
- *   - completion_driver.c defines the GENERIC tick + seam entry points on top of them:
+ *   - completion_core.c defines the GENERIC tick + seam entry points on top of them:
  *       kl_comp_run / kl_http_comp_run / kl_http_comp_resume /
  *       kl_http_comp_post_read
  *
  * CAPABILITIES (IPv4, loopback): listen/accept + recv/send/sendfile completion for a TCP
- * server, an outbound TCP client connect (LC-1), and — as of LC-3a — a UDP datagram data-plane
+ * server, an outbound TCP client connect, and a UDP datagram data-plane
  * (datagram over raw): SOCK_DGRAM sockets create a udp_pcb, kl_comp_post_dgram_recv/send arm/send via
  * the glue, and the drain surfaces KL_COMP_DGRAM_RECV/SEND. The socket-provider primitives operate
  * on real tcp_pcb/udp_pcb handles via the glue. Unsupported operations fail EARLY and CLEARLY
@@ -69,13 +67,13 @@
 #include <keel/http_server.h>       /* KlHttpServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
-#include <keel/datagram.h>     /* KlDatagramOps (LC-3a datagram data-plane) */
+#include <keel/datagram.h>     /* KlDatagramOps (datagram data-plane) */
 #include "keel_lwip_raw.h"     /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "completion_io.h"         /* kl_comp_post_dgram_* decls */
-#include "datagram_life.h"     /* kl_dgram_life_release — drop the caller-transferred ref (7B-2b) */
+#include "datagram_life.h"     /* kl_dgram_life_release — drop the caller-transferred ref */
 
 #include <string.h>
 #include <time.h>
@@ -89,7 +87,7 @@
 #define KL_LWR_NS_PER_MS      1000000L
 
 /* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
- * which completion_driver.c caps at KL_COMP_MAX_EVENTS = 64). */
+ * which completion_core.c caps at KL_COMP_MAX_EVENTS = 64). */
 #define KL_LWR_MAX_DRAIN  64
 
 /* Per-loop backend state stashed in loop->_backend. All connection state — including the
@@ -115,7 +113,7 @@ typedef struct {
  * needs no conn list of its own and stays lwIP-free. */
 
 /* ── KlEventLoop lifecycle ─────────────────────────────────────────────
- * Pure-provider form (RC-3): these are static lwr_ev_* ops referenced only by the
+ * Pure-provider form: these are static lwr_ev_* ops referenced only by the
  * KlEventOps literal below (which the KlEventProvider hangs off). No kl_event_*_builtin
  * surface — the backend is reached at runtime via loop->ops, never the compiled-in
  * default path. Mirrors event_lwip.c. */
@@ -145,13 +143,13 @@ static int lwr_ev_init(KlEventLoop *loop) {
 /* SERVER connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
  * readiness watches, so for server conns add/mod/del are inert — matching the IOCP model.
  *
- * CLIENT data plane (LC-1), however, rides a readiness watcher: the async KlHttpClient arms a
+ * CLIENT data plane, however, rides a readiness watcher: the async KlHttpClient arms a
  * KL_EVENT_WRITE/READ watcher on its connect pcb for the send/recv phase (it has no KlHttpConn, so it
  * cannot use the server-side completion post path). Since a NO_SYS=1 raw loop has no pollable fd,
  * add/mod RECORD the armed watcher (fd == the client pcb; udata == the tagged KlWatcher) into the
  * glue's client slot, and lwr_comp_drain relays it as KL_COMP_WATCHER when the pcb is writable/
  * readable. The recording is a no-op for a non-client (server) pcb. This keeps the client's
- * readiness-shaped I/O working over the raw loop without any lwIP type reaching client.c — the
+ * readiness-shaped I/O working over the raw loop without any lwIP type reaching the HTTP client — the
  * design doc's "reach the backend only through the completion contract + the tagged watcher". The
  * mask is passed through as KlEventMask (numerically == the KL_LWR_EV_* seam bits, asserted below). */
 _Static_assert((unsigned)KL_EVENT_READ  == KL_LWR_EV_READ,  "KlEventMask READ must match seam bit");
@@ -201,7 +199,7 @@ static void lwr_ev_close(KlEventLoop *loop) {
     loop->fd = -1;
 }
 
-/* Completion loop over lwIP-raw. COMPLETION makes the Phase 7 negotiation
+/* Completion loop over lwIP-raw. COMPLETION makes the capability negotiation
  * (kl_caps_compatible) require an OVERLAPPED socket provider — kl_socket_provider_lwip_raw
  * below. NOT native-fd: the raw loop has no OS descriptor to poll. */
 static unsigned lwr_ev_caps(const KlEventLoop *loop) {
@@ -216,8 +214,8 @@ static const struct KlSocketProvider *lwr_ev_native_provider(const KlEventLoop *
 
 /* ── Runtime KlEventProvider packaging (parallel to event_lwip.c) ────────────── */
 /* The completion sub-vtable is defined below (after the completion primitives) — forward-
- * declare it so the KlEventOps literal can carry it (RC-1): a runtime-injected lwip-raw
- * provider then advertises the completion axis too, which RC-2 exercises. */
+ * declare it so the KlEventOps literal can carry it: a runtime-injected lwip-raw
+ * provider then advertises the completion axis too. */
 static const KlCompletionOps lwip_raw_completion_ops;
 static const KlEventOps lwip_raw_event_ops = {
     .init = lwr_ev_init, .add = lwr_ev_add, .mod = lwr_ev_mod,
@@ -245,7 +243,7 @@ static int lwr_sock_opt(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd;
 
 static KlSocketHandle lwr_sock_socket(void *c, int d, int t, int p) {
     (void)c; (void)d; (void)p;
-    /* SOCK_DGRAM → a udp_pcb (LC-3a); anything else → a tcp_pcb. The glue tracks each in its own
+    /* SOCK_DGRAM → a udp_pcb; anything else → a tcp_pcb. The glue tracks each in its own
      * slot table, so bind/close can later route to the right lwIP call via kl_lwr_is_udp. */
     void *pcb = (t == SOCK_DGRAM) ? kl_lwr_udp_new() : kl_lwr_tcp_new();
     return pcb ? (KlSocketHandle)pcb : KL_INVALID_SOCKET;
@@ -258,7 +256,7 @@ static KlSocketHandle lwr_sock_socket(void *c, int d, int t, int p) {
 static int lwr_sock_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     (void)c;
     if (!a || kl_sockaddr_family(a) != KL_AF_INET) return -1;   /* IPv6 unsupported */
-    /* Route a datagram handle to udp_bind (LC-3a), a stream handle to tcp_bind. */
+    /* Route a datagram handle to udp_bind, a stream handle to tcp_bind. */
     if (kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd))
         return kl_lwr_udp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
     return kl_lwr_tcp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
@@ -295,7 +293,7 @@ static KlSocketHandle lwr_sock_accept(void *c, KlSocketHandle fd, KlSockAddr *pe
 static int lwr_sock_close(void *c, KlSocketHandle fd) {
     (void)c;
     if (!kl_handle_valid(fd)) return 0;
-    /* Route a datagram handle to udp_remove (LC-3a), a stream handle to tcp_close. */
+    /* Route a datagram handle to udp_remove, a stream handle to tcp_close. */
     if (kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd))
         kl_lwr_udp_close(kl_lwr_active_ctx(), (void *)fd);
     else
@@ -306,7 +304,7 @@ static int lwr_sock_close(void *c, KlSocketHandle fd) {
 static int lwr_sock_getaddr(void *c, KlSocketHandle fd, KlSockAddr *out) {
     (void)c;
     if (!out || !kl_handle_valid(fd)) return -1;
-    /* Datagram handle → udp local port (LC-3a); stream handle → tcp local port. */
+    /* Datagram handle → udp local port; stream handle → tcp local port. */
     uint16_t port = kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd)
                         ? kl_lwr_udp_local_port((void *)fd)
                         : kl_lwr_tcp_local_port((void *)fd);
@@ -330,7 +328,7 @@ static kl_ssize_t lwr_io_eagain(void) {
     return -1;
 }
 
-/* CLIENT send (LC-1): route to the glue's real client send. Server conns never call this (server
+/* CLIENT send: route to the glue's real client send. Server conns never call this (server
  * I/O rides the completion post path), so a non-client pcb falls through to a hard error. `would_
  * block` (no tcp_sndbuf headroom / ERR_MEM) maps to EAGAIN so the client re-arms the WRITE watcher.
  * A short write (chunk < n) is a normal partial send — the client loops. */
@@ -342,7 +340,7 @@ static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_
     long r = kl_lwr_client_send(lctx, (void *)fd, b, n, &wb);
     /* r<0 = not a connected CLIENT pcb. The completion-TLS handshake flush (comp_tls_flush) sends
      * server ciphertext through this same socket send op on a SERVER-accepted pcb — route that to
-     * the server sync-send (LC-4). If neither claims the pcb it is a genuine hard error. */
+     * the server sync-send. If neither claims the pcb it is a genuine hard error. */
     if (r < 0) {
         r = kl_lwr_srv_sync_send(lctx, (void *)fd, b, n, &wb);
         if (r < 0) return -1;
@@ -351,7 +349,7 @@ static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_
     return (kl_ssize_t)r;
 }
 
-/* CLIENT recv (LC-1): route to the glue's real client recv (drains the retained rx queue). Returns
+/* CLIENT recv: route to the glue's real client recv (drains the retained rx queue). Returns
  * 0 on peer close (EOF), >0 bytes, or EAGAIN when connected with no data yet. */
 static kl_ssize_t lwr_sock_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
     (void)c;
@@ -367,7 +365,7 @@ static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
     (void)c; (void)fd; (void)b; (void)n; return -1;
 }
 
-/* ── LC-3a: datagram data-plane (KlDatagramOps) ────────────────────────────────────
+/* ── Datagram data-plane (KlDatagramOps) ────────────────────────────────────
  * On a COMPLETION loop, udp.c drives recv/send through the completion primitives
  * (kl_comp_post_dgram_recv/send), NOT these ops — so send/recv are fail-stubs (the readiness /
  * source-pinned / TOS path that would call them never runs on this loop). The ONE op the machine
@@ -414,7 +412,7 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .name = "lwip-raw",
 };
 
-/* LC-3a: advertise KL_SOCK_CAP_DATAGRAM + the datagram ops, so kl_datagram_socket_init accepts this provider
+/* Advertise KL_SOCK_CAP_DATAGRAM + the datagram ops, so kl_datagram_socket_init accepts this provider
  * (udp_dg() non-NULL) and a KlDatagram runs over the raw completion loop. */
 static const KlSocketProvider lwip_raw_provider = {
     &lwip_raw_sock_ops, NULL, KL_SOCK_CAP_OVERLAPPED | KL_SOCK_CAP_DATAGRAM, &lwip_raw_dgram_ops,
@@ -425,14 +423,14 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 /* ── completion.h backend primitives ─────────────────────────────────────────── */
 
 
-/* Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii): accepts arrive via the passive tcp_accept
+/* Returns 0 = AUTONOMOUS accept model: accepts arrive via the passive tcp_accept
  * callback and surface through drain's per-slot scan (below), bounded by the per-conn slot table
  * (sized to max_connections == pool capacity), NOT by posted ops. No completion KlListener is
  * installed; this one-time setup latches the relocated listen pcb. */
 static int lwr_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
     if (!ctx) return -1;
     (void)listen_fd;   /* lwIP relocates + adopts its own listen pcb below (writes s->listen_fd) */
-    /* R2f: neutral accept ops. lwIP is an AUTONOMOUS backend that needs s->config + MUTATES
+    /* Neutral accept ops. lwIP is an AUTONOMOUS backend that needs s->config + MUTATES
      * s->listen_fd, so this integration adapter recovers the owning KlHttpServer from its embedded
      * event ctx via containerof (integrations may know KlHttpServer; only src/ substrate must not). */
     KlHttpServer *s = (KlHttpServer *)((char *)ctx - offsetof(KlHttpServer, ev));
@@ -486,7 +484,7 @@ static int lwr_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
  * old 16 MiB KL_LWR_POST_SEND_MAX cap is gone).
  *
  * The iov DATA is referenced in place and MUST stay valid until the KL_COMP_WRITE. That holds:
- * comp_send_response (completion_driver.c) builds the iovec from the live c->res segments
+ * comp_send_response (completion_core.c) builds the iovec from the live c->res segments
  * (res->hdr_buf, res->body) + static literals + a small stack Content-Length scratch (`cl_buf`);
  * the driver cannot reset c->res until comp_on_write. The glue snapshots any segment <= 256 B
  * (which covers cl_buf) into a preallocated head buffer, so even the transient scratch is safe.
@@ -535,14 +533,14 @@ static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     if (st && kl_handle_valid(fd)) kl_lwr_tcp_abort(st->lwrctx, (void *)fd);
 }
 
-/* LC-3a: UDP datagram over the raw completion loop. udp.c drives these on a completion loop
+/* UDP datagram over the raw completion loop. udp.c drives these on a completion loop
  * (KL_EVENT_CAP_COMPLETION): post_dgram_recv arms one datagram recv on the udp pcb (surfaced as
  * KL_COMP_DGRAM_RECV via the drain when a datagram arrives), and post_dgram_send hands one datagram to
  * udp_sendto (surfaced as KL_COMP_DGRAM_SEND). The KlDgramCore* is the completion target; the udp pcb is
  * udp->fd. Raw recv is passive (the udp_recv callback retains datagrams into the glue's per-slot
  * ring), so "posting" a recv just associates the owner + arms the slot — mirroring the tcp recv-arm
  * model. IPv4-only (the loopif is IPv4). */
-/* 7B-2b ownership note: the caller (udp.c / a facade) retained ONE token ref and TRANSFERRED it in the
+/* Ownership: the caller (udp.c / a facade) retained ONE token ref and TRANSFERRED it in the
  * descriptor. The lwIP GLUE keeps its OWN independent ref discipline (retain-at-arm/-send, transfer-at-
  * drain, release-at-close), so the transferred ref is redundant here: on a successful post the wrapper
  * RELEASES it (the glue's own ref carries the op); on failure it leaves it for the caller to release. */
@@ -565,7 +563,7 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     return rc;
 }
 
-/* 7B-2/7B-8 cancel/retire seam. A SEND completes synchronously in the drain (no in-kernel op) → cancel
+/* Cancel/retire seam. A SEND completes synchronously in the drain (no in-kernel op) → cancel
  * is a no-op. A RECV, however, is an armed op the KlDatagram close coordinator must see RETIRE: cancel
  * moves the armed recv to a context-owned pending TERMINAL the drain surfaces as an ok=0 completion
  * (kl_lwr_udp_cancel_recv), so recv_inflight retires. retire reports PENDING while that terminal is
@@ -614,7 +612,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
         if (r->kind == KL_LWR_ACCEPT) {
             ev->kind = KL_COMP_ACCEPT;
-            ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
+            ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
             ev->ok = 1;
             ev->accepted_fd = (KlSocketHandle)r->accepted;
             /* ev->peer is left zeroed (KL_AF_UNSPEC = "unavailable"); the driver keys on
@@ -625,11 +623,11 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         }
 
         if (r->kind == KL_LWR_CONNECT) {
-            /* An outbound client connect finished (LC-1). The consumer is the async KlHttpClient, not
+            /* An outbound client connect finished. The consumer is the async KlHttpClient, not
              * the server driver — route it exactly like KL_COMP_WATCHER (the driver dispatches it
              * via kl_event_dispatch to the client's tagged connect watcher). r->owner carries the
              * tagged KlWatcher udata; the result is mask-encoded (KL_EVENT_WRITE = connected, 0 =
-             * failed) matching pollcomp/io_uring, so client.c's connect branch is unchanged. */
+             * failed) matching pollcomp/io_uring, so the HTTP client's connect branch is unchanged. */
             ev->kind = KL_COMP_CONNECT;
             ev->target = r->owner;
             ev->ok = r->ok;
@@ -692,7 +690,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         count++;
     }
 
-    /* (c) CLIENT data-plane readiness relay (LC-1): the async KlHttpClient armed a KL_EVENT_WRITE/READ
+    /* (c) CLIENT data-plane readiness relay: the async KlHttpClient armed a KL_EVENT_WRITE/READ
      * watcher on its connect pcb (recorded via lwr_ev_add/mod). Surface KL_COMP_WATCHER for each
      * client pcb whose armed condition is met (writable = sndbuf headroom; readable = rx queued or
      * peer-closed). The driver routes it via kl_event_dispatch to the client's watcher (async_on_
@@ -711,7 +709,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         count++;
     }
 
-    /* (d) UDP datagram completions (LC-3a): the glue's udp slots surface inbound datagrams
+    /* (d) UDP datagram completions: the glue's udp slots surface inbound datagrams
      * (KL_LWR_DGRAM_RECV) + completed sends (KL_LWR_DGRAM_SEND). Translate each into KL_COMP_DGRAM_RECV /
      * KL_COMP_DGRAM_SEND targeting the KlDgramCore the machine posted. For a RECV, store the raw source
      * IPv4 bytes + port directly as the neutral KlSockAddr ev->peer (no native round-trip), and
@@ -724,12 +722,12 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             KlLwrUdpRecord *u = &urecs[i];
             KlCompletionEvent *ev = &out[count];
             memset(ev, 0, sizeof(*ev));
-            /* Token path (B.6): the ref transferred glue-op → record → event; udp_comp_dispatch
+            /* Token path: the ref transferred glue-op → record → event; udp_comp_dispatch
              * recovers the owner via the token and releases the ref after dispatch. No ev->target. */
             ev->life = u->life;
             if (u->kind == KL_LWR_DGRAM_RECV) {
                 ev->kind = KL_COMP_DGRAM_RECV;
-                ev->ok = u->terminal ? 0 : 1;   /* 7B-8: a cancelled/terminal recv retires with no delivery */
+                ev->ok = u->terminal ? 0 : 1;   /* a cancelled/terminal recv retires with no delivery */
                 ev->bytes = u->len;
                 ev->buf = (void *)u->data;
                 ev->truncated = u->truncated;
@@ -759,14 +757,14 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     return count;
 }
 
-/* ── Completion sub-vtable (RC-1/RC-3) ─────────────────────────────────────
+/* ── Completion sub-vtable ─────────────────────────────────────
  * This backend's completion primitives, grouped so the dispatch (completion_dispatch.c)
  * reaches them exclusively through the runtime lwip-raw provider
- * (loop->ops->completion — the only way this backend runs, RC-3). Forward-declared above
+ * (loop->ops->completion — the only way this backend runs). Forward-declared above
  * so the KlEventOps literal carries it. Static: there is NO kl_comp_ops_builtin here — a
  * pure runtime provider never binds the compiled-in default path, so it links cleanly
  * next to a stock libkeel (whose readiness kl_comp_ops_builtin stub owns that symbol). */
-/* Outbound connect (LC-0 completion CONNECT contract; LC-1 raw impl): drive tcp_connect via the
+/* Outbound connect (completion CONNECT contract; raw impl): drive tcp_connect via the
  * glue. `fd` is the client pcb the client created (lwr_sock_socket == tcp_new); marshal the
  * KlSockAddr's IPv4 bytes + port and hand the tagged watcher udata to the glue, which reserves a
  * per-conn slot, tags tcp_arg + tcp_err, and issues tcp_connect(pcb, ip, port, connected_cb). On

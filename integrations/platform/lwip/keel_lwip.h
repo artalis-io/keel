@@ -18,7 +18,7 @@
  * lwIP is NOT vendored — build against your own lwIP (LWIP_DIR) + lwipopts.h.
  * The providers use only Keel's public authoring API (<keel/socket.h>,
  * <keel/event.h>); no internal Keel or host-POSIX types. lwIP is readiness-only
- * (its sockets layer is lwip_poll). See docs/lwip_platform_design.md.
+ * (its sockets layer is lwip_poll). See docs/archive/designs/lwip_platform_design.md.
  *
  * SPDX-License-Identifier: MIT
  */

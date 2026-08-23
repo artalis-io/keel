@@ -1,8 +1,8 @@
 /*
  * efi_min.h — self-contained minimal UEFI base types + the boot/console services the
- * U-0 spike uses. Vendored from the UEFI Specification 2.10 (§2 data types, §4 system
+ * EFI client uses. Vendored from the UEFI Specification 2.10 (§2 data types, §4 system
  * table, §7 boot services, §12.4 simple text output). Deliberately tiny: only what
- * tcp4_get.c needs, so the spike builds under the clang/lld freestanding toolchain
+ * tcp4_get.c needs, so it builds under the clang/lld freestanding toolchain
  * (x86_64-unknown-windows PE) with NO gnu-efi runtime dependency.
  *
  * EFIAPI == Microsoft x64 calling convention (UEFI ABI). clang honors it via __ms_abi__.

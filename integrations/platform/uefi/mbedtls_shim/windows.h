@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/windows.h — minimal <windows.h> for the U-4 mbedTLS build.
+ * mbedtls_shim/windows.h — minimal <windows.h> for the mbedTLS build.
  *
  * clang --target=x86_64-unknown-windows defines _WIN32, so mbedTLS's
  * platform_util.c takes `#if defined(_WIN32) #include <windows.h>` — solely to use

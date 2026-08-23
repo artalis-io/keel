@@ -1,10 +1,10 @@
 /*
- * mbedtls_shim/stdio.h — freestanding <stdio.h> for the U-4 mbedTLS adapter build.
+ * mbedtls_shim/stdio.h — freestanding <stdio.h> for the mbedTLS adapter build.
  *
  * The base shim (tests/freestanding/shim/stdio.h) declares FILE/stderr/fprintf/
  * snprintf/printf for the vendored-llhttp residual. tls_mbedtls.c's file-based
  * cert loader (read_file) additionally references fopen/fseek/ftell/fread/fclose +
- * SEEK_SET/SEEK_END. That path is DEAD in U-4 (we use the *_from_buf ctx creators,
+ * SEEK_SET/SEEK_END. That path is DEAD (we use the *_from_buf ctx creators,
  * never a filesystem path), but it must still COMPILE and LINK. This local shim
  * (searched via -isystem AHEAD of the base) supplies the full set; the file ops are
  * inert stubs in mbedtls_platform_uefi.c that fail-closed (fopen -> NULL).

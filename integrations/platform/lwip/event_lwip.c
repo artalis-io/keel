@@ -6,7 +6,7 @@
  * poll → lwip_poll and struct pollfd / POLL* from lwip/sockets.h.
  *
  * BYO / opt-in: build against your own lwIP (LWIP_DIR). Uses only the public
- * <keel/event.h> + <keel/socket.h> contracts. See docs/lwip_platform_design.md.
+ * <keel/event.h> + <keel/socket.h> contracts. See docs/archive/designs/lwip_platform_design.md.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -200,7 +200,7 @@ static const KlEventOps lwip_event_ops = {
     .init = lwev_init, .add = lwev_add, .mod = lwev_mod, .del = lwev_del,
     .wait = lwev_wait, .close = lwev_close, .caps = lwev_caps,
     .native_provider = lwev_native_provider,
-    .completion = NULL,   /* readiness provider — no completion axis (RC-1) */
+    .completion = NULL,   /* readiness provider — no completion axis */
 };
 
 static const KlEventProvider lwip_event_provider = { &lwip_event_ops, "lwip" };

@@ -1,12 +1,11 @@
 /*
- * socket_efi_udp4.c — datagram half of the unified EFI socket provider (6.4b).
+ * socket_efi_udp4.c — datagram half of the unified EFI socket provider.
  *
- * See socket_efi_udp4.h + docs/phase10_efi_udp4_provider_design.md (FROZEN). This TU owns
+ * See socket_efi_udp4.h. This TU owns
  * the EFI_UDP4 child/token lifecycle on a TAGGED, generation-guarded slot handle and the
  * completion-native Receive/Transmit token primitives event_efi.c drives. It mirrors
  * socket_efi_tcp4.c (magic/generation stale-guard, create-events-once, pump/cancel). This TU
- * now OWNS the EFI_UDP4 calls (Configure / Receive+RecycleSignal / Transmit / quarantine); the
- * pattern was seeded from the now-retired one-shot dns_uefi.c.
+ * OWNS the EFI_UDP4 calls (Configure / Receive+RecycleSignal / Transmit / quarantine).
  *
  * No libc: memory ops are hand-rolled byte loops (no guaranteed memset in this TU); every
  * -1 is classified via kl_efi_status_to_io off the slot's last EFI_STATUS (no errno — the
@@ -15,7 +14,7 @@
 
 #include "socket_efi_udp4.h"
 #include "socket_efi_tcp4.h"          /* kl_efi_status_to_io + kl_efi_sockaddr_to_ipv4 / _ipv4_to_sockaddr */
-#include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
+#include "platform_uefi.h"            /* kl_uefi_after_ebs (boot-services guard) */
 
 #include <keel/handle.h>
 #include <keel/datagram.h>            /* struct KlDatagramSocketConfig (configure signature) */
@@ -117,7 +116,7 @@ static KlUefiUdp *udp_slot_of(KlSocketHandle fd) {
 }
 
 /* Resolve the EXACT posted operation via STABLE storage + the captured generation — the
- * completion-op identity (review-High). Returns the slot IFF it is still the live op that was
+ * completion-op identity. Returns the slot IFF it is still the live op that was
  * posted (magic set, not dead, generation matches); NULL if the op is STALE (closed / reused /
  * quarantined) OR @fd is not a datagram handle. A stale op is NEVER resolved through udp_of(),
  * so a poll can never touch a reused slot's token. @stale (optional) distinguishes "not a udp
@@ -254,7 +253,7 @@ int kl_uefi_udp_provider_quarantined_count(void) {
 KlSocketHandle kl_uefi_udp_socket(int domain, int type, int protocol) {
     (void)domain; (void)protocol;
     if (!g_uctx.created || !g_uctx.sb) return KL_INVALID_SOCKET;
-    if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;   /* F3 fail-closed */
+    if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;   /* fail-closed */
     if (type != SOCK_DGRAM) return KL_INVALID_SOCKET;
 
     int idx = -1;
@@ -557,7 +556,7 @@ KlUefiUdpOpResult kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long 
     return KL_UEFI_UDP_OP_QUARANTINED;
 }
 
-/* Centralized QUARANTINE transition (review-High): the single place that establishes the invariant
+/* Centralized QUARANTINE transition: the single place that establishes the invariant
  * an op {fd, captured_gen} needs to later classify as KL_UEFI_UDP_OP_QUARANTINED. Used by BOTH
  * kl_uefi_udp_close (unconfirmed drain) and the synchronous dg_send timeout. Atomic + idempotent:
  *   dead = 1 · quarantined = 1 · generation bumped EXACTLY ONCE (captured_gen == generation - 1) ·
@@ -574,8 +573,8 @@ static void udp_quarantine(KlUefiUdp *u) {
 /*
  * close(): reconcile every outstanding token before teardown so the firmware cannot write
  * freed/reused storage. Cancel(NULL) all tokens, drain each posted one; if any cannot be
- * confirmed retired → udp_quarantine() (leak the slot to EBS, never CloseEvent/DestroyChild). F3
- * post-EBS: touch no boot service, just free the slot. The generation is bumped exactly once in
+ * confirmed retired → udp_quarantine() (leak the slot to EBS, never CloseEvent/DestroyChild).
+ * Post-EBS: touch no boot service, just free the slot. The generation is bumped exactly once in
  * each TERMINAL branch (clean / quarantine / EBS) — NOT at entry — so the quarantine helper is the
  * sole bump on that path (even == closed / odd == live is preserved; no double bump).
  */
@@ -584,7 +583,7 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
     if (!u) return 0;               /* already invalid / dead / quarantined — nothing to do */
     u->dead = 1;                    /* mark dead (single-threaded: no poll interleaves the drain) */
 
-    if (kl_uefi_after_ebs()) { u->generation++; u->magic = 0; return 0; }   /* F3: no boot service */
+    if (kl_uefi_after_ebs()) { u->generation++; u->magic = 0; return 0; }   /* no boot service */
 
     EFI_BOOT_SERVICES *bs = u->bs;
     EFI_UDP4_PROTOCOL *udp = u->udp;
@@ -657,7 +656,7 @@ static uint32_t dg_configure(void *ctx, KlSocketHandle fd, int family,
  * completion fast path. Independent Tx token under the same quarantine discipline. The source
  * pin is written into the session BEFORE submit (via udp_post_send_ex).
  *
- * TOS is PROVIDE-OR-REJECT (frozen contract §9): EFI_UDP4 has no per-datagram TOS — it carries
+ * TOS is PROVIDE-OR-REJECT: EFI_UDP4 has no per-datagram TOS — it carries
  * TypeOfService through Configure, not the Transmit token — so an explicitly requested
  * per-datagram tos (>= 0) cannot be honored and is REJECTED (fail, send nothing) rather than
  * silently transmitted without the requested marking. tos < 0 = "no per-datagram TOS" proceeds. */
@@ -693,7 +692,7 @@ static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t
 
 static const KlDatagramOps EFI_UDP4_DGRAM_OPS = {
     .send      = dg_send,
-    .recv      = NULL,          /* FROZEN #1: no second receive machine — completion posts recv */
+    .recv      = NULL,          /* no second receive machine — completion posts recv */
     .configure = dg_configure,
     /* send_gso/set_tos/mcast_membership + mmsg batching = NULL (EFI_UDP4 has no analogue;
      * capabilities the resolver never uses). */

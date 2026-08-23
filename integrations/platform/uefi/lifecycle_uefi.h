@@ -1,5 +1,5 @@
 /*
- * lifecycle_uefi.h — one-call teardown of the KEEL EFI network stack (U-7).
+ * lifecycle_uefi.h — one-call teardown of the KEEL EFI network stack.
  *
  * The EFI provider is BOOT-SERVICES-ONLY: EFI_TCP4/UDP4, AllocatePool, and events all
  * vanish at ExitBootServices(). A UEFI app that transitions to OS runtime (an HTTP-boot

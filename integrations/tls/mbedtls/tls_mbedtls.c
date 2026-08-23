@@ -78,7 +78,7 @@ typedef struct {
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
     int                 reset_failed;  /* session_reset() failed → refuse next handshake */
-    /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
+    /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
     int                 comp_mode;
@@ -266,7 +266,7 @@ static size_t tls_pending(KlTls *self)
     return mbedtls_ssl_get_bytes_avail(&t->ssl);
 }
 
-/* Completion mode (8b-5): feed received ciphertext to the engine's input ring. */
+/* Completion mode: feed received ciphertext to the engine's input ring. */
 static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
@@ -442,7 +442,7 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     return 0;
 }
 
-/* KlTls.set_socket_provider — the framework (http_connection.c/client.c) calls this
+/* KlTls.set_socket_provider — the framework (http_connection.c and the HTTP client) calls this
  * before the handshake with the connection's provider, overriding any ctx default
  * so the socket-BIO uses the same stack as the connection. */
 static void tls_set_socket_provider(KlTls *self, const struct KlSocketProvider *sp)
@@ -480,7 +480,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.alpn_protocol = tls_alpn_protocol;
     t->base.set_hostname  = kl_tls_mbedtls_set_hostname;
     t->base.peer_cert     = tls_peer_cert;
-    t->base.feed_input    = tls_feed_input;      /* completion mode (8b-5) */
+    t->base.feed_input    = tls_feed_input;      /* completion mode */
     t->base.drain_output  = tls_drain_output;
     t->base.set_socket_provider = tls_set_socket_provider;  /* framework auto-wires the provider */
     t->base.at_eof        = tls_at_eof;          /* close-delimited response finalization */

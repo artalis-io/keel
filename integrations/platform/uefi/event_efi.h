@@ -1,7 +1,7 @@
 /*
- * event_efi.h — a completion-axis KlEventProvider over EFI_TCP4 tokens (U-3 client, S-3..S-7 server).
+ * event_efi.h — a completion-axis KlEventProvider over EFI_TCP4 tokens (client + server).
  *
- * The event/completion half of the real EFI provider. Together with the U-2 socket
+ * The event/completion half of the EFI provider. Together with the socket
  * provider (socket_efi_tcp4.c) it lets a STOCK freestanding libkeel async KlHttpClient AND a
  * freestanding KlHttpServer run HTTP(S) on bare UEFI firmware: no epoll/kqueue/io_uring, no
  * OS sockets, no errno — just EFI_TCP4 completion tokens pumped by the firmware event
@@ -15,7 +15,7 @@
  * ── Data-plane asymmetry (client vs server) ──────────────────────────────────────
  * The two directions drive I/O differently, by design:
  *   - CLIENT: completion-based CONNECT (post_connect → KL_COMP_CONNECT), then the actual
- *     send/recv ride the drain WATCHER RELAY (KL_COMP_WATCHER) over the U-2 provider's
+ *     send/recv ride the drain WATCHER RELAY (KL_COMP_WATCHER) over the socket provider's
  *     synchronous ops — the emulated-readiness model of tests/freestanding_harness.c.
  *   - SERVER: completion-NATIVE accept/recv/send. The generic completion server
  *     (completion_http_server.c) posts prime_accepts/post_recv/post_send directly, surfaced by
@@ -27,11 +27,12 @@
  * post_accept, post_recv, post_send (server). post_sendfile + post_udp_* stay NULL — file
  * responses and UDP are not yet wired for the EFI server.
  *
- * NOTE (abstraction boundary, matches IOCP/pollcomp): the SERVER recv path is now
+ * NOTE (abstraction boundary, matches IOCP/pollcomp): the SERVER recv path is
  * protocol-blind — post_recv(KlStream*, buf, cap) does raw transport I/O into a caller-chosen
  * buffer and never peeks TLS/connection state. The HTTP completion adapter picks the buffer
  * (plaintext read_buf vs the per-conn TLS ciphertext scratch) and feeds ciphertext to
- * tls->feed_input; the backend interprets no protocol state (Phase-A receive-boundary move).
+ * tls->feed_input; the backend interprets no protocol state (the receive boundary lives above
+ * the backend).
  *
  * BYO integration: nothing under src/ or include/ or the root Makefile references it.
  * The native socket provider (kl_uefi_socket_provider) is created lazily and returned
@@ -45,7 +46,7 @@
 
 /*
  * Build the EFI completion event provider. Stashes @bs/@image so native_provider()
- * can lazily create the U-2 socket provider over them. Returns a borrowed const
+ * can lazily create the socket provider over them. Returns a borrowed const
  * pointer (static storage) — pass it to kl_event_ctx_init_ex(). Borrows @bs/@image;
  * they must outlive the event ctx (i.e. until ExitBootServices). Single-instance
  * (mirrors the socket provider): a second call before kl_uefi_event_provider_reset()
