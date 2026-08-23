@@ -46,7 +46,7 @@ CFLAGS=(
   -c
 )
 
-SRCS=( ../allocator_uefi.c ../platform_uefi.c u1_link_stubs.c u1_selftest.c )
+SRCS=( ../allocator_uefi.c ../platform_uefi.c ../wallclock_uefi.c ../civil_time.c u1_link_stubs.c u1_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do
   o="$(basename "${s%.c}").obj"
