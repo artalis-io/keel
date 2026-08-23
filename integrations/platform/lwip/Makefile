@@ -265,9 +265,13 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 # ASan+UBSan+LSan variant — the lifetime/close/cancel + Stage-A receive/context cases need it.
 # Builds a STOCK DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + tests.
 LWIPRAW_ASAN = -std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -D_DEFAULT_SOURCE
+# `make -C $(KEEL_ROOT) debug` runs the root `clean`, whose integrations-clean cascade removes this
+# backend's raw_build tree — so re-materialize it (liblwip_raw.a pulls lwipopts.h + RAW_ARCH via its
+# own prerequisites) AFTER the root build, before anything here compiles against $(RAW_INC).
 loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
 	$(MAKE) -C $(KEEL_ROOT) debug
+	$(MAKE) liblwip_raw.a
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
 	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -I. -I$(KEEL_ROOT)/include \
@@ -355,6 +359,7 @@ loopback-raw-tls: $(LWIPRAW_OBJS) liblwip_raw.a
 loopback-raw-tls-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
 	$(MAKE) -C $(KEEL_ROOT) debug
+	$(MAKE) liblwip_raw.a
 	$(MAKE) -C ../../tls/mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
 	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
