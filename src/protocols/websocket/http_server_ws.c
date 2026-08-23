@@ -1,8 +1,7 @@
 /*
  * http_server_ws.c — the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
  * framed send/recv over a KlHttpConn, drain + idle keepalive, and the upgrade-seam
- * registration (http_proto_hooks.h). Split out of websocket.c in the Phase 10 UEFI
- * server work (S-1) — the shared frame codec (kl_ws_frame_*) stays in websocket.c;
+ * registration (http_proto_hooks.h). The shared frame codec (kl_ws_frame_*) stays in websocket.c;
  * this TU mirrors the client's websocket_client.c and the http_server_core.c /
  * http2_server.c naming. A freestanding HTTP/1.1 server links none of it.
  */
@@ -679,8 +678,7 @@ void kl_ws_server_hooks_install(void) {
     kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
 }
 
-/* Public WebSocket route-registration API. Lives in the ws module (moved from http_server.c
- * in the Finding-1 decoupling) so the readiness http_server.c owns no WebSocket type — a
+/* Public WebSocket route-registration API. Lives in the ws module so the readiness http_server.c owns no WebSocket type — a
  * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
 int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers the upgrade. */

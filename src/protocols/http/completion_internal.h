@@ -2,12 +2,10 @@
 #define KEEL_SRC_COMPLETION_INTERNAL_H
 
 /*
- * completion_internal.h — INTERNAL. The cross-TU surface shared by the split
- * completion driver (freestanding step B2a).
+ * completion_internal.h — INTERNAL. The cross-TU surface shared by the split completion driver.
  *
- * completion_driver.c was one 800-line TU bundling the generic completion tick with
- * the server/TLS/H2/WS connection processing, so referencing the generic tick pulled
- * the whole server + UDP stack. The split separates:
+ * The completion driver is split so that referencing the generic tick does not pull the
+ * whole server + UDP stack. The split separates:
  *
  *   completion_core.c   — the generic tick (kl_comp_run). Routes ACCEPT/READ/WRITE and
  *                         UDP kinds through the two opaque KlEventCtx hooks

@@ -258,7 +258,7 @@ static void h2c_on_stream_close(KlHttp2ClientSession *s, int32_t stream_id,
  * client speaks HTTP/2; if the server negotiated something else (e.g. http/1.1)
  * we must fail rather than send an HTTP/2 preface it cannot parse — no silent
  * protocol switch. A NULL result (the server sent no ALPN) is accepted as
- * prior-knowledge h2, the documented client policy (see docs/alpn_policy.md). */
+ * prior-knowledge h2, the documented client policy (see docs/contracts/alpn_policy.md). */
 static int h2c_alpn_ok(KlHttp2ClientConn *c)
 {
     if (!c->tls || !c->tls->alpn_protocol) return 1;   /* no ALPN → prior knowledge */

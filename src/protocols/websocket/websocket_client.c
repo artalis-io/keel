@@ -85,7 +85,7 @@ struct KlWsClientConn {
     int64_t          ping_timer_id;     /* -1 = no timer */
 
     /* Outbound backpressure: buffers unsent frame bytes on would-block and
-     * flushes them on write-readiness (see M3).  Preserves frame integrity
+     * flushes them on write-readiness.  Preserves frame integrity
      * on non-blocking sockets / TLS WANT_WRITE. */
     KlDrain          out_drain;
     int              out_drain_ready;   /* drain initialized */
@@ -478,7 +478,7 @@ static void wsc_handle_tls_handshake(KlWsClientConn *ws)
 
 static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
 {
-    /* Phase 1: send upgrade request */
+    /* Send upgrade request */
     if (ws->upgrade_sent < ws->upgrade_len) {
         if (!(ready & KL_EVENT_WRITE)) return;
 
@@ -507,7 +507,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         return;
     }
 
-    /* Phase 2: read upgrade response */
+    /* Read upgrade response */
     if (!(ready & KL_EVENT_READ)) return;
 
     if (!ws->handshake_buf) {

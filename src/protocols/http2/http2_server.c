@@ -476,7 +476,7 @@ static ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
 }
 
 /* The session emits produced frame bytes here; route them through the output seam
- * (default: the socket; a completion driver can install a buffering writer — 8d-4). */
+ * (default: the socket; a completion driver can install a buffering writer). */
 static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     return h2c->out_write(h2c->out_ctx, data, len);

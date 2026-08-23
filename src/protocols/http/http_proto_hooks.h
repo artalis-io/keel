@@ -7,7 +7,7 @@
  * The shared HTTP/1.1 server core (http_connection.c, http_server_core.c, and the sweep/drain
  * in http_server.c) dispatches into the WebSocket and HTTP-2 server modules on upgrade,
  * cleanup, and the drain/idle sweeps. Those modules (http_server_ws.c / http2_server.c) are
- * OPTIONAL — a freestanding HTTP/1.1 server (UEFI, docs/phase10_uefi_server_design.md
+ * OPTIONAL — a freestanding HTTP/1.1 server (UEFI, docs/archive/phases/phase10_uefi_server_design.md
  * §6) links neither. So the core never names kl_ws_server_* / kl_http2_server_* directly;
  * it goes through a SEPARATE hook table PER PROTOCOL, registered by that module.
  *

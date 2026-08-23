@@ -6,7 +6,7 @@
  * synchronous seam writev. The IOCP completion driver cannot use that synchronous
  * path — it must post the same bytes via overlapped WSASend. This exposes the
  * iovec assembly (the single source of truth for the byte layout) so the driver
- * builds the identical response and posts it itself. See docs/phase8_iocp_design.md.
+ * builds the identical response and posts it itself. See docs/archive/phases/phase8_iocp_design.md.
  */
 #ifndef KEEL_SRC_HTTP_RESPONSE_INTERNAL_H
 #define KEEL_SRC_HTTP_RESPONSE_INTERNAL_H

@@ -1,5 +1,5 @@
 /*
- * http_conn_internal.h — INTERNAL. The model-blind connection protocol core (PAL Phase 8).
+ * http_conn_internal.h — INTERNAL. The model-blind connection protocol core.
  *
  * The readiness read path (kl_http_conn_on_readable) interleaves TRANSPORT (recv into
  * read_buf, buffer growth, TLS-record drain) with the PROTOCOL CORE (parse the
@@ -12,7 +12,7 @@
  * readiness transport wrapper, and WITHOUT the completion concept leaking back into
  * http_connection.c (which stays model-blind: it never learns whether a readiness recv
  * or a completed WSARecv produced the bytes). kl_http_conn_on_readable is unchanged, so
- * the readiness path stays byte-identical. See docs/phase8_iocp_design.md §4.
+ * the readiness path stays byte-identical. See docs/archive/phases/phase8_iocp_design.md §4.
  */
 #ifndef KEEL_SRC_HTTP_CONN_INTERNAL_H
 #define KEEL_SRC_HTTP_CONN_INTERNAL_H

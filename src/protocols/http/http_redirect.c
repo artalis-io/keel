@@ -3,7 +3,7 @@
  *
  * Wraps kl_http_client_request / kl_http_client_start with automatic 3xx
  * redirect following. Method transformation per RFC 7231/7538.
- * Does not modify client.c.
+ * Does not modify the HTTP client.
  */
 
 #include <keel/http_redirect.h>

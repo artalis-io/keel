@@ -11,13 +11,13 @@
 #include <stddef.h>
 #include "http_internal.h"
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
-#include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
-#include "completion_io.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
+#include "event_caps.h"   /* event↔socket capability negotiation */
+#include "completion_io.h"    /* completion-loop tick dispatch (IOCP) */
 #include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
  * dispatches ws/h2 (and PROXY) through http_proto_hooks.h — the same seam the completion
- * driver uses — so this TU names no optional-protocol type or symbol (Finding 1). */
+ * driver uses — so this TU names no optional-protocol type or symbol. */
 #include "http_proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
 #define KL_LISTEN_BACKLOG  128
@@ -180,8 +180,8 @@ int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out) {
     return conn->tls->peer_cert(conn->tls, out);
 }
 
-/* Socket-activation (systemd LISTEN_* fd inheritance) moved to http_server_activation.c
- * (Finding 6): a self-contained responsibility, separate from the readiness loop,
+/* Socket-activation (systemd LISTEN_* fd inheritance) lives in http_server_activation.c:
+ * a self-contained responsibility, separate from the readiness loop,
  * TCP listener construction, and peer accessors. */
 
 /* Non-static so the freestanding kl_http_server_free (http_server_core.c) can call it on the
@@ -194,27 +194,27 @@ void kl_http_server_close_listener(KlHttpServer *s) {
     kl_http_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
-/* kl_http_server_conn_release moved to the freestanding-safe server core (http_server_core.c)
+/* kl_http_server_conn_release lives in the freestanding-safe server core (http_server_core.c)
  * — the completion sweeps there call it, so the archive needs it in-core.
  *
- * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also moved to http_server_core.c in
- * the Phase 10 UEFI server carve (S-4): a freestanding EFI server constructs its
+ * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also live in http_server_core.c, so
+ * a freestanding EFI server constructs its
  * KlHttpServer from the archive alone. The hosted-only pieces (ws/h2/proxy hook installers,
  * PROXY CIDR allowlist, async file I/O, self-pipe) are #ifndef KEEL_FREESTANDING there. */
 
 
 /* Route + middleware registration (the kl_http_server_route / kl_http_server_use family) and
  * the read-side body flow control (kl_http_request_pause_body / resume_body) plus
- * kl_http_server_stats moved to the freestanding-safe server core (http_server_core.c) in the
- * S-1 bisection. kl_http_server_ws_upgrade moved to http_server_ws.c (Finding 1): the WebSocket type +
+ * kl_http_server_stats live in the freestanding-safe server core (http_server_core.c).
+ * kl_http_server_ws_upgrade lives in http_server_ws.c: the WebSocket type +
  * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
-/* ── Readiness accept adapter (step 6B-1): drive KlListener over the listen fd + pool credits ──
+/* ── Readiness accept adapter: drive KlListener over the listen fd + pool credits ──
  * The listener owns the accept lifecycle (reserve-before-accept backpressure, pause/resume,
  * confirmed retirement); these hooks bridge it to the event loop and the split-credit pool. Only
- * installed for a readiness loop (!completion_loop); the completion path keeps its own accept
- * priming until 6B-3 part 2b-ii adopts the listener. */
+ * installed for a readiness loop (!completion_loop); the completion path drives its own accept
+ * adapter over the same listener. */
 static int server_accept_reserve(void *ctx) {
     KlHttpServer *s = ctx;
     return kl_http_conn_pool_reserve(&s->pool);
@@ -338,13 +338,13 @@ int kl_http_server_run(KlHttpServer *s) {
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
      * wait/dispatch below. Detected once from the backend's advertised event model
-     * (PAL Phase 8 completion seam) — the completion concept never enters the
+     * (completion seam) — the completion concept never enters the
      * readiness path. Never true on readiness backends, so that path is unchanged. */
     const int completion_loop =
         (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
 
-    /* Readiness loops drive the accept path through the embedded KlListener (step 6B-1); the
-     * completion path keeps its own accept priming until 6B-3 part 2b-ii. */
+    /* Readiness loops drive the accept path through the embedded KlListener; the
+     * completion path drives its own accept adapter over the same listener. */
     if (!completion_loop) {
         if (server_accept_listener_start(s) < 0) {
             s->last_error = KL_ERR_EVENT_ADD;
@@ -379,7 +379,7 @@ int kl_http_server_run(KlHttpServer *s) {
 
         wait_timeout = kl_timer_next_timeout(&s->ev, wait_timeout);
 
-        /* R3b-W: open the batch bracket BEFORE kl_event_wait and hold it through the file-I/O
+        /* Open the batch bracket BEFORE kl_event_wait and hold it through the file-I/O
          * completion callbacks AND watcher/connection dispatch. Those file-I/O callbacks run while a
          * watcher-event batch is already captured and can delete/reallocate watchers, so the bracket
          * must already be open (else the ABA window reopens before dispatch). begin → wait →
@@ -424,20 +424,20 @@ int kl_http_server_run(KlHttpServer *s) {
             }
         }
 
-        /* Batch dispatch runs inside the R3b-W bracket opened before kl_event_wait above. */
+        /* Batch dispatch runs inside the bracket opened before kl_event_wait above. */
         for (int i = 0; i < n; i++) {
             /* Watcher dispatch (tagged pointer, LSB=1) */
             if (kl_event_dispatch(&s->ev, &events[i]))
                 continue;
 
-            /* Readiness event identity is the raw KlStream (step 6B-2); recover the owning KlHttpConn
+            /* Readiness event identity is the raw KlStream; recover the owning KlHttpConn
              * only here, at the HTTP adapter boundary. NULL udata = the listen socket. */
             KlStream *evs = (KlStream *)events[i].udata;
             KlHttpConn *c = evs ? kl_http_conn_from_stream(evs) : NULL;
 
             if (c == NULL) {
-                /* Listen socket — accept new connections through the readiness KlListener
-                 * (step 6B-1). It holds one reserved pool credit while LISTENING; each accepted
+                /* Listen socket — accept new connections through the readiness KlListener.
+                 * It holds one reserved pool credit while LISTENING; each accepted
                  * fd is committed + wired by server_accept_on_accept; when the pool credit is
                  * exhausted it transitions to PAUSED (disarming the listen fd, so the kernel TCP
                  * backlog queues the rest) and resumes when a slot frees. */
@@ -616,7 +616,7 @@ transition:
                 kl_http_server_conn_release(s,c);
             }
         }
-        kl_event_ctx_dispatch_end(&s->ev);   /* R3b-W: reclaim watchers deferred during this batch */
+        kl_event_ctx_dispatch_end(&s->ev);   /* reclaim watchers deferred during this batch */
 
         /* Sweep for timed-out connections.
          * Single-threaded: no TOCTOU risk — all event processing above is
@@ -671,11 +671,11 @@ void kl_http_server_stop(KlHttpServer *s) {
     }
 }
 
-/* kl_http_request_pause_body / kl_http_request_resume_body / kl_http_server_stats moved to the
- * freestanding-safe server core (http_server_core.c) in the S-1 bisection. */
+/* kl_http_request_pause_body / kl_http_request_resume_body / kl_http_server_stats live in the
+ * freestanding-safe server core (http_server_core.c). */
 
-/* kl_http_server_free moved to the freestanding-safe server core (http_server_core.c) in the
- * Phase 10 UEFI server S-7 teardown carve — a freestanding EFI server tears itself down
+/* kl_http_server_free lives in the freestanding-safe server core (http_server_core.c) — a
+ * freestanding EFI server tears itself down
  * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
  * archive alone, then kl_uefi_shutdown() releases the EFI providers before
  * ExitBootServices. The hosted-only bits (async-op cancel, AF_UNIX unlink) are

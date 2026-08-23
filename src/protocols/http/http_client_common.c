@@ -1,7 +1,7 @@
 /*
  * http_client_common.c — HTTP/1.1 client shared helpers (sync + async)
  *
- * Freestanding step B2b: this TU holds the surface shared by the blocking
+ * This TU holds the surface shared by the blocking
  * sync client (http_client_sync.c) and the event-driven async client
  * (http_client_async.c): the CRLF injection guard, the plain/TLS I/O abstraction,
  * heap request formatting, response header helpers, response decompression

@@ -1,8 +1,8 @@
 /*
  * http_server_core.c — the model-blind, freestanding-safe half of the KlHttpServer.
  *
- * Split out of http_server.c for the Phase 10 UEFI *server* (docs/phase10_uefi_server_design.md,
- * S-1), mirroring the client's async.c -> event_ctx.c bisection. This TU holds the
+ * The model-blind, freestanding-safe half of the server (docs/archive/phases/phase10_uefi_server_design.md),
+ * mirroring the client's async.c -> event_ctx.c split. This TU holds the
  * server API + run machinery that touches ONLY the completion / connection-pool /
  * router / timer seams — no OS sockets, no signals, no systemd, no self-pipe, no
  * readiness event loop, no stdio. A freestanding completion server (EFI_TCP4 +
@@ -68,8 +68,8 @@ static void kl_http_server_wakeup_init(KlHttpServer *s) {
 #endif /* !KEEL_FREESTANDING */
 
 /* ── Server construction (model-blind: pool + router + event ctx + provider) ───
- * Moved from http_server.c in the Phase 10 UEFI server carve so the freestanding EFI
- * server can construct a KlHttpServer from the archive alone. The hosted-only pieces —
+ * A freestanding EFI server constructs a KlHttpServer from the archive alone. The
+ * hosted-only pieces —
  * the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
  * async file-I/O backend, and the stop self-pipe — are compiled out under
  * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
@@ -290,7 +290,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     }
 
     /* Preallocate the completion-mode TLS ciphertext scratch (one stable buffer per slot) at
-     * init — NEVER in the event-loop hot path (Step-2 review). Only for TLS + a completion event
+     * init — NEVER in the event-loop hot path. Only for TLS + a completion event
      * model: the HTTP completion adapter reads ciphertext into it, and readiness TLS decrypts
      * straight from the socket so needs none. The event model is only known now (post event-ctx
      * init). Unwinds like the negotiation failure above; pool_free reclaims any already set. */
@@ -325,14 +325,14 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
 }
 
 /* ── Server teardown (model-blind: close sockets, free pool/router, destroy ctx) ──
- * Moved from http_server.c in the S-7 teardown carve so a freestanding EFI server can tear
+ * A freestanding EFI server tears
  * itself down from the archive alone (then kl_uefi_shutdown() releases the EFI providers
  * before ExitBootServices). kl_http_conn_pool_free closes every accepted child's socket
  * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
  * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
  * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
 void kl_http_server_free(KlHttpServer *s) {
-    /* Invalidate the accept liveness token BEFORE any teardown (step 6B-1): a slot lease released
+    /* Invalidate the accept liveness token BEFORE any teardown: a slot lease released
      * while connections drain below must see accept_alive == 0 and no-op, never touching the
      * about-to-be-destroyed listener/pool. Ordered first, before the pool is freed. */
     s->accept_alive = 0;
@@ -350,7 +350,7 @@ void kl_http_server_free(KlHttpServer *s) {
     }
 
     /* Complete the accept listener's close/detachment contract WHILE the event context, listen
-     * handle, and pool still exist (step 6B-1 / 6B-3 2b-ii): the listener must reach CLOSED here
+     * handle, and pool still exist: the listener must reach CLOSED here
      * rather than being abandoned LISTENING with a held reservation + posted accepts. */
     if (s->accept_via_listener) {
         kl_listener_close(&s->accept_listener);
@@ -431,7 +431,7 @@ void kl_http_server_free(KlHttpServer *s) {
 int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Bound the tick by the nearest async-op deadline / timer so they fire on time
      * — the completion loop is a full event loop (watchers relayed via
-     * KL_COMP_WATCHER; timers + async deadlines serviced here, 8e-2). */
+     * KL_COMP_WATCHER; timers + async deadlines serviced here). */
     uint64_t cnow = kl_monotonic_ms();
     int cwait = KL_POLL_TIMEOUT_MS;
     for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
@@ -471,7 +471,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
  * exhaustion. Called from the event loop, timeout sweep, and async completion. */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
     if (s->accept_via_listener) {
-        /* Split-credit accept path (step 6B-1): return the physical KlHttpConn to the pool FIRST, then
+        /* Split-credit accept path: return the physical KlHttpConn to the pool FIRST, then
          * consume the admission lease. The lease's release returns the credit and resumes the
          * listener, which may immediately reserve + arm + accept — so the KlHttpConn must already be
          * back on the free list before the notification fires. */

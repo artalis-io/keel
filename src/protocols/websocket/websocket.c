@@ -2,10 +2,9 @@
  * websocket.c — the SHARED WebSocket frame codec (RFC 6455 §5).
  *
  * Just the incremental frame parser: used by BOTH the server (http_server_ws.c) and the
- * client (websocket_client.c). Split out of the old websocket.c in the Phase 10
- * UEFI server work (docs/phase10_uefi_server_design.md, S-1) so the WebSocket
+ * client (websocket_client.c). The WebSocket
  * SERVER logic (kl_ws_server_*) lives in http_server_ws.c — mirroring the client's
- * websocket_client.c and the new http_server_core.c / http2_server.c naming. A freestanding
+ * websocket_client.c and the http_server_core.c / http2_server.c naming. A freestanding
  * HTTP/1.1 server links neither this codec nor http_server_ws.c.
  */
 

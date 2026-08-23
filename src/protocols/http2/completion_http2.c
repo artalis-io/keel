@@ -1,7 +1,6 @@
 /*
- * completion_http2.c — HTTP/2-over-completion leg of the split completion driver (B2a).
- * Extracted verbatim from completion_driver.c: the driver-owned h2 output capture and
- * the h2 connection drive. Reaches back into the server TU for kl_comp_close /
+ * completion_http2.c — the HTTP/2-over-completion leg of the completion driver: the
+ * driver-owned h2 output capture and the h2 connection drive. Reaches back into the server TU for kl_comp_close /
  * kl_comp_tls_drain_output (completion_internal.h); reuses the h2 session vtable +
  * kl_http2_server_feed verbatim — no IOCP/pollcomp symbol appears here.
  */
@@ -15,10 +14,10 @@
 #include <string.h>
 #include <stdint.h>              /* SIZE_MAX (h2 output capture growth guard) */
 
-/* Driver-owned h2 output capture (8d-4): the completion driver installs this writer via
+/* Driver-owned h2 output capture: the completion driver installs this writer via
  * the h2 output seam (kl_http2_server_set_writer) around a feed, so the session's produced
  * frames land in one buffer the driver posts as a single overlapped send. The buffer +
- * grow logic live here, not h2.c — h2.c only exposes the generic writer seam. */
+ * grow logic live here, not the HTTP/2 server adapter (http2_server.c), which only exposes the generic writer seam. */
 typedef struct { KlAllocator *alloc; char *buf; size_t len, cap; int err; } CompH2Cap;
 static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
     CompH2Cap *cp = ctx;
@@ -40,7 +39,7 @@ static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
     return (ssize_t)len;
 }
 
-/* Drive an established HTTP/2 connection over the completion loop (8d-1). Feed received
+/* Drive an established HTTP/2 connection over the completion loop. Feed received
  * plaintext to the h2 session via kl_http2_server_feed (which parses frames and flushes
  * produced output through conn_write — a synchronous blocking send for plaintext, the
  * memory-BIO ring for TLS), then read more. The h2 session vtable and kl_http2_server_feed
@@ -51,7 +50,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         /* Decrypt + feed every currently-available record (the h2 session writes its
          * output ciphertext into the memory-BIO out ring via conn_write→tls->write),
-         * then drain that ring and post it as ONE ordered overlapped send (8d-3) —
+         * then drain that ring and post it as ONE ordered overlapped send —
          * deferring the next recv to comp_on_write, so at most one h2 send is in flight
          * and frames cannot reorder. */
         for (;;) {
@@ -77,7 +76,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
         return;
     }
     /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added
-     * this recv's bytes). Capture the session's output (8d-3) so all frames it produces
+     * this recv's bytes). Capture the session's output so all frames it produces
      * this feed go out as ONE ordered overlapped send; defer the next recv until that
      * send completes (comp_on_write) so at most one h2 send is ever in flight — frames
      * must not reorder. */

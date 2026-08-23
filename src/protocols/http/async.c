@@ -1,8 +1,8 @@
 /*
  * async.c — KlAsyncOp connection suspension (server-side).
  *
- * The KlEventCtx + KlWatcher API + kl_event_ctx_run moved to event_ctx.c in the
- * freestanding phase (F0) — that half is client-usable and server-free. This TU
+ * The KlEventCtx + KlWatcher API + kl_event_ctx_run live in event_ctx.c — that
+ * half is client-usable and server-free. This TU
  * keeps only the connection-suspension machinery, which reaches into the server
  * connection driver (kl_http_conn_on_writable / kl_http_server_conn_release /
  * kl_http_comp_resume) and so is not part of the freestanding client.
@@ -15,7 +15,7 @@
 #include "http_internal.h"
 #include "event_caps.h"
 #include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
-#include "completion_http.h" /* kl_http_comp_resume — completion resume (8e-2) */
+#include "completion_http.h" /* kl_http_comp_resume — completion resume */
 
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
@@ -82,7 +82,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
      * the readiness re-register + kl_http_conn_on_writable below is a no-op there (kl_event_add
      * is inert, kl_http_conn_on_writable does readiness socket writes). Branch on the abstract
      * event axis (not the backend); the completion send lives behind the completion seam so
-     * async.c stays free of completion internals (8e-2). */
+     * async.c stays free of completion internals. */
     if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
         kl_http_comp_resume(s, conn);
         return;

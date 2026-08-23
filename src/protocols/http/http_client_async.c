@@ -1,9 +1,9 @@
 /*
  * http_client_async.c — HTTP/1.1 client, async (event-driven) API
  *
- * Freestanding step B2b: the non-blocking state machine driven by KlEventCtx
+ * The non-blocking state machine driven by KlEventCtx
  * watchers lives here — Happy Eyeballs (RFC 8305) racing connect, the
- * completion-connect path (LC-0), async DNS, the SENDING/RECEIVING/TLS/proxy
+ * completion-connect path, async DNS, the SENDING/RECEIVING/TLS/proxy
  * states, and the public kl_http_client_start[_s] + kl_http_client_start_pooled entry
  * points. The async path uses kl_sock_send/kl_sock_recv through the provider +
  * watchers, so this TU links without the blocking sync path (http_client_sync.c).
@@ -26,9 +26,9 @@
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
-#include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
-#include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
-#include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
+#include "event_caps.h" /* event↔socket capability negotiation */
+#include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect */
+#include "watcher_internal.h" /* kl_watcher_add_detached — completion connect */
 #include "http_client_internal.h"
 #include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
@@ -83,7 +83,7 @@ static int client_loop_is_completion(const KlHttpClient *c)
     return (kl_event_caps(&c->ev_ctx->loop) & KL_EVENT_CAP_COMPLETION) != 0;
 }
 
-/* Arm one nonblocking connect on a completion loop (LC-0): register a DETACHED watcher (so the
+/* Arm one nonblocking connect on a completion loop: register a DETACHED watcher (so the
  * connect completion's tagged pointer resolves to async_on_event, without a parallel readiness
  * watch on the connecting fd), then post the connect. On completion the backend fires
  * KL_COMP_CONNECT → the driver → async_on_event (CONNECTING), which reads the win/fail result
@@ -380,7 +380,7 @@ static void he_on_writable(KlHttpClient *c, KlSocketHandle fd)
     }
 }
 
-/* Completion-loop connect result (LC-0): the backend delivered win/fail in the watcher mask
+/* Completion-loop connect result: the backend delivered win/fail in the watcher mask
  * (KL_EVENT_WRITE = connected) rather than SO_ERROR (io_uring does not preserve it after a failed
  * IORING_OP_CONNECT). Mirrors he_on_writable's win/fail branch. */
 static void he_on_connect_result(KlHttpClient *c, KlSocketHandle fd, KlEventMask ready)
@@ -469,9 +469,9 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
     if (cfg && cfg->system_dns)
         return NULL;
 #ifdef KEEL_FREESTANDING
-    /* Freestanding (F0 / UEFI): the built-in DNS-over-UDP resolver pulls the UDP +
+    /* Freestanding (UEFI): the built-in DNS-over-UDP resolver pulls the UDP +
      * dns_resolver stack, which is out of the minimal completion-client archive
-     * (docs/phase10_uefi_feasibility_design.md §8 — IPv4/numeric first, DNS is U-5).
+     * (docs/archive/phases/phase10_uefi_feasibility_design.md §8 — IPv4/numeric first).
      * A freestanding consumer supplies cfg->resolver or a numeric address; here we
      * fall back to sync name resolution (kl_resolve_sync), same as cfg->system_dns. */
     (void)ev_ctx;
@@ -906,8 +906,7 @@ static void async_handle_receiving(KlHttpClient *c)
                  * WANT_READ maps to 0), NOT end-of-stream — e.g. a non-blocking recv
                  * returned would-block mid-record. Re-arm and wait for more ciphertext.
                  * A real TLS EOF arrives via read()==-1 + at_eof() (handled above),
-                 * never via 0. (Latent bug pre-U-6: masked only because the old EFI
-                 * sync pump never returned WANT_READ.) */
+                 * never via 0. */
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
@@ -1204,14 +1203,14 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
-    /* PAL 8f-5a: on a completion loop, adopt the backend's native overlapped provider when
+    /* On a completion loop, adopt the backend's native overlapped provider when
      * the configured one is incompatible — so a completion backend is a drop-in for the
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
         if (np) c->ev_ctx->sockets = np;
     }
-    /* PAL Phase 7: the async client's readiness loop must be able to watch the
+    /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         kl_free(alloc, req_buf, req_len);
@@ -1588,14 +1587,14 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
-    /* PAL 8f-5a: on a completion loop, adopt the backend's native overlapped provider when
+    /* On a completion loop, adopt the backend's native overlapped provider when
      * the configured one is incompatible — so a completion backend is a drop-in for the
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
         if (np) c->ev_ctx->sockets = np;
     }
-    /* PAL Phase 7: the async client's readiness loop must be able to watch the
+    /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         kl_free(alloc, req_buf, req_len);

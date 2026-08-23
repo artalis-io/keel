@@ -18,7 +18,7 @@
 #define KL_WRITE_SPIN_MAX 256  /* max retries on EAGAIN/WANT_WRITE before giving up */
 /* Default backpressure bound for streaming responses (SSE / chunked): the outbound stream
  * buffer holds unsent bytes when the client can't keep up. Bounded so a slow reader applies
- * backpressure to the producer instead of growing memory unboundedly (8g-0). */
+ * backpressure to the producer instead of growing memory unboundedly. */
 #define KL_STREAM_DRAIN_MAX (1u << 20)   /* 1 MiB */
 
 /* ── Pre-built status lines — no snprintf in the hot path ─────────── */
@@ -667,10 +667,10 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
     if (kl_http_response_header(res, "Transfer-Encoding", "chunked") < 0)
         return -1;
 
-    /* Wire the transport-neutral outbound stream buffer by default (8g-0): stream writes
+    /* Wire the transport-neutral outbound stream buffer by default: stream writes
      * go through KlDrain — a non-blocking inline send with the would-block remainder
      * buffered (bounded, backpressure), flushed by the transport (readiness:
-     * kl_http_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and 8g-1's
+     * kl_http_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and the
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
      * on a slow client. If no allocator is available, fall back to the spin-write path. */
     if (!res->drain_enabled && res->alloc)

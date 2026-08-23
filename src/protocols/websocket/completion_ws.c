@@ -1,6 +1,6 @@
 /*
- * completion_ws.c — WebSocket-over-completion leg of the split completion driver (B2a).
- * Extracted verbatim from completion_driver.c: the WS connection drive. Reaches back into
+ * completion_ws.c — the WebSocket-over-completion leg of the completion driver: the WS
+ * connection drive. Reaches back into
  * the server TU for kl_comp_close / kl_comp_tls_flush (completion_internal.h); reuses the
  * transport-agnostic WS frame core (kl_ws_server_*) verbatim — no WebSocket-protocol code
  * and no IOCP/pollcomp symbol appears here.
@@ -15,7 +15,7 @@
 #include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
                                     transitively via http_response.h before off_t neutralization */
 
-/* Drive an established WebSocket connection over the completion loop (8e-1). Feed
+/* Drive an established WebSocket connection over the completion loop. Feed
  * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
  * the analogue of kl_http2_server_feed); its callbacks emit frames through conn_write — the
  * memory-BIO out ring for TLS — which we flush (plus any drain-buffered output). Reuses

@@ -19,7 +19,7 @@
 #include "http2_internal.h"
 #include "socket.h"
 
-/* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
+/* Socket provider for this connection's fd — via the raw KlStream seam. NULL (POSIX
  * default) for a standalone pool with no event ctx wired — see kl_http_conn_release. */
 static inline const KlSocketProvider *conn_sp(const KlHttpConn *c) {
     return kl_stream_provider(&c->stream);
@@ -60,7 +60,7 @@ int kl_http_conn_pool_init(KlHttpConnPool *pool, int capacity, KlAllocator *allo
     pool->alloc = alloc;
     pool->capacity = capacity;
     pool->active_count = 0;
-    pool->free_credits = capacity;   /* admission rights: one per slot (step 6B credit layer) */
+    pool->free_credits = capacity;   /* admission rights: one per slot (credit layer) */
     if ((size_t)capacity > SIZE_MAX / sizeof(KlHttpConn)) return -1;
     pool->conns = kl_malloc(alloc, sizeof(KlHttpConn) * (size_t)capacity);
     if (!pool->conns) return -1;
@@ -78,7 +78,7 @@ int kl_http_conn_pool_init(KlHttpConnPool *pool, int capacity, KlAllocator *allo
             pool->conns = NULL;
             return -1;
         }
-        /* Base-init the embedded raw stream (step 6B-2): sets read_buf/read_cap, invalid handle,
+        /* Base-init the embedded raw stream: sets read_buf/read_cap, invalid handle,
          * and clears all facet state. The read_buf was allocated just above; kl_stream_init records
          * it as the stable receive buffer. Arguments are known-valid, but check the result and
          * unwind on failure to keep initialization discipline intact against future changes. */
@@ -223,7 +223,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
                 kl_free(pool->alloc, pool->conns[i].stream.read_buf,
                         pool->conns[i].stream.read_cap);
             }
-            if (pool->conns[i].comp_cipher) {   /* Phase-A interim completion TLS scratch */
+            if (pool->conns[i].comp_cipher) {   /* interim completion TLS scratch */
                 kl_free(pool->alloc, pool->conns[i].comp_cipher,
                         pool->conns[i].comp_cipher_cap);
             }
@@ -246,8 +246,7 @@ static void conn_log_access(KlHttpConn *c) {
 }
 
 /*
- * Initialize response for the current request.  Extracted from conn_process
- * so middleware can write headers/status before the handler runs.
+ * Initialize response for the current request, so middleware can write headers/status before the handler runs.
  */
 static int conn_init_response(KlHttpConn *c) {
     c->req._server_ctx = c;
@@ -1069,13 +1068,13 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
     return c->state;
 }
 
-/* ── Model-blind protocol core (PAL Phase 8) ─────────────────────────
+/* ── Model-blind protocol core ─────────────────────────
  * Thin non-static handles onto the static helpers above, so the IOCP completion
  * driver can reuse the exact parse→route→handle→lifecycle core after a completed
  * WSARecv, without the readiness transport wrapper and without http_connection.c
  * learning which event model produced the bytes. kl_http_conn_on_readable is unchanged
  * (still calls the statics directly), so the readiness path stays byte-identical.
- * See http_conn_internal.h / docs/phase8_iocp_design.md §4. */
+ * See http_conn_internal.h / docs/archive/phases/phase8_iocp_design.md §4. */
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len) {
     return conn_dispatch_request(c, router, leftover, leftover_len);
@@ -1085,7 +1084,7 @@ KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router) 
     return conn_run_post_middleware_and_handle(c, router);
 }
 
-/* PAL Phase 8b-1: the model-blind request-body core. Feed `nread` freshly-received
+/* The model-blind request-body core. Feed `nread` freshly-received
  * bytes (already in read_buf[0..nread]) to the chunked decoder / body reader, apply
  * limits, honor streaming-handler transitions. Returns the next state
  * (KL_HTTP_CONN_READING_BODY = need more bytes). kl_http_conn_on_readable calls this inline

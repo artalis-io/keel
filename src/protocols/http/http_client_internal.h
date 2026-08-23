@@ -1,7 +1,7 @@
 /*
  * http_client_internal.h — shared internals for the split HTTP/1.1 client TUs
  *
- * The HTTP/1.1 client was split (freestanding step B2b) into three translation units
+ * The HTTP/1.1 client is split into three translation units
  * so a freestanding *async* client links without dragging in the blocking /
  * hosted sync path (poll()/read()/write()/blocking DNS):
  *

@@ -1,7 +1,7 @@
 /*
  * http_client_sync.c — HTTP/1.1 client, blocking (hosted) API
  *
- * Freestanding step B2b: the blocking poll()-based request/response path lives
+ * The blocking poll()-based request/response path lives
  * here — connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
  * send_*_sync / recv_response_sync loops, and the public kl_http_client_request[_s]
  * + kl_http_client_request_pooled (blocking) entry points. All I/O routes through the
