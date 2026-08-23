@@ -233,7 +233,12 @@ surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers 
   include-search-path escape nor a newly named header slips past. **G4** `make check-protocol-home`
   is a committed ownership manifest (`src/substrate-tus.manifest`): a new bare-`src/` `.c` fails until
   it is declared substrate there or moved under `src/protocols/<fam>/` — the case dynamic derivation
-  cannot decide. **G5** `make check-no-interim-paths` rejects the deleted directory layouts. A new
+  cannot decide. **G5** `make check-old-layout` (`tools/check_old_layout.sh`) is the single authoritative
+  resurrection gate: it rejects re-introduction of the deleted layouts — a top-level `protocols`
+  directory, old flat integration homes (structural role allowlist), the `spikes` tree, a `parsers`
+  directory, and any unclassified integration file at a backend root (exact ownership via
+  `integrations/non-test-files.manifest`);
+  protocol test placement inside `tests/` stays owned by `check-test-layout`. A new
   integration→substrate seam is authorized by adding its exact header name to the G3 allowlist (in
   `tools/check_boundaries.sh`) with a rationale, never a wildcard.
 
@@ -253,7 +258,7 @@ surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers 
 | I8 allocation-free hot path | fixed-slot design + sanitizer smokes |
 | I9 quarantine on uncertain retirement | EFI host-mock quarantine tests |
 | I10 protocols depend only through Tier-1 | `make check-tier1-boundary` |
-| I11 substrate/protocol/integration ownership | `make check-substrate-purity` / `-protocol-no-integration` / `-integration-seam` / `-protocol-home` / `-no-interim-paths` (G1–G5) |
+| I11 substrate/protocol/integration ownership | `make check-substrate-purity` / `-protocol-no-integration` / `-integration-seam` / `-protocol-home` / `-old-layout` (G1–G5) |
 
 Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
 points at a file which no longer exists fails the gate.

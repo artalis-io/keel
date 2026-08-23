@@ -1,0 +1,90 @@
+# integrations/non-test-files.manifest - the exhaustive set of tracked files under integrations/
+# that live at the umbrella or a backend ROOT (production impl, promoted ABI headers, shims,
+# Makefile, README.md, .gitignore, and the two umbrella files). Every tracked integration file NOT at
+# the exact integrations/<role>/<backend>/tests/ depth must be listed here; a new backend-root file
+# fails check-old-layout (case 5) until it is declared here OR moved under the backend's tests/. That
+# is the exact, name-independent ownership partition (test content lives at the exact backend tests/
+# depth; every other integration file is enumerated here).
+# Regenerate intentionally:
+#   git ls-files 'integrations/*' | grep -vE '^integrations/(codec|http2|platform|tls)/[^/]+/tests/' | LC_ALL=C sort
+integrations/Makefile
+integrations/README.md
+integrations/codec/miniz/compress_miniz.c
+integrations/codec/miniz/compress_miniz.h
+integrations/codec/miniz/decompress_miniz.c
+integrations/codec/miniz/decompress_miniz.h
+integrations/http2/nghttp2/Makefile
+integrations/http2/nghttp2/README.md
+integrations/http2/nghttp2/http2_nghttp2_client.c
+integrations/http2/nghttp2/http2_nghttp2_server.c
+integrations/http2/nghttp2/keel_http2_nghttp2.h
+integrations/non-test-files.manifest
+integrations/platform/lwip/Makefile
+integrations/platform/lwip/README.md
+integrations/platform/lwip/event_lwip.c
+integrations/platform/lwip/event_lwip_raw.c
+integrations/platform/lwip/keel_lwip.h
+integrations/platform/lwip/keel_lwip_raw.h
+integrations/platform/lwip/lwip_raw_glue.c
+integrations/platform/lwip/lwip_raw_glue.h
+integrations/platform/lwip/lwipopts.h
+integrations/platform/lwip/lwipopts_raw.h
+integrations/platform/lwip/platform_wakeup_lwip.c
+integrations/platform/lwip/resolve_sync_lwip.c
+integrations/platform/lwip/socket_lwip.c
+integrations/platform/uefi/.gitignore
+integrations/platform/uefi/Makefile
+integrations/platform/uefi/README.md
+integrations/platform/uefi/allocator_uefi.c
+integrations/platform/uefi/allocator_uefi.h
+integrations/platform/uefi/civil_time.c
+integrations/platform/uefi/civil_time.h
+integrations/platform/uefi/clock_snapshot.c
+integrations/platform/uefi/clock_snapshot.h
+integrations/platform/uefi/efi_min.h
+integrations/platform/uefi/efi_tcp4.h
+integrations/platform/uefi/efi_udp4.h
+integrations/platform/uefi/efi_uefi.h
+integrations/platform/uefi/entropy_uefi.c
+integrations/platform/uefi/errno_uefi.c
+integrations/platform/uefi/event_efi.c
+integrations/platform/uefi/event_efi.h
+integrations/platform/uefi/lifecycle_uefi.c
+integrations/platform/uefi/lifecycle_uefi.h
+integrations/platform/uefi/mbedtls_config_uefi.h
+integrations/platform/uefi/mbedtls_platform_uefi.c
+integrations/platform/uefi/mbedtls_platform_uefi.h
+integrations/platform/uefi/mbedtls_shim/assert.h
+integrations/platform/uefi/mbedtls_shim/errno.h
+integrations/platform/uefi/mbedtls_shim/inttypes.h
+integrations/platform/uefi/mbedtls_shim/sal.h
+integrations/platform/uefi/mbedtls_shim/stdio.h
+integrations/platform/uefi/mbedtls_shim/time.h
+integrations/platform/uefi/mbedtls_shim/windows.h
+integrations/platform/uefi/mbedtls_shim/ws2tcpip.h
+integrations/platform/uefi/platform_uefi.c
+integrations/platform/uefi/platform_uefi.h
+integrations/platform/uefi/resolve_uefi.c
+integrations/platform/uefi/resolve_uefi.h
+integrations/platform/uefi/socket_efi_tcp4.c
+integrations/platform/uefi/socket_efi_tcp4.h
+integrations/platform/uefi/socket_efi_udp4.c
+integrations/platform/uefi/socket_efi_udp4.h
+integrations/platform/uefi/time_uefi.c
+integrations/platform/uefi/time_uefi.h
+integrations/platform/uefi/wallclock_uefi.c
+integrations/platform/uefi/wallclock_uefi.h
+integrations/tls/boringssl/Makefile
+integrations/tls/boringssl/README.md
+integrations/tls/boringssl/keel_tls_boringssl.h
+integrations/tls/libressl/Makefile
+integrations/tls/libressl/README.md
+integrations/tls/libressl/keel_tls_libressl.h
+integrations/tls/mbedtls/Makefile
+integrations/tls/mbedtls/README.md
+integrations/tls/mbedtls/keel_tls_mbedtls.h
+integrations/tls/mbedtls/tls_mbedtls.c
+integrations/tls/openssl/Makefile
+integrations/tls/openssl/README.md
+integrations/tls/openssl/keel_tls_openssl.h
+integrations/tls/openssl/tls_openssl.c
