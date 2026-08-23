@@ -73,7 +73,7 @@ normal completion/close path (no dangling op, no double release — verified und
 
 ## Tests
 
-`tests/test_read_flow_control.c` is model-independent and runs over readiness (`make test`) and the
+`tests/protocols/http/test_read_flow_control.c` is model-independent and runs over readiness (`make test`) and the
 completion backends (pollcomp locally, io_uring via `IOURING_TEST_SUITES`): pause mid-body → async
 timer resume → full body delivered + `on_complete`; and shutdown-while-paused → clean teardown
 (ASan-clean). Fragmentation / split header-body completions / large streams / short writes /

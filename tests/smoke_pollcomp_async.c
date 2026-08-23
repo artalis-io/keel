@@ -6,7 +6,7 @@
  * a handler that offloads blocking work to the pool and suspends the connection. The
  * worker finishes → writes the wakeup pipe → the completion loop's drain surfaces it as a
  * KL_COMP_WATCHER → the driver routes it to the pool's done_fn → kl_async_complete →
- * kl_io_engine_resume_completion sends the response. None of that fired on a completion
+ * kl_http_comp_resume sends the response. None of that fired on a completion
  * loop before 8e-2. Runs in CI and under ASan.
  */
 #include <keel/keel.h>

@@ -5,7 +5,7 @@
  * sockaddr_native.h — the ONLY bridge between KlSockAddr and a platform
  * `struct sockaddr`. Included exclusively by socket providers (socket_posix.c,
  * socket_winsock.c, the overlapped providers in the completion backends, and a
- * foreign stack's own provider e.g. integrations/lwip/socket_lwip.c). Core /
+ * foreign stack's own provider e.g. integrations/platform/lwip/socket_lwip.c). Core /
  * protocol code never includes this — it speaks KlSockAddr only.
  *
  * Because the conversion is `static inline` and pulls the platform sockaddr via

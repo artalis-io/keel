@@ -17,8 +17,8 @@
  */
 
 #include <keel/keel.h>
-#include <keel/compress_miniz.h>
-#include <keel/decompress_miniz.h>
+#include "compress_miniz.h"
+#include "decompress_miniz.h"
 #include <stdio.h>
 #include <string.h>
 

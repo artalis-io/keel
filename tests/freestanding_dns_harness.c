@@ -2,7 +2,7 @@
  * freestanding_dns_harness.c — RUNTIME proof of the freestanding (UDP-only) DNS
  * resolver's truncation branch (6.4a-2 review, Medium).
  *
- * The freestanding build of src/dns_resolver.c compiles the RFC 7766 TCP fallback
+ * The freestanding build of src/protocols/dns/dns_resolver.c compiles the RFC 7766 TCP fallback
  * out; a truncated (TC) response must instead settle the leg EMPTY so the whole
  * resolution fails PROMPTLY and CLEARLY (KL_ERR_DNS) — never open a TCP socket and
  * never wait for the per-leg timeout. That branch is otherwise only compile/link
@@ -17,6 +17,7 @@
  * sockdef+builtin stubs); the 4 datagram-path sockdef seams udp.c references (never
  * called — the mock provider wins) are defined below, fail-closed.
  */
+#include <keel/clock.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>

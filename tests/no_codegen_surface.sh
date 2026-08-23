@@ -10,7 +10,7 @@
 # Run from CI:    make wx-guard  (or invoke the script directly)
 #
 # Exit 0 = clean. Exit 1 = at least one forbidden symbol was found
-# under src/ or parsers/.
+# under src/ (scanned recursively, so it covers the protocol impls under src/protocols/).
 #
 # SPDX-License-Identifier: MIT
 
@@ -40,7 +40,7 @@ PATTERNS='(^|[^A-Za-z0-9_])(mmap|mprotect)[[:space:]]*\([^)]*PROT_EXEC|MAP_JIT|m
 # fuzz harnesses are also excluded; they may legitimately exercise
 # these symbols (e.g. an example might fork a helper process). The
 # invariant is about the library, not its test surface.
-SCAN_PATHS="$ROOT/src $ROOT/parsers"
+SCAN_PATHS="$ROOT/src"
 
 # Quietly verify the paths exist (defensive — the script's only job
 # is to fail on regression, so missing dirs should fail too).
@@ -69,5 +69,5 @@ if [ -n "$HITS" ]; then
     exit 1
 fi
 
-echo "no_codegen_surface: PASS — no forbidden W^X surface in src/ or parsers/"
+echo "no_codegen_surface: PASS — no forbidden W^X surface in src/ (recursive, incl. src/protocols/)"
 exit 0

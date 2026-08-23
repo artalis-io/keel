@@ -7,7 +7,7 @@
  * on the server ctx, and a handler that offloads blocking work and suspends the connection.
  * The worker finishes → writes the wakeup pipe → the single-shot IORING_OP_POLL_ADD armed
  * for that watch completes → kl_comp_drain surfaces a KL_COMP_WATCHER → the driver routes
- * it to the pool's done_fn → kl_async_complete → kl_io_engine_resume_completion sends the
+ * it to the pool's done_fn → kl_async_complete → kl_http_comp_resume sends the
  * response. Proves POLL_ADD satisfies the same abstract watcher contract pollcomp meets
  * with a poll set and IOCP with an overlapped WSARecv. Linux-only; the Completion CI job
  * runs it. Sibling of smoke_pollcomp_async.c.

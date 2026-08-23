@@ -1,5 +1,5 @@
 #include <keel/timer.h>
-#include <keel/http_connection.h>  /* kl_monotonic_ms */
+#include <keel/clock.h>            /* kl_monotonic_ms */
 
 /* ── Min-heap helpers ──────────────────────────────────────────────── */
 

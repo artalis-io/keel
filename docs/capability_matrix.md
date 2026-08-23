@@ -95,9 +95,9 @@ See `integrations/README.md`. Validated outside CI (BYO libraries):
 
 | Adapter | Vtable | Validation |
 |---|---|---|
-| mbedTLS (`integrations/mbedtls`) | `KlTls` | Real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`); `tls`/`tls_integration`/`peer_cert` suites. |
-| nghttp2 client (`integrations/nghttp2`) | `KlHttp2ClientSession` | In-memory roundtrip + **real-socket e2e** via `kl_http2_client_connect` (h2c); ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
-| nghttp2 server (`integrations/nghttp2`) | `KlHttp2ServerSession` | In-memory roundtrip + **real-socket e2e** via `KlHttpServerConfig.h2` (h2c prior-knowledge) + **third-party interop** (`curl --http2-prior-knowledge`); same sanitizer coverage. |
+| mbedTLS (`integrations/tls/mbedtls`) | `KlTls` | Real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`); `tls`/`tls_integration`/`peer_cert` suites. |
+| nghttp2 client (`integrations/http2/nghttp2`) | `KlHttp2ClientSession` | In-memory roundtrip + **real-socket e2e** via `kl_http2_client_connect` (h2c); ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
+| nghttp2 server (`integrations/http2/nghttp2`) | `KlHttp2ServerSession` | In-memory roundtrip + **real-socket e2e** via `KlHttpServerConfig.h2` (h2c prior-knowledge) + **third-party interop** (`curl --http2-prior-knowledge`); same sanitizer coverage. |
 
 ---
 
@@ -112,7 +112,7 @@ See `integrations/README.md`. Validated outside CI (BYO libraries):
   standing test.
 - **nghttp2 client vs third-party server** (`nghttpd`) and **h2spec conformance**
   need the `nghttp2` CLI-tools formula; documented as optional follow-ups in
-  `integrations/nghttp2/README.md`.
+  `integrations/http2/nghttp2/README.md`.
 
 ---
 

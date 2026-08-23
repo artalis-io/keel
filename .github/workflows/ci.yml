@@ -373,6 +373,24 @@ jobs:
       - name: Stale-name gate (renamed HTTP taxonomy — no legacy KlServer/KlClient/KlH2/... names)
         run: make check-no-httplegacy
 
+      - name: Test-layout ownership gate (tests match tests/test-layout.manifest — no drift)
+        run: make check-test-layout
+
+      - name: Boundary gate G1 (substrate purity — src/ never includes a protocol header)
+        run: make check-substrate-purity
+
+      - name: Boundary gate G2 (protocols never include an integration impl header)
+        run: make check-protocol-no-integration
+
+      - name: Boundary gate G3 (integrations reach src/ only via the frozen seam allowlist)
+        run: make check-integration-seam
+
+      - name: Boundary gate G4 (protocol impl .c lives only under src/protocols/<fam>/)
+        run: make check-protocol-home
+
+      - name: Boundary gate G5 (interim protocols/ + deleted parsers/http1 paths cannot reappear)
+        run: make check-no-interim-paths
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
@@ -387,6 +405,12 @@ jobs:
 
       - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
         run: make uefi-dgram-gate UEFI_GATE_STRICT=1
+
+      - name: Self-contained client archive gate (client + completion only; both PE arches, selfcontained symbols)
+        run: make freestanding-lib-selfcontained
+
+      - name: Self-contained server archive gate (server core; both PE arches, selfcontained symbols)
+        run: make freestanding-lib-server-selfcontained
 
       - name: Self-contained DNS archive gate (6.4c EFI_UDP4 e2e archive; both PE arches, selfcontained symbols)
         run: make freestanding-lib-dns-selfcontained
@@ -405,8 +429,8 @@ jobs:
           # the flag column (RW / RWE / R) is on the same line as the
           # segment name. Without -W, flags wrap to a second line and
           # grep cannot correlate them with GNU_STACK.
-          make tests/test_http_router
-          STACK_LINE=$(readelf -lW tests/test_http_router | awk '/GNU_STACK/ {print; exit}')
+          make tests/protocols/http/test_http_router
+          STACK_LINE=$(readelf -lW tests/protocols/http/test_http_router | awk '/GNU_STACK/ {print; exit}')
           echo "GNU_STACK: $STACK_LINE"
           if echo "$STACK_LINE" | grep -qE ' RWE '; then
             echo "FAIL: GNU_STACK is executable (RWE)"
@@ -416,11 +440,11 @@ jobs:
             echo "FAIL: GNU_STACK missing RW flag"
             exit 1
           fi
-          if ! readelf -d tests/test_http_router | grep -q 'BIND_NOW'; then
+          if ! readelf -d tests/protocols/http/test_http_router | grep -q 'BIND_NOW'; then
             echo "FAIL: BIND_NOW not present (no full RELRO)"
             exit 1
           fi
-          if ! readelf -lW tests/test_http_router | grep -q 'GNU_RELRO'; then
+          if ! readelf -lW tests/protocols/http/test_http_router | grep -q 'GNU_RELRO'; then
             echo "FAIL: GNU_RELRO segment missing"
             exit 1
           fi
@@ -506,17 +530,17 @@ jobs:
 
       - name: nghttp2 adapter — roundtrip + real-socket e2e
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 test
+        run: make -C integrations/http2/nghttp2 test
 
       - name: nghttp2 conformance — h2spec
         timeout-minutes: 5
         # h2spec exits non-zero on ANY failure; Keel's expected result is ~136/146
         # (the residual ~10 are nghttp2 library behavior — nghttpd fails the same
-        # cases; see integrations/nghttp2/README.md). Gate on a pass-count floor so
+        # cases; see integrations/http2/nghttp2/README.md). Gate on a pass-count floor so
         # the result stays visible and a real regression fails the job, without
         # tripping on the known nghttp2-parity failures.
         run: |
-          out="$(make -C integrations/nghttp2 h2spec 2>&1 || true)"
+          out="$(make -C integrations/http2/nghttp2 h2spec 2>&1 || true)"
           echo "$out" | grep -aE "[0-9]+ tests," || true
           passed="$(echo "$out" | grep -aoE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1)"
           echo "h2spec passed=${passed:-0} (floor 130)"
@@ -524,17 +548,17 @@ jobs:
 
       - name: nghttp2 load — h2load
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 h2load
+        run: make -C integrations/http2/nghttp2 h2load
 
       - name: nghttp2 interop — curl + nghttpd
         timeout-minutes: 5
         run: |
-          make -C integrations/nghttp2 interop-curl
-          PATH="$PATH:/usr/sbin" make -C integrations/nghttp2 interop-nghttpd
+          make -C integrations/http2/nghttp2 interop-curl
+          PATH="$PATH:/usr/sbin" make -C integrations/http2/nghttp2 interop-nghttpd
 
       - name: ALPN e2e — mbedTLS + nghttp2 + openssl + curl + Keel client
         timeout-minutes: 5
-        run: make -C integrations/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
+        run: make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
 
       - name: mbedTLS adapter — real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
@@ -574,20 +598,16 @@ jobs:
 
       - name: lwIP loopback — stock libkeel + lwIP providers (server + client + UDP echo)
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback LWIP_DIR="$HOME/lwip"
 
       - name: lwIP HTTPS loopback — mbedTLS BIO routed through the lwIP socket provider
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
-
-      - name: lwIP raw-API spike — NO_SYS=1 tcp_* callbacks over loopback (Phase 9 foundation)
-        timeout-minutes: 5
-        run: make -C integrations/lwip raw-spike LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
 
       - name: lwIP raw completion backend — P9 cases via runtime injection on STOCK libkeel (RC-3)
         timeout-minutes: 5
-        run: make -C integrations/lwip loopback-raw LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-raw LWIP_DIR="$HOME/lwip"
 
       - name: lwIP raw completion backend — P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
         timeout-minutes: 8
-        run: make -C integrations/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"
+        run: make -C integrations/platform/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"

@@ -8,7 +8,7 @@
  * client can link it WITHOUT dragging in the server connection driver. The
  * server-side connection-suspension API (kl_async_suspend/complete/cancel) stays
  * in async.c, which references kl_http_conn_on_writable / kl_http_server_conn_release /
- * kl_io_engine_resume_completion — the exact server symbols that must not leak
+ * kl_http_comp_resume — the exact server symbols that must not leak
  * into the freestanding client archive.
  */
 #include <keel/event_ctx.h>
@@ -20,7 +20,7 @@
 #endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
 #include "event_caps.h"
-#include "io_engine.h"   /* kl_comp_run — the generic completion tick */
+#include "completion_io.h"   /* kl_comp_run — the generic completion tick */
 #include "watcher_internal.h"   /* kl_watcher_add_detached — completion connect (LC-0) */
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */

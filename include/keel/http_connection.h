@@ -204,8 +204,6 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c);
  */
 KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, int zero_copy);
 
-/** @brief Monotonic clock in milliseconds (for timeout tracking). */
-uint64_t kl_monotonic_ms(void);
 
 /**
  * @brief Peer (client) address for a connection — stable accessor.

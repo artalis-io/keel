@@ -9,20 +9,28 @@ keel_freestanding*.efi
 keel_freestanding*.lib
 
 # Integration test/smoke binaries (extensionless; sources are .c)
-integrations/*/link_smoke
-integrations/uefi/mock_efi_test
-integrations/uefi/host_map_test
-integrations/nghttp2/e2e/test_roundtrip
-integrations/nghttp2/e2e/e2e_socket
-integrations/nghttp2/e2e/interop_server
-integrations/nghttp2/e2e/client_probe
-integrations/nghttp2/e2e/alpn_server
-integrations/nghttp2/e2e/alpn_client
-integrations/openssl/e2e/tls_e2e
-integrations/mbedtls/e2e/tls_e2e
-integrations/libressl/e2e_libressl
-integrations/boringssl/e2e_boringssl
+integrations/tls/*/tests/link_smoke
+integrations/platform/uefi/tests/mock_efi_test
+integrations/platform/uefi/tests/host_map_test
+integrations/http2/nghttp2/tests/test_roundtrip
+integrations/http2/nghttp2/tests/e2e_socket
+integrations/http2/nghttp2/tests/interop_server
+integrations/http2/nghttp2/tests/client_probe
+integrations/http2/nghttp2/tests/alpn_server
+integrations/http2/nghttp2/tests/alpn_client
+integrations/tls/openssl/tests/tls_e2e
+integrations/tls/mbedtls/tests/tls_e2e
+integrations/tls/libressl/tests/e2e_libressl
+integrations/tls/boringssl/tests/e2e_boringssl
 integrations/*/*.dSYM
+integrations/tls/*/tests/*.dSYM
+integrations/http2/nghttp2/tests/*.dSYM
+# lwIP: many extensionless test binaries + .o/.dSYM under tests/; keep .c/.h sources.
+integrations/platform/lwip/tests/*
+!integrations/platform/lwip/tests/*.c
+!integrations/platform/lwip/tests/*.h
+# lwIP NO_SYS=1 raw-build scratch dir (generated lwipopts.h forwarder + arch/)
+integrations/platform/lwip/raw_build/
 
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*
@@ -34,10 +42,20 @@ examples/*
 # Test binaries
 tests/test_*
 !tests/test_*.c
+# Nested protocol-test binaries (§9: tests/protocols/<fam>/) — binaries/.d/.dSYM ignored,
+# sources (.c) stay tracked.
+tests/protocols/*/test_*
+!tests/protocols/*/test_*.c
+tests/protocols/*/smoke_*
+!tests/protocols/*/smoke_*.c
 # Smoke binaries (all backends: tcp/udp/dns + pollcomp/iocp/iouring + their tls/ws/async
 # variants), incl. .exe and macOS .dSYM bundles. Sources (.c) stay tracked.
 tests/smoke_*
 !tests/smoke_*.c
+
+# Integration test binaries (§10: integrations/<role>/<backend>/tests/) — sources .c stay tracked.
+integrations/tls/mbedtls/tests/smoke_tls*
+!integrations/tls/mbedtls/tests/smoke_tls*.c
 
 # Freestanding host mock harness binaries (sources .c stay tracked; make rm's them post-run)
 tests/freestanding_harness

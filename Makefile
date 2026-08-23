@@ -57,10 +57,10 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
-  SERVER_PLAT_SRC = src/http_server_plat_win.c
+  SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
-  DNS_SYS_SRC = src/dns_sys_win.c
+  DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
@@ -150,7 +150,7 @@ VENDOR_CFLAGS += -MMD -MP
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
-SERVER_PLAT_SRC ?= src/http_server_plat_posix.c
+SERVER_PLAT_SRC ?= src/protocols/http/http_server_plat_posix.c
 # The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
 # the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
@@ -161,22 +161,22 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # DNS config discovery (nameservers/hosts/search): POSIX resolv.conf/hosts; the
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
-DNS_SYS_SRC ?= src/dns_sys_posix.c
+DNS_SYS_SRC ?= src/protocols/dns/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
 # (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
-# server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_io_engine_*) + the
-# h2/ws legs (completion_http2.c / completion_ws.c) + the runtime-dispatch surface
-# (completion_dispatch.c: the kl_comp_* primitives, routed to the compiled-in backend or a
-# runtime provider) are linked on EVERY build. On a readiness build they are never called
-# (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
-# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs
-# (completion_absent.c) — the axis is compiled out.
+# server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_http_comp_* orchestration
+# + the HTTP kl_comp_* wrappers) + the h2/ws legs (completion_http2.c / completion_ws.c) + the
+# runtime-dispatch surface (completion_dispatch.c: the neutral kl_comp_*_raw primitives, routed to the
+# compiled-in backend or a runtime provider) are linked on EVERY build. On a readiness build they are
+# never called (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
+# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs — the neutral surface in
+# completion_absent.c + the HTTP surface in completion_http_absent.c (R2f) — the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
-  COMPLETION_CORE = src/completion_absent.c
+  COMPLETION_CORE = src/completion_absent.c src/protocols/http/completion_http_absent.c
 else
-  COMPLETION_CORE = src/completion_core.c src/completion_http_server.c \
-                    src/completion_http2.c src/completion_ws.c src/completion_dispatch.c
+  COMPLETION_CORE = src/completion_core.c src/protocols/http/completion_http_server.c \
+                    src/protocols/http2/completion_http2.c src/protocols/websocket/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
@@ -184,18 +184,18 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/http_response.c src/http_router.c \
-           src/http_connection.c src/http_server.c src/http_server_core.c src/http_server_activation.c src/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
-           src/http_body_reader_buffer.c \
-           src/http_body_reader_multipart.c src/http1_chunked.c src/http_cors.c \
-           src/websocket.c src/http_server_ws.c src/websocket_client.c \
-           src/http2_server.c src/http2_client.c src/thread_pool.c src/url.c \
-           src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
-           src/http_client_proxy.c \
-           src/http_client_pool.c src/http_redirect.c src/http_sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
-           src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
-           src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
+           src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
+           src/protocols/http/http_body_reader_buffer.c \
+           src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
+           src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c src/protocols/websocket/websocket_client.c \
+           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c src/url.c \
+           src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
+           src/protocols/http/http_client_proxy.c \
+           src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \
+           src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
+           src/protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
+           src/protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
@@ -205,22 +205,22 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
 # needed here.
 
 # Default parser backend (llhttp)
-LLHTTP_SRC = parsers/http1_parser_llhttp.c parsers/http1_response_parser_llhttp.c \
+LLHTTP_SRC = src/protocols/http/http1_parser_llhttp.c src/protocols/http/http1_response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
-# now lives in integrations/mbedtls/ (out of the dependency-light core); it still
+# now lives in integrations/tls/mbedtls/ (out of the dependency-light core); it still
 # builds on POSIX and Windows (its BIO I/O goes through the socket seam). Point
 # MBEDTLS_DIR at a source tree (include/ + library/) OR a system prefix (include/ +
 # lib/, e.g. `MBEDTLS_DIR=$(brew --prefix mbedtls)`); if unset, the compiler's
 # default search paths are used (e.g. MSYS2 /mingw64).
 #   make KEEL_TLS=mbedtls [MBEDTLS_DIR=/path]
-# `make integration-mbedtls` builds the adapter standalone (integrations/mbedtls/).
+# `make integration-mbedtls` builds the adapter standalone (integrations/tls/mbedtls/).
 ifdef KEEL_TLS
 ifeq ($(KEEL_TLS),mbedtls)
   # -Isrc: the adapter includes the internal socket seam ("socket.h").
-  # -Iintegrations/mbedtls: its public header <keel_tls_mbedtls.h>.
-  CFLAGS  += -Isrc -Iintegrations/mbedtls
+  # -Iintegrations/tls/mbedtls: its public header <keel_tls_mbedtls.h>.
+  CFLAGS  += -Isrc -Iintegrations/tls/mbedtls
   ifdef MBEDTLS_DIR
     CFLAGS  += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
     LDFLAGS += -L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib
@@ -229,8 +229,8 @@ ifeq ($(KEEL_TLS),mbedtls)
     CFLAGS += -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"$(MBEDTLS_CONFIG_FILE)"'
   endif
   LDFLAGS += -lmbedtls -lmbedx509 -lmbedcrypto   # after -lkeel in the link line
-  TLS_MBEDTLS_SRC = integrations/mbedtls/tls_mbedtls.c
-  TLS_MBEDTLS_OBJ = integrations/mbedtls/tls_mbedtls.o
+  TLS_MBEDTLS_SRC = integrations/tls/mbedtls/tls_mbedtls.c
+  TLS_MBEDTLS_OBJ = integrations/tls/mbedtls/tls_mbedtls.o
 endif
 endif
 TLS_MBEDTLS_OBJ ?=
@@ -239,10 +239,13 @@ TLS_MBEDTLS_OBJ ?=
 ifdef KEEL_COMPRESS
 ifeq ($(KEEL_COMPRESS),miniz)
   MINIZ_DIR ?= ../miniz
-  MINIZ_CFLAGS = -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
+  # -Iintegrations/codec/miniz: the adapter TUs + examples reach the miniz ADAPTER headers
+  # (compress_miniz.h/decompress_miniz.h, now beside the adapter TUs — R3.1/§10.1 P2) via a bare
+  # include; -I$(MINIZ_DIR): the external BYO <miniz.h>.
+  MINIZ_CFLAGS = -Iintegrations/codec/miniz -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
   CFLAGS += $(MINIZ_CFLAGS)
-  COMPRESS_MINIZ_SRC = src/compress_miniz.c src/decompress_miniz.c
-  COMPRESS_MINIZ_OBJ = src/compress_miniz.o src/decompress_miniz.o
+  COMPRESS_MINIZ_SRC = integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c
+  COMPRESS_MINIZ_OBJ = integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 endif
 endif
 COMPRESS_MINIZ_OBJ ?=
@@ -270,13 +273,22 @@ else
 	$(AR) rcs $@ $^
 endif
 
+# $(EXTRA_INC) is an empty-by-default per-target include add-on. Protocol objects reach the substrate
+# internal seams (socket.h, stream_io.h, http2_internal.h, ...) via -Isrc and the HTTP-family
+# coordination seam (http_internal.h, http_proto_hooks.h, completion_internal.h) via -Isrc/protocols/http.
+# Substrate recipes get NEITHER (empty EXTRA_INC), keeping the boundary honest (check-substrate-purity).
+# EXTRA_INC (target-specific, never a command-line var) survives builds that OVERRIDE CFLAGS on the
+# sub-make command line (debug/asan/coverage) — unlike a target-specific `CFLAGS +=`, and portably
+# across GNU Make 3.81 (macOS) which does not prefer the more-specific `src/protocols/%.o` pattern.
 %.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
 
-# The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
+src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
+
+# The lwIP-raw completion backend (integrations/platform/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
 # the core lib (BACKEND=lwipraw was retired in RC-3). Its object build rules live in
-# integrations/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
+# integrations/platform/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
 
 # Vendor code — relaxed warnings
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
@@ -317,7 +329,10 @@ examples: $(EXAMPLES)
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
 # test_iocp_engine.c requires the IOCP backend (asserts COMPLETION caps +
 # kl_socket_provider_iocp) — exclude by default, add back only for that backend.
-TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c))
+# Discovery is recursive over the protocol test dirs (one family level deep — no `**`
+# needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
+# (docs/protocols_restructure_freeze.md §9).
+TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -331,6 +346,20 @@ ifdef KEEL_NO_COMPLETION
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 
+# Curated-suite resolver (§9.4/§9.5): map a BARE suite name to its source wherever it lives
+# (flat tests/ or nested tests/protocols/<fam>/), then derive the platform binary WITH $(EXE).
+# Keeps the curated suite-name lists stable while the binaries resolve to nested paths and carry the
+# correct Windows extension. Fail-loud — the resolver requires EXACTLY ONE source, so a misspelled/
+# stale suite name cannot silently drop coverage and a duplicate basename cannot build an ambiguous
+# target: zero matches -> unknown-suite error; >1 -> ambiguity error; one -> the binary.
+# Resolves against the FILESYSTEM ($(wildcard ...)), NOT the config-filtered $(TEST_SRC): a curated set
+# legitimately names suites a given config excludes from the default `make test` (e.g. iocp_engine is
+# absent unless BACKEND=iocp), and a curated BIN var is expanded at PARSE time via its target's
+# prerequisites — filtering by TEST_SRC would false-error every build. This matches the original
+# `addprefix` behavior (which never filtered by config), now with path resolution + fail-loud checks.
+test_src_for = $(wildcard tests/test_$(1).c tests/protocols/*/test_$(1).c)
+test_bin_for = $(patsubst %.c,%$(EXE),$(if $(call test_src_for,$(1)),$(if $(word 2,$(call test_src_for,$(1))),$(error curated test suite '$(1)' is ambiguous: $(call test_src_for,$(1))),$(call test_src_for,$(1))),$(error curated test suite '$(1)' is unknown: no tests/test_$(1).c or tests/protocols/*/test_$(1).c)))
+
 # Per-platform test-network helpers (net_compat_posix.c / net_compat_win.c),
 # linked into every test binary. Built by the generic %.o rule.
 TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
@@ -340,7 +369,7 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -365,15 +394,15 @@ test: $(TEST_BIN)
 # smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
 # by `make KEEL_TLS=mbedtls smoke-tls`; mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress drain \
-                  http_multipart_stream overflow http1_parser http1_response_parser http_router url \
+                  http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser http1_response_parser http_router url \
                   http_client http_client_stream http_connection http2_client http_redirect \
                   http_server_stats thread_pool timer websocket_client \
                   error proxy_protocol resolver_cache http_request timeout \
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
-                  async http_client_pool cross_module event_ctx event_caps \
+                  async http_async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  tls tls_integration peer_cert
-WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
+                  tls http_tls tls_integration peer_cert
+WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
 # force-include (utest.h QueryPerformanceCounter clash). POSIX builds fall through
@@ -381,7 +410,11 @@ WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
 tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+# Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
+# so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
+tests/protocols/%$(EXE): tests/protocols/%.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -401,7 +434,7 @@ test-win: $(WIN_TEST_BIN)
 # (test_event_caps is a *readiness*-backend suite — it asserts READINESS caps — so it
 # runs in the WSAPoll/POSIX jobs, NOT here.)
 WIN_IOCP_TEST_SUITES = iocp_engine stream_single_shot
-WIN_IOCP_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_IOCP_TEST_SUITES)))
+WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
 	for t in $(WIN_IOCP_TEST_BIN); do \
@@ -413,10 +446,10 @@ test-win-iocp: $(WIN_IOCP_TEST_BIN)
 # Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone
 # (not a utest suite), so it needs -lpthread explicitly (Windows LDFLAGS omits it).
-SMOKE_BIN = tests/smoke_tcp$(EXE)
+SMOKE_BIN = tests/protocols/http/smoke_tcp$(EXE)
 smoke-tcp: $(SMOKE_BIN)
 	./$(SMOKE_BIN)
-$(SMOKE_BIN): tests/smoke_tcp.c $(LIB)
+$(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
@@ -464,11 +497,11 @@ $(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # WebSocket-over-completion roundtrip on POSIX via pollcomp — runs comp_ws_drive (8e-1).
-SMOKE_POLLCOMP_WS_BIN = tests/smoke_pollcomp_ws$(EXE)
+SMOKE_POLLCOMP_WS_BIN = tests/protocols/websocket/smoke_pollcomp_ws$(EXE)
 smoke-pollcomp-ws: $(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_WS_BIN)
-$(SMOKE_POLLCOMP_WS_BIN): tests/smoke_pollcomp_ws.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_WS_BIN): tests/protocols/websocket/smoke_pollcomp_ws.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Async/thread-pool handler over completion via pollcomp — runs the watcher relay + async
 # resume (8e-2b): a thread-pool wakeup watcher fires on the completion loop and resumes.
@@ -505,8 +538,8 @@ smoke-pollcomp-asan:
 	      -o $(SMOKE_POLLCOMP_BIN) tests/smoke_pollcomp.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_TLS_BIN) tests/smoke_pollcomp_tls.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
-	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/smoke_pollcomp_ws.c -L. -lkeel -lpthread
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/protocols/websocket/smoke_pollcomp_ws.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_ASYNC_BIN) tests/smoke_pollcomp_async.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
@@ -651,17 +684,17 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async http_body_reader http1_chunked http_client http_client_happy_eyeballs http_client_pool \
+IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chunked http_client http_client_happy_eyeballs http_client_pool \
                           http_client_stream compress http_connection http_cors cross_module \
                           datagram_batch datagram_life datagram_public datagram_live datagram_socket datagram_multicast \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io http2 http2_client http_integration \
-                          http_multipart_stream overflow http1_parser peer_addr peer_cert http_client_proxy \
+                          http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser peer_addr peer_cert http_client_proxy \
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
-                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration \
+                          stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
                           udp_cmsg unix_socket url version websocket websocket_client
-IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
+IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
 	for t in $(IOURING_TEST_BIN); do \
@@ -681,10 +714,10 @@ $(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(LIB)
 
 # DNS resolver link + init/resolve smoke test — the Windows CI gate for
 # dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
-SMOKE_DNS_BIN = tests/smoke_dns$(EXE)
+SMOKE_DNS_BIN = tests/protocols/dns/smoke_dns$(EXE)
 smoke-dns: $(SMOKE_DNS_BIN)
 	./$(SMOKE_DNS_BIN)
-$(SMOKE_DNS_BIN): tests/smoke_dns.c $(LIB)
+$(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
 # TLS handshake smoke test — a real mbedTLS handshake + request/response over
@@ -693,30 +726,30 @@ $(SMOKE_DNS_BIN): tests/smoke_dns.c $(LIB)
 # KEEL_TLS=mbedtls (else tls_mbedtls.o isn't in the lib). Standalone → -lpthread
 # explicitly (Windows LDFLAGS omits it); mbedTLS libs ride in LDFLAGS.
 #   make KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls
-SMOKE_TLS_BIN = tests/smoke_tls$(EXE)
+SMOKE_TLS_BIN = integrations/tls/mbedtls/tests/smoke_tls$(EXE)
 smoke-tls: $(SMOKE_TLS_BIN)
 	./$(SMOKE_TLS_BIN)
-$(SMOKE_TLS_BIN): tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Buffered-BIO (completion-mode) TLS validation for 8b-5 — a full mbedTLS handshake
 # + app data via feed_input/drain_output, no socket. Local/BYO gate (KEEL_TLS=mbedtls).
-SMOKE_TLS_COMP_BIN = tests/smoke_tls_completion$(EXE)
+SMOKE_TLS_COMP_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion$(EXE)
 smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
 	./$(SMOKE_TLS_COMP_BIN)
-$(SMOKE_TLS_COMP_BIN): tests/smoke_tls_completion.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_COMP_BIN): integrations/tls/mbedtls/tests/smoke_tls_completion.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end real-mbedTLS over a completion event loop + real socket (broadens the in-memory
 # smoke-tls-completion above): smoke_tls.c with the server pinned to the completion provider.
 # Build against a completion backend so kl_socket_provider_pollcomp() links:
 #   make BACKEND=pollcomp KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls-completion-e2e
 # Local/BYO gate (mbedTLS out of CI).
-SMOKE_TLS_E2E_BIN = tests/smoke_tls_completion_e2e$(EXE)
+SMOKE_TLS_E2E_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion_e2e$(EXE)
 smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
 	./$(SMOKE_TLS_E2E_BIN)
-$(SMOKE_TLS_E2E_BIN): tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_E2E_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -Isrc -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Optional first-party integrations (integrations/) — bring-your-own libraries,
 # never required by `make` / `make test`. Each target skips with a notice when
@@ -766,9 +799,17 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
-	rm -f tests/smoke_tcp tests/smoke_tcp.exe \
-	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
+	rm -f tests/protocols/http/smoke_tcp tests/protocols/http/smoke_tcp.exe \
+	      tests/protocols/dns/smoke_dns tests/protocols/dns/smoke_dns.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls integrations/tls/mbedtls/tests/smoke_tls.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls_completion integrations/tls/mbedtls/tests/smoke_tls_completion.exe \
+	      integrations/tls/mbedtls/tests/smoke_tls_completion_e2e integrations/tls/mbedtls/tests/smoke_tls_completion_e2e.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
+	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
+	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles
+	# (never .c/.h — a `test_*` glob would delete the sources too).
+	rm -f tests/protocols/*/test_*.exe tests/protocols/*/smoke_*.exe tests/protocols/*/*.d
+	rm -rf tests/protocols/*/*.dSYM
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
 	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
@@ -776,18 +817,18 @@ clean:
 	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
-	rm -f src/completion_core.o src/completion_server.o src/completion_h2.o src/completion_ws.o
+	rm -f src/completion_core.o src/protocols/http/completion_http_server.o src/protocols/http2/completion_http2.o src/protocols/websocket/completion_ws.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
 	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
-	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
+	rm -f tests/protocols/websocket/smoke_pollcomp_ws tests/protocols/websocket/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
-	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
+	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/tls/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
 	rm -f libkeel_freestanding_server*.a
@@ -804,6 +845,7 @@ clean:
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	-$(MAKE) -C integrations clean
 	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
+	find src/protocols -name '*.o' -delete 2>/dev/null || true
 	find . -name '*.d' -delete
 	rm -f keel.pc
 	rm -f coverage.info
@@ -853,11 +895,11 @@ analyze:
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
-AXIS_PROTO_TUS = src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
-                 src/http_client_proxy.c \
-                 src/http2_client.c src/websocket_client.c \
-                 src/http_connection.c src/http_server.c src/http2_server.c src/websocket.c src/http_server_ws.c \
-                 src/http_sse.c src/http_response.c src/http_redirect.c src/http_client_pool.c \
+AXIS_PROTO_TUS = src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
+                 src/protocols/http/http_client_proxy.c \
+                 src/protocols/http2/http2_client.c src/protocols/websocket/websocket_client.c \
+                 src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http2/http2_server.c src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c \
+                 src/protocols/http/http_sse.c src/protocols/http/http_response.c src/protocols/http/http_redirect.c src/protocols/http/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
 	@bad=0; \
@@ -873,7 +915,8 @@ check-sockaddr-neutral:
 # DEFAULT-DENY: EVERY src/*.c + parsers/*.c is treated as an above-transport (protocol/util) TU that
 # must NOT reach below the Tier-1 transports (KlListener/KlStream/KlDatagram) into engine/provider
 # internals — no platform networking/event system header, no raw completion seam (completion.h), no
-# completion tick (io_engine.h) — UNLESS it is in TIER1_INFRA: the layer that legitimately bridges
+# completion tick (completion_io.h) or HTTP completion seam (completion_http.h) — UNLESS it is in
+# TIER1_INFRA: the layer that legitimately bridges
 # Tier-1 to the engine/provider (event backends, socket providers, platform glue, the completion
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
 # the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
@@ -886,32 +929,32 @@ check-sockaddr-neutral:
 #
 # TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
 # for the transport machines + run-loop/async drivers). http_server.c / http_client_async.c live here because
-# they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
+# they drive the loop / async connect via the Keel completion tick (completion_io.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard src/http_server_plat_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard src/protocols/http/http_server_plat_*.c) $(wildcard src/protocols/http/completion_*.c) $(wildcard src/protocols/http2/completion_*.c) $(wildcard src/protocols/websocket/completion_*.c) $(wildcard src/protocols/dns/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
-              src/event_ctx.c src/async.c src/http_server_core.c src/http_server.c src/http_client_async.c
+              src/event_ctx.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/http_server.c src/protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
-# and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
-TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"
+# and the socket-ADDRESS headers, plus the internal completion.h / completion_io.h / completion_http.h seams.
+TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|completion_io|completion_http)\.h"
 check-tier1-boundary:
 	@bad=0; \
-	for f in src/*.c parsers/*.c; do \
+	for f in src/*.c src/protocols/*/*.c; do \
 	  case " $(TIER1_INFRA) " in *" $$f "*) continue ;; esac; \
 	  if grep -nE '$(TIER1_FORBIDDEN_RE)' "$$f"; then \
 	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
 	  fi; \
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED — an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
-	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"io_engine.h"'; do \
+	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"completion_io.h"' '"completion_http.h"'; do \
 	  if ! printf '#include %s\n' "$$h" | grep -qE '$(TIER1_FORBIDDEN_RE)'; then \
 	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \
 	done; \
-	echo "check-tier1-boundary: OK (default-deny: every src/parsers TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
+	echo "check-tier1-boundary: OK (default-deny: every src/ + src/protocols/ TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate
@@ -937,6 +980,34 @@ check-doc-refs:
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-doc-refs: FAILED"; exit 1; fi; \
 	echo "check-doc-refs: OK ($(words $(DOC_REF_FILES)) living-architecture docs, all in-repo links resolve)"
+
+# Test-layout ownership gate (§9.6). Enforces the EXACT authorized test-source layout recorded in
+# tests/test-layout.manifest (basename→path map), so a protocol test cannot drift to the wrong home
+# and a new/renamed/duplicated test cannot land unclassified. Rejects: (a) a file whose real path is
+# not the manifested one (mismatch — wrong family/dir), (b) a basename at two paths (duplicate/leftover
+# copy), (c) any test_*.c/smoke_*.c not in the manifest (unknown), (d) a tests/protocols/<x>/ dir where
+# <x> is not one of the five frozen families. Scopes to test_*.c + smoke_*.c (helpers/fixtures/
+# freestanding harnesses are not suites). Self-canary included.
+TEST_LAYOUT_FAMILIES = http http2 websocket dns proxy_protocol
+check-test-layout:
+	@bad=0; tmp=`mktemp`; \
+	git ls-files 'tests/test_*.c' 'tests/smoke_*.c' 'tests/protocols/*/test_*.c' 'tests/protocols/*/smoke_*.c' | LC_ALL=C sort > $$tmp; \
+	unknown=`grep -vxF -f tests/test-layout.manifest $$tmp || true`; \
+	missing=`grep -vxF -f $$tmp tests/test-layout.manifest || true`; \
+	if [ -n "$$unknown" ]; then echo "$$unknown" | sed 's/^/  UNMAPPED (mismatch\/unknown path): /'; bad=1; fi; \
+	if [ -n "$$missing" ]; then echo "$$missing" | sed 's/^/  MISSING (manifested but absent): /'; bad=1; fi; \
+	dups=`awk -F/ '{print $$NF}' $$tmp | LC_ALL=C sort | uniq -d`; \
+	if [ -n "$$dups" ]; then echo "$$dups" | sed 's/^/  DUPLICATE basename: /'; bad=1; fi; \
+	rm -f $$tmp; \
+	for d in `git ls-files 'tests/protocols/*/*' | sed -E 's#tests/protocols/([^/]+)/.*#\1#' | LC_ALL=C sort -u`; do \
+	  case " $(TEST_LAYOUT_FAMILIES) " in *" $$d "*) ;; *) echo "  UNKNOWN family dir: tests/protocols/$$d/"; bad=1 ;; esac; \
+	done; \
+	if ! grep -qxF 'tests/protocols/http/test_http_overflow.c' tests/test-layout.manifest; then \
+	  echo "check-test-layout: SELF-TEST FAILED — manifest lost a known split file"; exit 1; fi; \
+	if grep -qxF 'tests/test_overflow.c' tests/test-layout.manifest; then \
+	  echo "check-test-layout: SELF-TEST FAILED — manifest still lists a retired pre-split path"; exit 1; fi; \
+	if [ $$bad -ne 0 ]; then echo "check-test-layout: FAILED — the test tree diverges from tests/test-layout.manifest (§9.6); update the manifest in the SAME commit that moves a test"; exit 1; fi; \
+	echo "check-test-layout: OK (`wc -l < tests/test-layout.manifest | tr -d ' '` authorized test sources; families: $(TEST_LAYOUT_FAMILIES))"
 
 # Stale-name gate (D3-3): the KlUdp/KlUdpServer object API was deleted; fail if it reappears in the
 # code tree (src/ include/ tests/ integrations/). TWO INDEPENDENT scans, so an allowed cmsg helper on a
@@ -1000,7 +1071,7 @@ check-no-kludp:
 HTTPLEGACY_TYPES_RE = \b(KlServerStats|KlServer|KlConfig|KlClientPoolConfig|KlClientPoolConn|KlClientPoolEntry|KlClientPool|KlClientConfig|KlClientResponse|KlClientHeader|KlClientDoneFn|KlClientBodyFn|KlClientHeadersFn|KlClientReadFn|KlClientStreamCfg|KlClientState|KlClientConnectAttempt|KlClient|KlProxyConfig|KlRequestParser|KlRequest|KlResponseParserFactory|KlResponseParser|KlResponse|KlBodyMode|KlWriteFn|KlConnState|KlConnPool|KlConn|KlHandler|KlMiddlewareEntry|KlMiddleware|KlRouter|KlRoute|KlParam|KlBodyReaderFactory|KlCorsConfig|KlBodyReader|KlBufReader|KlMultipartReader|KlMultipartPartMeta|KlMultipartPart|KlMultipartConfig|KlMultipartEvent|KlMultipartErrorCode|KlSse|KlCompressStream|KlRedirectClient|KlRedirectConfig|KlRedirectDoneFn|KlChunkedDecoder|KlChunkedState|KlParserFactory|KlParseResult|KlParser|KlH2ServerSessionFactory|KlH2ServerSession|KlH2ServerConfig|KlH2ServerConn|KlH2ServerCallbacks|KlH2ServerStream|KlH2ServerHooks|KlH2ClientSessionFactory|KlH2ClientSession|KlH2ClientConfig|KlH2ClientConn|KlH2ClientCallbacks|KlH2ClientStream|KlH2ClientResponseFn|KlH2ClientResponse|KlH2ClientHeader|KlH2ClientErrorFn|KlH2Client|KlH2WriteFn|KlH2CompHooks|KlAccessLogFn|KlLogFn|KlTransport)\b
 HTTPLEGACY_CONST_RE = KL_(CONN|BODY|CLIENT|H2|PARSE|CHUNK|MP|CORS|CPOOL|REDIRECT|TRANSPORT|LOG)_|\bKL_READ_BUF_SIZE\b|\bKL_PEER_(SOCKET|PROXY)\b|\bKL_MAX_PARAMS\b|\bKL_DEFAULT_(MAX_CONNS|READ_TIMEOUT|MAX_BODY_SIZE)\b
 HTTPLEGACY_FN_RE = kl_(server|client|request|response|conn|router|cors|body_reader|buf_reader|multipart|sse|redirect|cpool|parser|chunked|h2|comp_h2|compress_stream)_[A-Za-z0-9_]*|\bkl_log(_errno)?\b
-HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
+HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations protocols README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
 HTTPLEGACY_FILES_RE = \b(body_reader\.h|body_reader_buffer\.c|body_reader_multipart\.c|body_reader_multipart\.h|chunked\.c|client\.h|client_async\.c|client_common\.c|client_internal\.h|client_pool\.c|client_pool\.h|client_proxy\.c|client_proxy\.h|client_sync\.c|completion_h2\.c|completion_server\.c|conn_internal\.h|connection\.c|connection\.h|cors\.c|cors\.h|h2\.h|h2_client\.h|h2_internal\.h|h2_nghttp2_client\.c|h2_nghttp2_server\.c|h2_server\.h|keel_h2_nghttp2\.h|parser_llhttp\.c|proto_hooks\.c|proto_hooks\.h|redirect\.c|redirect\.h|request\.h|response\.c|response\.h|response_internal\.h|response_parser_llhttp\.c|router\.c|router\.h|server\.c|server\.h|server_activation\.c|server_core\.c|server_h2\.c|server_plat\.h|server_plat_posix\.c|server_plat_win\.c|server_ws\.c|sse\.h)\b|\bsrc/(client|h2_client|sse)\.c\b
 check-no-httplegacy:
 	@bad=0; \
@@ -1034,6 +1105,61 @@ check-no-httplegacy:
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-no-httplegacy: OK (types/constants/functions/filenames -- no legacy HTTP name or deleted-module path in code or living docs)"
 
+# ── R4 boundary gates (frozen §6.2) — FINAL src/protocols/ + integrations/<role>/<backend>/ layout ──
+# Permanently enforce the three-axis ownership split. Default-deny, self-canaried, file:line, binary-
+# skip, BSD+GNU-portable. G1–G3 classify EVERY #include token (both <...> and "...") against
+# inventories DERIVED FROM THE TREE (tools/check_boundaries.sh), so neither an include-search-path
+# escape (<http_internal.h>) nor a newly named header can slip past a fixed regex. G4 is a committed
+# ownership manifest (src/substrate-tus.manifest) so a NEW bare-src .c fails until it is declared
+# substrate or moved under src/protocols/<fam>/ — the case dynamic derivation cannot decide.
+#   G1 check-substrate-purity        — src/*.{c,h} (substrate) may not include a protocol header
+#   G2 check-protocol-no-integration — src/protocols/**/*.{c,h} may not include an integration adapter header
+#   G3 check-integration-seam        — integrations reach src/ only via the frozen §6.3 seam allowlist; never a protocol header
+#   G4 check-protocol-home           — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/
+check-substrate-purity:
+	@sh tools/check_boundaries.sh G1
+
+check-protocol-no-integration:
+	@sh tools/check_boundaries.sh G2
+
+check-integration-seam:
+	@sh tools/check_boundaries.sh G3
+
+check-protocol-home:
+	@bad=0; \
+	git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort > /tmp/keel_g4_tracked; \
+	grep -vE '^[[:space:]]*(#|$$)' src/substrate-tus.manifest | LC_ALL=C sort > /tmp/keel_g4_manifest; \
+	if grep -qxF 'src/http_router.c' /tmp/keel_g4_manifest; then \
+	  echo "check-protocol-home: SELF-TEST FAILED — manifest unexpectedly declares a protocol .c (src/http_router.c) as substrate"; rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; exit 1; fi; \
+	unclassified=`grep -vxFf /tmp/keel_g4_manifest /tmp/keel_g4_tracked`; \
+	if [ -n "$$unclassified" ]; then echo "$$unclassified"; echo "check-protocol-home: FAILED (G4) — bare-src .c not declared in src/substrate-tus.manifest (unclassified addition — declare it substrate there OR move it under src/protocols/<fam>/)"; bad=1; fi; \
+	stale=`grep -vxFf /tmp/keel_g4_tracked /tmp/keel_g4_manifest`; \
+	if [ -n "$$stale" ]; then echo "$$stale"; echo "check-protocol-home: FAILED (G4) — src/substrate-tus.manifest lists a bare-src .c that no longer exists"; bad=1; fi; \
+	rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-protocol-home: OK (G4 — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/)"
+
+# G5 check-no-interim-paths (frozen §6.2) — the deleted layouts cannot reappear: the interim
+# top-level protocols/<fam>/ (R2g moved it under src/) and parsers/http1_*.c (now under
+# src/protocols/http/). Only the FINAL src/protocols/… source paths and the UNRELATED retained
+# tests/protocols/… test paths are allowed. Per-token (grep -o) so a src/protocols/ on the same
+# line cannot mask a bare interim reference. Sibling of check-no-httplegacy (which owns the
+# deleted-module-basename refs); this owns the deleted-DIRECTORY paths.
+R4_INTERIM_RE   = ([A-Za-z0-9_./]*)protocols/(http2|http|websocket|dns|proxy_protocol)/
+R4_INTERIM_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md docs/capability_matrix.md
+check-no-interim-paths:
+	@bad=0; \
+	if ! printf 'protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
+	  echo "check-no-interim-paths: SELF-TEST FAILED — a bare interim protocols/ path is not caught"; exit 1; fi; \
+	if printf 'src/protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
+	  echo "check-no-interim-paths: SELF-TEST FAILED — the final src/protocols/ path was flagged"; exit 1; fi; \
+	interim=`grep -rInoE '$(R4_INTERIM_RE)' $(R4_INTERIM_SCAN) 2>/dev/null | grep -vE '(src|tests)/protocols/[A-Za-z0-9_]+/$$'`; \
+	if [ -n "$$interim" ]; then echo "$$interim"; echo "check-no-interim-paths: FAILED (G5) — a reference to the interim top-level protocols/ layout reappeared (final layout is src/protocols/)"; bad=1; fi; \
+	parsers=`grep -rInE '\bparsers/http1' $(R4_INTERIM_SCAN) 2>/dev/null`; \
+	if [ -n "$$parsers" ]; then echo "$$parsers"; echo "check-no-interim-paths: FAILED (G5) — a reference to the deleted parsers/http1_*.c path reappeared (now src/protocols/http/)"; bad=1; fi; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-no-interim-paths: OK (G5 — no interim top-level protocols/ or deleted parsers/http1 path; final src/protocols/ layout enforced)"
+
 
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
@@ -1050,13 +1176,13 @@ cppcheck:
 	  --suppress=toomanyconfigs --suppress=staticFunction \
 	  --suppress=normalCheckLevelMaxBranches \
 	  --suppress=unmatchedSuppression \
-	  --suppress=unusedStructMember:src/dns_resolver.c \
-	  --suppress=knownConditionTrueFalse:src/dns_resolver.c \
+	  --suppress=unusedStructMember:src/protocols/dns/dns_resolver.c \
+	  --suppress=knownConditionTrueFalse:src/protocols/dns/dns_resolver.c \
 	  --suppress=constParameterCallback:src/event_iocp.c \
 	  --suppress=constParameterCallback:src/event_iouring.c \
 	  --suppress=constParameterCallback:src/event_pollcomp.c \
 	  -UKEEL_PLATFORM_LWIP \
-	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
+	  --error-exitcode=1 -Iinclude -Ivendor/llhttp -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket src/
 
 # Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
 # the raw KlStream (&conn->stream) as udata, not a bare KlHttpConn. Pointer equality (stream is the
@@ -1065,7 +1191,7 @@ cppcheck:
 # completion accept path (completion_http_server.c) still registers KlHttpConn until 6B-3 and is excluded.
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
-	     src/http_server.c src/async.c src/http_server_core.c src/completion_http_server.c \
+	     src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/completion_http_server.c \
 	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
@@ -1106,7 +1232,9 @@ FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
                $(COMPRESS_MINIZ_SRC:%.c=%.fuzz.o)
 
 %.fuzz.o: %.c
-	$(CC) $(FUZZ_INSTR_CFLAGS) -c -o $@ $<
+	$(CC) $(FUZZ_INSTR_CFLAGS) $(EXTRA_INC) -c -o $@ $<
+# Protocol + interim-src fuzz objects need the same seam includes as their plain-object twins.
+src/protocols/%.fuzz.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 
 $(FUZZ_LIB): $(FUZZ_LIB_OBJ)
 	$(AR) rcs $@ $^
@@ -1135,7 +1263,7 @@ fuzz/fuzz_url: fuzz/fuzz_url.c $(FUZZ_LIB)
 # Decompression fuzzer needs the miniz backend compiled into FUZZ_LIB:
 #   make fuzz-decompress KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz CC=clang
 fuzz/fuzz_decompress: fuzz/fuzz_decompress.c $(FUZZ_LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+	$(CC) $(FUZZ_CFLAGS) $(MINIZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 fuzz-decompress: fuzz/fuzz_decompress
 
 fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \
@@ -1252,13 +1380,20 @@ freestanding-headers:
 # out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
 # deliberately NOT in the manifest — a freestanding build supplies its own
 # provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
+# datagram_life.c is a hard LINK dependency of completion_core.c: the generic
+# completion loop's datagram-completion release site (7B-2a) calls
+# kl_dgram_life_dispatch/target/release. That branch is dead on the client (no
+# KL_COMP_DGRAM_* events ever arrive), but the symbols must resolve — and
+# datagram_life.c is a transport-neutral refcount token (alloc-only, no UDP/DNS
+# I/O, no syscall), so it is completion infrastructure, not the UDP/DNS surface
+# the gate forbids. Every archive carrying completion_core.c must carry it.
 FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c \
-    src/http_client_common.c src/http_client_async.c src/http_client_proxy.c src/http_client_pool.c src/decompress.c \
+    src/completion_dispatch.c src/completion_core.c src/datagram_life.c \
+    src/protocols/http/http_client_common.c src/protocols/http/http_client_async.c src/protocols/http/http_client_proxy.c src/protocols/http/http_client_pool.c src/decompress.c \
     src/connect_op.c \
-    parsers/http1_response_parser_llhttp.c \
+    src/protocols/http/http1_response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
@@ -1302,6 +1437,13 @@ FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar \
                           -fno-stack-protector -fno-builtin -DKEEL_FREESTANDING \
                           -Iinclude -Ivendor/llhttp -Isrc
 FREESTANDING_LIB = libkeel_freestanding.a
+
+# Server-only include dirs — the protocol-internal headers http_connection.c pulls
+# (http_internal.h via source-dir search; http2_internal.h from the sibling http2/
+# dir, which source-dir search cannot reach). Kept OUT of the global flags so the
+# client / datagram / DNS archives never see protocol internals — passed only to the
+# server archive builds (fs_build_and_gate arg 4).
+FREESTANDING_SERVER_INC = -Isrc/protocols/http -Isrc/protocols/http2
 FREESTANDING_LIB_OBJ = $(FREESTANDING_CLIENT_SRC:.c=.freestanding.o)
 
 %.freestanding.o: %.c
@@ -1368,17 +1510,17 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/completion_http_server.c \
+    src/completion_dispatch.c src/completion_core.c src/datagram_life.c src/protocols/http/completion_http_server.c \
     src/listener.c src/stream.c \
-    src/http_connection.c src/http_response.c src/http_router.c src/http1_chunked.c src/drain.c \
-    src/http_body_reader_buffer.c src/http_server_core.c src/http_proto_hooks.c \
-    parsers/http1_parser_llhttp.c \
+    src/protocols/http/http_connection.c src/protocols/http/http_response.c src/protocols/http/http_router.c src/protocols/http/http1_chunked.c src/drain.c \
+    src/protocols/http/http_body_reader_buffer.c src/protocols/http/http_server_core.c src/protocols/http/http_proto_hooks.c \
+    src/protocols/http/http1_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 freestanding-lib-server:
 	@echo "== freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
 	@rm -f libkeel_freestanding_server.a
-	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,)
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,$(FREESTANDING_SERVER_INC))
 
 # ── Freestanding DATAGRAM archive (Phase 10 6.4a-1: KlUdp + the Tier-1 machine) ──
 # OPT-IN layer — the DNS/UDP surface is deliberately OUT of the minimal client
@@ -1475,7 +1617,7 @@ freestanding-dgram-link:
 	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
 
 # ── Freestanding DNS layer (6.4a-2) ───────────────────────────────────────────
-# The stock async resolver (src/dns_resolver.c) freestanding-enabled: it rides the
+# The stock async resolver (src/protocols/dns/dns_resolver.c) freestanding-enabled: it rides the
 # datagram layer (KlUdp over a freestanding provider) for UDP-only Do53 against an
 # EXPLICIT cfg->nameserver. dns_resolver.c compiles its three hosted-only surfaces
 # out under KEEL_FREESTANDING — RFC 7766 TCP fallback, /etc/hosts, resolv.conf
@@ -1484,7 +1626,7 @@ freestanding-dgram-link:
 # errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
 # EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c was
 # retired against it separately (2026-08).
-FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/dns_resolver.c
+FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/protocols/dns/dns_resolver.c
 
 freestanding-lib-dns:
 	@echo "== freestanding DNS archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
@@ -1586,10 +1728,10 @@ FREESTANDING_SERVER_SC_LIB = libkeel_freestanding_server_selfcontained.a
 freestanding-lib-server-selfcontained:
 	@echo "== self-contained freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
 	@rm -f $(FREESTANDING_SERVER_SC_LIB)
-	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA) $(FREESTANDING_SERVER_INC))
 
 # Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
-# (udp + datagram_* + completion) + the STOCK src/dns_resolver.c + in-archive mem*/
+# (udp + datagram_* + completion) + the STOCK src/protocols/dns/dns_resolver.c + in-archive mem*/
 # strlen (kl_cstr_builtin.c), for a bare EFI target with no libc/EDK2 BaseMemoryLib.
 # Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
 # the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links
@@ -1751,12 +1893,12 @@ freestanding-dns-harness:
 # compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references — the boundary that keeps
 # U-3/U-4/U-7 + S-4/S-6/S-7 (which link event_efi.c but not the UDP provider) building. The gate
 # proves BOTH configs compile, both arches. socket_efi_udp4.c is datagram-only (no TCP-only pass).
-UEFI_DGRAM_TU     = integrations/uefi/socket_efi_tcp4.c integrations/uefi/socket_efi_udp4.c \
-                    integrations/uefi/event_efi.c
-UEFI_TCPONLY_TU   = integrations/uefi/socket_efi_tcp4.c integrations/uefi/event_efi.c
+UEFI_DGRAM_TU     = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/socket_efi_udp4.c \
+                    integrations/platform/uefi/event_efi.c
+UEFI_TCPONLY_TU   = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/event_efi.c
 UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-builtin -std=c11 \
                          -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
-                         -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/uefi -Ispikes/uefi \
+                         -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/platform/uefi \
                          -Wall -Wextra -Wpedantic -Werror
 # UEFI_GATE_STRICT (set by CI, .github/workflows/ci.yml): every FREESTANDING_TARGETS arch MUST compile —
 # no toolchain-absence SKIP is allowed to green-pass. Locally it is unset, so a dev without the clang PE
@@ -1792,7 +1934,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-no-kludp check-no-httplegacy freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-no-interim-paths freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

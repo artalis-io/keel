@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# build_mock_efi_test.sh — HOST build of the mock-EFI failure-path harness (F7b).
+#
+# Compiles the REAL provider TUs (socket_efi_tcp4.c, socket_efi_udp4.c, event_efi.c,
+# allocator_uefi.c) host-side against the scriptable fake EFI in mock_efi_test.c, under
+# ASan+UBSan, and links the core libkeel.a for kl_sockaddr_*/kl_malloc/etc. Runs the
+# token-lifetime failure-path assertions (timeouts, aborts, close-with-outstanding,
+# post-EBS, stale-guard). This is the load-bearing verification the QEMU happy-path
+# cannot provide.
+#
+# EFIAPI is gated on __x86_64__ (efi_min.h): on an arm64 host it is empty
+# (AAPCS), on x86_64 it is ms_abi — either way the mock vtables and the provider's calls
+# agree, so the fake firmware is ABI-compatible with the provider on the host.
+set -euo pipefail
+cd "$(dirname "$0")"
+: "${CC:=cc}"
+: "${KEEL_ROOT:=../../../..}"
+
+[ -f "$KEEL_ROOT/libkeel.a" ] || ( cd "$KEEL_ROOT" && make -j4 >/dev/null )
+# Refresh the archive symbol index: a parallel `make -j` can leave libkeel.a with a stale/
+# partial armap, which GNU ld then fails to resolve members from (e.g. kl_monotonic_ms via
+# clock_snapshot.c) — even though the member defines the symbol. ranlib is a safe no-op on macOS.
+# Require it to SUCCEED when the archive is present (a silent skip would drop us back into the
+# nondeterministic link failure); use $RANLIB if the toolchain provides one.
+: "${RANLIB:=ranlib}"
+"$RANLIB" "$KEEL_ROOT/libkeel.a"
+
+CFLAGS=(
+  -std=c11 -g -O1 -fno-omit-frame-pointer
+  -fsanitize=address,undefined -fno-sanitize-recover=all
+  -DKEEL_UEFI_DATAGRAM   # the mock exercises event_efi's datagram completion wiring (6.4b)
+  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I..
+  -Wall -Wextra
+)
+SRCS=( mock_efi_test.c ../socket_efi_tcp4.c ../socket_efi_udp4.c ../event_efi.c ../allocator_uefi.c
+       ../entropy_uefi.c ../civil_time.c ../wallclock_uefi.c ../clock_snapshot.c )
+
+echo "building mock_efi_test (host, ASan+UBSan) ..."
+"$CC" "${CFLAGS[@]}" "${SRCS[@]}" "$KEEL_ROOT/libkeel.a" -o mock_efi_test
+
+# LSan (detect_leaks) is unsupported by Apple's ASan runtime on Darwin — it aborts before
+# running any test. Enable it on Linux (the container gate does the real leak check); disable
+# it on macOS. The quarantine tests deliberately "leak" into static pools, which are reachable
+# and thus not reported by LSan anyway, so disabling on Darwin loses no coverage.
+case "$(uname -s)" in
+  Darwin) LEAKS=0 ;;
+  *)      LEAKS=1 ;;
+esac
+echo "running (detect_leaks=$LEAKS) ..."
+ASAN_OPTIONS="detect_leaks=$LEAKS" ./mock_efi_test

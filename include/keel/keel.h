@@ -63,6 +63,7 @@ int kl_version_number(void);
 /** @} */
 
 #include <keel/error.h>
+#include <keel/clock.h>
 #include <keel/allocator.h>
 #include <keel/handle.h>
 #include <keel/socket.h>
@@ -96,6 +97,7 @@ int kl_version_number(void);
 #include <keel/http_client_pool.h>
 #include <keel/http_redirect.h>
 #include <keel/compress.h>
+#include <keel/http_compress.h>
 #include <keel/decompress.h>
 #include <keel/drain.h>
 #include <keel/http_sse.h>

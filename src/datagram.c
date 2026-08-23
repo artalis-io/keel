@@ -32,7 +32,7 @@
 #include "datagram_core.h"
 #include "datagram_batch.h"     /* KlDatagramBatch layout — M5.2a send_batch drives the core send queue */
 #include "completion.h"         /* KlCompletionEvent + kl_comp_* + KL_COMP_DGRAM_* */
-#include "io_engine.h"          /* KlDgramSendOp / KlDgramRecvOp descriptors */
+#include "completion_io.h"          /* KlDgramSendOp / KlDgramRecvOp descriptors */
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
 #include "event_caps.h"         /* kl_event_caps */
 #include "datagram_life.h"      /* kl_dgram_life_retain/_release */

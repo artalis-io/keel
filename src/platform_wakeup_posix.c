@@ -5,7 +5,7 @@
  * backend cannot watch a host pipe (lwIP's lwip_poll, a UEFI SNP loop, …) can
  * OVERRIDE just the wakeup by linking its own kl_plat_wakeup_* object ahead of
  * libkeel.a — without touching the rest of the platform layer. Generic seam; the
- * lwIP override lives in integrations/lwip/platform_wakeup_lwip.c.
+ * lwIP override lives in integrations/platform/lwip/platform_wakeup_lwip.c.
  */
 #include "platform.h"
 

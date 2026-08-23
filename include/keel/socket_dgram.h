@@ -27,7 +27,7 @@
  * <keel/datagram.h> in 7B-1b so the public fixed-slot KlDatagram API can take that
  * header; <keel/datagram.h> re-includes this one for source compatibility. The
  * COMPLETION-axis op descriptors (KlDgramSendOp/KlDgramRecvOp) are a separate,
- * internal concern in src/io_engine.h — not here.
+ * internal concern in src/completion_io.h — not here.
  */
 
 struct KlDatagramSocketConfig;   /* keel/datagram.h — datagram socket-option config (borrowed) */

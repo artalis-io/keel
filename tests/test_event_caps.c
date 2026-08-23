@@ -13,7 +13,7 @@
 #include "utest.h"
 #include "../src/event_caps.h"
 #include "../src/socket.h"   /* internal KL_SOCK_CAP_OVERLAPPED (Phase 8) */
-#include "../src/io_engine.h"   /* kl_completion_axis_available() — 0 under KEEL_NO_COMPLETION */
+#include "../src/completion_io.h"   /* kl_completion_axis_available() — 0 under KEEL_NO_COMPLETION */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>

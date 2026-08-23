@@ -62,6 +62,7 @@
  * tests/freestanding_harness (see `make freestanding-harness`).
  */
 
+#include <keel/clock.h>
 #include <keel/sockaddr.h>
 #include "../src/socket.h"        /* kl_sockdef_* decls (fail-closed defs below) */
 #include "../src/resolve_sync.h"  /* kl_resolve_sync decl */

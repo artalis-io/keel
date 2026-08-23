@@ -52,4 +52,4 @@ exercises them on `ubuntu-latest` so they cannot silently rot, running:
 1.59). mbedTLS is **built from source at v3.6.2**, because Ubuntu ships the 2.28
 LTS which the 3.x adapter does not support (see `mbedtls/README.md`). To
 reproduce locally, point `MBEDTLS_DIR` at a 3.x tree and run the same targets
-(`make -C integrations/nghttp2 alpn-interop MBEDTLS_DIR=… `, etc.).
+(`make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR=… `, etc.).
