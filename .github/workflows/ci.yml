@@ -388,8 +388,8 @@ jobs:
       - name: Boundary gate G4 (protocol impl .c lives only under src/protocols/<fam>/)
         run: make check-protocol-home
 
-      - name: Boundary gate G5 (interim protocols/ + deleted parsers/http1 paths cannot reappear)
-        run: make check-no-interim-paths
+      - name: Boundary gate G5 (check-old-layout - no resurrected protocols / flat-home / spikes / parsers / unclassified integration file)
+        run: make check-old-layout
 
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers

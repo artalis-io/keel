@@ -39,12 +39,12 @@ Every PR should be checked for:
 ### Unsafe functions to scan for
 
 ```bash
-# These should NEVER appear in src/ or parsers/
-grep -rn 'sprintf\b' src/ parsers/       # use snprintf
-grep -rn 'strcpy\b' src/ parsers/        # use memcpy with length
-grep -rn 'strcat\b' src/ parsers/        # use snprintf
-grep -rn 'gets\b' src/ parsers/          # never
-grep -rn 'atoi\b' src/ parsers/          # use strtol with validation
+# These should NEVER appear in src/
+grep -rn 'sprintf\b' src/       # use snprintf
+grep -rn 'strcpy\b' src/        # use memcpy with length
+grep -rn 'strcat\b' src/        # use snprintf
+grep -rn 'gets\b' src/          # never
+grep -rn 'atoi\b' src/          # use strtol with validation
 ```
 
 ### Integer overflow patterns to check

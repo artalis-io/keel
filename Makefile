@@ -814,9 +814,9 @@ clean:
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
 	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
 	# escape $(CORE_OBJ) on a default clean — remove them unconditionally to prevent a
-	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
+	# stale cross-toolchain object (e.g. a MinGW completion_core.o) surviving into a
 	# later native build.
-	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
+	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o
 	rm -f src/completion_core.o src/protocols/http/completion_http_server.o src/protocols/http2/completion_http2.o src/protocols/websocket/completion_ws.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
@@ -828,7 +828,7 @@ clean:
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
-	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/tls/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
+	rm -f src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o integrations/tls/mbedtls/tls_mbedtls.o integrations/codec/miniz/compress_miniz.o integrations/codec/miniz/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
 	rm -f libkeel_freestanding_server*.a
@@ -839,12 +839,12 @@ clean:
 	find . -name '*.link_*.o' -delete
 	find . -name '*.compose_*.o' -delete
 	rm -f libkeel_freestanding_compose_*.a keel_freestanding_dgram_compose*.efi keel_freestanding_dns_compose*.efi
-	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
+	rm -rf .aarch64 src/.aarch64 src/protocols/*/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	-$(MAKE) -C integrations clean
-	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
+	rm -f $(FUZZ_LIB) src/*.fuzz.o vendor/llhttp/*.fuzz.o
 	find src/protocols -name '*.o' -delete 2>/dev/null || true
 	find . -name '*.d' -delete
 	rm -f keel.pc
@@ -912,7 +912,7 @@ check-sockaddr-neutral:
 	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
 
 # Tier-1 transport-boundary gate (R1). Complements check-sockaddr-neutral (host socket-ADDRESS types).
-# DEFAULT-DENY: EVERY src/*.c + parsers/*.c is treated as an above-transport (protocol/util) TU that
+# DEFAULT-DENY: EVERY src/*.c + src/protocols/*/*.c is treated as an above-transport (protocol/util) TU that
 # must NOT reach below the Tier-1 transports (KlListener/KlStream/KlDatagram) into engine/provider
 # internals — no platform networking/event system header, no raw completion seam (completion.h), no
 # completion tick (completion_io.h) or HTTP completion seam (completion_http.h) — UNLESS it is in
@@ -921,8 +921,8 @@ check-sockaddr-neutral:
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
 # the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
 # in TIER1_INFRA), so a new file cannot silently include completion.h/a platform header the way the
-# old AXIS_PROTO_TUS-only manifest allowed (e.g. http_router.c / http_cors.c / http1_chunked.c / body_reader*.c /
-# parsers/*.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
+# old AXIS_PROTO_TUS-only manifest allowed (e.g. the src/protocols/http/ TUs http_router.c / http_cors.c /
+# http1_chunked.c / http_body_reader_*.c / http1_parser_llhttp.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
 # TIER1_INFRA below, with a reason. Include-based → robust vs the WSA*/overlapped mentions that appear
 # only in explanatory comments (http_connection.c / http_response.c / http_client_sync.c). Backstop for
 # docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
@@ -1057,7 +1057,7 @@ check-no-kludp:
 #      point at a nonexistent file. Bare-anchored for unambiguous names; the two basenames that also exist
 #      as retained example scenarios (sse.c, h2_client.c) are flagged ONLY when path-qualified as src/, so
 #      examples/sse.c and examples/h2_client.c (and the example-only h2_server.c) stay allowed.
-# SCAN SET = code (src include parsers tests examples bench fuzz integrations) + the LIVING docs:
+# SCAN SET = code (src include tests examples bench fuzz integrations) + the LIVING docs:
 # README/CLAUDE/AGENTS/CONTRIBUTING, examples' & integrations' READMEs (via their dirs), site/index.html,
 # and the docs/ that describe CURRENT public behavior/API -- the two living-architecture docs plus the
 # contracts/policies/matrices (alpn_policy, async_lifecycle, capability_matrix, comparison, compatibility,
@@ -1071,7 +1071,7 @@ check-no-kludp:
 HTTPLEGACY_TYPES_RE = \b(KlServerStats|KlServer|KlConfig|KlClientPoolConfig|KlClientPoolConn|KlClientPoolEntry|KlClientPool|KlClientConfig|KlClientResponse|KlClientHeader|KlClientDoneFn|KlClientBodyFn|KlClientHeadersFn|KlClientReadFn|KlClientStreamCfg|KlClientState|KlClientConnectAttempt|KlClient|KlProxyConfig|KlRequestParser|KlRequest|KlResponseParserFactory|KlResponseParser|KlResponse|KlBodyMode|KlWriteFn|KlConnState|KlConnPool|KlConn|KlHandler|KlMiddlewareEntry|KlMiddleware|KlRouter|KlRoute|KlParam|KlBodyReaderFactory|KlCorsConfig|KlBodyReader|KlBufReader|KlMultipartReader|KlMultipartPartMeta|KlMultipartPart|KlMultipartConfig|KlMultipartEvent|KlMultipartErrorCode|KlSse|KlCompressStream|KlRedirectClient|KlRedirectConfig|KlRedirectDoneFn|KlChunkedDecoder|KlChunkedState|KlParserFactory|KlParseResult|KlParser|KlH2ServerSessionFactory|KlH2ServerSession|KlH2ServerConfig|KlH2ServerConn|KlH2ServerCallbacks|KlH2ServerStream|KlH2ServerHooks|KlH2ClientSessionFactory|KlH2ClientSession|KlH2ClientConfig|KlH2ClientConn|KlH2ClientCallbacks|KlH2ClientStream|KlH2ClientResponseFn|KlH2ClientResponse|KlH2ClientHeader|KlH2ClientErrorFn|KlH2Client|KlH2WriteFn|KlH2CompHooks|KlAccessLogFn|KlLogFn|KlTransport)\b
 HTTPLEGACY_CONST_RE = KL_(CONN|BODY|CLIENT|H2|PARSE|CHUNK|MP|CORS|CPOOL|REDIRECT|TRANSPORT|LOG)_|\bKL_READ_BUF_SIZE\b|\bKL_PEER_(SOCKET|PROXY)\b|\bKL_MAX_PARAMS\b|\bKL_DEFAULT_(MAX_CONNS|READ_TIMEOUT|MAX_BODY_SIZE)\b
 HTTPLEGACY_FN_RE = kl_(server|client|request|response|conn|router|cors|body_reader|buf_reader|multipart|sse|redirect|cpool|parser|chunked|h2|comp_h2|compress_stream)_[A-Za-z0-9_]*|\bkl_log(_errno)?\b
-HTTPLEGACY_SCAN = src include parsers tests examples bench fuzz integrations protocols README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
+HTTPLEGACY_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md site/index.html docs/alpn_policy.md docs/async_lifecycle.md docs/capability_matrix.md docs/comparison.md docs/compatibility.md docs/roadmap.md docs/stream_contract.md docs/streaming_contract.md docs/transport_surface.md
 HTTPLEGACY_FILES_RE = \b(body_reader\.h|body_reader_buffer\.c|body_reader_multipart\.c|body_reader_multipart\.h|chunked\.c|client\.h|client_async\.c|client_common\.c|client_internal\.h|client_pool\.c|client_pool\.h|client_proxy\.c|client_proxy\.h|client_sync\.c|completion_h2\.c|completion_server\.c|conn_internal\.h|connection\.c|connection\.h|cors\.c|cors\.h|h2\.h|h2_client\.h|h2_internal\.h|h2_nghttp2_client\.c|h2_nghttp2_server\.c|h2_server\.h|keel_h2_nghttp2\.h|parser_llhttp\.c|proto_hooks\.c|proto_hooks\.h|redirect\.c|redirect\.h|request\.h|response\.c|response\.h|response_internal\.h|response_parser_llhttp\.c|router\.c|router\.h|server\.c|server\.h|server_activation\.c|server_core\.c|server_h2\.c|server_plat\.h|server_plat_posix\.c|server_plat_win\.c|server_ws\.c|sse\.h)\b|\bsrc/(client|h2_client|sse)\.c\b
 check-no-httplegacy:
 	@bad=0; \
@@ -1139,26 +1139,13 @@ check-protocol-home:
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-protocol-home: OK (G4 — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/)"
 
-# G5 check-no-interim-paths (frozen §6.2) — the deleted layouts cannot reappear: the interim
-# top-level protocols/<fam>/ (R2g moved it under src/) and parsers/http1_*.c (now under
-# src/protocols/http/). Only the FINAL src/protocols/… source paths and the UNRELATED retained
-# tests/protocols/… test paths are allowed. Per-token (grep -o) so a src/protocols/ on the same
-# line cannot mask a bare interim reference. Sibling of check-no-httplegacy (which owns the
-# deleted-module-basename refs); this owns the deleted-DIRECTORY paths.
-R4_INTERIM_RE   = ([A-Za-z0-9_./]*)protocols/(http2|http|websocket|dns|proxy_protocol)/
-R4_INTERIM_SCAN = src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md docs/capability_matrix.md
-check-no-interim-paths:
-	@bad=0; \
-	if ! printf 'protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
-	  echo "check-no-interim-paths: SELF-TEST FAILED — a bare interim protocols/ path is not caught"; exit 1; fi; \
-	if printf 'src/protocols/http/x.c\n' | grep -oE '$(R4_INTERIM_RE)' | grep -vE '(src|tests)/protocols/' | grep -q .; then \
-	  echo "check-no-interim-paths: SELF-TEST FAILED — the final src/protocols/ path was flagged"; exit 1; fi; \
-	interim=`grep -rInoE '$(R4_INTERIM_RE)' $(R4_INTERIM_SCAN) 2>/dev/null | grep -vE '(src|tests)/protocols/[A-Za-z0-9_]+/$$'`; \
-	if [ -n "$$interim" ]; then echo "$$interim"; echo "check-no-interim-paths: FAILED (G5) — a reference to the interim top-level protocols/ layout reappeared (final layout is src/protocols/)"; bad=1; fi; \
-	parsers=`grep -rInE '\bparsers/http1' $(R4_INTERIM_SCAN) 2>/dev/null`; \
-	if [ -n "$$parsers" ]; then echo "$$parsers"; echo "check-no-interim-paths: FAILED (G5) — a reference to the deleted parsers/http1_*.c path reappeared (now src/protocols/http/)"; bad=1; fi; \
-	if [ $$bad -ne 0 ]; then exit 1; fi; \
-	echo "check-no-interim-paths: OK (G5 — no interim top-level protocols/ or deleted parsers/http1 path; final src/protocols/ layout enforced)"
+# check-old-layout (S4-1) — the single authoritative resurrection gate. Rejects re-introduction of
+# every deleted layout: top-level protocols/, old flat integration homes, spikes/, parsers/, and an
+# unclassified integration file at a backend root (exact ownership via integrations/non-test-files.
+# manifest, case 5). Absorbs the former check-no-interim-paths. Protocol test placement inside the
+# tests/ tree stays owned by check-test-layout. See tools/check_old_layout.sh.
+check-old-layout:
+	@sh tools/check_old_layout.sh
 
 
 # Scoped suppressions for documented false-positives (not real defects):
@@ -1934,7 +1921,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-no-interim-paths freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

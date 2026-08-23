@@ -1,433 +1,368 @@
-# Keel improvement roadmap — harden the axes, do not redesign them
+# Keel Refactor and Improvement Roadmap
 
-**Status:** proposed roadmap and Claude Code implementation prompt.  This document authorizes no
-implementation by itself.  Each code-bearing increment requires its own reviewed design freeze.
+Status: canonical forward roadmap.
 
-**Living docs this roadmap maintains** (produced/kept current by R0):
-[architecture.md](architecture.md) (Transport / Engine / Provider entry point),
-[architecture_invariants.md](architecture_invariants.md) (enforceable invariants, each anchored to
-code/contract/gate), and the historical [audits/README.md](audits/README.md) index.
+This document replaces the overlapping restructure and improvement-roadmap numbering. It describes
+the remaining work from the current repository state. Completed implementation history belongs in Git
+and, when it retains architectural value, under `docs/archive/`.
 
-## Executive direction
+## Governing principles
 
-Keel's architecture is already on the right boundary:
+1. Generic transport and execution machinery belongs to the substrate.
+2. Protocol-specific code belongs to `src/protocols/<family>/`.
+3. Optional providers and adapters belong to `integrations/<role>/<backend>/`.
+4. Tests follow the component that owns their assertions and dependencies.
+5. Public headers remain flat under `include/keel/` unless a separate public-API review rules otherwise.
+6. Readiness and completion are execution axes, not filesystem ownership categories.
+7. Active comments explain current invariants, ownership, and behavior, not implementation history.
+8. Documents and comments use project punctuation conventions, including no Unicode em dash.
+9. Every structural change lands with its build, CI, cleanup, documentation, and enforcement updates.
+10. Each consequential phase starts with a docs-only inventory and design freeze.
 
-```text
-protocols
-    |
-    v
-KlListener / KlStream / KlDatagram       transport semantics
-    |
-    +-------------------+----------------+
-    |                                    |
-    v                                    v
-readiness / completion                   socket provider
-engine model                             POSIX / Winsock / lwIP / EFI
-```
+## Phase S: Finish structural ownership
 
-The next phase is consolidation, not reinvention.  Preserve `KlListener`, `KlStream`, and
-`KlDatagram` as the canonical Tier-1 transport primitives.  Preserve readiness and completion as
-different engine models.  Preserve `KlSocketProvider` as the network-stack axis.  Improve lifetime
-safety, reduce legacy ambiguity, remove protocol knowledge from platform backends, and expand
-cross-backend conformance evidence.
+### S1 through S3.5, and F1: completed work
 
-Architectural assessment at the start of this roadmap: **approximately 8.5/10**.  The risk center is
-completion/callback lifetime correctness, not the choice of abstractions.
+The following work is complete and CI-protected; treat it as history rather than as future sequencing:
 
----
+- The HTTP public taxonomy uses `KlHttp*` and `kl_http_*` names.
+- `KlUdp` and `KlUdpServer` were consolidated into `KlDatagram` and removed.
+- Built-in protocols live under `src/protocols/<family>/`.
+- Protocol tests live under `tests/protocols/<family>/`.
+- Codec, TLS, HTTP/2, lwIP, and UEFI integrations are grouped by role under `integrations/<role>/<backend>/`.
+- Integration-owned tests live under each backend's `tests/` directory.
+- The UEFI integration lives under `integrations/platform/uefi/` with production separated from test
+  machinery; the live EFI ABI headers are promoted into the backend and `spikes/` is removed (former S3.5).
+- The freestanding client, server, datagram, and DNS compositions link and run under CI; the
+  `kl_dgram_life_*` composition gap is resolved (former F1).
 
-## Claude Code master prompt
+Do not preserve this chronology in active source comments. The final architecture documentation should
+describe the resulting system directly.
 
-Copy the prompt below into a fresh Claude Code session rooted at the Keel repository.
+### S4: structural enforcement and reconciliation
 
-```text
-You are working in the Keel C11 networking repository. Read AGENTS.md completely and obey it.
-Before changing anything, inspect the current branch, git status, relevant architecture documents,
-public headers, backend capability tables, Makefile gates, and tests. Preserve all pre-existing user
-changes. Do not push, open or modify a PR, mark a PR ready, merge, or perform any other outward action
-unless I explicitly authorize that exact action.
+Finalize and wire permanent checks into CI:
 
-GOAL
+- `check-substrate-purity`
+- `check-protocol-no-integration`
+- `check-integration-seam`
+- `check-protocol-home`
+- `check-test-layout`
+- `check-old-layout`
+- `check-no-kludp`
+- `check-no-httplegacy`
 
-Execute the Keel improvement roadmap in docs/keel_improvement_roadmap.md. The governing principle is:
+The old-layout check must reject resurrection of:
 
-    stop redesigning the major axes; harden them, reduce legacy duplication,
-    codify their invariants, and broaden conformance evidence.
+- Top-level `protocols/`.
+- Old flat integration homes.
+- `spikes/`.
+- Deleted source, header, and test paths.
+- Integration tests outside their backend's `tests/` directory.
+- Protocol tests at the root of `tests/`.
 
-The canonical Tier-1 semantic transports are KlListener, KlStream, and KlDatagram. Readiness and
-completion remain separate peer engine models. KlSocketProvider remains the network-stack/provider
-axis. Integrations implement Keel-owned seams and must not leak dependency-owned types into
-include/keel/*.h.
+Reconcile all active build manifests, CI labels, clean rules, contributor instructions, and living path
+references in the same phase.
 
-NON-GOALS — DO NOT DO THESE
+## Phase C: Consolidate documentation and repository hygiene
 
-- Do not rewrite the networking abstraction.
-- Do not merge KlEventOps and KlCompletionOps.
-- Do not introduce futures, promises, a generic task runtime, or a giant transport vtable.
-- Do not re-base KlUdp onto KlDatagram or silently change KlUdp behavior.
-- Do not mechanically replace every completion target with a new token.
-- Do not change public ABI merely to make the type graph look cleaner.
-- Do not mix documentation cleanup, behavioral fixes, and CI/toolchain fixes in one commit.
-- Do not claim a backend confidence level that its native runtime tests do not support.
+Complete this phase before another broad source-layout change. Otherwise stale documentation will keep
+producing incorrect assumptions during later audits.
 
-WORKING METHOD
+### C1: establish one documentation taxonomy
 
-1. Treat every numbered roadmap increment as a separate review unit.
-2. For any cross-cutting lifetime, ABI, backend-seam, or ownership change, first write a docs-only
-   design freeze containing the exact state transitions, ownership table, failure paths, compatibility
-   impact, backend matrix, and validation plan. Pause for review before implementation.
-3. Trace behavior from actual code. Do not infer backend semantics from comments or old audits.
-4. Prefer mechanical architecture checks and shared contract tests over prose-only promises.
-5. Keep hot paths allocation-free. Use KlAllocator for every allocation. Check all arithmetic,
-   capacities, pointer inputs, allocation results, system-call results, and cleanup paths.
-6. A logical cancel/close is not physical retirement. Any completion-referenced storage must remain
-   valid until the backend proves retirement or explicitly quarantines it.
-7. Assume callbacks may run synchronously, reentrantly, and earlier in the same drained completion
-   batch than another event that references related state.
-8. Test failure paths and allocation failure, not only successful round trips.
-9. Commit one logical increment at a time with a concise why-focused message and no Co-Authored-By
-   trailer. Do not amend an already-reviewed increment unless explicitly asked.
-10. At each pause, report: files changed, invariants established, compatibility impact, exact tests and
-    native environments run, unverified environments, commit hash, push status, and worktree status.
-
-STARTING TASK
-
-Begin with R0 only: establish the current-state baseline and reconcile the living architecture docs.
-Do not start R1 or any code change. Produce the R0 deliverables, validate documentation references and
-mechanical checks, commit the docs-only increment if asked, and pause for review.
-```
-
----
-
-## Roadmap rules
-
-### Required invariant vocabulary
-
-Use these terms consistently in code, tests, and documentation:
-
-| Noun | Meaning |
-|---|---|
-| **Transport** | Semantic contract: `KlListener`, `KlStream`, or `KlDatagram` |
-| **Engine** | Execution model: readiness or completion |
-| **Provider** | Network stack/platform: POSIX, Winsock, lwIP, or EFI |
-| **Driver/adapter** | Code translating a transport state machine onto an engine/provider seam |
-| **Integration** | Optional third-party/platform implementation of a Keel-owned interface |
-| **Retirement** | Proof that an operation can no longer access its submitted storage |
-| **Quarantine** | Fail-closed retention when retirement cannot be proved |
-
-“Event backend,” “completion backend,” and provider-specific names remain valid implementation terms,
-but introductory documentation should begin with Transport / Engine / Provider.
-
-### Review cadence
-
-Every increment ends at a review checkpoint.  A later increment must not be folded into an earlier one
-for speed.  Native backend validation may be delegated to CI or a purpose-built container/VM, but a
-cross-compile alone is not runtime proof.
-
----
-
-## R0 — establish a trustworthy current-state baseline
-
-**Purpose:** replace historical ambiguity with a small set of living documents without deleting the
-audit trail.
-
-### Deliverables
-
-1. Make `docs/architecture.md` the concise current architecture entry point, organized around
-   Transport / Engine / Provider.
-2. Add or refresh `docs/architecture_invariants.md` with enforceable invariants:
-   - semantic transports do not expose readiness/completion differences;
-   - readiness registers interest; completion submits owned operations;
-   - logical close is distinct from physical retirement;
-   - callback reentrancy and synchronous completion are supported;
-   - completion-batch targets outlive every event that can reference them;
-   - platform backends are transport-mechanical, not protocol-aware;
-   - integration-owned types do not enter `include/keel/*.h`;
-   - hot transport paths allocate no memory;
-   - uncertain retirement quarantines storage rather than guessing.
-3. Convert append-only audit documents into clearly dated historical evidence, or add prominent
-   “historical; verify against current code” banners and an index under `docs/audits/`.
-4. Find and correct stale Makefile/docs claims, including statements contradicted by current IOCP,
-   io_uring, datagram, listener, or EFI/lwIP gates.
-5. Add links from README and the existing roadmap without duplicating the full contracts.
-
-### Acceptance gates
-
-- Every architecture claim is linked to current code, a contract, or an executable gate.
-- Historical findings are not presented as current defects after they have been fixed.
-- No public API or behavior changes.
-- Documentation link/reference check passes; `git diff --check` passes.
-
----
-
-## R1 — canonize the Tier-1 transport boundary
-
-**Purpose:** make architectural dependency direction explicit without changing runtime behavior.
-
-### Deliverables
-
-1. Declare `KlListener`, `KlStream`, and `KlDatagram` canonical Tier-1 transports in the architecture
-   and contribution guides.
-2. Document the permitted dependency direction:
-
-   ```text
-   new protocol -> semantic transport -> driver/adapter -> engine + provider
-   ```
-
-   A protocol may use a lower seam only when the missing semantic is documented and reviewed.
-3. Add a lightweight architecture check that prevents new protocol TUs from directly including
-   private backend headers or host socket-address types.
-4. Inventory existing exceptions.  Classify each as intentional, transitional, or a defect; do not
-   mechanically rewrite them in this increment.
-
-### Acceptance gates
-
-- Mechanical check is narrow enough to avoid suppressing legitimate integration code.
-- Existing intentional exceptions are allowlisted with reasons and owners.
-- Default, no-completion, freestanding-header, and provider-neutrality gates remain green.
-
----
-
-## R2 — position `KlUdp` without breaking it
-
-**Purpose:** end conceptual competition between the two public datagram APIs.
-
-### Frozen direction
+Target structure:
 
 ```text
-KlDatagram = canonical bounded Tier-1 message transport
-KlUdp      = compatibility and extended UDP facility
+docs/
+  README.md
+
+  architecture/
+    overview.md
+    transport_substrate.md
+    event_axis.md
+    protocol_ownership.md
+    integration_model.md
+    public_api.md
+
+  contracts/
+    stream.md
+    datagram.md
+    listener.md
+    async_lifecycle.md
+    streaming.md
+    compatibility.md
+
+  operations/
+    capability_matrix.md
+    backend_confidence.md
+    testing.md
+    fuzzing.md
+
+  roadmap/
+    roadmap.md
+
+  archive/
+    audits/
+    designs/
+    phases/
+    freezes/
 ```
 
-`KlUdp` retains its behavior and advanced UDP features, including batching, GSO/GRO, multicast,
-packet-info controls, and legacy queue semantics.  It is not deprecated merely because
-`KlDatagram` is canonical.
+Classify every existing document as exactly one of:
 
-### Deliverables
+- Living specification: update it and place it outside `archive/`.
+- Historically useful record: move it under the appropriate `docs/archive/` category.
+- Fully superseded with no independent value: delete it.
+- Temporary prompt or planning aid: delete it once the accepted freeze captures its decisions.
 
-1. Update API and architecture documentation with a decision table: when to use `KlDatagram`, when to
-   use `KlUdp`, and which semantics intentionally differ.
-2. Add a contributor rule that new portable message protocols use `KlDatagram` unless they require a
-   documented `KlUdp` extension.
-3. Inventory DNS and other datagram consumers.  Propose migrations separately; do not combine them
-   with this documentation increment.
-4. If a protocol migration is justified, freeze and implement it one protocol at a time with behavior
-   parity, failure-path tests, and every applicable backend gate.
+Do not retain a document merely because it exists. Do not keep multiple active documents claiming to
+be the canonical architecture, compatibility policy, capability matrix, or roadmap.
 
-### Acceptance gates
+The project-restructure prompt should not remain a parallel source of truth. Delete it after the final
+freeze captures its applicable contracts, or archive it only if it has genuine historical value.
 
-- No source or ABI break for `KlUdp` users.
-- No hidden change from byte-budget to slot-budget semantics.
-- Documentation does not promise that every `KlUdp` extension exists in `KlDatagram`.
+### C2: remove implementation-history narration from active code
 
----
+Sweep every active `.c` and `.h` file. Remove or rewrite comments containing:
 
-## R3 — completion-target lifetime audit and design freeze
+- Milestone names such as `M5.3`, `R2f`, or `Phase 7B`.
+- References to deleted files or former repository layouts.
+- Statements such as "formerly", "moved from", or "the old path" when they only record chronology.
+- Review notes, migration explanations, and superseded implementation alternatives.
 
-**Purpose:** formalize the largest remaining correctness risk before generalizing any token.
+Comments must describe the current invariant instead:
 
-### R3a: inventory only
+```c
+/* Bad: moved from udp.c during M5.2b. */
+/* Good: the final segment retires the caller-owned GSO group. */
+```
 
-Build a table for every object directly or indirectly referenced by a completion event:
+Add a focused gate for known milestone-marker families in active source and headers. Allow an exception
+only where a numbered phase is part of an external protocol or standard.
 
-| Target class | Event owner representation | Ref/lease mechanism | Same-batch destruction risk | Cancel path | Retirement proof | Quarantine support |
-|---|---|---|---|---|---|---|
-| datagram operation | `KlDgramLife` | stable token ref | controlled | backend cancel | retire classifier/terminal | yes |
-| stream read/write | inspect | inspect | inspect | inspect | inspect | inspect |
-| listener accept | inspect | slot lease/op state | inspect | inspect | inspect | inspect |
-| connect attempt | inspect | inspect | inspect | inspect | inspect | inspect |
-| watcher | inspect | inspect | inspect | inspect | inspect | inspect |
+### C3: eliminate Unicode em dash
 
-Explicitly model:
+Replace the Unicode em dash character throughout:
 
-- two related events in one drained batch;
-- the first callback closing/freeing the second event's target;
-- synchronous completion during submit/arm;
-- cancellation that completes inline;
-- late completion after logical close;
-- fd/handle reuse;
-- backend teardown with operations still registered;
-- confirmed retirement versus quarantine.
+- C source and headers.
+- Markdown and HTML.
+- Makefiles and shell scripts.
+- YAML and other living configuration.
+- Archived as well as living documentation.
 
-### R3b: choose the smallest remedy
+Use a colon, semicolon, comma, parentheses, or an ASCII hyphen as appropriate. Add a permanent gate:
 
-After the inventory, choose independently for each unsafe class:
+```sh
+rg -nP '\x{2014}' \
+  --glob '*.c' --glob '*.h' --glob '*.md' --glob '*.html' \
+  --glob 'Makefile*' --glob '*.sh' --glob '*.yml' --glob '*.yaml'
+```
 
-1. reorder or defer destruction until the batch ends;
-2. transfer an existing lease/ref into the event;
-3. use a target-specific stable token;
-4. introduce a shared internal `KlOpLife` only if at least two target classes need identical semantics.
+The check must fail on any match. Do not maintain contextual exceptions.
 
-A generalized token is not automatically the desired outcome.  If proposed, freeze:
+### C4: rewrite agent and contributor guidance
 
-- owner/operation reference counts;
-- target invalidation and generation rules;
-- finalizer context and thread;
-- transfer versus borrow event disposition;
-- no-handler routing behavior;
-- quarantine ownership;
-- overflow policy for refcounts/generations;
-- allocation and reuse rules;
-- ABI visibility (prefer private/internal).
+Reconcile `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and related instructions:
 
-### Acceptance gates
+- Use `KlHttpServer`, `KlHttpRequest`, `KlHttpResponse`, and current function names.
+- Describe `src/protocols/`, role-grouped integrations, and test-placement rules.
+- Document the flat public-header policy.
+- Document platform and event-provider ownership.
+- Remove obsolete API examples and paths.
+- Avoid volatile hard-coded suite or module counts where possible.
+- State that active comments describe present behavior, not migration history.
+- State the no-em-dash rule.
 
-- Design note reviewed before code.
-- Deterministic regression for every proven unsafe sequence.
-- Same-batch, reentrant, duplicate, stale, cancel, no-handler, teardown, and allocation-failure tests.
-- ASan/UBSan/LSan on pollcomp plus native IOCP/io_uring validation where touched.
-- EFI/lwIP tests where callback-native or quarantine semantics are touched.
+### C5: revamp `site/`
 
----
+Rebuild the site around the current architecture rather than mechanically replacing old names.
 
-## R4 — remove protocol state from platform completion backends
+Required content:
 
-**Purpose:** make platform TUs mechanically transport-oriented while allowing driver code to know
-connection/protocol state.
+1. Keel as a transport substrate.
+2. Core abstractions: `KlStream`, `KlDatagram`, `KlListener`, and `KlEventCtx`.
+3. Built-in application protocols: HTTP/1, HTTP/2, WebSocket, DNS, and PROXY protocol.
+4. Optional integrations grouped by TLS, HTTP/2, codecs, and platforms.
+5. Readiness and completion as orthogonal execution models.
+6. An evidence-based platform and backend capability matrix.
+7. Current public-API examples using only valid names.
+8. Links to canonical living documentation.
+9. Build, sanitizer, fuzz, conformance, and stress evidence.
 
-### Deliverables
+Site acceptance requirements:
 
-1. Audit `event_iocp.c`, `event_iouring.c`, `event_pollcomp.c`, and integration completion engines for
-   references to HTTP, PROXY, TLS, WebSocket, HTTP/2, `KlConn` state enums, or protocol buffers.
-2. Classify every reference:
-   - platform-mechanical and acceptable;
-   - transport-driver responsibility;
-   - genuine protocol leakage.
-3. For genuine leakage, freeze the smallest neutral descriptor/flag/callback passed by the driver.
-   The backend should receive operation kind, opaque target/lifetime, buffers, lengths, and mechanical
-   flags—not protocol state enums.
-4. Add a mechanical include/symbol check preventing new protocol-state dependencies in platform
-   backend TUs.
+- No obsolete API names, paths, or milestone narration.
+- No unsupported marketing claims.
+- Responsive and accessible markup.
+- Updated navigation, metadata, Open Graph material, and diagrams.
+- A CI-checked `site/` build.
+- Automated internal-link and referenced-file validation.
 
-### Acceptance gates
+## Phase F: Fix known correctness and composition debt
 
-- No giant replacement vtable.
-- No duplicated protocol decisions across backends.
-- TLS remains above `KlStream`.
-- Existing readiness and completion behavior remains byte-for-byte compatible at the public surface.
-- Native IOCP and io_uring tests plus pollcomp sanitizer coverage pass.
+(F1, freestanding composition repair, is complete and recorded in the completed-work summary above.)
 
----
+### F2: audit public headers and installation
 
-## R5 — one semantic transport conformance harness
+Keep `include/keel/` flat for consumers, while verifying:
 
-**Purpose:** increase confidence by running the same contracts over genuinely different engines and
-providers rather than adding more abstraction.
+- Only public substrate and built-in protocol headers are installed.
+- Integration adapter headers remain with their integrations.
+- Detail headers are intentionally public or removed from installation.
+- `keel.h` exposes exactly the intended umbrella surface.
+- Every public function has test coverage.
+- Examples compile with installed-style includes.
+- Public comments use current taxonomy and contain no implementation history.
 
-### Design
+### F3: audit dead code and clutter
 
-Factor contract suites into backend-neutral scenarios with thin environment fixtures:
+Audit and remove:
+
+- Unreferenced internal functions and headers.
+- Obsolete Makefile variables and cleanup tokens.
+- Dead CI jobs and scripts.
+- Generated artifacts accidentally tracked.
+- Duplicate tests without distinct coverage.
+- Compatibility shims for deleted pre-1.0 APIs.
+- Empty directories and stale ignore rules.
+- Superseded site assets and documentation.
+
+Before deleting an item, perform a reference sweep, build-manifest sweep, CI/script sweep, public-symbol
+check, and relevant platform or integration build.
+
+## Phase P: Review platform-specific substrate placement
+
+Start with a docs-only inventory. This phase is not authorization for an immediate bulk move.
+
+### P1: classify platform-owned translation units
+
+Candidate end state:
 
 ```text
-contract scenario
-    +-- hosted socket fixture
-    +-- Windows fixture
-    +-- lwIP raw fixture
-    +-- EFI/QEMU fixture
+src/platforms/posix/
+  platform_posix.c
+  socket_posix.c
+  socket_dgram_posix.c
+  event_epoll.c
+  event_kqueue.c
+  event_poll.c
+  event_iouring.c
+  event_pollcomp.c
+
+src/platforms/windows/
+  platform_win.c
+  socket_winsock.c
+  socket_dgram_win.c
+  event_wsapoll.c
+  event_iocp.c
 ```
 
-The scenario logic and assertions must be shared.  Fixture code may prepare sockets, pump an engine,
-or translate test markers, but must not weaken the contract.
+Classify per function rather than by the majority role of a file. Split a mixed translation unit when
+generic and platform-specific functions coexist.
 
-### Required scenario families
+Keep neutral substrate flat, including event-context orchestration, neutral dispatch, completion
+coordination, stream and datagram machines, listener machinery, and provider-neutral seams.
 
-For `KlStream`:
+### P2: keep readiness and completion as axes
 
-- ordered bounded writes and backpressure;
-- pause/resume with one held completion result;
-- synchronous/reentrant receive completion;
-- graceful drain and abortive close;
-- callback-triggered close;
-- physical retirement before reuse/free.
+Do not create `src/readiness/` or `src/completion/`. These execution models cross platforms and should
+be expressed through vtables, capabilities, neutral dispatch, conformance tests, and architecture
+documentation.
 
-For `KlDatagram`:
+### P3: move only clearly platform-owned tests
 
-- atomic admission and fixed-slot backpressure;
-- message boundaries, zero-length messages, source/local metadata, truncation;
-- FIFO single-flight send;
-- strict pause with exactly one held packet;
-- graceful and abortive close;
-- confirmed retirement, quarantine, and no-double-release.
+Keep backend-neutral semantic tests flat. If the inventory proves clear ownership, platform-specific
+tests may move to:
 
-For `KlListener`:
+```text
+tests/platforms/posix/
+tests/platforms/windows/
+```
 
-- credit reservation and lease transfer;
-- readiness window versus multi-accept completion window;
-- cancel/close with outstanding accepts;
-- callback-triggered teardown;
-- physical retirement and exact slot release.
+Do not classify a test as platform-owned merely because current CI runs it on one operating system.
 
-### Backend matrix
+## Phase E: Expand evidence and hardening
 
-Run where supported:
+This phase carries forward the useful outstanding work from the former R5 and R6 roadmap items.
 
-| Engine/provider | Stream | Datagram | Listener | Required proof |
-|---|---:|---:|---:|---|
-| epoll/POSIX | yes | yes | yes | Linux sanitizer CI |
-| kqueue/POSIX | yes | yes | yes | macOS CI |
-| poll/POSIX | yes | yes | yes | fallback CI |
-| WSAPoll/Winsock | yes | yes | yes | Windows runtime CI |
-| pollcomp/POSIX | yes | yes | yes | ASan/UBSan/LSan |
-| io_uring/POSIX | yes | yes | yes | native Linux kernel CI |
-| IOCP/Winsock | yes | yes | yes | native Windows CI |
-| lwIP raw | supported subset | yes | supported subset | raw integration sanitizer gate |
-| EFI | supported subset | yes | supported subset | host mock + QEMU/OVMF |
+### E1: build a unified transport conformance harness
 
-Unsupported cells must be explicit capability limits, not silently skipped tests.
+Run the same semantic assertions for `KlStream`, `KlDatagram`, and `KlListener` across supported
+providers and engines:
 
-### Acceptance gates
+- epoll
+- kqueue
+- poll
+- WSAPoll
+- pollcomp
+- io_uring
+- IOCP
+- lwIP
+- EFI
 
-- Shared scenario assertions are not forked per backend.
-- Every skip reports the missing capability.
-- Stress repetitions and randomized callback/close timing use reproducible seeds.
-- CI time remains bounded; extended stress can run on a scheduled/manual job.
+Capabilities must produce explicit skips. Backends must not maintain divergent copies of semantic
+assertions.
 
----
+Required scenario families:
 
-## R6 — production-confidence campaign
+- Bounded backpressure and ordered delivery.
+- Pause and resume with retained input.
+- Synchronous and reentrant completion.
+- Graceful and abortive close.
+- Callback-triggered teardown.
+- Physical retirement before reuse.
+- Exact resource release.
+- Datagram boundaries, truncation, and metadata.
+- Listener credit reservation and transfer.
 
-**Purpose:** separate architectural support from demonstrated operational maturity.
+### E2: run a production-confidence campaign
 
-### Deliverables
+Add scheduled or manually dispatched stress jobs for:
 
-1. Publish a backend confidence matrix with evidence-based labels, not marketing labels.
-2. Add scheduled or manually dispatched stress jobs for:
-   - io_uring cancellation, close, fd reuse, queue pressure, and registered-buffer fallback;
-   - IOCP send-only, receive-only, concurrent close, AcceptEx windows, and teardown drain;
-   - real TLS over IOCP, including the currently underrepresented real-mbedTLS path;
-   - pollcomp randomized completion ordering as a portable semantic oracle.
-3. Add bounded watchdogs that fail with operation-registry diagnostics; never “fix” a hang merely by
-   replacing an infinite wait with silent abandonment.
-4. Archive the seed, backend capabilities, OS/kernel version, and outstanding operation inventory on
-   stress failure.
+- io_uring cancellation, descriptor reuse, queue pressure, and fallback behavior.
+- IOCP send/receive asymmetry, AcceptEx windows, close, and retirement.
+- Real TLS over IOCP.
+- pollcomp randomized completion ordering.
+- lwIP raw lifecycle stress.
+- EFI host-mock and QEMU lifecycle repetition.
 
-### Acceptance gates
+Every timeout must report a reproducible seed, backend capabilities, OS and kernel version,
+outstanding operations, and ownership/lifecycle state. Do not convert hangs into silent abandonment.
 
-- A timeout produces actionable ownership/operation diagnostics.
-- Diagnostic instrumentation is gated and does not remain enabled in production builds.
-- “Production” confidence requires native runtime evidence, sanitizer coverage where feasible, and a
-  documented teardown/retirement story.
+### E3: publish a backend confidence matrix
 
----
+Use evidence-based labels:
 
-## R7 — `KlEventLoop.fd` modernization (deferred ABI work)
+- Architecturally supported.
+- Compile-gated.
+- Mock-validated.
+- Runtime-validated.
+- Sanitizer-validated.
+- Conformance-tested.
+- Stress-tested.
+- Production-proven.
 
-**Purpose:** remove the last visibly readiness-shaped field only when compatibility economics justify
-it.
+README and site claims must use the same categories.
 
-### Required first step: usage and ABI audit
+## Phase A: Optional ABI modernization
+
+This phase carries forward the former R7 item as a separately reviewed compatibility decision.
+
+### A1: audit `KlEventLoop.fd`
 
 Determine:
 
-- whether external consumers can legally access `KlEventLoop.fd`;
-- every internal read/write and backend-specific meaning;
-- installed layout and source/ABI compatibility consequences;
-- whether the field is merely dead compatibility state;
-- whether an opaque loop layout is possible without harming stack allocation or freestanding builds.
+- Every internal reader and writer.
+- Whether external consumers access the public field.
+- Stack-allocation and embedding requirements.
+- Source and binary compatibility impact.
+- Freestanding consequences.
+- Whether all backend state can live behind `_backend`.
 
-### Preferred end-state
+### A2: remove or reserve the field
 
-Conceptually:
+Preferred pre-1.0 result:
 
 ```c
 typedef struct KlEventLoop {
@@ -437,84 +372,51 @@ typedef struct KlEventLoop {
 } KlEventLoop;
 ```
 
-This sketch is not authorization to change the ABI.  If compatibility prevents removal, retain the
-field, mark it legacy/reserved, and forbid new consumers.  Removal belongs in an explicitly versioned
-ABI transition.
+Move epoll and kqueue descriptors into backend-owned state.
 
-### Acceptance gates
+If removal is rejected, mark the field reserved and legacy, ban new consumers, document why it
+remains, and gate access to the exact approved backend translation units.
 
-- Design freeze includes source and binary compatibility analysis.
-- No pointer truncation or assumption that native handles fit in `int`.
-- All event backends and freestanding/header gates pass.
-- This increment may be permanently deferred with no architectural penalty.
+Do not mix this ABI change with filesystem moves.
 
----
+## Phase B: Add breadth only after consolidation
 
-## R8 — add breadth only after hardening
+Candidate projects, each separately designed and frozen:
 
-**Purpose:** validate the architecture through real consumers rather than another abstraction pass.
+- Explicit mode-B datagram receive batching.
+- Native completion-backend batched receive.
+- mDNS or CoAP as bounded-message consumers.
+- QUIC experiments over `KlDatagram`, without treating QUIC as merely UDP.
+- Additional providers only when they exercise a genuinely new execution or ownership model.
 
-Candidate work, each separately designed and scoped:
+No new feature may push protocol-specific state into the neutral substrate.
 
-- move a suitable portable DNS path onto `KlDatagram` while retaining advanced `KlUdp` paths where
-  needed;
-- add mDNS or CoAP as a bounded-message consumer;
-- use `KlDatagram` as groundwork for QUIC experiments without claiming QUIC is “just UDP”;
-- add another provider only when it exercises a genuinely new ownership/execution model.
-
-New consumers must not cause protocol-specific fields to appear in core engine/provider interfaces.
-If a new protocol does not fit, first determine whether it needs a real missing transport semantic or
-merely an adapter—not a new universal abstraction.
-
----
-
-## Dependency order and suggested milestones
+## Recommended execution order
 
 ```text
-R0 current docs
- |
- +--> R1 canonical boundary --> R2 KlUdp positioning
- |
- +--> R3 lifetime audit/freeze --> targeted lifetime fixes
- |
- +--> R4 backend decontamination
- |
- +--> R5 conformance harness --> R6 production confidence
- |
- +--> R7 event-loop ABI work (optional/versioned)
- |
- `--> R8 new consumers/providers (after relevant hardening)
+S4    structural gates and reconciliation
+C1-C5 documentation, comments, punctuation, guidance, and site
+F2-F3 public-surface and dead-code audits
+P1    platform-layout inventory
+P2-P3 optional platform moves and platform-owned tests
+E1    unified conformance harness
+E2-E3 stress campaign and confidence publication
+A1-A2 optional KlEventLoop.fd modernization
+B     independently scoped new capabilities
 ```
-
-Recommended review milestones:
-
-1. **Architecture baseline:** R0–R2, primarily documentation and enforcement.
-2. **Lifetime hardening:** R3 inventory, freeze, then narrowly justified implementations.
-3. **Axis enforcement:** R4 plus mechanical guards.
-4. **Evidence expansion:** R5–R6.
-5. **Optional ABI modernization:** R7 only with an explicit compatibility window.
-6. **Breadth:** R8 as independent protocol/provider projects.
-
-R3 and R4 may be researched in parallel after R0, but their code changes must remain separate.  R5
-should reuse the stabilized contracts from R1–R4 rather than freeze incidental backend internals.
-
----
 
 ## Definition of done
 
-This roadmap is successful when:
+This roadmap is complete when:
 
-- contributors can explain Keel using Transport / Engine / Provider without reading historical audits;
-- new protocols normally depend on `KlStream`, `KlDatagram`, or `KlListener`;
-- `KlUdp` has a clear, stable role and no accidental semantic migration;
-- every completion target has a documented lifetime and retirement proof;
-- platform backend TUs contain no protocol-state decisions;
-- the same semantic contract scenarios run across all applicable backends;
-- native IOCP/io_uring failures leave actionable operation-lifetime diagnostics;
-- backend confidence claims match native test evidence;
-- integration-owned types remain outside the installed core API;
-- no new universal async abstraction was required.
-
-The desired end state is not fewer layers at any cost.  It is a system where each layer has one clear
-job, lifetime ownership is explicit, and backend diversity strengthens rather than distorts the
-transport contracts.
+- Repository layout communicates real ownership without relying on historical knowledge.
+- Active source and header comments explain only current behavior and invariants.
+- Living documentation has one canonical home per subject.
+- Superseded material is either deleted or clearly archived.
+- No Unicode em dash remains in governed files.
+- The site accurately presents the current architecture and verified backend confidence.
+- Freestanding compositions link and run under CI.
+- Public headers and installation contents match the intended API.
+- Platform-specific code is isolated only where ownership is unambiguous.
+- One semantic harness validates transports across all supported execution models.
+- Optional ABI modernization and new protocol breadth remain separately authorized decisions.
