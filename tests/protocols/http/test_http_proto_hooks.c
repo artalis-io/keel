@@ -1,6 +1,6 @@
 /*
- * test_http_proto_hooks.c — the install-once protocol-hook registry invariant (S-7-review
- * Finding 2). The tables are process-wide compiled-in capability registrations; the
+ * test_http_proto_hooks.c — the install-once protocol-hook registry invariant.
+ * The tables are process-wide compiled-in capability registrations; the
  * setter must accept the first install, an idempotent re-install of the SAME table, and a
  * NULL reset, but reject a DIFFERENT live table (keeping the first). Exercised via the
  * completion-mode ws-drive registry, which — unlike the server ws/h2 tables — is NOT

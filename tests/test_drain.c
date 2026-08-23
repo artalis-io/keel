@@ -4,7 +4,7 @@
 #include <keel/http_response.h>
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
-#include "../src/drain_reserve.h"   /* Phase-B internal reservation + low-water API */
+#include "../src/drain_reserve.h"   /* internal reservation + low-water API */
 #include <string.h>
 #include <stdlib.h>
 
@@ -725,7 +725,7 @@ UTEST(drain, ws_drain_pending_check) {
 }
 
 /* kl_drain_data / kl_drain_consume — the peek + front-drop accessors a transport uses to
- * flush the buffer itself (e.g. the completion loop posting an overlapped send, 8g-1). */
+ * flush the buffer itself (e.g. the completion loop posting an overlapped send). */
 UTEST(drain, data_and_consume) {
     KlAllocator a = kl_allocator_default();
     MockWriter w;
@@ -776,7 +776,7 @@ UTEST(drain, consume_fires_on_drain) {
     kl_drain_free(&d);
 }
 
-/* ── Phase-B reservation + low-water (drain_reserve.h) ───────────────────── */
+/* ── reservation + low-water (drain_reserve.h) ───────────────────── */
 
 /* A failing allocator: fails malloc/realloc after `budget` successful calls (0 = fail all). */
 typedef struct { int budget; } FailAlloc;
@@ -901,7 +901,7 @@ UTEST(drain_reserve, low_water_writable_fires_once_per_crossing) {
 }
 
 UTEST(drain_reserve, requires_prealloc_not_just_max_size) {
-    /* Finding 1 regression: an ordinary (growable) drain with max_size but NO preallocated
+    /* Regression: an ordinary (growable) drain with max_size but NO preallocated
      * buffer must NOT be treated as reservation-capable — reserve_write fails closed without
      * invoking the writer or modifying state (else a remainder is copied into buf == NULL). */
     KlAllocator a = kl_allocator_default();
@@ -920,7 +920,7 @@ UTEST(drain_reserve, requires_prealloc_not_just_max_size) {
 }
 
 UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
-    /* Finding 4: reserve capacity for the whole remainder, writer takes a nonzero prefix, the
+    /* Reserve capacity for the whole remainder, writer takes a nonzero prefix, the
      * EXACT remainder is copied (caller buffer may then change), flush sends it in order. */
     KlAllocator a = kl_allocator_default();
     MockWriter w; mock_init(&w);
@@ -948,7 +948,7 @@ UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
 }
 
 UTEST(drain_reserve, low_water_fires_on_second_crossing) {
-    /* Finding 5: a crossing fires again after the buffer goes back above low-water. */
+    /* A crossing fires again after the buffer goes back above low-water. */
     KlAllocator a = kl_allocator_default();
     MockWriter w; mock_init(&w);
     w.mode = 2;   /* buffer everything */

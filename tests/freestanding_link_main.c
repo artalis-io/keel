@@ -1,15 +1,12 @@
 /*
- * freestanding_link_main.c — B2 CRT-less PE/COFF link proof.
+ * freestanding_link_main.c — CRT-less PE/COFF link proof.
  *
  * This is the entry TU for `make freestanding-link`: it LINKS
  * libkeel_freestanding_selfcontained.a (mem-family + strlen in-archive) into PE/COFF
  * image with NO hosted CRT (-nostdlib, lld PE), proving the freestanding archive
- * links standalone. It is the last literal of the acceptance milestone from
- * docs/phase10_uefi_feasibility_design.md:
- *
- *     "links as PE/COFF without a hosted CRT, documented undefined-symbol
- *      whitelist, passes host sanitizer tests, performs an HTTP/1.1 GET over a
- *      mock completion provider."
+ * links standalone. The contract it enforces: the archive links as PE/COFF without a
+ * hosted CRT, leaves only a documented undefined-symbol whitelist, passes the host
+ * sanitizer tests, and performs an HTTP/1.1 GET over a mock completion provider.
  *
  * It is a LINK target, not a RUN target — it need not execute; it must resolve
  * with an empty undefined set under -nostdlib. So every symbol the archive
@@ -44,11 +41,11 @@
 #include "../src/event_builtin.h" /* kl_event_*_builtin */
 #include "../src/completion.h"    /* KlCompletionOps + kl_comp_ops_builtin */
 #ifdef KEEL_FS_LINK_DGRAM
-#include <keel/datagram.h>          /* 6.4a-1 composition probe: pull the datagram archive layer */
+#include <keel/datagram.h>          /* composition probe: pull the datagram archive layer */
 #endif
 #ifdef KEEL_FS_LINK_DNS
 #include <keel/datagram.h>
-#include <keel/dns_resolver.h>     /* 6.4a-2 composition probe: pull the DNS layer (which rides the datagram layer) */
+#include <keel/dns_resolver.h>     /* composition probe: pull the DNS layer (which rides the datagram layer) */
 #endif
 
 #include <stddef.h>
@@ -81,7 +78,7 @@ int efi_main(void *image_handle, void *system_table) {
     for (unsigned i = 0; i < sizeof(refs) / sizeof(refs[0]); i++)
         acc |= (uintptr_t)refs[i];
 #ifdef KEEL_FS_LINK_DGRAM
-    /* Composition probe (6.4a-1 review): also reference the KlDatagram entry points so the datagram
+    /* Composition probe: also reference the KlDatagram entry points so the datagram
      * archive layer participates in the link — proving the client + datagram freestanding archives compose with
      * NO duplicate or unresolved symbol across their overlapping base objects (allocator / event_ctx /
      * sockaddr / completion_*). */
@@ -92,7 +89,7 @@ int efi_main(void *image_handle, void *system_table) {
         acc |= (uintptr_t)dgram_refs[i];
 #endif
 #ifdef KEEL_FS_LINK_DNS
-    /* Composition probe (6.4a-2): reference the built-in resolver entry point so dns_resolver.o
+    /* Composition probe: reference the built-in resolver entry point so dns_resolver.o
      * (and, transitively, the datagram layer it rides) participates in the link — proving the
      * client + DNS freestanding archives compose with NO duplicate or unresolved symbol across
      * their overlapping base objects (allocator / event_ctx / sockaddr / completion_* / kl_cstr). */

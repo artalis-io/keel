@@ -1,5 +1,5 @@
 /*
- * test_kl_cstr.c — the bounded, locale-free C-string helpers (F-4) that replaced
+ * test_kl_cstr.c — the bounded, locale-free C-string helpers used instead of
  * snprintf/strtol/str* in the freestanding client path. Each is checked against
  * its libc equivalent (byte-identical output / sign / acceptance) + edge cases.
  */

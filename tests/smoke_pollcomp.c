@@ -1,8 +1,8 @@
 /*
- * smoke_pollcomp.c — end-to-end HTTP-over-completion roundtrip on POSIX (PAL 8d-0.5).
+ * smoke_pollcomp.c — end-to-end HTTP-over-completion roundtrip on POSIX.
  *
  * The first runtime validation of the platform-independent completion connection
- * driver (completion_driver.c) OFF Windows: a KlHttpServer pinned to the portable poll()
+ * driver (completion_core.c) OFF Windows: a KlHttpServer pinned to the portable poll()
  * completion backend (BACKEND=pollcomp, the overlapped provider), served by the same
  * accept/recv/send/sendfile completion mechanics the IOCP backend implements — hit by
  * the sync KlHttpClient over loopback. It proves the completion axis is genuinely
@@ -88,7 +88,7 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
- * outbound buffer fills and the completion loop must flush it as overlapped sends (8g-1),
+ * outbound buffer fills and the completion loop must flush it as overlapped sends,
  * NOT busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
@@ -116,7 +116,7 @@ static void udp_echo(void *ud, const void *data, size_t len,
 /* Minimal echo HTTP/2 server session (no nghttp2/HPACK): it echoes whatever bytes the
  * peer sends back through the send callback. Enough to exercise the h2 completion driver
  * (comp_h2_drive) end-to-end over pollcomp — feed received bytes → session → drain output
- * → send — without a real h2 stack. Entered via an h2c Upgrade (8d-1). */
+ * → send — without a real h2 stack. Entered via an h2c Upgrade. */
 typedef struct {
     KlHttp2ServerSession   base;
     KlHttp2ServerCallbacks cb;
@@ -255,12 +255,12 @@ static int resilience_ok(KlAllocator *alloc, KlHttpClientConfig *ccfg) {
     return ok;
 }
 
-/* 8g-1 head-of-line: a slow client requests the big stream and then stalls (tiny receive
+/* Head-of-line: a slow client requests the big stream and then stalls (tiny receive
  * window, no reads). The server's outbound buffer fills and it must post overlapped sends
  * and move on — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a
  * *second*, normal request to completion while the first is stalled; then we drain the
- * first fully and verify every byte of the 256 KiB stream arrived (dechunked). Before
- * 8g-1, comp_send_stream spin-flushed the blocked socket and starved the second client. */
+ * first fully and verify every byte of the 256 KiB stream arrived (dechunked). A spin-flush
+ * of the blocked socket would starve the second client. */
 static size_t dechunk_body_len(const char *buf, size_t n) {
     const char *end = buf + n;
     const char *p = NULL;
@@ -350,7 +350,7 @@ static void *server_thread(void *arg) {
 
 /* Raw h2c roundtrip: HTTP/1.1 request with Upgrade: h2c → server 101 → then the echo
  * h2 session round-trips a frame. Exercises comp_h2_drive over the completion loop
- * (8d-1), plaintext, no nghttp2. */
+ * plaintext, no nghttp2. */
 static int h2c_roundtrip(void) {
     int cs = socket(AF_INET, SOCK_STREAM, 0);
     if (cs < 0) return 0;
@@ -395,7 +395,7 @@ static int h2c_roundtrip(void) {
 
 #define SMOKE_H2PK "FRAME-VIA-PRIOR-KNOWLEDGE"
 
-/* h2 prior-knowledge roundtrip (8d-2): the client opens straight into h2 by sending the
+/* h2 prior-knowledge roundtrip: the client opens straight into h2 by sending the
  * 24-byte connection preface (no HTTP/1.1 Upgrade), followed by a frame. Exercises the
  * completion path's preface detection + comp_h2_drive. */
 static int h2_prior_knowledge_roundtrip(void) {
@@ -485,7 +485,7 @@ static int proxy_over_completion_ok(void) {
     return ok;
 }
 
-/* Backlog exhaustion (6B-3 2b-ii): with ONE connection slot, a post-driven completion server must
+/* Backlog exhaustion: with ONE connection slot, a post-driven completion server must
  * QUEUE a second connection in the kernel backlog — not accept-and-drop/reset it — and serve it
  * once the first slot frees. Proves the reserve-before-post PAUSE end to end over real sockets:
  *   1. client A occupies the one slot (keep-alive: its conn stays READING after the response);
@@ -693,7 +693,7 @@ int main(void) {
         }
     }
 
-    /* h2c Upgrade → h2-over-completion echo roundtrip (comp_h2_drive, 8d-1). */
+    /* h2c Upgrade → h2-over-completion echo roundtrip (comp_h2_drive). */
     int h2_ok = 0;
     if (ok && post_ok && file_ok && stream_ok) {
         for (int i = 0; i < 20 && !h2_ok; i++) {
@@ -702,7 +702,7 @@ int main(void) {
         }
     }
 
-    /* h2 prior-knowledge (preface) → echo roundtrip (8d-2). */
+    /* h2 prior-knowledge (preface) → echo roundtrip. */
     int h2pk_ok = 0;
     if (h2_ok) {
         for (int i = 0; i < 20 && !h2pk_ok; i++) {
@@ -726,7 +726,7 @@ int main(void) {
         big_ok = (rc == 0 && resp.status == 200 && resp.body_len == SMOKE_BIG_LEN);
         if (rc == 0) kl_http_client_response_free(&resp);
     }
-    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+    /* Overlapped streaming flush — a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = big_ok ? bigstream_no_hol_ok() : 0;
 

@@ -1,6 +1,6 @@
 /*
- * freestanding_host_platform.c — F-5 HOST reference implementations of the
- * freestanding platform-hook contract, for the F-7 host mock harness.
+ * freestanding_host_platform.c — HOST reference implementations of the
+ * freestanding platform-hook contract, for the host mock harness.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * THE FREESTANDING PLATFORM-HOOK CONTRACT
@@ -9,10 +9,10 @@
  * `make freestanding-lib`) leaves a documented set of symbols UNDEFINED — the
  * seams an embedder (UEFI, a unikernel, this test harness) must fill. The
  * enforced whitelist lives in tests/freestanding_symbol_gate.sh. They fall in
- * three classes; F-5 concerns the FIRST two:
+ * three classes; this TU provides the FIRST two:
  *
  *   1. PLATFORM SEAMS — the tiny per-platform services the design flags
- *      (docs/phase10_uefi_feasibility_design.md §6):
+ *      (docs/archive/phases/phase10_uefi_feasibility_design.md §6):
  *        - uint64_t kl_monotonic_ms(void)
  *              A monotonic millisecond clock. Drives kl_timer deadlines, the
  *              Happy-Eyeballs attempt delay, and the overall request deadline.
@@ -54,7 +54,7 @@
  *   - a KlEventProvider with a KlCompletionOps (drain + post_connect + cancel;
  *                               add/mod/del/wait/caps/native_provider)
  *   Nothing more for a plaintext client. TLS/ws would add a KlTls backend +
- *   its entropy (kl_plat_random / EFI_RNG); DNS (U-5) would add a KlResolver or
+ *   its entropy (kl_plat_random / EFI_RNG); DNS would add a KlResolver or
  *   a real kl_resolve_sync over EFI_UDP4/EFI_DNS4.
  *
  * This TU is TEST/HARNESS-ONLY. It is compiled with the SAME -DKEEL_FREESTANDING
@@ -127,10 +127,10 @@ void kl_plat_random(void *buf, size_t len) {
  * fallback blocks in http_client_async.c — a real src change — and would leave a
  * freestanding client unable to dial a NUMERIC address literal without a
  * resolver (numeric IPs also flow through this path in the fallback). The design
- * (§F-0) deliberately keeps kl_resolve_sync on the whitelist as "the tiny
+ * deliberately keeps kl_resolve_sync on the whitelist as "the tiny
  * platform seam"; the right move is to PROVIDE it as a numeric-only reference
  * impl (no getaddrinfo, no host DNS) — which is exactly what a minimal
- * freestanding embedder would ship pre-DNS (U-5). Reported in the deliverable.
+ * freestanding embedder would ship pre-DNS. Reported in the deliverable.
  *
  * Parses a dotted-quad IPv4 literal; any non-numeric host fails (a freestanding
  * client with no resolver cannot resolve names — the correct behavior). */

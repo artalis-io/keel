@@ -1,5 +1,5 @@
 /*
- * test_stream_single_shot.c — R3b-T1: the single-shot completion contract for KlStream, exercised
+ * test_stream_single_shot.c — the single-shot completion contract for KlStream, exercised
  * through the REAL completion seam (no scripted mock).
  *
  * Contract (architecture_invariants.md I5): every completion backend emits EXACTLY ONE completion

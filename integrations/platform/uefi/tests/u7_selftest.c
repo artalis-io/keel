@@ -1,7 +1,7 @@
 /*
- * u7_selftest.c — U-7 acceptance: ExitBootServices lifetime / clean EFI teardown.
+ * u7_selftest.c — client teardown acceptance: ExitBootServices lifetime / clean EFI teardown.
  *
- * Does the U-3 plaintext GET, then exercises the boot-services-lifetime path:
+ * Does the plaintext GET, then exercises the boot-services-lifetime path:
  *   kl_uefi_shutdown()  → releases the EFI_TCP4 socket provider, the completion event
  *                         provider, and the platform (periodic monotonic timer + the
  *                         EVT_SIGNAL_EXIT_BOOT_SERVICES event).
@@ -121,8 +121,8 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 
-    /* ── the U-7 payload: clean boot-services teardown, observably proven ── */
-    /* F6: the lifecycle contract is that every opened socket is closed before shutdown.
+    /* ── the payload: clean boot-services teardown, observably proven ── */
+    /* The lifecycle contract is that every opened socket is closed before shutdown.
      * The async client closes its fd on completion, so this must read 0 here — prove it. */
     int live = kl_uefi_socket_provider_live_count();
     print("U-7: live socket slots before shutdown = "); print_int(live);

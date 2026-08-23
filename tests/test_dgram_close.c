@@ -1,5 +1,5 @@
 /*
- * test_dgram_close.c — Phase B step 4: close/cancel + confirmed-detachment over send + recv.
+ * test_dgram_close.c — close/cancel + confirmed-detachment over send + recv.
  *
  * Covers: both retirement orders, graceful drain-then-detach, abortive discard + sync/async cancel,
  * cancel-at-most-once, graceful→abortive escalation, error during graceful drain (no permanent

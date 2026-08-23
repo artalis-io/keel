@@ -89,7 +89,7 @@ int main(void) {
         .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
     };
     /* Default provider: on a completion backend (BACKEND=pollcomp|iouring) the server auto-adopts
-     * the overlapped provider (5a), so this same smoke drives real mbedTLS over comp_tls_drive /
+     * the overlapped provider, so this same smoke drives real mbedTLS over comp_tls_drive /
      * the memory-BIO feed_input/drain_output path on an actual event loop + socket — the full e2e
      * counterpart to the in-memory smoke-tls-completion. The SMOKE_TLS_COMPLETION build asserts the
      * loop really is completion (below). */

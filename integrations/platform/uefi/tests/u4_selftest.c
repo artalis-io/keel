@@ -1,10 +1,10 @@
 /*
- * u4_selftest.c — U-4 acceptance self-test (UEFI EFI application).
+ * u4_selftest.c — HTTPS-client acceptance self-test (UEFI EFI application).
  *
- * The TLS culmination of Phase 10: a STOCK libkeel_freestanding.a async KlHttpClient
+ * The TLS client on bare firmware: a STOCK libkeel_freestanding.a async KlHttpClient
  * performs an HTTPS GET over the EFI_TCP4 completion backend on bare UEFI firmware.
  * TLS is the mbedTLS adapter (integrations/tls/mbedtls/tls_mbedtls.c) built FREESTANDING
- * for the EFI target. mbedTLS's ciphertext BIO routes through the U-2 EFI socket
+ * for the EFI target. mbedTLS's ciphertext BIO routes through the EFI socket
  * provider (kl_http_client_start sets ev_ctx->sockets = the EFI native provider, and
  * src/http_client_async.c auto-wires it into the TLS session via set_socket_provider).
  *
@@ -18,8 +18,8 @@
  *   pump: kl_event_ctx_run + kl_timer_fire until done or bounded ticks
  *
  * Prints:
- *   U-4: status = <n>
- *   U-4: GO            (done && status == 200)   |   U-4: NO-GO-YET
+ *   status = <n>
+ *   GO            (done && status == 200)   |   NO-GO-YET
  *
  * *** SPIKE SHORTCUTS (loud, deliberate, NOT production-safe): ***
  *   1. VERIFY-NONE — NULL CA => MBEDTLS_SSL_VERIFY_NONE. The self-signed test
@@ -116,7 +116,7 @@ static void print_int(int v) {
  * Pinpoints whether the KL_ERR_IO is in the request write or the response read. */
 #include <keel/socket.h>
 #include <keel/sockaddr.h>
-int kl_uefi_socket_connect_now(KlSocketHandle fd);   /* U-2: issue+pump the Connect token */
+int kl_uefi_socket_connect_now(KlSocketHandle fd);   /* issue+pump the Connect token */
 
 static void manual_diag(EFI_BOOT_SERVICES *bs, EFI_HANDLE image,
                         KlTlsCtx *tctx, KlAllocator *alloc) {
@@ -208,7 +208,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto park;
     }
 
-    /* U-8: the cert-clock gate is INSIDE kl_uefi_mbedtls_platform_init() — it validates + snapshots
+    /* The cert-clock gate is INSIDE kl_uefi_mbedtls_platform_init() — it validates + snapshots
      * the wall clock and FAILS if the clock is untrustworthy, so TLS cannot come up without one and
      * the app cannot bypass it. We deliberately do NOT pre-check the clock here: run_u4.sh
      * U4_CLOCK=bad must reach this mandatory gate to prove it rejects the bad clock. */
@@ -243,7 +243,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("U-4: event ctx up (efi-tcp4-completion)");
 
-    /* U-8: the cert-clock snapshot + fail-closed gate were already taken INSIDE
+    /* The cert-clock snapshot + fail-closed gate were already taken INSIDE
      * kl_uefi_mbedtls_platform_init() above (no per-session choreography); mbedtls_time() reads
      * that lifetime snapshot during the handshake, never GetTime. Nothing to do here. */
 
@@ -333,7 +333,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     kl_http_client_free(c);
     kl_tls_mbedtls_ctx_destroy(tctx);   /* destroy every TLS object FIRST ... */
-    kl_uefi_mbedtls_platform_shutdown();/* F5: ... then drop the Boot Services heap ptr so
+    kl_uefi_mbedtls_platform_shutdown();/* ... then drop the Boot Services heap ptr so
                                          * no later mbedTLS calloc/free can touch firmware */
     kl_event_ctx_free(&ev);
 

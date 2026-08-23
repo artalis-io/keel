@@ -1,7 +1,7 @@
 /*
- * raw_udp_test.c — LC-3a: public KlDatagram round-trip over the lwIP raw completion backend.
+ * raw_udp_test.c — public KlDatagram round-trip over the lwIP raw completion backend.
  *
- * The UDP analog of the LC-1 TCP client loopback test. It brings up ONE raw ctx
+ * The UDP analog of the TCP client loopback test. It brings up ONE raw ctx
  * (kl_event_ctx_init_ex + kl_event_provider_lwip_raw → NO_SYS=1 lwIP + loopback netif) and runs
  * KEEL's public KlDatagram machine (src/datagram.c) over the raw datagram data-plane:
  *
@@ -22,13 +22,13 @@
  *         (no drain ran), so its pending sends take the close-side cancel/release path (T4 cannot cover
  *         this — the drain consumes all pending sends of a slot in one tick). Isolates the send-side
  *         retained-ref release under the public close.
- *   T6  one-held-packet overflow (7A-5), driven at the GLUE level (kl_lwr_udp_*, own ctx): two datagrams
+ *   T6  one-held-packet overflow, driven at the GLUE level (kl_lwr_udp_*, own ctx): two datagrams
  *         reach the udp_recv callback in one netif_poll (synchronous glue sends, before any drain) — the
  *         backend holds exactly ONE and DROPS the second (no 16-entry ring), so precisely one is
  *         delivered. The public KlDatagram send posts a completion op flushed during a tick, so it cannot
- *         force both into one poll (the legacy UDP object's eager synchronous udp_sendto did) — the property lives in the
+ *         force both into one poll (an eager synchronous udp_sendto would) — the property lives in the
  *         backend, so it is asserted at the glue seam like T7.
- *   T7  no stale capture while UNARMED (7A-5), driven at the GLUE level (kl_lwr_udp_*, its own ctx after
+ *   T7  no stale capture while UNARMED, driven at the GLUE level (kl_lwr_udp_*, its own ctx after
  *         the event ctx is freed): a datagram arriving with no recv armed is DROPPED at the callback, so
  *         a later post_recv surfaces NOTHING stale. Not observable through the public KlDatagram API
  *         (recv_stop is terminal in KlDgramRecv + the dispatch drops on recv_active==0), so this proves
@@ -39,7 +39,7 @@
  * case — LSan validates the suite as a whole).
  *
  * A real datagram crosses the loopback netif through KEEL's datagram.c machine — src/datagram.c and the
- * lwIP-raw provider + glue are UNCHANGED; only the public transport driver changes. Prints "LC-3a PASS".
+ * lwIP-raw provider + glue are UNCHANGED; only the public transport driver changes. Prints its PASS marker on success.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -92,8 +92,8 @@ static void reset_capture(void) {
 }
 
 /* Public close lifecycle: abortive close_cancel -> pump the raw loop until CLOSED -> free.
- * Replaces the legacy synchronous teardown, exercising the canonical KlDatagram teardown over
- * the lwIP-raw provider (the close coordinator's recv-cancel terminal + pending-send release). */
+ * Exercises the canonical KlDatagram teardown over the lwIP-raw provider (the close
+ * coordinator's recv-cancel terminal + pending-send release). */
 static int dg_close_free(KlEventCtx *ctx, KlDatagram *dg) {
     if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
         (void)kl_datagram_close_cancel(dg);
@@ -222,7 +222,7 @@ static int t4_close_with_armed_recv(KlEventCtx *ctx) {
     KlSockAddr dst; dest_v4(&dst, port);
 
     if (kl_datagram_send(&tx, &(KlDatagramMessage){ .data = "one", .len = 3, .peer = &dst, .tos = -1 }) != KL_DATAGRAM_ACCEPTED) { dg_close_free(ctx, &tx); dg_close_free(ctx, &rx); return fail("T4 send"); }
-    pump_until(ctx, 1, 200);   /* deliver one; udp.c re-arms → a recv is armed at free time */
+    pump_until(ctx, 1, 200);   /* deliver one; the datagram machine re-arms → a recv is armed at free time */
 
     /* Free with a recv armed (arm token ref outstanding) — kl_lwr_udp_close releases it; no leak. */
     dg_close_free(ctx, &tx);
@@ -262,13 +262,13 @@ static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T6 — one-held-packet overflow (7A-5), driven at the GLUE level (like T7).
+/* T6 — one-held-packet overflow, driven at the GLUE level (like T7).
  *
  * Through the public KlDatagram API the two datagrams cannot be forced into a SINGLE netif_poll:
  * KlDatagram posts each send as a completion op flushed DURING a loop tick (interleaved with the
  * lwIP poll), so back-to-back sends spread across ticks and the recv re-arms between them — both
- * would be delivered. the legacy UDP object's send did a SYNCHRONOUS udp_sendto, so both landed before
- * the first poll; that eager-send timing is gone. The one-held-slot overflow is a BACKEND property,
+ * would be delivered. A SYNCHRONOUS udp_sendto would land both before the first poll; the public
+ * send has no such eager timing. The one-held-slot overflow is a BACKEND property,
  * deterministic only where the send is synchronous: the glue (kl_lwr_udp_send → udp_sendto). With a
  * recv armed, TWO datagrams delivered in one netif_poll must surface EXACTLY ONE RECV on drain (the
  * backend holds one, drops the second; a former 16-entry ring would have surfaced both). Sibling of
@@ -335,7 +335,7 @@ static int t6_glue_one_held(void) {
     return 0;
 }
 
-/* T7 — no stale capture while UNARMED (7A-5 review), driven at the GLUE level.
+/* T7 — no stale capture while UNARMED, driven at the GLUE level.
  *
  * Through the public KlDatagram API this is not observable: KlDgramRecv's recv_stop is terminal (it never
  * re-posts after an unarmed gap) and the completion dispatch independently drops on recv_active == 0 — so a
@@ -384,7 +384,7 @@ static int t7_glue_unarmed_drop(void) {
         }
 
         /* (2) UNARMED: "b" MUST actually send — its SEND completion proves the datagram traversed the
-         * loopback to the recv callback (else the phase-3 oracle would false-green). The callback must
+         * loopback to the recv callback (else the step-(3) oracle would false-green). The callback must
          * DROP it, so this drain yields exactly one SEND and ZERO RECV. */
         if (kl_lwr_udp_send(lwrctx, tx, ltx, "b", 1, lo, port) != 0) rc = fail("T7: send b");
         else {

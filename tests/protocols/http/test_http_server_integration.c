@@ -177,7 +177,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     /* Wait for pool to register both connections */
     usleep(50000);
 
-    /* Stats must reflect the readiness listener's PAUSED state when the pool is full (step 6B-1). */
+    /* Stats must reflect the readiness listener's PAUSED state when the pool is full. */
     KlHttpServerStats st_full;
     kl_http_server_stats(&srv, &st_full);
     ASSERT_EQ(st_full.active_connections, 2);
@@ -221,7 +221,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     kl_http_server_free(&srv);
 }
 
-/* ── Listener teardown (step 6B-1): kl_http_server_free must complete the accept listener's
+/* ── Listener teardown: kl_http_server_free must complete the accept listener's
  *    close/detachment while armed AND while paused. ASan/UBSan verify no leak/UAF. ─────── */
 
 UTEST(server_integration, teardown_while_armed) {

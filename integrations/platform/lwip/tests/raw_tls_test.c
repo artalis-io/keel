@@ -1,11 +1,12 @@
 /*
- * raw_tls_test.c — LC-4: HTTPS (TLS) over the lwIP-raw completion backend, in-process over the
+ * raw_tls_test.c — HTTPS (TLS) over the lwIP-raw completion backend, in-process over the
  * loopback netif (NO_SYS=1, single-thread).
  *
- * The proof for LC-4 (docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4): the SAME single-loop
- * model as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw
- * async KlHttpClient on the loop thread), now with TLS on BOTH ends — a genuine mbedTLS handshake +
- * request round-trips over 127.0.0.1 on the loopif with zero lwIP-specific TLS code.
+ * The proof for the TLS-over-raw path (docs/archive/phases/phase10_lwip_raw_client_design.md §6 + §8):
+ * the SAME single-loop model as the plaintext raw-client test (ONE KlEventCtx == the one lwIP mainloop,
+ * driving BOTH a raw KlHttpServer and a raw async KlHttpClient on the loop thread), now with TLS on
+ * BOTH ends — a genuine mbedTLS handshake + request round-trips over 127.0.0.1 on the loopif with zero
+ * lwIP-specific TLS code.
  *
  * TLS over raw rides two EXISTING, generic legs (no new TLS code in the lwIP backend):
  *
@@ -16,18 +17,18 @@
  *      the pcb. The WANT_READ/WANT_WRITE handshake churn rides the raw backend's emulated readiness
  *      watcher (writable = sndbuf headroom; readable = retained rx / peer close).
  *
- *   2. Server side = the generic memory-BIO completion-TLS leg. src/completion_driver.c's
+ *   2. Server side = the generic memory-BIO completion-TLS leg. src/protocols/http/completion_http_server.c's
  *      comp_tls_drive + comp_tls_drain_output drive the abstract KlTls feed_input/drain_output
  *      vtable with zero mbedTLS knowledge: the raw backend delivers ciphertext via KL_COMP_READ, the
  *      driver feed_input's it, tls->read returns plaintext, drain_output ciphertext is posted via
- *      the send path. The raw KlHttpServer already uses completion_driver.c, so server TLS "just moves
+ *      the send path. The raw KlHttpServer already uses the completion driver, so server TLS "just moves
  *      bytes".
  *
  * Case: a raw HTTPS KlHttpClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
  * 200 + body BYTE-EXACT. Embedded self-signed EC cert (CN=127.0.0.1); the client skips CA
  * verification. Same test-only cert material as integrations/tls/mbedtls/tests/smoke_tls.c / lwip_loopback_test.c.
  *
- * Buffered HTTP/1.1 over TLS only (the 8b-5 subset, §6 caveat): small buffered body, no
+ * Buffered HTTP/1.1 over TLS only (§6 caveat): small buffered body, no
  * file/stream body, no ALPN-h2.
  *
  * Must be ASan+UBSan+LSan-clean.
@@ -51,7 +52,7 @@
 #include <string.h>
 #include <time.h>
 
-/* ── numeric-only KlResolver (no DNS, no UDP — same as LC-1) ────────────────────
+/* ── numeric-only KlResolver (no DNS, no UDP — same as the plaintext raw-client test) ─
  * Parses a numeric IPv4/IPv6 literal via kl_sockaddr_parse and completes SYNCHRONOUSLY inside
  * resolve() — the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP: the
  * built-in kl_dns_resolver is unusable on raw (it eagerly kl_datagram_socket_init's, which lwip-raw rejects). */

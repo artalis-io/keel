@@ -1,24 +1,24 @@
 /*
- * s7_selftest.c — S-7 acceptance: clean KlHttpServer teardown + EFI ExitBootServices lifetime.
+ * s7_selftest.c — server teardown acceptance: clean KlHttpServer teardown + EFI ExitBootServices lifetime.
  *
- * The server mirror of U-7. A freestanding KlHttpServer serves ONE plaintext GET / -> 200
+ * The server mirror of the client teardown self-test. A freestanding KlHttpServer serves ONE plaintext GET / -> 200
  * over EFI_TCP4, then tears itself down cleanly from the archive alone and releases the
  * EFI network stack before (a real app would) ExitBootServices:
  *
  *   kl_http_server_free(&s)                     → closes the listener + every accepted child
  *                                            (draining their EFI_TCP4 tokens), frees the
- *                                            pool/router — the S-7 freestanding carve.
+ *                                            pool/router — the freestanding teardown path.
  *   kl_uefi_socket_provider_live_count()   → MUST be 0 now (every socket closed) — the
  *                                            documented precondition for kl_uefi_shutdown.
  *   kl_uefi_shutdown()                     → releases the EFI_TCP4 socket provider, the
  *                                            completion event provider, and the platform
- *                                            timer/EBS event (U-7).
+ *                                            timer/EBS event.
  *
- * Like U-7 we do NOT call the real ExitBootServices() — there is no serial console after
+ * We do NOT call the real ExitBootServices() — there is no serial console after
  * it. kl_uefi_after_ebs() is shown as the fail-closed guard (0 pre-EBS; a real
  * ExitBootServices sets it, after which KEEL's EFI providers refuse boot-service I/O).
  *
- * Prints:  S-7: served -> tearing down -> live sockets = 0 -> providers released -> PASS
+ * Prints: a served → tearing-down → live-sockets=0 → providers-released → PASS status line
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -145,7 +145,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         if (g_served && ++drain > S7_DRAIN_TICKS) break;
     }
 
-    /* ── clean teardown (the S-7 acceptance) ──────────────────────────────────── */
+    /* ── clean teardown (the acceptance) ──────────────────────────────────────── */
     print_line("S-7: tearing down — kl_http_server_free (close listener + children) ...");
     kl_http_server_free(&s);
 

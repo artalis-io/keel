@@ -1,6 +1,6 @@
 /*
  * test_io_status.c — the portable I/O-result classification seam (freestanding
- * step B1). Proves:
+ * I/O-status contract). Proves:
  *   - kl_sock_io_status() dispatches to a provider's io_status op when set, and
  *     that a provider CAN classify every category WITHOUT ever touching errno
  *     (the freestanding contract: a stack with no hosted errno supplies io_status);

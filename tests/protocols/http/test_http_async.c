@@ -1,11 +1,10 @@
-/* test_http_async.c — HTTP KlAsyncOp/server-suspension slice of the former
- * tests/test_async.c.
+/* test_http_async.c — HTTP KlAsyncOp/server-suspension slice of the async tests.
  *
- * This is the HTTP half of the T-split of the async test family: the cases here
+ * This is the HTTP half of the async test family: the cases here
  * exercise connection suspension/resume, deadlines, cancellation, the
  * exactly-one-terminal guarantees, and an end-to-end async handler in a real
  * KlHttpServer. The generic KlWatcher cases (which touch no HTTP connection
- * state) stay in tests/test_async.c.
+ * state) live in tests/test_async.c.
  */
 
 #include "utest.h"
@@ -610,7 +609,7 @@ UTEST(async, e2e_handler_suspend_resume) {
     kl_http_server_free(&async_server);
 }
 
-/* ── Exactly-one-terminal guarantees (Phase 4) ─────────────────────────
+/* ── Exactly-one-terminal guarantees ─────────────────────────
  * These test the terminal *guard* in async.c, not the post-resume state drive:
  * the resume callback only counts and leaves conn->state as PROCESSING, so
  * kl_async_complete takes no SENDING/READING/CLOSED branch (no socket I/O, no

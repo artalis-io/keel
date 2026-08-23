@@ -1,14 +1,14 @@
 /*
- * raw_he_test.c — LC-2: Happy Eyeballs (RFC 8305) racing + timers over the lwIP-raw completion
+ * raw_he_test.c — Happy Eyeballs (RFC 8305) racing + timers over the lwIP-raw completion
  * backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
- * The proof for LC-2 (docs/phase10_lwip_raw_client_design.md §8 LC-2): the SAME single-loop model
- * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
+ * The proof (docs/archive/phases/phase10_lwip_raw_client_design.md): the SAME single-loop model
+ * as the plaintext-connect test (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
  * KlHttpClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
  * Happy-Eyeballs layer (src/http_client_async.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
  * natively. The winning pcb is adopted; every losing/connecting pcb is aborted (kl_comp_cancel ->
- * kl_lwr_tcp_abort) and its glue slot freed — the new memory-safety surface this test hardens.
+ * kl_lwr_tcp_abort) and its glue slot freed — the memory-safety surface this test hardens.
  *
  * Cases (all in-process over loopback, NO_SYS=1):
  *
@@ -31,10 +31,10 @@
  *      the delay. Same 200 + body; confirms the delay timer path + fast-fail interplay, and that
  *      the delay timer is cancelled on win (no stray timer fires post-completion).
  *
- * DNS is LC-3, TLS is LC-4: this test is plaintext numeric-IP ONLY. Each address is a numeric
+ * DNS and TLS are covered by sibling tests: this test is plaintext numeric-IP ONLY. Each address is a numeric
  * literal fed through a fixed in-test KlResolver (no DNS machinery, no UDP — lwip-raw rejects UDP).
  *
- * Must be ASan+UBSan+LSan-clean — aborting connecting/losing pcbs + freeing their slots is the LC-2
+ * Must be ASan+UBSan+LSan-clean — aborting connecting/losing pcbs + freeing their slots is the
  * memory-safety surface.
  *
  * SPDX-License-Identifier: MIT
@@ -58,8 +58,8 @@
 /* ── ports / addresses ────────────────────────────────────────────────────────
  * GOOD    — the raw server's listen port on 127.0.0.1 (accepts).
  * REFUSED — a 127.0.0.1 port with NO listener: on the loopif a SYN loops back and, finding no
- *           bound pcb, gets an RST -> a deterministic FAST connect refusal (proven by LC-1's
- *           closed-port case). Happy Eyeballs fast-fails through it to the GOOD address.
+ *           bound pcb, gets an RST -> a deterministic FAST connect refusal (proven by the
+ *           plaintext-connect test's closed-port case). Happy Eyeballs fast-fails through it to the GOOD address.
  * BLACKHOLE_IP — a NON-loopif IPv4 (10.x): the raw stack routes it out the default (loopback)
  *           netif; the looped-back packet is not addressed to the loopif and is dropped (no RST,
  *           no SYN-ACK). So a connect to it stays CONNECTING forever -> the client's overall
@@ -70,7 +70,7 @@
 static const char *GOOD_IP      = "127.0.0.1";
 static const char *BLACKHOLE_IP = "10.255.255.1";  /* non-loopif, unrouted -> SYN dropped (hang) */
 
-/* ── multi-address KlResolver (LC-2: no DNS, no UDP) ───────────────────────────
+/* ── multi-address KlResolver (no DNS, no UDP) ─────────────────────────────────
  * Keyed on the request host string, returns a FIXED 2-address list per case, completing
  * SYNCHRONOUSLY inside resolve() (the resolver sync-completion contract, CLAUDE.md). The
  * addresses are numeric literals parsed via kl_sockaddr_parse — no DNS, no timers, no lwIP. */

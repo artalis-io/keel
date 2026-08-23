@@ -1,5 +1,5 @@
 /*
- * test_dgram_core.c — Phase B step 7A-3: the fixed-slot KlDgramCore assembly.
+ * test_dgram_core.c — the fixed-slot KlDgramCore assembly.
  *
  * Drives the integrated core over a SCRIPTED neutral adapter (no real socket/provider): init +
  * failure unwind; fixed-slot send FIFO / count-based backpressure / single-flight / writable+drain
@@ -21,7 +21,7 @@ static KlDgramCore *g_core;   /* the core under test — the adapters reach it t
 static KlDgramLife *g_send_life;  /* the outstanding posted-send op's token (captured at submit) */
 
 /* submit: copy-before-accept of payload AND metadata into backend-owned storage, and — for an INFLIGHT
- * (async-posted) send — RETAIN a stable-token ref, uniform with the recv arm (B.6). */
+ * (async-posted) send — RETAIN a stable-token ref, uniform with the recv arm (the stable-token contract). */
 static KlDgramSubmitResult g_submit_result;
 static int        g_submit_calls;
 static unsigned char g_submitted[64];         /* backend's COPY of the last payload */
@@ -63,7 +63,7 @@ static KlDgramRetireResult test_retire(void *ctx, KlDgramOpKind kind, int *te) {
     return kind == KL_DGRAM_OP_SEND ? g_retire_send : g_retire_recv;
 }
 
-/* recv arm. Completion: posting a recv PINS the op by retaining a core life ref (the B.6 contract) —
+/* recv arm. Completion: posting a recv PINS the op by retaining a core life ref (the stable-token contract) —
  * readiness interest is NOT a posted op, so it retains nothing. Readiness also tracks armed interest. */
 static int         g_completion;        /* the core's mode (set by base_cfg) */
 static int         g_arm_calls, g_disarm_calls, g_pull_calls, g_interest;
@@ -177,7 +177,7 @@ static KlDgramCoreConfig base_cfg(KlAllocator *a, int completion, size_t slots, 
     c.alloc = a; c.fd = TEST_FD; c.completion = completion;
     c.send_slots = slots; c.send_slot_cap = cap; c.recv_cap = 64;
     c.caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
-    c.connected = 1;   /* D1: these unit tests use peerless sends — start already-connected */
+    c.connected = 1;   /* These unit tests use peerless sends — start already-connected */
     c.submit = test_submit; c.arm = test_arm; c.disarm = test_disarm; c.pull = test_pull;
     c.deliver = test_deliver; c.cancel_recv = test_cancel_recv;
     c.retire = test_retire; c.close_transport = test_close_transport; c.on_close = test_on_close;
@@ -327,7 +327,7 @@ UTEST(dgram_core, copy_before_accept_facade) {
 /* Provider contract, storage ASYMMETRY. A QUARANTINED send exercises BOTH halves of the split:
  *  - copy-before-accept (payload AND address/TOS metadata) makes the OBJECT-owned outbound pool safe to
  *    release immediately at core_free — no late access through the pool pointer (ASan on the freed pool);
- *  - yet the send op still holds a B.6 token ref (uniform contract), so abandoning it on quarantine
+ *  - yet the send op still holds a stable-token ref (uniform contract), so abandoning it on quarantine
  *    PINS the life-owned rx storage exactly as a quarantined recv would — on_final defers until the
  *    abandoned ref is reclaimed. */
 UTEST(dgram_core, quarantined_send_releases_pool_but_pins_rx) {
@@ -445,7 +445,7 @@ UTEST(dgram_core, close_detached_when_all_retired) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* ── strict pause / receive control (7A-4a — CORE CONFORMANCE) ────────────────────────────────
+/* ── strict pause / receive control (CORE CONFORMANCE) ────────────────────────────────────────
  * These prove KlDgramCore correctly drives the strict-pause interest-drop latch over neutral scripted
  * adapters (completion + readiness). Wiring the ACTUAL backend seams (poll/kqueue/epoll, pollcomp,
  * io_uring, IOCP, EFI, lwIP-raw) onto KlDgramCore and flipping the §10 matrix is 7B — this increment

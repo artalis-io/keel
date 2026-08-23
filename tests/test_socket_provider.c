@@ -1,6 +1,6 @@
 /*
- * test_socket_provider.c — the internal socket seam + provider vtable
- * (PAL Phase 2). Proves: POSIX default + fast path, provider dispatch, per-op
+ * test_socket_provider.c — the internal socket seam + provider vtable.
+ * Proves: POSIX default + fast path, provider dispatch, per-op
  * NULL fallback, deterministic fault injection (short write, EWOULDBLOCK,
  * ECONNRESET), a decorator over real socketpair I/O, and that  * (a KlDatagram) actually threads ctx->sockets to the seam.
  */
@@ -11,7 +11,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
+#include <keel/datagram_detail.h>   /* provider-threading tests use a stack KlDatagram */
 #include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
 #include <keel/http_server.h>
 #include <keel/http_client.h>
@@ -216,7 +216,7 @@ UTEST(sockprov, decorator_short_write_real_io) {
 
 /* End-to-end threading: a KlDatagram created on a ctx carrying the mock provider routes its setup calls
  * through the mock (proves ctx->sockets reaches the datagram construction, not just the seam in
- * isolation). D2: migrated from the legacy UDP object. */
+ * isolation). */
 UTEST(sockprov, datagram_threads_provider) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
     KlSocketProvider p = mock_provider(&m);
@@ -239,7 +239,7 @@ UTEST(sockprov, datagram_threads_provider) {
 
 /* ── Mock datagram data-plane (KlDatagramOps) ──────────────────────── */
 
-/* A programmable KlDatagramOps hung off a provider, proving that udp.c drives the
+/* A programmable KlDatagramOps hung off a provider, proving that the datagram machine drives the
  * datagram machine (configure cap negotiation, send → enqueue-on-EAGAIN) purely
  * through the provider vtable — no real UDP syscalls, deterministic. The ops read
  * a file-static state (the provider ctx carries the *stream* MockSock). */
@@ -283,7 +283,7 @@ static int mdg_mcast(void *ctx, KlSocketHandle fd, int family,
 static const KlDatagramOps MOCK_DGRAM_OPS = {
     .send = mdg_send, .recv = mdg_recv, .configure = mdg_configure,
     .set_tos = mdg_set_tos, .mcast_membership = mdg_mcast,
-    /* send_gso + batch ops NULL → udp.c uses the per-datagram path */
+    /* send_gso + batch ops NULL → the datagram machine uses the per-datagram path */
 };
 
 /* A provider whose stream ops are the built-in defaults (NULL ops → kl_sockdef_*
@@ -296,7 +296,7 @@ static KlSocketProvider mock_dgram_provider(void) {
     return p;
 }
 
-/* configure() reports the accepted RX-capture bitmask; udp.c stores exactly those
+/* configure() reports the accepted RX-capture bitmask; the datagram machine stores exactly those
  * flags (pktinfo/tos on, gro off here) — the capability handshake across the seam. */
 UTEST(dgramprov, configure_caps_negotiated) {
     memset(&g_mdg, 0, sizeof(g_mdg));
@@ -322,8 +322,8 @@ UTEST(dgramprov, configure_caps_negotiated) {
     kl_event_ctx_free(&ctx);
 }
 
-/* A successful provider send retires the datagram; an EAGAIN send makes udp.c
- * QUEUE it (backpressure) rather than drop it — both decisions live in udp.c and
+/* A successful provider send retires the datagram; an EAGAIN send makes the datagram machine
+ * QUEUE it (backpressure) rather than drop it — both decisions live in the datagram machine and
  * are driven entirely off the provider send()'s return. */
 UTEST(dgramprov, send_success_then_eagain_enqueues) {
     memset(&g_mdg, 0, sizeof(g_mdg));
@@ -372,7 +372,7 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── Lifecycle ops (Phase 2 ops-table extension) ───────────────────── */
+/* ── Lifecycle ops (ops-table extension) ───────────────────── */
 
 /* socket/bind/listen/connect/accept/close all via the seam over loopback. */
 UTEST(sockprov, lifecycle_posix_loopback) {
@@ -426,7 +426,7 @@ UTEST(sockprov, mock_connect_failure) {
     ASSERT_EQ(1, m.connect_calls);
 }
 
-/* ── Phase 3 semantics: capabilities, native-fd, destroy, error taxonomy ── */
+/* ── Semantics: capabilities, native-fd, destroy, error taxonomy ── */
 
 UTEST(sockprov, capability_query) {
     /* NULL provider == POSIX == native-fd. */
@@ -511,7 +511,7 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
     ASSERT_EQ((uint64_t)100, off);
 }
 
-/* ── Provider SELECTION via public config (Phase 4 step 3) ─────────────── */
+/* ── Provider SELECTION via public config ─────────────── */
 
 /* A native-fd decorator over the built-in defaults: counts socket()/accept()/
  * connect() and delegates everything else (NULL ops fall back to kl_sockdef_*).

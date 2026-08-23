@@ -1,8 +1,8 @@
 /*
- * raw_recv_test.c — Stage A tests for the hardened lwIP-raw completion backend.
+ * raw_recv_test.c — tests for the hardened lwIP-raw completion backend.
  *
- * Covers the four Stage-A fixes with byte-exact + sanitizer-checkable cases:
- *   #1 receive (retained pbuf queue, no ack-before-deliver, no truncation):
+ * Covers the four hardening fixes with byte-exact + sanitizer-checkable cases:
+ *   Receive (retained pbuf queue, no ack-before-deliver, no truncation):
  *        R1 header just below 8 KiB  -> 200
  *        R2 header ABOVE 8 KiB       -> server closes (overflow), no 200 (no hang)
  *        R3 body 32 KiB (> 8 KiB)    -> echoed back BYTE-EXACT
@@ -10,12 +10,12 @@
  *        R5 chunked body (Transfer-Encoding: chunked)      -> echoed BYTE-EXACT
  *      (a large tcp_write fragments into many MSS pbufs delivered over multiple recv
  *       callbacks -> exercises the pbuf chain + multi-callback-before-consume paths.)
- *   #2/#4 concurrency + completion saturation (per-conn slot cap, per-slot pending):
- *        C1 12 concurrent GET / clients (>> old 8-armed / 64-ring) -> all 200
+ *   Concurrency + completion saturation (per-conn slot cap, per-slot pending):
+ *        C1 12 concurrent GET / clients (>> the earlier 8-armed / 64-ring) -> all 200
  *        C2 exactly max_connections concurrent                     -> all 200
  *        C3 capacity+1 concurrent -> the extra is REJECTED (RST), none hang
  *        C4 slot reuse after a burst + keep-serving                -> all 200
- *   #5 context (de-globalized KlLwrCtx + single-active guard):
+ *   Context (de-globalized KlLwrCtx + single-active guard):
  *        X1 second SIMULTANEOUS ctx is rejected (assert the error)
  *        X2 init/free/init again + two SEQUENTIAL servers on different ports
  *      (X2 is implicit: every phase runs its own kl_http_server_init/run/free in sequence,

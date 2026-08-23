@@ -1,9 +1,9 @@
 /*
- * test_iocp_engine.c — PAL Phase 8, IOCP backend lifecycle (Windows/BACKEND=iocp).
+ * test_iocp_engine.c — IOCP backend lifecycle (Windows/BACKEND=iocp).
  *
  * Increment 2 scope: prove the IOCP event backend boots and advertises the
  * completion capability, the overlapped provider carries KL_SOCK_CAP_OVERLAPPED,
- * and the Phase 7/8 negotiation accepts that pairing on a REAL completion loop.
+ * and the capability negotiation accepts that pairing on a REAL completion loop.
  * The completion tick + connection driver (accept/read/write over WSARecv/WSASend)
  * land in the next increment; this is the runtime lifecycle gate.
  *

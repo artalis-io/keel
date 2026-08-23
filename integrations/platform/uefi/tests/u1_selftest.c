@@ -1,7 +1,7 @@
 /*
- * u1_selftest.c — U-1 acceptance self-test (UEFI EFI application).
+ * u1_selftest.c — platform+allocator acceptance self-test (UEFI EFI application).
  *
- * Proves the two U-1 shims (allocator_uefi.c + platform_uefi.c) work AND that
+ * Proves the two firmware shims (allocator_uefi.c + platform_uefi.c) work AND that
  * they satisfy the freestanding archive's undefined platform/allocator hooks,
  * by:
  *   1. linking against libkeel_freestanding_selfcontained.a and REFERENCING the
@@ -13,10 +13,10 @@
  *      and kl_plat_random (fill 16 bytes, report GO / fail-closed).
  *
  * Prints, over ConOut:
- *   U-1: allocator OK
- *   U-1: monotonic OK (dt=<ms>)
- *   U-1: rng <available|fail-closed>
- *   U-1: GO           (only if allocator + monotonic both passed)
+ *   allocator OK
+ *   monotonic OK (dt=<ms>)
+ *   rng <available|fail-closed>
+ *   GO           (only if allocator + monotonic both passed)
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE,
  * subsystem efi_application. No libc.
@@ -32,7 +32,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* The two freestanding platform hooks (src/platform.h contract), defined by
+/* The two freestanding platform hooks (src/platform.h contract), supplied by
  * platform_uefi.c. Declared here directly so the self-test needs no internal
  * header (src/platform.h drags in keel/handle.h + the socket surface). */
 uint64_t kl_monotonic_ms(void);
@@ -72,7 +72,7 @@ static UINTN u64_to_dec(UINT64 v, char *dst, UINTN cap) {
  * static DATA (not in a called function) forces the linker to pull the client
  * objects — and, transitively, llhttp — into the image so the -nostdlib link
  * closure exercises the platform/allocator hooks the shims supply. It is pure
- * data: no code path ever CALLS these functions (U-1 issues no request), so the
+ * data: no code path ever CALLS these functions (this test issues no request), so the
  * parser never runs. (An earlier version put this in a called helper; at -O0 the
  * linked llhttp state machine ended up on a live path and #PF'd on UEFI's
  * bounded stack — data-only anchoring keeps it strictly link-time.) */

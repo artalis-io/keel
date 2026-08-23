@@ -3,7 +3,7 @@
  *
  * This translation unit #includes the maximal subset of Keel's public headers
  * that a *freestanding* consumer (UEFI / bare-metal / no hosted libc — see
- * docs/phase10_uefi_feasibility_design.md §6, UEFI review finding F-1) must be
+ * docs/archive/phases/phase10_uefi_feasibility_design.md §6, the UEFI feasibility review) must be
  * able to compile with NO POSIX / hosted types leaking in. It is compiled with
  *
  *     cc -ffreestanding -DKEEL_FREESTANDING -Iinclude -Ivendor/llhttp -c ...
@@ -26,8 +26,8 @@
  * the internal sendfile seam (src/socket.h) — so neither header needs the hosted
  * <sys/types.h> off_t any more.
  *
- * The SERVER protocol surface joined the gate in the Phase 10 UEFI *server* step
- * (docs/phase10_uefi_server_design.md, S-1): router, compress, proxy_protocol,
+ * The SERVER protocol surface also joins the gate
+ * (docs/archive/phases/phase10_uefi_server_design.md): router, compress, proxy_protocol,
  * h2_server, connection, server. Their peer/PROXY addresses are already the
  * neutral KlSockAddr (kl_http_request_peer_sockaddr, kl_proxy_protocol_parse,
  * kl_cidr_match) and their file size/offset the uint64_t sendfile seam — so a
@@ -61,7 +61,7 @@
 #include <keel/http2_client.h>
 #include <keel/http_response.h>
 #include <keel/file_io.h>
-/* Server protocol surface (S-1): the whole inbound public API, freestanding-clean. */
+/* Server protocol surface: the whole inbound public API, freestanding-clean. */
 #include <keel/http_router.h>
 #include <keel/compress.h>
 #include <keel/proxy_protocol.h>

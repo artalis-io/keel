@@ -1,10 +1,10 @@
 /*
- * u3_selftest.c — U-3 acceptance self-test (UEFI EFI application).
+ * u3_selftest.c — plaintext-client acceptance self-test (UEFI EFI application).
  *
- * The culmination of Phase 10: a STOCK libkeel_freestanding.a async KlHttpClient runs an
- * HTTP/1.1 GET on bare UEFI firmware, driven by the EFI completion backend (U-3,
- * event_efi.c) over the EFI_TCP4 socket provider (U-2, socket_efi_tcp4.c), with the
- * U-1 platform/allocator shims and a numeric resolver (resolve_uefi.c). No epoll /
+ * A STOCK libkeel_freestanding.a async KlHttpClient runs an
+ * HTTP/1.1 GET on bare UEFI firmware, driven by the EFI completion backend
+ * (event_efi.c) over the EFI_TCP4 socket provider (socket_efi_tcp4.c), with the
+ * platform/allocator shims and a numeric resolver (resolve_uefi.c). No epoll /
  * kqueue / io_uring, no OS sockets, no errno, no libc — just the firmware's event
  * services pumping EFI_TCP4 completion tokens.
  *
@@ -18,9 +18,9 @@
  *   pump: kl_event_ctx_run + kl_timer_fire until done or bounded ticks
  *
  * Prints:
- *   U-3: status = <n>
- *   U-3: body: <bytes>
- *   U-3: GO            (done && status == 200)   |   U-3: NO-GO-YET
+ *   status = <n>
+ *   body: <bytes>
+ *   GO            (done && status == 200)   |   NO-GO-YET
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -118,7 +118,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         print_line("U-3: (warn) platform_init failed — clock stuck, continuing");
 
     /* Inject the EFI completion provider on the stock freestanding archive. The
-     * provider's native_provider() lazily builds the U-2 socket provider; if this
+     * provider's native_provider() lazily builds the EFI_TCP4 socket provider; if this
      * OVMF has no TCP4 stack that returns NULL and ctx init fails. */
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("U-3: event provider build failed"); goto park; }

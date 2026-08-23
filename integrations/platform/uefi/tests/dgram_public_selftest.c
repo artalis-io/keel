@@ -1,12 +1,12 @@
 /*
- * dgram_public_selftest.c — 7B-9 acceptance self-test (UEFI EFI application).
+ * dgram_public_selftest.c — public-facade close acceptance self-test (UEFI EFI application).
  *
  * The PUBLIC KlDatagram facade (keel/datagram.h) over EFI_UDP4 on bare OVMF firmware —
  * the end-to-end gate the host-mock cannot provide. Unlike dgram_dns_selftest.c (which
  * drives a KlDatagram via the stock dns_resolver), this exercises the public kl_datagram_*
  * surface directly: init → recv_start → send → (round-trip) → graceful close → DETACHED.
  *
- * It is the runtime proof for 7B-9 (the confirmed-detachment close): at close the armed
+ * It is the runtime proof for the confirmed-detachment close: at close the armed
  * recv is EMPTY (its terminal is surfaced from the post-backend_close STALE_RETIRED
  * observation) and the send has drained — so close must confirm DETACHED with ZERO live
  * or quarantined EFI_UDP4 children.
@@ -199,7 +199,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("7b9: recv_matched = "); print_int(c.recv_matched); print_line("");
 
     /* Graceful close: the send has drained and the re-armed recv is EMPTY → confirmed-detachment
-     * close cancels it and settles DETACHED (the 7B-9 path on real firmware). */
+     * close cancels it and settles DETACHED (the empty-armed-recv close path on real firmware). */
     if (kl_datagram_close_begin(&dg) != 0) print_line("7b9: (warn) close_begin failed");
     for (int tick = 0; tick < 200000 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; tick++) {
         kl_event_ctx_run(&ev, 16, 5);

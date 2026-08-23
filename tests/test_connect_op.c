@@ -1,5 +1,5 @@
 /*
- * test_connect_op.c — Phase-B step 4: outbound-connect terminal-once state machine
+ * test_connect_op.c — outbound-connect terminal-once state machine
  * (src/connect_op.h), exercised in isolation with mock resolve/connect/cancel hooks (no live
  * sockets, no timers).
  *

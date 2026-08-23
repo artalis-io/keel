@@ -8,8 +8,8 @@
  * (http/1.1, no ALPN, an unsupported value) → the HTTP/1.1 adapter
  * (KL_HTTP_CONN_READING). This is the regression guard for the ALPN selection.
  *
- * Part B (single REST layer): drive an HTTP/2 request through the real h2 server
- * path (h2.c) via a capturing session, and assert it lands on the SAME router,
+ * Part B (single REST layer): drive an HTTP/2 request through the real HTTP/2 server
+ * path (src/protocols/http2/http2_server.c) via a capturing session, and assert it lands on the SAME router,
  * middleware, and handler an HTTP/1.1 request would — and that the HTTP/2
  * :authority pseudo-header converges onto the same "host" header HTTP/1.1 uses.
  */

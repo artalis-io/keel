@@ -1,5 +1,5 @@
 /*
- * test_dgram_send.c — Phase B step 2: atomic send machinery over KlDgramSlots.
+ * test_dgram_send.c — atomic send machinery over KlDgramSlots.
  *
  * Covers: exact status mapping, refusal-takes-no-ownership, copy-before-return, FIFO order over the
  * LIFO free-slot allocator, single-flight enforcement, inline completion (no phantom in-flight),
@@ -433,7 +433,7 @@ UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
     kl_dgram_slots_free(&slots);
 }
 
-/* ══ M1 — BOTH byte-gate send-queue policy (docs/datagram_m1_queue_policy_design.md §10) ══════════
+/* ══ BOTH byte-gate send-queue policy (docs/archive/designs/datagram_m1_queue_policy_design.md §10) ══════════
  * SLOT (byte_budget 0) is exercised by every test above (§10.1 regression). These cover BOTH. */
 
 /* §10.2 — BOTH byte-gate refusal (case b): the byte budget refuses while a slot is still free, and
@@ -678,7 +678,7 @@ UTEST(dgram_send, both_discard_zero_length_inflight_head) {
     kl_dgram_slots_free(&slots);
 }
 
-/* ══ M5.2a — readiness batch-drain (kl_dgram_send_flush_batch) ═══════════════════════════════════ */
+/* ══ Readiness batch-drain (kl_dgram_send_flush_batch) ══════════════════════════════════════════ */
 
 /* submit_batch mock: transmits the leading run of non-'B' descriptors; a 'B' at the head → ERROR. */
 static KlDgramBatchResult batch_submit_mark(void *ctx, const KlDgramTxDesc *descs, int n, int *sent) {
@@ -835,7 +835,7 @@ UTEST(dgram_send, flush_batch_partial_prefix) {
     kl_dgram_slots_free(&slots);
 }
 
-/* ══ M5.2b — GSO queued group (machine level) ═══════════════════════════════════════════════════ */
+/* ══ GSO queued group (machine level) ═══════════════════════════════════════════════════════════ */
 
 /* A whole-group GSO submit hook: DONE unless the payload's first byte marks it — 'W' → WOULDBLOCK,
  * 'U' → UNSUPPORTED, 'E' → ERROR. Records the group submit for ordering assertions. */
@@ -1000,7 +1000,7 @@ UTEST(dgram_send, gso_connected_capability) {
     KlDgramSlots s2; ASSERT_EQ(kl_dgram_slots_init(&s2, &a, 8, 64), 0);
     KlDgramSend conn;
     ASSERT_EQ(kl_dgram_send_init(&conn, &s2, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
-    /* D1: the granted cap alone is NOT enough — a peerless GSO before connect is refused. */
+    /* The granted cap alone is NOT enough — a peerless GSO before connect is refused. */
     ASSERT_EQ(kl_dgram_send_enqueue_gso(&conn, g4, 4, 2, 2, NULL, -1, 0, NULL), KL_DATAGRAM_UNSUPPORTED);
     ASSERT_EQ((int)kl_dgram_send_queued(&conn), 0);
     /* after a successful connect (state set) the same peerless GSO is admitted. */

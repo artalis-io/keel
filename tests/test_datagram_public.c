@@ -1,12 +1,12 @@
 /*
- * test_datagram_public.c — the PUBLIC KlDatagram surface over a scripted completion mock (7B-3).
+ * test_datagram_public.c — the PUBLIC KlDatagram surface over a scripted completion mock.
  *
  * No live backend: a hand-built KlEventCtx whose loop advertises KL_EVENT_CAP_COMPLETION and whose
  * completion vtable is a scripted double records the posted send/recv ops (by their KlDgramLife token)
  * and lets the test drive completions exactly as the real driver would — life->dispatch(target, ev).
  * This proves the public surface + ABI + ownership (init/reuse/free-refusal, fixed-slot send geometry,
  * copy-before-accept, recv delivery, strict pause/resume, confirmed-detachment close + terminal result)
- * with ZERO live-backend risk. §10 live rows are wired in 7B-4+.
+ * with ZERO live-backend risk. Live-backend rows are exercised by the live suites.
  */
 
 /* Match the POSIX provider's feature-test preamble (socket_dgram_posix.c) BEFORE any system header, so
@@ -59,7 +59,7 @@ typedef struct {
     /* retire scripting */
     KlDgramRetireResult retire_result;
     int                 cancels;
-    /* 7B-7 fd↔loop registration (kl_event_add/del) + lifecycle ordering (monotonic seq) */
+    /* fd↔loop registration (kl_event_add/del) + lifecycle ordering (monotonic seq) */
     int                 add_calls, del_calls, add_fail;
     int                 seq, add_seq, first_post_seq, del_seq, close_seq;
 } MockComp;
@@ -95,7 +95,7 @@ static const KlCompletionOps MC_COMP = {
     .cancel_dgram = mc_cancel, .retire_dgram = mc_retire,
 };
 static unsigned mc_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_CAP_COMPLETION; }
-/* 7B-7: the facade registers/deregisters the fd with the loop via the generic kl_event_add/del — the
+/* The facade registers/deregisters the fd with the loop via the generic kl_event_add/del — the
  * mock records them + can force a registration failure. `add` records BEFORE any post; `del` before close. */
 static int mc_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop; (void)fd; (void)mask; (void)udata;
@@ -131,7 +131,7 @@ static void drive_recv(const void *data, size_t len, const KlSockAddr *peer, int
     if (peer) ev.peer = *peer;
     kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
 }
-/* Drive a recv completion carrying a received-TOS byte (M6.0a) — like a completion backend that parsed
+/* Drive a recv completion carrying a received-TOS byte — like a completion backend that parsed
  * the RX TOS cmsg into ev->tos. The facade's dispatch only trusts it when the socket's accepted_rx_caps
  * carry RX_TOS. */
 static void drive_recv_tos(const void *data, size_t len, const KlSockAddr *peer, int tos) {
@@ -322,7 +322,7 @@ UTEST(datagram_public, pause_holds_one_then_resume_delivers) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
-/* 7B-7: a completion transport registers its fd with the loop (kl_event_add) before posting. A
+/* A completion transport registers its fd with the loop (kl_event_add) before posting. A
  * registration FAILURE must fail init cleanly — nothing adopted, posted, or closed; the caller keeps
  * the fd. (The generic fd↔loop lifecycle; inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP.) */
 UTEST(datagram_public, registration_failure_keeps_fd) {
@@ -340,7 +340,7 @@ UTEST(datagram_public, registration_failure_keeps_fd) {
     (void)close((int)fd);
 }
 
-/* 7B-7 lifecycle ordering: register BEFORE the first post; on close, deregister BEFORE the socket close
+/* Lifecycle ordering: register BEFORE the first post; on close, deregister BEFORE the socket close
  * (retire → kl_event_del → close, exactly once). Uses the mock socket provider to observe the close. */
 UTEST(datagram_public, registration_ordering) {
     mk_ctx(); mc_reset();
@@ -377,7 +377,7 @@ static KlAllocator failing_alloc(int fail_at) {
     KlAllocator a = { fa_malloc, fa_realloc, fa_free, NULL }; return a;
 }
 
-/* 7B-7 (review): an allocation failure DURING core preparation must leave the fd UN-registered — proving
+/* An allocation failure DURING core preparation must leave the fd UN-registered — proving
  * registration is gated behind successful prep (the pre-adoption hook), not rolled back by kl_event_del
  * (which on IOCP is a no-op and cannot detach an ordinary socket from its port). The failing allocator
  * fails the first core-internal allocation (#2: the facade's KlDgramCore struct is #1), which is before
@@ -397,8 +397,8 @@ UTEST(datagram_public, alloc_failure_during_prep_leaves_fd_unregistered) {
 }
 
 /* Terminal QUARANTINE classification (the fail-closed leak of the life-owned inbound storage) is proven
- * at the core/backend layer where the arena teardown keeps it LSan-clean — test_dgram_core (7A-3) and
- * the EFI host-mock (7B-2c retire_dgram override). The public test stays on the clean DETACHED paths so
+ * at the core/backend layer where the arena teardown keeps it LSan-clean — test_dgram_core and
+ * the EFI host-mock (retire_dgram override). The public test stays on the clean DETACHED paths so
  * it is leak-free under container ASan/UBSan/LSan. */
 
 /* ── Option A: synchronous owner-destruction teardown (kl_datagram_teardown) ──────────────────────
@@ -409,7 +409,7 @@ UTEST(datagram_public, alloc_failure_during_prep_leaves_fd_unregistered) {
  * teardown; it must dispatch against the now-dead token (NULL owner), drop, and release the op's ref so
  * the life-owned rx storage is reclaimed — all UAF/leak-clean (ASan/UBSan; LSan on Linux). Silent: no
  * on_close callback fires and no public terminal is reported (§4a). See
- * docs/datagram_sync_teardown_design.md. */
+ * docs/archive/designs/datagram_sync_teardown_design.md. */
 
 UTEST(datagram_public, teardown_recv_only_then_late_terminal) {
     mk_ctx(); mc_reset();
@@ -609,7 +609,7 @@ UTEST(datagram_public, teardown_then_free_idempotent) {
     drive_recv_cancelled();
 }
 
-/* ══ M1 — BOTH byte-gate policy through the PUBLIC facade (§10.10) ═════════════════════════════════
+/* ══ BOTH byte-gate policy through the PUBLIC facade (§10.10) ══════════════════════════════════════
  * kl_datagram_init_ex(send_byte_budget > 0) selects BOTH end-to-end over the scripted completion mock:
  * the byte gate binds before the slot count, an oversize datagram is a permanent TOO_LARGE (completion
  * mode refuses upfront), and a retirement reopens admission. */
@@ -666,7 +666,7 @@ UTEST(datagram_public, m1_init_is_slot_policy) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
-/* ══ M2 — capability derivation + multicast (docs/datagram_m2_capability_design.md §9) ════════════
+/* ══ Capability derivation + multicast (docs/archive/designs/datagram_m2_capability_design.md §9) ════════════
  * A scriptable mock socket provider whose dgram vtable reports caps + records mcast_membership, so the
  * FACADE gate/routing can be tested independently of any real provider. */
 static unsigned g_mock_caps;                     /* what mock caps() returns */
@@ -681,7 +681,7 @@ static int mock_dg_mcast(void *ctx, KlSocketHandle fd, int family, const char *g
     snprintf(g_mcast_group, sizeof(g_mcast_group), "%s", group ? group : "");
     return g_mcast_ret;
 }
-/* M6.0a set_tos recorder (socket-default TOS routing). g_settos_present toggles whether the mock exposes
+/* set_tos recorder (socket-default TOS routing). g_settos_present toggles whether the mock exposes
  * a set_tos op (to exercise the UNSUPPORTED path). The mock provider's close op also serves get_local_addr
  * so kl_datagram_set_tos can derive the family (returns an AF_INET addr). */
 static int g_settos_calls, g_settos_family, g_settos_val, g_settos_ret;
@@ -761,7 +761,7 @@ UTEST(datagram_public, m2_null_caps_no_optional) {
     g_mock_caps_null = 0;
 }
 
-/* §9.4 (blocker P1) — a family-limited report makes an unavailable requested cap fail INIT. */
+/* §9.4 — a family-limited report makes an unavailable requested cap fail INIT. */
 UTEST(datagram_public, m2_family_limited_rejects_at_init) {
     mk_ctx(); mc_reset(); g_mock_caps_null = 0;
     /* model an IPv6 fd: everything BUT the IPv4-only BROADCAST */
@@ -868,7 +868,7 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
 #if defined(IPV6_JOIN_GROUP) || defined(IPV6_ADD_MEMBERSHIP)
     exp6 |= KL_DGRAM_CAP_MULTICAST;
 #endif
-    /* M5 high-throughput SUPPORT is family-independent and, in the POSIX provider, gated on __linux__
+    /* High-throughput SUPPORT is family-independent and, in the POSIX provider, gated on __linux__
      * (recvmmsg/sendmmsg + the always-defined-on-Linux UDP_SEGMENT/UDP_GRO fallbacks) — so all four are
      * present on Linux and absent elsewhere. Mirror the provider (socket_dgram_posix.c pdg_caps). */
 #if defined(__linux__)
@@ -900,7 +900,7 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
     }
 }
 
-/* M4 — kl_datagram_fd/local_port require a LIVE core: a zeroed handle, a failed init, and a freed
+/* kl_datagram_fd/local_port require a LIVE core: a zeroed handle, a failed init, and a freed
  * datagram all report the invalid fd / port 0 (never a zeroed or stale-closed descriptor). */
 UTEST(datagram_public, m4_fd_accessors_require_live_core) {
     mk_ctx(); mc_reset();
@@ -952,7 +952,7 @@ UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
-/* ══ M6.0a — additive KlDatagram prerequisites (optional_caps + send_queued_bytes) ════════════════ */
+/* ══ Additive KlDatagram prerequisites (optional_caps + send_queued_bytes) ════════════════════════ */
 
 /* optional_caps are granted opportunistically = intersected with provider support. A provider that has
  * only a SUBSET of the requested optional caps grants exactly that subset (never fails init). This is what
@@ -971,7 +971,7 @@ UTEST(datagram_public, m6a_optional_caps_granted_intersection) {
 
 /* A REDUCED provider (NULL caps op ⇒ provider_caps == 0) still initializes when the wrapper requests caps
  * ONLY optionally — the granted set is empty, but ordinary unconnected send_to keeps working. This is the
- * M6.1-prerequisite behavior: opportunistic optional caps never regress a reduced/freestanding provider. */
+ * expected behavior: opportunistic optional caps never regress a reduced/freestanding provider. */
 UTEST(datagram_public, m6a_optional_caps_reduced_provider_inits) {
     mk_ctx(); mc_reset(); g_mock_caps_null = 1;   /* MOCK_SP_NOCAPS: caps == NULL → provider_caps 0 */
     KlDatagram dg; memset(&dg, 0, sizeof(dg));
@@ -1022,8 +1022,8 @@ UTEST(datagram_public, m6a_set_tos_routes_to_provider) {
     m2_close(&dg);
 }
 
-/* P1 (capability truthfulness): a provider that EXPOSES set_tos but does NOT advertise KL_DGRAM_CAP_TOS
- * for this fd must fail KL_ERR_UNSUPPORTED WITHOUT invoking the provider (M2 exact-fd contract). */
+/* Capability truthfulness: a provider that EXPOSES set_tos but does NOT advertise KL_DGRAM_CAP_TOS
+ * for this fd must fail KL_ERR_UNSUPPORTED WITHOUT invoking the provider (exact-fd contract). */
 UTEST(datagram_public, m6a_set_tos_cap_absent_not_invoked) {
     mk_ctx(); mc_reset(); g_mock_caps_null = 0;
     g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* NO TOS cap, though MOCK_SP_CAPS has a set_tos op */
@@ -1037,7 +1037,7 @@ UTEST(datagram_public, m6a_set_tos_cap_absent_not_invoked) {
     m2_close(&dg);
 }
 
-/* P1 (never guess a family): an unspecified/non-IP local address must fail KL_ERR_INVALID_ARG WITHOUT
+/* Never guess a family: an unspecified/non-IP local address must fail KL_ERR_INVALID_ARG WITHOUT
  * calling set_tos (else the wrong socket-option level could be applied). */
 UTEST(datagram_public, m6a_set_tos_unknown_family_refused) {
     mk_ctx(); mc_reset(); g_mock_caps_null = 0;
@@ -1131,8 +1131,8 @@ UTEST(datagram_public, m6a_recv_tos_gated_on_accepted_caps) {
     ASSERT_EQ(0, kl_datagram_free(&dg2));
 }
 
-/* D2: KL_TOS() composition + the DSCP/ECN constants (migrated from test_udp_tos.c:kl_tos_macro; the
- * constants are datagram-neutral and now live in <keel/datagram.h>). Deterministic, no I/O. */
+/* KL_TOS() composition + the DSCP/ECN constants (datagram-neutral, defined in
+ * <keel/datagram.h>). Deterministic, no I/O. */
 UTEST(datagram_public, kl_tos_macro_and_constants) {
     /* KL_TOS packs DSCP into the high 6 bits and ECN into the low 2. */
     ASSERT_EQ(187, KL_TOS(KL_DSCP_EF, KL_ECN_CE));         /* (46<<2)|3 */

@@ -1,19 +1,19 @@
 /*
- * raw_datagram_test.c — the PUBLIC KlDatagram over the lwIP-raw COMPLETION backend (7B-8).
+ * raw_datagram_test.c — the PUBLIC KlDatagram over the lwIP-raw COMPLETION backend.
  *
- * The live lwIP-raw binding of the public facade, the completion counterpart of pollcomp/io_uring
- * (7B-4/7B-5). Brings up NO_SYS=1 lwIP + loopback via kl_event_provider_lwip_raw(), preps datagram fds
+ * The live lwIP-raw binding of the public facade, the completion counterpart of pollcomp/io_uring.
+ * Brings up NO_SYS=1 lwIP + loopback via kl_event_provider_lwip_raw(), preps datagram fds
  * through the raw socket provider (the KlDatagram contract), and exercises:
  *   T1  send→recv roundtrip + a clean graceful close → DETACHED.
  *   T2  empty armed cancellation: recv armed but NO datagram → close still retires the armed recv (the
- *         7B-8 cancel→terminal path) → DETACHED.
+ *         cancel→terminal path) → DETACHED.
  *   T3  glue-level cancel semantics (kl_lwr_udp_cancel_recv/drain/recv_pending directly): PENDING while a
  *         terminal is queued → RETIRED after it drains; repeated cancellation is idempotent; the drain
  *         emits exactly ONE terminal (no duplicate); ref accounting is LSan-clean.
  *
- * The 7B-8 glue fix (a cancelled armed recv → a context-owned pending terminal the drain surfaces as an
- * ok=0 completion) is what lets the KlDatagram close coordinator retire recv_inflight; the removed UDP object never used
- * cancel_dgram, so its path (raw_udp_test T1-T7) is unchanged.
+ * The cancel→terminal glue fix (a cancelled armed recv → a context-owned pending terminal the drain
+ * surfaces as an ok=0 completion) is what lets the KlDatagram close coordinator retire recv_inflight; the
+ * legacy UDP object never calls cancel_dgram, so its path (raw_udp_test T1-T7) is unchanged.
  */
 
 #include <keel/datagram.h>
@@ -111,7 +111,7 @@ static int t1_roundtrip(KlEventCtx *ctx, const KlSocketProvider *sp) {
 }
 
 /* T2 — empty armed cancellation: a recv is armed but no datagram ever arrives; graceful close must still
- * retire the armed recv (via the 7B-8 cancel→terminal path) and reach DETACHED. */
+ * retire the armed recv (via the cancel→terminal path) and reach DETACHED. */
 static int t2_empty_armed_cancel(KlEventCtx *ctx, const KlSocketProvider *sp) {
     g_got = 0;
     uint16_t port = 0;

@@ -1,11 +1,11 @@
 /*
- * test_datagram_batch.c — datagram M5.1 scaffolding (the batch object lifecycle, capability bits +
- * accepted_rx_caps masking, completion-creation rules E2, overflow-safe allocation + allocation-failure
- * unwind, KL_IO_UNSUPPORTED mapping) + M5.2a send batch (kl_datagram_send_batch: all-delivered,
+ * test_datagram_batch.c — datagram batch scaffolding (the batch object lifecycle, capability bits +
+ * accepted_rx_caps masking, completion-creation rules, overflow-safe allocation + allocation-failure
+ * unwind, KL_IO_UNSUPPORTED mapping) + send batch (kl_datagram_send_batch: all-delivered,
  * partial accept, TOO_LARGE + owner/direction validation, the recoverable per-datagram drop, and
- * backpressure draining via the writable edge) + M5.2b GSO (kl_datagram_send_gso: the queued FIFO
+ * backpressure draining via the writable edge) + GSO (kl_datagram_send_gso: the queued FIFO
  * group — delivery via one send_gso or the per-segment fallback, validation/bounds, gso_busy lifetime
- * + one-group-per-batch, and close/discard clearing gso_busy) + M5.3 RECV batching (attach + the
+ * + one-group-per-batch, and close/discard clearing gso_busy) + RECV batching (attach + the
  * borrowed-view seam: batch delivery, GRO split-by-default vs whole-buffer on_recv_segments, held-cursor
  * pause/resume, stop-from-delivery, attach/ownership validation, destructive-tail reclamation).
  * Whitebox (internal batch + core layout).
@@ -22,7 +22,7 @@
 #include "../src/event_caps.h"   /* kl_event_caps — the gating-provider drop test is readiness-only */
 #include "../src/datagram_core.h"/* KlDgramCore — whitebox accepted_rx_caps */
 #include "../src/datagram_batch.h"/* struct KlDatagramBatch — whitebox blocks/owner/dir */
-#include "../src/datagram_open.h"/* kl_datagram_teardown — the P1-1 reentrancy test */
+#include "../src/datagram_open.h"/* kl_datagram_teardown — the teardown-reentrancy test */
 
 #include <errno.h>
 #include <string.h>
@@ -58,7 +58,7 @@ static KlAllocator ca_init(CountAlloc *c) {
     return a;
 }
 
-/* ── M5.3 mock RECV provider: wraps POSIX, reports RX_BATCH, and its recv_batch does a REAL recv (so
+/* ── Mock RECV provider: wraps POSIX, reports RX_BATCH, and its recv_batch does a REAL recv (so
  *    the fd's readability is honest) then FABRICATES gro_seg — deterministic GRO on any platform. ─── */
 static int g_mock_gro;                 /* fabricated gro_seg per recv_batch (0 = plain) */
 static unsigned char g_mock_rxbuf[8][2048];
@@ -128,7 +128,7 @@ static const KlSocketProvider *mock_recv_provider(int (*rb)(void *, KlSocketHand
     return p;
 }
 
-/* M6.0a P1: a mock that FABRICATES a received TOS (a "custom provider that surfaces TOS") so the facade's
+/* A mock that FABRICATES a received TOS (a "custom provider that surfaces TOS") so the facade's
  * accepted_rx_caps GATE can be tested on the readiness single-recv AND batch paths deterministically. */
 static int g_mock_tos = -1;
 /* single-recv: real recv (honest readability), then stamp the fabricated TOS onto meta. */
@@ -162,7 +162,7 @@ static void  mock_rx_free(KlAllocator *a, void *b) { kl_free(a, b, sizeof(int));
 static void *mock_tx_new(KlAllocator *a, int n) { (void)n; return kl_malloc(a, sizeof(int)); }
 static void  mock_tx_free(KlAllocator *a, void *b) { kl_free(a, b, sizeof(int)); }
 static int   mock_recv_batch(void *c, KlSocketHandle f, void *rb, KlDgramRxSlot *s, int m) {
-    (void)c; (void)f; (void)rb; (void)s; (void)m; return 0;   /* stub — never called in M5.1 */
+    (void)c; (void)f; (void)rb; (void)s; (void)m; return 0;   /* stub — never called in the scaffolding tests */
 }
 static int   mock_send_batch(void *c, KlSocketHandle f, void *tb, const KlDgramTxDesc *d, int n) {
     (void)c; (void)f; (void)tb; (void)d; (void)n; return 0;   /* stub */
@@ -190,7 +190,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp) {
     return fd;
 }
 
-/* ── The KL_IO_UNSUPPORTED mapping (M5.1) ──────────────────────────────────────────────────────── */
+/* ── The KL_IO_UNSUPPORTED mapping ─────────────────────────────────────────────────────────────── */
 UTEST(dgram_batch, io_status_unsupported_mapping) {
     errno = EOPNOTSUPP;
     ASSERT_EQ(KL_IO_UNSUPPORTED, kl_sockdef_io_status());
@@ -219,7 +219,7 @@ UTEST(dgram_batch, accepted_rx_caps_masked_and_stored) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── create validation + the cap↔provider-block coupling + completion rules (E2) ────────────────── */
+/* ── create validation + the cap↔provider-block coupling + completion rules ────────────────── */
 UTEST(dgram_batch, create_validation_and_rules) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
@@ -268,7 +268,7 @@ UTEST(dgram_batch, create_validation_and_rules) {
 
     ASSERT_EQ(0, kl_datagram_batch_free(NULL));   /* NULL is a no-op */
 
-    /* COMPLETION branch (E2): RECV/BOTH refused, SEND allowed. */
+    /* COMPLETION branch: RECV/BOTH refused, SEND allowed. */
     dg.completion = 1;
     ASSERT_TRUE(kl_datagram_batch_create(&dg, KL_DGRAM_BATCH_RECV, 4, 1500) == NULL);
     ASSERT_TRUE(kl_datagram_batch_create(&dg, KL_DGRAM_BATCH_BOTH, 4, 1500) == NULL);
@@ -299,7 +299,7 @@ UTEST(dgram_batch, create_alloc_failure_unwind) {
     /* For each of the create's allocations in turn, inject a failure and assert the outstanding-alloc
      * count returns to baseline (every prior allocation unwound). Once fail_at exceeds create's alloc
      * count, create succeeds and is freed — also back to baseline. */
-    /* SEND is valid on both readiness and completion datagrams (E2), so this exercises create's
+    /* SEND is valid on both readiness and completion datagrams, so this exercises create's
      * allocations regardless of the build's backend. */
     for (int k = 1; k <= 8; k++) {
         int base_live = c.live;
@@ -411,7 +411,7 @@ UTEST(dgram_batch, create_alloc_failure_recv_both_mock) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── a non-IP datagram fd reports NONE of the M5 support bits (exact-fd family rule) ────────────── */
+/* ── a non-IP datagram fd reports NONE of the high-throughput support bits (exact-fd family rule) ── */
 UTEST(dgram_batch, non_ip_fd_reports_no_m5_caps) {
 #if defined(AF_UNIX)
     int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -445,7 +445,7 @@ UTEST(dgram_batch, gso_busy_refuses_free) {
     int held = c.live;
     ASSERT_TRUE(held > base);                       /* the batch is allocated */
 
-    b->gso_busy = 1;                                /* whitebox: a GSO group is in flight (M5.2 sets this) */
+    b->gso_busy = 1;                                /* whitebox: a GSO group is in flight (the send path sets this) */
     ASSERT_EQ(-1, kl_datagram_batch_free(b));       /* refused — the group still reads the buffer */
     ASSERT_EQ(held, c.live);                         /* nothing freed */
 
@@ -458,7 +458,7 @@ UTEST(dgram_batch, gso_busy_refuses_free) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── M5.2a send batch: over a real loopback tx datagram + a raw rx peer ─────────────────────────── */
+/* ── Send batch: over a real loopback tx datagram + a raw rx peer ───────────────────────────────── */
 
 /* A bound raw rx UDP socket on 127.0.0.1; returns its port (0 = fail). */
 static int mk_rx(int *fd_out) {
@@ -606,7 +606,7 @@ UTEST(dgram_batch, send_batch_too_large_and_validation) {
     ASSERT_EQ((int)KL_DATAGRAM_TOO_LARGE, (int)stop);   /* descs[1] is permanently too large */
 
     /* validation (backend-independent whitebox flips — a RECV batch cannot exist on a completion
-     * datagram, E2): a non-SEND direction and a foreign owner are each refused with -1. */
+     * datagram): a non-SEND direction and a foreign owner are each refused with -1. */
     KlDgramBatchDir save_dir = bs->dir;
     bs->dir = KL_DGRAM_BATCH_RECV;
     stop = KL_DATAGRAM_ACCEPTED;
@@ -651,7 +651,7 @@ static const KlSocketProvider *gating_provider(void) {
     return &g_gate_sp;
 }
 
-/* Recoverable per-datagram error (facade), bad in the MIDDLE — the hard part (P1-2): after the good
+/* Recoverable per-datagram error (facade), bad in the MIDDLE — the hard part: after the good
  * prefix drains, the retained bad-middle datagram reaches the head on a later writable edge and is
  * dropped there via the ordinary single-flight path (its recoverable slot provenance), NOT poisoned
  * with the sticky error. It surfaces via last_error; the good datagrams still deliver; the call does
@@ -745,7 +745,7 @@ UTEST(dgram_batch, send_batch_backpressure_drains_on_writable) {
     kl_event_ctx_free(&ctx);
 }
 
-/* P1-1: a teardown from a drain callback DURING kl_datagram_send_batch must not UAF — the facade
+/* A teardown from a drain callback DURING kl_datagram_send_batch must not UAF — the facade
  * brackets the whole operation (dispatch_begin/end), so the drain's activity release cannot free
  * dg/core until dispatch_end, after which only the local `accepted` is touched. Readiness-only (the
  * batch drain — and thus on_drain — is synchronous within the call). */
@@ -785,7 +785,7 @@ UTEST(dgram_batch, send_batch_teardown_from_drain_no_uaf) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── M5.2b GSO ──────────────────────────────────────────────────────────────────────────────────── */
+/* ── GSO ──────────────────────────────────────────────────────────────────────────────────────── */
 
 /* send_gso delivers the whole payload: one send_gso syscall where supported, else the same segments
  * per-send. Robust across both (assert total bytes; the segment count where the platform falls back). */
@@ -1013,7 +1013,7 @@ UTEST(dgram_batch, gso_completion_close_with_inflight_segment) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── M5.3 RECV batching / GRO ────────────────────────────────────────────────────────────────── */
+/* ── RECV batching / GRO ─────────────────────────────────────────────────────────────────────── */
 
 /* recv delivery recorder */
 static int   g_rx_calls;
@@ -1041,7 +1041,7 @@ static void rx_on_segments(void *ud, const void *data, size_t len, size_t seg,
     (void)ud; (void)data; (void)peer; (void)local; (void)flags;
     g_seg_calls++; g_seg_size = seg; g_seg_len = len;
 }
-/* M6.0a P1: reads kl_datagram_recv_tos DURING on_recv (its only valid window). */
+/* Reads kl_datagram_recv_tos DURING on_recv (its only valid window). */
 static int g_rx_tos;
 static void rx_on_recv_tos(void *ud, const void *data, size_t len, const KlSockAddr *peer,
                            const KlSockAddr *local, unsigned flags) {
@@ -1064,7 +1064,7 @@ static void blast(int n, uint16_t port, const char *const *msgs) {
 UTEST(dgram_batch, recv_batch_delivers) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
-    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }  /* readiness (D-M5-3) */
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }  /* readiness only */
     const KlSocketProvider *sp = ctx.sockets;
 
     KlSocketHandle rxfd = prep_fd(sp);
@@ -1133,7 +1133,7 @@ UTEST(dgram_batch, recv_gro_split_default) {
  * coalesces), even though the provider advertises CAP_GRO. The gate stays inactive → the fabricated
  * gro_seg is IGNORED and the buffer is delivered WHOLE, and recv_start SUCCEEDS (no corruption is
  * possible without capture). The DANGEROUS half — RX_GRO accepted but no active splitter — is now
- * fail-loud at recv_start (D1 P1-A), covered by recv_start_refuses_gro_inactive_batch. */
+ * fail-loud at recv_start, covered by recv_start_refuses_gro_inactive_batch. */
 UTEST(dgram_batch, recv_gro_gate_accepted_half_missing_safe) {
     {
         KlAllocator a = kl_allocator_default();
@@ -1356,7 +1356,7 @@ UTEST(dgram_batch, recv_teardown_from_delivery) {
     kl_event_ctx_free(&ctx);
 }
 
-/* recv_start with a NULL callback still latches "started" — a later attach is refused (P1-3). */
+/* recv_start with a NULL callback still latches "started" — a later attach is refused. */
 UTEST(dgram_batch, recv_attach_after_null_start_refused) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
@@ -1378,7 +1378,7 @@ UTEST(dgram_batch, recv_attach_after_null_start_refused) {
 }
 
 /* Fallback single-recv path (no RX_BATCH): a datagram larger than slot_bufsz is delivered as a
- * captured prefix with TRUNCATED (length clamped to slot_bufsz), never over the buffer (P1-4). */
+ * captured prefix with TRUNCATED (length clamped to slot_bufsz), never over the buffer. */
 static int g_rx_trunc;
 static void rx_on_recv_trunc(void *ud, const void *data, size_t len, const KlSockAddr *peer,
                              const KlSockAddr *local, unsigned flags) {
@@ -1516,7 +1516,7 @@ UTEST(dgram_batch, recv_gro_mode_latched_per_slot) {
     kl_event_ctx_free(&ctx);
 }
 
-/* M6.0a P1 — readiness SINGLE-recv (dg_rdy_pull) RX-TOS gate: a provider that surfaces meta.tos must NOT
+/* Readiness SINGLE-recv (dg_rdy_pull) RX-TOS gate: a provider that surfaces meta.tos must NOT
  * leak it into kl_datagram_recv_tos unless the socket ACCEPTED RX_TOS. Both configs run in one body:
  * accepted → the fabricated 0x28 is surfaced; NOT accepted → gated to -1 (backend-independent). */
 UTEST(dgram_batch, recv_tos_single_gate) {
@@ -1549,7 +1549,7 @@ UTEST(dgram_batch, recv_tos_single_gate) {
     }
 }
 
-/* M6.0a P1 — readiness BATCH-recv (dg_rdy_pull_batch) RX-TOS gate: same negative/positive gate through
+/* Readiness BATCH-recv (dg_rdy_pull_batch) RX-TOS gate: same negative/positive gate through
  * the attached RECV batch cursor path. */
 UTEST(dgram_batch, recv_tos_batch_gate) {
     const unsigned accepted[2] = { KL_DGRAM_RX_TOS, 0 };
@@ -1584,7 +1584,7 @@ UTEST(dgram_batch, recv_tos_batch_gate) {
     }
 }
 
-/* ══ D1 P1-A — kl_datagram_recv_start fail-loud guard: GRO-capture-enabled sockets MUST have an
+/* ══ kl_datagram_recv_start fail-loud guard: GRO-capture-enabled sockets MUST have an
  * actively-splitting batch, else recv_start refuses (a coalesced buffer would be delivered unsplit). ═══ */
 
 /* GRO accepted (RX_GRO) but NO batch attached → recv_start fails KL_ERR_UNSUPPORTED. */

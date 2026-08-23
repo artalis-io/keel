@@ -1,6 +1,6 @@
 /*
- * test_stream_close.c — Phase-B step 3: graceful-close / confirmed-detachment lifecycle
- * (src/stream_close.h), exercised in isolation over the step-2A write machinery and the step-2B
+ * test_stream_close.c — graceful-close / confirmed-detachment lifecycle
+ * (src/stream_close.h), exercised in isolation over the write machinery and the
  * read machinery with mock hooks (no live sockets).
  *
  * The single invariant under test: on_close (detachment) fires EXACTLY ONCE, and ONLY after BOTH

@@ -1,6 +1,6 @@
 /*
- * test_watcher_aba.c — R3b-T2: deterministic regression for the watcher pointer-reuse ABA
- * (R3a finding 1a; remedy R3b-W deferred node reclamation).
+ * test_watcher_aba.c — deterministic regression for the watcher pointer-reuse ABA
+ * (remedy: deferred node reclamation).
  *
  * The bug: kl_event_dispatch matches a watcher by POINTER IDENTITY against ctx->watchers. If a
  * watcher B is deleted DURING a drained batch and its freed node address is reused by a new watcher
@@ -269,7 +269,7 @@ UTEST(watcher_aba, overflow_refusal_completion_acquires_nothing) {
 
 /* ── server-loop ABA: the REAL kl_http_server_run loop receives a scripted [A, stale-B] readiness batch ─
  * A scripted readiness KlEventProvider is injected into KlHttpServer (cfg.event_provider). Its .wait
- * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own R3b-W bracket, so A
+ * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own deferred-reclamation bracket, so A
  * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C — the exact
  * ABA sequence, driven through the server loop (not a probe). */
 static KlHttpServer      g_srv;

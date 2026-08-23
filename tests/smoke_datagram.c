@@ -1,12 +1,12 @@
 /*
- * smoke_datagram.c — public KlDatagram link + loopback roundtrip smoke (7B-7).
+ * smoke_datagram.c — public KlDatagram link + loopback roundtrip smoke.
  *
  * NOT a utest suite — a standalone program built by the `smoke-datagram` Makefile target, the
  * Windows-portable analogue of smoke_udp for the PUBLIC KlDatagram API. It preps two datagram fds
  * THROUGH the socket provider (the KlDatagram contract: caller socket()/configure()/bind before init),
  * runs one real datagram over 127.0.0.1, and tears down cleanly. Built over the default provider so it
  * is winsock-aware on Windows; on BACKEND=iocp it is the runtime proof of the facade's IOCP fd↔loop
- * registration (7B-7 kl_event_add/CreateIoCompletionPort) — the completion path pollcomp/io_uring
+ * registration (kl_event_add/CreateIoCompletionPort) — the completion path pollcomp/io_uring
  * cannot exercise (their kl_event_add is inert). Runs on POSIX (kqueue/epoll readiness) too.
  */
 
@@ -127,7 +127,7 @@ int main(void) {
         kl_sock_close(sp, txfd2);
     }
 
-    /* clean close: graceful → retire → deregister → close fd once → DETACHED (the 7B-7 lifecycle) */
+    /* clean close: graceful → retire → deregister → close fd once → DETACHED (the registration lifecycle) */
     kl_datagram_close_begin(&rx); pump_close(&ctx, &rx);
     kl_datagram_close_begin(&tx); pump_close(&ctx, &tx);
     int detached = (kl_datagram_close_result(&rx) == KL_DGRAM_DETACHED &&

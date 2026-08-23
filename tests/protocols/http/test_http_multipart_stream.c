@@ -985,7 +985,7 @@ UTEST(mp, duplicate_content_type_header_no_leak) {
 }
 
 UTEST(mp, name_does_not_collide_with_other_param_suffix) {
-    /* M5 regression: `somename=` must NOT be matched as `name=`.
+    /* Regression: `somename=` must NOT be matched as `name=`.
      * Real `name=` parameter must win. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
@@ -1012,7 +1012,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
 }
 
 UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
-    /* M5 regression for filename=. */
+    /* Regression for filename=. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=FC");
@@ -1038,7 +1038,7 @@ UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
 }
 
 UTEST(mp, boundary_does_not_collide_with_other_param_suffix) {
-    /* M5 regression at factory layer. `xboundary=` must NOT match;
+    /* Regression at factory layer. `xboundary=` must NOT match;
      * real `boundary=` must win. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(

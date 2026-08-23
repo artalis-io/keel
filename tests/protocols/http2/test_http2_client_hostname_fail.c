@@ -1,6 +1,6 @@
 /*
- * test_http2_client_hostname_fail.c — Finding 1 regression (HTTP/2 client slice; T-split of
- * the former tests/test_tls_set_hostname_fail.c). The HTTP/2 client MUST fail closed when
+ * test_http2_client_hostname_fail.c — guards that the HTTP/2 client fails closed on a
+ * set_hostname failure (HTTP/2 client slice of the TLS set-hostname-fail tests). The HTTP/2 client MUST fail closed when
  * KlTls::set_hostname() returns -1 (see the HTTP slice for the full rationale).
  *
  * Strategy: a loopback listener (loopback_listener.h) accepts + holds; the h2 client is

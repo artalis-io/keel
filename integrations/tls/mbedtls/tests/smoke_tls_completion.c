@@ -1,5 +1,5 @@
 /*
- * smoke_tls_completion.c — buffered-BIO (completion-mode) TLS validation (8b-5a).
+ * smoke_tls_completion.c — buffered-BIO (completion-mode) TLS validation.
  *
  * NOT a utest suite — a standalone program built by the `smoke-tls-completion`
  * Makefile target (needs KEEL_TLS=mbedtls). It drives a full mbedTLS handshake +

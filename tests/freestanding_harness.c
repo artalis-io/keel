@@ -1,10 +1,10 @@
 /*
- * freestanding_harness.c — F-7 host mock harness: proves libkeel_freestanding.a
+ * freestanding_harness.c — host mock harness: proves libkeel_freestanding.a
  * actually RUNS the async HTTP/1.1 client end-to-end, on the host, over fully
  * MOCKED (non-hosted) platform hooks + socket provider + completion event
  * provider — no real syscalls, no errno, no loopback socket. This is the
- * freestanding-phase acceptance milestone
- * (docs/phase10_uefi_feasibility_design.md: "performs an HTTP/1.1 GET over a mock
+ * freestanding-phase acceptance check
+ * (docs/archive/phases/phase10_uefi_feasibility_design.md: "performs an HTTP/1.1 GET over a mock
  * completion provider") BEFORE any UEFI/firmware toolchain work.
  *
  * ─────────────────────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@
  *     ready mask, which re-drives the client's state handler → it retries the
  *     send/recv and consumes the next scripted step.
  *
- * So a pure mock needs exactly two cooperating objects (the U-2 / U-3 seams):
+ * So a pure mock needs exactly two cooperating objects (the socket + completion seams):
  *   1. MOCK SOCKET PROVIDER (KlSocketProvider, KL_SOCK_CAP_OVERLAPPED) — a
  *      per-fd script of connect / send / recv results; no syscall, no errno,
  *      io_status reports the category directly.

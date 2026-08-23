@@ -1,7 +1,7 @@
 /*
- * raw_send_test.c — Stage B tests for the hardened lwIP-raw completion backend's SEND path.
+ * raw_send_test.c — tests for the hardened lwIP-raw completion backend's SEND path.
  *
- * Stage B redesigned the send + file-response path to stream through a BOUNDED, PREALLOCATED
+ * The send + file-response path streams through a BOUNDED, PREALLOCATED
  * per-connection transmit window (KL_LWR_TX_WIN) — no per-response malloc, no whole-payload
  * copy, no whole-file read. These tests prove that, byte-exact + sanitizer-clean:
  *
@@ -9,7 +9,7 @@
  *   B2  zero-length response                   -> exact (empty body, 200)
  *   B3  64 KiB response                        -> byte-exact (length + checksum)
  *   B4  4 MiB response                         -> byte-exact (many pump/tcp_sent rounds)
- *   B5  24 MiB response (> old 16 MiB cap)     -> byte-exact (proves no size cap)
+ *   B5  24 MiB response                        -> byte-exact (proves no size cap)
  *   B6  multi-MiB FILE response                -> byte-exact + BOUNDED-MEMORY proof:
  *          peak live allocation stays ~ conn_cap*KL_LWR_TX_WIN + fixed overhead, INDEPENDENT
  *          of file size (a whole-file read or per-response send buffer would spike peak).

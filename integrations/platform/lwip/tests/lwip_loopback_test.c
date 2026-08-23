@@ -15,7 +15,7 @@
 #include <keel/datagram_detail.h>   /* complete KlDatagram type — the echo server embeds one */
 #include "keel_lwip.h"
 #ifdef LWT_TLS
-#include <keel_tls_mbedtls.h>   /* Phase 4: HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
+#include <keel_tls_mbedtls.h>   /* HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
 #endif
 
 #include "lwip/tcpip.h"
@@ -45,7 +45,7 @@ static void *srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return N
 static volatile int g_cli_done;
 static void cli_done(KlHttpClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
 
-/* Phase 2: a Keel async HTTP client on the lwIP providers → the server.
+/* A Keel async HTTP client on the lwIP providers → the server.
  * Proves the outbound axis (connect + resolve_sync_lwip name resolution). */
 static int keel_client_on_lwip(uint16_t port) {
     KlAllocator alloc = kl_allocator_default();
@@ -79,7 +79,7 @@ static int keel_client_on_lwip(uint16_t port) {
     return ok;
 }
 
-/* Phase 3: a Keel KlDatagram echo server on the lwIP providers, exercised by a raw lwIP
+/* A Keel KlDatagram echo server on the lwIP providers, exercised by a raw lwIP
  * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send) —
  * the foundation for udp_server and the built-in async DNS resolver on lwIP. */
 static void udp_echo(void *ud, const void *data, size_t len,
@@ -146,7 +146,7 @@ static int keel_udp_on_lwip(void) {
 }
 
 #ifdef LWT_TLS
-/* Phase 4: HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
+/* HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
  * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
  * socket provider — which the framework auto-wires from KlHttpServerConfig.sockets /
  * KlHttpClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
@@ -288,17 +288,17 @@ int main(void) {
     printf("lwIP loopback: raw client -> Keel server replied %s\n",
            ok ? "200 OK (correct)" : "UNEXPECTED");
 
-    /* Phase 2: a Keel async client on lwIP → the same server. */
+    /* A Keel async client on lwIP → the same server. */
     int client_ok = keel_client_on_lwip((uint16_t)g_srv.bound_port);
     printf("lwIP loopback: Keel client on lwIP got %s\n",
            client_ok ? "200 (correct)" : "UNEXPECTED");
 
-    /* Phase 3: a Keel KlDatagram echo on lwIP, exercised by a raw lwIP UDP client. */
+    /* A Keel KlDatagram echo on lwIP, exercised by a raw lwIP UDP client. */
     int udp_ok = keel_udp_on_lwip();
     printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
            udp_ok ? "round-tripped (correct)" : "UNEXPECTED");
 
-    /* Phase 4 (optional, LWT_TLS): HTTPS on lwIP — Keel TLS server + client, mbedTLS
+    /* Optional (LWT_TLS): HTTPS on lwIP — Keel TLS server + client, mbedTLS
      * BIO routed through the lwIP socket provider. */
     int tls_ok = 1;
 #ifdef LWT_TLS

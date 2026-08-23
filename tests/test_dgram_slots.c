@@ -1,5 +1,5 @@
 /*
- * test_dgram_slots.c — Phase B: packet-slot storage foundation (7A-1 storage separation).
+ * test_dgram_slots.c — packet-slot storage foundation (storage separation).
  *
  * Covers the two INDEPENDENTLY-OWNED storage objects and their invariants (no send/recv/pause/close
  * semantics here): the OBJECT-owned outbound pool (KlDgramSlots) and the LIFE-ownable inbound slot

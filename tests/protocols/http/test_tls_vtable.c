@@ -1,6 +1,6 @@
 /*
  * test_tls_vtable.c — kl_http_server_init must reject a malformed server TLS config WITHOUT
- * crashing during error cleanup (regression for the S-7-review Finding 1):
+ * crashing during error cleanup:
  *   - a NULL factory pointer,
  *   - a factory that returns a session missing a REQUIRED vtable op (esp. destroy/shutdown).
  * Each case must return -1 with KL_ERR_TLS_VTABLE and free cleanly (kl_http_conn_pool_free must

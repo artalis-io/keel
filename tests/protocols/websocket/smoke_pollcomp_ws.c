@@ -1,7 +1,7 @@
 /*
  * smoke_pollcomp_ws.c — WebSocket-over-completion roundtrip on POSIX (pollcomp).
  *
- * Runtime-tests WebSocket over the completion loop (comp_ws_drive, 8e-1): a KlHttpServer on
+ * Runtime-tests WebSocket over the completion loop (comp_ws_drive): a KlHttpServer on
  * the pollcomp completion loop with a WS echo route, hit by a hand-rolled raw WS client
  * (HTTP Upgrade handshake + one masked text frame; reads the server's unmasked echo).
  * The completion driver reuses kl_ws_server_on_readable_data verbatim — this test proves

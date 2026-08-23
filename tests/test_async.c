@@ -1,7 +1,6 @@
 /*
  * test_async.c — generic KlEventCtx watcher tests (substrate). The HTTP KlAsyncOp /
- * server-suspension coverage that shared this file was split to
- * tests/protocols/http/test_http_async.c (T-split of the family); this remainder is
+ * server-suspension coverage lives in tests/protocols/http/test_http_async.c; this file is
  * protocol-neutral — it drives kl_watcher_add/mod/del + kl_event_ctx_run over a bare
  * KlEventCtx, no HTTP server/connection/async types.
  */
@@ -213,7 +212,7 @@ UTEST(async, watcher_del_not_found) {
  * retired poll; exact fire timing is edge-triggered and intentionally NOT asserted
  * (functional correctness is covered by watcher_mod_changes_interest). No normal
  * HTTP path mods a watcher's mask over io_uring, so this is the dedicated stress
- * for that path (see docs/phase8f5 §4). */
+ * for that path (see docs/archive/phases/phase8f5_iouring_default_migration_design.md §4). */
 #define SOAK_ROUNDS 3000
 UTEST(async, watcher_mask_churn_soak) {
     TestLoop loop;

@@ -1,15 +1,15 @@
 /*
- * test_datagram_live.c — the public KlDatagram over a REAL event loop + REAL loopback UDP (7B-4).
+ * test_datagram_live.c — the public KlDatagram over a REAL event loop + REAL loopback UDP.
  *
- * The first LIVE backend binding: no mock. `kl_event_ctx_init` yields whatever the build's backend is —
- * a pollcomp COMPLETION loop under BACKEND=pollcomp (the 7B-4 target), a kqueue/epoll READINESS loop on
+ * A LIVE backend binding: no mock. `kl_event_ctx_init` yields whatever the build's backend is —
+ * a pollcomp COMPLETION loop under BACKEND=pollcomp, a kqueue/epoll READINESS loop on
  * a default build — and the facade's §2.5 adapter builder selects the matching path. The caller prepares
  * the fd through the socket seam (KlDatagram contract), then does a real send→recv round-trip over
  * 127.0.0.1 and a clean close, so the live completion/readiness adapters are exercised end to end.
  *
  * sockets = NULL → the default POSIX provider; pollcomp drives overlapped ops on the ordinary fd, so no
  * provider plumbing is needed. The same test therefore runs green on both the completion and readiness
- * gates (the readiness §10 rows are only FLIPPED in 7B-6, but the adapter working here is a bonus).
+ * gates (the readiness adapter working here is a bonus).
  */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
@@ -282,7 +282,7 @@ UTEST(datagram_live, completion_tos_send_verifies_tos) {
     kl_event_ctx_free(&ctx);
 }
 
-/* M6.0a: kl_datagram_set_tos sets the SOCKET-DEFAULT TOS — a plain send (no per-message tos) then
+/* kl_datagram_set_tos sets the SOCKET-DEFAULT TOS — a plain send (no per-message tos) then
  * egresses with that default. A RAW recvmsg peer with IP_RECVTOS reads the received TOS and asserts the
  * socket default actually applied. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy) —
  * the completion send path applies the kernel socket default just like readiness. */
@@ -338,7 +338,7 @@ UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
     kl_event_ctx_free(&ctx);
 }
 
-/* M6.0a: receive-TOS through the REAL capture seam. A KlDatagram rx with RX_TOS enabled receives a
+/* Receive-TOS through the REAL capture seam. A KlDatagram rx with RX_TOS enabled receives a
  * datagram sent with a per-packet TOS mark; kl_datagram_recv_tos() (read inside on_recv) returns the mark.
  * Backend-adaptive via kl_event_ctx_init: on BACKEND=pollcomp/iouring this exercises the COMPLETION recv
  * cmsg parse (dg_comp_arm requests RX_TOS → backend fills ev->tos → dispatch stamps the inbound slot); on

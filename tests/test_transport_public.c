@@ -1,5 +1,5 @@
 /*
- * test_transport_public.c — Phase-B step 6A conformance: exercise the candidate PUBLIC transport
+ * test_transport_public.c — conformance: exercise the candidate PUBLIC transport
  * API through the installed headers only.
  *
  * This TU deliberately includes ONLY <keel/...> headers — never a src/ internal header — to prove

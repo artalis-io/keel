@@ -1,7 +1,7 @@
 /*
- * s6_selftest.c — S-6 acceptance self-test (UEFI EFI application): HTTPS server.
+ * s6_selftest.c — HTTPS-server acceptance self-test (UEFI EFI application).
  *
- * The TLS mirror of S-4: a STOCK freestanding KlHttpServer answers `GET / -> 200` over
+ * The TLS mirror of the plaintext freestanding server: a STOCK freestanding KlHttpServer answers `GET / -> 200` over
  * HTTPS (EFI_TCP4 + freestanding mbedTLS) on bare UEFI firmware, driven by the EFI
  * completion backend. The completion-mode TLS server is entirely in the model-blind
  * core (completion_http_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
@@ -9,7 +9,7 @@
  *   1. post_recv does raw transport I/O into the caller-chosen buffer (event_efi.c) — the HTTP
  *      completion adapter (comp_on_read) feeds received CIPHERTEXT to tls->feed_input,
  *   2. a synchronous send on the accepted socket for kl_comp_tls_flush (efi_sock_send).
- * The response ciphertext rides the same post_send as S-4 (content-agnostic).
+ * The response ciphertext rides the same post_send as the plaintext server (content-agnostic).
  *
  * Flow (all through the PUBLIC KlHttpServer API — zero protocol edits):
  *   kl_uefi_platform_init(bs, st)            → monotonic clock + EFI_RNG
@@ -18,7 +18,7 @@
  *   kl_http_server_init(cfg{event_provider, tls}) → construct from the freestanding archive
  *   kl_http_server_route(GET "/", handler); bind(:443)/listen; run_completion_loop
  *
- * Prints:  S-6: server up → listening on :443 → GO (served GET / 200)
+ * Prints: a server-up → listening → GO status line (served GET / 200)
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -141,7 +141,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("S-6: server up (efi-tcp4-completion + mbedTLS)");
 
-    /* NB: kl_http_server_free is hosted-only (teardown is S-7). On error the firmware parks;
+    /* NB: kl_http_server_free is hosted-only (teardown is the teardown self-test's job). On error the firmware parks;
      * QEMU is power-cycled by the harness, so there is no leak to reclaim. */
     if (kl_http_server_route(&s, "GET", "/", s6_handler, NULL, NULL) != 0) {
         print_line("S-6: route registration failed"); goto park;
@@ -175,7 +175,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         kl_timer_fire(&s.ev);
     }
 
-    /* (No kl_http_server_free — hosted-only; teardown is S-7.) */
+    /* (No kl_http_server_free — hosted-only; teardown is the teardown self-test's job.) */
 
 park:
     print_line("S-6: (parked; harness will terminate QEMU)");

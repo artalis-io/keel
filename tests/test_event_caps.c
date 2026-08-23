@@ -1,5 +1,5 @@
 /*
- * test_event_caps.c — PAL Phase 7: event/socket capability negotiation.
+ * test_event_caps.c — event/socket capability negotiation.
  *
  * Proves the contract is real, not a constant `true`:
  *   1. the built (compile-time-selected) event backend advertises
@@ -12,7 +12,7 @@
  */
 #include "utest.h"
 #include "../src/event_caps.h"
-#include "../src/socket.h"   /* internal KL_SOCK_CAP_OVERLAPPED (Phase 8) */
+#include "../src/socket.h"   /* internal KL_SOCK_CAP_OVERLAPPED */
 #include "../src/completion_io.h"   /* kl_completion_axis_available() — 0 under KEEL_NO_COMPLETION */
 
 #include <keel/event_ctx.h>
@@ -35,7 +35,7 @@ static const KlSocketProvider non_native_provider = {
     NULL,
 };
 
-/* Overlapped provider (Phase 8 / IOCP): native SOCKET handles whose I/O is driven
+/* Overlapped provider (IOCP): native SOCKET handles whose I/O is driven
  * by the completion loop's submit path. */
 static const KlSocketProvider overlapped_provider = {
     &stub_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
@@ -52,7 +52,7 @@ UTEST(event_caps, backend_advertises_readiness_native_fd) {
      * readiness poller of native OS descriptors. */
     ASSERT_TRUE(caps & KL_EVENT_CAP_READINESS);
     ASSERT_TRUE(caps & KL_EVENT_CAP_NATIVE_FD);
-    /* No backend advertises the reserved completion model yet (Phase 8). */
+    /* This readiness backend does not advertise the completion model. */
     ASSERT_FALSE(caps & KL_EVENT_CAP_COMPLETION);
 
     kl_event_ctx_free(&ctx);
@@ -93,7 +93,7 @@ UTEST(event_caps, null_ctx_is_incompatible) {
 }
 
 /* The full negotiation matrix over both axes, via the pure helper — unit-testable
- * without a real IOCP backend (Phase 8's completion arm). */
+ * without a real IOCP backend (the completion arm). */
 UTEST(event_caps, negotiation_matrix_readiness) {
     unsigned readiness = KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
     ASSERT_TRUE(kl_caps_compatible(readiness, NULL));                    /* POSIX default */

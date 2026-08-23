@@ -1,5 +1,5 @@
 /*
- * test_listener.c — Phase-B step 5: accept-side listener state machine (src/listener.h),
+ * test_listener.c — accept-side listener state machine (src/listener.h),
  * exercised in isolation with mock credit/arm/accept/dispose hooks (no live sockets).
  *
  * Covers the four distinct lifetimes: listener lifetime (start/close/detach), pool-owned
@@ -149,7 +149,7 @@ UTEST(listener, backpressure_pauses_when_no_slot) {
 
 UTEST(listener, readiness_pause_disarms_then_resume_rearms) {
     /* Readiness backpressure must DROP the listen interest on pause (a level-triggered fd would
-     * otherwise keep firing), and re-arm on resume. Exposed by the live server wiring (step 6B-1). */
+     * otherwise keep firing), and re-arm on resume. Exposed by the live server wiring. */
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/0);
     m.slots = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);          /* reserves the one slot, arms */
@@ -488,7 +488,7 @@ UTEST(listener, reserved_slot_returned_on_readiness_close_while_armed) {
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
-/* ── Counted bounded-accept window (step 6B-3) — one reserved credit per posted accept ──────── */
+/* ── Counted bounded-accept window — one reserved credit per posted accept ──────────────────── */
 
 UTEST(listener, window_posts_up_to_window) {
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
@@ -561,9 +561,9 @@ UTEST(listener, window_exhaustion_pauses_then_resumes) {
 }
 
 UTEST(listener, completion_exhaustion_queues_not_drops) {
-    /* 6B-3 2b-ii: when the pool is exhausted, a POST-DRIVEN completion listener must PAUSE — post
+    /* When the pool is exhausted, a POST-DRIVEN completion listener must PAUSE — post
      * NO accept — so a further connection waits in the kernel TCP backlog. It must NOT accept the
-     * fd and then drop it (the old comp_on_accept behavior). Proof: while exhausted no accept is
+     * fd and then drop it (the accept-then-reset failure mode). Proof: while exhausted no accept is
      * posted (arm frozen) and nothing is disposed; when a slot frees, the listener posts and the
      * queued connection is accepted — never reset. */
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);

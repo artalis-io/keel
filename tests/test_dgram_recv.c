@@ -1,5 +1,5 @@
 /*
- * test_dgram_recv.c — Phase B step 3: serial receive + strict pause/resume over the inbound slot.
+ * test_dgram_recv.c — serial receive + strict pause/resume over the inbound slot.
  *
  * Covers: inline-completion chains (iterative, no phantom), pause inside delivery, repeated
  * pause/resume idempotence, held-packet preservation, duplicate/spurious completion dropped without
@@ -229,7 +229,7 @@ UTEST(dgram_recv, duplicate_completion_dropped) {
     kl_dgram_inbound_free(&slots);
 }
 
-/* ── step-5 uniform truncation + metadata conformance ────────────────────────────────────────── */
+/* ── uniform truncation + metadata conformance ──────────────────────────────────────────────── */
 #define PAY16 "0123456789ABCDEF"   /* exactly 16 bytes (== in_cap below) */
 
 /* a completion recv machine with in_cap 16, armed (async, no inline) and ready for one manual

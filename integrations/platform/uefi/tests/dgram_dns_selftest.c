@@ -1,31 +1,30 @@
 /*
- * dgram_dns_selftest.c — 6.4c acceptance self-test (UEFI EFI application).
+ * dgram_dns_selftest.c — DNS-over-datagram acceptance self-test (UEFI EFI application).
  *
- * The on-real-firmware validation for the EFI_UDP4 datagram provider (6.4b): the STOCK
+ * The on-real-firmware validation for the EFI_UDP4 datagram provider: the STOCK
  * src/protocols/dns/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
- * wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token) — with NO bespoke
- * dns_uefi.c on the path. (The retired U-5 build used the one-shot dns_uefi.c behind
- * kl_resolve_sync; U-5 and dns_uefi.c have since been removed.) Here the async KlResolver vtable
+ * wiring in event_efi.c (post_dgram_recv/_send + drain, stable token) — with NO bespoke
+ * sync DNS-over-EFI_UDP4 engine on the path. Here the async KlResolver vtable
  * runs the real Do53 query engine over the
  * datagram machine, and the resolved address then drives an EFI_TCP4 GET.
  *
- * Frozen 6.4c acceptance (docs/phase10_efi_udp4_provider_design.md §9):
+ * Frozen acceptance (docs/archive/phases/phase10_efi_udp4_provider_design.md §9):
  *   1. stock DNS over EFI_UDP4 → A/AAAA → HTTP GET 200 (the resolver is injected as
  *      cfg.resolver, so kl_client resolves over EFI_UDP4 then connects over EFI_TCP4;
- *      TLS-over-EFI_TCP4 is orthogonal and already proven in U-4/U-6).
+ *      TLS-over-EFI_TCP4 is orthogonal and already proven by the HTTPS-client self-tests).
  *   2. a truncated-response (TC=1) case: the freestanding resolver has NO TCP fallback
- *      (6.4a-2, #ifndef KEEL_FREESTANDING), so a TC answer settles a clean KL_ERR_DNS
+ *      (#ifndef KEEL_FREESTANDING), so a TC answer settles a clean KL_ERR_DNS
  *      failure — no hang — on real firmware.
  *   3. kl_uefi_udp_provider_live_count()==0 (and quarantined==0) after teardown.
  *
  * The self-test is mode-agnostic: it always resolves→GETs and reports FACTS; the harness
  * oracle (run_dgram_dns.sh) decides PASS per DNS mode. Machine-checkable markers:
- *   6.4c: http status = <n>        (<0 if resolve/connect failed)
- *   6.4c: error = <KlError>
- *   6.4c: udp_live = <n> udp_quarantined = <n>     (asserted 0/0 on the happy path)
- *   6.4c: GO       (status==200 && live==0 && quarantined==0)   |   6.4c: NO-GO
- *   6.4c: DONE     (always — the terminal marker; its absence means crash/hang)
+ *   http status = <n>        (<0 if resolve/connect failed)
+ *   error = <KlError>
+ *   udp_live = <n> udp_quarantined = <n>     (asserted 0/0 on the happy path)
+ *   GO       (status==200 && live==0 && quarantined==0)   |   NO-GO
+ *   DONE     (always — the terminal marker; its absence means crash/hang)
  *
  * Freestanding: clang --target=*-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -148,7 +147,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
     /* Time the whole resolve→GET. On the TC leg the stock resolver fails PROMPTLY (no TCP
-     * fallback, no retransmit — src/protocols/dns/dns_resolver.c header §"TC-settles-clean"), so completion
+     * fallback, no retransmit — the TC-settles-clean contract), so completion
      * lands far below the per-leg timeout (dcfg.timeout_ms). If instead the TC responses were
      * dropped, both legs would only settle KL_ERR_DNS after the ≥6000 ms leg timeout. The
      * elapsed marker below therefore distinguishes response-driven settlement from a timeout. */
@@ -173,12 +172,12 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("6.4c: elapsed_ms = "); print_int((int)elapsed); print_line("");
     /* Symbolic error marker (robust to KlError reordering vs the numeric above): lets the TC
      * oracle attribute the failure to the DNS rejection specifically — not a timeout, socket
-     * error, or malformed-response reject — per the 6.3 negative-test rule. */
+     * error, or malformed-response reject — per the negative-test rule. */
     if (d.err == KL_ERR_DNS)     print_line("6.4c: resolve-error = KL_ERR_DNS");
     if (d.err == KL_ERR_TIMEOUT) print_line("6.4c: resolve-error = KL_ERR_TIMEOUT");
 
     /* Teardown BEFORE the live-count assertion: the resolver's KlDatagram (EFI_UDP4 child) must
-     * be reaped and no slot leaked/quarantined on the happy path (frozen §9.3). */
+     * be reaped and no slot leaked/quarantined on the happy path (frozen §9). */
     if (c) kl_http_client_free(c);
     res->destroy(res);
     kl_event_ctx_free(&ev);

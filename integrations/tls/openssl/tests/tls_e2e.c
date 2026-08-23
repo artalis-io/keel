@@ -134,8 +134,8 @@ static void gen_cert(const char *cn, int is_ca,
 static void pem_pair_free(PemPair *p) { free(p->cert_pem); free(p->key_pem); }
 
 /* Generate a leaf cert signed by (issuer_key/issuer_crt) whose ONLY SAN is an
- * iPAddress (`ip_asc`, an IPv4/IPv6 literal). Used to prove IP-SAN verification
- * (finding 4). Subject CN is set to `ip_asc` for readability. */
+ * iPAddress (`ip_asc`, an IPv4/IPv6 literal). Used to prove IP-SAN verification.
+ * Subject CN is set to `ip_asc` for readability. */
 static void gen_cert_ip_san(const char *ip_asc,
                             EVP_PKEY *issuer_key, X509 *issuer_crt,
                             PemPair *out)
@@ -499,7 +499,7 @@ static void axis2_memory_bio(KlAllocator *alloc, PemPair *ca, PemPair *server)
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* ── Hardening regression tests (findings 1-8) ───────────────────── */
+/* ── Hardening regression tests ──────────────────────────────────── */
 
 /* Handshake a client/server pair over the memory-BIO axis (no sockets). Both
  * sessions are returned to the caller (not destroyed). Verifies against `ca`. */
@@ -562,8 +562,8 @@ static int mem_handshake_ok(KlAllocator *alloc, KlTlsCtx *sctx, KlTlsCtx *cctx,
     return ok;
 }
 
-/* Finding 1 regression: a second session's peer_cert() must NOT clobber a first
- * session's returned DER (they were shared thread-local scratch before the fix). */
+/* A second session's peer_cert() must NOT clobber a first session's returned DER
+ * (per-session storage, not shared thread-local scratch). */
 static void test_der_alpn_lifetime(KlAllocator *alloc, PemPair *ca, PemPair *server,
                                    PemPair *client)
 {
@@ -726,7 +726,7 @@ static void test_missing_client_cert(KlAllocator *alloc, PemPair *ca, PemPair *s
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Finding 6: mTLS config validation — OPTIONAL/REQUIRED without a CA, bad mode,
+/* mTLS config validation — OPTIONAL/REQUIRED without a CA, bad mode,
  * and mismatched ca_buf/ca_len are all rejected (ctor returns NULL). */
 static void test_mtls_config_validation(KlAllocator *alloc, PemPair *server, PemPair *ca)
 {
@@ -761,7 +761,7 @@ static void test_mtls_config_validation(KlAllocator *alloc, PemPair *server, Pem
     printf("  PASS: invalid mTLS configs rejected, valid one accepted\n");
 }
 
-/* Finding 3: completion-buffer boundary — feed_input rejects oversized + NULL. */
+/* Completion-buffer boundary — feed_input rejects oversized + NULL. */
 static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
 {
     printf("== Finding 3: feed_input boundary (oversize + NULL) ==\n");
@@ -793,7 +793,7 @@ static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
     printf("  PASS: feed_input/drain_output reject oversize + NULL args\n");
 }
 
-/* Finding 2: from_buf boundary — a ctor rejects len==0 / NULL buffers. */
+/* from_buf boundary — a ctor rejects len==0 / NULL buffers. */
 static void test_from_buf_boundary(KlAllocator *alloc, PemPair *server, PemPair *ca)
 {
     printf("== Finding 2: from_buf boundary (len==0 / NULL rejected) ==\n");
@@ -817,7 +817,7 @@ static void test_from_buf_boundary(KlAllocator *alloc, PemPair *server, PemPair 
     printf("  PASS: from_buf ctors reject empty/NULL PEM buffers\n");
 }
 
-/* Finding 7: insecure client ctx opt-out accepts an untrusted server. */
+/* Insecure client ctx opt-out accepts an untrusted server. */
 static void test_insecure_client(KlAllocator *alloc, PemPair *server)
 {
     printf("== Finding 7: explicit insecure client ctx (verify-none) ==\n");
@@ -837,7 +837,7 @@ static void test_insecure_client(KlAllocator *alloc, PemPair *server)
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Finding 3: peer_cert(NULL) must return -1 (no crash, no write through NULL). */
+/* peer_cert(NULL) must return -1 (no crash, no write through NULL). */
 static void test_peer_cert_null(KlAllocator *alloc, PemPair *ca, PemPair *server,
                                 PemPair *client)
 {
@@ -869,7 +869,7 @@ static void test_peer_cert_null(KlAllocator *alloc, PemPair *ca, PemPair *server
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Finding 5: a second full handshake after reset() on the SAME sessions round-trips. */
+/* A second full handshake after reset() on the SAME sessions round-trips. */
 static void test_second_handshake_after_reset(KlAllocator *alloc, PemPair *ca,
                                                PemPair *server)
 {
@@ -915,7 +915,7 @@ static void test_second_handshake_after_reset(KlAllocator *alloc, PemPair *ca,
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Finding 4: numeric-IP SAN — matching IP verifies, wrong IP fails. */
+/* Numeric-IP SAN — matching IP verifies, wrong IP fails. */
 static void test_ip_san(KlAllocator *alloc, EVP_PKEY *ca_key, X509 *ca_crt,
                         PemPair *ca)
 {
@@ -948,7 +948,7 @@ static void test_ip_san(KlAllocator *alloc, EVP_PKEY *ca_key, X509 *ca_crt,
     pem_pair_free(&ipsrv);
 }
 
-/* Finding 5: strict vs lenient truncation over the REAL socket-BIO readiness
+/* Strict vs lenient truncation over the REAL socket-BIO readiness
  * path. The peer fd is closed WITHOUT a TLS close_notify (abrupt transport EOF).
  *   strict (default):     read() == -1 && at_eof() == 0  (truncation is an error)
  *   lenient (allow=1):    read() == -1 && at_eof() == 1  (treated as clean EOF)
@@ -1023,7 +1023,7 @@ static void test_truncation_modes(KlAllocator *alloc, PemPair *ca, PemPair *serv
     printf("  PASS: lenient — abrupt EOF is read()==-1 && at_eof()==1\n");
 }
 
-/* ── Finding 5: allocation-failure injection ─────────────────────── */
+/* ── Allocation-failure injection ────────────────────────────────── */
 
 typedef struct {
     KlAllocator base;   /* forwards to real allocator */
@@ -1134,7 +1134,7 @@ static void poison_error_queue(void)
     assert(ERR_peek_error() != 0);   /* the queue is now non-empty */
 }
 
-/* Round-6 finding: OpenSSL's error queue is thread-local and SSL_get_error() only
+/* OpenSSL's error queue is thread-local and SSL_get_error() only
  * classifies correctly against an EMPTY queue. The adapter must ERR_clear_error()
  * before every SSL op so a stale error (from another session sharing the event
  * loop) cannot change the result. Proven two ways:
@@ -1223,7 +1223,7 @@ static void test_error_queue_discipline(KlAllocator *alloc, PemPair *ca, PemPair
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Round-5 finding: KlPeerCert.verified must mean the chain was ACTUALLY verified,
+/* KlPeerCert.verified must mean the chain was ACTUALLY verified,
  * not merely that a stored result reads X509_V_OK. A verifying client sees
  * verified==1 for a trusted server; an insecure (verify-none) client completes the
  * handshake but must report verified==0. (Untrusted-server / mTLS-verified paths
@@ -1290,7 +1290,7 @@ static void test_client_verified_flag(KlAllocator *alloc, PemPair *ca, PemPair *
     kl_tls_openssl_ctx_destroy(sctx);
 }
 
-/* Round-5 finding 2: a CN that would not fit KlPeerCert.subject_cn[256] must be
+/* A CN that would not fit KlPeerCert.subject_cn[256] must be
  * OMITTED, not truncated — two long CNs sharing a 255-byte prefix must never
  * collapse to the same exposed string. The issuer CN (short) is unaffected. */
 static void test_overlong_cn_omitted(KlAllocator *alloc, EVP_PKEY *ca_key,
@@ -1346,7 +1346,7 @@ static void test_overlong_cn_omitted(KlAllocator *alloc, EVP_PKEY *ca_key,
     pem_pair_free(&leaf);
 }
 
-/* Round-4 finding: textual peer-cert identities must be canonicalized. A client
+/* Textual peer-cert identities must be canonicalized. A client
  * cert whose CN embeds a NUL ("trusted-user\0attacker") and whose SANs include
  * comma/control/NUL bytes must NOT surface those bytes to the application: the CN
  * is omitted (empty) and the hostile SANs are dropped, leaving only the clean one.
@@ -1423,10 +1423,10 @@ static void test_identity_canonicalization(KlAllocator *alloc, EVP_PKEY *ca_key,
     pem_pair_free(&evil);
 }
 
-/* Round-3 finding 1: prove the TLS 1.2 minimum floor is actually enforced — a raw
+/* Prove the TLS 1.2 minimum floor is actually enforced — a raw
  * client capped at an obsolete protocol (TLS 1.1) must NOT negotiate with the
- * adapter server. The adapter's SSL_CTX_set_min_proto_version(TLS1_2) return is now
- * fatal at ctx-create; this asserts the resulting floor holds on the wire. */
+ * adapter server. Failure of SSL_CTX_set_min_proto_version(TLS1_2) is fatal during
+ * context creation; this asserts the resulting floor holds on the wire. */
 static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
 {
 #ifdef TLS1_1_VERSION
@@ -1505,7 +1505,7 @@ int main(void) {
     axis1_socket_bio(&alloc, &ca, &server, &client);
     axis2_memory_bio(&alloc, &ca, &server);
 
-    /* Hardening regression suite (findings 1-8). */
+    /* Hardening regression suite. */
     test_der_alpn_lifetime(&alloc, &ca, &server, &client);
     test_two_simultaneous(&alloc, &ca, &server);
     test_hostname_mismatch(&alloc, &ca, &server);
@@ -1516,7 +1516,7 @@ int main(void) {
     test_from_buf_boundary(&alloc, &server, &ca);
     test_insecure_client(&alloc, &server);
 
-    /* Finding 5 coverage additions. */
+    /* Truncation / allocation-failure / protocol-floor coverage additions. */
     test_peer_cert_null(&alloc, &ca, &server, &client);
     test_second_handshake_after_reset(&alloc, &ca, &server);
     test_ip_san(&alloc, ca_key, ca_crt, &ca);

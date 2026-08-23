@@ -1,5 +1,5 @@
 /*
- * test_stream.c — Phase-B step 2A: internal KlStream write machinery (src/stream_write.h).
+ * test_stream.c — internal KlStream write machinery (src/stream_write.h).
  * Exercised in isolation with mock readiness-writer + completion-submit hooks (no live sockets).
  */
 #include "utest.h"
@@ -159,7 +159,7 @@ UTEST(stream_write, completion_submission_failure_keeps_bytes_and_errors) {
 }
 
 UTEST(stream_write, completion_write_failure_referencing_retains_bytes) {
-    /* Finding 1: a WRITE that FAILS after a successful submit — referencing backend must NOT
+    /* A WRITE that FAILS after a successful submit — referencing backend must NOT
      * consume the queued bytes (provider may still reference them) and must not pump. */
     KlAllocator a = kl_allocator_default();
     CS c; cs_init(&c);
@@ -199,7 +199,7 @@ UTEST(stream_write, completion_write_failure_copying) {
 }
 
 UTEST(stream_write, free_refused_while_send_in_flight) {
-    /* Finding 2: freeing while a send is outstanding would UAF provider-referenced storage. */
+    /* Freeing while a send is outstanding would UAF provider-referenced storage. */
     KlAllocator a = kl_allocator_default();
     CS c; cs_init(&c);
     KlStream s; memset(&s, 0, sizeof(s));
@@ -227,7 +227,7 @@ UTEST(stream_write, free_refused_while_send_in_flight_copying) {
 }
 
 UTEST(stream_write, write_without_transport_hook_fails_closed) {
-    /* Finding 3: readiness mode with no writer installed must not deref a NULL write_fn. */
+    /* Readiness mode with no writer installed must not deref a NULL write_fn. */
     KlAllocator a = kl_allocator_default();
     KlStream s; memset(&s, 0, sizeof(s));
     ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);   /* no set_writer / set_submit */
@@ -270,7 +270,7 @@ UTEST(stream_write, flush_fails_closed_in_completion_and_without_writer) {
 }
 
 UTEST(stream_write, config_locked_while_data_active) {
-    /* Finding 4: transport mode/ownership must not change while data is queued or in flight. */
+    /* Transport mode/ownership must not change while data is queued or in flight. */
     KlAllocator a = kl_allocator_default();
     RW w; rw_init(&w); w.mode = 2;   /* would-block → bytes stay queued */
     CS c; cs_init(&c);

@@ -1,5 +1,5 @@
 /*
- * raw_caps_test.c — Stage C fail-early capability contract for the lwIP-raw completion backend.
+ * raw_caps_test.c — fail-early capability contract for the lwIP-raw completion backend.
  *
  * lwip-raw is an IPv4-only TCP+UDP completion backend that now does server AND client
  * (plaintext + HTTPS + DNS — see raw_client_test/raw_he_test/raw_dns_test/raw_tls_test for the
@@ -9,12 +9,12 @@
  *   K1  the SYNCHRONOUS socket-provider connect op -> -1 / ENOTSUP BY DESIGN. Outbound client
  *         connects ride the COMPLETION connect primitive (kl_comp_post_connect → tcp_connect),
  *         NOT this blocking op, which is nonsensical on a NO_SYS=1 single-loop target. So this
- *         op staying ENOTSUP is correct even though the client is fully supported (LC-1/2/4).
+ *         op staying ENOTSUP is correct even though the client is fully supported.
  *   K2  bind() with a non-IPv4 (IPv6) address -> -1 (the loopif is IPv4; IPv6 unsupported).
  *   K3  bind() with an IPv4 address -> 0 (the supported family still works — a control case).
- *   K4  UDP is SUPPORTED (LC-3a): the raw socket provider now exposes datagram ops
+ *   K4  UDP is SUPPORTED: the raw socket provider exposes datagram ops
  *         (.dgram != NULL), so kl_datagram_socket_init() on a ctx wired to this provider SUCCEEDS —
- *         KlDatagram runs over the raw completion loop. (This FLIPPED at LC-3a; previously unsupported.)
+ *         KlDatagram runs over the raw completion loop.
  *
  * (The second-simultaneous-ctx rejection + sequential-ctx cases are covered in raw_recv_test.c;
  * they are not duplicated here.)
@@ -31,7 +31,7 @@
 #include <keel/socket.h>
 #include <keel/sockaddr.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* complete KlDatagram type — stack instance in K4b */
+#include <keel/datagram_detail.h>   /* complete KlDatagram type — stack instance in the UDP case */
 
 #include "keel_lwip_raw.h"
 
@@ -91,7 +91,7 @@ static int test_bind_family(void) {
     return 0;
 }
 
-/* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_datagram_socket_init
+/* K4 — UDP is SUPPORTED: the raw provider exposes datagram ops, so kl_datagram_socket_init
  * succeeds. `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly
  * as a KlHttpServer does via the loop's native_provider(). kl_datagram_socket_init now creates a udp_pcb
  * through the provider's datagram data-plane (udp_dg() non-NULL). */

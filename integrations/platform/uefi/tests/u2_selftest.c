@@ -1,26 +1,26 @@
 /*
- * u2_selftest.c — U-2 acceptance self-test (UEFI EFI application).
+ * u2_selftest.c — socket-provider acceptance self-test (UEFI EFI application).
  *
  * Proves the EFI_TCP4 KlSocketProvider's DATA PLANE end-to-end over real firmware:
  * build kl_uefi_socket_provider, then drive a raw HTTP GET / ENTIRELY through the
  * PROVIDER's ops:
  *   provider->ops->socket()            → CreateChild + OpenProtocol (a KlUefiConn)
  *   provider->ops->connect()           → Configure (active, DHCP, remote addr)
- *   kl_uefi_socket_connect_now()       → issue + pump the Connect token (U-3's
- *                                        post_connect, done inline here since the
- *                                        completion backend is not built in U-2)
+ *   kl_uefi_socket_connect_now()       → issue + pump the Connect token (the completion
+ *                                        backend's post_connect, done inline here since the
+ *                                        completion backend is not built in this test)
  *   provider->ops->send()              → Transmit(GET) + pump
  *   provider->ops->recv()              → Receive + pump (loop until FIN)
  *   provider->ops->get_local_addr()    → station address (DHCP)
  *   provider->ops->close()             → Close/CloseEvent/CloseProtocol/DestroyChild
  *
  * Prints:
- *   U-2: socket provider send/recv OK
- *   U-2: status = <status line>
- *   U-2: GO
+ *   socket provider send/recv OK
+ *   status = <status line>
+ *   GO
  *
- * The completion/connect ORCHESTRATION (races, deadlines, watcher relay) is U-3;
- * U-2 proves the socket provider's send/recv works over EFI_TCP4.
+ * The completion/connect ORCHESTRATION (races, deadlines, watcher relay) is the
+ * completion backend's job; this test proves the socket provider's send/recv works over EFI_TCP4.
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -39,7 +39,7 @@
 #define TARGET_PORT 18080
 #endif
 
-/* U-3's post_connect done inline (declared in socket_efi_tcp4.c). */
+/* The completion backend's post_connect done inline (declared in socket_efi_tcp4.c). */
 int kl_uefi_socket_connect_now(KlSocketHandle fd);
 
 /* ── tiny ASCII console (no libc) ─────────────────────────────────────────────── */
@@ -117,7 +117,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("U-2: connect() Configure OK (DHCP settled, connect pending)");
 
-    /* 3b. Establish the connection (U-3's post_connect, inline here). */
+    /* 3b. Establish the connection (the completion backend's post_connect, inline here). */
     if (kl_uefi_socket_connect_now(fd) != 0) {
         print_line("U-2: Connect token failed");
         ops->close(cx, fd);
@@ -158,7 +158,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     print_line("U-2: --- response begin ---");
     static char rxbuf[4096];
-    /* U-6: recv() is now NON-BLOCKING — WOULD_BLOCK means "no data yet". Pump the
+    /* recv() is NON-BLOCKING — WOULD_BLOCK means "no data yet". Pump the
      * stack ourselves via a short Stall between spins (the provider no longer loops
      * internally), bounded so a wedged connection fails rather than hangs. */
     for (int loop = 0; loop < 60000; loop++) {

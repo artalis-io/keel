@@ -1,9 +1,9 @@
-/* test_http_tls.c — HTTP-TLS-adapter slice of the former tests/test_tls.c.
+/* test_http_tls.c — HTTP-TLS-adapter slice of the TLS tests.
  *
- * This is the HTTP half of the T-split of the TLS test family: the cases here
+ * This is the HTTP half of the TLS test family: the cases here
  * drive the HTTP connection/response layer through the mock KlTls vtable
  * (handshake state machine, response send/stream/file through TLS, keep-alive
- * reset, and pool/connection shutdown). The generic KlTls-interface cases stay
+ * reset, and pool/connection shutdown). The generic KlTls-interface cases live
  * in tests/test_tls.c.
  */
 

@@ -1,10 +1,10 @@
 /*
  * smoke_iouring.c — end-to-end HTTP-over-completion roundtrip on the completion-native
- * io_uring backend (PAL Phase 8f).
+ * io_uring backend.
  *
  * The runtime validation of the THIRD completion backend (event_iouring.c): a
  * KlHttpServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
- * provider), served by the SAME completion driver (completion_driver.c) the IOCP and
+ * provider), served by the SAME completion driver (completion_core.c) the IOCP and
  * pollcomp backends drive — reused verbatim — hit by the sync KlHttpClient over loopback. It
  * proves the completion axis is genuinely platform-independent on a real, completion-native
  * kernel engine, and is the first production Linux completion backend (pollcomp is a test
@@ -80,7 +80,7 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* GET /bigfile — a >pipe-capacity file so the splice sendfile loops over multiple
- * file→pipe→socket chunks and exercises the short-splice-out re-submit path (8f-2). */
+ * file→pipe→socket chunks and exercises the short-splice-out re-submit path. */
 static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_BIGFILE_PATH, O_RDONLY);
@@ -102,7 +102,7 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
- * outbound buffer fills and the io_uring loop must flush it as overlapped sends (8g-1) rather
+ * outbound buffer fills and the io_uring loop must flush it as overlapped sends rather
  * than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
@@ -262,7 +262,7 @@ static int resilience_ok(KlAllocator *alloc, KlHttpClientConfig *ccfg) {
 
 static KlHttpServer g_srv;
 
-/* Async / long-lived streaming over the completion loop (Phase 8g): begin a stream and
+/* Async / long-lived streaming over the completion loop: begin a stream and
  * write the first chunk during dispatch, then SUSPEND on a one-shot timer. The timer fires
  * on the loop thread, writes the second chunk, ends the stream, and resumes — so the body is
  * produced across multiple event-loop ticks, not synchronously in the handler. Verifies the
@@ -278,7 +278,7 @@ static void astream_resume(KlAsyncOp *op, void *ud) {
     (void)op;
     AsyncStreamCtx *a = ud;
     /* On a completion loop the accepted socket is blocking, so each stream write flushes
-     * inline (through the 8g-0 drain); the second chunk + terminator go out here, and the
+     * inline (through the drain); the second chunk + terminator go out here, and the
      * driver closes the connection once the resume returns. */
     a->write_fn(a->wctx, "chunk-two", 9);
     kl_http_response_end_stream(a->res);
@@ -303,12 +303,12 @@ static void handle_astream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_timer_add(&g_srv.ev, 20, astream_timer, a);   /* resume after 20 ms */
 }
 
-/* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
+/* Head-of-line: a slow client requests the big stream and stalls (tiny receive window,
  * no reads). The server's outbound buffer fills and it must post overlapped sends and move on
  * — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a *second*,
  * normal request to completion while the first is stalled, then drain the first fully and
- * verify every byte of the 256 KiB stream arrived (dechunked). Before 8g-1 comp_send_stream
- * spin-flushed the blocked socket and starved the second client. */
+ * verify every byte of the 256 KiB stream arrived (dechunked). A spin-flush of the blocked
+ * socket would starve the second client. */
 static size_t dechunk_body_len(const char *buf, size_t n) {
     const char *end = buf + n;
     const char *p = NULL;
@@ -490,7 +490,7 @@ int main(void) {
     }
     close(wfd);
 
-    /* A >pipe-capacity file for the multi-chunk splice path (8f-2). */
+    /* A >pipe-capacity file for the multi-chunk splice path. */
     int bfd = open(SMOKE_BIGFILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     int bigfile_ok = (bfd >= 0);
     for (int w = 0; bigfile_ok && w < SMOKE_BIGFILE_LEN; ) {
@@ -570,7 +570,7 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
-    /* Large file → multi-chunk splice sendfile + short-splice-out re-submit (8f-2). */
+    /* Large file → multi-chunk splice sendfile + short-splice-out re-submit. */
     int bigfile_dl_ok = 0;
     if (ok && post_ok && file_ok) {
         KlHttpClientResponse resp;
@@ -600,7 +600,7 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
-    /* Async / long-lived streaming over completion (8g): body produced across ticks. */
+    /* Async / long-lived streaming over completion: body produced across ticks. */
     int astream_ok = 0;
     if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok) {
         KlHttpClientResponse resp;
@@ -615,7 +615,7 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
-    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+    /* Overlapped streaming flush — a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = 0;
     if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok)

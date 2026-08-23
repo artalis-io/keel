@@ -1,5 +1,5 @@
 /*
- * test_read_flow_control.c — Phase 1 read-side body flow control (kl_http_request_pause_body /
+ * test_read_flow_control.c — read-side body flow control (kl_http_request_pause_body /
  * kl_http_request_resume_body).
  *
  * A custom body reader pauses after the first chunk and schedules an async resume on a timer.
@@ -7,7 +7,7 @@
  * first half (pause), then continue after the timer resumes (READ re-armed / recv re-posted).
  * Verifies: no data lost, on_complete fires, and the pause actually took effect (reading stopped
  * until the timer resumed it). Model-independent — the same test runs over readiness here and
- * over the completion backends via the parity fixture (Phase 3).
+ * over the completion backends via the parity fixture.
  */
 #include "utest.h"
 #include <keel/keel.h>

@@ -1,5 +1,5 @@
 /*
- * s4_link_stubs.c — server-only link residuals for the S-4 EFI_TCP4 HTTP server.
+ * s4_link_stubs.c — server-only link residuals for the freestanding EFI_TCP4 HTTP server.
  *
  * u1_link_stubs.c covers the CLIENT residuals (the connect/recv/send seam fallbacks,
  * the event/completion builtins, and the vendored-llhttp abort/fprintf/__chkstk). The
@@ -15,7 +15,7 @@
  *   - _fltused: the PE/COFF floating-point marker the backend emits for http_connection.c's
  *     access-log double. The CRT/EDK2 supplies it on a real target; here a plain int.
  *
- * A later phase (S-6 file responses / S-7 teardown) can promote any of these to real
+ * Later work (file responses / teardown) can promote any of these to real
  * EFI implementations; for the plaintext GET / -> 200 boot they are inert.
  */
 
@@ -28,9 +28,9 @@ int kl_sockdef_set_tcp_nodelay(KlSocketHandle f, int on) { (void)f; (void)on; re
 int kl_sockdef_set_cork(KlSocketHandle f, int on) { (void)f; (void)on; return -1; }
 int kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f; (void)a; return -1; }
 int kl_sockdef_listen(KlSocketHandle f, int backlog) { (void)f; (void)backlog; return -1; }
-/* kl_sockdef_accept moved to u1_link_stubs.c: event_efi.c (the shared completion provider)
+/* kl_sockdef_accept is defined in u1_link_stubs.c: event_efi.c (the shared completion provider)
  * references kl_sock_accept in el_drain, so the fail-closed default is a CLIENT residual too —
- * not a server-only one — else U-3/U-7 (which link only u1_link_stubs.c) fail to link. */
+ * not a server-only one — else the client self-tests (which link only u1_link_stubs.c) fail to link. */
 ssize_t kl_sockdef_writev(KlSocketHandle f, const KlIoVec *iov, int iovcnt) {
     (void)f; (void)iov; (void)iovcnt; return -1;
 }
@@ -44,7 +44,7 @@ int  kl_plat_file_pread(int fd, void *buf, size_t count, long long offset) {
 }
 void kl_plat_file_close(int fd) { (void)fd; }
 
-/* ── stop-wakeup self-pipe hook (S-7) — never reached on a freestanding EFI server ──
+/* ── stop-wakeup self-pipe hook — never reached on a freestanding EFI server ──
  * kl_http_server_free's self-pipe teardown references kl_plat_wakeup_close, but a freestanding
  * server has no self-pipe (stop_wake_rd stays KL_INVALID_SOCKET — the wakeup init is
  * #ifndef KEEL_FREESTANDING), so the block is skipped and this stub is never called. It

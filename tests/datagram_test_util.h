@@ -1,8 +1,8 @@
 /*
- * datagram_test_util.h — shared helpers for the KlDatagram migration tests/smokes (D2).
+ * datagram_test_util.h — shared helpers for the KlDatagram tests and smokes.
  *
  * Exercises the PUBLIC lifecycle — kl_datagram_close_cancel/close_begin -> drive the loop until CLOSED ->
- * kl_datagram_free — instead of the internal kl_datagram_teardown escape hatch, so the migrated consumers
+ * kl_datagram_free — instead of the internal kl_datagram_teardown escape hatch, so consumers
  * prove the canonical public teardown contract on both readiness and completion backends.
  */
 #ifndef KEEL_TESTS_DATAGRAM_TEST_UTIL_H

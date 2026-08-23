@@ -1,7 +1,7 @@
 /*
- * lwip_raw_testclient.c — TEST-ONLY raw-API TCP client for the Phase 9 lwIP-raw tests.
+ * lwip_raw_testclient.c — TEST-ONLY raw-API TCP client for the lwIP-raw completion tests.
  *
- * Moved out of the production glue (lwip_raw_glue.c) in Stage A so no test-client state lives
+ * Lives outside the production glue (lwip_raw_glue.c) so no test-client state lives
  * in the shipping backend. Compiled ONLY into the test binaries. Includes lwIP's NO_SYS=1 raw
  * headers directly (like the glue) — a separate TU from the KEEL-header-only backend, so the
  * lwIP/host header seam is preserved. It creates its own client PCBs (tcp_connect) and never
@@ -23,7 +23,7 @@
 #include <string.h>
 #include <stdint.h>   /* intptr_t (slot index carried in tcp_arg) */
 
-/* ── accumulating client (P9-2/P9-3) ────────────────────────────────────────── */
+/* ── accumulating client (server roundtrips + byte-exact body checks) ────────── */
 static unsigned char *g_cli_buf;    /* heap accumulator (NUL-terminated for strstr) */
 static size_t g_cli_cap;
 static size_t g_cli_len;
@@ -192,7 +192,7 @@ size_t kl_lwr_client_body_peek(size_t off, unsigned char *dst, size_t cap) {
     return n;
 }
 
-/* ── lifetime client (P9-4) ────────────────────────────────────────────────── */
+/* ── lifetime client (close-cancel token lifetime) ──────────────────────────── */
 enum { KLW_MODE_FULL = 0, KLW_MODE_PARTIAL_ABORT = 1, KLW_MODE_PARTIAL_CLOSE = 2 };
 
 static struct tcp_pcb *g_lc_pcb;
@@ -294,7 +294,7 @@ int    kl_lwr_lc_completed(void) { return g_lc_completed; }
 size_t kl_lwr_lc_recv(void)      { return g_lc_recv; }
 void   kl_lwr_lc_reset_counter(void) { g_lc_completed = 0; }
 
-/* ── multi-connection client (Stage A concurrency tests) ──────────────────────
+/* ── multi-connection client (concurrency tests) ──────────────────────────────
  * Each slot owns an independent client pcb + response accumulator. The pcb's tcp_arg carries
  * the slot index so the shared callbacks route to the right slot. */
 typedef struct {

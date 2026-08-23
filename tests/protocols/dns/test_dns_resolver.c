@@ -2,7 +2,7 @@
 #include <keel/clock.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
-#include <keel/datagram.h>          /* D2: the fake nameserver + spoofer are bound KlDatagrams now */
+#include <keel/datagram.h>          /* the fake nameserver + spoofer are bound KlDatagrams */
 #include <keel/datagram_detail.h>   /* stack-allocate KlDatagram */
 #include "datagram_test_util.h"     /* kl_dg_close_free — PUBLIC close/drive/free lifecycle */
 #include <keel/event_ctx.h>
@@ -14,7 +14,7 @@
 #include <errno.h>
 #include "net_compat.h"
 
-/* D-DNS-3 send-backpressure tests use a socket provider that wraps the built-in POSIX provider and can
+/* The send-backpressure tests use a socket provider that wraps the built-in POSIX provider and can
  * force datagram sends to WOULD_BLOCK on demand (real fds so the readiness loop still polls writability). */
 #include "socket.h"       /* KlSocketProvider / KlDatagramOps / kl_socket_provider_posix */
 #include "event_caps.h"   /* kl_event_caps — skip the readiness-only gate on completion backends */
@@ -96,14 +96,14 @@ static uint8_t g_last_q[128];    /* last query's question-section bytes */
 static size_t g_last_q_len;
 static int g_last_arcount;       /* last query's ARCOUNT (1 = EDNS0 OPT present) */
 static char g_last_qname[256];   /* last query's decoded name (lowercased) */
-/* Step 6.3 conformance knobs (see the section at the bottom): */
+/* Resolver conformance knobs (see the section at the bottom): */
 static int    g_octet_from_name; /* A record's 4th octet = the query name's first char (lowercased) —
                                   * gives DISTINGUISHABLE answers for the concurrent-resolution demux test */
 static int    g_wrong_source;    /* two-phase src-filter proof: send ONLY a POISONED answer from
                                   * g_spoof_sock (a non-nameserver source) + STASH the legit response +
                                   * the resolver's dest for the test to release later. No auto-reply. */
 static KlDatagram *g_spoof_sock; /* the wrong-source socket (bound to a different ephemeral port) */
-static uint8_t    g_stash_resp[2][512]; /* stashed legit responses (A + AAAA), released in phase 2 */
+static uint8_t    g_stash_resp[2][512]; /* stashed legit responses (A + AAAA), released in the second phase */
 static size_t     g_stash_len[2];
 static int        g_stash_n;
 static KlSockAddr g_stash_dest;         /* the resolver's addr:port (reply destination) */
@@ -281,7 +281,7 @@ static void mock_ns(void *ud, const void *data, size_t len,
     }
     /* Two-phase wrong-source proof: send ONLY a POISONED copy (corrupt the A answer's last octet) FROM
      * a socket that is NOT the configured nameserver, and STASH the legit response + the resolver's
-     * dest so the test can release it from the real nameserver socket in phase 2. No legit reply now —
+     * dest so the test can release it from the real nameserver socket in the second phase. No legit reply now —
      * so if the resolver's src (address+port) gate were broken, the poison alone would (wrongly)
      * complete the resolution; a working gate leaves it PENDING until the stashed reply is released. */
     if (g_wrong_source && g_spoof_sock && n <= 512) {
@@ -294,13 +294,13 @@ static void mock_ns(void *ud, const void *data, size_t len,
             g_poison_sent++;
         else
             g_poison_fail++;                    /* a send failure would falsely leave the resolver pending */
-        if (g_stash_n < 2) {                    /* stash the legit A + AAAA responses for phase 2 */
+        if (g_stash_n < 2) {                    /* stash the legit A + AAAA responses for the second phase */
             memcpy(g_stash_resp[g_stash_n], resp, n);
             g_stash_len[g_stash_n] = n;
             g_stash_n++;
         }
         g_stash_dest = *src;
-        return;                                 /* withhold the legit reply until phase 2 */
+        return;                                 /* withhold the legit reply until the second phase */
     }
     KlDatagramMessage rm = { .data = resp, .len = (size_t)n, .peer = src, .tos = -1 };
     (void)kl_datagram_send(s, &rm);
@@ -472,12 +472,12 @@ static void pump(KlEventCtx *ctx, int *flag, int ticks) {
 }
 
 /* Internal test hook (not in the public header): create a resolver with an explicit outbound-slot count,
- * so the D-DNS-3 tests can force KL_DATAGRAM_WOULD_BLOCK deterministically (send_slots=1). Production uses
+ * so the send-backpressure tests can force KL_DATAGRAM_WOULD_BLOCK deterministically (send_slots=1). Production uses
  * kl_dns_resolver_create (default slots). */
 extern KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg,
                                                 int send_slots);
 
-/* Same as make_resolver_cfg but with an explicit outbound-slot count (the internal D-DNS-3 test hook). */
+/* Same as make_resolver_cfg but with an explicit outbound-slot count (the internal send-backpressure test hook). */
 static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlDatagram *ns,
                                        KlDnsResolverConfig *dc, int send_slots) {
     KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
@@ -845,7 +845,7 @@ UTEST(dns, disable_0x20_lowercase_and_resolves) {
 }
 
 UTEST(dns, transaction_ids_not_sequential) {
-    /* IDs must not be the old predictable 1,2,3 counter. */
+    /* IDs must not be a predictable 1,2,3 counter. */
     reset_dns();
     g_answer_a = 1;
     KlAllocator alloc = kl_allocator_default();
@@ -862,7 +862,7 @@ UTEST(dns, transaction_ids_not_sequential) {
         ASSERT_EQ(1, g_done);
     }
     ASSERT_TRUE(g_seen_n >= 3);
-    /* The old counter would have produced exactly 1,2,3. */
+    /* A predictable counter would have produced exactly 1,2,3. */
     ASSERT_FALSE(g_seen_ids[0] == 1 && g_seen_ids[1] == 2 && g_seen_ids[2] == 3);
 
     r->destroy(r);
@@ -870,7 +870,7 @@ UTEST(dns, transaction_ids_not_sequential) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── Phase 1a: /etc/hosts + EDNS0 ────────────────────────────────────── */
+/* ── /etc/hosts + EDNS0 ────────────────────────────────────── */
 
 static const char *write_hosts(const char *content) {
     static char path[64];
@@ -1002,7 +1002,7 @@ UTEST(dns, edns0_disabled) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── Phase 1b-i: multiple nameservers + failover ─────────────────────── */
+/* ── multiple nameservers + failover ─────────────────────── */
 
 UTEST(dns, nameserver_failover) {
     /* Two nameservers via a resolv.conf fixture: the first is silent, so the
@@ -1085,7 +1085,7 @@ UTEST(dns, all_nameservers_silent_times_out) {
     unlink(rcpath);
 }
 
-/* ── Phase 1b-ii: search domains + ndots ─────────────────────────────── */
+/* ── search domains + ndots ─────────────────────────────── */
 
 /* Build a resolver from a resolv.conf fixture with one mock nameserver. */
 static KlResolver *resolver_with_search(KlEventCtx *ctx, KlDatagram *ns,
@@ -1290,7 +1290,7 @@ UTEST(dns, e2e_vs_getaddrinfo) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── Phase 2b: dual-family (A + AAAA concurrent) + resolution delay ────── */
+/* ── dual-family (A + AAAA concurrent) + resolution delay ────── */
 
 UTEST(dns, dual_family_returns_both) {
     /* Both families answer → the result carries both, interleaved (A first by
@@ -1576,9 +1576,9 @@ UTEST(dns, cookie_client_mismatch_ignored) {
  * and run on both readiness and completion backends. */
 
 /* Two-phase proof that a valid-content response from a NON-nameserver socket is rejected at the src
- * (address+port) gate — independent of cross-socket scheduling. Phase 1: only the poisoned answer is
+ * (address+port) gate — independent of cross-socket scheduling. First phase: only the poisoned answer is
  * ever sent (from the spoofer's port); pump and assert the resolution stays PENDING (a broken gate
- * would complete it here with 10.1.2.238). Phase 2: release the withheld legit responses from the real
+ * would complete it here with 10.1.2.238). Second phase: release the withheld legit responses from the real
  * nameserver socket; pump and assert completion with 10.1.2.3. (A single-phase send of both would not
  * prove the gate: if the legit arrived first it would retire the txn and the poison would be dropped
  * as an unknown id regardless of the src check.) */
@@ -1589,7 +1589,7 @@ UTEST(dns, wrong_source_response_ignored) {
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     KlDatagram ns;
-    KlResolver *r = make_resolver(&ctx, &ns, 3000, 1);   /* long timeout, 1 attempt: no retransmit in phase 1 */
+    KlResolver *r = make_resolver(&ctx, &ns, 3000, 1);   /* long timeout, 1 attempt: no retransmit in the first phase */
     ASSERT_TRUE(r != NULL);
 
     KlDatagram spoof;
@@ -1602,7 +1602,7 @@ UTEST(dns, wrong_source_response_ignored) {
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
 
-    /* Phase 1: only the wrong-source poison is ever in flight. Pump until BOTH queries (A+AAAA) have
+    /* First phase: only the wrong-source poison is ever in flight. Pump until BOTH queries (A+AAAA) have
      * been seen (both legit responses stashed) AND both poisons were SUCCESSFULLY submitted, then a
      * margin so each poison round-trips to the resolver and is dropped. Track submissions separately
      * from stashing: a poison SEND failure (not a source rejection) would otherwise leave the resolver
@@ -1616,7 +1616,7 @@ UTEST(dns, wrong_source_response_ignored) {
     for (int i = 0; i < 20; i++) kl_event_ctx_run(&ctx, 16, 2);   /* poison round-trip + drop */
     ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate — still pending */
 
-    /* Phase 2: release the legit responses from the configured nameserver socket (correct src). */
+    /* Second phase: release the legit responses from the configured nameserver socket (correct src). */
     for (int i = 0; i < g_stash_n; i++) {
         KlDatagramMessage sm = { .data = g_stash_resp[i], .len = g_stash_len[i],
                                  .peer = &g_stash_dest, .tos = -1 };
@@ -1629,7 +1629,7 @@ UTEST(dns, wrong_source_response_ignored) {
     ASSERT_TRUE(g_res.naddrs >= 1);
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, g_res.addrs[0].u.ip, ip, sizeof(ip));
-    ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer, released only in phase 2 */
+    ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer, released only in the second phase */
 
     g_spoof_sock = NULL;
     kl_dg_close_free(&ctx, &spoof);
@@ -1682,13 +1682,13 @@ UTEST(dns, concurrent_distinct_resolutions) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ── D-DNS-3: transient send backpressure (WOULD_BLOCK) state machine ─────────────────────────────
+/* ── Transient send backpressure (WOULD_BLOCK) state machine ─────────────────────────────
  *
  * A gating socket provider wraps the built-in POSIX provider (real fds, so the readiness loop still
  * polls the socket for writability) and overrides ONLY the datagram send: when g_block is set, every
  * send returns EAGAIN so the fixed send slots fill and kl_datagram_send returns WOULD_BLOCK. Combined
  * with send_slots = 1, the SECOND leg of a resolve deterministically WOULD_BLOCKs → the frozen
- * send_pending / writable-retry / send-admission-guard machine (D-DNS-3) is exercised end to end.
+ * send_pending / writable-retry / send-admission-guard machine is exercised end to end.
  *
  * These are the two load-bearing tests from the freeze: (1) WOULD_BLOCK → writable edge → success, and
  * (2) no writable edge ever → guard fires → the resolve fails without hanging. Readiness is the

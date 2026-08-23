@@ -12,7 +12,7 @@
 /* ── H2 struct size sanity ───────────────────────────────────────── */
 
 UTEST(overflow, h2_stream_alloc_guard) {
-    /* h2.c:463 — verify SIZE_MAX / sizeof(KlHttp2ServerStream) is bounded */
+    /* h2 stream-alloc overflow guard — verify SIZE_MAX / sizeof(KlHttp2ServerStream) is bounded */
     ASSERT_TRUE(sizeof(KlHttp2ServerStream) > 0);
     size_t max_safe = SIZE_MAX / sizeof(KlHttp2ServerStream);
     ASSERT_TRUE(max_safe > 0);

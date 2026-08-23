@@ -1,5 +1,5 @@
 /*
- * smoke_iocp.c — end-to-end HTTP-over-IOCP roundtrip (PAL Phase 8a, 4b).
+ * smoke_iocp.c — end-to-end HTTP-over-IOCP roundtrip.
  *
  * The first real runtime validation of the IOCP completion connection driver:
  * a KlHttpServer running on the IOCP completion loop (BACKEND=iocp, the overlapped
@@ -42,7 +42,7 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* POST /echo — reads the request body via the buffer reader (READING_BODY over
- * IOCP) and echoes it back, exercising the completion body path (8b-1). */
+ * IOCP) and echoes it back, exercising the completion body path. */
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
@@ -51,7 +51,7 @@ static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-/* GET /file — serve a file body via kl_http_response_file (TransmitFile over IOCP, 8b-2).
+/* GET /file — serve a file body via kl_http_response_file (TransmitFile over IOCP).
  * Opens the pre-written temp file per request; the response owns and closes the fd. */
 static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -80,7 +80,7 @@ static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* GET /stream — a synchronous chunked stream produced during the handler
- * (KL_HTTP_BODY_STREAM over IOCP, 8b-3). */
+ * (KL_HTTP_BODY_STREAM over IOCP). */
 static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write = NULL;
@@ -92,7 +92,7 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
- * outbound buffer fills and the IOCP loop must flush it as overlapped WSASend chunks (8g-1)
+ * outbound buffer fills and the IOCP loop must flush it as overlapped WSASend chunks
  * rather than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
@@ -109,9 +109,9 @@ static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_response_end_stream(res);
 }
 
-/* UDP echo over the IOCP completion loop (8b-4c): a KlDatagram on the server's ctx
+/* UDP echo over the IOCP completion loop: a KlDatagram on the server's ctx
  * receives via WSARecvFrom completions and echoes each datagram back to its source
- * (synchronous sendto — overlapped UDP send is 8b-4d). */
+ * (synchronous sendto). */
 static KlDatagram g_udp;
 /* Set when a received datagram carried its local (destination) address — proves the IOCP
  * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
@@ -190,7 +190,7 @@ static int proxy_over_completion_ok(void) {
     return ok;
 }
 
-/* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
+/* Head-of-line: a slow client requests the big stream and stalls (tiny receive window,
  * no reads). The server's outbound buffer fills and it must post overlapped WSASend chunks and
  * move on — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a second,
  * normal request to completion while the first is stalled, then drain the first fully and
@@ -362,7 +362,7 @@ int main(void) {
         }
     }
 
-    /* POST /echo — exercise the request-body path (READING_BODY over IOCP, 8b-1). */
+    /* POST /echo — exercise the request-body path (READING_BODY over IOCP). */
     int post_ok = 0;
     if (ok) {
         KlHttpClientResponse resp;
@@ -382,7 +382,7 @@ int main(void) {
         }
     }
 
-    /* GET /file — exercise the file-response path (TransmitFile over IOCP, 8b-2). */
+    /* GET /file — exercise the file-response path (TransmitFile over IOCP). */
     int file_ok = 0;
     if (ok && post_ok) {
         KlHttpClientResponse resp;
@@ -402,8 +402,8 @@ int main(void) {
         }
     }
 
-    /* GET /stream — exercise the chunked/streaming path (KL_HTTP_BODY_STREAM over IOCP,
-     * 8b-3). The client dechunks; the body is the concatenated chunks. */
+    /* GET /stream — exercise the chunked/streaming path (KL_HTTP_BODY_STREAM over IOCP).
+     * The client dechunks; the body is the concatenated chunks. */
     int stream_ok = 0;
     if (ok && post_ok && file_ok) {
         KlHttpClientResponse resp;
@@ -447,7 +447,7 @@ int main(void) {
         }
     }
 
-    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+    /* Overlapped streaming flush — a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok) ? bigstream_no_hol_ok() : 0;
 

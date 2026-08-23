@@ -1,5 +1,5 @@
 /*
- * test_stream_transport.c — Phase 5: a non-HTTP TCP protocol built entirely on
+ * test_stream_transport.c — a non-HTTP TCP protocol built entirely on
  * Keel's public transport surface, proving a protocol author needs no HTTP
  * machinery and no internal APIs.
  *

@@ -1,12 +1,12 @@
 /*
- * smoke_pollcomp_client.c — async KlHttpClient CONNECT over a completion loop (LC-0 proof).
+ * smoke_pollcomp_client.c — async KlHttpClient CONNECT over a completion loop.
  *
  * The proof for the completion CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect):
  * an async KlHttpClient does GET / to a KlHttpServer, BOTH on the pollcomp completion axis, and the
  * client's connect is driven over the completion loop (kl_comp_post_connect → real
  * connect()+POLLOUT+SO_ERROR → KL_COMP_CONNECT → he_on_writable) rather than the readiness
- * WRITE-watcher shim. Before LC-0 the async client's connect only "worked by luck" on
- * pollcomp; this makes it correct by design (and mirrors the io_uring / IOCP backends).
+ * WRITE-watcher shim. Driving connect over the completion loop makes it correct by design
+ * — rather than "working by luck" — and mirrors the io_uring / IOCP backends.
  *
  * Topology: the server runs its own completion loop on a background thread; the async client
  * runs on a SEPARATE pollcomp KlEventCtx on the main thread, driven by kl_event_ctx_run

@@ -1,10 +1,10 @@
 /*
- * test_datagram_open.c — M0 provider-neutral datagram socket-preparation helper
- * (docs/datagram_consolidation_design.md §2 D-DNS-2).
+ * test_datagram_open.c — provider-neutral datagram socket-preparation helper
+ * (docs/archive/designs/datagram_consolidation_design.md §2).
  *
  * kl_datagram_open() reproduces the datagram socket create/configure/bind prep, minus the send/receive machine, and
  * hands the caller a prepared+bound fd plus the capture-option mask configure() enabled. This suite
- * proves what M0 owes:
+ * proves what the helper owes:
  *
  *   (1) PER-STEP FAILURE CLEANUP — a failure at any step (bad arg, no-datagram provider, partial vtable,
  *       bad bind address, socket(), set_nonblocking, bind) closes exactly the fd it created (no leak, no

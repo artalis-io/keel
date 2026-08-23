@@ -4,8 +4,7 @@
 /*
  * loopback_listener.h — a minimal accept-only loopback TCP listener for client tests.
  *
- * Shared test support (like mock_tls.h), extracted from the former
- * tests/test_tls_set_hostname_fail.c when it was split by client family (T-split). A
+ * Shared test support (like mock_tls.h) for client-family tests. A
  * background thread accepts and holds connections; with reply_http set it writes a canned
  * HTTP/1.1 200 to each accepted connection so a client that gets PAST the (identity) mock
  * TLS handshake would parse a success — the discriminator for fail-closed client behavior.

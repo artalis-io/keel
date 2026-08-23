@@ -1,6 +1,6 @@
 /*
  * freestanding_dns_harness.c — RUNTIME proof of the freestanding (UDP-only) DNS
- * resolver's truncation branch (6.4a-2 review, Medium).
+ * resolver's truncation branch.
  *
  * The freestanding build of src/protocols/dns/dns_resolver.c compiles the RFC 7766 TCP fallback
  * out; a truncated (TC) response must instead settle the leg EMPTY so the whole
@@ -13,8 +13,8 @@
  *
  * Built + run under ASan+UBSan+LSan by `make freestanding-dns-harness`. It links
  * the SAME freestanding TUs as the freestanding-dns archive (FREESTANDING_DNS_SRC)
- * + the F-5 host platform TU (kl_plat_random / kl_monotonic_ms / the fail-closed
- * sockdef+builtin stubs); the 4 datagram-path sockdef seams udp.c references (never
+ * + the host platform TU (kl_plat_random / kl_monotonic_ms / the fail-closed
+ * sockdef+builtin stubs); the 4 datagram-path sockdef seams the datagram machine references (never
  * called — the mock provider wins) are defined below, fail-closed.
  */
 #include <keel/clock.h>
@@ -270,7 +270,7 @@ int main(void) {
     return g_fail ? 1 : 0;
 }
 
-/* ── Datagram-path sockdef seams referenced by udp.c (never called — the mock
+/* ── Datagram-path sockdef seams referenced by the datagram machine (never called — the mock
  *    provider supplies the live datagram ops; these are fail-closed link fodder,
  *    mirroring the KEEL_FS_LINK_DGRAM stubs in freestanding_link_main.c). The
  *    stream sockdef seams (socket/connect/close/...) come from the host platform TU. */
