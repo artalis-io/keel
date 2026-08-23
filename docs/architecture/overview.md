@@ -35,8 +35,9 @@ three and touch no platform socket API or event engine directly.
     read pause/resume, graceful/abortive close). Contract: [stream_contract.md](../contracts/stream.md).
   - [`KlDatagram`](../../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
     message boundaries, source/local metadata). Contract: [datagram_contract.md](../contracts/datagram.md).
-    `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast) —
-    which API to use, and how their semantics intentionally differ (slot-budget vs byte-budget), is
+    Extended-UDP features (batching, GSO/GRO, multicast, per-packet TOS/ECN) are capabilities of
+    `KlDatagram` itself (`KL_DGRAM_CAP_*`); the earlier separate byte-budget UDP object was
+    consolidated into it and removed. The historical two-object rationale is archived in
     [datagram_vs_udp.md](../archive/designs/datagram_vs_udp.md).
 - **Engine axis** — readiness ([event.h](../../include/keel/event.h): register interest → wait →
   re-arm) and completion ([completion.h](../../src/completion.h): submit owned op → track → retire) are
@@ -56,7 +57,7 @@ network through `KlListener`/`KlStream`/`KlDatagram` and the socket/event abstra
 including a platform networking/event header or the raw completion seam, and never by calling an
 engine directly. A lower seam is used only when a missing semantic is documented and reviewed. This
 is invariant I10, enforced by `make check-tier1-boundary` (the complement of `check-sockaddr-neutral`).
-The gate is **default-deny**: every `src`/`parsers` TU is governed except an allowlisted `TIER1_INFRA`
+The gate is **default-deny**: every `src`/`src/protocols` TU is governed except an allowlisted `TIER1_INFRA`
 layer (event backends, socket providers, platform glue, the completion driver/adapters, the transport
 machines, and the run-loop/async-connect drivers `http_server.c` / `http_client_async.c`) — so a newly added
 protocol TU is covered automatically, and only infrastructure may include a backend header.
@@ -312,7 +313,7 @@ typedef enum {
 } KlHttpBodyMode;
 ```
 
-### Buffer mode (`kl_http_response_body`)
+### Buffer mode (`kl_http_response_body_borrow` / `kl_http_response_body_copy`)
 
 Headers and body are sent in a single `writev(2)` call — one syscall for the entire response. The response builder formats headers into a growable buffer, then `writev` sends `[header_iov, body_iov]` atomically.
 
@@ -443,15 +444,18 @@ KEEL provides a pluggable TLS vtable (`KlTls`) so users can bring any TLS backen
 
 ```c
 struct KlTls {
-    KlTlsResult (*handshake)(KlTls *self, int fd);
-    ssize_t     (*read)(KlTls *self, int fd, void *buf, size_t len);
-    ssize_t     (*write)(KlTls *self, int fd, const void *buf, size_t len);
-    KlTlsResult (*shutdown)(KlTls *self, int fd);
+    KlTlsResult (*handshake)(KlTls *self, KlSocketHandle fd);
+    kl_ssize_t  (*read)(KlTls *self, KlSocketHandle fd, void *buf, size_t len);
+    kl_ssize_t  (*write)(KlTls *self, KlSocketHandle fd, const void *buf, size_t len);
+    KlTlsResult (*shutdown)(KlTls *self, KlSocketHandle fd);
     size_t      (*pending)(KlTls *self);
     void        (*reset)(KlTls *self);
     void        (*destroy)(KlTls *self);
-    int         (*set_hostname)(KlTls *self, const char *hostname);  /* SNI, NULL = not supported */
     const char *(*alpn_protocol)(KlTls *self);                       /* NULL = not supported */
+    int         (*set_hostname)(KlTls *self, const char *hostname);  /* SNI, NULL = not supported */
+    int         (*peer_cert)(KlTls *self, KlPeerCert *out);          /* mTLS client cert, NULL = not supported */
+    /* optional completion-mode transport hooks (feed_input / drain_output / at_eof) —
+       NULL on readiness-only backends; see include/keel/tls.h */
 };
 ```
 

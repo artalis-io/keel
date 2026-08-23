@@ -17,7 +17,7 @@ server built entirely from what is described here.
 | Outbound backpressure | `KlDrain` (`kl_drain_init`/`_write`/`_flush`/`_pending`/`_data`/`_consume`/`_free`) | `drain.h` |
 | One-shot timers | `kl_timer_add`, `KlTimerFn` | `timer.h` |
 | Connection suspension | `KlAsyncOp` (`kl_async_suspend`/`_complete`/`_cancel`) | `async.h` |
-| Datagram dispatch (precedent) | `KlUdpServer` | `udp_server.h` |
+| Datagram primitive | `KlDatagram` (`kl_datagram_socket_init` / `kl_datagram_connect` / `kl_datagram_send` / `kl_datagram_recv_start` / `kl_datagram_close_begin`) | `datagram.h` (opt-in layout `datagram_detail.h`) |
 
 The socket ops are reached through the provider on the context —
 `ctx->sockets` (or `kl_socket_provider_posix()` when it is NULL) —

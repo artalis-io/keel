@@ -2,8 +2,8 @@
 
 Authoritative contract for `KlAsyncOp` — the primitive that suspends a connection
 while a handler waits on out-of-band work (a thread-pool job, a timer, an async
-resolve, a completion from another fd). Companion to `docs/streaming_contract.md`
-and `docs/capability_matrix.md`; identical across the readiness and completion
+resolve, a completion from another fd). Companion to `docs/contracts/streaming.md`
+and `docs/operations/capability_matrix.md`; identical across the readiness and completion
 axes (only the resume mechanism differs).
 
 ## States

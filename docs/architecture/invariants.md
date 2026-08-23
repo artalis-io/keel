@@ -121,7 +121,7 @@ nested / overflow / depth-0), demonstrated to fail against the pre-fix behavior.
   for raw-`target` classes, single-shot + the class guard makes the freed-then-referenced sequence
   unreachable rather than merely survivable.
 - **Anchor:** [completion.h](../../src/completion.h) `KlCompletionEvent.life` + `retain_life` (the
-  borrowed-vs-transferred rule), released *iff* `!retain_life` at all three sites —
+  borrowed-vs-transferred rule), released *iff* `!retain_life` at both sites —
   [completion_core.c](../../src/completion_core.c), [datagram.c](../../src/datagram.c).
 - **Enforced by:** ASan/UBSan/LSan over the completion driver (`make smoke-pollcomp-asan`,
   container `make smoke-iouring-asan`); the R3 lifetime audit builds the full target table.
@@ -135,7 +135,8 @@ flags — never protocol-state enums.
 
 - **Why:** protocol knowledge in a backend duplicates decisions per engine and couples the axes.
 - **Anchor:** completion ops are neutral by-value descriptors (`KlDgramSendOp`/`KlDgramRecvOp` in
-  [completion.h](../../src/completion.h)); the address seam is [socket.h](../../src/socket.h) (`KlSockAddr`).
+  [completion_io.h](../../src/completion_io.h), surfaced via completion.h); the address seam is
+  [socket.h](../../src/socket.h) (`KlSockAddr`).
 - **Enforced by:** `make check-sockaddr-neutral` ([Makefile](../../Makefile)) + the protocol-header grep
   in [keel_axis_audit.md](../archive/audits/keel_axis_audit.md) Goal 4. (R4 extends this to a protocol-state check.)
 
@@ -193,17 +194,17 @@ seam only when a missing semantic is documented and reviewed.
   above the transport, and runs over every backend unchanged.
 - **Anchor:** `make check-tier1-boundary` ([Makefile](../../Makefile)) — the complement of
   `make check-sockaddr-neutral` (host socket-*address* types, I6). It is **default-deny**: *every*
-  `src/*.c` + `parsers/*.c` is governed (no platform networking/event header, no `completion.h`, no
-  `io_engine.h`) **except** the allowlisted `TIER1_INFRA` — the engine/provider/bridge layer (event
+  `src/*.c` + `src/protocols/*/*.c` is governed (no platform networking/event header, no `completion.h`
+  / `completion_io.h` / `completion_http.h`) **except** the allowlisted `TIER1_INFRA` — the engine/provider/bridge layer (event
   backends, socket providers, platform glue, the completion driver/adapters, the transport state
   machines, and the run-loop / async-connect drivers). This is the **mechanical classification rule**:
   a newly added protocol TU is governed automatically, so the whole protocol layer — including the
-  pure-byte TUs `http_router.c`/`http_cors.c`/`http1_chunked.c`/`body_reader*.c`/`parsers/*.c` — is covered, not just
+  pure-byte TUs `http_router.c`/`http_cors.c`/`http1_chunked.c`/`http_body_reader_*.c`/`http1_parser_llhttp.c` — is covered, not just
   the network-facing subset. Include-based, so robust against the `WSA*`/overlapped mentions that
   appear only in explanatory comments (`http_connection.c`/`http_response.c`/`http_client_sync.c`).
 - **`TIER1_INFRA` allowlist (with reason):** the bridge layer legitimately includes these headers.
   Notably `http_server.c` and `http_client_async.c` sit there because they drive the run loop / async connect
-  via the Keel completion **tick** (`io_engine.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
+  via the Keel completion **tick** (`completion_io.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
   orchestration seam, not a backend internal. A new infrastructure TU that needs the headers is added
   to `TIER1_INFRA` with a reason; nothing else may include them.
 - **Address exceptions (separate, I6):** `dns_resolver.c` (the freestanding DNS-over-TCP fallback)

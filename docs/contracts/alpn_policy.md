@@ -2,14 +2,14 @@
 
 How Keel negotiates the application protocol (HTTP/2 vs HTTP/1.1) over TLS, for
 both the server and the client, and how the two protocols converge on one shared
-REST layer. Authoritative; paired with `docs/capability_matrix.md`.
+REST layer. Authoritative; paired with `docs/operations/capability_matrix.md`.
 
 ## Architecture
 
 ```text
 TCP → TLS handshake → ALPN result
-        h2        → HTTP/2 adapter (h2.c + a KlHttp2ServerSession, e.g. nghttp2)
-        http/1.1  → HTTP/1.1 adapter (http_connection.c + the llhttp parser)
+        h2        → HTTP/2 adapter (src/protocols/http2/http2_server.c + a KlHttp2ServerSession, e.g. nghttp2)
+        http/1.1  → HTTP/1.1 adapter (src/protocols/http/http_connection.c + the llhttp parser)
         (none)    → HTTP/1.1 adapter
    → one KlHttpRequest / KlHttpResponse
    → one KlHttpRouter (kl_http_router_match)
@@ -19,7 +19,7 @@ TCP → TLS handshake → ALPN result
 
 Protocol selection happens **after** the TLS handshake completes and **before**
 any HTTP parser or protocol engine sees application bytes
-(`kl_http_conn_on_handshake`, `src/http_connection.c`). The selected protocol is immutable
+(`kl_http_conn_on_handshake`, `src/protocols/http/http_connection.c`). The selected protocol is immutable
 for the life of the connection; there is no post-negotiation protocol switch.
 
 ## Server policy

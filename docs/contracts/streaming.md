@@ -2,13 +2,14 @@
 
 Authoritative semantics for request-body and response streaming, **identical across the readiness
 and completion axes** (the observable contract is the same; only the internal mechanism differs).
-Companion to `docs/core_completion_plan.md`. Where a behavior is already enforced in code, the
-enforcing symbol is named.
+Companion to `docs/archive/designs/core_completion_plan.md`. Where a behavior is already enforced in
+code, the enforcing symbol is named.
 
 ## Write side (response streaming / outbound)
 
-Producers (`kl_http_response_stream_write`, SSE `kl_http_sse_write`, chunked, WebSocket server frames, a
-handler writing a body) write into the per-connection **outbound buffer** (`KlDrain`), never a
+Producers (the `KlHttpResponseWriteFn` returned by `kl_http_response_begin_stream`, SSE
+`kl_http_sse_event`, chunked, WebSocket server frames, a handler writing a body) write into the
+per-connection **outbound buffer** (`KlDrain`), never a
 socket or event engine.
 
 **Ownership — bytes are copied immediately.** A streaming write copies the supplied bytes before
@@ -43,7 +44,7 @@ chunks. `on_data` returns `0` to continue or `-1` to **abort** (→ 413 / connec
   still deliver ≤1 more chunk (bounded). A paused conn holds no unbounded buffer: unread bytes stay
   in the kernel socket buffer, and the parser retains only its partial frame.
 - *resume* — `kl_http_request_resume_body(req)`: re-enable reading. Idempotent (a no-op unless a pause is
-  in effect). Readiness re-arms READ; completion posts a fresh recv (`kl_io_engine_post_read`).
+  in effect). Readiness re-arms READ; completion posts a fresh recv (`kl_http_comp_post_read`).
 - *abort* — `on_data` → -1.
 
 A conn that stays paused is **not** exempt from the idle-read timeout: an indefinitely paused
