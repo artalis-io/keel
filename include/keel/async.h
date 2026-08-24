@@ -7,7 +7,7 @@
 typedef struct KlHttpServer KlHttpServer;
 typedef struct KlHttpConn KlHttpConn;
 
-/* ── KlAsyncOp — connection suspension ────────────────────────────── */
+/* ── KlAsyncOp: connection suspension ────────────────────────────── */
 
 typedef struct KlAsyncOp KlAsyncOp;
 
@@ -28,13 +28,13 @@ typedef void (*KlAsyncFn)(KlAsyncOp *op, void *user_data);
  *
  * **Exactly-one-terminal contract.** An op is *pending* from kl_async_suspend()
  * until exactly one terminal transition retires it:
- *   - resume  — kl_async_complete() (fires on_resume), or
- *   - cancel  — kl_async_cancel()   (fires on_cancel).
+ *   - resume:  kl_async_complete() (fires on_resume), or
+ *   - cancel:  kl_async_cancel()   (fires on_cancel).
  * on_deadline is a *trigger*, not a terminal: the deadline callback must resolve
  * the op by calling kl_async_complete() (deadline-as-success, e.g. sleep) or
  * kl_async_cancel() (deadline-as-failure, e.g. HTTP timeout). It fires at most
- * once. All three entry points are idempotent — a second call on an
- * already-retired op is a no-op — so a cancel racing a completion (or a double
+ * once. All three entry points are idempotent (a second call on an
+ * already-retired op is a no-op), so a cancel racing a completion (or a double
  * completion) can never double-fire a callback, double-release, or use-after-free.
  */
 struct KlAsyncOp {
@@ -83,7 +83,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
  *
  * The abnormal-termination terminal: fires op->on_cancel (so the caller can free
  * its async context), removes the op from the active list, and clears the
- * connection's async_op. Does NOT re-arm the fd or drive the state machine — the
+ * connection's async_op. Does NOT re-arm the fd or drive the state machine; the
  * caller is expected to be tearing the connection down. Idempotent: a no-op if
  * the op was already retired by kl_async_complete() or a prior cancel.
  *

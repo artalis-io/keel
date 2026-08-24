@@ -5,7 +5,7 @@
 
 /**
  * @file clock.h
- * @brief Generic monotonic clock — substrate primitive.
+ * @brief Generic monotonic clock: substrate primitive.
  *
  * A process-monotonic millisecond clock used for timeouts, idle sweeps, and
  * keep-alive accounting across every layer (event loop, timers, resolver cache,

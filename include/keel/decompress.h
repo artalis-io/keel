@@ -62,7 +62,7 @@ struct KlDecompress {
 /**
  * @brief Factory creates a KlDecompress session from the shared context.
  *
- * Shares KlCompressCtx with compression — same algorithm configuration.
+ * Shares KlCompressCtx with compression: same algorithm configuration.
  *
  * @param ctx   Shared compression context (algorithm, level).
  * @param alloc Allocator for session resources.
@@ -77,7 +77,7 @@ typedef KlDecompress *(*KlDecompressFactory)(KlCompressCtx *ctx,
  * Shares KlCompressCtx with KlCompressConfig for algorithm configuration.
  */
 typedef struct KlDecompressConfig {
-    KlCompressCtx       *ctx;         /**< Shared context — user-owned */
+    KlCompressCtx       *ctx;         /**< Shared context: user-owned */
     KlDecompressFactory  factory;     /**< Creates per-operation KlDecompress */
     void (*ctx_destroy)(KlCompressCtx *ctx);  /**< Optional cleanup */
 } KlDecompressConfig;

@@ -2,10 +2,10 @@
 #define KEEL_DATAGRAM_DETAIL_H
 
 /*
- * datagram_detail.h — the OPT-IN, UNSTABLE layout of KlDatagram.
+ * datagram_detail.h: the OPT-IN, UNSTABLE layout of KlDatagram.
  *
  * Include this ONLY to stack-/embed-allocate a KlDatagram by value; you then opt into the layout and
- * MUST recompile when it changes (it is NOT ABI-stable — see the <keel/datagram.h> banner). A consumer
+ * MUST recompile when it changes (it is NOT ABI-stable; see the <keel/datagram.h> banner). A consumer
  * that only holds a `KlDatagram *` created behind the API never needs this header.
  *
  * The heavy machine state (KlDgramCore + its slots/send/recv/close/life machines) is heap-allocated
@@ -23,7 +23,7 @@ extern "C" {
 
 struct KlEventCtx;
 struct KlSocketProvider;
-struct KlDgramCore;   /* opaque — the full type is src-only (src/datagram_core.h); init heap-allocates it */
+struct KlDgramCore;   /* opaque: the full type is src-only (src/datagram_core.h); init heap-allocates it */
 
 struct KlDatagram {
     struct KlDgramCore     *core;      /* heap; allocated in init from cfg->alloc, freed in free (after CLOSED) */
@@ -36,7 +36,7 @@ struct KlDatagram {
     /* batch/GRO receive (facade-only). `on_recv_segments` (+ its ud), when set, receives a
      * whole GRO-coalesced buffer instead of the default per-segment split; `recv_seg_size` is the
      * yield adapter's scratch (the coalesced segment size for the current whole-buffer delivery, 0 for
-     * a plain/split datagram) — read by the deliver adapter to route on_recv vs on_recv_segments. */
+     * a plain/split datagram): read by the deliver adapter to route on_recv vs on_recv_segments. */
     void (*on_recv_segments)(void *ud, const void *data, size_t len, size_t segment_size,
                              const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
     void                   *recv_seg_ud;
@@ -48,7 +48,7 @@ struct KlDatagram {
     uint64_t                truncated; /* count of delivered captured-prefix (KL_DGRAM_TRUNCATED) datagrams */
     uint64_t                dropped;   /* RESERVED: 0 until the recv machine surfaces overflow/contract drops */
     int                     completion;/* 1 = completion mode / 0 = readiness mode */
-    int                     registered;/* completion: the fd is registered with the loop (kl_event_add) —
+    int                     registered;/* completion: the fd is registered with the loop (kl_event_add):
                                         * the generic fd↔loop association step: inert on
                                         * io_uring/pollcomp, CreateIoCompletionPort on IOCP */
     int                     read_armed;/* readiness: a watcher is installed on `fd` */

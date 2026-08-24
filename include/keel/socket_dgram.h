@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /*
- * socket_dgram.h — the datagram data-plane a KlSocketProvider optionally provides.
+ * socket_dgram.h: the datagram data-plane a KlSocketProvider optionally provides.
  *
  * The socket provider's stream vtable (keel/socket.h) is a small, uniform surface
  * (flat send/recv + lifecycle). The datagram data-plane is larger and more
@@ -17,19 +17,19 @@
  * the provider (KlSocketProvider.dgram; present iff caps & KL_SOCK_CAP_DATAGRAM).
  *
  * Folding it onto the provider means ONE runtime object owns all of a stack's
- * socket I/O — stream and datagram — so a foreign stack (lwIP, …) supplies a single
+ * socket I/O, stream and datagram, so a foreign stack (lwIP, …) supplies a single
  * provider with no separately-linked datagram artifact to keep in sync (axis-audit
- * A2). Every op takes the provider ctx + a KlSocketHandle and speaks KlSockAddr —
- * never the datagram core — so the provider holds no datagram machine state; the send-queue walk,
+ * A2). Every op takes the provider ctx + a KlSocketHandle and speaks KlSockAddr,
+ * never the datagram core, so the provider holds no datagram machine state; the send-queue walk,
  * delivery, backpressure, and interest tracking all stay in the datagram core.
  *
  * This is the PROVIDER data-plane axis (KlSocketProvider.dgram); it is separate from the public
  * fixed-slot KlDatagram API in <keel/datagram.h>, which re-exports this provider surface. The
  * COMPLETION-axis op descriptors (KlDgramSendOp/KlDgramRecvOp) are a separate,
- * internal concern in src/completion_io.h — not here.
+ * internal concern in src/completion_io.h, not here.
  */
 
-struct KlDatagramSocketConfig;   /* keel/datagram.h — datagram socket-option config (borrowed) */
+struct KlDatagramSocketConfig;   /* keel/datagram.h: datagram socket-option config (borrowed) */
 
 /* Per-datagram receive-capture options a provider enabled during configure(),
  * returned so the datagram core stores the matching state (kernel may reject any of them). */
@@ -39,7 +39,7 @@ struct KlDatagramSocketConfig;   /* keel/datagram.h — datagram socket-option c
 
 /* Per-datagram receive metadata a provider fills from control messages. A field a
  * provider can't obtain is left at its "absent" value (has_local 0 / gro_seg 0 /
- * tos -1), which delivery treats as "not present" — the same graceful degradation
+ * tos -1), which delivery treats as "not present": the same graceful degradation
  * as the option being off. */
 typedef struct {
     KlSockAddr local;      /**< pktinfo local (dest) address; valid iff has_local */
@@ -69,7 +69,7 @@ typedef struct {
 } KlDgramTxDesc;
 
 typedef struct KlDatagramOps {
-    /* One datagram out. Returns bytes sent, or -1 (errno set) — the datagram core decides
+    /* One datagram out. Returns bytes sent, or -1 (errno set): the datagram core decides
      * queue-on-EAGAIN vs drop. */
     kl_ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                        const KlSockAddr *dest, const KlSockAddr *src, int tos);
@@ -79,7 +79,7 @@ typedef struct KlDatagramOps {
     kl_ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
                        KlSockAddr *src, KlDgramRxMeta *meta);
 
-    /* One-syscall UDP GSO. Optional (NULL) — or return -1/EOPNOTSUPP where GSO is
+    /* One-syscall UDP GSO. Optional (NULL); or return -1/EOPNOTSUPP where GSO is
      * unavailable, and the datagram core falls back to per-segment send(). */
     kl_ssize_t (*send_gso)(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                            uint16_t seg, const KlSockAddr *dest);
@@ -97,13 +97,13 @@ typedef struct KlDatagramOps {
     int (*mcast_membership)(void *ctx, KlSocketHandle fd, int family,
                             const char *group, unsigned iface_index, int join);
 
-    /* KL_DGRAM_CAP_* the provider can honor on THIS fd — accounting for the fd's actual address
+    /* KL_DGRAM_CAP_* the provider can honor on THIS fd, accounting for the fd's actual address
      * family. Optional (NULL ⇒ the facade grants no optional caps). Family-AWARE but takes no `family`
      * param: the provider inspects the fd (e.g. getsockname) or reports the cross-family intersection;
      * it MUST NOT report a capability the fd's family cannot use (e.g. BROADCAST on an IPv6 fd). */
     unsigned (*caps)(void *ctx, KlSocketHandle fd);
 
-    /* ── Optional mmsg batching (Linux) — data-oriented, no callbacks ───────── */
+    /* ── Optional mmsg batching (Linux): data-oriented, no callbacks ───────── */
     /* All NULL on a provider without recvmmsg/sendmmsg → the datagram core uses send/recv in a
      * loop. The batch block is provider-allocated but core-owned (opaque here). */
     void *(*rx_batch_new)(KlAllocator *a, int n, size_t bufsz);

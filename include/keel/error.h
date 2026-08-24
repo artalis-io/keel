@@ -61,7 +61,7 @@ typedef enum {
     /* Capability */
     KL_ERR_UNSUPPORTED,     /**< A requested capability is not supported by the provider */
 
-    KL_ERR__COUNT           /**< Sentinel — not an error code */
+    KL_ERR__COUNT           /**< Sentinel: not an error code */
 } KlError;
 
 /**

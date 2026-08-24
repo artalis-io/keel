@@ -1,5 +1,5 @@
 /**
- * resolver.h — Pluggable async DNS resolver vtable
+ * resolver.h: Pluggable async DNS resolver vtable
  *
  * When set in KlHttpClientConfig, the async client uses this for non-blocking
  * name resolution. When NULL, falls back to sync getaddrinfo (default).
@@ -36,11 +36,11 @@ typedef struct {
     int ai_protocol;                         /**< Protocol (shared) */
 } KlResolveResult;
 
-/** @brief Completion callback — called on the event loop thread. */
+/** @brief Completion callback: called on the event loop thread. */
 typedef void (*KlResolveDoneFn)(KlResolveReq *req, const KlResolveResult *result,
                                  int error, void *user_data);
 
-/** @brief Opaque per-request handle — resolver implementation allocates. */
+/** @brief Opaque per-request handle: resolver implementation allocates. */
 struct KlResolveReq {
     KlResolver *resolver;  /**< Back-pointer to owning resolver */
 };
@@ -54,7 +54,7 @@ struct KlResolver {
      *
      * Sync completion: resolve() MAY call done_fn synchronously (inside
      * the call, before returning).  Decorators that wrap another resolver
-     * must handle this — the inner resolver's done_fn may fire before
+     * must handle this; the inner resolver's done_fn may fire before
      * inner->resolve() returns.  Use an in_resolve/completed sentinel
      * to detect sync completion and defer freeing the per-request handle.
      * See resolver_cache.c for the canonical implementation of this pattern.

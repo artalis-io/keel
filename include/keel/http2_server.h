@@ -26,7 +26,7 @@ typedef struct KlHttp2ServerStream KlHttp2ServerStream;
 typedef struct KlHttp2ServerConn KlHttp2ServerConn;
 typedef struct KlHttpConn KlHttpConn;
 
-/* ── KlHttp2ServerCallbacks — KEEL provides these to the session ────── */
+/* ── KlHttp2ServerCallbacks: KEEL provides these to the session ────── */
 
 struct KlHttp2ServerCallbacks {
     int (*on_request)(void *ud, uint32_t stream_id,
@@ -43,8 +43,8 @@ struct KlHttp2ServerCallbacks {
     void (*on_stream_reset)(void *ud, uint32_t stream_id,
                             uint32_t error_code); /**< Stream reset by peer. */
     /**
-     * Write data to the network.  May return short — `< len` bytes
-     * written — under socket backpressure.  The session library MUST
+     * Write data to the network.  May return short (`< len` bytes
+     * written) under socket backpressure.  The session library MUST
      * handle short returns by re-queuing the un-written tail and
      * retrying on the next @ref KlHttp2ServerSession::flush call.  A
      * session implementation that assumes "send always writes
@@ -53,13 +53,13 @@ struct KlHttp2ServerCallbacks {
      * COMPRESSION_ERROR.
      *
      * (KEEL's WebSocket server wraps the equivalent boundary with
-     * @ref kl_drain — there's no analogous helper for HTTP/2 yet;
+     * @ref kl_drain; there's no analogous helper for HTTP/2 yet;
      * the session library is expected to manage its own send queue.)
      */
     kl_ssize_t (*send)(void *ud, const void *data, size_t len);
 };
 
-/* ── KlHttp2ServerSession — user-provided vtable ───────────────────── */
+/* ── KlHttp2ServerSession: user-provided vtable ───────────────────── */
 
 struct KlHttp2ServerSession {
     kl_ssize_t (*recv)(KlHttp2ServerSession *self, const void *data,
@@ -76,7 +76,7 @@ struct KlHttp2ServerSession {
     /**
      * Optional (may be NULL): returns non-zero while the session still wants to
      * read more input. When a session provides it, KEEL closes the connection
-     * once the session wants neither read nor write — i.e. it has terminated
+     * once the session wants neither read nor write, i.e. it has terminated
      * (e.g. sent a GOAWAY for a protocol error, or completed a graceful
      * shutdown). A NULL want_read keeps the connection open until the peer
      * closes (legacy behavior).
@@ -99,7 +99,7 @@ typedef struct KlHttp2ServerConfig {
     int initial_window_size;     /**< 0 = KL_HTTP2_DEFAULT_WINDOW_SIZE */
 } KlHttp2ServerConfig;
 
-/* Per-stream (KlHttp2ServerStream) and per-connection (KlHttp2ServerConn) state are opaque —
+/* Per-stream (KlHttp2ServerStream) and per-connection (KlHttp2ServerConn) state are opaque:
  * their bodies are internal (src/protocols/http2/http2_internal.h). Users interact with HTTP/2 only through
  * the KlHttp2ServerSession vtable + KlHttp2ServerConfig above; the connection is passed to the
  * session callbacks as an opaque void*. Keeping the bodies out of this public header lets

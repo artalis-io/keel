@@ -121,7 +121,7 @@ int kl_http_redirect_error(const KlHttpRedirectClient *rc);
  * Defined post-completion (after the @ref KlHttpRedirectDoneFn fires).
  * Together with @ref kl_http_redirect_response NULL, a non-zero error here
  * is the only indicator a caller has that no response was ever
- * received — there is no separate "inner client construction failed"
+ * received; there is no separate "inner client construction failed"
  * vs. "all redirect hops failed" distinction in the public API.
  */
 KlError kl_http_redirect_last_error(const KlHttpRedirectClient *rc);

@@ -1,9 +1,9 @@
 /*
- * keel/connect_op_detail.h — Layout of KlConnectOp (opt-in detail).
+ * keel/connect_op_detail.h: Layout of KlConnectOp (opt-in detail).
  *
  * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlConnectOp; the fields are
  * NOT part of the API and may change without notice. The behavior/ownership contract is in
- * <keel/connect_op.h>. Do not read or write these fields directly — use the kl_connect_op_* functions.
+ * <keel/connect_op.h>. Do not read or write these fields directly; use the kl_connect_op_* functions.
  */
 #ifndef KEEL_CONNECT_OP_DETAIL_H
 #define KEEL_CONNECT_OP_DETAIL_H
@@ -36,8 +36,8 @@ struct KlConnectOp {
     int  deadline_armed;
 
     /* sync-completion / reentrancy sentinels */
-    int  in_start;            /* DEPTH: inside a start/arm hook — defer detachment */
-    int  in_dispatch;         /* DEPTH: inside the terminal dispatch / cancel — defer detachment */
+    int  in_start;            /* DEPTH: inside a start/arm hook; defer detachment */
+    int  in_dispatch;         /* DEPTH: inside the terminal dispatch / cancel; defer detachment */
 
     KlConnectResolveFn        start_resolve;
     KlConnectResolveCancelFn  cancel_resolve;

@@ -14,7 +14,7 @@
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
 #include <keel/drain.h>      /* KlDrain wq (write queue, embedded in KlStream) */
 #include <keel/stream.h>         /* KlStream contract (STABLE transport API) */
-#include <keel/stream_detail.h>  /* struct KlStream layout — KlHttpConn embeds it (opt-in detail) */
+#include <keel/stream_detail.h>  /* struct KlStream layout: KlHttpConn embeds it (opt-in detail) */
 #include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
 
 /** @brief Default read buffer size (bytes). */
@@ -33,7 +33,7 @@ typedef struct KlHttp2ServerConfig KlHttp2ServerConfig;
 /* The raw-transport subset of a connection is the STABLE public KlStream (function + ownership
  * contract in <keel/stream.h>, opt-in/unstable layout in <keel/stream_detail.h>). KlHttpConn embeds it
  * below via the detail header. External code must use accessors (e.g. kl_http_conn_peer_addr()), not
- * `conn->stream.*` — the embedded layout is INTERNAL/UNSTABLE even though the API is stable. */
+ * `conn->stream.*`; the embedded layout is INTERNAL/UNSTABLE even though the API is stable. */
 
 typedef enum {
     KL_HTTP_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
@@ -82,7 +82,7 @@ typedef struct KlHttpConn {
                                      init for TLS + completion slots (never in the event-loop hot
                                      path); NULL otherwise. Freed in pool free.
                                      INTERNAL/UNSTABLE. */
-    size_t comp_cipher_cap;     /**< Allocated size of comp_cipher (0 if unallocated) — so
+    size_t comp_cipher_cap;     /**< Allocated size of comp_cipher (0 if unallocated), so
                                      alloc/free need no completion-internal size macro. */
 
     KlWsServerConn *ws;         /**< WebSocket state (NULL until upgrade) */
@@ -205,7 +205,7 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
 
 
 /**
- * @brief Peer (client) address for a connection — stable accessor.
+ * @brief Peer (client) address for a connection: stable accessor.
  *
  * Returns a pointer to the connection's peer address (family KL_AF_UNSPEC when
  * unavailable). Prefer this over reaching into `conn->stream.*`, which is

@@ -29,7 +29,7 @@ struct KlHttp1RequestParser {
  */
 KlHttp1RequestParser *kl_http1_request_parser_llhttp(KlAllocator *alloc);
 
-/** @brief Backward compatibility — existing code can use the old name. */
+/** @brief Backward compatibility: existing code can use the old name. */
 typedef KlHttp1RequestParser KlHttp1Parser;
 /** @brief Backward compatibility alias for kl_http1_request_parser_llhttp. */
 #define kl_http1_parser_llhttp kl_http1_request_parser_llhttp

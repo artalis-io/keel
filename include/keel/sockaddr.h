@@ -5,24 +5,24 @@
 #include <stddef.h>
 
 /**
- * sockaddr.h — Keel's platform-neutral socket address (PAL: address axis).
+ * sockaddr.h: Keel's platform-neutral socket address (PAL: address axis).
  *
  * The symmetric partner of `KlSocketHandle` (handle.h). Keel neutralized the
  * native *handle* long ago; `KlSockAddr` finishes the same job for the *address*,
  * so no layer above the socket provider ever touches a platform `struct sockaddr`
- * — whose layout is compile-time and differs per stack (BSD/lwIP carry `sin_len`,
+ * (whose layout is compile-time and differs per stack: BSD/lwIP carry `sin_len`,
  * Linux does not). Providers are the ONLY code that marshals `KlSockAddr` <->
- * platform `sockaddr` (see src/sockaddr_native.h); everything else — the resolver,
+ * platform `sockaddr` (see src/sockaddr_native.h); everything else (the resolver,
  * proxy_protocol, udp, the protocol clients, the completion backends' delivered
- * results — speaks `KlSockAddr`. That makes the socket/address ABI runtime-
+ * results) speaks `KlSockAddr`. That makes the socket/address ABI runtime-
  * injectable: a stock libkeel + a foreign socket provider (lwIP, …) is enough,
  * with no library recompile. See docs/archive/designs/keel_sockaddr_design.md.
  *
- * Layout is fixed and identical on every platform. It is ~120 bytes — smaller
+ * Layout is fixed and identical on every platform. It is ~120 bytes: smaller
  * than the `struct sockaddr_storage` (128 B) it replaces in KlResolveResult.
  */
 
-/** Keel-owned address families — providers map to/from platform AF_* values, so
+/** Keel-owned address families: providers map to/from platform AF_* values, so
  *  core never depends on system AF_* numbering. */
 typedef enum {
     KL_AF_UNSPEC = 0,
@@ -41,8 +41,8 @@ typedef enum {
  * @brief Canonical socket address. Fixed Keel-defined layout on all platforms.
  *
  * `port` is in HOST byte order (core compares/logs without ntohs); `u.ip` is in
- * NETWORK byte order — as it appears on the wire and out of inet_pton / DNS A/AAAA
- * records / PROXY headers — so the construct-from-wire helpers need no swapping.
+ * NETWORK byte order, as it appears on the wire and out of inet_pton / DNS A/AAAA
+ * records / PROXY headers, so the construct-from-wire helpers need no swapping.
  */
 typedef struct {
     uint16_t family;      /**< KlAddrFamily */
@@ -69,7 +69,7 @@ int kl_sockaddr_from_unix(KlSockAddr *out, const char *path);
  * Parse a NUMERIC address literal (no DNS) into @p out with host-order @p port:
  * dotted-quad IPv4 ("127.0.0.1", "0.0.0.0") or IPv6 ("::1", "::", "2001:db8::1",
  * with RFC 4291 "::" compression and an optional embedded-IPv4 tail). Returns 0
- * on success, -1 if @p host is not a valid numeric literal. Pure — no getaddrinfo,
+ * on success, -1 if @p host is not a valid numeric literal. Pure: no getaddrinfo,
  * no platform headers (works identically on every platform, incl. lwIP).
  */
 int kl_sockaddr_parse(KlSockAddr *out, const char *host, uint16_t port);

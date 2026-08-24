@@ -1,12 +1,12 @@
 /**
- * resolver_cache.h — Caching DNS resolver decorator
+ * resolver_cache.h: Caching DNS resolver decorator
  *
  * Wraps any KlResolver and caches successful results with configurable TTL.
  * Returns a KlResolver * that plugs directly into KlHttpClientConfig.resolver.
  *
  * Cache miss → delegates to inner resolver, stores result on completion.
  * Cache hit  → calls done_fn synchronously, returns immediately.
- * Errors are never cached — the next resolve retries via the inner resolver.
+ * Errors are never cached; the next resolve retries via the inner resolver.
  */
 
 #ifndef KEEL_RESOLVER_CACHE_H
@@ -28,7 +28,7 @@ typedef struct {
  * @brief Create a caching resolver that wraps an inner resolver.
  *
  * The returned KlResolver * is the cache; destroy it via the vtable's
- * destroy function.  The inner resolver is borrowed (not owned) — the
+ * destroy function.  The inner resolver is borrowed (not owned); the
  * caller must destroy it separately after destroying the cache.
  *
  * @param inner  Inner resolver to delegate cache misses to (borrowed).

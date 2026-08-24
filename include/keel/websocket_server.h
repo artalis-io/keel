@@ -87,7 +87,7 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
 /**
  * @brief Read the peer credentials of a live WebSocket connection.
  *
- * The post-upgrade equivalent of kl_http_request_peer_cred — lets a handler
+ * The post-upgrade equivalent of kl_http_request_peer_cred: lets a handler
  * identify the process on the other end of a UNIX-socket WebSocket after the
  * HTTP upgrade, when there is no longer a KlHttpRequest.
  *

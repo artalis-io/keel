@@ -7,7 +7,7 @@
  * Used when KEEL sits behind an L4 load balancer (HAProxy, AWS NLB, nginx
  * stream) that prepends the real client address to each connection. Only
  * honored from sources in a configured CIDR allowlist (see KlHttpServerConfig.
- * proxy_trusted_cidrs) — a header from an untrusted peer could spoof any IP.
+ * proxy_trusted_cidrs); a header from an untrusted peer could spoof any IP.
  */
 
 #include <stddef.h>
@@ -15,7 +15,7 @@
 #include <keel/sockaddr.h>
 
 typedef enum {
-    KL_PROXY_NONE = 0,   /**< Leading bytes are not a PROXY header — direct conn */
+    KL_PROXY_NONE = 0,   /**< Leading bytes are not a PROXY header; direct conn */
     KL_PROXY_NEED_MORE,  /**< Looks like a PROXY header but need more bytes */
     KL_PROXY_OK,         /**< Parsed; *consumed set; peer filled unless LOCAL/UNKNOWN */
     KL_PROXY_INVALID     /**< Malformed / oversized → close the connection */
@@ -29,7 +29,7 @@ typedef enum {
  * @param consumed  On KL_PROXY_OK, receives the header length to consume.
  * @param peer      On KL_PROXY_OK with a real source address, receives it
  *                  (KL_AF_INET / KL_AF_INET6). Set to family KL_AF_UNSPEC for
- *                  LOCAL/UNKNOWN — the caller then keeps the real socket address.
+ *                  LOCAL/UNKNOWN; the caller then keeps the real socket address.
  * @return A KlProxyResult.
  */
 KlProxyResult kl_proxy_parse(const uint8_t *buf, size_t len, size_t *consumed,

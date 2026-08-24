@@ -2,7 +2,7 @@
 #define KEEL_NET_H
 
 /*
- * net.h — the public socket-types compatibility boundary.
+ * net.h: the public socket-types compatibility boundary.
  *
  * The single place Keel's *installed* headers resolve where struct sockaddr /
  * sockaddr_storage / socklen_t come from across platforms. Public headers that
@@ -13,7 +13,7 @@
  * This is the public counterpart of the internal src/sockcompat.h (which adds
  * implementation-only shims: struct iovec, ssize_t, afunix, etc.).
  *
- * On Windows, winsock2.h must precede windows.h — including this header first
+ * On Windows, winsock2.h must precede windows.h; including this header first
  * keeps that ordering correct for consumers.
  */
 
@@ -22,7 +22,7 @@
   #include <ws2tcpip.h>   /* struct sockaddr_storage, socklen_t, getaddrinfo */
 #elif defined(KEEL_PLATFORM_LWIP)
   /* lwIP target: the stack provides its own BSD socket types (struct sockaddr,
-   * socklen_t, ...) via lwip/sockets.h — do NOT pull the host <sys/socket.h>,
+   * socklen_t, ...) via lwip/sockets.h: do NOT pull the host <sys/socket.h>,
    * which would clash. Inert unless a build/provider defines KEEL_PLATFORM_LWIP
    * (e.g. the examples/lwip reference). See docs/archive/designs/lwip_platform_design.md. */
   #include "lwip/sockets.h"

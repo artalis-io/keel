@@ -16,7 +16,7 @@
 typedef kl_ssize_t (*KlDrainWriteFn)(const char *data, size_t len, void *ctx);
 
 /**
- * @brief Drain callback — fired when buffer transitions non-empty → empty.
+ * @brief Drain callback: fired when buffer transitions non-empty → empty.
  */
 typedef void (*KlDrainCb)(void *ctx);
 
@@ -26,7 +26,7 @@ typedef void (*KlDrainCb)(void *ctx);
  * Sits between a producer (SSE, compress stream, WebSocket, etc.) and a
  * writer function. When the writer returns would-block (0), KlDrain buffers
  * the remaining data. The caller composes KlDrain with KlWatcher / KlAsyncOp
- * to resume on write-readiness — KlDrain itself has zero event loop dependency.
+ * to resume on write-readiness; KlDrain itself has zero event loop dependency.
  *
  * Caller-owned struct (stack-allocatable). NOT thread-safe.
  */

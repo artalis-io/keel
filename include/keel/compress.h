@@ -8,7 +8,7 @@
  * @brief Pluggable compression vtable.
  *
  * Users implement this interface to provide compression (gzip, deflate, zstd).
- * One KlCompress instance is created per compress operation via the factory —
+ * One KlCompress instance is created per compress operation via the factory,
  * not pre-allocated per connection (deflate state is ~300KB).
  */
 typedef struct KlCompress KlCompress;
@@ -61,7 +61,7 @@ struct KlCompress {
 
 /**
  * @brief Opaque per-server compression context (algorithm config, level).
- * User-owned — KEEL never inspects or modifies this.
+ * User-owned: KEEL never inspects or modifies this.
  */
 typedef struct KlCompressCtx KlCompressCtx;
 
@@ -78,7 +78,7 @@ typedef KlCompress *(*KlCompressFactory)(KlCompressCtx *ctx,
  * @brief Compression configuration (shared context + per-operation factory).
  */
 typedef struct KlCompressConfig {
-    KlCompressCtx     *ctx;         /**< Shared context — user-owned */
+    KlCompressCtx     *ctx;         /**< Shared context: user-owned */
     KlCompressFactory  factory;     /**< Creates per-operation KlCompress */
     void (*ctx_destroy)(KlCompressCtx *ctx);  /**< Optional cleanup */
 } KlCompressConfig;

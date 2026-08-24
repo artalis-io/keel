@@ -1,21 +1,21 @@
 /*
- * keel/stream.h — Raw-transport stream: write queue, strict read pause/resume, and graceful-close
+ * keel/stream.h - Raw-transport stream: write queue, strict read pause/resume, and graceful-close
  * lifecycle (KlStream).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
  * │ STABLE transport API. The function signatures + ownership contracts below are the            │
  * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
  * │ <keel/stream_detail.h> (opt-in, for embedders that stack/embed a KlStream) and may change    │
- * │ between releases — embedders recompile. Use the accessors, never the detail fields.          │
+ * │ between releases; embedders recompile. Use the accessors, never the detail fields.           │
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic raw byte transport, independent of readiness vs completion. Three cooperating
  * facets, all dormant until their _init is called (so a plain KlHttpConn is unaffected):
  *   - WRITE: atomic all-or-none over a bounded, preallocated queue; readiness direct-send + flush,
  *     or completion one-submit-at-a-time with WRITE-completion pumping.
- *   - READ: strict pause/resume — a completed receive is HELD undelivered while paused and
+ *   - READ: strict pause/resume; a completed receive is HELD undelivered while paused and
  *     delivered exactly once on resume; sync-completion-safe (iterative arm trampoline).
- *   - CLOSE: graceful (drain) or abortive (cancel) close with CONFIRMED DETACHMENT — on_close fires
+ *   - CLOSE: graceful (drain) or abortive (cancel) close with CONFIRMED DETACHMENT; on_close fires
  *     once, only after both the receive and send ops are physically retired.
  *
  * TLS lives ABOVE the raw stream: the adapter's writer/submit and read hooks encrypt/decrypt.
@@ -34,18 +34,18 @@ typedef struct KlStream KlStream;
 
 /** Base initializer. Validates the stable receive buffer, resets ALL state, and establishes the
  *  base invariants (an un-configured stream has an invalid handle and no facet installed). Call
- *  this FIRST — before the facet initializers (kl_stream_write_init / read_init / close_init) and
+ *  this FIRST: before the facet initializers (kl_stream_write_init / read_init / close_init) and
  *  before an internal adapter configures the platform handle/context. Consumers must not touch the
  *  detail fields; this is the whole-object initializer. `read_buffer` is the caller-owned stable
  *  buffer that completed receives land in.
  *
- *  STRICT PRECONDITION — the stream MUST be one of:
+ *  STRICT PRECONDITION: the stream MUST be one of:
  *    - fresh / uninitialized storage (never passed to a facet initializer); or
  *    - a fully DETACHED stream (kl_stream_is_detached() == 1) whose write queue has been released
  *      with kl_stream_write_free() and all provider-owned resources have retired.
  *  Calling it on an ACTIVE or partially-initialized stream is INVALID (undefined): it would lose an
- *  allocated write queue and erase outstanding-operation ownership. This function does not — and
- *  cannot safely — detect that condition; it is the caller's contract.
+ *  allocated write queue and erase outstanding-operation ownership. This function does not, and
+ *  cannot safely, detect that condition; it is the caller's contract.
  *
  *  Returns 0, or -1 if `stream`/`read_buffer` is NULL or `read_capacity` is 0. */
 int kl_stream_init(KlStream *stream, char *read_buffer, size_t read_capacity);
@@ -56,8 +56,8 @@ int kl_stream_init(KlStream *stream, char *read_buffer, size_t read_capacity);
 typedef enum {
     KL_STREAM_ACCEPTED = 0,  /**< all bytes taken (sent inline and/or queued) */
     KL_STREAM_WOULD_BLOCK,   /**< len <= capacity but no room now; NOTHING taken */
-    KL_STREAM_TOO_LARGE,     /**< len > capacity; permanent — caller must chunk */
-    KL_STREAM_CLOSED,        /**< write side closing — new writes refused */
+    KL_STREAM_TOO_LARGE,     /**< len > capacity; permanent: caller must chunk */
+    KL_STREAM_CLOSED,        /**< write side closing; new writes refused */
     KL_STREAM_ERROR          /**< fatal (writer/submission failure); bytes stay owned */
 } KlStreamWriteStatus;
 
