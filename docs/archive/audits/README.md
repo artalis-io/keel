@@ -7,7 +7,7 @@ may have been fixed in a later one (or in code since). The living, current-state
 [architecture.md](../../architecture/overview.md) and
 [architecture_invariants.md](../../architecture/invariants.md).
 
-The audit files live at their original paths (not moved) so existing references stay valid:
+The audit files retain stable names within this archive (`docs/archive/audits/`):
 
 | Audit | Scope | Latest pass |
 |---|---|---|
