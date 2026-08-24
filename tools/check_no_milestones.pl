@@ -54,45 +54,82 @@ my $TOKEN_RE = qr{
     | \bD[12]\b                       # D1, D2
 }x;
 
-# ── Comment extractor: return [lineno, comment_text, matched_token] for lines whose COMMENT text
-#    (only) matches $TOKEN_RE. A per-character state machine; string/char literals are skipped so
-#    their contents can never match. ──────────────────────────────────────────────────────────────
+# ── Comment extractor. Returns [physical_line, comment_fragment, matched_token] for every milestone
+#    match in COMMENT text (only). Implements C translation phase 2 (backslash-newline line splicing)
+#    BEFORE tokenizing, so lexical state — string/char literals, // and /* */ comments — is preserved
+#    across a spliced line exactly as a C compiler sees it. This closes both a false-positive (a
+#    /* ... */ that lives inside a string continued over a splice) and a bypass (a banned token on the
+#    continued physical line of a // comment). Diagnostics report the ORIGINAL physical line: the
+#    splice deletes the backslash+newline but each surviving character keeps its source line number,
+#    and a comment "run" (a maximal /* */ or // span) is scanned as one string with every match mapped
+#    back to the physical line of its first character — so a token split across the splice, or one on a
+#    continued line, is reported where it truly sits. ─────────────────────────────────────────────────
 sub scan_text {
     my ($text) = @_;
-    my @hits;
-    my $in_block = 0;                 # inside a /* ... */ that may span lines
-    my $lineno = 0;
-    for my $line (split /\n/, $text, -1) {
-        $lineno++;
-        my $comment = '';             # comment text seen on THIS line
-        my $i = 0;
-        my $len = length $line;
-        while ($i < $len) {
-            if ($in_block) {
-                my $end = index($line, '*/', $i);
-                if ($end >= 0) { $comment .= substr($line, $i, $end - $i); $i = $end + 2; $in_block = 0; }
-                else           { $comment .= substr($line, $i); $i = $len; }
-                next;
-            }
-            my $c  = substr($line, $i, 1);
-            my $c2 = substr($line, $i, 2);
-            if    ($c2 eq '/*') { $in_block = 1; $i += 2; }
-            elsif ($c2 eq '//') { $comment .= substr($line, $i + 2); $i = $len; }   # to EOL
-            elsif ($c eq '"' || $c eq "'") {                                        # skip literal
-                my $q = $c; $i++;
-                while ($i < $len) {
-                    my $s = substr($line, $i, 1);
-                    if    ($s eq '\\') { $i += 2; }
-                    elsif ($s eq $q)   { $i++; last; }
-                    else               { $i++; }
-                }
-            }
-            else { $i++; }
+
+    # Phase 2: splice. Build a character stream where each surviving char keeps its physical line.
+    my @ch;                                     # [character, physical_line]
+    my @c = split //, $text, -1;
+    my $n = @c;
+    my $line = 1;
+    my $i = 0;
+    while ($i < $n) {
+        my $x = $c[$i];
+        if ($x eq "\\") {                       # backslash + (CR)LF is deleted → the lines join
+            if    ($i + 1 < $n && $c[$i + 1] eq "\n")                        { $line++; $i += 2; next; }
+            elsif ($i + 2 < $n && $c[$i + 1] eq "\r" && $c[$i + 2] eq "\n")  { $line++; $i += 3; next; }
         }
-        if (length $comment && $comment =~ $TOKEN_RE) {
-            push @hits, [ $lineno, $comment, $& ];
+        push @ch, [ $x, $line ];
+        $line++ if $x eq "\n";
+        $i++;
+    }
+
+    # State machine over the spliced stream. A comment run is collected with its per-char line map and
+    # scanned when it ends (or at EOF for an unterminated run).
+    my @hits;
+    my @run;                                    # current comment run: [char, physical_line]
+    my $flush = sub {
+        return unless @run;
+        my $str = join('', map { $_->[0] } @run);
+        while ($str =~ /$TOKEN_RE/g) {
+            my ($tok, $start) = ($&, $-[0]);
+            my $pl = $run[$start][1];
+            my $frag = join('', map { $_->[0] } grep { $_->[1] == $pl } @run);   # this line's comment text
+            push @hits, [ $pl, $frag, $tok ];
+        }
+        @run = ();
+    };
+
+    my $state = 'code';                         # code | block | line | string | char
+    my $m = @ch;
+    my $j = 0;
+    while ($j < $m) {
+        my $x  = $ch[$j][0];
+        my $x2 = ($j + 1 < $m) ? $x . $ch[$j + 1][0] : $x;
+        if ($state eq 'block') {
+            if ($x2 eq '*/') { $j += 2; $state = 'code'; $flush->(); }
+            else             { push @run, $ch[$j]; $j++; }
+        }
+        elsif ($state eq 'line') {
+            if ($x eq "\n")  { $j++; $state = 'code'; $flush->(); }   # a REAL newline ends // (spliced ones were removed)
+            else             { push @run, $ch[$j]; $j++; }
+        }
+        elsif ($state eq 'string' || $state eq 'char') {
+            my $q = ($state eq 'string') ? '"' : "'";
+            if    ($x eq "\\") { $j += 2; }                          # escaped char (incl. \" \') never terminates
+            elsif ($x eq $q)   { $j++; $state = 'code'; }
+            elsif ($x eq "\n") { $j++; $state = 'code'; }            # defensive: an unterminated literal never runs away
+            else               { $j++; }
+        }
+        else {                                                      # code
+            if    ($x2 eq '/*') { $state = 'block';  $j += 2; }
+            elsif ($x2 eq '//') { $state = 'line';   $j += 2; }
+            elsif ($x eq '"')   { $state = 'string'; $j++; }
+            elsif ($x eq "'")   { $state = 'char';   $j++; }
+            else                { $j++; }
         }
     }
+    $flush->();                                 # EOF: flush a trailing unterminated block/line comment
     return @hits;
 }
 
@@ -106,6 +143,9 @@ sub selftest {
         '/* 6.4c GO */', '/* blocker P1-2 */', '/* D1: convenience */', '/* the E2 rules */',
         '/* Goal 8 */', '/* PAL Phase 4 */', '/* Phase-B transport */', '/* 2b-ii window */',
         '/* Step 2a rework */', '/* step 6B-1 embed */', '/* step B1 link proof */',
+        # line-splicing: a banned token on the CONTINUED physical line of a // comment must be caught,
+        # and reported on its true physical line (2).
+        "// intro note \\\nLC-3a on the next physical line\nint x;\n",
     );
     my @must_pass = (
         '/* B1 small response; B11 no-alloc; raw-DNS B1/B2 catalog */',   # local scenario catalogs
@@ -118,6 +158,12 @@ sub selftest {
         'print_line("S-4: GO");',            # CI-oracle output marker in a string literal
         'const char *m = "6.4c: DONE Phase 8g";',
         "char q = '\"'; /* an escaped quote must not swallow the next token: fine */",
+        # line-splicing: a milestone-looking /* ... */ INSIDE a string continued over a backslash-newline
+        # is still string content — the splice must not let it be seen as a comment.
+        "const char *s = \"start \\\n/* Phase 8g */ still inside the string\";\n",
+        # line-splicing: an escaped quote formed across a continuation must not terminate the string, so
+        # the following /* ... */ stays string content and is ignored.
+        "const char *s = \"abc\\\n\\\" /* LC-3a */ still string\";\n",
     );
     my $bad = 0;
     for my $t (@must_flag) {
