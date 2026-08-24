@@ -1,5 +1,5 @@
 /*
- * dns_sys.h — platform config-discovery seam for the built-in DNS resolver.
+ * dns_sys.h: platform config-discovery seam for the built-in DNS resolver.
  *
  * The resolver's datagram + TCP-fallback I/O already runs over the udp and
  * socket.h seams, both cross-platform, so dns_resolver.c itself is

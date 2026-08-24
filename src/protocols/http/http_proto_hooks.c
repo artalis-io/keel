@@ -1,5 +1,5 @@
 /*
- * http_proto_hooks.c — storage for the per-protocol server upgrade seam (http_proto_hooks.h).
+ * http_proto_hooks.c: storage for the per-protocol server upgrade seam (http_proto_hooks.h).
  *
  * Freestanding-safe: two file-scope pointers + getters/setters, nothing else.
  * Linked into BOTH the hosted core and the freestanding server archive. In a
@@ -11,7 +11,7 @@
 
 /* Install-once guard (makes the "install-once global registration" invariant executable).
  * The hook tables are process-wide compiled-in capability registrations, not per-server
- * config — installed by a load-time constructor and/or kl_http_server_init, always with the
+ * config: installed by a load-time constructor and/or kl_http_server_init, always with the
  * SAME canonical static table. Accept: the first install, an idempotent re-install of the
  * identical table, or a reset to NULL. Silently keep the first table if a DIFFERENT
  * non-NULL table is offered (a programming error) rather than allowing live replacement. */

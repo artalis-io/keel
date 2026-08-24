@@ -2,7 +2,7 @@
 #define KEEL_PROTOCOLS_HTTP_INTERNAL_H
 
 /*
- * http_internal.h — HTTP-family internal seam: TLS-aware connection I/O over the
+ * http_internal.h - HTTP-family internal seam: TLS-aware connection I/O over the
  * embedded KlStream + HTTP-server cross-TU forward decls. Owned by src/protocols/http/;
  * the http2/websocket completion adapters include it for conn_read/conn_write
  * (permitted HTTP-family coordination seam). Substrate stream I/O lives in
@@ -27,10 +27,10 @@
 /* Completion-mode TLS ciphertext scratch size (one TLS record + slack). The HTTP completion
  * adapter hands a per-connection buffer of this size (KlHttpConn.comp_cipher, preallocated at
  * server init for TLS+completion slots) to the raw receive; the backend does raw I/O into it
- * with no TLS knowledge. Internal — not a public API (was briefly in http_connection.h). */
+ * with no TLS knowledge. Internal, not a public API (was briefly in http_connection.h). */
 #define KL_COMP_CIPHER_SIZE (17u * 1024u)
 
-/* ── Transport helpers — TLS-aware read/write over the embedded KlStream ──────── */
+/* ── Transport helpers: TLS-aware read/write over the embedded KlStream ──────── */
 
 /* Recover the owning KlHttpConn from its embedded stream at the HTTP adapter boundary. The stream is
  * the leading member (offset 0), but containerof keeps that an implementation detail. */

@@ -35,7 +35,7 @@ int kl_http_sse_event(KlHttpSse *sse, const char *event,
             return -1;
     }
 
-    /* Split data on '\n' — each line gets "data: " prefix */
+    /* Split data on '\n': each line gets "data: " prefix */
     const char *p = data;
     const char *end = data + data_len;
     while (p < end) {

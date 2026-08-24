@@ -8,7 +8,7 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
 
     KlAllocator *alloc = res->alloc;
 
-    /* Empty body — just set empty buffer body */
+    /* Empty body: just set empty buffer body */
     if (len == 0) {
         res->body_mode = KL_HTTP_BODY_BUFFER;
         res->body = "";
@@ -29,7 +29,7 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
         return -1;
     }
 
-    /* Expansion check — if compressed is not smaller, use original */
+    /* Expansion check: if compressed is not smaller, use original */
     if (out_len >= len) {
         kl_free(alloc, out, out_len);
         comp->destroy(comp);
@@ -127,7 +127,7 @@ int kl_http_compress_stream_end(KlHttpCompressStream *cs) {
 
     int rc = 0;
 
-    /* Final flush — emit remaining compressed data + trailer */
+    /* Final flush: emit remaining compressed data + trailer */
     if (!cs->error) {
         if (cs->comp->feed(cs->comp, NULL, 0, 1, stream_emit, cs) < 0) {
             cs->error = 1;

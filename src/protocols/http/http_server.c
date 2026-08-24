@@ -13,11 +13,11 @@
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* event↔socket capability negotiation */
 #include "completion_io.h"    /* completion-loop tick dispatch (IOCP) */
-#include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
-#include "platform.h"     /* KlPlatWakeup — self-pipe so kl_http_server_stop wakes the run loop */
+#include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals: per-platform, no #ifdef here */
+#include "platform.h"     /* KlPlatWakeup: self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
- * dispatches ws/h2 (and PROXY) through http_proto_hooks.h — the same seam the completion
- * driver uses — so this TU names no optional-protocol type or symbol. */
+ * dispatches ws/h2 (and PROXY) through http_proto_hooks.h (the same seam the completion
+ * driver uses) so this TU names no optional-protocol type or symbol. */
 #include "http_proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
 #define KL_LISTEN_BACKLOG  128
@@ -43,7 +43,7 @@ void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg) {
 }
 
 static int kl_http_server_bind_tcp(KlHttpServer *s) {
-    /* Parse the numeric bind address (IPv4/IPv6 literal) — no DNS. */
+    /* Parse the numeric bind address (IPv4/IPv6 literal); no DNS. */
     KlSockAddr bind_sa;
     if (kl_sockaddr_parse(&bind_sa, s->config.bind_addr, (uint16_t)s->config.port) != 0) {
         kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "invalid bind address '%s'", s->config.bind_addr);
@@ -108,7 +108,7 @@ static int kl_http_server_adopt_fd(KlHttpServer *s) {
         s->config.transport = KL_HTTP_SERVER_TRANSPORT_TCP;
         s->bound_port = kl_sockaddr_port(&la);
     }
-    /* Adopted fd is never unlinked — the supervisor owns the socket path. */
+    /* Adopted fd is never unlinked; the supervisor owns the socket path. */
     s->unix_socket_owned = 0;
     /* CLOEXEC so the inherited listener doesn't re-leak to our own children. */
     kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
@@ -162,7 +162,7 @@ int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
     const KlSockAddr *a = &conn->stream.peer_addr;
     KlAddrFamily fam = kl_sockaddr_family(a);
     if (fam != KL_AF_INET && fam != KL_AF_INET6)
-        return -1;  /* UNSPEC / AF_UNIX — no IP address (use peer credentials) */
+        return -1;  /* UNSPEC / AF_UNIX: no IP address (use peer credentials) */
     if (kl_sockaddr_format_ip(a, ip, iplen) < 0)
         return -1;
     if (port)
@@ -194,8 +194,8 @@ void kl_http_server_close_listener(KlHttpServer *s) {
     kl_http_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
-/* kl_http_server_conn_release lives in the freestanding-safe server core (http_server_core.c)
- * — the completion sweeps there call it, so the archive needs it in-core.
+/* kl_http_server_conn_release lives in the freestanding-safe server core (http_server_core.c):
+ * the completion sweeps there call it, so the archive needs it in-core.
  *
  * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also live in http_server_core.c, so
  * a freestanding EFI server constructs its
@@ -243,7 +243,7 @@ static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
 }
 static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
     KlHttpServer *s = ctx;
-    KlHttpConn *nc = kl_http_conn_acquire(&s->pool, fd);         /* commit — credit already reserved */
+    KlHttpConn *nc = kl_http_conn_acquire(&s->pool, fd);         /* commit; credit already reserved */
     if (!nc) {
         /* Invariant failure (credit-backed accept but no free KlHttpConn): dispose the descriptor and
          * consume the lease to return the credit. free_credits+reserved+active==capacity guarantees
@@ -290,7 +290,7 @@ int kl_http_server_run(KlHttpServer *s) {
     if (kl_http_server_bind_listener(s) < 0)
         return -1;
 
-    /* An adopted fd (socket activation) is already listening — don't re-listen. */
+    /* An adopted fd (socket activation) is already listening; don't re-listen. */
     if (s->config.listen_fd <= 0 && kl_sock_listen(s->ev.sockets, s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
@@ -328,8 +328,8 @@ int kl_http_server_run(KlHttpServer *s) {
     }
 
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
-     * a console Ctrl handler (Windows). Done here — past the setup early-returns
-     * — so a failed bind never leaves handlers installed without a restore. */
+     * a console Ctrl handler (Windows). Done here (past the setup early-returns)
+     * so a failed bind never leaves handlers installed without a restore. */
     kl_http_server_plat_signals_install(s);
 
     atomic_store(&s->running, 1);
@@ -338,7 +338,7 @@ int kl_http_server_run(KlHttpServer *s) {
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
      * wait/dispatch below. Detected once from the backend's advertised event model
-     * (completion seam) — the completion concept never enters the
+     * (completion seam); the completion concept never enters the
      * readiness path. Never true on readiness backends, so that path is unchanged. */
     const int completion_loop =
         (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
@@ -356,7 +356,7 @@ int kl_http_server_run(KlHttpServer *s) {
 
     while (atomic_load(&s->running)) {
         if (completion_loop) {
-            /* One completion-loop tick — factored into the freestanding-safe server
+            /* One completion-loop tick: factored into the freestanding-safe server
              * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */
             if (kl_http_server_run_completion_loop(s) < 0)
                 break;
@@ -384,7 +384,7 @@ int kl_http_server_run(KlHttpServer *s) {
          * watcher-event batch is already captured and can delete/reallocate watchers, so the bracket
          * must already be open (else the ABA window reopens before dispatch). begin → wait →
          * file-I/O → dispatch → end on EVERY exit (timeout, error, EINTR, normal iteration). If begin
-         * fails (max nesting — an unbalanced-bracket bug), fail-stop the run loop. */
+         * fails (max nesting, an unbalanced-bracket bug), fail-stop the run loop. */
         if (kl_event_ctx_dispatch_begin(&s->ev) < 0) {
             kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "dispatch nesting overflow");
             break;
@@ -410,7 +410,7 @@ int kl_http_server_run(KlHttpServer *s) {
                     fc, fio_results[fi].result, fio_results[fi].zero_copy);
                 if (fstate == KL_HTTP_CONN_SENDING) {
                     if (fc->file_io_phase == 1) {
-                        /* FILE_IO_READING — async read pending, no WRITE reg */
+                        /* FILE_IO_READING: async read pending, no WRITE reg */
                     } else {
                         kl_event_mod(&s->ev.loop, fc->stream.fd,
                                      KL_EVENT_WRITE, &fc->stream);
@@ -436,7 +436,7 @@ int kl_http_server_run(KlHttpServer *s) {
             KlHttpConn *c = evs ? kl_http_conn_from_stream(evs) : NULL;
 
             if (c == NULL) {
-                /* Listen socket — accept new connections through the readiness KlListener.
+                /* Listen socket: accept new connections through the readiness KlListener.
                  * It holds one reserved pool credit while LISTENING; each accepted
                  * fd is committed + wired by server_accept_on_accept; when the pool credit is
                  * exhausted it transitions to PAUSED (disarming the listen fd, so the kernel TCP
@@ -453,7 +453,7 @@ int kl_http_server_run(KlHttpServer *s) {
                     }
 
                     /* The default provider's accept (kl_sockdef_accept) already returns a
-                     * non-blocking, close-on-exec socket (accept4 on Linux/BSD) — skip the two
+                     * non-blocking, close-on-exec socket (accept4 on Linux/BSD); skip the two
                      * redundant per-connection syscalls on the accept hot path. A custom
                      * provider's accept op may not fold them, so apply them for a non-default
                      * (non-NULL) provider. */
@@ -469,7 +469,7 @@ int kl_http_server_run(KlHttpServer *s) {
                         (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
                     /* Hand the accepted fd to the listener: it commits the reserved credit to a
-                     * KlHttpConn (server_accept_on_accept), then reserves + arms the next accept — or
+                     * KlHttpConn (server_accept_on_accept), then reserves + arms the next accept, or
                      * PAUSEs if the pool is full, ending this drain. The peer is stashed for the
                      * hook (single-threaded, consumed immediately). */
                     s->accept_pending_peer = peer;
@@ -488,7 +488,7 @@ rearm_listen:
             /* Client connection event */
             KlHttpConnState new_state = c->state;
 
-            /* PROXY protocol header — read before TLS/HTTP */
+            /* PROXY protocol header: read before TLS/HTTP */
             if (c->state == KL_HTTP_CONN_PROXY_HEADER) {
                 int pr = kl_http_conn_read_proxy_header(c);
                 if (pr < 0) {
@@ -499,7 +499,7 @@ rearm_listen:
                     new_state = KL_HTTP_CONN_PROXY_HEADER;   /* need more bytes */
                     goto transition;
                 }
-                /* Done — advance to the real initial state. */
+                /* Done: advance to the real initial state. */
                 if (s->config.tls) {
                     c->tls_want = KL_EVENT_READ;
                     c->state = KL_HTTP_CONN_TLS_HANDSHAKE;
@@ -516,13 +516,13 @@ rearm_listen:
                     goto transition;
             }
 
-            /* TLS handshake — handle before normal read/write */
+            /* TLS handshake: handle before normal read/write */
             if (c->state == KL_HTTP_CONN_TLS_HANDSHAKE) {
                 new_state = kl_http_conn_on_handshake(c);
                 goto transition;
             }
 
-            /* WebSocket — handle read/write events through the ws seam (symmetric with
+            /* WebSocket: handle read/write events through the ws seam (symmetric with
              * the completion path's KlWsCompHooks; the conn only reached this state via a
              * ws upgrade, so the hooks are installed). */
             if (c->state == KL_HTTP_CONN_WEBSOCKET) {
@@ -536,7 +536,7 @@ rearm_listen:
                 goto transition;
             }
 
-            /* HTTP/2 — handle read/write events through the h2 seam. */
+            /* HTTP/2: handle read/write events through the h2 seam. */
             if (c->state == KL_HTTP_CONN_HTTP2) {
                 const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
                 if (!h2h) { new_state = KL_HTTP_CONN_CLOSED; goto transition; }
@@ -572,7 +572,7 @@ transition:
                 }
             } else if (new_state == KL_HTTP_CONN_SENDING) {
                 if (c->file_io_phase == 1) {
-                    /* FILE_IO_READING — async read pending, no WRITE event */
+                    /* FILE_IO_READING: async read pending, no WRITE event */
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  KL_EVENT_WRITE, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
@@ -609,7 +609,7 @@ transition:
                     kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_SUSPENDED) {
-                /* Handler suspended for async I/O — FD already removed
+                /* Handler suspended for async I/O; FD already removed
                  * from event loop by kl_async_suspend. */
             } else if (new_state == KL_HTTP_CONN_CLOSED) {
                 kl_event_del(&s->ev.loop, c->stream.fd);
@@ -619,7 +619,7 @@ transition:
         kl_event_ctx_dispatch_end(&s->ev);   /* reclaim watchers deferred during this batch */
 
         /* Sweep for timed-out connections.
-         * Single-threaded: no TOCTOU risk — all event processing above is
+         * Single-threaded: no TOCTOU risk; all event processing above is
          * complete, so connection states are stable.  Newly acquired slots
          * have fresh last_active_ms and won't be timed out. */
         now = kl_monotonic_ms();
@@ -674,7 +674,7 @@ void kl_http_server_stop(KlHttpServer *s) {
 /* kl_http_request_pause_body / kl_http_request_resume_body / kl_http_server_stats live in the
  * freestanding-safe server core (http_server_core.c). */
 
-/* kl_http_server_free lives in the freestanding-safe server core (http_server_core.c) — a
+/* kl_http_server_free lives in the freestanding-safe server core (http_server_core.c): a
  * freestanding EFI server tears itself down
  * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
  * archive alone, then kl_uefi_shutdown() releases the EFI providers before

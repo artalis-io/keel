@@ -1,5 +1,5 @@
 /*
- * http_client_proxy.h — transport-independent HTTP CONNECT (proxy tunnel) helpers.
+ * http_client_proxy.h: transport-independent HTTP CONNECT (proxy tunnel) helpers.
  *
  * The sync (http_client_sync.c) and async (http_client_async.c) clients both establish a proxy
  * tunnel with an HTTP CONNECT handshake. They previously each open-coded the request
@@ -22,14 +22,14 @@
  *   "CONNECT <host>:<port> HTTP/1.1\r\nHost: <host>:<port>\r\n"
  *   [ "Proxy-Authorization: <auth>\r\n" ]  "\r\n"
  * Returns 0 on success and sets *out_len to the byte count; -1 if it does not fit @cap.
- * Locale-free (bounded append helpers) — the ONE serialization shared by sync + async.
+ * Locale-free (bounded append helpers): the ONE serialization shared by sync + async.
  */
 int kl_proxy_build_connect(char *buf, size_t cap, size_t *out_len,
                            const char *host, uint16_t port, const char *auth);
 
 /*
  * Classify an accumulated proxy CONNECT response (the caller owns byte movement + the
- * overall size cap; @buf need not be NUL-terminated — @len is authoritative):
+ * overall size cap; @buf need not be NUL-terminated; @len is authoritative):
  *   1  = tunnel established  (end-of-headers seen AND status is HTTP/1.x 200)
  *   0  = need more bytes     (end-of-headers "\r\n\r\n" not seen yet)
  *  -1  = protocol error      (headers complete but status is not 2xx-200, or malformed)

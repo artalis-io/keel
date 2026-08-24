@@ -1,5 +1,5 @@
 /*
- * http_client_pool.c — HTTP client connection pool
+ * http_client_pool.c: HTTP client connection pool
  *
  * Flat array of KlHttpClientPoolEntry with linear scan. Pool sizes are
  * small (32-128 max), so linear scan is cache-friendly and simpler
@@ -11,7 +11,7 @@
 #include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
 #include "socket.h"
-#include "kl_cstr.h"   /* kl_streq — locale-free exact host-key compare */
+#include "kl_cstr.h"   /* kl_streq: locale-free exact host-key compare */
 
 #include <string.h>
 
@@ -157,7 +157,7 @@ int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int po
             continue;
 
         /* Test-on-borrow: peek for a peer close. Ensure the fd is non-blocking
-         * first (it already is in production — the async client sets it) so the
+         * first (it already is in production, the async client sets it) so the
          * MSG_PEEK returns EAGAIN on an idle connection instead of blocking. This
          * is the portable replacement for the old per-call MSG_DONTWAIT, which
          * Winsock lacks. */
@@ -167,7 +167,7 @@ int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int po
         /* r==0 → peer closed; r<0 that is not would-block → real error: both stale.
          * Classify via the seam (portable, no errno read). */
         if (r == 0 || (r < 0 && kl_sock_io_status(cpool_sp(pool)) != KL_IO_WOULD_BLOCK)) {
-            /* Stale connection — close and skip */
+            /* Stale connection: close and skip */
             if (pool->ev_ctx && e->timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, e->timer_id);
             entry_close(e);
@@ -176,7 +176,7 @@ int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int po
             continue;
         }
 
-        /* Hit — cancel idle timer, populate conn, clear slot */
+        /* Hit: cancel idle timer, populate conn, clear slot */
         if (pool->ev_ctx && e->timer_id >= 0)
             kl_timer_cancel(pool->ev_ctx, e->timer_id);
 
@@ -219,7 +219,7 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
         return -1;
     }
 
-    /* Enforce max_per_host — evict oldest for this host if at limit */
+    /* Enforce max_per_host: evict oldest for this host if at limit */
     int host_count = 0;
     int oldest_idx = -1;
     uint64_t oldest_time = UINT64_MAX;
@@ -254,7 +254,7 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
         }
     }
 
-    /* Pool full — evict globally oldest idle connection */
+    /* Pool full: evict globally oldest idle connection */
     if (slot < 0) {
         oldest_idx = -1;
         oldest_time = UINT64_MAX;
@@ -277,7 +277,7 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
     }
 
     if (slot < 0) {
-        /* Should not happen — pool is fully occupied with no evictable entry */
+        /* Should not happen: pool is fully occupied with no evictable entry */
         kl_http_client_pool_discard(pool, conn);
         return -1;
     }

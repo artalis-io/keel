@@ -3,7 +3,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include "sockcompat.h"   /* inet_pton / htons / struct in_addr — cross-platform */
+#include "sockcompat.h"   /* inet_pton / htons / struct in_addr: cross-platform */
 
 /* ── PROXY protocol header parsing ───────────────────────────────────── */
 
@@ -87,7 +87,7 @@ static KlProxyResult parse_v2(const uint8_t *buf, size_t len, size_t *consumed,
 
     *consumed = total;
     memset(peer, 0, sizeof(*peer));      /* default KL_AF_UNSPEC → keep socket address */
-    if (cmd == 0x0)                      /* LOCAL — health check, no address */
+    if (cmd == 0x0)                      /* LOCAL: health check, no address */
         return KL_PROXY_OK;
     if (cmd != 0x1)                      /* only LOCAL or PROXY */
         return KL_PROXY_INVALID;
@@ -107,7 +107,7 @@ static KlProxyResult parse_v2(const uint8_t *buf, size_t len, size_t *consumed,
         kl_sockaddr_from_ipv6(peer, a, ntohs(port), 0);
         return KL_PROXY_OK;
     }
-    return KL_PROXY_OK;                  /* AF_UNSPEC / AF_UNIX — keep socket address */
+    return KL_PROXY_OK;                  /* AF_UNSPEC / AF_UNIX: keep socket address */
 }
 
 KlProxyResult kl_proxy_parse(const uint8_t *buf, size_t len, size_t *consumed,

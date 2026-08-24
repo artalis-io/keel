@@ -1,12 +1,12 @@
 /*
- * http_server_plat_win.c — Windows implementation of the server platform services
+ * http_server_plat_win.c: Windows implementation of the server platform services
  * (http_server_plat.h). The Windows sibling of http_server_plat_posix.c; compiled only on
  * Windows (Makefile SERVER_PLAT_SRC), so it uses Win32 directly with no
  * internal #ifdef.
  *
  * AF_UNIX exists on Windows 10+ (via <afunix.h>, pulled by sockcompat.h) with
  * working bind/connect, but has no filesystem-permission or ownership model and
- * no peer-credential mechanism — so the node perms (chmod/chown/getpwnam) and
+ * no peer-credential mechanism, so the node perms (chmod/chown/getpwnam) and
  * peer creds are simply absent here. SIGPIPE does not exist; graceful stop uses
  * a console control handler instead of SIGTERM/SIGINT.
  */
@@ -42,7 +42,7 @@ static BOOL WINAPI kl_ctrl_handler(DWORD type) {
 }
 
 void kl_http_server_plat_signals_install(KlHttpServer *s) {
-    /* No SIGPIPE on Windows — send() never raises it. */
+    /* No SIGPIPE on Windows; send() never raises it. */
     if (s->config.install_signal_handlers) {
         atomic_store(&kl_signal_server, s);
         SetConsoleCtrlHandler(kl_ctrl_handler, TRUE);
@@ -81,7 +81,7 @@ int kl_http_server_plat_bind_unix(KlHttpServer *s) {
     kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
 
     /* AF_UNIX on Windows creates a file at the path; bind fails if it exists.
-     * Best-effort removal (no S_ISSOCK guard — Windows has no such test). */
+     * Best-effort removal (no S_ISSOCK guard, Windows has no such test). */
     if (s->config.unix_socket_unlink)
         (void)DeleteFileA(path);
 

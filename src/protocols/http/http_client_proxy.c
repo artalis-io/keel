@@ -1,5 +1,5 @@
 /*
- * http_client_proxy.c — shared HTTP CONNECT (proxy tunnel) request/response logic.
+ * http_client_proxy.c: shared HTTP CONNECT (proxy tunnel) request/response logic.
  * See http_client_proxy.h. Shared by http_client_sync.c and http_client_async.c so both transports
  * share ONE serialization + status check (no snprintf-vs-append drift). Locale-free and
  * allocation-free; part of the freestanding client archive.
@@ -40,7 +40,7 @@ int kl_proxy_connect_status(const char *buf, size_t len) {
      * a well-formed HTTP header block, so this is safe + len-bounded in practice. */
     if (!kl_strstr(buf, "\r\n\r\n"))
         return 0;
-    /* Headers complete — verify the status line is HTTP/1.x 200. len>=12 guarantees the
+    /* Headers complete; verify the status line is HTTP/1.x 200. len>=12 guarantees the
      * fixed-offset reads below are in bounds. */
     if (len < 12 ||
         memcmp(buf, "HTTP/1.", 7) != 0 ||

@@ -1,11 +1,11 @@
 /*
- * http_client_sync.c — HTTP/1.1 client, blocking (hosted) API
+ * http_client_sync.c: HTTP/1.1 client, blocking (hosted) API
  *
  * The blocking poll()-based request/response path lives
- * here — connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
+ * here: connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
  * send_*_sync / recv_response_sync loops, and the public kl_http_client_request[_s]
  * + kl_http_client_request_pooled (blocking) entry points. All I/O routes through the
- * socket-provider seam (kl_sock_send/recv + kl_sock_io_status — no raw read()/
+ * socket-provider seam (kl_sock_send/recv + kl_sock_io_status, no raw read()/
  * write()/errno); the only hosted dependencies are the blocking wait
  * (kl_plat_poll1) and blocking DNS, so a freestanding async build links
  * client_common + client_async without this TU.
@@ -28,8 +28,8 @@
 #include <sys/types.h>
 
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
-#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
-#include "platform.h"     /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
+#include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
+#include "platform.h"     /* kl_plat_poll1: sync readiness wait (poll/WSAPoll) */
 #include "http_client_internal.h"
 #include "http_client_proxy.h"   /* shared CONNECT serialization + status (no sync/async drift) */
 
@@ -177,7 +177,7 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
         tls->set_socket_provider(tls, sockets);
 
     /* Set SNI hostname via vtable (backend-agnostic). FAIL CLOSED: if the host
-     * does not fit the buffer, or set_hostname() reports failure, abort — a
+     * does not fit the buffer, or set_hostname() reports failure, abort; a
      * missing hostname check would let a cert for the wrong host verify. */
     if (tls->set_hostname) {
         char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
@@ -228,7 +228,7 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t req_len = 0;
-    /* Shared serialization (http_client_proxy.c) — identical bytes to the async client. */
+    /* Shared serialization (http_client_proxy.c): identical bytes to the async client. */
     if (kl_proxy_build_connect(buf, sizeof(buf), &req_len, host, port, proxy_auth) != 0)
         return -1;
     int n = (int)req_len;
@@ -249,7 +249,7 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         sent += (size_t)w;
     }
 
-    /* Read proxy response — look for "HTTP/1.x 200" */
+    /* Read proxy response: look for "HTTP/1.x 200" */
     size_t recv_len = 0;
     for (;;) {
         if (recv_len >= sizeof(buf) - 1)
@@ -567,7 +567,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
 
     memset(resp, 0, sizeof(*resp));
 
-    /* Selected socket provider (NULL = built-in default) — threaded through the
+    /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
 
@@ -784,7 +784,7 @@ int kl_http_client_request(KlAllocator *alloc, const KlHttpClientConfig *cfg,
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * Pooled blocking request — connection pool integration (sync path)
+ * Pooled blocking request: connection pool integration (sync path)
  * ══════════════════════════════════════════════════════════════════════ */
 
 int kl_http_client_request_pooled(KlHttpClientPool *pool,
@@ -803,7 +803,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
 
     memset(resp, 0, sizeof(*resp));
 
-    /* Selected socket provider (NULL = built-in default) — threaded through the
+    /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
 
@@ -855,11 +855,11 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     int ret = -1;
 
     if (acq == 0) {
-        /* Pool hit — reuse connection */
+        /* Pool hit: reuse connection */
         fd = pconn.fd;
         tls = pconn.tls;
     } else {
-        /* Pool miss — connect fresh */
+        /* Pool miss: connect fresh */
         KlError conn_err = KL_ERR_NONE;
         fd = connect_with_timeout(parsed.host, parsed.host_len,
                                    parsed.port, timeout_ms, sockets, &conn_err);

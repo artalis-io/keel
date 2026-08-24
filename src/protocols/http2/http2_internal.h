@@ -1,11 +1,11 @@
 /*
- * http2_internal.h — INTERNAL HTTP/2 server state.
+ * http2_internal.h: INTERNAL HTTP/2 server state.
  *
  * The per-connection (KlHttp2ServerConn) and per-stream (KlHttp2ServerStream) bodies live
  * here, not in the public <keel/http2_server.h>, so they are truly opaque to users: the
  * KlHttp2ServerSession vtable treats the connection as a void*, and only http_connection.c,
  * http_server.c and http2_server.c (plus the white-box h2 unit test) touch these fields. Keeping the
- * bodies internal means new internal state — e.g. the output-writer seam below — is not
+ * bodies internal means new internal state (e.g. the output-writer seam below) is not
  * a public-API change.
  */
 #ifndef KEEL_SRC_HTTP2_INTERNAL_H
@@ -70,7 +70,7 @@ struct KlHttp2ServerConn {
     /* Output boundary seam. Produced frame bytes flow through out_write; the
      * default writes the socket (conn_write). A completion driver installs a buffering
      * writer (kl_http2_server_set_writer) to collect a feed's frames for one ordered
-     * overlapped send — symmetric with the WebSocket server's kl_drain boundary. The
+     * overlapped send, symmetric with the WebSocket server's kl_drain boundary. The
      * readiness path always uses the default writer, so it is unchanged. */
     KlHttp2WriteFn out_write;         /**< Output sink for produced frames. */
     void       *out_ctx;           /**< Context for out_write. */

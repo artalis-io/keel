@@ -68,7 +68,7 @@ int kl_http_router_add_streaming_async(KlHttpRouter *r, const char *method,
     /* streaming_handler enables the early-dispatch / mid-stream-exit
      * machinery; streaming_async additionally tells conn_dispatch_request
      * to invoke the handler BEFORE feeding leftover body bytes (so the
-     * handler can park on NEED_DATA and be resumed by on_data — both
+     * handler can park on NEED_DATA and be resumed by on_data, both
      * for the leftover AND subsequent socket reads). */
     r->routes[r->count - 1].streaming_handler = 1;
     r->routes[r->count - 1].streaming_async   = 1;
@@ -106,7 +106,7 @@ static int match_path(const char *pattern, size_t pat_len,
         size_t rs_len = (size_t)(rs_end - rp);
 
         if (ps_len > 0 && *pp == ':') {
-            /* Param capture — still matches even if params array is full */
+            /* Param capture: still matches even if params array is full */
             if (*num_params < KL_HTTP_ROUTER_MAX_PARAMS) {
                 params[*num_params] = (KlHttpParam){
                     .name = pp + 1,
@@ -270,14 +270,14 @@ int kl_http_router_dispatch_synthetic(KlHttpRouter *r, KlHttpRequest *req,
                                        req->path, req->path_len,
                                        &matched, req->params, &num_params);
     /* Defensive clamp: kl_http_router_match already bounds writes into params
-     * by KL_HTTP_ROUTER_MAX_PARAMS (see match_path) — repeating the clamp on the
+     * by KL_HTTP_ROUTER_MAX_PARAMS (see match_path); repeating the clamp on the
      * count we expose protects req->num_params against any future
      * regression in the matcher and costs nothing on the hot path. */
     if (num_params < 0) num_params = 0;
     if (num_params > KL_HTTP_ROUTER_MAX_PARAMS) num_params = KL_HTTP_ROUTER_MAX_PARAMS;
     req->num_params = num_params;
 
-    /* No-middleware fast path for a miss — caller decides what to do
+    /* No-middleware fast path for a miss; caller decides what to do
      * with the status (e.g. a test that explicitly asserts 404 doesn't
      * want middleware to run). */
     if (!run_middleware && (match_status != 200 || !matched))

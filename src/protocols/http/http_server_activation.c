@@ -1,5 +1,5 @@
 /*
- * http_server_activation.c — socket-activation fd inheritance (systemd LISTEN_* protocol).
+ * http_server_activation.c: socket-activation fd inheritance (systemd LISTEN_* protocol).
  *
  * The systemd socket-activation surface is its own TU, separate from the readiness run
  * loop, TCP listener construction, and peer accessors. Parses the LISTEN_PID / LISTEN_FDS /

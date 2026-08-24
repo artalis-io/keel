@@ -1,5 +1,5 @@
 /*
- * dns_sys_win.c — Windows config discovery for the built-in DNS resolver.
+ * dns_sys_win.c: Windows config discovery for the built-in DNS resolver.
  *
  * The Winsock sibling of dns_sys_posix.c (implements the dns_sys.h seam).
  * Windows has no resolv.conf/hosts as the source of truth: the system
@@ -18,8 +18,8 @@
 #include <string.h>
 
 /* Fetch the adapter list into an allocator-backed buffer (caller frees with the
- * returned size). Skips the unicast/anycast/multicast lists — we only need the
- * per-adapter DNS server list + suffix — so the output stays small. Grows on
+ * returned size). Skips the unicast/anycast/multicast lists (we only need the
+ * per-adapter DNS server list + suffix) so the output stays small. Grows on
  * ERROR_BUFFER_OVERFLOW. Returns NULL on OOM / no adapters / error. */
 static IP_ADAPTER_ADDRESSES *dns_win_fetch_adapters(KlAllocator *alloc, ULONG *out_size) {
     ULONG flags = GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST |
@@ -40,7 +40,7 @@ static IP_ADAPTER_ADDRESSES *dns_win_fetch_adapters(KlAllocator *alloc, ULONG *o
 }
 
 /* Windows returns deprecated fec0::/10 site-local placeholder addresses as DNS
- * servers on adapters with no real IPv6 resolver — not usable; skip them. */
+ * servers on adapters with no real IPv6 resolver, not usable; skip them. */
 static int dns_win_is_placeholder_v6(const struct sockaddr_in6 *s6) {
     const uint8_t *b = s6->sin6_addr.s6_addr;
     return b[0] == 0xfe && (b[1] & 0xc0) == 0xc0;
@@ -140,7 +140,7 @@ const char *kl_dns_sys_default_hosts_path(void) {
         if (n + strlen(tail) + 1 <= sizeof(path)) {
             memcpy(path + n, tail, strlen(tail) + 1);
         } else {
-            /* System dir too long to append the tail — use the full default
+            /* System dir too long to append the tail; use the full default
              * rather than caching a truncated directory-only path. */
             const char *full = "C:\\Windows\\System32\\drivers\\etc\\hosts";
             memcpy(path, full, strlen(full) + 1);

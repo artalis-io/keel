@@ -1,9 +1,9 @@
 /*
- * dns_sys_posix.c — POSIX config discovery for the built-in DNS resolver.
+ * dns_sys_posix.c: POSIX config discovery for the built-in DNS resolver.
  *
  * The POSIX sibling of dns_sys_win.c (implements the dns_sys.h seam): system
  * nameservers + search domains come from /etc/resolv.conf, the hosts file is
- * /etc/hosts. Plain stdio text parsing — no sockets, no platform #ifdef.
+ * /etc/hosts. Plain stdio text parsing; no sockets, no platform #ifdef.
  */
 #include "dns_sys.h"
 
@@ -22,7 +22,7 @@ static int dns_sys_copy(char *out, size_t cap, const char *a) {
 
 int kl_dns_sys_nameservers(KlAllocator *alloc, const char *resolv_conf_path,
                            char out[][KL_DNS_SYS_NS_STRMAX], int max) {
-    (void)alloc;   /* POSIX reads a file — no transient OS-query buffer */
+    (void)alloc;   /* POSIX reads a file: no transient OS-query buffer */
     const char *path = resolv_conf_path ? resolv_conf_path : "/etc/resolv.conf";
     FILE *f = fopen(path, "r");
     if (!f)

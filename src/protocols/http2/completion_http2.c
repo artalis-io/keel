@@ -1,14 +1,14 @@
 /*
- * completion_http2.c — the HTTP/2-over-completion leg of the completion driver: the
+ * completion_http2.c - the HTTP/2-over-completion leg of the completion driver: the
  * driver-owned h2 output capture and the h2 connection drive. Reaches back into the server TU for kl_comp_close /
  * kl_comp_tls_drain_output (completion_internal.h); reuses the h2 session vtable +
- * kl_http2_server_feed verbatim — no IOCP/pollcomp symbol appears here.
+ * kl_http2_server_feed verbatim; no IOCP/pollcomp symbol appears here.
  */
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include "http_internal.h"            /* kl_http2_server_feed / kl_http2_server_set_writer */
 #include "http2_internal.h"
-#include "completion_http.h"     /* kl_comp_post_send / post_recv (HTTP wrappers) — pulls completion.h */
+#include "completion_http.h"     /* kl_comp_post_send / post_recv (HTTP wrappers), pulls completion.h */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_drain_output */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <string.h>
@@ -41,22 +41,22 @@ static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
 
 /* Drive an established HTTP/2 connection over the completion loop. Feed received
  * plaintext to the h2 session via kl_http2_server_feed (which parses frames and flushes
- * produced output through conn_write — a synchronous blocking send for plaintext, the
+ * produced output through conn_write: a synchronous blocking send for plaintext, the
  * memory-BIO ring for TLS), then read more. The h2 session vtable and kl_http2_server_feed
- * are reused verbatim — this only inverts the transport, exactly as the HTTP/1.1 path
+ * are reused verbatim; this only inverts the transport, exactly as the HTTP/1.1 path
  * does. For TLS the received ciphertext was already fed to the engine (kl_comp_drain);
  * loop on pending() so coalesced records aren't stranded. */
 void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         /* Decrypt + feed every currently-available record (the h2 session writes its
          * output ciphertext into the memory-BIO out ring via conn_write→tls->write),
-         * then drain that ring and post it as ONE ordered overlapped send —
+         * then drain that ring and post it as ONE ordered overlapped send,
          * deferring the next recv to comp_on_write, so at most one h2 send is in flight
          * and frames cannot reorder. */
         for (;;) {
             ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
-            if (p == 0) break;                         /* WANT_READ — batch done */
+            if (p == 0) break;                         /* WANT_READ, batch done */
             KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)p);
             if (st != KL_HTTP_CONN_HTTP2) { kl_comp_close(s, c); return; }
             if (!c->tls->pending || c->tls->pending(c->tls) == 0) break;
@@ -78,7 +78,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added
      * this recv's bytes). Capture the session's output so all frames it produces
      * this feed go out as ONE ordered overlapped send; defer the next recv until that
-     * send completes (comp_on_write) so at most one h2 send is ever in flight — frames
+     * send completes (comp_on_write) so at most one h2 send is ever in flight; frames
      * must not reorder. */
     CompH2Cap cap = { c->stream.alloc, NULL, 0, 0, 0 };
     kl_http2_server_set_writer(c, comp_h2_capture_write, &cap);
@@ -97,7 +97,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
         if (rc < 0) kl_comp_close(s, c);
     } else {
         kl_free(c->stream.alloc, cap.buf, cap.cap);
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);   /* no output — read more */
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);   /* no output: read more */
     }
 }
 

@@ -89,7 +89,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             dec->size_digits = 0;
 
             if (dec->chunk_remaining == 0) {
-                /* Terminal chunk — enter trailer parsing.
+                /* Terminal chunk: enter trailer parsing.
                  * trailer_cr=1 means "at start of line". If the next
                  * bytes are \r\n, it's the empty terminating line. */
                 dec->state = KL_HTTP1_CHUNK_TRAILER;
@@ -145,7 +145,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
                     i++;
                     dec->state = KL_HTTP1_CHUNK_SIZE;
                 } else {
-                    /* CR at end of buffer — remember for next call */
+                    /* CR at end of buffer, remember for next call */
                     dec->trailer_cr = 1;
                 }
             } else {
@@ -172,11 +172,11 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             }
             i++;
             if (dec->trailer_cr) {
-                /* Empty line (\r\n at start of line) — done */
+                /* Empty line (\r\n at start of line): done */
                 dec->state = KL_HTTP1_CHUNK_DONE;
                 return 1;
             }
-            /* End of a non-empty trailer line — next line starts fresh */
+            /* End of a non-empty trailer line; next line starts fresh */
             dec->trailer_cr = 1;
             dec->state = KL_HTTP1_CHUNK_TRAILER;
             break;

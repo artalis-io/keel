@@ -1,24 +1,24 @@
 /*
- * completion_ws.c — the WebSocket-over-completion leg of the completion driver: the WS
+ * completion_ws.c - the WebSocket-over-completion leg of the completion driver: the WS
  * connection drive. Reaches back into
  * the server TU for kl_comp_close / kl_comp_tls_flush (completion_internal.h); reuses the
- * transport-agnostic WS frame core (kl_ws_server_*) verbatim — no WebSocket-protocol code
+ * transport-agnostic WS frame core (kl_ws_server_*) verbatim; no WebSocket-protocol code
  * and no IOCP/pollcomp symbol appears here.
  */
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
-#include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion */
-#include "completion_http.h"     /* kl_comp_post_recv (HTTP wrapper) — pulls the neutral completion.h */
+#include <keel/websocket_server.h> /* kl_ws_server_on_readable_data: WS over completion */
+#include "completion_http.h"     /* kl_comp_post_recv (HTTP wrapper): pulls the neutral completion.h */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <stdint.h>
-#include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
+#include <sys/types.h>           /* ssize_t (TLS read return): previously pulled
                                     transitively via http_response.h before off_t neutralization */
 
 /* Drive an established WebSocket connection over the completion loop. Feed
  * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
- * the analogue of kl_http2_server_feed); its callbacks emit frames through conn_write — the
- * memory-BIO out ring for TLS — which we flush (plus any drain-buffered output). Reuses
+ * the analogue of kl_http2_server_feed); its callbacks emit frames through conn_write (the
+ * memory-BIO out ring for TLS) which we flush (plus any drain-buffered output). Reuses
  * the WS core + KlTls vtable verbatim: no WebSocket-protocol code and no IOCP/pollcomp
  * symbol appears here, so the completion axis stays out of the WS layer entirely. */
 void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
@@ -26,7 +26,7 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
         for (;;) {
             ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
-            if (p == 0) {                              /* WANT_READ — need the network */
+            if (p == 0) {                              /* WANT_READ: need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;
             }

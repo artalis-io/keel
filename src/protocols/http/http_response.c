@@ -9,7 +9,7 @@
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
 /* KlIoVec + the socket seam come from socket.h; sockaddr/TCP_NODELAY via
- * socket.h -> sockcompat.h. No raw net headers, and no platform iovec here —
+ * socket.h -> sockcompat.h. No raw net headers, and no platform iovec here;
  * scatter-gather uses the Keel-owned KlIoVec, translated to struct iovec/WSABUF
  * only inside the provider TUs. */
 
@@ -21,7 +21,7 @@
  * backpressure to the producer instead of growing memory unboundedly. */
 #define KL_STREAM_DRAIN_MAX (1u << 20)   /* 1 MiB */
 
-/* ── Pre-built status lines — no snprintf in the hot path ─────────── */
+/* ── Pre-built status lines: no snprintf in the hot path ─────────── */
 
 typedef struct { const char *str; size_t len; } KlStatusLine;
 
@@ -59,7 +59,7 @@ static KlStatusLine status_line_for(int code) {
     }
 }
 
-/* ── Fast integer formatting — replaces snprintf for Content-Length ── */
+/* ── Fast integer formatting: replaces snprintf for Content-Length ── */
 
 static int format_uint(char *p, size_t n) {
     char tmp[21];  /* 20 digits max for 64-bit + safety margin */
@@ -151,7 +151,7 @@ void kl_http_response_reset(KlHttpResponse *res) {
         kl_drain_free(&res->drain);
     }
 
-    /* Fast reinit for keep-alive — reuses header buffer, no alloc */
+    /* Fast reinit for keep-alive: reuses header buffer, no alloc */
     char *buf = res->hdr_buf;
     size_t cap = res->hdr_cap;
     KlAllocator *alloc = res->alloc;
@@ -306,7 +306,7 @@ static ssize_t seam_writev(const KlSocketProvider *p, int fd,
     return total;
 }
 
-/* ── try_writev — single attempt, returns bytes written ──────────── */
+/* ── try_writev: single attempt, returns bytes written ──────────── */
 
 static ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
                           KlIoVec *iov, int iovcnt) {
@@ -328,7 +328,7 @@ static ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
     return 0;
 }
 
-/* ── stream_writev_all — spin-write for streaming (small chunks) ── */
+/* ── stream_writev_all: spin-write for streaming (small chunks) ── */
 
 static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
                              KlIoVec *iov, int iovcnt) {
@@ -361,7 +361,7 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
         return 0;
     }
 
-    /* TLS — linearize segments through tls->write */
+    /* TLS: linearize segments through tls->write */
     for (int i = 0; i < iovcnt; i++) {
         const char *seg = iov[i].base;
         size_t remaining = iov[i].len;
@@ -384,7 +384,7 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
 
 static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 
-/* Assemble the buffered-response wire bytes into iov — the single source of truth
+/* Assemble the buffered-response wire bytes into iov: the single source of truth
  * for the byte layout, shared by kl_http_response_send (synchronous seam writev) and the
  * IOCP completion driver (overlapped WSASend). See http_response_internal.h. */
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
@@ -463,7 +463,7 @@ int kl_http_response_send(KlHttpResponse *res) {
 
         if (res->send_offset >= total)
             return 0;  /* done */
-        return 1;  /* partial — yield to event loop */
+        return 1;  /* partial: yield to event loop */
     }
 
     if (!res->headers_sent) {
@@ -517,7 +517,7 @@ int kl_http_response_send(KlHttpResponse *res) {
         int r = kl_drain_flush(&res->drain);
         if (r < 0) return -1;
         if (r == 1) return 1;  /* more pending */
-        /* Fully drained — if stream ended, we're done */
+        /* Fully drained; if stream ended, we're done */
         if (res->stream_ended) return 0;
         return 1;  /* handler may produce more data */
     }
@@ -525,7 +525,7 @@ int kl_http_response_send(KlHttpResponse *res) {
     /* Send file body (already skipped above for HEAD) */
     if (res->body_mode == KL_HTTP_BODY_FILE) {
         if (res->tls) {
-            /* TLS: sendfile bypasses userspace — incompatible with encryption.
+            /* TLS: sendfile bypasses userspace, incompatible with encryption.
              * Fall back to pread + tls->write, one chunk per event tick
              * to avoid head-of-line blocking on slow connections. */
             if (res->file_offset >= res->file_size) return 0;
@@ -539,7 +539,7 @@ int kl_http_response_send(KlHttpResponse *res) {
             while (left > 0) {
                 ssize_t nw = res->tls->write(res->tls, res->conn_fd, p, left);
                 if (nw < 0) return -1;
-                if (nw == 0) break;  /* WANT_WRITE — yield to event loop */
+                if (nw == 0) break;  /* WANT_WRITE: yield to event loop */
                 p += nw;
                 left -= (size_t)nw;
             }
@@ -548,7 +548,7 @@ int kl_http_response_send(KlHttpResponse *res) {
         }
 
         /* Provider without sendfile support (e.g. a mock, or a stack whose fds
-         * aren't sendfile-able): pread + provider send, one chunk per tick —
+         * aren't sendfile-able): pread + provider send, one chunk per tick,
          * same shape as the TLS branch. */
         const KlSocketProvider *sp = res_provider(res);
         if (sp && !sp->ops->sendfile) {
@@ -578,7 +578,7 @@ int kl_http_response_send(KlHttpResponse *res) {
         (void)kl_sock_set_cork(sp, res->conn_fd, 1);
         size_t remaining = (size_t)(res->file_size - res->file_offset);
         while (remaining > 0) {
-            /* file_offset is uint64_t end to end, matching the sendfile seam op —
+            /* file_offset is uint64_t end to end, matching the sendfile seam op;
              * the kernel advances it in place, no off_t conversion needed. */
             ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
                                             &res->file_offset, remaining);
@@ -596,7 +596,7 @@ int kl_http_response_send(KlHttpResponse *res) {
     return 0;
 }
 
-/* ── Drain writer — wraps raw write/TLS for KlDrainWriteFn ───────── */
+/* ── Drain writer: wraps raw write/TLS for KlDrainWriteFn ───────── */
 
 static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
     KlHttpResponse *res = ctx;
@@ -668,7 +668,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
         return -1;
 
     /* Wire the transport-neutral outbound stream buffer by default: stream writes
-     * go through KlDrain — a non-blocking inline send with the would-block remainder
+     * go through KlDrain: a non-blocking inline send with the would-block remainder
      * buffered (bounded, backpressure), flushed by the transport (readiness:
      * kl_http_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and the
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all

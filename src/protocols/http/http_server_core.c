@@ -1,10 +1,10 @@
 /*
- * http_server_core.c — the model-blind, freestanding-safe half of the KlHttpServer.
+ * http_server_core.c: the model-blind, freestanding-safe half of the KlHttpServer.
  *
  * The model-blind, freestanding-safe half of the server (docs/archive/phases/phase10_uefi_server_design.md),
  * mirroring the client's async.c -> event_ctx.c split. This TU holds the
  * server API + run machinery that touches ONLY the completion / connection-pool /
- * router / timer seams — no OS sockets, no signals, no systemd, no self-pipe, no
+ * router / timer seams: no OS sockets, no signals, no systemd, no self-pipe, no
  * readiness event loop, no stdio. A freestanding completion server (EFI_TCP4 +
  * the EFI completion backend) links it WITHOUT dragging in http_server.c's hosted half.
  *
@@ -22,9 +22,9 @@
 #include "http_internal.h"
 #include "completion_io.h"    /* kl_comp_cancel (neutral completion seam) */
 #include "completion_http.h" /* kl_http_comp_run / _quiesce_accepts / _post_read (HTTP orchestration) */
-#include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
+#include "event_caps.h"   /* kl_event_caps: completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
-#include "http_proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
+#include "http_proto_hooks.h"  /* ws/h2 upgrade seam: sweep/drain reach ws/h2 through it */
 #include <keel/http1_parser.h>       /* kl_http1_parser_llhttp (default request parser) */
 #include <keel/event_ctx.h>    /* kl_event_ctx_init_ex / kl_watcher_add */
 #ifndef KEEL_FREESTANDING
@@ -41,8 +41,8 @@
 
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
  * kl_http_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
- * server has no self-pipe (no OS pipe/socketpair, no kl_http_server_stop caller) — it
- * runs the completion loop directly — so both the helpers and their init call are
+ * server has no self-pipe (no OS pipe/socketpair, no kl_http_server_stop caller), it
+ * runs the completion loop directly, so both the helpers and their init call are
  * compiled out under KEEL_FREESTANDING. */
 #ifndef KEEL_FREESTANDING
 static void kl_http_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -69,9 +69,9 @@ static void kl_http_server_wakeup_init(KlHttpServer *s) {
 
 /* ── Server construction (model-blind: pool + router + event ctx + provider) ───
  * A freestanding EFI server constructs a KlHttpServer from the archive alone. The
- * hosted-only pieces —
- * the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
- * async file-I/O backend, and the stop self-pipe — are compiled out under
+ * hosted-only pieces
+ * (the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
+ * async file-I/O backend, and the stop self-pipe) are compiled out under
  * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
  * file I/O, no self-pipe). Everything else is platform-neutral. */
 int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
@@ -86,7 +86,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
 #ifndef KEEL_FREESTANDING
     /* Register the WebSocket / HTTP-2 upgrade tables so http_connection.c's dispatch is
      * wired (idempotent; also pulls server_ws.o / server_h2.o out of the static
-     * archive). A freestanding HTTP/1.1 server never links these — the seam stays
+     * archive). A freestanding HTTP/1.1 server never links these; the seam stays
      * NULL and the core runs pure HTTP/1.1. */
     kl_ws_server_hooks_install();
     kl_http2_server_hooks_install();
@@ -128,7 +128,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     }
 
     /* Set up allocator. A freestanding server (like the freestanding client) has no
-     * stdlib default allocator in the archive — the caller MUST supply one (the EFI
+     * stdlib default allocator in the archive; the caller MUST supply one (the EFI
      * pool allocator on UEFI); falling back to kl_allocator_default() would drag
      * malloc/free/stdio into the freestanding closure. */
     if (s->config.alloc) {
@@ -173,7 +173,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     }
 
     /* Parse the PROXY protocol trusted-source CIDR allowlist (if any). Freestanding
-     * has no PROXY support — proxy_protocol.c is not in the archive. */
+     * has no PROXY support; proxy_protocol.c is not in the archive. */
     s->proxy_cidrs = NULL;
     s->proxy_cidr_count = 0;
 #ifndef KEEL_FREESTANDING
@@ -221,7 +221,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
 
     /* Pre-allocate TLS sessions (one per connection slot) */
     if (s->config.tls) {
-        /* A NULL factory would crash on the first call below — reject it up front (no
+        /* A NULL factory would crash on the first call below; reject it up front (no
          * sessions allocated yet, so pool_free touches no tls). */
         if (!s->config.tls->factory) {
             s->last_error = KL_ERR_TLS_VTABLE;
@@ -239,7 +239,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
                 return -1;
             }
             /* Validate the vtable (all 7 required ops; alpn_protocol etc. optional). A
-             * session missing a required op — notably `destroy` — must NOT reach
+             * session missing a required op, notably `destroy`, must NOT reach
              * kl_http_conn_pool_free, which would call the NULL op. Free it here via its own
              * destroy only when present, clear the slot, THEN run pool cleanup. */
             if (!kl_tls_vtable_valid(s->pool.conns[i].tls)) {
@@ -254,7 +254,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         }
     }
 
-    /* Init event context — must happen before thread pool / watcher registration.
+    /* Init event context: must happen before thread pool / watcher registration.
      * A configured event_provider (e.g. lwIP / EFI) installs its own backend. */
     if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
         s->last_error = KL_ERR_EVENT_INIT;
@@ -268,7 +268,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
 
     /* A completion loop needs an overlapped provider, which the default (or a
      * readiness) provider is not. If the configured provider is incompatible with the
-     * loop, adopt the backend's own native provider (kl_event_native_provider — NULL on
+     * loop, adopt the backend's own native provider (kl_event_native_provider, NULL on
      * readiness backends, the overlapped provider on completion backends). This makes a
      * completion backend a source-compatible drop-in: a server written for epoll works
      * unchanged. An explicitly-configured compatible provider is kept; a still-
@@ -290,7 +290,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     }
 
     /* Preallocate the completion-mode TLS ciphertext scratch (one stable buffer per slot) at
-     * init — NEVER in the event-loop hot path. Only for TLS + a completion event
+     * init, NEVER in the event-loop hot path. Only for TLS + a completion event
      * model: the HTTP completion adapter reads ciphertext into it, and readiness TLS decrypts
      * straight from the socket so needs none. The event model is only known now (post event-ctx
      * init). Unwinds like the negotiation failure above; pool_free reclaims any already set. */
@@ -309,7 +309,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     }
 
     /* Create async file I/O backend (NULL if backend doesn't support it). Freestanding
-     * has no async file I/O — file_io.c is not in the archive; s->file_io stays NULL. */
+     * has no async file I/O: file_io.c is not in the archive; s->file_io stays NULL. */
 #ifndef KEEL_FREESTANDING
     s->file_io = kl_file_io_create(&s->ev.loop, alloc);
 #endif
@@ -328,7 +328,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
  * A freestanding EFI server tears
  * itself down from the archive alone (then kl_uefi_shutdown() releases the EFI providers
  * before ExitBootServices). kl_http_conn_pool_free closes every accepted child's socket
- * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
+ * (draining its EFI tokens), so after this the socket provider's live count is 0: the
  * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
  * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
 void kl_http_server_free(KlHttpServer *s) {
@@ -358,15 +358,15 @@ void kl_http_server_free(KlHttpServer *s) {
          * the listener is already detached. A COMPLETION close only REQUESTED cancellation; the
          * posted accepts retire only once physically completed + reaped. Do it in a guaranteed,
          * memory-safe, no-completion-lost order:
-         *   (1) close the listen socket — freestanding-safe; forces every posted IOCP AcceptEx to
+         *   (1) close the listen socket: freestanding-safe; forces every posted IOCP AcceptEx to
          *       complete (closesocket cancels its overlapped I/O). kl_http_server_close_listener below
          *       then only does the owned-AF_UNIX unlink (fd already invalid).
-         *   (2) kl_comp_shutdown_accepts — the backend GUARANTEES every posted accept will complete
+         *   (2) kl_comp_shutdown_accepts: the backend GUARANTEES every posted accept will complete
          *       (io_uring unconditionally submits a cancel per accept; pollcomp marks them aborted;
          *       IOCP relies on the closed listen socket). Returns -1 only if it could not force.
          *   (3) reap through the NORMAL completion path until confirmed detachment: each kl_comp_run
          *       DEQUEUES every completion before freeing it (no OVERLAPPED use-after-free) and routes
-         *       every dequeued entry ordinarily — accepts retire the listener; unrelated read/write/
+         *       every dequeued entry ordinarily; accepts retire the listener; unrelated read/write/
          *       udp/watcher completions get their normal teardown handling, NONE lost. Guaranteed to
          *       terminate: the forced accept completions are pending and each blocking drain reaps
          *       them. If the force failed we skip the loop (the backend close is the physical
@@ -379,7 +379,7 @@ void kl_http_server_free(KlHttpServer *s) {
             }
             /* Force + teardown-reap (see kl_http_comp_quiesce_accepts): a teardown-specific
              * dispatcher routes ONLY ACCEPT to the listener and drops every other completion
-             * without dispatch, so no HTTP step / consumer callback / timer runs here — safe now
+             * without dispatch, so no HTTP step / consumer callback / timer runs here; safe now
              * that async ops + file_io are already destroyed. Returns -1 only if the force could
              * not be guaranteed, in which case the backend close below is the physical backstop. */
             (void)kl_http_comp_quiesce_accepts(s);
@@ -397,7 +397,7 @@ void kl_http_server_free(KlHttpServer *s) {
     }
 #endif
 
-    /* Tear down the stop-wakeup self-pipe (never opened on freestanding — stop_wake_rd
+    /* Tear down the stop-wakeup self-pipe (never opened on freestanding, stop_wake_rd
      * stays KL_INVALID_SOCKET, so this is skipped). */
     if (kl_handle_valid(s->stop_wake_rd)) {
         kl_watcher_del(&s->ev, s->stop_wake_rd);
@@ -430,7 +430,7 @@ void kl_http_server_free(KlHttpServer *s) {
  * The caller owns the `while (running)` guard + drain/running atomics. */
 int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Bound the tick by the nearest async-op deadline / timer so they fire on time
-     * — the completion loop is a full event loop (watchers relayed via
+     * (the completion loop is a full event loop; watchers relayed via
      * KL_COMP_WATCHER; timers + async deadlines serviced here). */
     uint64_t cnow = kl_monotonic_ms();
     int cwait = KL_POLL_TIMEOUT_MS;
@@ -445,7 +445,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
     if (kl_http_comp_run(s, cwait) < 0)
         return -1;
     cnow = kl_monotonic_ms();
-    /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
+    /* Idle-timeout sweep on the completion loop too (slowloris defense); the
      * completion path never falls through to the readiness sweep in http_server.c. */
     kl_http_server_sweep_conn_timeouts(s, cnow, 1);
     for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
@@ -473,7 +473,7 @@ void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
     if (s->accept_via_listener) {
         /* Split-credit accept path: return the physical KlHttpConn to the pool FIRST, then
          * consume the admission lease. The lease's release returns the credit and resumes the
-         * listener, which may immediately reserve + arm + accept — so the KlHttpConn must already be
+         * listener, which may immediately reserve + arm + accept, so the KlHttpConn must already be
          * back on the free list before the notification fires. */
         KlSlotLease lease = c->slot_lease;
         memset(&c->slot_lease, 0, sizeof(lease));   /* clear the owned copy on the conn */
@@ -503,7 +503,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         KlHttpConn *tc = &s->pool.conns[i];
         if (tc->state == KL_HTTP_CONN_CLOSED || tc->state == KL_HTTP_CONN_PROCESSING)
             continue;
-        /* Suspended: exempt from idle timeout — has its own deadline */
+        /* Suspended: exempt from idle timeout; has its own deadline */
         if (tc->state == KL_HTTP_CONN_SUSPENDED)
             continue;
         /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). */
@@ -541,8 +541,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 continue;  /* wait for cancel CQE in next tick */
             }
             if (tc->file_io_phase == 3)
-                continue;  /* FILE_IO_CANCELLING — still waiting */
-            /* Best-effort 408 (skip for TLS handshake — no HTTP framing yet). */
+                continue;  /* FILE_IO_CANCELLING: still waiting */
+            /* Best-effort 408 (skip for TLS handshake, no HTTP framing yet). */
             if (tc->state == KL_HTTP_CONN_READING ||
                 tc->state == KL_HTTP_CONN_READING_BODY)
                 best_effort_conn_write(tc, kl_408_response,

@@ -4,7 +4,7 @@
 #endif
 
 /*
- * http_server_plat_posix.c — POSIX implementation of the server platform services
+ * http_server_plat_posix.c: POSIX implementation of the server platform services
  * (http_server_plat.h). The AF_UNIX node lifecycle, peer credentials, and signal
  * handling live here so http_server.c stays platform-#ifdef-free.
  *
@@ -272,7 +272,7 @@ void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
         /* Re-check that the path is still a socket before unlinking, so a
          * regular file (or a socket from a different process) that replaced
          * our path is not removed.  lstat (not stat) avoids following a
-         * symlink.  Best-effort teardown — no error reporting. */
+         * symlink.  Best-effort teardown; no error reporting. */
         struct stat st;
         if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
             unlink(s->config.unix_socket_path);

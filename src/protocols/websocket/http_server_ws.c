@@ -1,5 +1,5 @@
 /*
- * http_server_ws.c — the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
+ * http_server_ws.c - the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
  * framed send/recv over a KlHttpConn, drain + idle keepalive, and the upgrade-seam
  * registration (http_proto_hooks.h). The shared frame codec (kl_ws_frame_*) stays in websocket.c;
  * this TU mirrors the client's websocket_client.c and the http_server_core.c /
@@ -11,13 +11,13 @@
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
-#include <keel/http_server.h>   /* KlHttpServer — kl_http_server_ws_upgrade registration API lives here */
+#include <keel/http_server.h>   /* KlHttpServer: kl_http_server_ws_upgrade registration API lives here */
 #include <keel/http_router.h>   /* kl_http_router_add + KlHttpRoute.ws_config */
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 #include "http_internal.h"
-#include "http_proto_hooks.h"   /* WS server upgrade seam — registered for the core */
+#include "http_proto_hooks.h"   /* WS server upgrade seam: registered for the core */
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
@@ -76,7 +76,7 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
         data[i] ^= mask[(start_offset + i) & 3];
 }
 
-/* ── Drain writer — wraps conn_write for KlDrainWriteFn ──────────── */
+/* ── Drain writer: wraps conn_write for KlDrainWriteFn ──────────── */
 
 static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
@@ -111,7 +111,7 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
     uint8_t hdr[10];
     size_t hdr_len;
 
-    /* FIN=1, no RSV, opcode — server frames are never masked */
+    /* FIN=1, no RSV, opcode; server frames are never masked */
     hdr[0] = (uint8_t)(KL_WS_FIN_BIT | (opcode & KL_WS_OPCODE_MASK));
 
     if (len < 126) {
@@ -500,13 +500,13 @@ int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
                 }
                 /* Control frames must fit in one parse since max 125 bytes */
             } else {
-                /* Data frame — reassemble */
+                /* Data frame: reassemble */
                 int is_first = (opcode != KL_WS_OP_CONTINUATION);
 
                 if (is_first) {
                     /* Start of new message */
                     if (ws->msg_len > 0 && ws->msg_opcode != 0) {
-                        /* Previous message not finished — protocol error */
+                        /* Previous message not finished: protocol error */
                         kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
                         return KL_HTTP_CONN_CLOSED;
                     }
@@ -678,10 +678,10 @@ void kl_ws_server_hooks_install(void) {
     kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
 }
 
-/* Public WebSocket route-registration API. Lives in the ws module so the readiness http_server.c owns no WebSocket type — a
+/* Public WebSocket route-registration API. Lives in the ws module so the readiness http_server.c owns no WebSocket type; a
  * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
 int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
-    /* Register as a GET route with no handler — ws_config triggers the upgrade. */
+    /* Register as a GET route with no handler; ws_config triggers the upgrade. */
     if (kl_http_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
         return -1;
     s->router.routes[s->router.count - 1].ws_config = config;
@@ -689,7 +689,7 @@ int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerCo
 }
 
 /* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
- * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * (without kl_http_server_init, e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_ws_server_* reference pulls it in). */
 __attribute__((constructor))
 static void kl_ws_server_hooks_autoinstall(void) {

@@ -1,5 +1,5 @@
 /*
- * websocket_client.c — Async WebSocket client
+ * websocket_client.c: Async WebSocket client
  *
  * State machine: CONNECTING -> TLS_HANDSHAKE -> WS_HANDSHAKE -> OPEN -> CLOSING -> CLOSED
  *
@@ -27,7 +27,7 @@
 #include "base64.h"
 #include "utf8.h"
 #include "socket.h"
-#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
+#include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "platform.h"
 
 /* ── Connection states ──────────────────────────────────────────── */
@@ -130,7 +130,7 @@ static kl_ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
     KlWsClientConn *ws = ctx;
     ssize_t r = wsc_write(ws, data, len);
     if (r > 0) return r;
-    if (r == 0) return 0;  /* TLS WANT_* — treat as would-block */
+    if (r == 0) return 0;  /* TLS WANT_*, treat as would-block */
     if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
     return -1;
 }
@@ -587,7 +587,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
             memcpy(leftover, ws->handshake_buf + http_end_offset, leftover_len);
     }
 
-    /* Handshake complete — free handshake buffers */
+    /* Handshake complete: free handshake buffers */
     if (ws->upgrade_buf) {
         kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_len);
         ws->upgrade_buf = NULL;
@@ -686,7 +686,7 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                     /* Pong: ignore */
                 }
             } else {
-                /* Data frame — reassemble */
+                /* Data frame: reassemble */
                 int is_first = (opcode != KL_WS_OP_CONTINUATION);
                 if (is_first) {
                     wsc_msg_reset(ws);
@@ -1009,7 +1009,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         return NULL;
     }
 
-    /* Register watcher — connect in progress, wait for writable */
+    /* Register watcher: connect in progress, wait for writable */
     if (kl_watcher_add(ev, fd, KL_EVENT_WRITE, wsc_on_event, ws) != 0) {
         if (ws->upgrade_buf)
             kl_free(alloc, ws->upgrade_buf, ws->upgrade_len);

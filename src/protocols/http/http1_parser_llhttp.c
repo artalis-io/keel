@@ -12,7 +12,7 @@
  */
 
 typedef struct {
-    KlHttp1RequestParser base;          /* vtable — must be first */
+    KlHttp1RequestParser base;          /* vtable: must be first */
     KlAllocator *alloc;
     llhttp_t llhttp;
     llhttp_settings_t settings;
@@ -35,7 +35,7 @@ static int on_url(llhttp_t *p, const char *at, size_t len) {
         req->path = at;
         req->path_len = len;
     } else {
-        /* Continuation — extend */
+        /* Continuation: extend */
         req->path_len = (size_t)(at + len - req->path);
     }
     return 0;
@@ -137,7 +137,7 @@ static int on_body(llhttp_t *p, const char *at, size_t len) {
     /* Forward to body reader if present */
     if (req->body_reader) {
         if (req->body_reader->on_data(req->body_reader, at, len) < 0)
-            return -1;  /* reader rejected — abort parse */
+            return -1;  /* reader rejected: abort parse */
     }
     /* No body reader → discard */
     return 0;
@@ -174,7 +174,7 @@ static KlHttp1ParseResult llhttp_parse(KlHttp1RequestParser *self, KlHttpRequest
     }
 
     if (lp->headers_done && err == HPE_PAUSED) {
-        /* Headers just completed — pause for routing */
+        /* Headers just completed: pause for routing */
         const char *error_pos = llhttp_get_error_pos(&lp->llhttp);
         *consumed = (size_t)(error_pos - buf);
         llhttp_resume(&lp->llhttp);

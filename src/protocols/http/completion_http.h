@@ -2,17 +2,17 @@
 #define KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H
 
 /*
- * completion_http.h — the HTTP leg of the completion axis. Owned by src/protocols/http/.
+ * completion_http.h: the HTTP leg of the completion axis. Owned by src/protocols/http/.
  *
  * The substrate completion axis (src/completion.h) is protocol-neutral: its vtable +
  * `kl_comp_*_raw` entry points speak only KlEventCtx / KlStream / KlSocketHandle. This
  * header is the HTTP adapter over it, in two tiers (docs/archive/freezes/protocols_restructure_freeze.md §4.8):
  *
- *   - `kl_comp_*` (KlHttpConn / KlHttpServer form) — thin wrappers that each mirror a neutral
+ *   - `kl_comp_*` (KlHttpConn / KlHttpServer form): thin wrappers that each mirror a neutral
  *     `kl_comp_*_raw` operation 1:1, extracting the neutral arg (&s->ev, s->listen_fd, &c->stream)
  *     and forwarding. Defined in completion_http_server.c (hosted) / completion_http_absent.c
  *     (KEEL_NO_COMPLETION). Consumed by the HTTP-1/h2/ws completion adapters.
- *   - `kl_http_comp_*` — HTTP-only completion orchestration with NO neutral counterpart (the run
+ *   - `kl_http_comp_*`: HTTP-only completion orchestration with NO neutral counterpart (the run
  *     loop's completion tick, accept quiescence, async resume, body re-post). Consumed by http_server_core.c (run/quiesce/post_read) + async.c (resume).
  *
  * The neutral run-loop tick kl_comp_run() and the neutral cancel/datagram/connect seam stay in
@@ -28,8 +28,8 @@ struct KlHttpServer;
 
 /* ── Tier 2: HTTP wrappers mirroring a neutral kl_comp_*_raw op 1:1 ─────────────────── */
 
-/* Choose the receive buffer for the connection's current phase — plaintext/PROXY →
- * c->stream.read_buf; TLS → the per-conn ciphertext scratch (c->comp_cipher) — then post the raw
+/* Choose the receive buffer for the connection's current phase: plaintext/PROXY →
+ * c->stream.read_buf; TLS → the per-conn ciphertext scratch (c->comp_cipher); then post the raw
  * receive (kl_comp_post_recv_raw). This is where all TLS/PROXY/state knowledge lives; the backend
  * sees only (stream, buf, cap). */
 int kl_comp_post_recv(KlHttpConn *c);

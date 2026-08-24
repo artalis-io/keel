@@ -1,5 +1,5 @@
 /*
- * http1_response_parser_llhttp.c — llhttp backend for KlHttp1ResponseParser vtable
+ * http1_response_parser_llhttp.c: llhttp backend for KlHttp1ResponseParser vtable
  *
  * Uses llhttp in HTTP_RESPONSE mode to parse response status, headers,
  * and body. Accumulates headers and body into the KlHttpClientResponse struct.
@@ -21,7 +21,7 @@
 /* ── Parser state ────────────────────────────────────────────────── */
 
 typedef struct {
-    KlHttp1ResponseParser base;         /* vtable — must be first */
+    KlHttp1ResponseParser base;         /* vtable: must be first */
     llhttp_t         parser;
     llhttp_settings_t settings;
     KlAllocator     *alloc;
@@ -166,7 +166,7 @@ static int resp_on_header_field(llhttp_t *parser, const char *at, size_t len)
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
 
     /* A completed header (name+value) is flushed at on_header_value_complete,
-     * so the accumulators are empty here even after an empty-valued header —
+     * so the accumulators are empty here even after an empty-valued header;
      * no heuristic flush needed (which would merge empty-valued headers). */
     if (p->hdr_name_len + len > KL_MAX_HEADER_SIZE)
         return -1;
@@ -189,8 +189,8 @@ static int resp_on_header_value(llhttp_t *parser, const char *at, size_t len)
 static int resp_on_header_value_complete(llhttp_t *parser)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
-    /* llhttp signals the end of each header's value here — including empty
-     * values — so this is the correct boundary to commit name+value. */
+    /* llhttp signals the end of each header's value here (including empty
+     * values) so this is the correct boundary to commit name+value. */
     return flush_header(p);
 }
 
@@ -296,7 +296,7 @@ static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
     /* Transfer ownership to response */
     resp->headers = p->headers;
     resp->num_headers = p->num_headers;
-    resp->alloc = *p->alloc;  /* copy by value — safe after caller returns */
+    resp->alloc = *p->alloc;  /* copy by value, safe after caller returns */
 
     /* Clear parser pointers */
     p->headers = NULL;

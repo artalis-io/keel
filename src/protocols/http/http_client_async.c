@@ -1,8 +1,8 @@
 /*
- * http_client_async.c — HTTP/1.1 client, async (event-driven) API
+ * http_client_async.c: HTTP/1.1 client, async (event-driven) API
  *
  * The non-blocking state machine driven by KlEventCtx
- * watchers lives here — Happy Eyeballs (RFC 8305) racing connect, the
+ * watchers lives here: Happy Eyeballs (RFC 8305) racing connect, the
  * completion-connect path, async DNS, the SENDING/RECEIVING/TLS/proxy
  * states, and the public kl_http_client_start[_s] + kl_http_client_start_pooled entry
  * points. The async path uses kl_sock_send/kl_sock_recv through the provider +
@@ -25,10 +25,10 @@
 #include <sys/types.h>
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
-#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
+#include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "event_caps.h" /* event↔socket capability negotiation */
-#include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect */
-#include "watcher_internal.h" /* kl_watcher_add_detached — completion connect */
+#include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel: completion connect */
+#include "watcher_internal.h" /* kl_watcher_add_detached: completion connect */
 #include "http_client_internal.h"
 #include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
@@ -42,7 +42,7 @@ static void async_handle_sending_stream(KlHttpClient *c);
 static void async_handle_proxy_connecting(KlHttpClient *c);
 static void async_handle_proxy_handshake(KlHttpClient *c);
 static int  start_connect(KlHttpClient *c, const KlSockAddr *addr);
-/* Happy Eyeballs via KlConnectOp (6C) — hooks + entry-point wrappers defined below start_connect */
+/* Happy Eyeballs via KlConnectOp (6C): hooks + entry-point wrappers defined below start_connect */
 static void he_proceed_after_connect(KlHttpClient *c);
 static void he_win(KlHttpClient *c, KlSocketHandle fd);
 static void he_on_writable(KlHttpClient *c, KlSocketHandle fd);
@@ -60,7 +60,7 @@ static int build_connect_request(KlHttpClient *c, const char *host,
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t n = 0;
-    /* Shared serialization (http_client_proxy.c) — one definition for sync + async. */
+    /* Shared serialization (http_client_proxy.c): one definition for sync + async. */
     if (kl_proxy_build_connect(buf, sizeof(buf), &n, host, port, auth) != 0)
         return -1;
 
@@ -102,7 +102,7 @@ static int client_comp_connect(KlHttpClient *c, KlSocketHandle fd, const KlSockA
 }
 
 /* Tear down one racing connect fd (loser/failure/deadline). On a completion loop a pending
- * connect op still references the fd — drop it (kl_comp_cancel frees the PC_CONNECT op) before
+ * connect op still references the fd; drop it (kl_comp_cancel frees the PC_CONNECT op) before
  * removing the (detached) watcher + closing the fd, so no stale completion dispatches against
  * the freed watcher. On a readiness loop this is just watcher_del + close. */
 static void client_drop_connect_fd(KlHttpClient *c, KlSocketHandle fd)
@@ -157,7 +157,7 @@ static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
     return 0;
 }
 
-/* ── Happy Eyeballs via KlConnectOp — racing connect over the resolved list (RFC 8305) ── 6C ──
+/* ── Happy Eyeballs via KlConnectOp: racing connect over the resolved list (RFC 8305) ── 6C ──
  * KlConnectOp (connect_op.c) owns the resolve + racing cursor + attempt-delay stagger + winner
  * selection + loser cancellation + terminal-once + confirmed detachment. The client provides the
  * adapter hooks below and drives the on_* entry points from the resolver callback, the connect-
@@ -191,10 +191,10 @@ static int he_idx_of_fd(const KlHttpClient *c, KlSocketHandle fd)
 /* ── KlConnectOp adapter hooks (ctx = the KlHttpClient) ───────────────────────────────────────────── */
 
 /* Begin name resolution: kick the (already-selected) resolver. dns_resolved drives on_resolved/
- * on_resolve_failed — possibly INLINE for a sync-completion-capable resolver, in which case the op
+ * on_resolve_failed: possibly INLINE for a sync-completion-capable resolver, in which case the op
  * has already advanced past RESOLVING and the returned req is moot. If resolve() could NOT start
  * (returns NULL, no inline completion), flag it so cli_co_on_done suppresses the request callback
- * for the resulting terminal FAILED — the setup then frees the client and returns NULL, preserving
+ * for the resulting terminal FAILED; the setup then frees the client and returns NULL, preserving
  * the "no callback on a start failure" contract while the op still retires cleanly (terminal +
  * detach). */
 static int cli_co_start_resolve(void *ctx)
@@ -204,7 +204,7 @@ static int cli_co_start_resolve(void *ctx)
                                             c->resolve_host, c->resolve_port,
                                             dns_resolved, c);
     if (kl_connect_op_state(&c->connect_op) != KL_CONNECT_OP_STATE_RESOLVING)
-        return 0;                     /* dns_resolved ran inline — op already advanced */
+        return 0;                     /* dns_resolved ran inline: op already advanced */
     c->resolve_req = rq;
     if (!rq) { c->connect_start_failed = 1; return -1; }   /* → terminal FAILED, callback suppressed */
     return 0;
@@ -216,7 +216,7 @@ static void cli_co_cancel_resolve(void *ctx)
     if (c->resolve_req && c->resolver && c->resolver->cancel)
         c->resolver->cancel(c->resolve_req);
     c->resolve_req = NULL;
-    /* KEEL resolvers cancel by freeing the request and do NOT then invoke done_fn — so the machine
+    /* KEEL resolvers cancel by freeing the request and do NOT then invoke done_fn; so the machine
      * would never see the resolve retire. Report it synchronously now (the op is already terminal
      * when this hook runs, so this just clears resolve_inflight; reentrancy is guarded). */
     kl_connect_op_on_resolve_failed(&c->connect_op, KL_ERR_DNS);
@@ -241,7 +241,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     }
 
     /* Completion loop: post the connect over the completion axis (several may race natively). The
-     * completion always arrives on a later drain — no inline-success shortcut. */
+     * completion always arrives on a later drain: no inline-success shortcut. */
     if (client_loop_is_completion(c)) {
         if (client_comp_connect(c, fd, sa) != 0) {
             kl_sock_close(c->ev_ctx->sockets, fd);
@@ -266,7 +266,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     }
     c->conn_attempts[idx].fd = fd;
     c->conn_attempts[idx].active = 1;
-    if (rc == 0)   /* connected immediately (e.g. loopback) — decide this attempt inline */
+    if (rc == 0)   /* connected immediately (e.g. loopback), decide this attempt inline */
         kl_connect_op_on_attempt_connected(&c->connect_op, idx, fd);
     return 0;
 }
@@ -274,7 +274,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
 /* Abort an in-flight (not-yet-connected) racing attempt: drop its socket, then REPORT the retirement
  * to the machine. The provider op + fd are removed synchronously here; kl_connect_op_on_attempt_
  * failed clears attempt_active[idx] + pending so the op can reach confirmed detachment (the machine
- * never observes the drop otherwise). Reentrancy is guarded — this hook runs inside the machine's
+ * never observes the drop otherwise). Reentrancy is guarded: this hook runs inside the machine's
  * terminal/cancel dispatch. */
 static void cli_co_cancel_attempt(void *ctx, int idx)
 {
@@ -334,20 +334,20 @@ static void cli_co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd,
         he_win(c, fd);
     } else if (result == KL_CONNECT_FAILED) {
         /* A resolver-start failure (resolve()==NULL) retires the op cleanly but must NOT fire the
-         * request callback — the setup detects connect_start_failed and returns NULL instead. */
+         * request callback; the setup detects connect_start_failed and returns NULL instead. */
         if (c->connect_start_failed)
             return;
         c->error = error ? (KlError)error : KL_ERR_CONNECT;
         async_complete_error(c);
     }
     /* CANCELLED: the client itself requested the cancel (deadline / teardown) and completes
-     * separately — nothing to do here. */
+     * separately; nothing to do here. */
 }
 
 static void cli_co_on_detach(void *ctx)
 {
     KlHttpClient *c = ctx;
-    c->conn_racing = 0;   /* the connect op is fully retired — reusable */
+    c->conn_racing = 0;   /* the connect op is fully retired: reusable */
 }
 
 static const KlConnectOpHooks CLI_CONNECT_HOOKS = {
@@ -460,7 +460,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
  * (borrowed) → cfg->system_dns (NULL → blocking sync name resolution) → auto-created
  * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
- * sync name resolution (also on auto-create failure — better than failing the request). */
+ * sync name resolution (also on auto-create failure, better than failing the request). */
 static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
                                         KlEventCtx *ev_ctx, int *owned) {
     *owned = 0;
@@ -471,7 +471,7 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
 #ifdef KEEL_FREESTANDING
     /* Freestanding (UEFI): the built-in DNS-over-UDP resolver pulls the UDP +
      * dns_resolver stack, which is out of the minimal completion-client archive
-     * (docs/archive/phases/phase10_uefi_feasibility_design.md §8 — IPv4/numeric first).
+     * (docs/archive/phases/phase10_uefi_feasibility_design.md §8, IPv4/numeric first).
      * A freestanding consumer supplies cfg->resolver or a numeric address; here we
      * fall back to sync name resolution (kl_resolve_sync), same as cfg->system_dns. */
     (void)ev_ctx;
@@ -518,7 +518,7 @@ static void he_proceed_after_connect(KlHttpClient *c)
         return;
     }
 
-    /* Proxy: HTTP target — request already has absolute-form URL, send directly */
+    /* Proxy: HTTP target; request already has absolute-form URL, send directly */
     if (c->is_proxied) {
         c->state = KL_HTTP_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
@@ -584,7 +584,7 @@ static void async_handle_proxy_connecting(KlHttpClient *c)
         c->connect_sent += (size_t)w;
     }
 
-    /* CONNECT request fully sent — switch to reading proxy response */
+    /* CONNECT request fully sent: switch to reading proxy response */
     kl_free(c->alloc, c->connect_buf, c->connect_len);
     c->connect_buf = NULL;
 
@@ -647,7 +647,7 @@ static void async_handle_proxy_handshake(KlHttpClient *c)
             return;
         }
 
-        /* CONNECT tunnel established — free buffer, start TLS */
+        /* CONNECT tunnel established: free buffer, start TLS */
         kl_free(c->alloc, c->proxy_recv, KL_PROXY_RESPONSE_MAX);
         c->proxy_recv = NULL;
 
@@ -757,7 +757,7 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 return;
             }
             if (nr == 0) {
-                /* EOF — send final chunk */
+                /* EOF: send final chunk */
                 memcpy(c->chunk_hdr, "0\r\n\r\n", KL_HTTP_CLIENT_FINAL_CHUNK_LEN);
                 c->chunk_hdr_len = KL_HTTP_CLIENT_FINAL_CHUNK_LEN;
                 c->chunk_hdr_sent = 0;
@@ -864,7 +864,7 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 if (w == 0) { async_complete_error(c); return; }
                 c->chunk_hdr_sent += (size_t)w;
             }
-            /* Done sending — switch to receiving */
+            /* Done sending: switch to receiving */
             c->state = KL_HTTP_CLIENT_RECEIVING;
             kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
             return;
@@ -893,7 +893,7 @@ static void async_handle_receiving(KlHttpClient *c)
              * has no distinct EOF code). Treat it like a socket EOF so a close-
              * delimited response (HTTP/1.0 / Connection: close, no Content-Length)
              * is finalized rather than reported as KL_ERR_IO. This is the REAL TLS
-             * EOF signal — finalize here directly (do NOT fall through to the
+             * EOF signal: finalize here directly (do NOT fall through to the
              * nread==0 rearm below, which is for the WANT_READ 0 only). */
             if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls))
                 goto eof;
@@ -903,7 +903,7 @@ static void async_handle_receiving(KlHttpClient *c)
         if (nread == 0) {
             if (c->tls) {
                 /* Over TLS, read()==0 means the vtable returned WANT_READ (mbedTLS
-                 * WANT_READ maps to 0), NOT end-of-stream — e.g. a non-blocking recv
+                 * WANT_READ maps to 0), NOT end-of-stream: e.g. a non-blocking recv
                  * returned would-block mid-record. Re-arm and wait for more ciphertext.
                  * A real TLS EOF arrives via read()==-1 + at_eof() (handled above),
                  * never via 0. */
@@ -932,7 +932,7 @@ static void async_handle_receiving(KlHttpClient *c)
             async_complete_error(c);
             return;
         }
-        /* KL_HTTP1_PARSE_INCOMPLETE — try to read more (non-blocking) */
+        /* KL_HTTP1_PARSE_INCOMPLETE: try to read more (non-blocking) */
     }
 }
 
@@ -946,10 +946,10 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
     case KL_HTTP_CLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HTTP_CLIENT_CONNECTING:
-        /* Happy Eyeballs races several fds — dispatch by the fd that fired.
+        /* Happy Eyeballs races several fds; dispatch by the fd that fired.
          * The single-fd UNIX / sync-sync name resolution path uses c->fd directly.
          * On a completion loop the connect result is carried in `ready` (KL_EVENT_WRITE =
-         * connected) — the backend already resolved win/fail (SO_ERROR isn't preserved after a
+         * connected); the backend already resolved win/fail (SO_ERROR isn't preserved after a
          * failed io_uring connect), so trust the delivered result instead of re-reading it. */
         if (client_loop_is_completion(c)) {
             if (c->conn_racing)
@@ -1083,7 +1083,7 @@ static void async_complete_error(KlHttpClient *c)
     }
 
     c->state = KL_HTTP_CLIENT_DONE;
-    /* error already set by caller — fallback if not set */
+    /* error already set by caller; fallback if not set */
     if (c->error == KL_ERR_NONE)
         c->error = KL_ERR_IO;
     if (c->on_done)
@@ -1150,7 +1150,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         const char *path = (parsed.path_len > 0) ? parsed.path : "/";
         int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
 
-        /* "http://<host>[:<port>]<path>" — byte-identical to the former
+        /* "http://<host>[:<port>]<path>": byte-identical to the former
          * snprintf, built with bounded, locale-free append helpers. */
         size_t n = 0;
         if (kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, "http://") != 0 ||
@@ -1168,7 +1168,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         absolute_url = abs_url_buf;
     }
 
-    /* Build request buffer — headers-only for streaming, full for buffered */
+    /* Build request buffer: headers-only for streaming, full for buffered */
     size_t req_len = 0;
     char *req_buf;
     if (stream && stream->body_read) {
@@ -1204,7 +1204,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
     /* On a completion loop, adopt the backend's native overlapped provider when
-     * the configured one is incompatible — so a completion backend is a drop-in for the
+     * the configured one is incompatible, so a completion backend is a drop-in for the
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
@@ -1314,7 +1314,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return c;
     }
 
-    /* DNS resolution — resolve proxy host when proxied, target host otherwise. The host itself is
+    /* DNS resolution: resolve proxy host when proxied, target host otherwise. The host itself is
      * taken from the persistent c->host_buf / borrowed proxy->host at the connect-op wiring below. */
     int resolve_port = is_proxied ? proxy->port : parsed.port;
 
@@ -1325,7 +1325,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         c->resolver = resolver;
         c->owns_resolver = res_owned;
         /* Persistent host for start_resolve: c->host_buf (already copied above) for the target, or
-         * the borrowed proxy host (valid through the request) when proxied — no dangling local. */
+         * the borrowed proxy host (valid through the request) when proxied, no dangling local. */
         c->resolve_host = is_proxied ? proxy->host : c->host_buf;
         c->resolve_port = resolve_port;
         c->state = KL_HTTP_CLIENT_RESOLVING;
@@ -1350,7 +1350,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         }
         /* Otherwise: still RESOLVING (deferred; resolve_req stored by start_resolve) or the resolver
          * completed inline (op advanced/terminal, possibly firing on_done + taking ownership of c).
-         * Both cases return c — the request is live or already completed via on_done. */
+         * Both cases return c: the request is live or already completed via on_done. */
         return c;
     }
 
@@ -1435,9 +1435,9 @@ void kl_http_client_cancel(KlHttpClient *client)
         return;
 
     /* Abort the connect op (6C): cancels an in-flight resolve, drops every racing attempt socket
-     * (cli_co_cancel_attempt), and disarms the Connection Attempt Delay — all exactly once. */
+     * (cli_co_cancel_attempt), and disarms the Connection Attempt Delay: all exactly once. */
     kl_connect_op_cancel(&client->connect_op);
-    /* The overall request deadline is client-owned (not a connect-op timer) — cancel it here. */
+    /* The overall request deadline is client-owned (not a connect-op timer); cancel it here. */
     he_cancel_timers(client);
 
     if (kl_handle_valid(client->fd)) {
@@ -1520,7 +1520,7 @@ void kl_http_client_free(KlHttpClient *client)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * Pooled async client API — connection pool integration
+ * Pooled async client API: connection pool integration
  * ══════════════════════════════════════════════════════════════════════ */
 
 KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
@@ -1588,7 +1588,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
     /* On a completion loop, adopt the backend's native overlapped provider when
-     * the configured one is incompatible — so a completion backend is a drop-in for the
+     * the configured one is incompatible, so a completion backend is a drop-in for the
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
@@ -1634,7 +1634,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                 NULL, 0, &pconn);
 
     if (acq == 0) {
-        /* Pool hit — skip connect + TLS, go straight to sending */
+        /* Pool hit: skip connect + TLS, go straight to sending */
         c->fd = pconn.fd;
         c->tls = pconn.tls;
         c->pool_conn = pconn;
@@ -1654,7 +1654,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         return c;
     }
 
-    /* Pool miss — normal connect flow */
+    /* Pool miss: normal connect flow */
     int res_owned = 0;
     KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
     if (resolver) {
@@ -1680,7 +1680,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
             kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
-        return c;                 /* deferred (RESOLVING) or inline-completed — both return c */
+        return c;                 /* deferred (RESOLVING) or inline-completed: both return c */
     }
 
     /* Sync DNS fallback (blocking name resolution → KlSockAddr) */

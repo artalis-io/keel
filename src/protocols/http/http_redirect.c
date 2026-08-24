@@ -1,5 +1,5 @@
 /*
- * http_redirect.c — HTTP redirect following (sync + async)
+ * http_redirect.c: HTTP redirect following (sync + async)
  *
  * Wraps kl_http_client_request / kl_http_client_start with automatic 3xx
  * redirect following. Method transformation per RFC 7231/7538.
@@ -183,14 +183,14 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
         if (rc != 0)
             return -1;
 
-        /* Not a redirect — return final response */
+        /* Not a redirect: return final response */
         if (!is_redirect(resp->status))
             return 0;
 
         /* Find Location header */
         const char *location = find_location(resp);
         if (!location) {
-            /* No Location header — return the 3xx response as-is */
+            /* No Location header: return the 3xx response as-is */
             return 0;
         }
 
@@ -215,7 +215,7 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
         /* Advance */
         size_t nlen = strlen(next_url);
         if (nlen >= sizeof(cur_url)) {
-            /* Zero the struct before setting error — kl_http_client_response_free
+            /* Zero the struct before setting error: kl_http_client_response_free
              * above invalidated headers/body/num_headers; a caller that
              * inspects them after seeing error != 0 (perfectly reasonable)
              * would hit UAF.  Match the sibling pattern at line ~220
@@ -228,7 +228,7 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
     }
 
     /* More than max_redirects hops attempted (the loop above runs
-     * `max_redir + 1` iterations total — the initial request plus
+     * `max_redir + 1` iterations total: the initial request plus
      * `max_redir` redirect chases). */
     memset(resp, 0, sizeof(*resp));
     resp->error = KL_ERR_REDIRECT_LOOP;
@@ -433,7 +433,7 @@ static void internal_on_done(KlHttpClient *client, void *user_data)
         return;
     }
 
-    /* Not a redirect — we're done, final response */
+    /* Not a redirect: we're done, final response */
     if (!is_redirect(resp->status)) {
         if (rc->on_done)
             rc->on_done(rc, rc->user_data);
@@ -451,7 +451,7 @@ static void internal_on_done(KlHttpClient *client, void *user_data)
     /* Find Location */
     const char *location = find_location(resp);
     if (!location) {
-        /* No Location — return the 3xx as final */
+        /* No Location: return the 3xx as final */
         if (rc->on_done)
             rc->on_done(rc, rc->user_data);
         return;
