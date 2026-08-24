@@ -1,5 +1,5 @@
 /*
- * test_dgram_recv.c — serial receive + strict pause/resume over the inbound slot.
+ * test_dgram_recv.c: serial receive + strict pause/resume over the inbound slot.
  *
  * Covers: inline-completion chains (iterative, no phantom), pause inside delivery, repeated
  * pause/resume idempotence, held-packet preservation, duplicate/spurious completion dropped without
@@ -91,7 +91,7 @@ typedef struct {
     int    arms, disarms, pulls;
     int    avail;              /* datagrams available to pull before would-block */
     const char *payload; size_t plen;
-    size_t report_len;         /* if != 0, pull reports this length (else plen) — truncation-by-size */
+    size_t report_len;         /* if != 0, pull reports this length (else plen): truncation-by-size */
     int    with_local, trunc;  /* metadata knobs (as for CompCtx) */
     int    fatal;              /* if set, pull returns a fatal error (-1) */
 } RdCtx;
@@ -194,7 +194,7 @@ UTEST(dgram_recv, repeated_pause_resume_idempotent) {
     inbound_fill(&slots, "ONCE", 4, 0, 0);
     ASSERT_EQ(kl_dgram_recv_on_complete(&r, 4, 1), 0);  /* held */
     ASSERT_EQ(kl_dgram_recv_resume(&r), 0);
-    ASSERT_EQ(kl_dgram_recv_resume(&r), 0);             /* idempotent — no second delivery */
+    ASSERT_EQ(kl_dgram_recv_resume(&r), 0);             /* idempotent: no second delivery */
     ASSERT_EQ(g_deliv, 1);
     kl_dgram_recv_stop(&r);
     kl_dgram_recv_on_complete(&r, 0, 0);
@@ -295,7 +295,7 @@ UTEST(dgram_recv, oversized_readiness_truncated_not_fatal) {
     ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &rd), 0);
     reset_deliver(&r, ACT_NONE, 0);
     ASSERT_EQ(kl_dgram_recv_start(&r), 0);
-    ASSERT_EQ(kl_dgram_recv_on_readable(&r), 0);              /* delivers 1, then would-block — NOT -1 */
+    ASSERT_EQ(kl_dgram_recv_on_readable(&r), 0);              /* delivers 1, then would-block: NOT -1 */
     ASSERT_EQ(g_deliv, 1);
     ASSERT_EQ((int)g_last_len, 16);
     ASSERT_TRUE((g_last_flags & KL_DGRAM_TRUNCATED) != 0);
@@ -317,7 +317,7 @@ UTEST(dgram_recv, zero_length_distinct_from_failure) {
     ASSERT_TRUE(g_has_peer);
     ASSERT_TRUE((g_last_flags & KL_DGRAM_TRUNCATED) == 0);
     ASSERT_TRUE(!kl_dgram_recv_error(&r));
-    /* contrast: ok=0 on the re-armed op is a FAILURE — no delivery, error set */
+    /* contrast: ok=0 on the re-armed op is a FAILURE: no delivery, error set */
     ASSERT_EQ(kl_dgram_recv_on_complete(&r, 0, 0), -1);
     ASSERT_EQ(g_deliv, 1);                                     /* no second delivery */
     ASSERT_TRUE(kl_dgram_recv_error(&r));
@@ -332,7 +332,7 @@ UTEST(dgram_recv, peer_mandatory_missing_fails_safe) {
     inbound_fill(&slots, "hi", 2, 0, 0);
     memset(&kl_dgram_inbound_slot(&slots)->peer, 0,          /* strip the peer (provider bug) */
            sizeof(kl_dgram_inbound_slot(&slots)->peer));
-    ASSERT_EQ(kl_dgram_recv_on_complete(&r, 2, 1), -1);       /* fails safe — no anonymous delivery */
+    ASSERT_EQ(kl_dgram_recv_on_complete(&r, 2, 1), -1);       /* fails safe: no anonymous delivery */
     ASSERT_EQ(g_deliv, 0);
     ASSERT_TRUE(kl_dgram_recv_error(&r));
     ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);
@@ -414,7 +414,7 @@ UTEST(dgram_recv, paused_failed_completion_not_held) {
     ASSERT_TRUE(kl_dgram_recv_error(&r));
     ASSERT_EQ(kl_dgram_recv_resume(&r), 0);
     ASSERT_EQ(g_deliv, 0);                                  /* nothing delivered on resume */
-    ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);               /* stopped — no re-arm */
+    ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);               /* stopped: no re-arm */
     ASSERT_EQ(kl_dgram_recv_free(&r), 0);
     kl_dgram_inbound_free(&slots);
 }
@@ -496,7 +496,7 @@ UTEST(dgram_recv, free_refused_while_inflight) {
     reset_deliver(&r, ACT_NONE, 0);
     ASSERT_EQ(kl_dgram_recv_start(&r), 0);
     ASSERT_EQ(kl_dgram_recv_inflight(&r), 1);
-    ASSERT_EQ(kl_dgram_recv_free(&r), -1);                  /* refused — recv references inbound slot */
+    ASSERT_EQ(kl_dgram_recv_free(&r), -1);                  /* refused: recv references inbound slot */
     kl_dgram_recv_stop(&r);
     ASSERT_EQ(kl_dgram_recv_on_complete(&r, 0, 0), 0);      /* posted op retires (dropped) */
     ASSERT_EQ(kl_dgram_recv_free(&r), 0);                   /* now safe */

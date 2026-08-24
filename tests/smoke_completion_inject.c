@@ -1,16 +1,16 @@
 /*
- * smoke_completion_inject.c — proof of runtime completion-axis injection: a DEFAULT
+ * smoke_completion_inject.c: proof of runtime completion-axis injection: a DEFAULT
  * (readiness-compiled: epoll on Linux / kqueue on macOS) libkeel serving GET / over a
  * RUNTIME-INJECTED pollcomp COMPLETION backend.
  *
  * event_pollcomp.c is a PURE runtime provider (static KlEventOps + KlCompletionOps +
  * kl_event_provider_pollcomp(), no _builtin free functions), so it links as an extra
  * object next to a default libkeel.a and injects its completion axis at runtime via
- * KlHttpServerConfig.event_provider — with no duplicate-symbol clash against the default
+ * KlHttpServerConfig.event_provider; with no duplicate-symbol clash against the default
  * backend's own compiled-in ops.
  *
  * The server auto-wires the matched overlapped socket provider from the injected loop's
- * native_provider, exactly as the compiled-in completion path does — the
+ * native_provider, exactly as the compiled-in completion path does; the
  * caller sets only event_provider. A blocking loopback client does GET / and asserts 200 +
  * the expected body. Prints COMPLETION-INJECT PASS on success.
  *
@@ -52,7 +52,7 @@ static void *server_thread(void *arg) {
 
 int main(void) {
     /* An OTHERWISE-DEFAULT server: the ONLY non-default knob is the injected completion
-     * provider. No .sockets — the server auto-adopts the provider's overlapped native
+     * provider. No .sockets; the server auto-adopts the provider's overlapped native
      * provider since the injected loop advertises KL_EVENT_CAP_COMPLETION. */
     KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_pollcomp() };

@@ -1,5 +1,5 @@
 /*
- * client_probe.c — drive the KEEL nghttp2 *client* against an arbitrary h2c
+ * client_probe.c: drive the KEEL nghttp2 *client* against an arbitrary h2c
  * server (default: a third-party nghttpd), closing the last interop quadrant:
  * KEEL client ⇄ non-KEEL server. GETs a path and prints the status; exit 0 on a
  * 2xx/3xx/4xx response (any valid HTTP/2 response proves interop), non-zero on

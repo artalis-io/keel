@@ -1,7 +1,7 @@
 /*
- * test_async.c — generic KlEventCtx watcher tests (substrate). The HTTP KlAsyncOp /
+ * test_async.c: generic KlEventCtx watcher tests (substrate). The HTTP KlAsyncOp /
  * server-suspension coverage lives in tests/protocols/http/test_http_async.c; this file is
- * protocol-neutral — it drives kl_watcher_add/mod/del + kl_event_ctx_run over a bare
+ * protocol-neutral: it drives kl_watcher_add/mod/del + kl_event_ctx_run over a bare
  * KlEventCtx, no HTTP server/connection/async types.
  */
 #include "utest.h"
@@ -46,7 +46,7 @@ static void test_watcher_cb(KlSocketHandle fd, KlEventMask ready, void *user_dat
 }
 
 /* Pump the event loop until *flag reaches `want` (or attempts run out). Uses
- * kl_event_ctx_run — the portable tick (wait + dispatch watchers) that works on
+ * kl_event_ctx_run: the portable tick (wait + dispatch watchers) that works on
  * BOTH the readiness and completion event models, so these watcher tests are
  * backend-agnostic instead of hard-coding a readiness kl_event_wait loop. */
 static void pump_until(KlEventCtx *ev, const int *flag, int want) {
@@ -95,7 +95,7 @@ UTEST(async, watcher_mod_changes_interest) {
     WatcherCtx ctx = {0};
     ASSERT_EQ(kl_watcher_add(&loop.ev, fds[0], KL_EVENT_READ, test_watcher_cb, &ctx), 0);
 
-    /* Mod to WRITE interest — socket should be writable immediately */
+    /* Mod to WRITE interest: socket should be writable immediately */
     ASSERT_EQ(kl_watcher_mod(&loop.ev, fds[0], KL_EVENT_WRITE), 0);
 
     pump_until(&loop.ev, &ctx.called, 1);
@@ -125,7 +125,7 @@ UTEST(async, watcher_del_stops_events) {
     /* Remove watcher before writing */
     kl_watcher_del(&loop.ev, fds[0]);
 
-    /* Write to fds[1] — should NOT fire callback */
+    /* Write to fds[1]: should NOT fire callback */
     (void)kl_test_sockwrite(fds[1], "x", 1);
 
     kl_event_ctx_run(&loop.ev, 8, 50);   /* one tick; the deleted watcher must not fire */
@@ -207,7 +207,7 @@ UTEST(async, watcher_del_not_found) {
  * (the fix that made watcher_mod_changes_interest work); on readiness backends it
  * is plain kl_event_mod. Each round retargets the SAME armed watch READ↔WRITE
  * (the watch is armed at every mod, so the poll_update branch is taken, not a
- * fresh arm). The point is resource lifetime under churn — run under ASan/LSan
+ * fresh arm). The point is resource lifetime under churn: run under ASan/LSan
  * this proves the thousands of re-arms leak no CQE/SQE/watch and never UAF a
  * retired poll; exact fire timing is edge-triggered and intentionally NOT asserted
  * (functional correctness is covered by watcher_mod_changes_interest). No normal
@@ -234,7 +234,7 @@ UTEST(async, watcher_mask_churn_soak) {
         ASSERT_EQ(kl_watcher_mod(&loop.ev, fds[0], KL_EVENT_READ), 0);  /* poll_update → READ */
         (void)kl_event_ctx_run(&loop.ev, 16, 0);                        /* READ must not fire */
     }
-    /* poll_update actually delivered interest changes — the WRITE interest fired. */
+    /* poll_update actually delivered interest changes: the WRITE interest fired. */
     ASSERT_TRUE(ctx.called > 0);
 
     kl_watcher_del(&loop.ev, fds[0]);

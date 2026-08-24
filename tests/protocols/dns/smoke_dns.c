@@ -1,13 +1,13 @@
 /*
- * smoke_dns.c — DNS resolver link + init/resolve smoke test.
+ * smoke_dns.c: DNS resolver link + init/resolve smoke test.
  *
- * NOT a utest suite — a standalone program built by the `smoke-dns` Makefile
+ * NOT a utest suite: a standalone program built by the `smoke-dns` Makefile
  * target. It links the built-in DNS resolver and proves it both links and runs
  * on the target platform (the Windows CI gate for dns_sys_win.c: the iphlpapi
  * config discovery + the resolver pipeline). Runs on POSIX too.
  *
  * Deterministic (no network): creating the resolver with an all-default config
- * runs the platform config discovery — on Windows that's GetAdaptersAddresses
+ * runs the platform config discovery: on Windows that's GetAdaptersAddresses
  * (nameservers + DNS suffix) + the System32\drivers\etc\hosts path. Resolving
  * "localhost" then completes via the loopback shortcut, driven by the event
  * loop, without any DNS query going out.

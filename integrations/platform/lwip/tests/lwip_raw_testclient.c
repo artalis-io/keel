@@ -1,13 +1,13 @@
 /*
- * lwip_raw_testclient.c — TEST-ONLY raw-API TCP client for the lwIP-raw completion tests.
+ * lwip_raw_testclient.c: TEST-ONLY raw-API TCP client for the lwIP-raw completion tests.
  *
  * Lives outside the production glue (lwip_raw_glue.c) so no test-client state lives
  * in the shipping backend. Compiled ONLY into the test binaries. Includes lwIP's NO_SYS=1 raw
- * headers directly (like the glue) — a separate TU from the KEEL-header-only backend, so the
+ * headers directly (like the glue): a separate TU from the KEEL-header-only backend, so the
  * lwIP/host header seam is preserved. It creates its own client PCBs (tcp_connect) and never
  * touches the server's per-conn slots.
  *
- * malloc/free is used here (this is a test peer, not production code — the KlAllocator
+ * malloc/free is used here (this is a test peer, not production code: the KlAllocator
  * discipline governs production glue). All calls run on the single lwIP tick thread (marshalled
  * via KEEL timers in the tests), so plain non-atomic state is safe.
  *
@@ -45,7 +45,7 @@ static void cli_req_pump(struct tcp_pcb *pcb) {
         if (chunk > 0xffffu) chunk = 0xffffu;
         err_t w = tcp_write(pcb, (const char *)g_cli_req + g_cli_req_sent, (u16_t)chunk,
                             TCP_WRITE_FLAG_COPY);
-        if (w == ERR_MEM) break;             /* queue full — resume on tcp_sent */
+        if (w == ERR_MEM) break;             /* queue full: resume on tcp_sent */
         if (w != ERR_OK) return;
         g_cli_req_sent += chunk;
         wrote = 1;
@@ -55,13 +55,13 @@ static void cli_req_pump(struct tcp_pcb *pcb) {
 
 static err_t cli_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     (void)arg; (void)len;
-    cli_req_pump(tpcb);                      /* window opened — push more of the request */
+    cli_req_pump(tpcb);                      /* window opened: push more of the request */
     return ERR_OK;
 }
 
 /* Detach + gracefully close the current accumulating-client pcb (if still live). Called before a
  * fresh start so a previous connection can never keep writing into the (about-to-be-freed)
- * g_cli_buf — the accumulating client is a single-slot peer, so overlapping two connections would
+ * g_cli_buf: the accumulating client is a single-slot peer, so overlapping two connections would
  * be a use-after-free on the shared buffer. Uses tcp_close (graceful FIN) so the previous conn
  * settles into TIME_WAIT rather than being RST/freed-and-immediately-reused. */
 static void lwr_cli_teardown(void) {
@@ -79,7 +79,7 @@ static err_t lwr_cli_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         if (p) pbuf_free(p);
         tcp_recv(tpcb, NULL);
         if (g_cli_pcb == tpcb) g_cli_pcb = NULL;
-        g_cli_closed = 1;            /* server FIN'd — this roundtrip's conn is fully done */
+        g_cli_closed = 1;            /* server FIN'd: this roundtrip's conn is fully done */
         tcp_close(tpcb);
         return ERR_OK;
     }
@@ -321,7 +321,7 @@ static size_t mc_body_len(const McSlot *s) {
 
 /* A response is "complete" once we have a Content-Length header's worth of body OR the peer
  * closed. To keep the test simple + robust the tests use Connection: close, so the server FINs
- * after the full body — lc-style. We resolve `done` on peer close (recv NULL) which arrives
+ * after the full body: lc-style. We resolve `done` on peer close (recv NULL) which arrives
  * after the whole body, and also opportunistically when a 200 + non-empty body is present. */
 static void mc_resolve(McSlot *s) {
     if (!s->done) s->done = 1;

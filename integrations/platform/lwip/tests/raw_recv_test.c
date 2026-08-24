@@ -1,5 +1,5 @@
 /*
- * raw_recv_test.c — tests for the hardened lwIP-raw completion backend.
+ * raw_recv_test.c: tests for the hardened lwIP-raw completion backend.
  *
  * Covers the four hardening fixes with byte-exact + sanitizer-checkable cases:
  *   Receive (retained pbuf queue, no ack-before-deliver, no truncation):
@@ -24,7 +24,7 @@
  * SINGLE-THREADED lwIP discipline (as in raw_tick_test.c): kl_http_server_run() blocks on a
  * pthread that owns the lwIP tick; every lwIP-touching client call is marshalled onto that
  * thread via KEEL timers (kl_timer_add fires on the loop thread). Runs in-process over the
- * loopback netif — no tap device, no root.
+ * loopback netif; no tap device, no root.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -231,7 +231,7 @@ static void r_poll(void *ud) {
              * expected checksum and are verified byte-exact. */
             if (blen >= g_expect_body) {
                 if (blen == g_expect_body && (g_expect_chk == 0 || chk == g_expect_chk)) {
-                    printf("PASS R (%s) — %zu bytes%s\n", r_stage_name(stage), blen,
+                    printf("PASS R (%s): %zu bytes%s\n", r_stage_name(stage), blen,
                            g_expect_chk ? ", checksum ok" : "");
                     atomic_store(&g_r_stage, stage + 1);
                     r_advance(s);
@@ -371,7 +371,7 @@ static void c_poll(void *ud) {
             c_next(s, pass);
         } else if (++g_c_wait > 1000) {   /* ~5s */
             atomic_store(&g_c_fail, 1);
-            printf("C FAIL (%s): HANG — only %d/%d resolved (ok=%d refused=%d)\n",
+            printf("C FAIL (%s): HANG, only %d/%d resolved (ok=%d refused=%d)\n",
                    c_stage_name(stage), done, g_c_n, ok, refused);
             atomic_store(&g_c_finished, 1); kl_http_server_stop(s); return;
         }

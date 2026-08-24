@@ -1,7 +1,7 @@
 #ifndef KEEL_FS_SHIM_ASSERT_H
 #define KEEL_FS_SHIM_ASSERT_H
 /*
- * Freestanding <assert.h> shim (declarations only — see README.md).
+ * Freestanding <assert.h> shim (declarations only: see README.md).
  *
  * -ffreestanding provides no <assert.h>. Reduce assert() to a no-op for the
  * cross-target symbol-gate build; a real UEFI/EDK2 build maps it to ASSERT() /

@@ -1,11 +1,11 @@
 /*
- * test_stream_close.c — graceful-close / confirmed-detachment lifecycle
+ * test_stream_close.c: graceful-close / confirmed-detachment lifecycle
  * (src/stream_close.h), exercised in isolation over the write machinery and the
  * read machinery with mock hooks (no live sockets).
  *
  * The single invariant under test: on_close (detachment) fires EXACTLY ONCE, and ONLY after BOTH
  * the receive (recv_inflight == 0) and the send (send_inflight == 0) operations are physically
- * retired — a merely logical close is never enough. Covers graceful drain, abortive cancel with
+ * retired: a merely logical close is never enough. Covers graceful drain, abortive cancel with
  * synchronous AND asynchronous cancel completion (obeying the arm-trampoline discipline), order
  * independence of the two retirements, queue draining, readiness flush retirement, write refusal
  * while closing, idempotence, and graceful→abortive escalation.
@@ -96,7 +96,7 @@ UTEST(stream_close, graceful_waits_for_recv_completion) {
     ASSERT_EQ(kl_stream_read_start(&s), 0);            /* recv posted (in flight) */
 
     ASSERT_EQ(kl_stream_close_begin(&s), 0);           /* logical read close; recv still physical */
-    ASSERT_EQ(l.closed, 0);                            /* NOT detached — recv op outstanding */
+    ASSERT_EQ(l.closed, 0);                            /* NOT detached: recv op outstanding */
     ASSERT_EQ(kl_stream_close_state(&s), KL_STREAM_STATE_CLOSING);
 
     kl_stream_on_recv(&s, 5, 1);                       /* completion arrives after close → dropped */
@@ -296,7 +296,7 @@ UTEST(stream_close, idempotent_double_begin_and_after_closed) {
     ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
     ASSERT_EQ(kl_stream_close_begin(&s), 0);
     ASSERT_EQ(l.closed, 1);
-    ASSERT_EQ(kl_stream_close_begin(&s), 0);         /* already CLOSED — no-op */
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);         /* already CLOSED: no-op */
     ASSERT_EQ(kl_stream_cancel(&s), 0);              /* also no-op after CLOSED */
     ASSERT_EQ(l.closed, 1);                          /* on_close fired exactly once */
     mk_free(&s, buf);
@@ -308,7 +308,7 @@ UTEST(stream_close, double_begin_while_waiting_fires_once) {
     ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
     ASSERT_EQ((int)kl_stream_write(&s, "z", 1), KL_STREAM_ACCEPTED);
     ASSERT_EQ(kl_stream_close_begin(&s), 0);
-    ASSERT_EQ(kl_stream_close_begin(&s), 0);         /* second begin while CLOSING — no-op */
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);         /* second begin while CLOSING: no-op */
     ASSERT_EQ(l.closed, 0);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
     ASSERT_EQ(l.closed, 1);                          /* still exactly once */
@@ -329,7 +329,7 @@ UTEST(stream_close, abortive_repeat_cancel_requests_once_per_op) {
     ASSERT_EQ(kl_stream_cancel(&s), 0);
     ASSERT_EQ(l.cancel_recv_calls, 1);
     ASSERT_EQ(l.cancel_send_calls, 1);
-    ASSERT_EQ(kl_stream_cancel(&s), 0);              /* both ops still outstanding — no re-request */
+    ASSERT_EQ(kl_stream_cancel(&s), 0);              /* both ops still outstanding: no re-request */
     ASSERT_EQ(l.cancel_recv_calls, 1);
     ASSERT_EQ(l.cancel_send_calls, 1);
     ASSERT_EQ(l.closed, 0);

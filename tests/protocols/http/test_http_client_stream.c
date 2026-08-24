@@ -308,7 +308,7 @@ UTEST(client_stream, stream_no_body) {
 UTEST(client_stream, stream_null_optional_callbacks) {
     KlAllocator a = kl_allocator_default();
 
-    /* on_body set, but on_headers=NULL and on_complete=NULL — should not crash */
+    /* on_body set, but on_headers=NULL and on_complete=NULL; should not crash */
     KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body_noop, NULL, NULL, NULL);
     ASSERT_TRUE(p != NULL);
@@ -395,7 +395,7 @@ static kl_ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_dat
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * Integration test infrastructure — real server + client
+ * Integration test infrastructure: real server + client
  * ══════════════════════════════════════════════════════════════════ */
 
 /* Wait for server to bind (max 2s) */

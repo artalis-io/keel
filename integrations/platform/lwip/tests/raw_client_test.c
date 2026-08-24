@@ -1,5 +1,5 @@
 /*
- * raw_client_test.c — a plaintext numeric-IPv4 async KlHttpClient over the lwIP-raw
+ * raw_client_test.c: a plaintext numeric-IPv4 async KlHttpClient over the lwIP-raw
  * completion backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for the raw client (docs/archive/phases/phase10_lwip_raw_client_design.md §8): ONE KlEventCtx
@@ -8,7 +8,7 @@
  * kl_http_server_run() on a background thread; the KlHttpClient is created + driven ENTIRELY on that same
  * loop thread (started from a KEEL timer that fires on the loop thread, exactly the single-thread
  * marshalling discipline the raw completion tests use). So the client's connected_cb + request send +
- * response recv and the server's accept + recv + send all fire inline on the ONE thread — the
+ * response recv and the server's accept + recv + send all fire inline on the ONE thread: the
  * request round-trips over 127.0.0.1 with no data race (NO_SYS=1 has one lwIP stack, no locks).
  *
  * How the connect maps: kl_http_client_start (numeric literal -> a synchronous numeric resolver, no
@@ -26,7 +26,7 @@
  * DNS, TLS, and Happy-Eyeballs each have their own dedicated tests: this test is plaintext
  * numeric-IP ONLY. The
  * built-in kl_dns_resolver is NOT usable here (it eagerly kl_datagram_socket_init's, which lwip-raw rejects),
- * so the client is handed an explicit numeric-only KlResolver via KlHttpClientConfig.resolver — the
+ * so the client is handed an explicit numeric-only KlResolver via KlHttpClientConfig.resolver: the
  * clean plaintext-numeric-IP-scoped way to avoid any DNS machinery.
  *
  * Must be ASan+UBSan+LSan-clean.
@@ -51,7 +51,7 @@
 
 /* ── numeric-only KlResolver (no DNS, no UDP) ──────────────────────────────────
  * Parses a numeric IPv4/IPv6 literal via kl_sockaddr_parse and completes SYNCHRONOUSLY inside
- * resolve() — the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP. This
+ * resolve(): the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP. This
  * keeps this test strictly plaintext numeric-IP; DNS has its own dedicated test. */
 typedef struct { KlResolver base; KlResolveReq req; } NumResolver;
 
@@ -62,7 +62,7 @@ static KlResolveReq *num_resolve(KlResolver *self, KlEventCtx *ctx, const char *
     KlResolveResult res;
     memset(&res, 0, sizeof(res));
     if (kl_sockaddr_parse(&res.addrs[0], host, (uint16_t)port) != 0) {
-        done_fn(&nr->req, NULL, -1, ud);   /* not a numeric literal — synchronous failure */
+        done_fn(&nr->req, NULL, -1, ud);   /* not a numeric literal: synchronous failure */
         return &nr->req;
     }
     res.naddrs = 1;
@@ -120,8 +120,8 @@ static void on_done(KlHttpClient *client, void *ud) {
 }
 
 /* Fired on the loop thread: start the async KlHttpClient on the server's shared ctx (== the one lwIP
- * mainloop). Everything the client does from here rides that ctx — its connect completion, its
- * data-plane watcher relay, its timers — all serviced by kl_http_server_run's completion tick. */
+ * mainloop). Everything the client does from here rides that ctx: its connect completion, its
+ * data-plane watcher relay, its timers: all serviced by kl_http_server_run's completion tick. */
 static void start_client(void *ud) {
     ClientCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */

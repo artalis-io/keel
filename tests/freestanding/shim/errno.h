@@ -1,4 +1,4 @@
-/* freestanding shim <errno.h> — see ../README.md.
+/* freestanding shim <errno.h>: see ../README.md.
  * sockcompat.h's _WIN32 branch pulls <errno.h>; the freestanding client seam is
  * errno-free (classification rides KlIoStatus), so this only needs the symbol +
  * the would-block/EINTR/EINPROGRESS macros any include-order might reference. */

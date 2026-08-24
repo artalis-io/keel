@@ -1,5 +1,5 @@
 /*
- * test_tls_vtable.c — kl_http_server_init must reject a malformed server TLS config WITHOUT
+ * test_tls_vtable.c: kl_http_server_init must reject a malformed server TLS config WITHOUT
  * crashing during error cleanup:
  *   - a NULL factory pointer,
  *   - a factory that returns a session missing a REQUIRED vtable op (esp. destroy/shutdown).
@@ -24,7 +24,7 @@ static void        stub_destroy(KlTls *s) { (void)s; g_destroy_calls++; }
 enum { OMIT_NONE = -1, OMIT_HANDSHAKE, OMIT_READ, OMIT_WRITE, OMIT_SHUTDOWN,
        OMIT_PENDING, OMIT_RESET, OMIT_DESTROY };
 static int   g_omit;
-static KlTls g_session;   /* shared across slots — the stub ops are stateless/idempotent */
+static KlTls g_session;   /* shared across slots; the stub ops are stateless/idempotent */
 
 static KlTls *vtable_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
     (void)ctx; (void)alloc;
@@ -76,7 +76,7 @@ UTEST(tls_vtable, missing_destroy_no_crash) {
     g_omit = OMIT_DESTROY;
     ASSERT_EQ(init_with_tls(&s, &tls), -1);
     ASSERT_EQ((int)s.last_error, (int)KL_ERR_TLS_VTABLE);
-    /* survived cleanup — no crash. */
+    /* survived cleanup; no crash. */
 }
 
 /* Missing shutdown → invalid; destroy IS present, so init frees the bad session via it. */

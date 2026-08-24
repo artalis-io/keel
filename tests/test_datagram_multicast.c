@@ -1,5 +1,5 @@
 /*
- * test_datagram_multicast.c — LIVE multicast join/leave/delivery over KlDatagram. The
+ * test_datagram_multicast.c: LIVE multicast join/leave/delivery over KlDatagram. The
  * validation/routing/gating cases are covered deterministically by
  * test_datagram_public.m2_multicast_*; this file adds the live-delivery coverage. Delivery is
  * environment-sensitive: these probe the sandbox and UTEST_SKIP where loopback multicast is unavailable.

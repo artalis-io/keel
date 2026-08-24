@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# build_dgram_public.sh — build the 7B-9 PUBLIC-KlDatagram-over-EFI_UDP4 self-test into BOOTX64.EFI.
+# build_dgram_public.sh: build the 7B-9 PUBLIC-KlDatagram-over-EFI_UDP4 self-test into BOOTX64.EFI.
 #
 # The runtime proof for 7B-9: the public keel/datagram.h facade (kl_datagram_init/recv_start/
 # send/close_begin/free) over EFI_UDP4 on real firmware. Links the self-contained freestanding
-# DATAGRAM archive (make freestanding-lib-dgram-selfcontained — udp + datagram_* + the public
-# src/datagram.c + completion + event_ctx + in-archive mem*/strlen) — NO client/DNS archive, NO
+# DATAGRAM archive (make freestanding-lib-dgram-selfcontained: udp + datagram_* + the public
+# src/datagram.c + completion + event_ctx + in-archive mem*/strlen); NO client/DNS archive, NO
 # TLS. The transport is the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4, socket_efi_udp4.c)
 # + the datagram completion wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token).
 #

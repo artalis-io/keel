@@ -1,5 +1,5 @@
 /*
- * freestanding_link_main.c — CRT-less PE/COFF link proof.
+ * freestanding_link_main.c: CRT-less PE/COFF link proof.
  *
  * This is the entry TU for `make freestanding-link`: it LINKS
  * libkeel_freestanding_selfcontained.a (mem-family + strlen in-archive) into PE/COFF
@@ -8,7 +8,7 @@
  * hosted CRT, leaves only a documented undefined-symbol whitelist, passes the host
  * sanitizer tests, and performs an HTTP/1.1 GET over a mock completion provider.
  *
- * It is a LINK target, not a RUN target — it need not execute; it must resolve
+ * It is a LINK target, not a RUN target: it need not execute; it must resolve
  * with an empty undefined set under -nostdlib. So every symbol the archive
  * leaves undefined (the documented whitelist) is DEFINED here as a minimal,
  * fail-closed stub:
@@ -22,7 +22,7 @@
  * A REAL UEFI build supplies these from EDK2 (BaseMemoryLib, a real clock,
  * EFI_TCP4/EFI token provider, CpuDeadLoop for abort, the PE runtime's __chkstk).
  * The point of this TU is only that the ARCHIVE'S link closure is exactly the
- * documented seam — nothing hosted leaks in.
+ * documented seam: nothing hosted leaks in.
  *
  * FREESTANDING: no libc headers. It pulls Keel's public/internal headers under
  * the same -DKEEL_FREESTANDING + freestanding shim (-isystem tests/freestanding/
@@ -79,7 +79,7 @@ int efi_main(void *image_handle, void *system_table) {
         acc |= (uintptr_t)refs[i];
 #ifdef KEEL_FS_LINK_DGRAM
     /* Composition probe: also reference the KlDatagram entry points so the datagram
-     * archive layer participates in the link — proving the client + datagram freestanding archives compose with
+     * archive layer participates in the link: proving the client + datagram freestanding archives compose with
      * NO duplicate or unresolved symbol across their overlapping base objects (allocator / event_ctx /
      * sockaddr / completion_*). */
     void *dgram_refs[] = {
@@ -90,7 +90,7 @@ int efi_main(void *image_handle, void *system_table) {
 #endif
 #ifdef KEEL_FS_LINK_DNS
     /* Composition probe: reference the built-in resolver entry point so dns_resolver.o
-     * (and, transitively, the datagram layer it rides) participates in the link — proving the
+     * (and, transitively, the datagram layer it rides) participates in the link: proving the
      * client + DNS freestanding archives compose with NO duplicate or unresolved symbol across
      * their overlapping base objects (allocator / event_ctx / sockaddr / completion_* / kl_cstr). */
     void *dns_refs[] = {
@@ -163,13 +163,13 @@ const KlCompletionOps *kl_comp_ops_builtin(void) { return NULL; }
  * abort / fprintf / stderr come from vendor/llhttp/api.c (unreachable switch
  * defaults + the never-called pretty-printer). A real UEFI build maps abort ->
  * CpuDeadLoop and drops stdio; here they are inert stubs so the -nostdlib link
- * resolves. We keep them minimal (no varargs machinery needed — never called). */
+ * resolves. We keep them minimal (no varargs machinery needed: never called). */
 typedef struct _KL_FS_FILE KL_FS_FILE;
 KL_FS_FILE *stderr;                      /* llhttp references &stderr */
 void abort(void) { for (;;) { } }
 int fprintf(KL_FS_FILE *stream, const char *fmt, ...) { (void)stream; (void)fmt; return 0; }
 
-/* __chkstk — the Windows-ABI stack-probe helper the PE target emits for
+/* __chkstk: the Windows-ABI stack-probe helper the PE target emits for
  * functions with large stack frames (both x86_64 and aarch64). Part of the PE
  * compiler runtime, supplied by the CRT/EDK2 on a real target; a no-op stub is
  * safe here because the image is not executed. Documented as the sole

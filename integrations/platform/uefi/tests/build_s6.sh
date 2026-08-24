@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# build_s6.sh — build the S-6 KlHttpServer HTTPS-over-EFI_TCP4+mbedTLS self-test into
+# build_s6.sh: build the S-6 KlHttpServer HTTPS-over-EFI_TCP4+mbedTLS self-test into
 # BOOTX64.EFI. The server mirror of build_u4.sh (which builds the HTTPS *client*):
 #   - compile ALL mbedTLS library/*.c freestanding with the U-4 config.
 #   - compile the Keel mbedTLS adapter + the mbedTLS platform TUs (entropy/time/heap).
 #   - compile the U-1/U-2/U-3 Keel UEFI TUs (allocator/platform/socket/event) +
 #     u1_link_stubs.c (client residuals) + s4_link_stubs.c (server residuals) +
-#     s6_selftest.c (entry). NO resolve_uefi.c — a server serves, it does not connect.
+#     s6_selftest.c (entry). NO resolve_uefi.c: a server serves, it does not connect.
 #   - link with the freestanding SERVER self-contained archive -> BOOTX64.EFI.
 #
 # Requires MBEDTLS_SRC to point at an extracted mbedTLS release tarball tree; run_s6.sh
@@ -71,7 +71,7 @@ echo "  compiled $(ls mbedtls_obj/*.obj | wc -l) mbedTLS objects"
 
 # Entropy: the S-6 spike opts into the INSECURE weak-entropy fallback so the demo runs
 # without a virtio-rng device (matches the loud runtime warning). A production build drops
-# this define and requires real EFI_RNG (fail-closed) — see build_u4.sh U4_MODE=prod.
+# this define and requires real EFI_RNG (fail-closed); see build_u4.sh U4_MODE=prod.
 ENTROPY_DEFS=( -DKL_UEFI_INSECURE_TEST_ENTROPY )
 echo "entropy policy:    INSECURE test fallback (spike; -DKL_UEFI_INSECURE_TEST_ENTROPY)"
 

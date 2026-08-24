@@ -1,5 +1,5 @@
 /*
- * test_stream_read.c — strict read pause/resume machinery (src/stream_read.h).
+ * test_stream_read.c: strict read pause/resume machinery (src/stream_read.h).
  * Exercised in isolation with a mock deliver/arm/disarm and a stream whose read_buf is a plain
  * heap buffer (no live sockets). Covers the strict-pause invariants incl. reentrant pause/close
  * from the deliver callback and held terminal conditions.
@@ -99,7 +99,7 @@ UTEST(stream_read, completion_pause_holds_inflight_then_resume_delivers_once) {
     ASSERT_EQ((int)r.last_len, 5);
     ASSERT_EQ(kl_stream_read_held(&s), 0);
     ASSERT_EQ(r.arm_calls, 2);
-    ASSERT_EQ(kl_stream_resume(&s), 0);              /* idempotent — not paused, no re-deliver */
+    ASSERT_EQ(kl_stream_resume(&s), 0);              /* idempotent: not paused, no re-deliver */
     ASSERT_EQ(r.delivered, 1);
 
     free(buf);
@@ -155,7 +155,7 @@ UTEST(stream_read, repeated_pause_resume_before_completion) {
     kl_stream_pause(&s); ASSERT_EQ(kl_stream_resume(&s), 0);
     kl_stream_pause(&s); ASSERT_EQ(kl_stream_resume(&s), 0);
     ASSERT_EQ(r.delivered, 0);                        /* nothing completed yet */
-    ASSERT_EQ(r.arm_calls, 1);                        /* recv still in flight — no spurious re-arm */
+    ASSERT_EQ(r.arm_calls, 1);                        /* recv still in flight: no spurious re-arm */
 
     put(&s, "data", 4);
     ASSERT_EQ(kl_stream_on_recv(&s, 4, 1), 0);
@@ -223,14 +223,14 @@ UTEST(stream_read, recv_at_exact_capacity_delivers) {
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, 1, rc_deliver, rc_arm, rc_disarm, &r), 0);
     ASSERT_EQ(kl_stream_read_start(&s), 0);
-    ASSERT_EQ(kl_stream_on_recv(&s, 8, 1), 0);        /* exactly read_cap — fine */
+    ASSERT_EQ(kl_stream_on_recv(&s, 8, 1), 0);        /* exactly read_cap: fine */
     ASSERT_EQ(r.delivered, 1);
     ASSERT_EQ((int)r.last_len, 8);
     free(buf);
 }
 
 UTEST(stream_read, oversized_recv_fails_closed) {
-    /* len > read_cap is a backend contract violation — fail closed, never deliver. */
+    /* len > read_cap is a backend contract violation: fail closed, never deliver. */
     KlStream s; char *buf; mk_stream(&s, &buf, 8);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, 1, rc_deliver, rc_arm, rc_disarm, &r), 0);
@@ -337,7 +337,7 @@ UTEST(stream_read, double_close_is_idempotent) {
     ASSERT_EQ(kl_stream_read_start(&s), 0);
     kl_stream_read_close(&s);
     ASSERT_EQ(r.disarm_calls, 1);
-    kl_stream_read_close(&s);                          /* idempotent — no second disarm */
+    kl_stream_read_close(&s);                          /* idempotent: no second disarm */
     ASSERT_EQ(r.disarm_calls, 1);
 
     /* Completion mode double close is also a no-op after the first. */
@@ -439,7 +439,7 @@ UTEST(stream_read, duplicate_completion_while_held_preserves_held) {
     ASSERT_EQ(kl_stream_read_held(&s), 1);
     ASSERT_EQ((int)s.held_len, 4);
 
-    ASSERT_EQ(kl_stream_on_recv(&s, 99, 1), 0);       /* spurious dup (inflight clear) — dropped */
+    ASSERT_EQ(kl_stream_on_recv(&s, 99, 1), 0);       /* spurious dup (inflight clear): dropped */
     ASSERT_EQ(kl_stream_read_held(&s), 1);            /* held completion NOT replaced */
     ASSERT_EQ((int)s.held_len, 4);
     ASSERT_EQ(kl_stream_resume(&s), 0);

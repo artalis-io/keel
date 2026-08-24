@@ -1,14 +1,14 @@
 /*
- * u3_selftest.c — plaintext-client acceptance self-test (UEFI EFI application).
+ * u3_selftest.c: plaintext-client acceptance self-test (UEFI EFI application).
  *
  * A STOCK libkeel_freestanding.a async KlHttpClient runs an
  * HTTP/1.1 GET on bare UEFI firmware, driven by the EFI completion backend
  * (event_efi.c) over the EFI_TCP4 socket provider (socket_efi_tcp4.c), with the
  * platform/allocator shims and a numeric resolver (resolve_uefi.c). No epoll /
- * kqueue / io_uring, no OS sockets, no errno, no libc — just the firmware's event
+ * kqueue / io_uring, no OS sockets, no errno, no libc: just the firmware's event
  * services pumping EFI_TCP4 completion tokens.
  *
- * Flow (all through the PUBLIC KlHttpClient API — the client is model-blind):
+ * Flow (all through the PUBLIC KlHttpClient API: the client is model-blind):
  *   kl_uefi_platform_init(bs, st)          → monotonic clock + EFI_RNG
  *   kl_uefi_event_provider(bs, image)      → the completion provider (+ lazy socket provider)
  *   kl_event_ctx_init_ex(&ev, alloc, ep)   → inject the provider on the stock archive
@@ -115,7 +115,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("U-3: target = "); print_line(TARGET_URL);
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("U-3: (warn) platform_init failed — clock stuck, continuing");
+        print_line("U-3: (warn) platform_init failed, clock stuck, continuing");
 
     /* Inject the EFI completion provider on the stock freestanding archive. The
      * provider's native_provider() lazily builds the EFI_TCP4 socket provider; if this

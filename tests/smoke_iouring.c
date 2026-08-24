@@ -1,11 +1,11 @@
 /*
- * smoke_iouring.c — end-to-end HTTP-over-completion roundtrip on the completion-native
+ * smoke_iouring.c: end-to-end HTTP-over-completion roundtrip on the completion-native
  * io_uring backend.
  *
  * The runtime validation of the THIRD completion backend (event_iouring.c): a
  * KlHttpServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
  * provider), served by the SAME completion driver (completion_core.c) the IOCP and
- * pollcomp backends drive — reused verbatim — hit by the sync KlHttpClient over loopback. It
+ * pollcomp backends drive (reused verbatim) hit by the sync KlHttpClient over loopback. It
  * proves the completion axis is genuinely platform-independent on a real, completion-native
  * kernel engine, and is the first production Linux completion backend (pollcomp is a test
  * facade). Linux-only (io_uring); the Completion CI job runs it.
@@ -17,13 +17,13 @@
 #include <keel/keel.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
+#include "datagram_test_util.h"   /* kl_dg_close_free: public lifecycle */
 #include "../src/socket.h"   /* internal kl_socket_provider_iouring() */
 
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>            /* calloc / free — async-stream handler ctx */
+#include <stdlib.h>            /* calloc / free: async-stream handler ctx */
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -79,7 +79,7 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_file(res, (KlSocketHandle)fd, size);
 }
 
-/* GET /bigfile — a >pipe-capacity file so the splice sendfile loops over multiple
+/* GET /bigfile: a >pipe-capacity file so the splice sendfile loops over multiple
  * file→pipe→socket chunks and exercises the short-splice-out re-submit path. */
 static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -101,7 +101,7 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_end_stream(res);
 }
 
-/* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
+/* GET /bigstream: a chunked stream far larger than a slow client's receive window, so the
  * outbound buffer fills and the io_uring loop must flush it as overlapped sends rather
  * than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
 #define SMOKE_BS_CHUNK   1024
@@ -127,7 +127,7 @@ static void udp_echo(void *ud, const void *data, size_t len,
     (void)kl_datagram_send((KlDatagram *)ud, &m);
 }
 
-/* Minimal echo HTTP/2 server session (no nghttp2/HPACK) — echoes bytes through the send
+/* Minimal echo HTTP/2 server session (no nghttp2/HPACK): echoes bytes through the send
  * callback; enough to exercise comp_h2_drive end to end over io_uring completion. */
 typedef struct {
     KlHttp2ServerSession   base;
@@ -180,7 +180,7 @@ static KlHttp2ServerSession *echo_factory(KlAllocator *alloc, KlHttp2ServerCallb
 }
 
 /* Idle-timeout roundtrip (hardening): open a connection, send nothing, confirm the server
- * times it out and closes it (read_timeout_ms=400) — completion-path slowloris defense
+ * times it out and closes it (read_timeout_ms=400): completion-path slowloris defense
  * via kl_comp_cancel (prep_cancel of the in-flight recv). */
 static int idle_timeout_closes(void) {
     int cs = socket(AF_INET, SOCK_STREAM, 0);
@@ -264,7 +264,7 @@ static KlHttpServer g_srv;
 
 /* Async / long-lived streaming over the completion loop: begin a stream and
  * write the first chunk during dispatch, then SUSPEND on a one-shot timer. The timer fires
- * on the loop thread, writes the second chunk, ends the stream, and resumes — so the body is
+ * on the loop thread, writes the second chunk, ends the stream, and resumes: so the body is
  * produced across multiple event-loop ticks, not synchronously in the handler. Verifies the
  * async-suspend/resume + streaming path drives correctly over a completion backend. */
 typedef struct {
@@ -305,7 +305,7 @@ static void handle_astream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 /* Head-of-line: a slow client requests the big stream and stalls (tiny receive window,
  * no reads). The server's outbound buffer fills and it must post overlapped sends and move on
- * — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a *second*,
+ * -- NOT busy-spin a blocking flush. We prove the loop stayed free by driving a *second*,
  * normal request to completion while the first is stalled, then drain the first fully and
  * verify every byte of the 256 KiB stream arrived (dechunked). A spin-flush of the blocked
  * socket would starve the second client. */
@@ -350,7 +350,7 @@ static int bigstream_no_hol_ok(void) {
 
     nap_ms(150);   /* let the server dispatch, fill A's window, post the overlapped send */
 
-    /* Conn B — a normal request must complete promptly while A is stalled (the HOL check). */
+    /* Conn B: a normal request must complete promptly while A is stalled (the HOL check). */
     int b = connect_client();
     if (b < 0) { close(a); return 0; }
     const char *reqb = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -615,7 +615,7 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
-    /* Overlapped streaming flush — a stalled slow reader must not block the loop, and
+    /* Overlapped streaming flush: a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = 0;
     if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok)
@@ -676,7 +676,7 @@ int main(void) {
 
     kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
+    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now: safe to pump the public close */
     kl_http_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
     unlink(SMOKE_BIGFILE_PATH);

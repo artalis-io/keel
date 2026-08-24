@@ -1,18 +1,18 @@
 /*
- * test_socket_provider.c — the internal socket seam + provider vtable.
+ * test_socket_provider.c: the internal socket seam + provider vtable.
  * Proves: POSIX default + fast path, provider dispatch, per-op
  * NULL fallback, deterministic fault injection (short write, EWOULDBLOCK,
  * ECONNRESET), a decorator over real socketpair I/O, and that  * (a KlDatagram) actually threads ctx->sockets to the seam.
  */
 #include "utest.h"
 #include "../src/socket.h"
-#include "../src/event_caps.h"   /* kl_event_caps — guard readiness-only provider-seam tests */
+#include "../src/event_caps.h"   /* kl_event_caps: guard readiness-only provider-seam tests */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>   /* provider-threading tests use a stack KlDatagram */
-#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
+#include "datagram_test_util.h"   /* kl_dg_close_free: public lifecycle */
 #include <keel/http_server.h>
 #include <keel/http_client.h>
 
@@ -193,7 +193,7 @@ UTEST(sockprov, per_op_null_fallback) {
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
-/* Decorator: mock wraps real I/O but caps each send — the tail still arrives
+/* Decorator: mock wraps real I/O but caps each send: the tail still arrives
  * on a second send, proving faults compose with real bytes on the wire. */
 UTEST(sockprov, decorator_short_write_real_io) {
     MockSock m; memset(&m, 0, sizeof(m)); m.wrap = 1; m.short_send = 4;
@@ -241,7 +241,7 @@ UTEST(sockprov, datagram_threads_provider) {
 
 /* A programmable KlDatagramOps hung off a provider, proving that the datagram machine drives the
  * datagram machine (configure cap negotiation, send → enqueue-on-EAGAIN) purely
- * through the provider vtable — no real UDP syscalls, deterministic. The ops read
+ * through the provider vtable: no real UDP syscalls, deterministic. The ops read
  * a file-static state (the provider ctx carries the *stream* MockSock). */
 typedef struct {
     uint32_t configure_caps;   /* bitmask configure() reports as accepted */
@@ -297,7 +297,7 @@ static KlSocketProvider mock_dgram_provider(void) {
 }
 
 /* configure() reports the accepted RX-capture bitmask; the datagram machine stores exactly those
- * flags (pktinfo/tos on, gro off here) — the capability handshake across the seam. */
+ * flags (pktinfo/tos on, gro off here): the capability handshake across the seam. */
 UTEST(dgramprov, configure_caps_negotiated) {
     memset(&g_mdg, 0, sizeof(g_mdg));
     g_mdg.configure_caps = KL_DGRAM_RX_PKTINFO | KL_DGRAM_RX_TOS;   /* no GRO */
@@ -323,7 +323,7 @@ UTEST(dgramprov, configure_caps_negotiated) {
 }
 
 /* A successful provider send retires the datagram; an EAGAIN send makes the datagram machine
- * QUEUE it (backpressure) rather than drop it — both decisions live in the datagram machine and
+ * QUEUE it (backpressure) rather than drop it: both decisions live in the datagram machine and
  * are driven entirely off the provider send()'s return. */
 UTEST(dgramprov, send_success_then_eagain_enqueues) {
     memset(&g_mdg, 0, sizeof(g_mdg));
@@ -338,7 +338,7 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
      * provider->send that returns EAGAIN is queued, not dropped. On a completion
      * loop the datagram routes sends through the completion driver on the real
      * fd (the provider->send op is never consulted), so the mock-seam assertion
-     * does not apply — skip there. */
+     * does not apply: skip there. */
     if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) {
         kl_event_ctx_free(&ctx);
         UTEST_SKIP("readiness-only mock provider-seam send contract");
@@ -534,7 +534,7 @@ static const KlSocketOps deco_ops = {
     .socket = deco_socket, .accept = deco_accept, .connect = deco_connect, .name = "deco",
 };
 
-/* A minimal ops table with NO native-fd capability — used only to prove the
+/* A minimal ops table with NO native-fd capability: used only to prove the
  * guard rejects it (its ops are never invoked). */
 static const KlSocketOps nonnative_ops = { .name = "nonnative" };
 
@@ -544,7 +544,7 @@ static void deco_ok_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
 }
 static void *deco_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
-/* #1 — the native-fd guard: a non-native provider is rejected at init; a native
+/* #1: the native-fd guard: a non-native provider is rejected at init; a native
  * one (and NULL = built-in) is accepted. */
 UTEST(sockprov, select_native_fd_guard) {
     KlSocketProvider nonnative = { &nonnative_ops, NULL, 0, NULL };  /* no NATIVE_FD */
@@ -561,7 +561,7 @@ UTEST(sockprov, select_native_fd_guard) {
     kl_http_server_free(&s2);
 }
 
-/* #2 — end-to-end selection: a decorator provider on BOTH the server
+/* #2: end-to-end selection: a decorator provider on BOTH the server
  * (KlHttpServerConfig.sockets) and the client (KlHttpClientConfig.sockets), over a real
  * loopback request. The listen socket + accept flow through the server decorator;
  * the client socket + connect flow through the client decorator. (The listen

@@ -100,7 +100,7 @@ UTEST(cors, middleware_no_origin) {
     KlHttpResponse res;
     kl_http_response_init(&res, &a);
 
-    /* No Origin header — should pass through, no CORS headers added */
+    /* No Origin header: should pass through, no CORS headers added */
     int rc = kl_http_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(res.hdr_len, (size_t)0);
@@ -218,7 +218,7 @@ UTEST(cors, middleware_preflight_disallowed) {
     kl_http_response_init(&res, &a);
 
     int rc = kl_http_cors_middleware(&req, &res, &c);
-    ASSERT_EQ(rc, 0);  /* disallowed origin — no CORS, no preflight */
+    ASSERT_EQ(rc, 0);  /* disallowed origin: no CORS, no preflight */
     ASSERT_EQ(res.hdr_len, (size_t)0);
 
     kl_http_response_free(&res);

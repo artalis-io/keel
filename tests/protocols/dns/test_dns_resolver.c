@@ -4,7 +4,7 @@
 #include <keel/resolver.h>
 #include <keel/datagram.h>          /* the fake nameserver + spoofer are bound KlDatagrams */
 #include <keel/datagram_detail.h>   /* stack-allocate KlDatagram */
-#include "datagram_test_util.h"     /* kl_dg_close_free — PUBLIC close/drive/free lifecycle */
+#include "datagram_test_util.h"     /* kl_dg_close_free: PUBLIC close/drive/free lifecycle */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/error.h>
@@ -17,8 +17,8 @@
 /* The send-backpressure tests use a socket provider that wraps the built-in POSIX provider and can
  * force datagram sends to WOULD_BLOCK on demand (real fds so the readiness loop still polls writability). */
 #include "socket.h"       /* KlSocketProvider / KlDatagramOps / kl_socket_provider_posix */
-#include "event_caps.h"   /* kl_event_caps — skip the readiness-only gate on completion backends */
-#include "platform.h"     /* kl_monotonic_ms — portable monotonic clock (no raw clock_gettime) */
+#include "event_caps.h"   /* kl_event_caps: skip the readiness-only gate on completion backends */
+#include "platform.h"     /* kl_monotonic_ms: portable monotonic clock (no raw clock_gettime) */
 
 /* ── A canned A-record response for a.com → 1.2.3.4, id 0x1234 ────────── */
 static const uint8_t A_RESP[] = {
@@ -97,7 +97,7 @@ static size_t g_last_q_len;
 static int g_last_arcount;       /* last query's ARCOUNT (1 = EDNS0 OPT present) */
 static char g_last_qname[256];   /* last query's decoded name (lowercased) */
 /* Resolver conformance knobs (see the section at the bottom): */
-static int    g_octet_from_name; /* A record's 4th octet = the query name's first char (lowercased) —
+static int    g_octet_from_name; /* A record's 4th octet = the query name's first char (lowercased),
                                   * gives DISTINGUISHABLE answers for the concurrent-resolution demux test */
 static int    g_wrong_source;    /* two-phase src-filter proof: send ONLY a POISONED answer from
                                   * g_spoof_sock (a non-nameserver source) + STASH the legit response +
@@ -138,7 +138,7 @@ static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
     resp[8] = 0; resp[9] = 0; resp[10] = 0; resp[11] = 0;
     n = 12;
     if (g_wrong_question) {
-        /* Emit a fixed, different question ("evil" A IN) — right id, wrong name. */
+        /* Emit a fixed, different question ("evil" A IN): right id, wrong name. */
         static const uint8_t evilq[] = { 0x04,'e','v','i','l',0x00, 0x00,0x01, 0x00,0x01 };
         memcpy(resp + n, evilq, sizeof(evilq));
         n += sizeof(evilq);
@@ -166,7 +166,7 @@ static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
         resp[n++] = 0; resp[n++] = 0; resp[n++] = 0x01; resp[n++] = 0x00; /* ttl */
         if (qtype == KL_DNS_TYPE_A) {
             /* Default answer 10.1.2.3; with g_octet_from_name the 4th octet = the query name's first
-             * character lowercased (q[13] is the first label's first byte — case-insensitive so it is
+             * character lowercased (q[13] is the first label's first byte; case-insensitive so it is
              * stable under 0x20 randomization), giving each distinct name a distinct answer. */
             uint8_t last = g_octet_from_name ? (uint8_t)(q[13] | 0x20) : (uint8_t)3;
             resp[n++] = 0; resp[n++] = 4;
@@ -281,7 +281,7 @@ static void mock_ns(void *ud, const void *data, size_t len,
     }
     /* Two-phase wrong-source proof: send ONLY a POISONED copy (corrupt the A answer's last octet) FROM
      * a socket that is NOT the configured nameserver, and STASH the legit response + the resolver's
-     * dest so the test can release it from the real nameserver socket in the second phase. No legit reply now —
+     * dest so the test can release it from the real nameserver socket in the second phase. No legit reply now.
      * so if the resolver's src (address+port) gate were broken, the poison alone would (wrongly)
      * complete the resolution; a working gate leaves it PENDING until the stashed reply is released. */
     if (g_wrong_source && g_spoof_sock && n <= 512) {
@@ -331,14 +331,14 @@ static void mock_tcp_on_client(KlSocketHandle fd, KlEventMask ready, void *ud) {
     MockTcpConn *c = ud;
     ssize_t r = recv(fd, c->buf + c->len, sizeof(c->buf) - c->len, 0);
     if (r <= 0)
-        return;                                  /* EOF / error — test tears down */
+        return;                                  /* EOF / error; test tears down */
     c->len += (size_t)r;
 
     size_t off = 0;
     while (c->len - off >= 2) {                   /* frame by the 2-byte length prefix */
         size_t mlen = ((size_t)c->buf[off] << 8) | c->buf[off + 1];
         if (c->len - off - 2 < mlen)
-            break;                               /* incomplete frame — wait for more */
+            break;                               /* incomplete frame; wait for more */
         const uint8_t *q = c->buf + off + 2;
         int qtype = 0;
         size_t qend = dns_q_parse(q, mlen, &qtype);
@@ -433,13 +433,13 @@ static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlDatagram *ns,
     /* Diagnostic on any NULL return: pin the EXACT failing call + its Keel error + errno, so a
      * construction failure that only reproduces in some environments is actionable at a glance
      * (instead of a bare `r == NULL` from the 30+ resolver-backed cases). Two distinct failure
-     * points — the mock nameserver's bound KlDatagram vs the resolver's own KlDatagram construction
+     * points: the mock nameserver's bound KlDatagram vs the resolver's own KlDatagram construction
      * (kl_datagram_open -> _init -> _recv_start). */
     errno = 0;
     if (kl_datagram_socket_init(ns, &sc) != 0) {
         fprintf(stderr, "make_resolver: nameserver socket_init FAILED: %s (errno=%d: %s)\n",
                 kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
-        return NULL;   /* socket_init closed the fd on failure — nothing to reclaim */
+        return NULL;   /* socket_init closed the fd on failure; nothing to reclaim */
     }
     if (kl_datagram_recv_start(ns, mock_ns, ns) != 0) {         /* split: reclaim the ADOPTED nameserver */
         fprintf(stderr, "make_resolver: nameserver recv_start FAILED: %s\n",
@@ -653,7 +653,7 @@ UTEST(dns, localhost_shortcut) {
 }
 
 UTEST(dns, destroy_with_inflight) {
-    /* Destroy while a query is outstanding — must free cleanly (ASan). */
+    /* Destroy while a query is outstanding; must free cleanly (ASan). */
     reset_dns();
     g_silent = 1;
     KlAllocator alloc = kl_allocator_default();
@@ -672,7 +672,7 @@ UTEST(dns, destroy_with_inflight) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Destroy the resolver from WITHIN its own resolve-done callback — which the resolver fires from inside
+/* Destroy the resolver from WITHIN its own resolve-done callback, which the resolver fires from inside
  * dns_on_recv (the datagram's recv-delivery frame, close.busy > 0). The synchronous teardown must DEFER
  * the whole reclamation (incl. freeing the resolver) to the outermost frame leave, so `dns_complete`'s
  * post-`done` access to `r` (freeing the request, touching idle TCP) and the unwinding recv_leave never
@@ -699,12 +699,12 @@ UTEST(dns, destroy_from_within_on_recv) {
     pump(&ctx, &g_done, 200);   /* NS replies → dns_on_recv → on_done_destroy → destroy (deferred) */
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    /* r was freed by the deferred teardown at the outermost leave — do NOT touch it. */
+    /* r was freed by the deferred teardown at the outermost leave; do NOT touch it. */
     kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
-/* Destroy from a done callback fired by a TIMER — which, unlike recv delivery, has NO datagram busy
+/* Destroy from a done callback fired by a TIMER, which, unlike recv delivery, has NO datagram busy
  * frame, so the datagram-level deferral does not apply. The resolver-level in_done/destroy_requested
  * sentinel must defer the teardown to dns_complete's destructive tail so dns_complete's post-`done`
  * access to `r` (freeing the request, dns_tcp_touch_idle_all) does not touch freed memory (ASan/UBSan).
@@ -912,7 +912,7 @@ UTEST(dns, hosts_file_lookup) {
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
 
-    /* Resolve via the alias name — must hit the hosts file, no DNS query. */
+    /* Resolve via the alias name; must hit the hosts file, no DNS query. */
     ASSERT_TRUE(r->resolve(r, &ctx, "alias.test", 80, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 50);
 
@@ -1261,7 +1261,7 @@ UTEST(dns, e2e_vs_getaddrinfo) {
         hints.ai_socktype = SOCK_STREAM;
         if (getaddrinfo(names[i], NULL, &hints, &gai) != 0 || !gai) {
             if (gai) freeaddrinfo(gai);
-            continue;                        /* unresolvable here — skip this name */
+            continue;                        /* unresolvable here; skip this name */
         }
 
         reset_dns();
@@ -1367,7 +1367,7 @@ UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
 
     ASSERT_EQ(1, g_done);                 /* completed via resolution delay */
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(1, g_res.naddrs);           /* A only — AAAA never arrived */
+    ASSERT_EQ(1, g_res.naddrs);           /* A only: AAAA never arrived */
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
 
     r->destroy(r);
@@ -1426,7 +1426,7 @@ UTEST(dns, tcp_persistent_reuse) {
     MockTcp tcp;
     ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
 
-    /* First resolve — both families pipeline over one connection. */
+    /* First resolve; both families pipeline over one connection. */
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 200);
     ASSERT_EQ(1, g_done);
@@ -1434,7 +1434,7 @@ UTEST(dns, tcp_persistent_reuse) {
     ASSERT_EQ(2, g_res.naddrs);           /* A + AAAA both recovered over TCP */
     ASSERT_EQ(1, tcp.accepts);            /* single connection for two pipelined legs */
 
-    /* Second resolve — reuses the idle-cached connection (still one accept). */
+    /* Second resolve; reuses the idle-cached connection (still one accept). */
     g_done = 0;
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 200);
@@ -1492,14 +1492,14 @@ UTEST(dns, cookie_learned_and_echoed) {
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
-    /* First resolve — the query carries only a client cookie; resolver learns
+    /* First resolve; the query carries only a client cookie; resolver learns
      * the server cookie from the reply. */
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 200);
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(1, g_seen_client_ok);       /* the query carried a client cookie */
 
-    /* Second resolve — the query must now echo the learned server cookie. */
+    /* Second resolve; the query must now echo the learned server cookie. */
     g_done = 0; g_seen_server_len = 0;
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 200);
@@ -1572,11 +1572,11 @@ UTEST(dns, cookie_client_mismatch_ignored) {
  * slot) via kl_datagram_recv_start(dns_on_recv); its UDP sends + synchronous teardown go through the same
  * KlDatagram surface the fake nameserver + spoofer use here. The TCP fallback (mock above) is an
  * independent byte-stream path, NOT the datagram machine. These cases cover the couplings dns_on_recv
- * leans on THROUGH the machine — src on every recv (anti-spoof) and txid demux across serial re-arms —
+ * leans on THROUGH the machine, src on every recv (anti-spoof) and txid demux across serial re-arms,
  * and run on both readiness and completion backends. */
 
 /* Two-phase proof that a valid-content response from a NON-nameserver socket is rejected at the src
- * (address+port) gate — independent of cross-socket scheduling. First phase: only the poisoned answer is
+ * (address+port) gate; independent of cross-socket scheduling. First phase: only the poisoned answer is
  * ever sent (from the spoofer's port); pump and assert the resolution stays PENDING (a broken gate
  * would complete it here with 10.1.2.238). Second phase: release the withheld legit responses from the real
  * nameserver socket; pump and assert completion with 10.1.2.3. (A single-phase send of both would not
@@ -1596,7 +1596,7 @@ UTEST(dns, wrong_source_response_ignored) {
     KlDatagramSocketConfig sp = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_datagram_socket_init(&spoof, &sp));
     g_wrong_source = 1; g_spoof_sock = &spoof;
-    /* Same address (127.0.0.1), DIFFERENT port — the port is what makes the spoofer's source not match
+    /* Same address (127.0.0.1), DIFFERENT port: the port is what makes the spoofer's source not match
      * the configured nameserver, so the mismatch is purely the discriminator dns_ns_index rejects on. */
     ASSERT_TRUE(kl_datagram_local_port(&spoof) != kl_datagram_local_port(&ns));
 
@@ -1614,7 +1614,7 @@ UTEST(dns, wrong_source_response_ignored) {
     ASSERT_EQ(2, g_stash_n);                 /* both legit responses (A + AAAA) captured */
     ASSERT_EQ(2, g_poison_sent);             /* both poisons in flight from the wrong source */
     for (int i = 0; i < 20; i++) kl_event_ctx_run(&ctx, 16, 2);   /* poison round-trip + drop */
-    ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate — still pending */
+    ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate; still pending */
 
     /* Second phase: release the legit responses from the configured nameserver socket (correct src). */
     for (int i = 0; i < g_stash_n; i++) {
@@ -1650,7 +1650,7 @@ static void on_done_ctx(KlResolveReq *req, const KlResolveResult *result, int er
 /* Two DISTINCT names resolved concurrently over the ONE shared resolver socket. Each name's answer is
  * distinguishable (A octet = the name's first char via g_octet_from_name), so verifying each callback
  * gets ONLY its own name's address proves transaction-id demultiplexing across the machine's serial
- * receive re-arms — no cross-matching between the interleaved in-flight legs. */
+ * receive re-arms; no cross-matching between the interleaved in-flight legs. */
 UTEST(dns, concurrent_distinct_resolutions) {
     reset_dns();
     g_answer_a = 1; g_octet_from_name = 1;
@@ -1718,7 +1718,7 @@ static int is_completion(KlEventCtx *ctx) {
 
 /* Pump until `*flag` or a real-time budget elapses. A permanently send-blocked socket keeps WRITE
  * interest armed, so the always-writable fd makes each kl_event_ctx_run return immediately without
- * waiting — a fixed TICK budget would never let wall-clock reach the guard/response deadlines. Bound by
+ * waiting, a fixed TICK budget would never let wall-clock reach the guard/response deadlines. Bound by
  * real time instead: the guard still fires once its deadline passes; we just have to let the clock run. */
 static void pump_realtime(KlEventCtx *ctx, int *flag, int budget_ms) {
     uint64_t t0 = kl_monotonic_ms();
@@ -1748,7 +1748,7 @@ UTEST(dns, wouldblock_retries_on_writable_and_succeeds) {
                                                         * leg1 finds no free slot → WOULD_BLOCK → pending */
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
     kl_event_ctx_run(&ctx, 16, 5);                     /* let the (refused) initial sends settle */
-    ASSERT_EQ(0, g_done);                              /* nothing out yet — the socket is blocked */
+    ASSERT_EQ(0, g_done);                              /* nothing out yet; the socket is blocked */
 
     g_block = 0;                                       /* release: writable edge flushes slot 0, which
                                                         * frees a slot → on_writable re-sends the pending leg */
@@ -1778,7 +1778,7 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
     KlResolver *r = make_resolver_slots(&ctx, &ns, &dc, 1);   /* 1 slot → 2nd leg WOULD_BLOCKs */
     ASSERT_TRUE(r != NULL);
 
-    g_block = 1;                                        /* stays blocked forever — no writable progress */
+    g_block = 1;                                        /* stays blocked forever; no writable progress */
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
 
     /* The guard (timeout_ms=40) settles the send_pending leg; the queued leg's response timeout settles
@@ -1786,7 +1786,7 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
      * budget (guard + response deadlines are 40ms; 2000ms is generous headroom). */
     pump_realtime(&ctx, &g_done, 2000);
     ASSERT_EQ(1, g_done);
-    ASSERT_NE(0, g_err);                               /* KL_ERR_DNS — settled, not hung */
+    ASSERT_NE(0, g_err);                               /* KL_ERR_DNS: settled, not hung */
 
     r->destroy(r);
     kl_dg_close_free(&ctx, &ns);

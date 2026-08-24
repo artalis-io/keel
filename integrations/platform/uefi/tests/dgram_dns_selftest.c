@@ -1,10 +1,10 @@
 /*
- * dgram_dns_selftest.c — DNS-over-datagram acceptance self-test (UEFI EFI application).
+ * dgram_dns_selftest.c: DNS-over-datagram acceptance self-test (UEFI EFI application).
  *
  * The on-real-firmware validation for the EFI_UDP4 datagram provider: the STOCK
- * src/protocols/dns/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
+ * src/protocols/dns/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4: the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
- * wiring in event_efi.c (post_dgram_recv/_send + drain, stable token) — with NO bespoke
+ * wiring in event_efi.c (post_dgram_recv/_send + drain, stable token); with NO bespoke
  * sync DNS-over-EFI_UDP4 engine on the path. Here the async KlResolver vtable
  * runs the real Do53 query engine over the
  * datagram machine, and the resolved address then drives an EFI_TCP4 GET.
@@ -15,7 +15,7 @@
  *      TLS-over-EFI_TCP4 is orthogonal and already proven by the HTTPS-client self-tests).
  *   2. a truncated-response (TC=1) case: the freestanding resolver has NO TCP fallback
  *      (#ifndef KEEL_FREESTANDING), so a TC answer settles a clean KL_ERR_DNS
- *      failure — no hang — on real firmware.
+ *      failure, no hang, on real firmware.
  *   3. kl_uefi_udp_provider_live_count()==0 (and quarantined==0) after teardown.
  *
  * The self-test is mode-agnostic: it always resolves→GETs and reports FACTS; the harness
@@ -24,7 +24,7 @@
  *   error = <KlError>
  *   udp_live = <n> udp_quarantined = <n>     (asserted 0/0 on the happy path)
  *   GO       (status==200 && live==0 && quarantined==0)   |   NO-GO
- *   DONE     (always — the terminal marker; its absence means crash/hang)
+ *   DONE     (always, the terminal marker; its absence means crash/hang)
  *
  * Freestanding: clang --target=*-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -35,7 +35,7 @@
 #include "socket_efi_udp4.h"   /* kl_uefi_udp_provider_live_count / _quarantined_count */
 #include "event_efi.h"
 #include "allocator_uefi.h"
-#include "../../../../src/platform.h" /* kl_monotonic_ms — elapsed-time oracle (response- vs timeout-driven) */
+#include "../../../../src/platform.h" /* kl_monotonic_ms: elapsed-time oracle (response- vs timeout-driven) */
 
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
@@ -105,7 +105,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print(" nameserver = "); print_line(KL_U9_NAMESERVER);
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("6.4c: (warn) platform_init failed — clock/RNG stuck, continuing");
+        print_line("6.4c: (warn) platform_init failed, clock/RNG stuck, continuing");
 
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("6.4c: event provider build failed"); goto done; }
@@ -138,7 +138,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     KlHttpClientConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.timeout_ms = 30000;   /* generous: DNS RTT + TCG + SLIRP */
-    cfg.resolver = res;       /* borrowed — destroyed below after kl_http_client_free */
+    cfg.resolver = res;       /* borrowed; destroyed below after kl_http_client_free */
 
     print("6.4c: resolving "); print(KL_U9_HOSTNAME); print(" via "); print(KL_U9_NAMESERVER);
     print_line(" over EFI_UDP4, then GET over EFI_TCP4 ...");
@@ -147,7 +147,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
     /* Time the whole resolve→GET. On the TC leg the stock resolver fails PROMPTLY (no TCP
-     * fallback, no retransmit — the TC-settles-clean contract), so completion
+     * fallback, no retransmit, the TC-settles-clean contract), so completion
      * lands far below the per-leg timeout (dcfg.timeout_ms). If instead the TC responses were
      * dropped, both legs would only settle KL_ERR_DNS after the ≥6000 ms leg timeout. The
      * elapsed marker below therefore distinguishes response-driven settlement from a timeout. */
@@ -171,8 +171,8 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("6.4c: leg_timeout_ms = "); print_int(dcfg.timeout_ms); print_line("");
     print("6.4c: elapsed_ms = "); print_int((int)elapsed); print_line("");
     /* Symbolic error marker (robust to KlError reordering vs the numeric above): lets the TC
-     * oracle attribute the failure to the DNS rejection specifically — not a timeout, socket
-     * error, or malformed-response reject — per the negative-test rule. */
+     * oracle attribute the failure to the DNS rejection specifically, not a timeout, socket
+     * error, or malformed-response reject; per the negative-test rule. */
     if (d.err == KL_ERR_DNS)     print_line("6.4c: resolve-error = KL_ERR_DNS");
     if (d.err == KL_ERR_TIMEOUT) print_line("6.4c: resolve-error = KL_ERR_TIMEOUT");
 
@@ -194,7 +194,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
 done:
     /* Terminal marker: its ABSENCE in the serial log is the harness's crash/hang signal.
-     * Return (rather than park) so startup.nsh's `reset -s` shuts the guest down promptly —
+     * Return (rather than park) so startup.nsh's `reset -s` shuts the guest down promptly;
      * teardown already ran and udp_live/quarantined were asserted above. BOOT_TIMEOUT is the
      * safety net if a firmware ignores the shutdown. */
     print_line("6.4c: DONE");

@@ -152,7 +152,7 @@ UTEST(url, wss_unix) {
 
 UTEST(url, unix_socket_unencoded_path) {
     /* Slashes need not be encoded if the socket path has no leading slash
-     * conflict — but the first literal '/' always starts the request path.
+     * conflict; but the first literal '/' always starts the request path.
      * A relative-looking socket name works unescaped: */
     KlUrl u;
     ASSERT_EQ(kl_url_parse("http+unix://app.sock/health", &u), 0);

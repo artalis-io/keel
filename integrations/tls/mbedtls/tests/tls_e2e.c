@@ -1,5 +1,5 @@
 /*
- * tls_e2e.c — end-to-end proof that the mbedTLS KlTls adapter satisfies BOTH
+ * tls_e2e.c: end-to-end proof that the mbedTLS KlTls adapter satisfies BOTH
  * transport axes of the KlTls vtable, plus a hardening/regression suite.
  *
  *   Axis 1 (socket-BIO / readiness): a socketpair() carries ciphertext; client
@@ -15,12 +15,12 @@
  *     read()==-1 with at_eof()==1.
  *
  * Certificates (a self-signed CA + a server leaf) are generated at runtime with
- * the mbedTLS library API — no filesystem, no `openssl` CLI.
+ * the mbedTLS library API; no filesystem, no `openssl` CLI.
  *
  * This mirrors the OpenSSL suite (integrations/tls/openssl/tests/tls_e2e.c) in
  * structure and style, adapted to the mbedTLS adapter's PUBLIC API surface.
  * The mbedTLS adapter has NO client-cert setter, NO insecure ctor and NO
- * truncation toggle, so those OpenSSL scenarios are intentionally absent — see
+ * truncation toggle, so those OpenSSL scenarios are intentionally absent; see
  * the notes printed by main() and the comments at each omission.
  *
  * Built under ASan+UBSan. SPDX-License-Identifier: MIT
@@ -255,7 +255,7 @@ static void axis1_socket_bio(KlAllocator *alloc, PemPair *ca, PemPair *server)
     printf("  handshake complete\n");
 
     /* ALPN: mbedTLS selects the SERVER's first advertised protocol that the
-     * client also offered — server preference wins → "h2" on both sides. */
+     * client also offered; server preference wins → "h2" on both sides. */
     const char *cn_alpn = cli->alpn_protocol(cli);
     const char *sn_alpn = srv->alpn_protocol(srv);
     printf("  ALPN client=%s server=%s\n", cn_alpn ? cn_alpn : "(none)",
@@ -457,7 +457,7 @@ static void test_hostname_mismatch(KlAllocator *alloc, PemPair *ca, PemPair *ser
 static void test_untrusted_ca(KlAllocator *alloc, Rng *rng, PemPair *server)
 {
     printf("== Untrusted CA -> verify fails ==\n");
-    /* A fresh, unrelated CA the client will trust — but the server leaf was
+    /* A fresh, unrelated CA the client will trust; but the server leaf was
      * signed by the real CA, so verification must fail. */
     PemPair other_ca = {0};
     gen_cert(rng, "Other CA", 1, NULL, NULL, NULL, &other_ca, NULL);
@@ -502,7 +502,7 @@ static void test_missing_client_cert(KlAllocator *alloc, PemPair *ca, PemPair *s
     kl_tls_mbedtls_ctx_destroy(cctx);
 }
 
-/* feed_input boundary — a NULL cipher with a non-zero length and an oversized
+/* feed_input boundary: a NULL cipher with a non-zero length and an oversized
  * chunk (> internal cap) are both rejected; len==0 is a no-op. */
 static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
 {
@@ -530,7 +530,7 @@ static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
     printf("  PASS: feed_input rejects NULL-cipher and oversized chunks\n");
 }
 
-/* from_buf boundary — a ctor rejects NULL cert/key/CA buffers. */
+/* from_buf boundary: a ctor rejects NULL cert/key/CA buffers. */
 static void test_from_buf_boundary(KlAllocator *alloc, PemPair *server, PemPair *ca)
 {
     printf("== from_buf boundary (NULL / empty PEM rejected) ==\n");
@@ -559,7 +559,7 @@ static void test_from_buf_boundary(KlAllocator *alloc, PemPair *server, PemPair 
     printf("  PASS: from_buf ctors reject empty/NULL PEM buffers\n");
 }
 
-/* peer_cert edge cases — NULL out and before-handshake both return -1. */
+/* peer_cert edge cases: NULL out and before-handshake both return -1. */
 static void test_peer_cert_edges(KlAllocator *alloc, PemPair *ca, PemPair *server)
 {
     printf("== peer_cert edges (NULL out, pre-handshake) ==\n");
@@ -722,7 +722,7 @@ static KlAllocator fail_alloc_make(FailAlloc *f, int fail_after) {
 
 /* Drive ctx creation + a handshake under an allocator that starts failing after
  * N allocations, for a sweep of N. Each iteration must fail gracefully (no
- * crash / no UAF under ASan); some N complete, some don't — either is fine, the
+ * crash / no UAF under ASan); some N complete, some don't; either is fine, the
  * point is memory-safety on the failure paths. */
 static void test_alloc_failure_injection(PemPair *ca, PemPair *server)
 {
@@ -755,7 +755,7 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server)
                             KlTlsResult r = srv->handshake(srv, KL_INVALID_SOCKET);
                             if (r == KL_TLS_OK) sdone = 1; else if (r == KL_TLS_ERROR) failed = 1;
                         }
-                        /* pump — feed/drain ring growth exercises comp_ensure under failure */
+                        /* pump; feed/drain ring growth exercises comp_ensure under failure */
                         unsigned char pb[4096];
                         for (;;) {
                             kl_ssize_t k = cli->drain_output(cli, pb, sizeof(pb));
@@ -819,7 +819,7 @@ int main(void) {
      *   - strict/lenient truncation toggle: no allow_truncation setter.
      *   - TLS 1.1 version-floor rejection: mbedTLS 3.x speaks only TLS 1.2/1.3. */
     printf("\nNOTE: mTLS-success / insecure-ctx / truncation-toggle / TLS1.1-floor\n"
-           "      omitted — not expressible via the mbedTLS adapter's public API.\n");
+           "      omitted, not expressible via the mbedTLS adapter's public API.\n");
 
     mbedtls_pk_free(&ca_key);
     pem_pair_free(&ca);

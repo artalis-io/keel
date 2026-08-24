@@ -458,7 +458,7 @@ UTEST(router, param_overflow_clamped) {
     kl_http_router_init(&r, &a);
 
     /* Build a pattern with KL_HTTP_ROUTER_MAX_PARAMS + 1 params */
-    /* /a/:p0/b/:p1/.../q/:p16 — 17 param segments */
+    /* /a/:p0/b/:p1/.../q/:p16: 17 param segments */
     kl_http_router_add(&r, "GET",
                   "/:a/:b/:c/:d/:e/:f/:g/:h/:i/:j/:k/:l/:m/:n/:o/:p/:q",
                   dummy_handler, NULL, NULL);

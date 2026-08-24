@@ -1,5 +1,5 @@
 /*
- * lwip_loopback_test.c — a full Keel HTTP server running on the lwIP TCP/IP stack
+ * lwip_loopback_test.c: a full Keel HTTP server running on the lwIP TCP/IP stack
  * (no kernel sockets), proving the socket + event providers end to end.
  *
  * Brings up lwIP (tcpip_init + loopback netif), starts a KlHttpServer configured with
@@ -8,11 +8,11 @@
  *   (2) a Keel ASYNC CLIENT on the lwIP providers GETs it (proves the outbound
  *       client axis: connect + blocking name resolution via resolve_sync_lwip).
  * Both driven entirely by lwIP sockets + lwip_poll, linked against a STOCK
- * libkeel — no core recompile. Exit 0 on success.
+ * libkeel: no core recompile. Exit 0 on success.
  */
 #include <keel/keel.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* complete KlDatagram type — the echo server embeds one */
+#include <keel/datagram_detail.h>   /* complete KlDatagram type: the echo server embeds one */
 #include "keel_lwip.h"
 #ifdef LWT_TLS
 #include <keel_tls_mbedtls.h>   /* HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
@@ -80,7 +80,7 @@ static int keel_client_on_lwip(uint16_t port) {
 }
 
 /* A Keel KlDatagram echo server on the lwIP providers, exercised by a raw lwIP
- * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send) —
+ * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send):
  * the foundation for udp_server and the built-in async DNS resolver on lwIP. */
 static void udp_echo(void *ud, const void *data, size_t len,
                      const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
@@ -148,9 +148,9 @@ static int keel_udp_on_lwip(void) {
 #ifdef LWT_TLS
 /* HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
  * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
- * socket provider — which the framework auto-wires from KlHttpServerConfig.sockets /
+ * socket provider: which the framework auto-wires from KlHttpServerConfig.sockets /
  * KlHttpClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
- * per-ctx call needed) — so a genuine TLS handshake + request runs over lwIP with
+ * per-ctx call needed): so a genuine TLS handshake + request runs over lwIP with
  * zero lwIP-specific TLS code. Embedded
  * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
  * the same test-only material as integrations/tls/mbedtls/tests/smoke_tls.c. */
@@ -189,7 +189,7 @@ static int keel_https_on_lwip(void) {
         (const unsigned char *)KEY_PEM,  sizeof(KEY_PEM),
         NULL, 0, KL_MTLS_NONE, &alloc);
     if (!sctx) return 0;
-    /* No explicit provider call — the server auto-wires it from KlHttpServerConfig.sockets. */
+    /* No explicit provider call: the server auto-wires it from KlHttpServerConfig.sockets. */
     KlTlsConfig stls = { .ctx = sctx, .factory = kl_tls_mbedtls_create };  /* destroy manually */
     KlHttpServerConfig cfg = {
         .port = LWT_TLS_PORT, .bind_addr = "127.0.0.1",
@@ -211,7 +211,7 @@ static int keel_https_on_lwip(void) {
         cev.sockets = kl_socket_provider_lwip();
         KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
         if (cctx) {
-            /* No explicit provider call — the client auto-wires it from KlHttpClientConfig.sockets. */
+            /* No explicit provider call: the client auto-wires it from KlHttpClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
             char url[64];
             snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);
@@ -298,7 +298,7 @@ int main(void) {
     printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
            udp_ok ? "round-tripped (correct)" : "UNEXPECTED");
 
-    /* Optional (LWT_TLS): HTTPS on lwIP — Keel TLS server + client, mbedTLS
+    /* Optional (LWT_TLS): HTTPS on lwIP: Keel TLS server + client, mbedTLS
      * BIO routed through the lwIP socket provider. */
     int tls_ok = 1;
 #ifdef LWT_TLS

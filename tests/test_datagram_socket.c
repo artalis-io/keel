@@ -1,5 +1,5 @@
 /*
- * test_datagram_socket.c — the public KlDatagram socket convenience (kl_datagram_socket_init) +
+ * test_datagram_socket.c: the public KlDatagram socket convenience (kl_datagram_socket_init) +
  * provider-neutral connect (kl_datagram_connect) + the accepted-RX inspector.
  *
  * Live tests run over a REAL loopback socket via kl_event_ctx_init (backend-adaptive: readiness on a
@@ -18,19 +18,19 @@
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include <keel/datagram_batch.h>   /* KlDgramTxDesc / send_batch / send_gso — peerless gate */
+#include <keel/datagram_batch.h>   /* KlDgramTxDesc / send_batch / send_gso: peerless gate */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
 #include <keel/socket.h>         /* kl_socket_provider_posix */
 
 #include "../src/socket.h"       /* KlSocketProvider / KlSocketOps / kl_sock_get_local_addr */
-#include "../src/event_caps.h"   /* kl_event_caps — completion detection (backend-adaptive tests) */
+#include "../src/event_caps.h"   /* kl_event_caps: completion detection (backend-adaptive tests) */
 
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>    /* inet_pton — source-pinned-reply test (Linux) */
+#include <arpa/inet.h>    /* inet_pton: source-pinned-reply test (Linux) */
 
 static KlAllocator g_alloc;
 
@@ -163,7 +163,7 @@ UTEST(datagram_socket, send_before_connect_unsupported) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Live: reconnect is unsupported — a second connect returns KL_ERR_INVALID_ARG. */
+/* Live: reconnect is unsupported; a second connect returns KL_ERR_INVALID_ARG. */
 UTEST(datagram_socket, second_connect_refused) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -312,7 +312,7 @@ UTEST(datagram_socket, context_provider_threaded_when_sockets_null) {
     KlDatagram dg; memset(&dg, 0, sizeof(dg));
     KlDatagramSocketConfig cfg = { .ctx = &ctx, .sockets = NULL, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
-    ASSERT_TRUE(g_configure_calls > 0);   /* the CTX provider's configure ran — not the built-in default */
+    ASSERT_TRUE(g_configure_calls > 0);   /* the CTX provider's configure ran: not the built-in default */
     close_free(&ctx, &dg);
     ASSERT_TRUE(g_close_calls > 0);        /* and its close op ran at teardown */
     kl_event_ctx_free(&ctx);
@@ -360,7 +360,7 @@ UTEST(datagram_socket, peerless_batch_and_gso_require_connect) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Connect must be refused once close has begun — without issuing a provider connect syscall. */
+/* Connect must be refused once close has begun: without issuing a provider connect syscall. */
 UTEST(datagram_socket, connect_after_close_begin_refused_no_syscall) {
     g_alloc = kl_allocator_default(); mock_reset();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -469,7 +469,7 @@ UTEST(datagram_socket, wildcard_source_pin_cap_gate) {
 }
 
 /* Source-pinned reply: a wildcard-bound datagram captures the datagram's local (hit) address on recv
- * and replies FROM it, so the reply egresses from the address the client contacted — the source-pin
+ * and replies FROM it, so the reply egresses from the address the client contacted: the source-pin
  * convenience expressed directly on KlDatagram. Linux-only: uses the 127.0.0.0/8 loopback range. */
 #if defined(__linux__)
 static KlSockAddr g_srv_local; static int g_srv_have_local; static KlSockAddr g_srv_peer;
@@ -557,7 +557,7 @@ UTEST(datagram_socket, reuse_port_shared_bind) {
     KlDatagram b; memset(&b, 0, sizeof(b));
     KlDatagramSocketConfig cb = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1",
                                   .bind_port = port, .reuse_port = 1 };
-    ASSERT_EQ(0, kl_datagram_socket_init(&b, &cb));   /* shares the port — SO_REUSEPORT */
+    ASSERT_EQ(0, kl_datagram_socket_init(&b, &cb));   /* shares the port: SO_REUSEPORT */
     int ra = 0, rb = 0; socklen_t l = sizeof(int);
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&a), SOL_SOCKET, SO_REUSEPORT, (char *)&ra, &l));
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&b), SOL_SOCKET, SO_REUSEPORT, (char *)&rb, &l));
@@ -569,7 +569,7 @@ UTEST(datagram_socket, reuse_port_shared_bind) {
 #endif
 }
 
-/* SO_BROADCAST gated by the broadcast flag (deterministic getsockopt check — a live
+/* SO_BROADCAST gated by the broadcast flag (deterministic getsockopt check: a live
  * send-to-broadcast probe is environment-sensitive, so verify the sockopt was applied). */
 UTEST(datagram_socket, broadcast_flag_applied) {
     g_alloc = kl_allocator_default();

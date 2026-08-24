@@ -1,16 +1,16 @@
 /*
- * test_alpn.c — ALPN → protocol-adapter dispatch, and the single shared REST
+ * test_alpn.c: ALPN → protocol-adapter dispatch, and the single shared REST
  * layer across HTTP/1.1 and HTTP/2.
  *
  * Part A (dispatch): drive kl_http_conn_on_handshake() with a mock TLS whose
  * negotiated ALPN is configurable, and assert the connection enters exactly the
- * right adapter — h2 → the HTTP/2 adapter (KL_HTTP_CONN_HTTP2), everything else
+ * right adapter: h2 → the HTTP/2 adapter (KL_HTTP_CONN_HTTP2), everything else
  * (http/1.1, no ALPN, an unsupported value) → the HTTP/1.1 adapter
  * (KL_HTTP_CONN_READING). This is the regression guard for the ALPN selection.
  *
  * Part B (single REST layer): drive an HTTP/2 request through the real HTTP/2 server
  * path (src/protocols/http2/http2_server.c) via a capturing session, and assert it lands on the SAME router,
- * middleware, and handler an HTTP/1.1 request would — and that the HTTP/2
+ * middleware, and handler an HTTP/1.1 request would: and that the HTTP/2
  * :authority pseudo-header converges onto the same "host" header HTTP/1.1 uses.
  */
 #include "utest.h"
@@ -163,7 +163,7 @@ UTEST(alpn, h2_alpn_without_h2_config_stays_http1) {
     ta_teardown();
 }
 
-/* ── Part B: single REST layer — same router/mw/handler, converged authority ── */
+/* ── Part B: single REST layer: same router/mw/handler, converged authority ── */
 
 UTEST(alpn, http2_request_uses_shared_rest_layer) {
     ta_setup();

@@ -139,7 +139,7 @@ UTEST(sockaddr, format_ipv6_compressed_midrun) {
 UTEST(sockaddr, format_ipv6_no_compression) {
     KlSockAddr a;
     char buf[KL_SOCKADDR_STRLEN];
-    /* 1:2:3:4:5:6:7:8 — no zero run */
+    /* 1:2:3:4:5:6:7:8: no zero run */
     uint8_t ip[16] = { 0,1, 0,2, 0,3, 0,4, 0,5, 0,6, 0,7, 0,8 };
     kl_sockaddr_from_ipv6(&a, ip, 0, 0);
     ASSERT_GT(kl_sockaddr_format(&a, buf, sizeof buf), 0);

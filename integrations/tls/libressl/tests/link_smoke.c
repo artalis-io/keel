@@ -1,5 +1,5 @@
 /*
- * link_smoke.c — link/relocation check for the LibreSSL build of the shared
+ * link_smoke.c: link/relocation check for the LibreSSL build of the shared
  * OpenSSL adapter. Identical intent to integrations/tls/openssl/link_smoke.c, but
  * links against LibreSSL. A clean exit proves ../openssl/tls_openssl.c resolves
  * against core libkeel.a + LibreSSL through the LIBRESSL_VERSION_NUMBER guards.

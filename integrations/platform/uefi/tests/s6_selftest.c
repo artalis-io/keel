@@ -1,17 +1,17 @@
 /*
- * s6_selftest.c — HTTPS-server acceptance self-test (UEFI EFI application).
+ * s6_selftest.c: HTTPS-server acceptance self-test (UEFI EFI application).
  *
  * The TLS mirror of the plaintext freestanding server: a STOCK freestanding KlHttpServer answers `GET / -> 200` over
  * HTTPS (EFI_TCP4 + freestanding mbedTLS) on bare UEFI firmware, driven by the EFI
  * completion backend. The completion-mode TLS server is entirely in the model-blind
  * core (completion_http_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
  * the EFI backend supplies only the two documented obligations:
- *   1. post_recv does raw transport I/O into the caller-chosen buffer (event_efi.c) — the HTTP
+ *   1. post_recv does raw transport I/O into the caller-chosen buffer (event_efi.c): the HTTP
  *      completion adapter (comp_on_read) feeds received CIPHERTEXT to tls->feed_input,
  *   2. a synchronous send on the accepted socket for kl_comp_tls_flush (efi_sock_send).
  * The response ciphertext rides the same post_send as the plaintext server (content-agnostic).
  *
- * Flow (all through the PUBLIC KlHttpServer API — zero protocol edits):
+ * Flow (all through the PUBLIC KlHttpServer API: zero protocol edits):
  *   kl_uefi_platform_init(bs, st)            → monotonic clock + EFI_RNG
  *   kl_uefi_mbedtls_platform_init(bs)        → EFI heap + entropy + cert clock for mbedTLS
  *   kl_tls_mbedtls_ctx_create_from_buf(cert,key,...)  → server TLS ctx (embedded PEM)
@@ -81,7 +81,7 @@ static void s6_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
     static const char body[] = "hello from KEEL on UEFI (HTTPS over EFI_TCP4)\n";
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, body, sizeof(body) - 1);
-    if (!g_served) { g_served = 1; print_line("S-6: GO — served GET / (200 over TLS)"); }
+    if (!g_served) { g_served = 1; print_line("S-6: GO, served GET / (200 over TLS)"); }
 }
 
 /* ── entry ────────────────────────────────────────────────────────────────────── */
@@ -95,7 +95,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("=== S-6 KlHttpServer HTTPS GET / -> 200 over EFI_TCP4 + freestanding mbedTLS ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("S-6: (warn) platform_init failed — clock stuck, continuing");
+        print_line("S-6: (warn) platform_init failed, clock stuck, continuing");
     /* EFI heap + entropy + cert clock for mbedTLS (mandatory TLS bring-up). */
     if (kl_uefi_mbedtls_platform_init(bs) != 0) {
         print_line("S-6: mbedtls_platform_init failed (entropy/clock)");
@@ -103,7 +103,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto park;
     }
     if (!kl_uefi_have_entropy())
-        print_line("S-6: *** WARN: no EFI_RNG — using WEAK entropy fallback (INSECURE) ***");
+        print_line("S-6: *** WARN: no EFI_RNG, using WEAK entropy fallback (INSECURE) ***");
 
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("S-6: event provider build failed"); goto park; }
@@ -165,7 +165,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     /* Run the completion loop. Each tick primes accepts, drains KL_COMP_ACCEPT →
      * comp_on_accept (which enters KL_HTTP_CONN_TLS_HANDSHAKE + memory-BIO mode), then the
      * EFI post_recv delivers raw ciphertext and the HTTP adapter (comp_on_read) feeds it to
-     * feed_input while comp_tls_drive handshakes / decrypts / responds — all model-blind. The handler prints GO on the first served
+     * feed_input while comp_tls_drive handshakes / decrypts / responds: all model-blind. The handler prints GO on the first served
      * request; the loop keeps serving (the harness times out QEMU after curl's 200). */
     for (long tick = 0; tick < 100000000L; tick++) {
         if (kl_http_server_run_completion_loop(&s) < 0) {
@@ -175,7 +175,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         kl_timer_fire(&s.ev);
     }
 
-    /* (No kl_http_server_free — hosted-only; teardown is the teardown self-test's job.) */
+    /* (No kl_http_server_free: hosted-only; teardown is the teardown self-test's job.) */
 
 park:
     print_line("S-6: (parked; harness will terminate QEMU)");

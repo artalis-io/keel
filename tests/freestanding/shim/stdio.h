@@ -1,4 +1,4 @@
-/* freestanding shim <stdio.h> — declarations only (see ../README.md).
+/* freestanding shim <stdio.h>: declarations only (see ../README.md).
  * Only what vendor/llhttp/api.c's never-called debug printer references. */
 #ifndef KEEL_FS_SHIM_STDIO_H
 #define KEEL_FS_SHIM_STDIO_H

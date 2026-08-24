@@ -1,5 +1,5 @@
 /*
- * test_http_redirect.c — Tests for URL resolution and redirect following
+ * test_http_redirect.c: Tests for URL resolution and redirect following
  */
 
 #include "utest.h"
@@ -95,7 +95,7 @@ UTEST(url_resolve, bare_relative) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * Part 2: Integration tests — redirect following with real test server
+ * Part 2: Integration tests - redirect following with real test server
  *
  * Servers are started ONCE before all tests and stopped after.
  * This avoids per-test server lifecycle issues.
@@ -281,7 +281,7 @@ static void ensure_servers(void) {
     redir_port2 = redir_srv2.bound_port;
 }
 
-/* Called via atexit — stops servers once when process exits */
+/* Called via atexit: stops servers once when process exits */
 static void cleanup_servers(void) {
     if (!servers_started) return;
     kl_http_server_stop(&redir_srv);

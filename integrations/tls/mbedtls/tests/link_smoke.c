@@ -1,5 +1,5 @@
 /*
- * link_smoke.c — minimal link/relocation check for the mbedTLS integration.
+ * link_smoke.c: minimal link/relocation check for the mbedTLS integration.
  *
  * Does NOT perform a handshake (that is covered by the repo's smoke-tls target,
  * which exercises a real loopback handshake). This only proves the adapter

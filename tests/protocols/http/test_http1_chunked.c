@@ -159,7 +159,7 @@ UTEST(chunked, overflow_hex) {
     kl_http1_chunked_init(&dec);
     MockReader m = make_mock();
 
-    /* 17 hex digits — exceeds 16-digit max */
+    /* 17 hex digits: exceeds 16-digit max */
     const char *input = "12345678901234567\r\n";
     int rc = kl_http1_chunked_decode(&dec, input, strlen(input), &m.base);
     ASSERT_EQ(rc, -1);
@@ -191,7 +191,7 @@ UTEST(chunked, null_reader_discard) {
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
-    /* NULL reader — data is consumed but discarded */
+    /* NULL reader: data is consumed but discarded */
     const char *input = "5\r\nhello\r\n0\r\n\r\n";
     int rc = kl_http1_chunked_decode(&dec, input, strlen(input), NULL);
     ASSERT_EQ(rc, 1);
@@ -236,7 +236,7 @@ UTEST(chunked, no_digits_before_cr) {
     kl_http1_chunked_init(&dec);
     MockReader m = make_mock();
 
-    /* CR with no hex digits — error */
+    /* CR with no hex digits: error */
     const char *input = "\r\n";
     int rc = kl_http1_chunked_decode(&dec, input, strlen(input), &m.base);
     ASSERT_EQ(rc, -1);
@@ -247,7 +247,7 @@ UTEST(chunked, no_digits_before_semicolon) {
     kl_http1_chunked_init(&dec);
     MockReader m = make_mock();
 
-    /* Semicolon with no hex digits — error */
+    /* Semicolon with no hex digits: error */
     const char *input = ";ext\r\n";
     int rc = kl_http1_chunked_decode(&dec, input, strlen(input), &m.base);
     ASSERT_EQ(rc, -1);

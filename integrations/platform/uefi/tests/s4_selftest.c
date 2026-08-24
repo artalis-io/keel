@@ -1,14 +1,14 @@
 /*
- * s4_selftest.c — freestanding-server acceptance self-test (UEFI EFI application).
+ * s4_selftest.c: freestanding-server acceptance self-test (UEFI EFI application).
  *
  * The server mirror of the plaintext-GET client self-test: a STOCK freestanding KlHttpServer serves an HTTP/1.1
  * "GET / -> 200" on bare UEFI firmware, driven by the EFI completion backend
  * (event_efi.c) over the EFI_TCP4 socket provider (socket_efi_tcp4.c), with the
  * platform/allocator shims. No epoll / kqueue / io_uring, no OS sockets, no
- * errno, no libc — just the firmware's event services pumping EFI_TCP4 tokens and
+ * errno, no libc; just the firmware's event services pumping EFI_TCP4 tokens and
  * relaying accepted children into the model-blind completion server driver.
  *
- * Flow (all through the PUBLIC KlHttpServer API — the server core is model-blind):
+ * Flow (all through the PUBLIC KlHttpServer API: the server core is model-blind):
  *   kl_uefi_platform_init(bs, st)          → monotonic clock
  *   kl_uefi_event_provider(bs, image)      → the completion provider (+ lazy socket provider)
  *   kl_http_server_init(&s, cfg{event_provider}) → construct the pool/router/event ctx from
@@ -19,13 +19,13 @@
  *   manual socket/bind(:80)/listen          → kl_http_server_bind_listener is hosted-only, so
  *                                             the entry drives the socket seam directly
  *   loop: kl_http_server_run_completion_loop(&s) → auto-primes accepts, drains KL_COMP_ACCEPT
- *                                             into comp_on_accept, pumps recv/send/close —
+ *                                             into comp_on_accept, pumps recv/send/close;
  *                                             all model-blind (the SAME loop io_uring/
  *                                             IOCP/pollcomp run)
  *
  * Prints (over the EFI console, echoed to the QEMU serial log):
  *   listening on :80
- *   GO — served GET / (200)      (once, from the handler)
+ *   GO, served GET / (200)      (once, from the handler)
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
  */
@@ -57,7 +57,7 @@
 #define S4_BACKLOG     4
 
 /* kl_http_server_run_completion_loop is the internal completion-loop tick (internal.h,
- * not a public header) — declare it here to avoid pulling the hosted internal.h. */
+ * not a public header); declare it here to avoid pulling the hosted internal.h. */
 extern int kl_http_server_run_completion_loop(KlHttpServer *s);
 
 /* ── tiny ASCII console (no libc) ─────────────────────────────────────────────── */
@@ -84,7 +84,7 @@ static void print_int(int v) {
     print(out);
 }
 
-/* ── the request handler (model-blind — the same handler a hosted server runs) ── */
+/* ── the request handler (model-blind, the same handler a hosted server runs) ── */
 static int g_served = 0;
 
 static void s4_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
@@ -94,7 +94,7 @@ static void s4_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
     kl_http_response_body_borrow(res, body, sizeof(body) - 1);
     if (!g_served) {
         g_served = 1;
-        print_line("S-4: GO — served GET / (200)");
+        print_line("S-4: GO, served GET / (200)");
     }
 }
 
@@ -109,7 +109,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("=== S-4 KlHttpServer GET / -> 200 over EFI_TCP4 completion backend ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("S-4: (warn) platform_init failed — clock stuck, continuing");
+        print_line("S-4: (warn) platform_init failed, clock stuck, continuing");
 
     /* Inject the EFI completion provider on the stock freestanding SERVER archive. The
      * provider's native_provider() lazily builds the EFI_TCP4 socket provider; if this
@@ -138,7 +138,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("S-4: server up (efi-tcp4-completion)");
 
     /* NB: kl_http_server_free (like kl_http_server_bind_listener) lives in the hosted http_server.c
-     * and is archive-excluded — proper listener teardown + EBS-clean shutdown is the teardown
+     * and is archive-excluded; proper listener teardown + EBS-clean shutdown is the teardown
      * self-test's job (kl_uefi_shutdown). On any error here the firmware simply parks; QEMU is
      * power-cycled by the harness, so there is no leak to reclaim. */
     if (kl_http_server_route(&s, "GET", "/", s4_handler, NULL, NULL) != 0) {
@@ -169,7 +169,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     /* Run the completion loop. Each tick auto-primes accepts (kl_comp_prime_accepts),
      * drains KL_COMP_ACCEPT into the model-blind comp_on_accept, then pumps recv/send/
      * close + timers. The handler prints its GO marker on the first served request; the
-     * loop keeps serving (a real server runs until power-off — the harness times out
+     * loop keeps serving (a real server runs until power-off; the harness times out
      * QEMU once curl has its 200). Bounded so a network-less OVMF still parks. */
     for (long tick = 0; tick < 100000000L; tick++) {
         if (kl_http_server_run_completion_loop(&s) < 0) {
@@ -179,7 +179,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         kl_timer_fire(&s.ev);
     }
 
-    /* (No kl_http_server_free — hosted-only; teardown is the teardown self-test's job.) */
+    /* (No kl_http_server_free; hosted-only; teardown is the teardown self-test's job.) */
 
 park:
     print_line("S-4: (parked; harness will terminate QEMU)");

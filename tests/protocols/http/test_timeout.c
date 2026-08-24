@@ -318,7 +318,7 @@ UTEST(timeout, keepalive_idle_timeout) {
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    /* Don't send second request — wait for idle timeout.
+    /* Don't send second request; wait for idle timeout.
      * The connection should be closed with a 408 or just closed. */
     n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
     /* n <= 0 means connection closed, or n > 0 with 408 */
@@ -326,7 +326,7 @@ UTEST(timeout, keepalive_idle_timeout) {
         buf[n] = '\0';
         ASSERT_TRUE(strstr(buf, "408") != NULL);
     } else {
-        /* Connection closed without response — also acceptable */
+        /* Connection closed without response; also acceptable */
         ASSERT_TRUE(n <= 0);
     }
 

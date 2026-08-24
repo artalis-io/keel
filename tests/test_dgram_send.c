@@ -1,5 +1,5 @@
 /*
- * test_dgram_send.c — atomic send machinery over KlDgramSlots.
+ * test_dgram_send.c: atomic send machinery over KlDgramSlots.
  *
  * Covers: exact status mapping, refusal-takes-no-ownership, copy-before-return, FIFO order over the
  * LIFO free-slot allocator, single-flight enforcement, inline completion (no phantom in-flight),
@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Counting allocator (real malloc/free + counters) — for the allocation-free hot path ─────── */
+/* ── Counting allocator (real malloc/free + counters): for the allocation-free hot path ─────── */
 static int g_mallocs, g_frees;
 static void *cnt_malloc(void *c, size_t n)                   { (void)c; g_mallocs++; return malloc(n); }
 static void *cnt_realloc(void *c, void *p, size_t o, size_t n){ (void)c; (void)o; return realloc(p, n); }
@@ -58,7 +58,7 @@ static KlSockAddr any_peer(void) {
     return a;
 }
 
-/* readiness sync provider: direct fast path — no slot churn, no on_drain spam */
+/* readiness sync provider: direct fast path: no slot churn, no on_drain spam */
 UTEST(dgram_send, readiness_sync_direct) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
@@ -71,7 +71,7 @@ UTEST(dgram_send, readiness_sync_direct) {
     for (int i = 0; i < 10; i++) {
         KlDatagramMessage m = { .data = "hello", .len = 5, .peer = &p, .tos = -1 };
         ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
-        ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);          /* direct — nothing queued */
+        ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);          /* direct: nothing queued */
     }
     ASSERT_EQ(mk.calls, 10);
     ASSERT_EQ(g_drain, 0);                                    /* no transient non-empty→empty */
@@ -156,7 +156,7 @@ UTEST(dgram_send, single_flight_and_fifo_over_lifo) {
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 4);
     for (int i = 0; i < 4; i++) ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
     ASSERT_EQ(mk.order_n, 4);
-    ASSERT_EQ(mk.order[0], 'A');   /* FIFO — not the LIFO slot order */
+    ASSERT_EQ(mk.order[0], 'A');   /* FIFO: not the LIFO slot order */
     ASSERT_EQ(mk.order[1], 'B');
     ASSERT_EQ(mk.order[2], 'C');
     ASSERT_EQ(mk.order[3], 'D');
@@ -185,7 +185,7 @@ UTEST(dgram_send, writable_edge_and_no_ownership_on_refusal) {
 
     ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);          /* A retires → full→non-full; B submitted */
     ASSERT_EQ(g_writable, 1);
-    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);          /* B retires (queue empties) — not full again */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);          /* B retires (queue empties): not full again */
     ASSERT_EQ(g_writable, 1);
     ASSERT_EQ(kl_dgram_send_free(&s), 0);
     kl_dgram_slots_free(&slots);
@@ -233,7 +233,7 @@ UTEST(dgram_send, submit_error_is_sticky_and_retains) {
 
     ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
     ASSERT_TRUE(kl_dgram_send_error(&s) != 0);
-    ASSERT_EQ((int)kl_dgram_send_queued(&s), 1);             /* retained — not discarded */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 1);             /* retained: not discarded */
     ASSERT_EQ((int)kl_dgram_send_inflight(&s), 0);
     ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ERROR);     /* sticky */
     ASSERT_EQ(kl_dgram_send_free(&s), 0);
@@ -264,7 +264,7 @@ UTEST(dgram_send, inline_completion_no_phantom) {
     for (int i = 0; i < 3; i++) {
         KlDatagramMessage m = { .data = msgs[i], .len = 1, .peer = &p, .tos = -1 };
         ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
-        ASSERT_EQ((int)kl_dgram_send_inflight(&s), 0);       /* retired inline — no phantom stuck at 1 */
+        ASSERT_EQ((int)kl_dgram_send_inflight(&s), 0);       /* retired inline: no phantom stuck at 1 */
         ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
     }
     ASSERT_EQ(mk.calls, 3);
@@ -436,7 +436,7 @@ UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
 /* ══ BOTH byte-gate send-queue policy (docs/archive/designs/datagram_m1_queue_policy_design.md §10) ══════════
  * SLOT (byte_budget 0) is exercised by every test above (§10.1 regression). These cover BOTH. */
 
-/* §10.2 — BOTH byte-gate refusal (case b): the byte budget refuses while a slot is still free, and
+/* §10.2: BOTH byte-gate refusal (case b): the byte budget refuses while a slot is still free, and
  * because bytes_used > 0 (count ≥ 1) a retirement re-signals writable. */
 UTEST(dgram_send, both_byte_gate_refuses_with_free_slot) {
     KlAllocator a = kl_allocator_default();
@@ -464,7 +464,7 @@ UTEST(dgram_send, both_byte_gate_refuses_with_free_slot) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.3 — under BOTH the SLOT bound still fires first when many small datagrams stay under budget. */
+/* §10.3: under BOTH the SLOT bound still fires first when many small datagrams stay under budget. */
 UTEST(dgram_send, both_slot_gate_still_active) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64), 0);  /* only 2 slots */
@@ -483,8 +483,8 @@ UTEST(dgram_send, both_slot_gate_still_active) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.4 — zero-length datagrams are bounded by SLOTS (not bytes); on_drain keys on count, not
- * bytes_used (which stays 0 throughout) — the P1a regression. */
+/* §10.4: zero-length datagrams are bounded by SLOTS (not bytes); on_drain keys on count, not
+ * bytes_used (which stays 0 throughout): the P1a regression. */
 UTEST(dgram_send, both_zero_length_bounded_by_slots) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 3, 64), 0);
@@ -513,7 +513,7 @@ UTEST(dgram_send, both_zero_length_bounded_by_slots) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.5 — case (a) len > byte_budget, readiness: permanent TOO_LARGE on a blocked empty queue (no
+/* §10.5: case (a) len > byte_budget, readiness: permanent TOO_LARGE on a blocked empty queue (no
  * full, no strand); but a socket-ready direct send still delivers it (direct-send parity). */
 UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
     KlAllocator a = kl_allocator_default();
@@ -527,7 +527,7 @@ UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
     KlDatagramMessage m = { .data = big, .len = 100, .peer = &p, .tos = -1 };   /* >budget, ≤slot_cap */
     /* socket blocked: fast path WOULD_BLOCK → byte gate case (a) → permanent TOO_LARGE */
     ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_TOO_LARGE);
-    ASSERT_EQ(s.full, 0);                                       /* NOT armed — nothing to retry */
+    ASSERT_EQ(s.full, 0);                                       /* NOT armed: nothing to retry */
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);               /* nothing queued → no strand */
     /* socket ready: the SAME oversize datagram is delivered directly (budget bypassed) */
     mk.next = KL_DGRAM_SUBMIT_DONE;
@@ -537,7 +537,7 @@ UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.6 — case (a), completion: no fast path, so len > byte_budget is refused TOO_LARGE upfront and
+/* §10.6: case (a), completion: no fast path, so len > byte_budget is refused TOO_LARGE upfront and
  * nothing is submitted (matches the completion-loop send model). */
 UTEST(dgram_send, both_oversize_completion_upfront) {
     KlAllocator a = kl_allocator_default();
@@ -556,7 +556,7 @@ UTEST(dgram_send, both_oversize_completion_upfront) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.7 — budget < slot_cap is valid (no budget≥slot_cap requirement): a ≤budget datagram admits, a
+/* §10.7: budget < slot_cap is valid (no budget≥slot_cap requirement): a ≤budget datagram admits, a
  * >budget (but ≤slot_cap) datagram is case (a). */
 UTEST(dgram_send, both_budget_below_slot_cap_valid) {
     KlAllocator a = kl_allocator_default();
@@ -576,7 +576,7 @@ UTEST(dgram_send, both_budget_below_slot_cap_valid) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.8 — retiring a datagram drops bytes_used by exactly its len and reopens admission. */
+/* §10.8: retiring a datagram drops bytes_used by exactly its len and reopens admission. */
 UTEST(dgram_send, both_accounting_reopens_admission) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
@@ -597,7 +597,7 @@ UTEST(dgram_send, both_accounting_reopens_admission) {
     kl_dgram_slots_free(&slots);
 }
 
-/* §10.9 — discard/abandon accounting with in-flight retention (blocker P2). */
+/* §10.9: discard/abandon accounting with in-flight retention (blocker P2). */
 UTEST(dgram_send, both_discard_queued_only_readiness) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
@@ -722,7 +722,7 @@ UTEST(dgram_send, flush_batch_recoverable_drop) {
     KlSockAddr p = any_peer();
     /* Bad datagram at the head: submit_batch returns ERROR on the head-run → the head is isolated,
      * hard-errors, is dropped, and the drain CONTINUES with the rest. (A middle bad descriptor instead
-     * surfaces as a short SENT prefix — transient, drained on the next writable edge per §4.2.) */
+     * surfaces as a short SENT prefix: transient, drained on the next writable edge per §4.2.) */
     enqueue_marked(&s, &p, "BAC");                        /* B bad (head), A + C good */
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
 
@@ -730,7 +730,7 @@ UTEST(dgram_send, flush_batch_recoverable_drop) {
     ASSERT_EQ(kl_dgram_send_flush_batch(&s, descs, 8, batch_submit_mark, NULL), 0);
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);          /* fully drained (B dropped, A + C sent) */
     ASSERT_EQ((size_t)1, kl_dgram_send_dropped(&s));      /* B dropped by the recoverable policy */
-    ASSERT_EQ(0, kl_dgram_send_error(&s));                /* recoverable — the queue is NOT poisoned */
+    ASSERT_EQ(0, kl_dgram_send_error(&s));                /* recoverable: the queue is NOT poisoned */
 
     ASSERT_EQ(kl_dgram_send_free(&s), 0);
     kl_dgram_slots_free(&slots);
@@ -748,7 +748,7 @@ UTEST(dgram_send, flush_batch_wouldblock_retains) {
 
     KlDgramTxDesc descs[8];
     ASSERT_EQ(kl_dgram_send_flush_batch(&s, descs, 8, batch_submit_wouldblock, NULL), 0);
-    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);          /* nothing sent — all retained */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);          /* nothing sent: all retained */
     ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));
     ASSERT_EQ(0, kl_dgram_send_error(&s));
 
@@ -757,8 +757,8 @@ UTEST(dgram_send, flush_batch_wouldblock_retains) {
 }
 
 /* A batch (recoverable) datagram that hard-errors on the ORDINARY single-flight pump (the path a
- * retained bad-middle slot takes on a later writable edge) is DROPPED, not sticky — the queue keeps
- * draining. (An ordinary single send in the same spot would set the sticky error — unchanged.) */
+ * retained bad-middle slot takes on a later writable edge) is DROPPED, not sticky; the queue keeps
+ * draining. (An ordinary single send in the same spot would set the sticky error: unchanged.) */
 UTEST(dgram_send, pump_recoverable_drop_of_batch_slot) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
@@ -777,7 +777,7 @@ UTEST(dgram_send, pump_recoverable_drop_of_batch_slot) {
     kl_dgram_slots_free(&slots);
 }
 
-/* An ordinary (single) send that hard-errors stays STICKY — the recoverable policy is batch-only. */
+/* An ordinary (single) send that hard-errors stays STICKY: the recoverable policy is batch-only. */
 UTEST(dgram_send, single_send_hard_error_is_sticky) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
@@ -837,7 +837,7 @@ UTEST(dgram_send, flush_batch_partial_prefix) {
 
 /* ══ GSO queued group (machine level) ═══════════════════════════════════════════════════════════ */
 
-/* A whole-group GSO submit hook: DONE unless the payload's first byte marks it — 'W' → WOULDBLOCK,
+/* A whole-group GSO submit hook: DONE unless the payload's first byte marks it: 'W' → WOULDBLOCK,
  * 'U' → UNSUPPORTED, 'E' → ERROR. Records the group submit for ordering assertions. */
 static int g_gso_calls, g_gso_done_calls;
 static char g_gso_first;
@@ -854,7 +854,7 @@ static KlDgramSubmitResult gso_submit(void *ctx, void *owner, const void *buf, s
 }
 static void gso_done(void *ctx, void *owner) { (void)ctx; (void)owner; g_gso_done_calls++; }
 
-/* A GSO group queued BEHIND an older ordinary datagram is not submitted until that datagram retires —
+/* A GSO group queued BEHIND an older ordinary datagram is not submitted until that datagram retires:
  * FIFO order (the ordinary 'X' egresses first, then the whole group). */
 UTEST(dgram_send, gso_fifo_behind_ordinary) {
     KlAllocator a = kl_allocator_default();
@@ -873,7 +873,7 @@ UTEST(dgram_send, gso_fifo_behind_ordinary) {
     ASSERT_EQ(kl_dgram_send_enqueue_gso(&s, gbuf, 4, 2, 2, &p, -1, 0, NULL), KL_DATAGRAM_ACCEPTED);
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);                      /* 1 ordinary + 2 GSO segments */
 
-    /* The head is the ordinary datagram — flush submits IT (via the single hook), NOT the group. */
+    /* The head is the ordinary datagram: flush submits IT (via the single hook), NOT the group. */
     mk.order_n = 0; mk.next = KL_DGRAM_SUBMIT_WOULDBLOCK;
     ASSERT_EQ(kl_dgram_send_flush(&s), 0);
     ASSERT_EQ(0, g_gso_calls);                                         /* group NOT submitted yet */
@@ -891,7 +891,7 @@ UTEST(dgram_send, gso_fifo_behind_ordinary) {
     kl_dgram_slots_free(&slots);
 }
 
-/* Atomic refusal: not enough free slots, and the BOTH byte budget — nothing is reserved on refusal. */
+/* Atomic refusal: not enough free slots, and the BOTH byte budget: nothing is reserved on refusal. */
 UTEST(dgram_send, gso_atomic_refusal) {
     KlAllocator a = kl_allocator_default();
     /* slots: only 2 free; a 3-segment group must be refused WHOLE (no partial reservation). */
@@ -923,7 +923,7 @@ UTEST(dgram_send, gso_atomic_refusal) {
     ASSERT_EQ((int)kl_dgram_send_queued(&b), 1);
     static char g4[4] = { 'z','z','z','z' };
     ASSERT_EQ(kl_dgram_send_enqueue_gso(&b, g4, 4, 2, 2, &p, -1, 0, NULL), KL_DATAGRAM_WOULD_BLOCK);
-    ASSERT_EQ((int)kl_dgram_send_queued(&b), 1);                      /* atomic — group not reserved */
+    ASSERT_EQ((int)kl_dgram_send_queued(&b), 1);                      /* atomic: group not reserved */
     ASSERT_EQ((int)kl_dgram_slots_free_count(&s2), 3);               /* only the 1 ordinary slot used */
     kl_dgram_send_discard_queued(&b);
     ASSERT_EQ(kl_dgram_send_free(&b), 0);
@@ -950,7 +950,7 @@ UTEST(dgram_send, gso_unsupported_then_fallback) {
     ASSERT_EQ(1, g_gso_done_calls);                      /* group retired once */
     ASSERT_EQ(0, g_gso_first == 0);                      /* the submit saw the buffer */
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
-    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));    /* fallback delivered — no drop */
+    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));    /* fallback delivered: no drop */
 
     ASSERT_EQ(kl_dgram_send_free(&s), 0);
     kl_dgram_slots_free(&slots);
@@ -974,7 +974,7 @@ UTEST(dgram_send, gso_hard_error_drops_group) {
     ASSERT_EQ(1, g_gso_calls);                          /* one whole-group attempt → hard error */
     ASSERT_EQ(0, mk.order_n);                            /* NO fallback retransmission */
     ASSERT_EQ((size_t)3, kl_dgram_send_dropped(&s));   /* the whole group (3 segments) dropped */
-    ASSERT_EQ(0, kl_dgram_send_error(&s));              /* recoverable — NOT sticky */
+    ASSERT_EQ(0, kl_dgram_send_error(&s));              /* recoverable: NOT sticky */
     ASSERT_EQ(1, g_gso_done_calls);                      /* group retired (dropped) → done fired */
     ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
 
@@ -1000,7 +1000,7 @@ UTEST(dgram_send, gso_connected_capability) {
     KlDgramSlots s2; ASSERT_EQ(kl_dgram_slots_init(&s2, &a, 8, 64), 0);
     KlDgramSend conn;
     ASSERT_EQ(kl_dgram_send_init(&conn, &s2, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
-    /* The granted cap alone is NOT enough — a peerless GSO before connect is refused. */
+    /* The granted cap alone is NOT enough: a peerless GSO before connect is refused. */
     ASSERT_EQ(kl_dgram_send_enqueue_gso(&conn, g4, 4, 2, 2, NULL, -1, 0, NULL), KL_DATAGRAM_UNSUPPORTED);
     ASSERT_EQ((int)kl_dgram_send_queued(&conn), 0);
     /* after a successful connect (state set) the same peerless GSO is admitted. */

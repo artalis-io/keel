@@ -147,16 +147,16 @@ UTEST(rescache, cache_hit) {
     KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
     ASSERT_TRUE(cache != NULL);
 
-    /* First resolve — cache miss, populates cache */
+    /* First resolve: cache miss, populates cache */
     resolve_fire(cache, "example.com", 80);
     ASSERT_EQ(mock_resolve_count, 1);
 
-    /* Second resolve — cache hit, no inner call */
+    /* Second resolve: cache hit, no inner call */
     reset_done();
     KlResolveReq *req2 = cache->resolve(cache, NULL, "example.com", 80,
                                           test_done_fn, NULL);
     ASSERT_TRUE(req2 != NULL);
-    ASSERT_EQ(mock_resolve_count, 1);  /* still 1 — no new inner call */
+    ASSERT_EQ(mock_resolve_count, 1);  /* still 1: no new inner call */
     ASSERT_EQ(done_called, 1);
     ASSERT_EQ(done_error, 0);
 
@@ -275,14 +275,14 @@ UTEST(rescache, error_not_cached) {
     KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
     ASSERT_TRUE(cache != NULL);
 
-    /* Error mode — should not be cached */
+    /* Error mode: should not be cached */
     mock_error_mode = 1;
     resolve_fire(cache, "fail.com", 80);
     ASSERT_EQ(mock_resolve_count, 1);
     ASSERT_EQ(done_error, -1);
     ASSERT_EQ(kl_resolver_cache_count(cache), 0);
 
-    /* Retry — should delegate again (not cached) */
+    /* Retry: should delegate again (not cached) */
     reset_done();
     resolve_fire(cache, "fail.com", 80);
     ASSERT_EQ(mock_resolve_count, 2);
@@ -303,7 +303,7 @@ UTEST(rescache, cancel_cache_hit) {
     /* Populate */
     resolve_fire(cache, "example.com", 80);
 
-    /* Hit — then cancel */
+    /* Hit: then cancel */
     KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
                                          test_done_fn, NULL);
     ASSERT_TRUE(req != NULL);
@@ -323,7 +323,7 @@ UTEST(rescache, cancel_cache_miss) {
     KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
     ASSERT_TRUE(cache != NULL);
 
-    /* Miss — inner resolve is pending */
+    /* Miss: inner resolve is pending */
     KlResolveReq *req = cache->resolve(cache, NULL, "pending.com", 80,
                                          test_done_fn, NULL);
     ASSERT_TRUE(req != NULL);
@@ -414,7 +414,7 @@ UTEST(rescache, count) {
     resolve_fire(cache, "b.com", 80);
     ASSERT_EQ(kl_resolver_cache_count(cache), 2);
 
-    /* Hit — count unchanged */
+    /* Hit: count unchanged */
     resolve_fire(cache, "a.com", 80);
     ASSERT_EQ(kl_resolver_cache_count(cache), 2);
 
@@ -426,7 +426,7 @@ UTEST(rescache, count) {
  * The user's done_fn calls cache->cancel(req) on the same request that
  * just completed.  Before the H-1 fix, this freed the request inside
  * cache_cancel, then inner_done_fn dereferenced cr->* on the freed
- * memory (UAF) — and on the sync path cache_resolve subsequently wrote
+ * memory (UAF): and on the sync path cache_resolve subsequently wrote
  * cr->inner_req on the freed slab.  The fix uses an in_user_done +
  * cancel_deferred flag pair so cancel() during user_done defers the
  * free to whichever caller (cache_resolve or inner_done_fn) is still
@@ -527,7 +527,7 @@ UTEST(rescache, reentrant_cancel_in_async_done_fn) {
     ASSERT_TRUE(req != NULL);
     ASSERT_EQ(done_called, 0);
 
-    /* Now fire the saved callback — user_done will cancel inside.
+    /* Now fire the saved callback: user_done will cancel inside.
      * The fix defers, inner_done_fn frees on its async branch.
      * No double free, no UAF. */
     KlResolveResult r = make_result();

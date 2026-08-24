@@ -1,18 +1,18 @@
 /*
- * test_datagram_open.c — provider-neutral datagram socket-preparation helper
+ * test_datagram_open.c: provider-neutral datagram socket-preparation helper
  * (docs/archive/designs/datagram_consolidation_design.md §2).
  *
  * kl_datagram_open() reproduces the datagram socket create/configure/bind prep, minus the send/receive machine, and
  * hands the caller a prepared+bound fd plus the capture-option mask configure() enabled. This suite
  * proves what the helper owes:
  *
- *   (1) PER-STEP FAILURE CLEANUP — a failure at any step (bad arg, no-datagram provider, partial vtable,
+ *   (1) PER-STEP FAILURE CLEANUP: a failure at any step (bad arg, no-datagram provider, partial vtable,
  *       bad bind address, socket(), set_nonblocking, bind) closes exactly the fd it created (no leak, no
  *       double-close; nothing created when it fails before create), reports the right KlError, and
  *       leaves prep.fd invalid;
- *   (2) OWNERSHIP HANDOFF — on success it returns a valid, bound fd it did NOT close (the caller owns
+ *   (2) OWNERSHIP HANDOFF: on success it returns a valid, bound fd it did NOT close (the caller owns
  *       it), and configure() was invoked once; and
- *   (3) CAPTURE-MASK PASSTHROUGH — prep.rx_caps carries exactly the KL_DGRAM_RX_* bitmask configure()
+ *   (3) CAPTURE-MASK PASSTHROUGH: prep.rx_caps carries exactly the KL_DGRAM_RX_* bitmask configure()
  *       reported (it cannot be reconstructed later).
  *
  * The failure/mask matrix runs against a fully-virtual mock KlSocketProvider (fake fds, injectable step
@@ -27,7 +27,7 @@
 #include <keel/error.h>        /* KlError */
 #include <keel/socket_dgram.h> /* KL_DGRAM_RX_* */
 
-#include "../src/datagram_open.h"   /* kl_datagram_open + KlDatagramPrep — the unit under test */
+#include "../src/datagram_open.h"   /* kl_datagram_open + KlDatagramPrep: the unit under test */
 #include "../src/socket.h"          /* KlSocketProvider / KlSocketOps + kl_sock_* seam (real close) */
 
 #include <string.h>
@@ -85,9 +85,9 @@ static uint32_t ms_dg_configure(void *ctx, KlSocketHandle fd, int family,
 static const KlDatagramOps MS_DG = { .configure = ms_dg_configure };
 /* Provider WITH a complete datagram data-plane. */
 static const KlSocketProvider MS_SP = { .ops = &MS_OPS, .capabilities = KL_SOCK_CAP_DATAGRAM, .dgram = &MS_DG };
-/* Provider WITHOUT a datagram data-plane (stream-only) — must be rejected before any fd is created. */
+/* Provider WITHOUT a datagram data-plane (stream-only); must be rejected before any fd is created. */
 static const KlSocketProvider MS_SP_NODG = { .ops = &MS_OPS, .capabilities = 0, .dgram = NULL };
-/* Provider with a PARTIAL datagram vtable (configure missing) — must also be rejected before create. */
+/* Provider with a PARTIAL datagram vtable (configure missing); must also be rejected before create. */
 static const KlDatagramOps MS_DG_PARTIAL = { .configure = NULL };
 static const KlSocketProvider MS_SP_PARTIAL = { .ops = &MS_OPS, .capabilities = KL_SOCK_CAP_DATAGRAM, .dgram = &MS_DG_PARTIAL };
 
@@ -221,7 +221,7 @@ UTEST(datagram_open, success_hands_off_fd_without_closing) {
     ASSERT_EQ(1, g_ms.nonblock_calls);
     ASSERT_EQ(1, g_ms.configure_calls);
     ASSERT_EQ(1, g_ms.bind_calls);
-    ASSERT_EQ(0, g_ms.close_calls);                    /* helper did NOT close — the caller owns it */
+    ASSERT_EQ(0, g_ms.close_calls);                    /* helper did NOT close; the caller owns it */
     /* the caller now disposes of it → exactly one close, of exactly this fd */
     ASSERT_EQ(0, kl_sock_close(&MS_SP, p.fd));
     ASSERT_EQ(1, g_ms.close_calls);

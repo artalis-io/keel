@@ -1,5 +1,5 @@
 /*
- * HTTP/1 overflow boundary tests — the HTTP slice of the former tests/test_overflow.c
+ * HTTP/1 overflow boundary tests: the HTTP slice of the former tests/test_overflow.c
  * (T-split). Exercises SIZE_MAX/INT_MAX overflow guards in the connection pool, chunked
  * decoder, multipart parser, router, and body reader. No real network connections needed.
  */
@@ -18,7 +18,7 @@
 /* ── Connection pool overflow ────────────────────────────────────── */
 
 UTEST(overflow, conn_pool_negative) {
-    /* http_connection.c:42 — capacity <= 0 returns -1 */
+    /* http_connection.c:42: capacity <= 0 returns -1 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpConnPool pool;
 
@@ -26,7 +26,7 @@ UTEST(overflow, conn_pool_negative) {
 }
 
 UTEST(overflow, conn_pool_size_guard_exists) {
-    /* http_connection.c:46 — SIZE_MAX / sizeof(KlHttpConn) guard is in place.
+    /* http_connection.c:46: SIZE_MAX / sizeof(KlHttpConn) guard is in place.
      * On 64-bit, INT_MAX won't trigger it (would need > 2^51), but
      * the guard protects 32-bit platforms. Verify the math. */
     ASSERT_TRUE(sizeof(KlHttpConn) > 0);
@@ -37,7 +37,7 @@ UTEST(overflow, conn_pool_size_guard_exists) {
 }
 
 UTEST(overflow, conn_pool_zero) {
-    /* http_connection.c:42 — capacity <= 0 */
+    /* http_connection.c:42: capacity <= 0 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpConnPool pool;
     ASSERT_EQ(kl_http_conn_pool_init(&pool, 0, &alloc), -1);
@@ -47,7 +47,7 @@ UTEST(overflow, conn_pool_zero) {
 /* ── Chunked hex overflow ────────────────────────────────────────── */
 
 UTEST(overflow, chunked_hex_too_many_digits) {
-    /* http1_chunked.c:60 — max 16 hex digits */
+    /* http1_chunked.c:60: max 16 hex digits */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -58,11 +58,11 @@ UTEST(overflow, chunked_hex_too_many_digits) {
 }
 
 UTEST(overflow, chunked_hex_accumulator_overflow) {
-    /* http1_chunked.c:64 — size_accum > SIZE_MAX / 16 */
+    /* http1_chunked.c:64: size_accum > SIZE_MAX / 16 */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
-    /* Feed 16 'f' digits — on 64-bit this is SIZE_MAX.
+    /* Feed 16 'f' digits: on 64-bit this is SIZE_MAX.
      * After 15 f's: size_accum = 0x0FFFFFFFFFFFFFFF
      * 16th f: check size_accum > SIZE_MAX/16 → false (equal)
      * Result: valid chunk size but no data follows → need more data */
@@ -73,7 +73,7 @@ UTEST(overflow, chunked_hex_accumulator_overflow) {
 }
 
 UTEST(overflow, chunked_no_digits_before_cr) {
-    /* http1_chunked.c:47 — size_digits == 0 when CR arrives */
+    /* http1_chunked.c:47: size_digits == 0 when CR arrives */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -83,7 +83,7 @@ UTEST(overflow, chunked_no_digits_before_cr) {
 }
 
 UTEST(overflow, chunked_no_digits_before_ext) {
-    /* http1_chunked.c:39 — size_digits == 0 when ';' arrives */
+    /* http1_chunked.c:39: size_digits == 0 when ';' arrives */
     KlHttp1ChunkedDecoder dec;
     kl_http1_chunked_init(&dec);
 
@@ -186,7 +186,7 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
 }
 
 UTEST(overflow, multipart_max_total_size_exceeded) {
-    /* http_body_reader_multipart.c:66-67 — max_total_size enforcement */
+    /* http_body_reader_multipart.c:66-67: max_total_size enforcement */
     KlAllocator alloc = kl_allocator_default();
 
     KlHttpRequest req;
@@ -227,7 +227,7 @@ static void dummy_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 UTEST(overflow, router_capacity_overflow) {
-    /* http_router.c:25 — capacity > INT_MAX / 2 */
+    /* http_router.c:25: capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -246,7 +246,7 @@ UTEST(overflow, router_capacity_overflow) {
 }
 
 UTEST(overflow, router_mw_overflow) {
-    /* http_router.c:144 — mw_capacity > INT_MAX / 2 */
+    /* http_router.c:144: mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -264,7 +264,7 @@ UTEST(overflow, router_mw_overflow) {
 }
 
 UTEST(overflow, router_post_mw_overflow) {
-    /* http_router.c:189 — post_mw_capacity > INT_MAX / 2 */
+    /* http_router.c:189: post_mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRouter r;
     ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
@@ -284,7 +284,7 @@ UTEST(overflow, router_post_mw_overflow) {
 /* ── Body reader buffer overflow ─────────────────────────────────── */
 
 UTEST(overflow, body_reader_buffer_max_size) {
-    /* http_body_reader_buffer.c:10 — max_size enforcement */
+    /* http_body_reader_buffer.c:10: max_size enforcement */
     KlAllocator alloc = kl_allocator_default();
     KlHttpRequest req;
     memset(&req, 0, sizeof(req));

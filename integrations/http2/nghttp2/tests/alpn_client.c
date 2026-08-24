@@ -1,5 +1,5 @@
 /*
- * alpn_client.c — the KEEL HTTP/2 client offering ALPN over real TLS against the
+ * alpn_client.c: the KEEL HTTP/2 client offering ALPN over real TLS against the
  * alpn_server, closing the client-side matrix rows:
  *
  *   Keel client --ALPN {h2,http/1.1}--> Keel TLS server --selects h2--> h2 adapter

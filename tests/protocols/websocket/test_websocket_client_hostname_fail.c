@@ -1,5 +1,5 @@
 /*
- * test_websocket_client_hostname_fail.c — guards that the WebSocket client fails closed on a
+ * test_websocket_client_hostname_fail.c: guards that the WebSocket client fails closed on a
  * set_hostname failure (WebSocket client slice of the TLS set-hostname-fail tests). The WebSocket client MUST fail
  * closed when KlTls::set_hostname() returns -1 (see the HTTP slice for the full rationale).
  *

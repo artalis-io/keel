@@ -257,7 +257,7 @@ UTEST(h2, session_vtable_validation) {
     g_mock_session = &mock;
 
     /* Create a mock factory that returns a session with NULL recv */
-    /* We test via kl_http2_server_upgrade — need a minimal conn */
+    /* We test via kl_http2_server_upgrade: need a minimal conn */
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
@@ -266,7 +266,7 @@ UTEST(h2, session_vtable_validation) {
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
 
-    /* Tell factory to skip vtable init — we set pointers manually
+    /* Tell factory to skip vtable init: we set pointers manually
      * with NULL recv to test validation */
     mock.skip_vtable_init = 1;
     mock.base.recv = NULL;
@@ -379,7 +379,7 @@ UTEST(h2, stream_max_limit) {
     ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_EQ(conn.h2->max_streams, 2);
 
-    /* Create stream 1 — POST with body, no stream_end yet */
+    /* Create stream 1: POST with body, no stream_end yet */
     const char *hn[] = {"content-length"};
     const char *hv[] = {"5"};
     size_t hnl[] = {14};
@@ -398,7 +398,7 @@ UTEST(h2, stream_max_limit) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(conn.h2->num_streams, 2);
 
-    /* Stream 5 should fail — at max */
+    /* Stream 5 should fail: at max */
     rc = mock.callbacks.on_request(mock.cb_user_data, 5,
                                    "POST", 4, "/data", 5,
                                    NULL, 0, hn, hv, hnl, hvl, 1);
@@ -441,7 +441,7 @@ UTEST(h2, stream_destroy_cleanup) {
     ASSERT_EQ(conn.h2->num_streams, 1);
     ASSERT_TRUE(conn.h2->streams[0].body_reader != NULL);
 
-    /* Reset stream — should call on_error and destroy body reader */
+    /* Reset stream: should call on_error and destroy body reader */
     mock.callbacks.on_stream_reset(mock.cb_user_data, 1, 0);
     ASSERT_EQ(conn.h2->num_streams, 0);
     ASSERT_EQ(g_test_br.error_count, 1);
@@ -565,7 +565,7 @@ UTEST(h2, cb_on_request_middleware) {
                                NULL, 0, NULL, NULL, NULL, NULL, 0);
 
     ASSERT_EQ(middleware_called, 1);
-    /* Middleware short-circuited — response submitted, stream destroyed */
+    /* Middleware short-circuited: response submitted, stream destroyed */
     ASSERT_EQ(mock.submit_count, 1);
     ASSERT_EQ(mock.last_status, 403);
     ASSERT_EQ(conn.h2->num_streams, 0);
@@ -879,13 +879,13 @@ UTEST(h2, alpn_h2) {
 
 UTEST(h2, alpn_null_fallback) {
     /* When alpn_protocol is NULL, no HTTP/2 upgrade should happen */
-    /* This is tested implicitly — without alpn, conn stays in READING */
+    /* This is tested implicitly: without alpn, conn stays in READING */
     KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
 
     /* No TLS at all means no ALPN */
     ASSERT_TRUE(conn.tls == NULL);
-    /* h2_config set but no TLS — preface detection still works */
+    /* h2_config set but no TLS: preface detection still works */
     ASSERT_TRUE(conn.h2 == NULL);
 }
 

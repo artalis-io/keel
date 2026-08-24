@@ -1,7 +1,7 @@
 /*
- * smoke_tls.c — real mbedTLS handshake link + roundtrip smoke test.
+ * smoke_tls.c: real mbedTLS handshake link + roundtrip smoke test.
  *
- * NOT a utest suite — a standalone program built by the `smoke-tls` Makefile
+ * NOT a utest suite: a standalone program built by the `smoke-tls` Makefile
  * target (needs KEEL_TLS=mbedtls). It wires the mbedTLS backend into a KlHttpServer
  * and a sync KlHttpClient and drives one real HTTPS request over loopback, proving
  * the backend both links and completes a genuine TLS handshake on the target
@@ -16,7 +16,7 @@
 #include <keel/keel.h>
 #include <keel_tls_mbedtls.h>
 #ifdef SMOKE_TLS_COMPLETION
-#include "event_caps.h"   /* kl_event_caps — assert the server runs on a completion loop */
+#include "event_caps.h"   /* kl_event_caps: assert the server runs on a completion loop */
 #endif
 #include <pthread.h>
 #include <string.h>
@@ -90,7 +90,7 @@ int main(void) {
     };
     /* Default provider: on a completion backend (BACKEND=pollcomp|iouring) the server auto-adopts
      * the overlapped provider, so this same smoke drives real mbedTLS over comp_tls_drive /
-     * the memory-BIO feed_input/drain_output path on an actual event loop + socket — the full e2e
+     * the memory-BIO feed_input/drain_output path on an actual event loop + socket: the full e2e
      * counterpart to the in-memory smoke-tls-completion. The SMOKE_TLS_COMPLETION build asserts the
      * loop really is completion (below). */
     KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1", .tls = &srv_tls };
@@ -102,10 +102,10 @@ int main(void) {
     kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
 
 #ifdef SMOKE_TLS_COMPLETION
-    /* Guard: this gate is meaningless unless the loop really is completion — fail loudly if built
+    /* Guard: this gate is meaningless unless the loop really is completion: fail loudly if built
      * against a readiness backend (build with BACKEND=pollcomp or BACKEND=iouring). */
     if (!(kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
-        fprintf(stderr, "smoke-tls: not a completion loop — build with BACKEND=pollcomp|iouring\n");
+        fprintf(stderr, "smoke-tls: not a completion loop, build with BACKEND=pollcomp|iouring\n");
         kl_http_server_free(&g_srv);
         kl_tls_mbedtls_ctx_destroy(srv_ctx);
         return 1;

@@ -1,7 +1,7 @@
 /*
- * raw_tick_test.c — lwIP-raw COMPLETION backend tests.
+ * raw_tick_test.c: lwIP-raw COMPLETION backend tests.
  *
- * Tick-without-server: an lwIP-raw KlEventCtx ticks without a server — inits a ctx on the
+ * Tick-without-server: an lwIP-raw KlEventCtx ticks without a server: inits a ctx on the
  * lwIP-raw completion backend, asserts the loop's caps + socket provider are compatible,
  * drives it ~20 times via kl_event_ctx_run (each run = one lwIP mainloop tick), and frees
  * cleanly, then prints its PASS marker.
@@ -23,12 +23,12 @@
  *              reuses the send-pump). Client verifies the whole file body.
  *
  * SINGLE-THREADED lwIP discipline: NO_SYS=1 raw lwIP is not thread-safe and must run on ONE
- * thread. kl_http_server_run() blocks, so the server runs on a pthread that owns the lwIP tick —
+ * thread. kl_http_server_run() blocks, so the server runs on a pthread that owns the lwIP tick;
  * and EVERY lwIP-touching client call (start + response poll) is scheduled onto THAT thread
  * via KEEL timers (kl_timer_add fires on the loop thread). The main thread only waits. So all
  * tcp_* calls (server + client) execute on the single tick thread; no lwIP data race.
  *
- * Runs in-process over the loopback netif — no tap device, no root — like the spike.
+ * Runs in-process over the loopback netif, no tap device, no root, like the spike.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -128,7 +128,7 @@ static void poll_client_cb(void *ud) {
         kl_http_server_stop(s);
         return;
     }
-    if (atomic_load(&g_srv_stop)) return;   /* timed out — stop re-arming */
+    if (atomic_load(&g_srv_stop)) return;   /* timed out; stop re-arming */
     kl_timer_add(&s->ev, 10, poll_client_cb, s);   /* re-arm */
 }
 
@@ -225,7 +225,7 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/octet-stream");
     /* FILE mode → the completion driver posts kl_comp_post_sendfile. The response layer
-     * OWNS closing fd (kl_http_response_reset/free) — we do NOT close it here. */
+     * OWNS closing fd (kl_http_response_reset/free); we do NOT close it here. */
     kl_http_response_file(res, fd, sz);
 }
 
@@ -261,7 +261,7 @@ static void p3_poll_cb(void *ud) {
     KlHttpServer *s = ud;
 
     /* Between the two cases: the accumulating client is a single-slot peer, so /file must not
-     * open until the /big connection is FULLY closed (server FIN seen) — otherwise the two
+     * open until the /big connection is FULLY closed (server FIN seen); otherwise the two
      * roundtrips overlap on the shared accumulator AND a mid-send teardown of /big churns the
      * loopback pcb pool. Once closed, kick /file. */
     if (g_p3_awaiting_close) {
@@ -402,15 +402,15 @@ static int run_p9_3(void) {
 
 /* ── close / cancel / idle-timeout LIFETIME + MEMORY SAFETY ─────────────────────
  * All four cases run inside ONE kl_http_server_run over ONE lwIP-raw loop (a raw NO_SYS=1 loop +
- * the glue's listen pcb + test client are process singletons — like the full-payload case). A
+ * the glue's listen pcb + test client are process singletons; like the full-payload case). A
  * state machine in the poll callback drives them sequentially on the tick thread. Cases:
- *   C1 many-short-lived  — N (>> 8) sequential open/serve/close roundtrips to GET / : all get
+ *   C1 many-short-lived  - N (>> 8) sequential open/serve/close roundtrips to GET / : all get
  *                          200, slots recycle, no leak / overflow of the bounded slot table.
- *   C2 close-with-outstanding — GET /big (64 KB); client reads a little then FIN (mode 2). The
+ *   C2 close-with-outstanding - GET /big (64 KB); client reads a little then FIN (mode 2). The
  *                          server tears down the in-flight send cleanly (send buffer freed).
- *   C3 reset-mid-send    — GET /big; client reads a little then RST (mode 1) → server tcp_err →
+ *   C3 reset-mid-send    - GET /big; client reads a little then RST (mode 1) → server tcp_err →
  *                          free-by-owner (pcb already dead) + exactly-one close, no UAF.
- *   C4 idle-timeout      — a raw client connects, sends a partial request (no CRLFCRLF) and
+ *   C4 idle-timeout      - a raw client connects, sends a partial request (no CRLFCRLF) and
  *                          never completes it; the server's idle sweep (short read_timeout_ms)
  *                          calls kl_comp_cancel → tcp_abort → terminal completion → one release.
  * Each case prints its PASS marker. The whole run is under ASan/UBSan/LSan in CI. */
@@ -420,7 +420,7 @@ static int run_p9_3(void) {
 /* A deliberately INCOMPLETE request (no terminating CRLFCRLF) so the server never routes it and
  * the idle sweep fires. */
 #define P9_4_REQ_PARTIAL    "GET / HTTP/1.1\r\nHost: x\r\n"
-#define P9_4_MANY_CONNS     50            /* N >> KL_LWR_MAX_CONNS (8/32) — forces recycling */
+#define P9_4_MANY_CONNS     50            /* N >> KL_LWR_MAX_CONNS (8/32); forces recycling */
 #define P9_4_PARTIAL_READ   2048u         /* bytes the partial-read client takes before tearing down */
 #define P9_4_CLI_CAP        (P9_3_BODY_LEN + 4096u)
 

@@ -1,5 +1,5 @@
 /*
- * test_dgram_close.c — close/cancel + confirmed-detachment over send + recv.
+ * test_dgram_close.c: close/cancel + confirmed-detachment over send + recv.
  *
  * Covers: both retirement orders, graceful drain-then-detach, abortive discard + sync/async cancel,
  * cancel-at-most-once, graceful→abortive escalation, error during graceful drain (no permanent
@@ -46,7 +46,7 @@ static KlDatagramCloseResult g_on_close_result;
 static void on_close_cb(void *ctx, KlDatagramCloseResult result) { (void)ctx; g_on_close++; g_on_close_result = result; }
 
 /* callback-initiated close: a machine callback calls close; detachment must be DEFERRED to the
- * outermost frame's unwind — otherwise the callback's frame would touch freed state (ASan). */
+ * outermost frame's unwind: otherwise the callback's frame would touch freed state (ASan). */
 static KlDgramClose *g_cb_close;
 static int           g_cb_did;
 static void cb_do_close(void) { if (!g_cb_did) { g_cb_did = 1; kl_dgram_close_begin(g_cb_close); } }
@@ -90,7 +90,7 @@ static void run_reentrant_close(int submit_result, int *st, int *queued, int *de
     KlDatagramMessage m = { .data = "x", .len = 1, .peer = &p, .tos = -1 };
     *st       = (int)kl_dgram_send(&send, &m);          /* hook closes reentrantly, mid-frame */
     *queued   = (int)kl_dgram_send_queued(&send);
-    *detached = kl_dgram_close_is_detached(&close);     /* must be 1 — deferred to send's final leave */
+    *detached = kl_dgram_close_is_detached(&close);     /* must be 1: deferred to send's final leave */
     *closes   = g_on_close;
     kl_dgram_close_free(&close);
     kl_dgram_send_free(&send);
@@ -124,7 +124,7 @@ static void send_one(Fix *f) {
     (void)kl_dgram_send(&f->send, &m);   /* ACCEPTED for valid args */
 }
 
-/* graceful drain-then-detach — retire order send-then-recv */
+/* graceful drain-then-detach: retire order send-then-recv */
 UTEST(dgram_close, graceful_send_then_recv) {
     Fix f; fix_init(&f, KL_DGRAM_CAP_CONNECTED);
     send_one(&f);                                          /* send in flight */
@@ -140,7 +140,7 @@ UTEST(dgram_close, graceful_send_then_recv) {
     fix_free(&f);
 }
 
-/* graceful — retire order recv-then-send */
+/* graceful: retire order recv-then-send */
 UTEST(dgram_close, graceful_recv_then_send) {
     Fix f; fix_init(&f, KL_DGRAM_CAP_CONNECTED);
     send_one(&f);
@@ -160,7 +160,7 @@ UTEST(dgram_close, graceful_drains_queue) {
     send_one(&f);                                          /* A: in flight */
     send_one(&f);                                          /* B: queued (single-flight) */
     ASSERT_EQ((int)kl_dgram_send_queued(&f.send), 2);
-    ASSERT_EQ(kl_dgram_close_begin(&f.close), 0);          /* recv NULL-less: recv started? none — */
+    ASSERT_EQ(kl_dgram_close_begin(&f.close), 0);          /* recv NULL-less: recv started? none: */
     ASSERT_EQ(kl_dgram_close_is_detached(&f.close), 0);
     ASSERT_EQ(kl_dgram_send_on_complete(&f.send, 1), 0);   /* A retires; B pumped (in flight) */
     ASSERT_EQ((int)kl_dgram_send_queued(&f.send), 1);
@@ -215,7 +215,7 @@ UTEST(dgram_close, repeated_cancel_once) {
     ASSERT_EQ(kl_dgram_recv_start(&f.recv), 0);
     g_cancel_mode = CANCEL_ASYNC;
     ASSERT_EQ(kl_dgram_close_cancel(&f.close), 0);
-    ASSERT_EQ(kl_dgram_close_cancel(&f.close), 0);         /* repeated — no re-invocation */
+    ASSERT_EQ(kl_dgram_close_cancel(&f.close), 0);         /* repeated: no re-invocation */
     ASSERT_EQ(g_cancel_send_calls, 1);
     ASSERT_EQ(g_cancel_recv_calls, 1);
     kl_dgram_send_on_complete(&f.send, 0);
@@ -230,7 +230,7 @@ UTEST(dgram_close, graceful_to_abortive_escalation) {
     ASSERT_EQ(kl_dgram_close_set_cancel(&f.close, cancel_recv, cancel_send, NULL), 0);
     send_one(&f); send_one(&f);                            /* A in flight, B queued */
     ASSERT_EQ(kl_dgram_recv_start(&f.recv), 0);
-    ASSERT_EQ(kl_dgram_close_begin(&f.close), 0);          /* graceful — waits */
+    ASSERT_EQ(kl_dgram_close_begin(&f.close), 0);          /* graceful: waits */
     ASSERT_EQ(kl_dgram_close_is_detached(&f.close), 0);
     g_cancel_mode = CANCEL_SYNC;
     ASSERT_EQ(kl_dgram_close_cancel(&f.close), 0);         /* escalate: discard B + cancel A + recv */
@@ -295,7 +295,7 @@ UTEST(dgram_close, cancel_reentrant_from_hook) {
     ASSERT_EQ(kl_dgram_close_cancel(&f.close), 0);
     ASSERT_EQ(g_cancel_send_calls, 1);                     /* still cancel-once despite reentry */
     ASSERT_EQ(g_cancel_recv_calls, 1);
-    /* ops async — retire them; exactly one detachment */
+    /* ops async: retire them; exactly one detachment */
     kl_dgram_send_on_complete(&f.send, 0);
     kl_dgram_recv_on_complete(&f.recv, 0, 0);
     ASSERT_EQ(g_on_close, 1);
@@ -308,7 +308,7 @@ UTEST(dgram_close, free_refused_before_detachment) {
     send_one(&f);
     ASSERT_EQ(kl_dgram_recv_start(&f.recv), 0);
     ASSERT_EQ(kl_dgram_close_begin(&f.close), 0);
-    ASSERT_EQ(kl_dgram_close_free(&f.close), -1);          /* not detached — refused */
+    ASSERT_EQ(kl_dgram_close_free(&f.close), -1);          /* not detached: refused */
     kl_dgram_send_on_complete(&f.send, 1);
     kl_dgram_recv_on_complete(&f.recv, 0, 0);
     ASSERT_EQ(kl_dgram_close_is_detached(&f.close), 1);
@@ -347,7 +347,7 @@ UTEST(dgram_close, destructive_on_close_tail) {
 }
 
 /* ── callback-initiated close: detachment must happen ONCE and only after the originating machine
- *    frame has unwound. These run under ASan — a mid-frame detach+free would be a UAF. ───────────── */
+ *    frame has unwound. These run under ASan: a mid-frame detach+free would be a UAF. ───────────── */
 
 /* close from a RECEIVE DELIVERY callback (recv-only coordinator). */
 UTEST(dgram_close, close_from_recv_delivery) {
@@ -444,7 +444,7 @@ UTEST(dgram_close, reentrant_close_readiness_done) {
     ASSERT_EQ(oc, 1);
 }
 
-/* WOULD_BLOCK after a reentrant close: MUST NOT enqueue (closing began) — returns CLOSED, queue empty. */
+/* WOULD_BLOCK after a reentrant close: MUST NOT enqueue (closing began); returns CLOSED, queue empty. */
 UTEST(dgram_close, reentrant_close_readiness_wouldblock) {
     int st, q, d, oc;
     run_reentrant_close(KL_DGRAM_SUBMIT_WOULDBLOCK, &st, &q, &d, &oc);
@@ -464,7 +464,7 @@ UTEST(dgram_close, reentrant_close_readiness_error) {
     ASSERT_EQ(oc, 1);
 }
 
-/* ══ §4.3 retirement classification — the terminal close RESULT via the backend classifier ═══════ */
+/* ══ §4.3 retirement classification: the terminal close RESULT via the backend classifier ═══════ */
 
 static KlDgramRetireResult g_rt_recv, g_rt_send;
 static int g_rt_te_recv, g_rt_te_send;

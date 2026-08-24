@@ -1,5 +1,5 @@
 /*
- * raw_datagram_test.c — the PUBLIC KlDatagram over the lwIP-raw COMPLETION backend.
+ * raw_datagram_test.c: the PUBLIC KlDatagram over the lwIP-raw COMPLETION backend.
  *
  * The live lwIP-raw binding of the public facade, the completion counterpart of pollcomp/io_uring.
  * Brings up NO_SYS=1 lwIP + loopback via kl_event_provider_lwip_raw(), preps datagram fds
@@ -76,7 +76,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, int do_bind, uint16_t 
     return fd;
 }
 
-/* T1 — roundtrip + clean DETACHED close. */
+/* T1: roundtrip + clean DETACHED close. */
 static int t1_roundtrip(KlEventCtx *ctx, const KlSocketProvider *sp) {
     g_got = 0; g_len = 0; g_has_peer = 0;
     uint16_t port = 0;
@@ -110,7 +110,7 @@ static int t1_roundtrip(KlEventCtx *ctx, const KlSocketProvider *sp) {
     return 0;
 }
 
-/* T2 — empty armed cancellation: a recv is armed but no datagram ever arrives; graceful close must still
+/* T2 - empty armed cancellation: a recv is armed but no datagram ever arrives; graceful close must still
  * retire the armed recv (via the cancel→terminal path) and reach DETACHED. */
 static int t2_empty_armed_cancel(KlEventCtx *ctx, const KlSocketProvider *sp) {
     g_got = 0;
@@ -133,7 +133,7 @@ static int t2_empty_armed_cancel(KlEventCtx *ctx, const KlSocketProvider *sp) {
 
 static void noop_final(void *ctx) { (void)ctx; }
 
-/* T3 — glue-level cancel semantics (own glue ctx, after the event ctx is gone; the raw backend allows
+/* T3: glue-level cancel semantics (own glue ctx, after the event ctx is gone; the raw backend allows
  * only one live ctx). Proves PENDING→RETIRED, idempotent repeated cancel, and no duplicate terminal. */
 static int t3_glue_cancel_semantics(void) {
     KlAllocator alloc = kl_allocator_default();
@@ -153,7 +153,7 @@ static int t3_glue_cancel_semantics(void) {
     /* Cancel → moves the arm to a pending terminal (PENDING). */
     if (rc == 0) { kl_lwr_udp_cancel_recv(lwrctx, l);
                    if (kl_lwr_udp_recv_pending(lwrctx, l) != 1) rc = fail("T3 not PENDING after cancel"); }
-    /* Repeated cancel is idempotent — no second terminal queued. */
+    /* Repeated cancel is idempotent: no second terminal queued. */
     if (rc == 0) { kl_lwr_udp_cancel_recv(lwrctx, l);
                    if (kl_lwr_udp_recv_pending(lwrctx, l) != 1) rc = fail("T3 repeated cancel changed state"); }
     /* Drain → exactly ONE terminal (ok=0, terminal=1); RETIRED after. */
@@ -178,7 +178,7 @@ static int t3_glue_cancel_semantics(void) {
     return rc;
 }
 
-/* T4 — bounded-state saturation/reuse (review): arm+cancel+close EVERY udp slot so all pending terminals
+/* T4 - bounded-state saturation/reuse (review): arm+cancel+close EVERY udp slot so all pending terminals
  * are queued (each tied 1:1 to its slot index); no slot may be reused until the terminals drain; after
  * draining, reuse works; exact ref accounting (each life: owner + arm→terminal→drain-release). */
 static int t4_saturation_reuse(void) {
@@ -240,7 +240,7 @@ int main(void) {
     int rc = 0;
     if (rc == 0) rc = t1_roundtrip(&ctx, sp);
     if (rc == 0) rc = t2_empty_armed_cancel(&ctx, sp);
-    kl_event_ctx_free(&ctx);   /* free the event ctx FIRST — one live ctx at a time */
+    kl_event_ctx_free(&ctx);   /* free the event ctx FIRST: one live ctx at a time */
     if (rc != 0) return 1;
 
     if (t3_glue_cancel_semantics() != 0) return 1;

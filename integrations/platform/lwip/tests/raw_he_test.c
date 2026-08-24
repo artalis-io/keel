@@ -1,5 +1,5 @@
 /*
- * raw_he_test.c — Happy Eyeballs (RFC 8305) racing + timers over the lwIP-raw completion
+ * raw_he_test.c: Happy Eyeballs (RFC 8305) racing + timers over the lwIP-raw completion
  * backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof (docs/archive/phases/phase10_lwip_raw_client_design.md): the SAME single-loop model
@@ -8,7 +8,7 @@
  * Happy-Eyeballs layer (src/http_client_async.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
  * natively. The winning pcb is adopted; every losing/connecting pcb is aborted (kl_comp_cancel ->
- * kl_lwr_tcp_abort) and its glue slot freed — the memory-safety surface this test hardens.
+ * kl_lwr_tcp_abort) and its glue slot freed: the memory-safety surface this test hardens.
  *
  * Cases (all in-process over loopback, NO_SYS=1):
  *
@@ -18,7 +18,7 @@
  *      200 + BYTE-EXACT body. The losing (refused) connecting pcb is aborted + its slot freed.
  *
  *   2. DEADLINE TIMEOUT. Resolver returns two BLACK-HOLE addresses (a non-loopif IP the raw stack
- *      routes out the default (loopback) netif but that answers neither SYN-ACK nor RST — the SYN
+ *      routes out the default (loopback) netif but that answers neither SYN-ACK nor RST: the SYN
  *      is simply dropped, so the connect neither completes nor refuses). Both attempts stay
  *      in-flight (connecting) until the client's OWN overall deadline fires (he_on_deadline), which
  *      aborts EVERY in-flight connecting pcb (kl_comp_cancel per attempt) and completes the request
@@ -26,15 +26,15 @@
  *      half-open connecting pcbs cleanly.
  *
  *   3. RACE-TO-WIN (two good-ish addresses). Resolver returns [127.0.0.1:REFUSED, 127.0.0.1:GOOD]
- *      again but with a LARGER Connection-Attempt-Delay so the 2nd attempt would normally wait —
+ *      again but with a LARGER Connection-Attempt-Delay so the 2nd attempt would normally wait:
  *      yet the 1st refuses immediately, so §5 fast-fail brings the winner up without waiting out
  *      the delay. Same 200 + body; confirms the delay timer path + fast-fail interplay, and that
  *      the delay timer is cancelled on win (no stray timer fires post-completion).
  *
  * DNS and TLS are covered by sibling tests: this test is plaintext numeric-IP ONLY. Each address is a numeric
- * literal fed through a fixed in-test KlResolver (no DNS machinery, no UDP — lwip-raw rejects UDP).
+ * literal fed through a fixed in-test KlResolver (no DNS machinery, no UDP, lwip-raw rejects UDP).
  *
- * Must be ASan+UBSan+LSan-clean — aborting connecting/losing pcbs + freeing their slots is the
+ * Must be ASan+UBSan+LSan-clean: aborting connecting/losing pcbs + freeing their slots is the
  * memory-safety surface.
  *
  * SPDX-License-Identifier: MIT
@@ -56,11 +56,11 @@
 #include <time.h>
 
 /* ── ports / addresses ────────────────────────────────────────────────────────
- * GOOD    — the raw server's listen port on 127.0.0.1 (accepts).
- * REFUSED — a 127.0.0.1 port with NO listener: on the loopif a SYN loops back and, finding no
+ * GOOD    - the raw server's listen port on 127.0.0.1 (accepts).
+ * REFUSED - a 127.0.0.1 port with NO listener: on the loopif a SYN loops back and, finding no
  *           bound pcb, gets an RST -> a deterministic FAST connect refusal (proven by the
  *           plaintext-connect test's closed-port case). Happy Eyeballs fast-fails through it to the GOOD address.
- * BLACKHOLE_IP — a NON-loopif IPv4 (10.x): the raw stack routes it out the default (loopback)
+ * BLACKHOLE_IP - a NON-loopif IPv4 (10.x): the raw stack routes it out the default (loopback)
  *           netif; the looped-back packet is not addressed to the loopif and is dropped (no RST,
  *           no SYN-ACK). So a connect to it stays CONNECTING forever -> the client's overall
  *           deadline is what terminates it. Distinct from a 127.x refused port (which RSTs). */
@@ -73,7 +73,7 @@ static const char *BLACKHOLE_IP = "10.255.255.1";  /* non-loopif, unrouted -> SY
 /* ── multi-address KlResolver (no DNS, no UDP) ─────────────────────────────────
  * Keyed on the request host string, returns a FIXED 2-address list per case, completing
  * SYNCHRONOUSLY inside resolve() (the resolver sync-completion contract, CLAUDE.md). The
- * addresses are numeric literals parsed via kl_sockaddr_parse — no DNS, no timers, no lwIP. */
+ * addresses are numeric literals parsed via kl_sockaddr_parse: no DNS, no timers, no lwIP. */
 typedef enum { LIST_FAILOVER, LIST_BLACKHOLE } AddrList;
 
 typedef struct { KlResolver base; KlResolveReq req; AddrList which; } HeResolver;
@@ -81,11 +81,11 @@ typedef struct { KlResolver base; KlResolveReq req; AddrList which; } HeResolver
 static int he_fill(KlResolveResult *res, AddrList which, int port) {
     memset(res, 0, sizeof(*res));
     if (which == LIST_FAILOVER) {
-        /* preferred first: the refused address, then the good one — forcing a real fail-over */
+        /* preferred first: the refused address, then the good one: forcing a real fail-over */
         if (kl_sockaddr_parse(&res->addrs[0], GOOD_IP, (uint16_t)REFUSED_PORT) != 0) return -1;
         if (kl_sockaddr_parse(&res->addrs[1], GOOD_IP, (uint16_t)port)         != 0) return -1;
         res->naddrs = 2;
-    } else { /* LIST_BLACKHOLE — two unrouted addresses that neither accept nor refuse */
+    } else { /* LIST_BLACKHOLE: two unrouted addresses that neither accept nor refuse */
         if (kl_sockaddr_parse(&res->addrs[0], BLACKHOLE_IP, (uint16_t)BLACKHOLE_PORT) != 0) return -1;
         if (kl_sockaddr_parse(&res->addrs[1], BLACKHOLE_IP, (uint16_t)(BLACKHOLE_PORT + 1)) != 0)
             return -1;
@@ -100,7 +100,7 @@ static KlResolveReq *he_resolve(KlResolver *self, KlEventCtx *ctx, const char *h
     HeResolver *hr = (HeResolver *)self;
     KlResolveResult res;
     if (he_fill(&res, hr->which, port) != 0) { done_fn(&hr->req, NULL, -1, ud); return &hr->req; }
-    done_fn(&hr->req, &res, 0, ud);   /* synchronous success — 2 addresses to race */
+    done_fn(&hr->req, &res, 0, ud);   /* synchronous success: 2 addresses to race */
     return &hr->req;
 }
 static void he_cancel(KlResolveReq *req)  { (void)req; }
@@ -167,7 +167,7 @@ static void on_done(KlHttpClient *client, void *ud) {
 
 /* Fired on the loop thread: start the async KlHttpClient on the server's shared ctx (== the one lwIP
  * mainloop). Its connect racing, its data-plane watcher relay, and its HE timers are all serviced
- * by kl_http_server_run's completion tick — single-thread NO_SYS=1 discipline. */
+ * by kl_http_server_run's completion tick: single-thread NO_SYS=1 discipline. */
 static void start_client(void *ud) {
     HeCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
@@ -247,18 +247,18 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
 }
 
 int main(void) {
-    /* Case 1: FAILOVER — refused addr first, good addr second; HE fast-fails to the winner. */
+    /* Case 1: FAILOVER: refused addr first, good addr second; HE fast-fails to the winner. */
     if (run_case("failover: [refused, good] -> 200, body byte-exact",
                  &g_res_failover, /*delay*/0, /*timeout*/5000, /*ok*/1, /*wait*/6000) != 0)
         return 1;
 
-    /* Case 2: DEADLINE — two black-hole addrs that hang; the overall deadline aborts them. A short
+    /* Case 2: DEADLINE: two black-hole addrs that hang; the overall deadline aborts them. A short
      * 300ms deadline keeps the test fast; the watchdog outlasts it. */
     if (run_case("deadline: [blackhole, blackhole] -> aborted + timeout error",
                  &g_res_blackhole, /*delay*/50, /*timeout*/300, /*ok*/0, /*wait*/4000) != 0)
         return 1;
 
-    /* Case 3: RACE-TO-WIN with a large Connection-Attempt-Delay — the 1st refuses immediately, so
+    /* Case 3: RACE-TO-WIN with a large Connection-Attempt-Delay: the 1st refuses immediately, so
      * §5 fast-fail brings the winner up WITHOUT waiting the delay; the delay timer is cancelled on
      * win (no stray fire post-completion). */
     if (run_case("delay+fast-fail: [refused, good], 400ms delay -> 200 without waiting",

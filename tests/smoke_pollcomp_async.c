@@ -1,5 +1,5 @@
 /*
- * smoke_pollcomp_async.c — async/thread-pool handler over the completion loop.
+ * smoke_pollcomp_async.c: async/thread-pool handler over the completion loop.
  *
  * Proves the whole watcher-relay + resume mechanism end to end: a KlHttpServer on the pollcomp
  * completion loop, a KlThreadPool whose wakeup pipe is a kl_watcher on the server ctx, and
@@ -30,7 +30,7 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-/* op MUST be first — on_cancel/cancel_fn free via this pointer. */
+/* op MUST be first: on_cancel/cancel_fn free via this pointer. */
 typedef struct { KlAsyncOp op; int result; } WorkCtx;
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */

@@ -1,5 +1,5 @@
 /*
- * s7_selftest.c — server teardown acceptance: clean KlHttpServer teardown + EFI ExitBootServices lifetime.
+ * s7_selftest.c: server teardown acceptance: clean KlHttpServer teardown + EFI ExitBootServices lifetime.
  *
  * The server mirror of the client teardown self-test. A freestanding KlHttpServer serves ONE plaintext GET / -> 200
  * over EFI_TCP4, then tears itself down cleanly from the archive alone and releases the
@@ -7,14 +7,14 @@
  *
  *   kl_http_server_free(&s)                     → closes the listener + every accepted child
  *                                            (draining their EFI_TCP4 tokens), frees the
- *                                            pool/router — the freestanding teardown path.
- *   kl_uefi_socket_provider_live_count()   → MUST be 0 now (every socket closed) — the
+ *                                            pool/router: the freestanding teardown path.
+ *   kl_uefi_socket_provider_live_count()   → MUST be 0 now (every socket closed): the
  *                                            documented precondition for kl_uefi_shutdown.
  *   kl_uefi_shutdown()                     → releases the EFI_TCP4 socket provider, the
  *                                            completion event provider, and the platform
  *                                            timer/EBS event.
  *
- * We do NOT call the real ExitBootServices() — there is no serial console after
+ * We do NOT call the real ExitBootServices(): there is no serial console after
  * it. kl_uefi_after_ebs() is shown as the fail-closed guard (0 pre-EBS; a real
  * ExitBootServices sets it, after which KEEL's EFI providers refuse boot-service I/O).
  *
@@ -79,7 +79,7 @@ static void s7_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
     static const char body[] = "hello from KEEL on UEFI (S-7 teardown test)\n";
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, body, sizeof(body) - 1);
-    if (!g_served) { g_served = 1; print_line("S-7: GO — served GET / (200)"); }
+    if (!g_served) { g_served = 1; print_line("S-7: GO, served GET / (200)"); }
 }
 
 /* ── entry ────────────────────────────────────────────────────────────────────── */
@@ -93,7 +93,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("=== S-7 KlHttpServer clean teardown + ExitBootServices lifetime ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("S-7: (warn) platform_init failed — clock stuck, continuing");
+        print_line("S-7: (warn) platform_init failed, clock stuck, continuing");
 
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("S-7: event provider build failed"); goto park; }
@@ -146,7 +146,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
 
     /* ── clean teardown (the acceptance) ──────────────────────────────────────── */
-    print_line("S-7: tearing down — kl_http_server_free (close listener + children) ...");
+    print_line("S-7: tearing down, kl_http_server_free (close listener + children) ...");
     kl_http_server_free(&s);
 
     int live = kl_uefi_socket_provider_live_count();
@@ -159,7 +159,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line(" (0 pre-EBS; a real ExitBootServices sets it -> providers fail-closed)");
 
     if (g_served && live == 0)
-        print_line("S-7: PASS — served GET / -> 200 then clean teardown (0 live sockets)");
+        print_line("S-7: PASS, served GET / -> 200 then clean teardown (0 live sockets)");
     else
         print_line("S-7: FAIL");
 

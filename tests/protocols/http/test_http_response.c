@@ -327,7 +327,7 @@ UTEST(response, header_rollback_on_alloc_failure) {
     size_t len_after_first = res.hdr_len;
     ASSERT_TRUE(len_after_first > 0);
 
-    /* Switch to failing allocator — cap stays small so next append triggers realloc */
+    /* Switch to failing allocator: cap stays small so next append triggers realloc */
     KlAllocator fail = { .malloc = fail_malloc, .realloc = fail_realloc, .free = fail_free };
     res.alloc = &fail;
     /* Force a realloc by filling remaining capacity */

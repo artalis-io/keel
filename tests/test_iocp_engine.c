@@ -1,5 +1,5 @@
 /*
- * test_iocp_engine.c — IOCP backend lifecycle (Windows/BACKEND=iocp).
+ * test_iocp_engine.c: IOCP backend lifecycle (Windows/BACKEND=iocp).
  *
  * Increment 2 scope: prove the IOCP event backend boots and advertises the
  * completion capability, the overlapped provider carries KL_SOCK_CAP_OVERLAPPED,

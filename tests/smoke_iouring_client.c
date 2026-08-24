@@ -1,12 +1,12 @@
 /*
- * smoke_iouring_client.c — async KlHttpClient CONNECT over the io_uring completion loop.
+ * smoke_iouring_client.c: async KlHttpClient CONNECT over the io_uring completion loop.
  *
  * The io_uring counterpart of smoke_pollcomp_client: an async KlHttpClient does GET / to a
  * KlHttpServer, BOTH on the io_uring completion axis, with the client's connect driven over the
  * completion loop (kl_comp_post_connect → IORING_OP_CONNECT → KL_COMP_CONNECT → he_on_writable)
  * rather than the readiness WRITE-watcher shim. Build with BACKEND=iouring first so the server
  * and the client's KlEventCtx both run on the io_uring completion loop; neither sets a socket
- * provider — the auto-wire adopts the backend's overlapped provider. Runs in the Apple
+ * provider: the auto-wire adopts the backend's overlapped provider. Runs in the Apple
  * container under `make BACKEND=iouring` + ASan.
  */
 #ifndef _DEFAULT_SOURCE

@@ -1,5 +1,5 @@
 /*
- * interop_server.c — a standalone KEEL HTTP/2 (h2c prior-knowledge) server
+ * interop_server.c: a standalone KEEL HTTP/2 (h2c prior-knowledge) server
  * backed by the nghttp2 server adapter, for third-party interop (curl --http2-
  * prior-knowledge, nghttp, h2load, h2spec). Runs until killed. Cleartext h2c on
  * 127.0.0.1:18478, route GET /hello -> JSON.

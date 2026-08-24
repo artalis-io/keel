@@ -1,5 +1,5 @@
 /*
- * tls_e2e.c — end-to-end proof that the OpenSSL KlTls adapter satisfies BOTH
+ * tls_e2e.c: end-to-end proof that the OpenSSL KlTls adapter satisfies BOTH
  * transport axes of the KlTls vtable.
  *
  *   Axis 1 (socket-BIO / readiness): a socketpair() carries ciphertext; client
@@ -15,7 +15,7 @@
  *     read()==-1 with at_eof()==1.
  *
  * Certificates (a self-signed CA + a server leaf + a client leaf) are generated
- * at runtime with the OpenSSL library API — no filesystem, no `openssl` CLI.
+ * at runtime with the OpenSSL library API: no filesystem, no `openssl` CLI.
  *
  * Built under ASan+UBSan. SPDX-License-Identifier: MIT
  */
@@ -92,7 +92,7 @@ static void gen_cert(const char *cn, int is_ca,
     X509_NAME *iname = issuer_crt ? X509_get_subject_name(issuer_crt) : name;
     X509_set_issuer_name(crt, iname);
 
-    /* Extensions via the programmatic X509_add1_ext_i2d — portable across OpenSSL,
+    /* Extensions via the programmatic X509_add1_ext_i2d, portable across OpenSSL,
      * LibreSSL, and BoringSSL (the CONF-string X509V3_EXT_conf_nid path is absent in
      * BoringSSL). CA basic constraints, or a dNSName SAN for leaves. */
     if (is_ca) {
@@ -485,7 +485,7 @@ static void axis2_memory_bio(KlAllocator *alloc, PemPair *ca, PemPair *server)
 
     /* Clean shutdown from server → client's read() must report at_eof(). Because
      * at_eof() reflects the LATEST read, the successful read just above cleared it
-     * and this EOF read sets it — it is not sticky from an earlier state. */
+     * and this EOF read sets it; it is not sticky from an earlier state. */
     srv->shutdown(srv, KL_INVALID_SOCKET);
     pump(srv, cli);
     kl_ssize_t rn = cli->read(cli, KL_INVALID_SOCKET, buf, sizeof(buf));
@@ -600,7 +600,7 @@ static void test_der_alpn_lifetime(KlAllocator *alloc, PemPair *ca, PemPair *ser
     KlPeerCert pcB;
     assert(srvB->peer_cert(srvB, &pcB) == 0);
     assert(pcB.der_len > 0 && pcB.der != NULL);
-    /* Distinct backing storage — the pre-fix shared scratch would alias. */
+    /* Distinct backing storage: the pre-fix shared scratch would alias. */
     assert(pcB.der != A_der_ptr);
 
     /* A's DER (re-read from A's still-live buffer) is UNCHANGED. */
@@ -684,7 +684,7 @@ static void test_hostname_mismatch(KlAllocator *alloc, PemPair *ca, PemPair *ser
 static void test_untrusted_ca(KlAllocator *alloc, PemPair *server)
 {
     printf("== Finding 7: untrusted CA -> verify fails ==\n");
-    /* A fresh, unrelated CA the client will trust — but the server leaf was
+    /* A fresh, unrelated CA the client will trust; but the server leaf was
      * signed by the real CA, so verification must fail. */
     PemPair other_ca = {0};
     gen_cert("Other CA", 1, NULL, NULL, &other_ca, NULL, NULL);
@@ -715,7 +715,7 @@ static void test_missing_client_cert(KlAllocator *alloc, PemPair *ca, PemPair *s
         (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem),
         KL_MTLS_REQUIRED, alloc);
     assert(sctx);
-    /* Client trusts the CA but does NOT set_cert — presents no client cert. */
+    /* Client trusts the CA but does NOT set_cert: presents no client cert. */
     KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
         (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
     assert(cctx);
@@ -726,7 +726,7 @@ static void test_missing_client_cert(KlAllocator *alloc, PemPair *ca, PemPair *s
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* mTLS config validation — OPTIONAL/REQUIRED without a CA, bad mode,
+/* mTLS config validation: OPTIONAL/REQUIRED without a CA, bad mode,
  * and mismatched ca_buf/ca_len are all rejected (ctor returns NULL). */
 static void test_mtls_config_validation(KlAllocator *alloc, PemPair *server, PemPair *ca)
 {
@@ -761,7 +761,7 @@ static void test_mtls_config_validation(KlAllocator *alloc, PemPair *server, Pem
     printf("  PASS: invalid mTLS configs rejected, valid one accepted\n");
 }
 
-/* Completion-buffer boundary — feed_input rejects oversized + NULL. */
+/* Completion-buffer boundary: feed_input rejects oversized + NULL. */
 static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
 {
     printf("== Finding 3: feed_input boundary (oversize + NULL) ==\n");
@@ -793,7 +793,7 @@ static void test_feed_input_boundary(KlAllocator *alloc, PemPair *ca)
     printf("  PASS: feed_input/drain_output reject oversize + NULL args\n");
 }
 
-/* from_buf boundary — a ctor rejects len==0 / NULL buffers. */
+/* from_buf boundary: a ctor rejects len==0 / NULL buffers. */
 static void test_from_buf_boundary(KlAllocator *alloc, PemPair *server, PemPair *ca)
 {
     printf("== Finding 2: from_buf boundary (len==0 / NULL rejected) ==\n");
@@ -826,7 +826,7 @@ static void test_insecure_client(KlAllocator *alloc, PemPair *server)
         (const unsigned char *)server->key_pem, strlen(server->key_pem),
         NULL, 0, KL_MTLS_NONE, alloc);
     assert(sctx);
-    /* verify-none: no CA needed, no hostname check — handshake completes even
+    /* verify-none: no CA needed, no hostname check: handshake completes even
      * though the client trusts nothing. */
     KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_insecure(alloc);
     assert(cctx);
@@ -915,7 +915,7 @@ static void test_second_handshake_after_reset(KlAllocator *alloc, PemPair *ca,
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
-/* Numeric-IP SAN — matching IP verifies, wrong IP fails. */
+/* Numeric-IP SAN: matching IP verifies, wrong IP fails. */
 static void test_ip_san(KlAllocator *alloc, EVP_PKEY *ca_key, X509 *ca_crt,
                         PemPair *ca)
 {
@@ -979,7 +979,7 @@ static void run_truncation_case(KlAllocator *alloc, PemPair *ca, PemPair *server
     int cfd = fds[0], sfd = fds[1];
     assert(drive_handshake(cli, cfd, srv, sfd) == 0);
 
-    /* Server writes one payload, then ABRUPTLY closes its fd — no shutdown(). */
+    /* Server writes one payload, then ABRUPTLY closes its fd: no shutdown(). */
     const char *msg = "pre-truncation body";
     size_t mlen = strlen(msg), sent = 0;
     for (int i = 0; i < 200 && sent < mlen; i++) {
@@ -995,7 +995,7 @@ static void run_truncation_case(KlAllocator *alloc, PemPair *ca, PemPair *server
     for (int i = 0; i < 400; i++) {
         kl_ssize_t n = cli->read(cli, cfd, buf + got, sizeof(buf) - got);
         if (n > 0) { got += (size_t)n; continue; }
-        if (n == 0) continue;      /* WANT_READ (readiness) — retry */
+        if (n == 0) continue;      /* WANT_READ (readiness): retry */
         /* n < 0: terminal. Consult at_eof(). */
         saw_eof_result = 1;
         if (allow_truncation) {
@@ -1018,9 +1018,9 @@ static void test_truncation_modes(KlAllocator *alloc, PemPair *ca, PemPair *serv
 {
     printf("== Finding 5: truncation (strict vs lenient) over socket-BIO ==\n");
     run_truncation_case(alloc, ca, server, 0);
-    printf("  PASS: strict — abrupt EOF is read()==-1 && at_eof()==0\n");
+    printf("  PASS: strict, abrupt EOF is read()==-1 && at_eof()==0\n");
     run_truncation_case(alloc, ca, server, 1);
-    printf("  PASS: lenient — abrupt EOF is read()==-1 && at_eof()==1\n");
+    printf("  PASS: lenient, abrupt EOF is read()==-1 && at_eof()==1\n");
 }
 
 /* ── Allocation-failure injection ────────────────────────────────── */
@@ -1052,7 +1052,7 @@ static KlAllocator fail_alloc_make(FailAlloc *f, int fail_after) {
 
 /* Drive a handshake + peer-cert extraction under an allocator that starts failing
  * after N allocations, for a sweep of N. Each iteration must fail gracefully
- * (no crash / no UAF under ASan); some N will complete, some won't — either is
+ * (no crash / no UAF under ASan); some N will complete, some won't; either is
  * acceptable, the point is memory-safety on the failure paths (DER-buffer growth
  * in peer_cert, completion in/out ring growth in feed_input/drain). */
 static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *client)
@@ -1091,7 +1091,7 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
                             KlTlsResult r = srv->handshake(srv, KL_INVALID_SOCKET);
                             if (r == KL_TLS_OK) sdone = 1; else if (r == KL_TLS_ERROR) failed = 1;
                         }
-                        /* pump — feed/drain ring growth exercises comp_ensure under failure */
+                        /* pump: feed/drain ring growth exercises comp_ensure under failure */
                         unsigned char pb[4096];
                         for (;;) {
                             kl_ssize_t k = cli->drain_output(cli, pb, sizeof(pb));
@@ -1123,7 +1123,7 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
 }
 
 /* Leave an unrelated error in OpenSSL's thread-local queue. Parsing garbage as
- * DER X.509 fails and queues an ASN.1 error on every OpenSSL-family library —
+ * DER X.509 fails and queues an ASN.1 error on every OpenSSL-family library:
  * simulating a stale error left by app code or another session on this thread. */
 static void poison_error_queue(void)
 {
@@ -1142,7 +1142,7 @@ static void poison_error_queue(void)
  *       clean EOF even with the queue poisoned (WITHOUT the fix the stale error
  *       makes SSL_get_error report SSL_ERROR_SSL and at_eof() would be 0), and
  *   (b) an independent session completes a full handshake + round-trip with the
- *       queue poisoned before each op — no cross-session contamination. */
+ *       queue poisoned before each op: no cross-session contamination. */
 static void test_error_queue_discipline(KlAllocator *alloc, PemPair *ca, PemPair *server)
 {
     printf("== Finding (r6): OpenSSL error-queue discipline ==\n");
@@ -1184,7 +1184,7 @@ static void test_error_queue_discipline(KlAllocator *alloc, PemPair *ca, PemPair
     }
 
     /* (b) an independent session, poisoned before every op, still handshakes and
-     * round-trips — the stale error does not leak across sessions. */
+     * round-trips: the stale error does not leak across sessions. */
     {
         KlTls *srv = kl_tls_openssl_create(sctx, alloc);
         KlTls *cli = kl_tls_openssl_create(cctx, alloc);
@@ -1291,7 +1291,7 @@ static void test_client_verified_flag(KlAllocator *alloc, PemPair *ca, PemPair *
 }
 
 /* A CN that would not fit KlPeerCert.subject_cn[256] must be
- * OMITTED, not truncated — two long CNs sharing a 255-byte prefix must never
+ * OMITTED, not truncated: two long CNs sharing a 255-byte prefix must never
  * collapse to the same exposed string. The issuer CN (short) is unaffected. */
 static void test_overlong_cn_omitted(KlAllocator *alloc, EVP_PKEY *ca_key,
                                      X509 *ca_crt, PemPair *ca, PemPair *server)
@@ -1385,12 +1385,12 @@ static void test_identity_canonicalization(KlAllocator *alloc, EVP_PKEY *ca_key,
     /* Two safe outcomes are acceptable, both fail-closed:
      *   (a) the backend rejects the malformed CN/SAN at the TLS layer outright
      *       (e.g. LibreSSL parses the hostile SAN strictly and aborts), or
-     *   (b) the handshake completes and the adapter canonicalizes the identity —
+     *   (b) the handshake completes and the adapter canonicalizes the identity:
      *       CN omitted, hostile SANs dropped (OpenSSL/BoringSSL).
      * What must NEVER happen is (b) surfacing the spoofable bytes. The normal-cert
      * mTLS path in axis1_socket_bio proves a well-formed client cert DOES complete
      * and yields its real identity, so a rejection here is specific to the hostile
-     * content — not a handshake defect. */
+     * content: not a handshake defect. */
     int hs = drive_handshake(cli, cfd, srv, sfd);
     if (hs != 0) {
         printf("  PASS: hostile-identity cert rejected at handshake (fail closed)\n");
@@ -1423,7 +1423,7 @@ static void test_identity_canonicalization(KlAllocator *alloc, EVP_PKEY *ca_key,
     pem_pair_free(&evil);
 }
 
-/* Prove the TLS 1.2 minimum floor is actually enforced — a raw
+/* Prove the TLS 1.2 minimum floor is actually enforced: a raw
  * client capped at an obsolete protocol (TLS 1.1) must NOT negotiate with the
  * adapter server. Failure of SSL_CTX_set_min_proto_version(TLS1_2) is fatal during
  * context creation; this asserts the resulting floor holds on the wire. */
@@ -1445,7 +1445,7 @@ static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
      * lower bound so it emits a genuine <=1.1 ClientHello; capping the max at 1.1
      * is the assertion that matters (a known constant, so this must succeed). If
      * the library lacks TLS 1.1 entirely the empty version range still fails the
-     * handshake — the same outcome we assert. */
+     * handshake: the same outcome we assert. */
     SSL_CTX *rctx = SSL_CTX_new(TLS_client_method());
     assert(rctx);
     SSL_CTX_set_verify(rctx, SSL_VERIFY_NONE, NULL);
@@ -1458,7 +1458,7 @@ static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
     int cfd = fds[0], sfd = fds[1];
-    SSL_set_fd(ssl, cfd);            /* BIO_NOCLOSE — we close cfd ourselves */
+    SSL_set_fd(ssl, cfd);            /* BIO_NOCLOSE: we close cfd ourselves */
     SSL_set_connect_state(ssl);
 
     int cfail = 0, sfail = 0, sdone = 0;

@@ -1,12 +1,12 @@
 /*
- * u1_selftest.c — platform+allocator acceptance self-test (UEFI EFI application).
+ * u1_selftest.c: platform+allocator acceptance self-test (UEFI EFI application).
  *
  * Proves the two firmware shims (allocator_uefi.c + platform_uefi.c) work AND that
  * they satisfy the freestanding archive's undefined platform/allocator hooks,
  * by:
  *   1. linking against libkeel_freestanding_selfcontained.a and REFERENCING the
- *      client public API (kl_http_client_start &co) so the archive objects — which
- *      reference kl_monotonic_ms / kl_plat_random / kl_resolve_sync — are pulled
+ *      client public API (kl_http_client_start &co) so the archive objects, which
+ *      reference kl_monotonic_ms / kl_plat_random / kl_resolve_sync, are pulled
  *      into the image and their undefined seams resolved by our shims;
  *   2. exercising the allocator (malloc/realloc-preserve/free + a huge-alloc
  *      NULL path), the monotonic clock (Stall 50 ms, assert a monotonic delta),
@@ -70,12 +70,12 @@ static UINTN u64_to_dec(UINT64 v, char *dst, UINTN cap) {
 /* ── the archive-reference anchor (link-only; NEVER executed) ───────────────
  * A file-scope, `used` table of client-API addresses. Taking their addresses in
  * static DATA (not in a called function) forces the linker to pull the client
- * objects — and, transitively, llhttp — into the image so the -nostdlib link
+ * objects, and, transitively, llhttp, into the image so the -nostdlib link
  * closure exercises the platform/allocator hooks the shims supply. It is pure
  * data: no code path ever CALLS these functions (this test issues no request), so the
  * parser never runs. (An earlier version put this in a called helper; at -O0 the
  * linked llhttp state machine ended up on a live path and #PF'd on UEFI's
- * bounded stack — data-only anchoring keeps it strictly link-time.) */
+ * bounded stack, data-only anchoring keeps it strictly link-time.) */
 __attribute__((used))
 static void *const g_client_refs[] = {
     (void *)&kl_http_client_start,
@@ -117,7 +117,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("=== U-1 UEFI platform+allocator self-test ===");
 
     /* g_client_refs (file scope, `used`) pulls the client + llhttp objects at
-     * LINK time — no runtime call here. */
+     * LINK time; no runtime call here. */
 
     kl_uefi_platform_trace(g_out); /* step-trace init to the console */
     if (kl_uefi_platform_init(bs, st) != 0) {

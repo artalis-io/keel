@@ -1,10 +1,10 @@
 /*
- * smoke_pollcomp_ws.c — WebSocket-over-completion roundtrip on POSIX (pollcomp).
+ * smoke_pollcomp_ws.c: WebSocket-over-completion roundtrip on POSIX (pollcomp).
  *
  * Runtime-tests WebSocket over the completion loop (comp_ws_drive): a KlHttpServer on
  * the pollcomp completion loop with a WS echo route, hit by a hand-rolled raw WS client
  * (HTTP Upgrade handshake + one masked text frame; reads the server's unmasked echo).
- * The completion driver reuses kl_ws_server_on_readable_data verbatim — this test proves
+ * The completion driver reuses kl_ws_server_on_readable_data verbatim: this test proves
  * that plumbing end to end. No dependency on the async kl_ws_client.
  */
 #include <keel/keel.h>
@@ -62,7 +62,7 @@ static int ws_roundtrip(void) {
     inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
     if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return 0; }
 
-    /* RFC 6455 handshake — the canonical example key. */
+    /* RFC 6455 handshake: the canonical example key. */
     const char *hs =
         "GET /ws HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"

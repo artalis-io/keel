@@ -1,10 +1,10 @@
 /*
- * smoke_tls_completion.c — buffered-BIO (completion-mode) TLS validation.
+ * smoke_tls_completion.c: buffered-BIO (completion-mode) TLS validation.
  *
- * NOT a utest suite — a standalone program built by the `smoke-tls-completion`
+ * NOT a utest suite: a standalone program built by the `smoke-tls-completion`
  * Makefile target (needs KEEL_TLS=mbedtls). It drives a full mbedTLS handshake +
  * bidirectional app data between a client and server session using ONLY the new
- * optional KlTls ops feed_input/drain_output — no socket, no event loop. This is the
+ * optional KlTls ops feed_input/drain_output: no socket, no event loop. This is the
  * platform-neutral proof that the memory-BIO the IOCP completion driver relies on
  * works (mbedTLS is BYO/out-of-CI, so this is a local validation gate).
  *
@@ -18,7 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Embedded self-signed EC cert + key (CN=127.0.0.1, SAN DNS:localhost) — same
+/* Embedded self-signed EC cert + key (CN=127.0.0.1, SAN DNS:localhost): same
  * test-only material as smoke_tls.c. */
 static const char CERT_PEM[] =
 "-----BEGIN CERTIFICATE-----\n"

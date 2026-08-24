@@ -1,5 +1,5 @@
 /*
- * test_connect_op.c — outbound-connect terminal-once state machine
+ * test_connect_op.c: outbound-connect terminal-once state machine
  * (src/connect_op.h), exercised in isolation with mock resolve/connect/cancel hooks (no live
  * sockets, no timers).
  *
@@ -56,7 +56,7 @@ static int co_start_resolve(void *ctx) {
     case M_SYNC_OK:   kl_connect_op_on_resolved(m->op, m->resolve_naddrs); return 0;
     case M_SYNC_FAIL: kl_connect_op_on_resolve_failed(m->op, m->resolve_err); return 0;
     case M_HARDFAIL:  return -1;
-    default:          return 0;   /* async — a completion arrives later */
+    default:          return 0;   /* async; a completion arrives later */
     }
 }
 static void co_cancel_resolve(void *ctx) {
@@ -192,7 +192,7 @@ UTEST(connect_op, all_attempts_fail_reports_last_error) {
 UTEST(connect_op, hard_local_fail_skips_to_next_address) {
     KlConnectOp op; CO m; co_setup(&m, &op);
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 2;
-    m.attempt_mode[0] = M_HARDFAIL;               /* socket() failed — never pending */
+    m.attempt_mode[0] = M_HARDFAIL;               /* socket() failed; never pending */
     m.attempt_mode[1] = M_SYNC_OK;
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     ASSERT_EQ(m.attempt_calls[0], 1);
@@ -218,7 +218,7 @@ UTEST(connect_op, happy_eyeballs_winner_cancels_loser_once) {
     ASSERT_EQ(m.last_fd, 201);
     ASSERT_EQ(m.attempt_cancel_calls[0], 1);      /* loser cancel-requested exactly once */
     ASSERT_EQ(m.attempt_cancel_calls[1], 0);      /* winner never cancelled */
-    ASSERT_EQ(kl_connect_op_is_detached(&op), 0); /* NOT detached — loser still outstanding */
+    ASSERT_EQ(kl_connect_op_is_detached(&op), 0); /* NOT detached; loser still outstanding */
 
     kl_connect_op_on_attempt_failed(&op, 0, 0);   /* loser's cancellation completes */
     ASSERT_EQ(m.detach_calls, 1);                 /* now fully retired → detached */
@@ -290,7 +290,7 @@ UTEST(connect_op, repeat_cancel_requests_once_per_op) {
     ASSERT_EQ(m.done_calls, 1);
     ASSERT_EQ(m.attempt_cancel_calls[0], 1);
     ASSERT_EQ(m.attempt_cancel_calls[1], 1);
-    ASSERT_EQ(kl_connect_op_cancel(&op), 0);      /* both still outstanding — no re-request */
+    ASSERT_EQ(kl_connect_op_cancel(&op), 0);      /* both still outstanding; no re-request */
     ASSERT_EQ(m.attempt_cancel_calls[0], 1);
     ASSERT_EQ(m.attempt_cancel_calls[1], 1);
     ASSERT_EQ(m.done_calls, 1);                   /* terminal still once */
@@ -352,18 +352,18 @@ UTEST(connect_op, duplicate_completions_dropped) {
     m.attempt_mode[0] = M_ASYNC;
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     kl_connect_op_on_resolved(&op, 1);
-    kl_connect_op_on_resolved(&op, 1);            /* duplicate resolve — dropped */
+    kl_connect_op_on_resolved(&op, 1);            /* duplicate resolve; dropped */
     ASSERT_EQ(m.attempt_calls[0], 1);
 
     kl_connect_op_on_attempt_connected(&op, 0, (KlSocketHandle)7);
-    kl_connect_op_on_attempt_connected(&op, 0, (KlSocketHandle)8);   /* duplicate — dropped */
+    kl_connect_op_on_attempt_connected(&op, 0, (KlSocketHandle)8);   /* duplicate; dropped */
     ASSERT_EQ(m.done_calls, 1);
     ASSERT_EQ(m.last_fd, 7);
     ASSERT_EQ(m.detach_calls, 1);
 }
 
 UTEST(connect_op, many_sync_failures_bounded) {
-    /* All 8 addresses hard/sync-fail inline via the fast-start chain — bounded stack. */
+    /* All 8 addresses hard/sync-fail inline via the fast-start chain; bounded stack. */
     KlConnectOp op; CO m; co_setup(&m, &op);
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = KL_CONNECT_MAX_ADDRS;
     for (int i = 0; i < KL_CONNECT_MAX_ADDRS; i++) { m.attempt_mode[i] = M_SYNC_FAIL; m.attempt_err[i] = i + 1; }
@@ -391,7 +391,7 @@ UTEST(connect_op, no_reuse_until_reinit) {
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     ASSERT_EQ(kl_connect_op_is_detached(&op), 1);
-    ASSERT_EQ(kl_connect_op_start(&op), -1);       /* not IDLE — cannot restart without re-init */
+    ASSERT_EQ(kl_connect_op_start(&op), -1);       /* not IDLE; cannot restart without re-init */
 
     co_setup(&m, &op);                             /* re-init = reuse reset */
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
@@ -406,7 +406,7 @@ UTEST(connect_op, cancel_after_success_is_idempotent) {
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     ASSERT_EQ(m.detach_calls, 1);
-    ASSERT_EQ(kl_connect_op_cancel(&op), 0);       /* already detached — no-op */
+    ASSERT_EQ(kl_connect_op_cancel(&op), 0);       /* already detached; no-op */
     ASSERT_EQ(m.done_calls, 1);
     ASSERT_EQ(m.detach_calls, 1);
 }
@@ -452,7 +452,7 @@ UTEST(connect_op, one_addr_async_then_fail_is_terminal) {
 /* ── Fix 1: on_done reentrancy must not cause premature detach / UAF ──────────────────────── */
 
 UTEST(connect_op, on_done_reentrant_cancel_no_outstanding) {
-    /* on_done calls cancel with nothing else outstanding — detachment must wait for the terminal
+    /* on_done calls cancel with nothing else outstanding; detachment must wait for the terminal
      * dispatch to unwind, then fire exactly once. */
     KlConnectOp op; CO m; co_setup(&m, &op);
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
@@ -480,7 +480,7 @@ UTEST(connect_op, on_done_reentrant_retire_final_loser) {
 }
 
 UTEST(connect_op, on_done_reentrant_both_paths) {
-    /* on_done both cancels AND retires the final loser — the depth guard must still yield exactly
+    /* on_done both cancels AND retires the final loser; the depth guard must still yield exactly
      * one detachment, never mid-dispatch. */
     KlConnectOp op; CO m; co_setup(&m, &op);
     m.resolve_mode = M_ASYNC; m.attempt_mode[0] = M_ASYNC; m.attempt_mode[1] = M_ASYNC;
@@ -521,14 +521,14 @@ UTEST(connect_op, deadline_disarms_delay_and_detaches) {
 
     kl_connect_op_on_deadline(&op, 13);
     ASSERT_EQ(m.cancel_delay_calls, 1);           /* the fired deadline disarms the pending delay */
-    ASSERT_EQ(m.cancel_deadline_calls, 0);        /* the deadline itself fired — not cancelled */
+    ASSERT_EQ(m.cancel_deadline_calls, 0);        /* the deadline itself fired; not cancelled */
     ASSERT_EQ(m.attempt_cancel_calls[0], 1);      /* pending attempt cancelled */
     kl_connect_op_on_attempt_failed(&op, 0, 0);
     ASSERT_EQ(m.detach_calls, 1);
 }
 
 UTEST(connect_op, stale_delay_event_dropped) {
-    /* A duplicate/stale delay event must be consumed exactly once — it must NOT start an extra
+    /* A duplicate/stale delay event must be consumed exactly once; it must NOT start an extra
      * address. */
     KlConnectOp op; CO m; co_setup(&m, &op);
     m.resolve_mode = M_ASYNC; m.attempt_mode[0] = M_ASYNC; m.attempt_mode[1] = M_ASYNC;
@@ -536,7 +536,7 @@ UTEST(connect_op, stale_delay_event_dropped) {
     kl_connect_op_on_resolved(&op, 2);            /* attempt 0 in flight; delay armed */
     kl_connect_op_on_delay(&op);                  /* consumes the delay → attempt 1 in flight */
     ASSERT_EQ(m.attempt_calls[1], 1);
-    kl_connect_op_on_delay(&op);                  /* stale duplicate — dropped */
+    kl_connect_op_on_delay(&op);                  /* stale duplicate; dropped */
     ASSERT_EQ(m.attempt_calls[2], 0);
     ASSERT_EQ(m.attempt_calls[1], 1);
 }
@@ -546,7 +546,7 @@ UTEST(connect_op, stale_deadline_event_dropped) {
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
     ASSERT_EQ(kl_connect_op_start(&op), 0);       /* success → deadline disarmed, detached */
     ASSERT_EQ(m.detach_calls, 1);
-    kl_connect_op_on_deadline(&op, 9);            /* stale (already disarmed) — dropped, no crash */
+    kl_connect_op_on_deadline(&op, 9);            /* stale (already disarmed); dropped, no crash */
     ASSERT_EQ(m.done_calls, 1);
 }
 
@@ -625,7 +625,7 @@ UTEST(connect_op, deadline_arm_failure_fails_connect) {
     ASSERT_EQ(m.last_result, KL_CONNECT_FAILED);
     ASSERT_EQ(m.last_error, 55);
     ASSERT_EQ(m.detach_calls, 1);
-    ASSERT_EQ(m.cancel_deadline_calls, 0);        /* nothing to cancel — never armed */
+    ASSERT_EQ(m.cancel_deadline_calls, 0);        /* nothing to cancel; never armed */
 }
 
 UTEST(connect_op, delay_arm_failure_fast_starts_next) {
@@ -657,7 +657,7 @@ UTEST(connect_op, delay_inline_fire_then_success_return) {
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     ASSERT_EQ(m.attempt_calls[0], 1);
     ASSERT_EQ(m.attempt_calls[1], 1);             /* inline delay started address 1 */
-    ASSERT_EQ(op.delay_armed, 0);                 /* consumed — not left armed */
+    ASSERT_EQ(op.delay_armed, 0);                 /* consumed; not left armed */
     ASSERT_EQ(kl_connect_op_is_detached(&op), 0);
 }
 

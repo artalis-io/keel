@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh — U-1 harness. Runs inside the Ubuntu 24.04 container.
+# run.sh: U-1 harness. Runs inside the Ubuntu 24.04 container.
 #   1. build the freestanding self-contained archive (make freestanding-lib-selfcontained)
 #   2. build BOOTX64.EFI (build.sh)
 #   3. build a FAT ESP image with EFI/BOOT/BOOTX64.EFI + startup.nsh

@@ -89,7 +89,7 @@ UTEST(file_io, vtable_null_on_non_iouring) {
     memset(&loop, 0, sizeof(loop));
     loop.alloc = &a;
 
-    /* Don't call kl_event_init — just test with a zeroed loop */
+    /* Don't call kl_event_init: just test with a zeroed loop */
     KlFileIO *fio = kl_file_io_create(&loop, &a);
     ASSERT_TRUE(fio == NULL);
 }
@@ -146,7 +146,7 @@ UTEST(file_io, headers_first) {
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.alloc = &a;
-    c.stream.fd = -1;  /* invalid fd — send will fail */
+    c.stream.fd = -1;  /* invalid fd: send will fail */
     c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
@@ -161,7 +161,7 @@ UTEST(file_io, headers_first) {
     c.res.headers_sent = 0;  /* headers not sent yet */
     c.res.conn_fd = -1;
 
-    /* response_send will fail on invalid fd — that's expected */
+    /* response_send will fail on invalid fd: that's expected */
     KlHttpConnState state = kl_http_conn_on_writable(&c);
     /* Should close due to send failure, no file I/O submitted */
     ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
@@ -209,7 +209,7 @@ UTEST(file_io, complete_writes) {
     /* Deliver completion: 11 bytes read */
     KlHttpConnState state = kl_http_conn_on_file_complete(&c, 11, 0);
 
-    /* File fully sent — should complete (CLOSED since keep_alive=0) */
+    /* File fully sent: should complete (CLOSED since keep_alive=0) */
     ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
     ASSERT_EQ(c.res.file_offset, (uint64_t)11);
 
@@ -523,9 +523,9 @@ UTEST(file_io, zero_copy_skips_write) {
     /* Simulate zero-copy completion of 500 bytes */
     KlHttpConnState state = kl_http_conn_on_file_complete(&c, 500, 1);
 
-    /* File fully sent — offset advanced, should complete */
+    /* File fully sent: offset advanced, should complete */
     ASSERT_EQ(c.res.file_offset, (uint64_t)500);
-    /* No WRITING phase — file_io_phase should NOT be FILE_IO_WRITING */
+    /* No WRITING phase: file_io_phase should NOT be FILE_IO_WRITING */
     ASSERT_NE(c.file_io_phase, FILE_IO_WRITING);
     /* Connection done (CLOSED since keep_alive=0) */
     ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);

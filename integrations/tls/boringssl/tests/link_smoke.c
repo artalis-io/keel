@@ -1,5 +1,5 @@
 /*
- * link_smoke.c — link/relocation check for the BoringSSL build of the shared
+ * link_smoke.c: link/relocation check for the BoringSSL build of the shared
  * OpenSSL adapter. Identical intent to integrations/tls/openssl/link_smoke.c, but
  * links against BoringSSL. A clean exit proves ../openssl/tls_openssl.c resolves
  * against core libkeel.a + BoringSSL through the OPENSSL_IS_BORINGSSL guards.

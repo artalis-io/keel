@@ -1,7 +1,7 @@
 /*
- * smoke_tcp.c — plaintext TCP link + roundtrip smoke test.
+ * smoke_tcp.c: plaintext TCP link + roundtrip smoke test.
  *
- * NOT a utest suite (not tests/test_*.c) — a standalone program built by the
+ * NOT a utest suite (not tests/test_*.c): a standalone program built by the
  * `smoke` Makefile target. It links the whole TCP core (KlHttpServer + sync
  * KlHttpClient) and drives one real request over loopback, proving the library
  * both links and runs on the target platform (the Windows CI gate). Runs on

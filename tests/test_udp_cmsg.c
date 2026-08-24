@@ -1,5 +1,5 @@
 /*
- * test_udp_cmsg.c — the shared POSIX UDP send-cmsg builder (udp_cmsg.h): overflow-safe capacity
+ * test_udp_cmsg.c: the shared POSIX UDP send-cmsg builder (udp_cmsg.h): overflow-safe capacity
  * checks, fail-on-requested-but-unbuilt, family resolution, and resulting-header level/type. Unit-
  * level (no event loop). Feature-specific cases are guarded by the same macros as the implementation,
  * with explicit requested-but-unavailable (-1) coverage on reduced-capability builds.
@@ -121,7 +121,7 @@ UTEST(udp_cmsg, tos_v6_is_tclass) {
 #endif
 }
 
-/* combined source-pin + TOS (v4): two records — IP_PKTINFO then IP_TOS; exact-fit, one short fails. */
+/* combined source-pin + TOS (v4): two records: IP_PKTINFO then IP_TOS; exact-fit, one short fails. */
 UTEST(udp_cmsg, combined_v4) {
 #if defined(IP_PKTINFO) && defined(IP_TOS)
     struct sockaddr_in s; mk_v4(&s);

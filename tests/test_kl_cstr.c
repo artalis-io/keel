@@ -1,5 +1,5 @@
 /*
- * test_kl_cstr.c — the bounded, locale-free C-string helpers used instead of
+ * test_kl_cstr.c: the bounded, locale-free C-string helpers used instead of
  * snprintf/strtol/str* in the freestanding client path. Each is checked against
  * its libc equivalent (byte-identical output / sign / acceptance) + edge cases.
  */
@@ -13,7 +13,7 @@
 
 static int sgn(int v) { return (v > 0) - (v < 0); }
 
-/* ── kl_ascii_strcasecmp / strncasecmp — sign matches libc for ASCII ─────────── */
+/* ── kl_ascii_strcasecmp / strncasecmp: sign matches libc for ASCII ─────────── */
 UTEST(kl_cstr, ascii_casecmp) {
     const char *pairs[][2] = {
         {"Host", "host"}, {"HOST", "host"}, {"host", "host"},
@@ -35,7 +35,7 @@ UTEST(kl_cstr, ascii_casecmp) {
               sgn(strncasecmp("abc", "abd", 3)));
 }
 
-/* ── kl_parse_u16_decimal — port parsing, bounded, overflow-safe ─────────────── */
+/* ── kl_parse_u16_decimal: port parsing, bounded, overflow-safe ─────────────── */
 UTEST(kl_cstr, parse_u16) {
     uint16_t out = 0xdead;
     ASSERT_EQ(kl_parse_u16_decimal("0", 1, &out), 0);      ASSERT_EQ(out, 0);
@@ -53,13 +53,13 @@ UTEST(kl_cstr, parse_u16) {
     ASSERT_NE(kl_parse_u16_decimal("-1", 2, &out), 0);      /* sign not a digit */
 }
 
-/* ── kl_u64_to_dec / kl_u64_to_hex — byte-identical to snprintf ──────────────── */
+/* ── kl_u64_to_dec / kl_u64_to_hex: byte-identical to snprintf ──────────────── */
 UTEST(kl_cstr, u64_format) {
     uint64_t vals[] = { 0, 1, 9, 10, 80, 255, 1000, 65535, 4294967295ULL,
                         18446744073709551615ULL /* UINT64_MAX */ };
     char got[32], want[32];
     for (size_t i = 0; i < sizeof(vals)/sizeof(vals[0]); i++) {
-        /* kl_u64_to_* do NOT NUL-terminate — terminate before ASSERT_STREQ. */
+        /* kl_u64_to_* do NOT NUL-terminate: terminate before ASSERT_STREQ. */
         size_t n = kl_u64_to_dec(got, sizeof(got) - 1, vals[i]);
         got[n] = '\0';
         snprintf(want, sizeof(want), "%llu", (unsigned long long)vals[i]);
@@ -77,7 +77,7 @@ UTEST(kl_cstr, u64_format) {
     ASSERT_EQ(kl_u64_to_dec(tiny, sizeof(tiny), 1000), (size_t)0);  /* "1000" is 4 digits > cap 3 */
 }
 
-/* ── kl_buf_append family — bounded builders tracking an offset ──────────────── */
+/* ── kl_buf_append family: bounded builders tracking an offset ──────────────── */
 UTEST(kl_cstr, buf_append) {
     char buf[64];
     size_t off = 0;
@@ -101,7 +101,7 @@ UTEST(kl_cstr, buf_append) {
     ASSERT_STREQ(hbuf, "1a2b");
 }
 
-/* ── kl_streq / kl_str_startswith — exact, case-sensitive ────────────────────── */
+/* ── kl_streq / kl_str_startswith: exact, case-sensitive ────────────────────── */
 UTEST(kl_cstr, streq_startswith) {
     ASSERT_TRUE(kl_streq("example.com", "example.com"));
     ASSERT_FALSE(kl_streq("example.com", "example.org"));
@@ -114,7 +114,7 @@ UTEST(kl_cstr, streq_startswith) {
     ASSERT_TRUE(kl_str_startswith("anything", ""));         /* empty prefix */
 }
 
-/* ── kl_strstr / kl_strchr — same result as libc ────────────────────────────── */
+/* ── kl_strstr / kl_strchr: same result as libc ────────────────────────────── */
 UTEST(kl_cstr, strstr_strchr) {
     const char *h = "HTTP/1.1 200 OK\r\n\r\nbody";
     ASSERT_EQ(kl_strstr(h, "\r\n\r\n"), strstr(h, "\r\n\r\n"));

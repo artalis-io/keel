@@ -100,7 +100,7 @@ static void mock_tls_init(MockTls *m) {
 UTEST(tls, vtable_struct_size) {
     /* KlTls has 14 function pointers (7 required + optional alpn_protocol +
      * set_hostname + peer_cert + feed_input + drain_output + set_socket_provider +
-     * at_eof). The optional ops are additive/nullable — growth here is expected when
+     * at_eof). The optional ops are additive/nullable: growth here is expected when
      * one is appended. */
     ASSERT_EQ(sizeof(KlTls), 14 * sizeof(void *));
 }

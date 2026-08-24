@@ -1,20 +1,20 @@
 /*
- * test_stream_single_shot.c — the single-shot completion contract for KlStream, exercised
+ * test_stream_single_shot.c: the single-shot completion contract for KlStream, exercised
  * through the REAL completion seam (no scripted mock).
  *
  * Contract (architecture_invariants.md I5): every completion backend emits EXACTLY ONE completion
- * per submitted op — no duplicate, no post-retirement re-fire. The stream raw-`containerof` recovery
+ * per submitted op: no duplicate, no post-retirement re-fire. The stream raw-`containerof` recovery
  * (KL_COMP_READ/WRITE → KlStream) leans on this.
  *
  * Drives a real KlStream over the build's completion backend (pollcomp = deterministic oracle;
  * native io_uring / IOCP via CI enrollment). For each of READ and WRITE it posts ONE op, drains
- * until the single terminal completion arrives, then — WITHOUT rearming/resubmitting — triggers
+ * until the single terminal completion arrives, then, WITHOUT rearming/resubmitting, triggers
  * additional peer activity (keeping the fd readable/writable) and drains again, asserting NO second
  * completion. On a readiness build (no submitted-op model) the property is N/A and the test skips.
  *
  * Handles are full-width KlSocketHandle throughout (the loopback pair is built via the KEEL default
  * socket seam, kl_sockdef_*), so the IOCP enrollment operates on real pointer-width, overlapped-
- * capable SOCKETs — not int-truncated test handles. All peer transfers and drain results are
+ * capable SOCKETs: not int-truncated test handles. All peer transfers and drain results are
  * asserted, so a failed peer write or drain cannot masquerade as "no duplicate".
  */
 #include "utest.h"
@@ -22,7 +22,7 @@
 #include <keel/event_ctx.h>
 #include <keel/event.h>
 #include <keel/stream.h>
-#include <keel/stream_detail.h>     /* struct KlStream layout — set fd/ctx/alloc for a bare stream */
+#include <keel/stream_detail.h>     /* struct KlStream layout: set fd/ctx/alloc for a bare stream */
 #include <keel/socket.h>            /* KlIoVec */
 #include <keel/sockaddr.h>          /* KlSockAddr, kl_sockaddr_from_ipv4 */
 #include <keel/handle.h>            /* KlSocketHandle, kl_handle_valid */
@@ -43,7 +43,7 @@ static void count_dispatch(struct KlEventCtx *ctx, const void *evp) {
     else if (ev->kind == KL_COMP_WRITE) g_writes++;
 }
 
-/* A connected TCP loopback pair via the default socket seam — full-width KlSocketHandle on every
+/* A connected TCP loopback pair via the default socket seam: full-width KlSocketHandle on every
  * platform (overlapped-capable on IOCP), unlike int-narrowed test socketpairs. */
 static int make_pair(KlSocketHandle *end, KlSocketHandle *peer) {
     KlSocketHandle lis = kl_sockdef_socket(AF_INET, SOCK_STREAM, 0);
@@ -74,7 +74,7 @@ UTEST(stream_single_shot, one_completion_per_op) {
     ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
 
     if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) {
-        /* Readiness build: no submitted-op / completion model — single-shot is N/A here. Skip. */
+        /* Readiness build: no submitted-op / completion model: single-shot is N/A here. Skip. */
         kl_event_ctx_free(&ctx);
         return;
     }
@@ -92,7 +92,7 @@ UTEST(stream_single_shot, one_completion_per_op) {
     g_target = &st;
 
     /* Associate the fd with the loop exactly as the completion server does at accept
-     * (completion_http_server.c) — inert-ish on pollcomp/io_uring, CreateIoCompletionPort on IOCP. */
+     * (completion_http_server.c): inert-ish on pollcomp/io_uring, CreateIoCompletionPort on IOCP. */
     ASSERT_EQ(kl_event_add(&ctx.loop, st.fd, KL_EVENT_READ, &st), 0);
 
     /* ── READ: one posted recv → exactly one completion ────────────────────────────────────────── */

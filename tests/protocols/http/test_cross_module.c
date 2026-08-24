@@ -1,5 +1,5 @@
 /*
- * test_cross_module.c — Integration tests for module combinations
+ * test_cross_module.c: Integration tests for module combinations
  *
  * Tests cross-module interactions that unit tests don't cover:
  *   - compress + drain pipeline
@@ -97,7 +97,7 @@ static int mock_feed(KlCompress *self, const char *data, size_t len,
 static int mock_compress_buf(KlCompress *self, const char *in, size_t in_len,
                               char **out, size_t *out_len, KlAllocator *alloc) {
     (void)self;
-    /* "Compress" by copying data without change — must be smaller than input
+    /* "Compress" by copying data without change: must be smaller than input
      * to pass the expansion check in kl_http_response_body_compress.
      * We drop the last byte to simulate compression savings. */
     size_t clen = in_len > 1 ? in_len - 1 : 0;
@@ -279,7 +279,7 @@ UTEST(cross, compress_drain_backpressure) {
     comp.base.encoding = mock_encoding;
     comp.base.destroy  = mock_destroy;
 
-    /* Feed data — should buffer in drain because writer blocks */
+    /* Feed data: should buffer in drain because writer blocks */
     int rc = comp.base.feed(&comp.base, "data", 4, 0, drain_emit, &drain);
     ASSERT_EQ(0, rc);
 
@@ -422,7 +422,7 @@ static void mw_async_resume(KlAsyncOp *op, void *user_data) {
     MwAsyncCtx *ctx = user_data;
     KlHttpConn *conn = ctx->op.conn;
 
-    /* Access body from the reader — should still be valid */
+    /* Access body from the reader: should still be valid */
     KlHttpBufReader *br = (KlHttpBufReader *)ctx->saved_req->body_reader;
     if (br && br->len > 0) {
         kl_http_response_status(&conn->res, 200);
@@ -561,7 +561,7 @@ UTEST(cross, resolver_cache_client) {
     /* Second resolve: cache hit → no new inner call */
     KlResolveReq *req2 = cache->resolve(cache, NULL, "example.com", 80,
                                           rc_test_done, NULL);
-    ASSERT_EQ(1, mock_resolve_count);  /* still 1 — cache hit */
+    ASSERT_EQ(1, mock_resolve_count);  /* still 1: cache hit */
     ASSERT_EQ(2, rc_test_done_count);  /* done_fn fired again */
     ASSERT_EQ(0, rc_test_last_error);
     if (req2) cache->cancel(req2);

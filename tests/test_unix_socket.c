@@ -428,7 +428,7 @@ UTEST(unix_socket, peer_credentials_available) {
     ASSERT_EQ(0, g_cred_rc);
     ASSERT_EQ((long)getuid(), g_captured_cred.uid);
     ASSERT_EQ((long)getgid(), g_captured_cred.gid);
-    /* A UNIX socket has no IP address — peer_addr reports unavailable. */
+    /* A UNIX socket has no IP address: peer_addr reports unavailable. */
     ASSERT_EQ(-1, g_addr_rc);
     /* Peer is this same test process; when a pid is available (Linux
      * SO_PEERCRED, macOS LOCAL_PEERPID) it must be ours. */
@@ -809,7 +809,7 @@ UTEST(unix_socket, socket_group_is_applied) {
     KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
-        .unix_socket_group = grpname,   /* our own group — allowed unprivileged */
+        .unix_socket_group = grpname,   /* our own group: allowed unprivileged */
         .unix_socket_mode = 0660,
         .max_connections = 4,
     };

@@ -74,14 +74,14 @@ UTEST(server_stats, stats_null_safety) {
     KlHttpServerStats stats;
     memset(&stats, 0xFF, sizeof(stats));
 
-    /* NULL server — should zero out */
+    /* NULL server: should zero out */
     kl_http_server_stats(NULL, &stats);
     ASSERT_EQ(stats.active_connections, 0);
     ASSERT_EQ(stats.max_connections, 0);
     ASSERT_EQ(stats.async_suspended, 0);
     ASSERT_EQ(stats.listen_paused, 0);
 
-    /* NULL out — should not crash */
+    /* NULL out: should not crash */
     KlHttpServer s;
     KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));

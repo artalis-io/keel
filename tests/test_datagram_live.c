@@ -1,9 +1,9 @@
 /*
- * test_datagram_live.c — the public KlDatagram over a REAL event loop + REAL loopback UDP.
+ * test_datagram_live.c: the public KlDatagram over a REAL event loop + REAL loopback UDP.
  *
- * A LIVE backend binding: no mock. `kl_event_ctx_init` yields whatever the build's backend is —
+ * A LIVE backend binding: no mock. `kl_event_ctx_init` yields whatever the build's backend is:
  * a pollcomp COMPLETION loop under BACKEND=pollcomp, a kqueue/epoll READINESS loop on
- * a default build — and the facade's §2.5 adapter builder selects the matching path. The caller prepares
+ * a default build; and the facade's §2.5 adapter builder selects the matching path. The caller prepares
  * the fd through the socket seam (KlDatagram contract), then does a real send→recv round-trip over
  * 127.0.0.1 and a clean close, so the live completion/readiness adapters are exercised end to end.
  *
@@ -163,7 +163,7 @@ static KlSocketHandle prep_fd_pktinfo(const KlSocketProvider *sp, const char *bi
 }
 
 /* The completion recv captures the datagram's local (dest) address (dg_comp_arm requests
- * KL_DGRAM_RX_PKTINFO), consistent with the readiness recv — the capability the source-pinned reply
+ * KL_DGRAM_RX_PKTINFO), consistent with the readiness recv; the capability the source-pinned reply
  * depends on. Backend-adaptive: BACKEND=pollcomp/iouring exercise the completion recv, default the
  * readiness recv. */
 UTEST(datagram_live, completion_recv_captures_local) {
@@ -228,14 +228,14 @@ static int recv_tos_oracle(int fd, unsigned char *buf, size_t buflen, size_t *ou
 
 /* Per-packet TOS through the backend: a KlDatagram send with tos >= 0 builds + carries the TOS cmsg on
  * the (overlapped, on completion backends) send; a RAW recvmsg peer with IP_RECVTOS reads the datagram
- * AND inspects the received TOS, asserting the requested DSCP/ECN actually egressed — so a backend that
+ * AND inspects the received TOS, asserting the requested DSCP/ECN actually egressed; so a backend that
  * silently omits the cmsg fails here. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy). */
 UTEST(datagram_live, completion_tos_send_verifies_tos) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
     const KlSocketProvider *sp = ctx.sockets;
 
-    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);   /* RAW peer — not a KlDatagram; recvmsg directly */
+    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);   /* RAW peer; not a KlDatagram; recvmsg directly */
     ASSERT_TRUE(kl_handle_valid(rxfd));
     int rfd = (int)rxfd;
 #if defined(IP_RECVTOS)
@@ -272,7 +272,7 @@ UTEST(datagram_live, completion_tos_send_verifies_tos) {
     ASSERT_EQ(0, memcmp(pbuf, msg, plen));
 #if defined(IP_RECVTOS)
 #if defined(__linux__)
-    ASSERT_TRUE(tos >= 0);                          /* Linux delivers the RX TOS — a dropped cmsg is caught */
+    ASSERT_TRUE(tos >= 0);                          /* Linux delivers the RX TOS; a dropped cmsg is caught */
 #endif
     if (tos >= 0) ASSERT_EQ(0x28, tos);             /* the requested DSCP egressed (where the platform delivers) */
 #endif
@@ -282,16 +282,16 @@ UTEST(datagram_live, completion_tos_send_verifies_tos) {
     kl_event_ctx_free(&ctx);
 }
 
-/* kl_datagram_set_tos sets the SOCKET-DEFAULT TOS — a plain send (no per-message tos) then
+/* kl_datagram_set_tos sets the SOCKET-DEFAULT TOS; a plain send (no per-message tos) then
  * egresses with that default. A RAW recvmsg peer with IP_RECVTOS reads the received TOS and asserts the
- * socket default actually applied. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy) —
+ * socket default actually applied. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy),
  * the completion send path applies the kernel socket default just like readiness. */
 UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
     const KlSocketProvider *sp = ctx.sockets;
 
-    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);   /* RAW peer — recvmsg directly */
+    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);   /* RAW peer; recvmsg directly */
     ASSERT_TRUE(kl_handle_valid(rxfd));
     int rfd = (int)rxfd;
 #if defined(IP_RECVTOS)
@@ -342,7 +342,7 @@ UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
  * datagram sent with a per-packet TOS mark; kl_datagram_recv_tos() (read inside on_recv) returns the mark.
  * Backend-adaptive via kl_event_ctx_init: on BACKEND=pollcomp/iouring this exercises the COMPLETION recv
  * cmsg parse (dg_comp_arm requests RX_TOS → backend fills ev->tos → dispatch stamps the inbound slot); on
- * a default build it exercises the readiness pull. NOT a fabricated-metadata accessor test — a backend
+ * a default build it exercises the readiness pull. NOT a fabricated-metadata accessor test; a backend
  * that drops the RX TOS cmsg fails here (on Linux, where the RX TOS is reliably delivered). */
 UTEST(datagram_live, recv_tos_capture_verifies) {
     g_alloc = kl_allocator_default();

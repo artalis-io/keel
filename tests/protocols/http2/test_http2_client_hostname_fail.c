@@ -1,5 +1,5 @@
 /*
- * test_http2_client_hostname_fail.c — guards that the HTTP/2 client fails closed on a
+ * test_http2_client_hostname_fail.c: guards that the HTTP/2 client fails closed on a
  * set_hostname failure (HTTP/2 client slice of the TLS set-hostname-fail tests). The HTTP/2 client MUST fail closed when
  * KlTls::set_hostname() returns -1 (see the HTTP slice for the full rationale).
  *

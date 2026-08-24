@@ -1,5 +1,5 @@
 /*
- * test_roundtrip.c — in-memory client<->server roundtrip over the nghttp2
+ * test_roundtrip.c: in-memory client<->server roundtrip over the nghttp2
  * adapters. No sockets, no KEEL event loop: the two sessions are wired directly,
  * each side's on_send output fed into the other's recv, so a full HTTP/2 request
  * + response is exercised through real nghttp2 framing. Validates both adapters
@@ -134,7 +134,7 @@ int main(void) {
 
     /* Pump until quiescent: move client->server and server->client bytes. The
      * server session consumes the client connection preface itself (nghttp2
-     * default), so feed the client's bytes through verbatim — magic included. */
+     * default), so feed the client's bytes through verbatim: magic included. */
     for (int iter = 0; iter < 100; iter++) {
         int moved = 0;
         if (cs->flush(cs) < 0) { cs->destroy(cs); ss->destroy(ss); return fail("client flush"); }
