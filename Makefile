@@ -1148,6 +1148,18 @@ check-protocol-home:
 check-old-layout:
 	@sh tools/check_old_layout.sh
 
+# Comments-only milestone/phase archaeology gate (C2-6). Scans every tracked first-party .c/.h
+# (vendor/ excluded), extracting COMMENT text only via a real C-comment state machine — so string
+# literals, including the UEFI/lwIP self-test CI-oracle output markers ("6.4c: GO", "S-4: GO",
+# "P9-3 PASS"), are naturally ignored — and rejects historical milestone/phase/finding/step token
+# families. Historical matching is PRECISE so legitimate local scenario catalogs pass (raw_send
+# B1..B11, raw_dns B1/B2) and ordinary text is not caught (UTF-8 is not F-8, E2E is not E2, lowercase
+# "phase 1"/"two-phase" prose is not a milestone). NO file, line, or marker exceptions. Positive +
+# negative self-canaries run first and abort if the scanner regresses. Design/history docs under
+# docs/ are NOT scanned — their recorded milestone history stands (as the other stale-name gates do).
+check-no-milestones:
+	@perl tools/check_no_milestones.pl
+
 
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
@@ -1922,7 +1934,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
