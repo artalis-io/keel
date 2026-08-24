@@ -17,7 +17,7 @@
 #include <unistd.h>   /* fork, getpid — multi-worker (SO_REUSEPORT) mode */
 
 /* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_http_server_init auto-adopts the
- * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
+ * backend's overlapped provider, so this default-provider server serves every backend
  * unchanged — no explicit provider needed. */
 
 static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {

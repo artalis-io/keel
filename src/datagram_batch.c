@@ -2,7 +2,7 @@
  * datagram_batch.c — the batch / GSO / GRO extension object lifecycle.
  *
  * Scope: capability-gated, caller-preallocated batch create/free with overflow-safe allocation,
- * owner/direction binding, the E2 completion-creation rules, and full allocation-failure unwind. The
+ * owner/direction binding, the completion-creation rules, and full allocation-failure unwind. The
  * send/recv wiring lives elsewhere.
  *
  * A KlDatagramBatch is layout-neutral (KlSockAddr-free) and touches no platform networking header — it
@@ -72,7 +72,7 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
 
     const int want_recv = (dir & KL_DGRAM_BATCH_RECV) != 0;
     const int want_send = (dir & KL_DGRAM_BATCH_SEND) != 0;
-    /* E2: a receive direction (RECV or BOTH) requires a readiness datagram; SEND works on both. */
+    /* A receive direction (RECV or BOTH) requires a readiness datagram; SEND works on both. */
     if (dg->completion && want_recv) return NULL;
 
     KlAllocator *a = dg->alloc;

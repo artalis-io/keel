@@ -8,7 +8,7 @@
  * under -ffreestanding -fno-builtin, and the platform provides them: libc on a
  * hosted build, EDK2 BaseMemoryLib on UEFI, gnu-efi on gnu-efi. That is the
  * documented "small required C-runtime surface" (docs/archive/phases/phase10_uefi_feasibility_
- * design.md §F-4), verified by tests/freestanding_symbol_gate.sh.
+ * design.md), verified by tests/freestanding_symbol_gate.sh.
  *
  * This TU is the OPTIONAL counterpart for a target that has none of those. It is
  * NOT in CORE_SRC and NOT in the default FREESTANDING_CLIENT_SRC — it is linked

@@ -175,7 +175,7 @@ typedef struct {
 int  kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg);
 int  kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget);
 
-/* ── D1: public socket convenience (create + configure + bind + adopt in one call) ────────────────
+/* ── Public socket convenience (create + configure + bind + adopt in one call) ────────────────
  * kl_datagram_init/_init_ex above adopt an ALREADY-prepared fd (advanced / bring-your-own). Most callers
  * want the socket created for them: kl_datagram_socket_init creates + configures + (optionally) binds +
  * adopts, reusing the M0 provider-neutral preparation internally. Works on every loop model + provider
@@ -240,7 +240,7 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg);
 /* Provider-neutral connect (first-time only). Requires the GRANTED kl_datagram_caps() CAP_CONNECTED bit;
  * calls the socket provider's connect seam and, on success, records the datagram's connected state so a
  * peerless send (KlDatagramMessage.peer == NULL) is admitted. Returns 0, or -1 with kl_datagram_last_
- * error(): KL_ERR_INVALID_ARG (bad args, or ALREADY connected — reconnect is unsupported in D1),
+ * error(): KL_ERR_INVALID_ARG (bad args, or ALREADY connected — reconnect is unsupported),
  * KL_ERR_UNSUPPORTED (CONNECTED not granted), KL_ERR_CONNECT (the connect syscall failed — the datagram
  * stays unconnected + usable for destination-addressed sends). */
 int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer);

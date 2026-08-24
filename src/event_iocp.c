@@ -580,7 +580,7 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
     int want_ctrl = (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0;
     LPFN_WSASENDMSG fn = want_ctrl ? kl_udp_win_get_sendmsg((SOCKET)sop->fd) : NULL;
     /* A REQUESTED control send with no WSASendMsg extension must FAIL — never fall back to WSASendTo and
-     * silently drop the source-pin/TOS (§P1; the seam must be correct for custom providers / runtime
+     * silently drop the source-pin/TOS (the seam must be correct for custom providers / runtime
      * extension failure, not just the capability-gated built-in provider). */
     if (want_ctrl && !fn) { iocp_op_free(op); return -1; }
     DWORD sent = 0;

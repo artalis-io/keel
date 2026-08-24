@@ -2,7 +2,7 @@
  * keel/listener.h — Accept-side listener state machine (KlListener).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ STABLE transport API. The function signatures + ownership contracts below are the            │
  * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
  * │ <keel/listener_detail.h> (opt-in, for embedders that stack/embed a KlListener) and may change │
  * │ between releases — embedders recompile. Use the accessors, never the detail fields.          │

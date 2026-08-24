@@ -12,8 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
-#include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
-#include <keel/stream.h>         /* KlStream contract (STABLE Phase-B transport API) */
+#include <keel/drain.h>      /* KlDrain wq (write queue, embedded in KlStream) */
+#include <keel/stream.h>         /* KlStream contract (STABLE transport API) */
 #include <keel/stream_detail.h>  /* struct KlStream layout — KlHttpConn embeds it (opt-in detail) */
 #include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
 

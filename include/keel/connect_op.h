@@ -2,7 +2,7 @@
  * keel/connect_op.h — Outbound-connect terminal-once state machine (KlConnectOp).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ STABLE transport API. The function signatures + ownership contracts below are the            │
  * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
  * │ <keel/connect_op_detail.h> (opt-in, for embedders that stack/embed a KlConnectOp) and may     │
  * │ change between releases — embedders recompile. Use the accessors, never the detail fields.   │

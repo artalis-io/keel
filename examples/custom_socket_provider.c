@@ -1,5 +1,5 @@
 /*
- * custom_socket_provider.c — bring-your-own socket stack (PAL Phase 4).
+ * custom_socket_provider.c — bring-your-own socket stack.
  *
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
  * and selecting a provider via KlHttpServerConfig.sockets (server) + KlHttpClientConfig.sockets

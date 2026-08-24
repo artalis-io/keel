@@ -11,7 +11,7 @@
 #include <keel/tls.h>
 #include <keel/http2_server.h>
 #include <keel/http_connection.h>
-#include <keel/listener_detail.h>  /* struct KlListener layout — KlHttpServer embeds it (step 6B-1) */
+#include <keel/listener_detail.h>  /* struct KlListener layout — KlHttpServer embeds it */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
@@ -128,7 +128,7 @@ typedef struct KlHttpServer {
      * this embedded KlListener with the split-credit pool accounting. INTERNAL/UNSTABLE. */
     KlListener accept_listener;   /**< accept driver (active when accept_via_listener); readiness or completion */
     int  accept_via_listener;     /**< 1 = the KlListener drives accepts (readiness, or a post-driven completion backend) */
-    int  accept_setup_done;       /**< completion path: prime_accepts run once (window latched) — 6B-3 2b-ii */
+    int  accept_setup_done;       /**< completion path: prime_accepts run once (window latched) */
     int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */

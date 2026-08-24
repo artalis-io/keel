@@ -3,7 +3,7 @@
  * lifecycle (KlStream).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ STABLE transport API. The function signatures + ownership contracts below are the            │
  * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
  * │ <keel/stream_detail.h> (opt-in, for embedders that stack/embed a KlStream) and may change    │
  * │ between releases — embedders recompile. Use the accessors, never the detail fields.          │

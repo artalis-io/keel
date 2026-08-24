@@ -760,7 +760,7 @@ int kl_datagram_recv_tos(const KlDatagram *dg) {
 
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {
     if (!dg || !dg->core) return -1;
-    /* P1-A fail-loud guard: a socket with GRO capture ENABLED (accepted RX_GRO) must have an
+    /* Fail-loud guard: a socket with GRO capture ENABLED (accepted RX_GRO) must have an
      * actively-splitting RECV batch attached, or a coalesced buffer would be delivered UNSPLIT as one
      * datagram (a boundary-corruption bug). Refuse recv_start rather than deliver corrupt data —
      * GRO-without-splitting is thus unrepresentable. (An attached-but-inactive batch, gro_active == 0,

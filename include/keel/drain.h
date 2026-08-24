@@ -41,7 +41,7 @@ typedef struct {
     size_t          buf_cap;     /**< Buffer capacity */
     size_t          max_size;    /**< 0 = unlimited, else hard cap */
     int             error;       /**< Sticky error flag */
-    /* ── Phase-B reservation + low-water extension (internal; API in src/drain_reserve.h) ──
+    /* ── Write-queue reservation + low-water extension (internal; API in src/drain_reserve.h) ──
      * Storage for the preallocated, allocation-free reservation path and the low-water
      * writable notification. Plain KlDrain users never touch these; they stay zero unless
      * kl_drain_prealloc() / kl_drain_set_low_water() are called. */
