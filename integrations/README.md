@@ -7,8 +7,8 @@ pass with **no** external library present.
 
 | Directory | Implements | Backing library | BYO var |
 |-----------|-----------|-----------------|---------|
-| [`mbedtls/`](mbedtls/) | `KlTls` (`include/keel/tls.h`) | mbedTLS 3.x | `MBEDTLS_DIR` |
-| [`nghttp2/`](nghttp2/) | `KlHttp2ClientSession` + `KlHttp2ServerSession` (`include/keel/http2_client.h`, `http2_server.h`) | nghttp2 1.x | `NGHTTP2_DIR` / pkg-config |
+| [`tls/mbedtls/`](tls/mbedtls/) | `KlTls` (`include/keel/tls.h`) | mbedTLS 3.x | `MBEDTLS_DIR` |
+| [`http2/nghttp2/`](http2/nghttp2/) | `KlHttp2ClientSession` + `KlHttp2ServerSession` (`include/keel/http2_client.h`, `http2_server.h`) | nghttp2 1.x | `NGHTTP2_DIR` / pkg-config |
 
 ## Ground rules (all integrations)
 
