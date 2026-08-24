@@ -1,5 +1,5 @@
 /*
- * keel_lwip.h — lwIP platform providers for Keel (socket + event backend).
+ * keel_lwip.h: lwIP platform providers for Keel (socket + event backend).
  *
  * A bring-your-own lwIP platform: a matched pair of a KlSocketProvider (over the
  * lwIP BSD socket API) and a KlEventProvider (over lwip_poll), so Keel's server
@@ -15,7 +15,7 @@
  * (The event provider's native_provider() returns the lwIP socket provider, so
  * setting only .event_provider auto-wires .sockets to match.)
  *
- * lwIP is NOT vendored — build against your own lwIP (LWIP_DIR) + lwipopts.h.
+ * lwIP is NOT vendored; build against your own lwIP (LWIP_DIR) + lwipopts.h.
  * The providers use only Keel's public authoring API (<keel/socket.h>,
  * <keel/event.h>); no internal Keel or host-POSIX types. lwIP is readiness-only
  * (its sockets layer is lwip_poll). See docs/archive/designs/lwip_platform_design.md.

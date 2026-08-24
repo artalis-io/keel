@@ -1,5 +1,5 @@
 /*
- * efi_tcp4.h — minimal EFI_TCP4 + ServiceBinding protocol surface.
+ * efi_tcp4.h: minimal EFI_TCP4 + ServiceBinding protocol surface.
  *
  * Vendored from the UEFI Specification 2.10, sections:
  *   - 28.1  EFI_SERVICE_BINDING_PROTOCOL           (CreateChild / DestroyChild)

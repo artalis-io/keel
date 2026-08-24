@@ -2,10 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* miniz public API — included via -I$(MINIZ_DIR) */
+/* miniz public API: included via -I$(MINIZ_DIR) */
 #include <miniz.h>
 
-/* Hard ceiling on decompressed output — anti-decompression-bomb bound.
+/* Hard ceiling on decompressed output: anti-decompression-bomb bound.
  * The gzip trailer ISIZE is untrusted (and only 32 bits, so it wraps), so
  * it cannot be relied on to bound output.  Both the one-shot growth loop
  * and the streaming path enforce this cap independently.  Override at build
@@ -17,7 +17,7 @@
 /* ── Internal session struct ─────────────────────────────────────── */
 
 typedef struct {
-    KlDecompress        base;       /* vtable — must be first */
+    KlDecompress        base;       /* vtable; must be first */
     KlAllocator        *alloc;
     tinfl_decompressor   decomp;    /* ~11KB */
     uint32_t            crc;
@@ -129,7 +129,7 @@ static int miniz_decompress_fn(KlDecompress *self,
     size_t comp_len = in_len - hdr_end - 8;
 
     /* Allocate output buffer using ISIZE hint (mod 2^32).
-     * Cap initial alloc to 16 MB — untrusted ISIZE could be huge.
+     * Cap initial alloc to 16 MB; untrusted ISIZE could be huge.
      * Growth loop below handles larger outputs. */
     #define KL_DECOMP_INIT_MAX (16 * 1024 * 1024)
     size_t buf_size = expected_isize;
@@ -203,7 +203,7 @@ static int miniz_decompress_fn(KlDecompress *self,
             return -1;
         }
 
-        /* NEEDS_MORE_INPUT with data remaining — continue */
+        /* NEEDS_MORE_INPUT with data remaining: continue */
         if (in_pos >= comp_len && status != TINFL_STATUS_DONE) {
             kl_free(alloc, buf, buf_size);
             return -1;
@@ -233,7 +233,7 @@ static int miniz_decompress_fn(KlDecompress *self,
             kl_free(alloc, buf, buf_size);
             buf = trimmed;
         }
-        /* else: keep oversized buffer — not an error */
+        /* else: keep oversized buffer; not an error */
     }
 
     *out = buf;
@@ -402,7 +402,7 @@ static void miniz_decomp_destroy(KlDecompress *self) {
 KlDecompress *kl_decompress_miniz_create(KlCompressCtx *ctx,
                                           KlAllocator *alloc) {
     if (!ctx || !alloc) return NULL;
-    (void)ctx;  /* context holds compression level — not used for decompression */
+    (void)ctx;  /* context holds compression level, not used for decompression */
 
     KlMinizDecompSession *s = kl_malloc(alloc, sizeof(*s));
     if (!s) return NULL;

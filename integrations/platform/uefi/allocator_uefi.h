@@ -1,5 +1,5 @@
 /*
- * allocator_uefi.h — a KlAllocator backed by UEFI Boot Services.
+ * allocator_uefi.h: a KlAllocator backed by UEFI Boot Services.
  *
  * A UEFI client requires an EXPLICIT allocator: there is no global heap in the
  * pre-boot environment,

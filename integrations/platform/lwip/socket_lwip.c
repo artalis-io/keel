@@ -1,12 +1,12 @@
 /*
- * socket_lwip.c — reference KlSocketProvider over the lwIP socket API.
+ * socket_lwip.c: reference KlSocketProvider over the lwIP socket API.
  *
- * BYO / opt-in: lwIP is NOT vendored — build this against your own lwIP
+ * BYO / opt-in: lwIP is NOT vendored; build this against your own lwIP
  * (LWIP_DIR) with your lwipopts.h. This is a reference that validates Keel's
  * public provider API (<keel/socket.h>) is sufficient to run Keel on lwIP; it is
  * not a shipped/default platform. See docs/archive/designs/lwip_platform_design.md.
  *
- * Uses only the public authoring API — kl_ssize_t / KlIoVec / KlSocketHandle,
+ * Uses only the public authoring API: kl_ssize_t / KlIoVec / KlSocketHandle,
  * never internal or host-POSIX types. struct iovec here is lwIP's own (from
  * lwip/sockets.h), translated from KlIoVec inside this TU.
  */
@@ -41,13 +41,13 @@ static int lw_set_ipv6only(void *c, KlSocketHandle fd, int on) {
 #if defined(IPPROTO_IPV6) && defined(IPV6_V6ONLY)
     return lw_setopt_int((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, on);
 #else
-    (void)fd; (void)on; return -1;   /* IPv4-only lwIP build — best-effort */
+    (void)fd; (void)on; return -1;   /* IPv4-only lwIP build: best-effort */
 #endif
 }
 static int lw_set_tcp_nodelay(void *c, KlSocketHandle fd, int on) { (void)c; return lw_setopt_int((int)fd, IPPROTO_TCP, TCP_NODELAY, on); }
 static int lw_set_cork(void *c, KlSocketHandle fd, int on)        { (void)c; (void)fd; (void)on; return -1; }  /* no TCP_CORK */
 
-/* KlSockAddr <-> lwIP sockaddr — the lwIP-local counterpart of the built-in
+/* KlSockAddr <-> lwIP sockaddr: the lwIP-local counterpart of the built-in
  * providers' src/sockaddr_native.h (which resolves host sockaddr and so cannot be
  * reused here). This is where, and the only where, lwIP's address layout lives. */
 static socklen_t lw_to_native(const KlSockAddr *a, struct sockaddr_storage *ss) {
@@ -140,18 +140,18 @@ static kl_ssize_t lw_writev(void *c, KlSocketHandle fd, const KlIoVec *iov, int 
     }
     return lwip_writev((int)fd, v, iovcnt);
 }
-/* No sendfile op — lwIP has none; without KL_SOCK_CAP_SENDFILE Keel pread-sends. */
+/* No sendfile op: lwIP has none; without KL_SOCK_CAP_SENDFILE Keel pread-sends. */
 
 /* ── Datagram data-plane (KlDatagramOps) ──────────────────────────────────
  * Folded onto the lwIP provider so one runtime object owns stream + datagram I/O
- * (axis-audit A2) — no separately-linked udp_io_lwip artifact. Public headers only:
+ * (axis-audit A2): no separately-linked udp_io_lwip artifact. Public headers only:
  * the ops take (ctx, fd) + KlSockAddr, reusing lw_to_native/lw_from_native. lwIP's
  * socket layer offers no source-pin/TOS control message, no recvmmsg/sendmmsg, and
- * no UDP GSO — so those degrade (send ignores src/tos; batch/GSO NULL). */
+ * no UDP GSO, so those degrade (send ignores src/tos; batch/GSO NULL). */
 
 static kl_ssize_t lwdg_send(void *c, KlSocketHandle fd, const void *data, size_t len,
                             const KlSockAddr *dest, const KlSockAddr *src, int tos) {
-    (void)c; (void)src; (void)tos;   /* lwIP: no pktinfo/TOS cmsg — best-effort to dest */
+    (void)c; (void)src; (void)tos;   /* lwIP: no pktinfo/TOS cmsg; best-effort to dest */
     int s = (int)fd;
     if (!dest || kl_sockaddr_family(dest) == KL_AF_UNSPEC)
         return lwip_send(s, data, len, 0);   /* connected socket */
@@ -178,7 +178,7 @@ static kl_ssize_t lwdg_recv(void *c, KlSocketHandle fd, void *buf, size_t buflen
 static kl_ssize_t lwdg_send_gso(void *c, KlSocketHandle fd, const void *data, size_t len,
                                 uint16_t seg, const KlSockAddr *dest) {
     (void)c; (void)fd; (void)data; (void)len; (void)seg; (void)dest;
-    errno = EIO;   /* no UDP GSO on lwIP — udp.c falls back to per-segment sends */
+    errno = EIO;   /* no UDP GSO on lwIP; udp.c falls back to per-segment sends */
     return -1;
 }
 
@@ -264,7 +264,7 @@ static int lwdg_mcast(void *c, KlSocketHandle fd, int family,
 
 /* lwIP ignores source-pin / per-packet TOS (§4) → NEVER granted (no silent-no-op emulation), and
  * has no IPv6 broadcast. Connected-mode send is always available. Multicast is granted ONLY when the
- * fd's family has its multicast subsystem compiled in — LWIP_IGMP (IPv4) / LWIP_IPV6_MLD (IPv6) — the
+ * fd's family has its multicast subsystem compiled in, LWIP_IGMP (IPv4) / LWIP_IPV6_MLD (IPv6), the
  * exact guards lwdg_mcast uses; otherwise a join would fail after init granted it. */
 static unsigned lwdg_caps(void *ctx, KlSocketHandle fd) {
     (void)ctx;

@@ -1,5 +1,5 @@
 /*
- * efi_udp4.h — minimal EFI_UDP4 + ServiceBinding protocol surface.
+ * efi_udp4.h: minimal EFI_UDP4 + ServiceBinding protocol surface.
  *
  * Vendored from the UEFI Specification 2.10, section 30.2 (EFI_UDP4_PROTOCOL) plus
  * the shared §28.1 EFI_SERVICE_BINDING_PROTOCOL / §28.3 EFI_IPv4_ADDRESS types. The
@@ -8,7 +8,7 @@
  *
  * Depends on efi_min.h (EFI_STATUS, EFI_EVENT, EFI_GUID, EFI_HANDLE, EFIAPI, BOOLEAN,
  * UINT8/16/32, UINTN, VOID) and efi_tcp4.h (for EFI_IPv4_ADDRESS +
- * EFI_SERVICE_BINDING_PROTOCOL, which the TCP4 header already defines — we reuse them
+ * EFI_SERVICE_BINDING_PROTOCOL, which the TCP4 header already defines; we reuse them
  * rather than re-vendoring, so the two stay in sync).
  *
  * EFIAPI is gated on __x86_64__ in efi_min.h (ms_abi only on x86-64).
@@ -29,12 +29,12 @@
 #define EFI_UDP4_PROTOCOL_GUID \
     { 0x3ad9df29, 0x4501, 0x478d, {0xb1, 0xf8, 0x7f, 0x7f, 0xe7, 0x0e, 0x50, 0xf3} }
 
-/* EFI_TIME (UEFI 2.10 §8.3 — RxData TimeStamp; unused here) now comes from efi_min.h
- * (included via efi_tcp4.h) — it is core UEFI and also the cert-validity clock source
+/* EFI_TIME (UEFI 2.10 §8.3, RxData TimeStamp; unused here) now comes from efi_min.h
+ * (included via efi_tcp4.h); it is core UEFI and also the cert-validity clock source
  * via Runtime Services GetTime, so it lives in the base header, defined once. */
 
 /* ---- UDP4 config data (UEFI 2.10 §30.2.5, EFI_UDP4_CONFIG_DATA) ----
- * Field order is per-spec — a wrong layout silently corrupts Configure(). */
+ * Field order is per-spec; a wrong layout silently corrupts Configure(). */
 typedef struct {
     BOOLEAN          AcceptBroadcast;
     BOOLEAN          AcceptPromiscuous;
@@ -53,7 +53,7 @@ typedef struct {
     UINT16           RemotePort;
 } EFI_UDP4_CONFIG_DATA;
 
-/* ---- UDP4 session data (UEFI 2.10 §30.2.6) — per-datagram src/dst override ---- */
+/* ---- UDP4 session data (UEFI 2.10 §30.2.6): per-datagram src/dst override ---- */
 typedef struct {
     EFI_IPv4_ADDRESS SourceAddress;
     UINT16           SourcePort;

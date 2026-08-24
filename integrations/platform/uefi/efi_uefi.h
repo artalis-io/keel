@@ -1,5 +1,5 @@
 /*
- * efi_uefi.h — UEFI platform+allocator shim base types.
+ * efi_uefi.h: UEFI platform+allocator shim base types.
  *
  * Extends the minimal vendored UEFI surface (efi_min.h)
  * with the handful of extra declarations the shims need that efi_min.h does
@@ -23,7 +23,7 @@
 /* ---- Memory pool types for AllocatePool (UEFI 2.10 §7.2, EFI_MEMORY_TYPE) ----
  * efi_min.h defines EfiLoaderData (2). The KEEL allocator uses
  * EfiBootServicesData (4): data owned by a boot-services application, freed
- * automatically at ExitBootServices — the correct class for a transient
+ * automatically at ExitBootServices, the correct class for a transient
  * networking heap that lives only in the pre-boot environment. */
 #ifndef EfiBootServicesData
 #define EfiBootServicesData 4

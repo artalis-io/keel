@@ -1,10 +1,10 @@
 /*
- * lwipopts_raw.h — NO_SYS=1 (bare mainloop) lwIP config for the raw completion backend.
+ * lwipopts_raw.h: NO_SYS=1 (bare mainloop) lwIP config for the raw completion backend.
  *
  * This is the config for a KEEL-DRIVEN raw (tcp_*) callback-API provider: lwIP runs
  * with NO tcpip thread, NO sockets, NO netconn/api layer. KEEL's single event loop
  * drives lwIP by calling sys_check_timeouts() + draining the loopback netif each
- * tick. The raw tcp_* callbacks fire inline on that loop thread — no locking needed.
+ * tick. The raw tcp_* callbacks fire inline on that loop thread; no locking needed.
  *
  * Contrast with lwipopts.h (NO_SYS=0): that one is the sockets/netconn/tcpip_thread
  * baseline the existing loopback test rides. This file is a SEPARATE config used
@@ -54,7 +54,7 @@
 #define LWIP_NETIF_STATUS_CALLBACK  0
 #define LWIP_NETIF_LINK_CALLBACK    0
 
-/* ── RNG (placeholder — see lwipopts.h warning; fine for a loopback spike) ────*/
+/* ── RNG (placeholder, see lwipopts.h warning; fine for a loopback spike) ────*/
 #define LWIP_RAND()                 ((u32_t)rand())
 #define LWIP_RANDOMIZE_INITIAL_LOCAL_PORTS 1
 
@@ -68,14 +68,14 @@
  * A large (64 KB) response over loopback forces many tcp_sent rounds + hits
  * tcp_sndbuf-full (ERR_MEM) backpressure. The send WINDOW (TCP_SND_BUF = 8*TCP_MSS
  * ≈ 11-12 KB) is deliberately far smaller than the 64 KB body so the send-pump
- * stalls and resumes repeatedly — pbuf/segment demand is bounded by the window, not
+ * stalls and resumes repeatedly; pbuf/segment demand is bounded by the window, not
  * the whole body. The pools + MEM_SIZE below comfortably cover one window's worth of
  * in-flight segments plus the loopback TX queue. */
 #define MEM_LIBC_MALLOC             0
 #define MEMP_MEM_MALLOC             0
 /* 8-byte alignment: on a 64-bit host lwIP's struct pbuf / struct memp want 8-byte
  * alignment (pointer members). MEM_ALIGNMENT=8 makes lwIP align its pool allocations
- * accordingly — matching the host ABI and keeping the raw backend clean under UBSan's
+ * accordingly, matching the host ABI and keeping the raw backend clean under UBSan's
  * alignment checker (a MEM_ALIGNMENT=4 build trips -fsanitize=alignment on aarch64). */
 #define MEM_ALIGNMENT               8
 /* TLS over raw: a TLS record is up to 16 KiB, and in the loopback test BOTH ends live in the
@@ -85,8 +85,8 @@
 #define MEM_SIZE                    (1024 * 1024)
 
 /* MEMP_NUM_TCP_PCB caps how many active TCP pcbs lwIP can hold. The Stage-A concurrency tests
- * (raw_recv_test) open many SIMULTANEOUS connections IN-PROCESS — both the server pcb AND the raw
- * test-client pcb live in the same lwIP stack — so this must cover ~2*N plus the listener and a
+ * (raw_recv_test) open many SIMULTANEOUS connections IN-PROCESS, both the server pcb AND the raw
+ * test-client pcb live in the same lwIP stack, so this must cover ~2*N plus the listener and a
  * few pcbs lingering in TIME-WAIT. 40 comfortably covers the tests' bursts with slack; the small
  * per-conn responses keep segment demand low. The exactly-once close discipline that makes rapid
  * churn safe is in the glue, not the pool size. */
@@ -108,7 +108,7 @@
  *
  * The SEND buffer (TCP_SND_BUF) is DELIBERATELY kept smaller than a big (64 KB) plaintext response
  * so the send-pump still stalls + resumes on tcp_sent (ERR_MEM backpressure on the SEND side)
- * — but it must still admit a full 16 KiB TLS record so a single tls->write of one record does not
+ * but it must still admit a full 16 KiB TLS record so a single tls->write of one record does not
  * itself deadlock. 12*TCP_MSS satisfies both (>16 KiB record, <64 KiB body). */
 #define TCP_SND_BUF                 (12 * TCP_MSS)
 #define TCP_SND_QUEUELEN            (4 * TCP_SND_BUF / TCP_MSS)   /* enough segs for the window */

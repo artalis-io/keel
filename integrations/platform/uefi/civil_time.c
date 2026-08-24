@@ -1,5 +1,5 @@
 /*
- * civil_time.c — see civil_time.h. Howard Hinnant's public-domain algorithms
+ * civil_time.c: see civil_time.h. Howard Hinnant's public-domain algorithms
  * (http://howardhinnant.github.io/date_algorithms.html), which are exact for the
  * proleptic Gregorian calendar over the entire int64 range (no libc, no tables).
  */

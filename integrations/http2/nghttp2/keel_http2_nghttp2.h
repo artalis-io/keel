@@ -1,9 +1,9 @@
 /*
- * keel_http2_nghttp2.h — nghttp2 backend for Keel's HTTP/2 session vtables.
+ * keel_http2_nghttp2.h: nghttp2 backend for Keel's HTTP/2 session vtables.
  *
  * Implements the client (KlHttp2ClientSession, include/keel/http2_client.h) and
  * server (KlHttp2ServerSession, include/keel/http2_server.h) session vtables on top
- * of nghttp2. nghttp2 types never appear here or in any Keel core header — the
+ * of nghttp2. nghttp2 types never appear here or in any Keel core header; the
  * whole nghttp2 dependency is confined to the adapter .c files.
  *
  * Bring-your-own nghttp2 (>= 1.57 for the size_t "*2" API; validated against

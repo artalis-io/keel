@@ -10,7 +10,7 @@
  * compression sessions created from it.
  *
  * @param level Compression level 1-9 (1=fastest, 9=best, 6=default).
- * @param alloc Allocator for context storage (borrowed — must outlive context).
+ * @param alloc Allocator for context storage (borrowed: must outlive context).
  * @return New context, or NULL on failure.
  */
 KlCompressCtx *kl_compress_miniz_ctx_create(int level, KlAllocator *alloc);

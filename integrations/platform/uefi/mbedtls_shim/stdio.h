@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/stdio.h — freestanding <stdio.h> for the mbedTLS adapter build.
+ * mbedtls_shim/stdio.h: freestanding <stdio.h> for the mbedTLS adapter build.
  *
  * The base shim (tests/freestanding/shim/stdio.h) declares FILE/stderr/fprintf/
  * snprintf/printf for the vendored-llhttp residual. tls_mbedtls.c's file-based

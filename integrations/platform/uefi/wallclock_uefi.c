@@ -1,5 +1,5 @@
 /*
- * wallclock_uefi.c — see wallclock_uefi.h. The EFI_TIME → UTC decode + unspecified-timezone
+ * wallclock_uefi.c: see wallclock_uefi.h. The EFI_TIME → UTC decode + unspecified-timezone
  * policy behind cert validity-time. Pure apart from the app-configured unspecified-TZ offset.
  */
 #include "wallclock_uefi.h"
@@ -14,7 +14,7 @@ void kl_uefi_clear_unspecified_tz(void)      { g_unspec_tz_min = 0;       g_unsp
 
 int kl_uefi_wallclock_from_efi(int gettime_ok, const EFI_TIME *t, int64_t *out_unix) {
     /* Defensive: a reusable API must not dereference NULL, and its contract is to PRODUCE a
-     * result — reject a NULL out rather than reporting success without one. */
+     * result; reject a NULL out rather than reporting success without one. */
     if (!gettime_ok || !t || !out_unix) return -1;
 
     KlCivil c = { (int)t->Year, (int)t->Month, (int)t->Day,

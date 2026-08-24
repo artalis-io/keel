@@ -1,5 +1,5 @@
 /*
- * mbedtls_platform_uefi.h — install the UEFI backing for the freestanding mbedTLS
+ * mbedtls_platform_uefi.h: install the UEFI backing for the freestanding mbedTLS
  * build (heap + entropy).
  *
  * mbedTLS, built with MBEDTLS_PLATFORM_MEMORY, calls a registered calloc/free pair
@@ -18,7 +18,7 @@
 
 /* Bring up the mbedTLS platform: register EFI AllocatePool/FreePool as mbedTLS's calloc/free
  * (borrows @bs; it must outlive every TLS allocation) AND capture the cert-validity clock
- * snapshot (the fail-closed gate — see clock_snapshot.h). Call once, AFTER kl_uefi_platform_init()
+ * snapshot (the fail-closed gate; see clock_snapshot.h). Call once, AFTER kl_uefi_platform_init()
  * (which installs Runtime Services GetTime). Idempotent after first success.
  *
  * Returns 0 on success, -1 if it CANNOT bring up TLS. Failure reasons include:
@@ -27,7 +27,7 @@
  *     is malformed, its year is below KL_UEFI_TIME_FLOOR_YEAR, or its timezone is unspecified with
  *     no configured offset (see wallclock_uefi.h / kl_uefi_set_unspecified_tz);
  *   - the mbedTLS calloc/free registration failed.
- * On -1 NO KlTlsCtx may be created — this is the structural gate that makes certificate
+ * On -1 NO KlTlsCtx may be created; this is the structural gate that makes certificate
  * validity-time enforceable, so a caller MUST treat -1 as "TLS unavailable" and not proceed. */
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs);
 

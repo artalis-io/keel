@@ -1,7 +1,7 @@
 #include "compress_miniz.h"
 #include <string.h>
 
-/* miniz public API — included via -I$(MINIZ_DIR) */
+/* miniz public API: included via -I$(MINIZ_DIR) */
 #include <miniz.h>
 
 /* miniz defines 'compress' as a macro → conflicts with vtable field name */
@@ -17,7 +17,7 @@ typedef struct {
 /* ── Internal session struct ─────────────────────────────────────── */
 
 typedef struct {
-    KlCompress       base;      /* vtable — must be first */
+    KlCompress       base;      /* vtable: must be first */
     int              level;
     KlAllocator     *alloc;
     tdefl_compressor comp;      /* ~300KB, embedded in this allocation */

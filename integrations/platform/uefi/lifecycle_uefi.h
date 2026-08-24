@@ -1,5 +1,5 @@
 /*
- * lifecycle_uefi.h — one-call teardown of the KEEL EFI network stack.
+ * lifecycle_uefi.h: one-call teardown of the KEEL EFI network stack.
  *
  * The EFI provider is BOOT-SERVICES-ONLY: EFI_TCP4/UDP4, AllocatePool, and events all
  * vanish at ExitBootServices(). A UEFI app that transitions to OS runtime (an HTTP-boot
@@ -16,7 +16,7 @@
  * ServiceBinding handle buffer), the completion event provider, and the platform
  * (periodic monotonic timer + EBS event). Precondition: all connections already
  * closed (the async client closes its fd on completion). Call BEFORE
- * ExitBootServices(). Idempotent — safe to call more than once.
+ * ExitBootServices(). Idempotent: safe to call more than once.
  */
 void kl_uefi_shutdown(void);
 
