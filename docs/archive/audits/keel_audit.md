@@ -1,14 +1,14 @@
 # C Audit Report: KEEL
 
-> **Historical, append-only evidence log — newest pass first.** Each pass records what was verified
+> **Historical, append-only evidence log: newest pass first.** Each pass records what was verified
 > on its date; verify any specific claim against current code before acting on it. Current-state
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
-## Thirteenth pass — datagram Phase B (public `KlDatagram` + `KlUdp`/dns) whole-tree re-audit (2026-08-17)
+## Thirteenth pass: datagram Phase B (public `KlDatagram` + `KlUdp`/dns) whole-tree re-audit (2026-08-17)
 
 **Scope:** whole `src/` (69 `.c`) + `parsers/` + headers + `Makefile`, focused on the code added
-since the twelfth pass — the datagram consolidation arc (`src/udp.c`, `src/socket_dgram_posix.c`,
+since the twelfth pass; the datagram consolidation arc (`src/udp.c`, `src/socket_dgram_posix.c`,
 `src/datagram.c`, `src/datagram_core.*`, `src/completion_core.c`, `src/dns_resolver.c`,
 `src/udp_server.c`, `integrations/uefi/event_efi.c`) plus the IOCP association-at-create fix.
 
@@ -23,7 +23,7 @@ the container (`smoke-iouring-asan`).
 |---|---|
 | Unsafe str/format (`strcpy`/`strcat`/`sprintf`/`gets`/`vsprintf`) | **none** (grep hits are the word "gets" in comments) |
 | Unsafe int parse (`atoi`/`atol`/`atof`/`atoll`) | **none** |
-| Direct `malloc`/`free`/`calloc`/`realloc` | **none** — all via `kl_malloc`/`kl_free` (with size) |
+| Direct `malloc`/`free`/`calloc`/`realloc` | **none**: all via `kl_malloc`/`kl_free` (with size) |
 | Unchecked `kl_malloc` (spot-checked incl. dgram batch, websocket, decompress) | all NULL-checked; multi-alloc uses batch-then-check + free-on-error |
 | Overflow guards (`SIZE_MAX`/`INT_MAX` before size arithmetic) | present in 39 `.c` files |
 | Dead code (`#if 0` / `if (0)`) | **none** |
@@ -49,9 +49,9 @@ applied (audit-only pass).
 
 ---
 
-## Twelfth pass — Phase 10 UEFI server (S-1..S-7) + client/server orchestration refactors (2026-08-08)
+## Twelfth pass: Phase 10 UEFI server (S-1..S-7) + client/server orchestration refactors (2026-08-08)
 
-**Scope:** the code added/changed since the eleventh pass — the freestanding UEFI HTTP(S)
+**Scope:** the code added/changed since the eleventh pass; the freestanding UEFI HTTP(S)
 **server** (S-1..S-7) and the two review-driven orchestration refactors: `src/server_core.c`
 (freestanding `kl_server_init`/`kl_server_free` carves), `src/client_proxy.c` (shared proxy
 CONNECT), `src/server_activation.c` (systemd socket-activation split), the readiness→hook
@@ -64,7 +64,7 @@ strongest available checks rather than inspection alone:
 | Check | Result |
 |-------|--------|
 | Unsafe fns (`strcpy`/`strcat`/`sprintf`/`gets`/`atoi`/`atof`) in `src/` + `parsers/` | none |
-| Direct `malloc`/`free`/`realloc` in `src/` (allocator discipline) | none — all via `kl_*` |
+| Direct `malloc`/`free`/`realloc` in `src/` (allocator discipline) | none; all via `kl_*` |
 | `kl_malloc` NULL-check discipline (new code) | the one new call site (server_core.c proxy_cidrs) is checked; client_proxy.c / server_activation.c are alloc-free |
 | Full test suite under **ASan + UBSan** (`make debug-test`) | **65/65 suites, 0 leaks, 0 UB, 0 errors** |
 | mock-EFI failure-path harness (ASan/UBSan) | PASS incl. the new `t_accept_backpressure` |
@@ -82,16 +82,16 @@ strongest available checks rather than inspection alone:
 - Accept backpressure bounds armed EFI tokens to free Keel pool slots (no accept-into-drop).
 
 **Informational (not a finding):** `integrations/uefi/mbedtls_platform_uefi.c` *defines*
-`strcpy` (and other libc primitives) — it is the freestanding libc backing the vendored
+`strcpy` (and other libc primitives), it is the freestanding libc backing the vendored
 mbedTLS build needs on bare firmware, not an unsafe *call* on untrusted input in KEEL code.
 A grep for unsafe-function *names* flags the definition; it is benign by construction.
 
 **Prior findings:** all eleventh-pass EFI lifetime bugs remain fixed (verified live on the
-branch, commit `71573dd` — see the axis-audit tenth pass and the S-7 review round).
+branch, commit `71573dd`; see the axis-audit tenth pass and the S-7 review round).
 
 ---
 
-## Eleventh pass — Phase 10 UEFI provider failure-path hardening (2026-08-06)
+## Eleventh pass: Phase 10 UEFI provider failure-path hardening (2026-08-06)
 
 **Scope:** the EFI network provider under `integrations/uefi/` + `spikes/uefi/` (F-8): the
 EFI_TCP4 socket provider (`socket_efi_tcp4.c`), the built-in DNS resolver over EFI_UDP4
@@ -101,13 +101,13 @@ self-tests.
 
 **This is NOT a "clean" pass.** Two rounds of adversarial *lifetime* review found **real,
 release-blocking EFI completion-token bugs** that QEMU happy-path testing (and the happy-path-focused
-earlier passes) never exercised. Every finding below was FOUND, FIXED, and — the load-bearing part —
+earlier passes) never exercised. Every finding below was FOUND, FIXED, and (the load-bearing part)
 **covered by a host mock-EFI harness** (`mock_efi_test.c`, 18 scenarios) that compiles the *real*
 provider TUs against a scriptable fake `EFI_BOOT_SERVICES`/`EFI_TCP4`/`EFI_UDP4` under ASan+UBSan.
 The lesson recorded: **a QEMU happy-path GO ≠ correct**; completion-token providers demand
 adversarial timeout/close/cancel/post-EBS host tests before any "production" claim.
 
-**Method.** Host mock-EFI harness (18 scenarios, ASan+UBSan+LSan (`detect_leaks=1` on Linux; `=0` on Darwin)) — the deliberate
+**Method.** Host mock-EFI harness (18 scenarios, ASan+UBSan+LSan (`detect_leaks=1` on Linux; `=0` on Darwin)), the deliberate
 quarantine "leak" is clean because backing storage is the static `g_conns`/`g_dns_*` pools
 (reachable, not leaked). All touched freestanding TUs cross-compiled `--target=x86_64-unknown-windows
 -ffreestanding -Wall -Wextra -Werror`. Core `make test` green. QEMU U-7 (plaintext send/recv/close
@@ -117,24 +117,24 @@ over real EFI_TCP4) re-run as a happy-path regression guard.
 
 | # | Severity | File:symbol | Bug | Fix | Test |
 |---|----------|-------------|-----|-----|------|
-| U1 | **Critical** | `socket_efi_tcp4.c` `efi_sock_send`/`efi_sock_close`; `dns_uefi.c` `kl_uefi_dns_resolve` | A **failed** `Cancel`+drain (token never reaches a terminal state) was still followed by ordinary cleanup — `CloseEvent`/`DestroyChild`/`kl_free` — releasing storage the firmware may still write into (UAF / firmware-write-after-free). | **Quarantine model.** On a drain that does not confirm the token retired, set `c->quarantined` (DNS: `g_dns_quarantined`): never `CloseEvent`/`DestroyChild`/reclaim the slot; its **stable, provider-owned** storage (`static KlUefiConn g_conns[]`; DNS `g_dns_op`) is deliberately leaked until ExitBootServices. DNS fails closed on every subsequent `resolve`. | `t_cancel_fails_quarantine`, `t_dns_cancel_fails_quarantine` (child NOT destroyed; slot not reused; resolve fails-closed) |
-| U1b | **Critical** | `dns_uefi.c` `kl_uefi_dns_resolve` (2nd review) | The DNS quarantine preserved the query buffer + descriptor but the **completion tokens themselves** (`tx_tok`/`rx_tok`) were still **stack-local** — on `goto quarantine` the frame died while firmware held their addresses (and would later write `Status`/`Packet.RxData` into freed stack). | Encapsulate the entire one-shot DNS op — tokens + descriptor + query buffer — in **one stable file-scope struct** `g_dns_op`. Invariant: nothing reachable from a submitted token lives on the stack. | `t_dns_cancel_fails_quarantine` extended to **model a delayed firmware write into the quarantined token after `dns_resolve()` returns**; negative control (tokens forced back to stack) reproduces the ASan **stack-use-after-return**, confirming the test bites |
+| U1 | **Critical** | `socket_efi_tcp4.c` `efi_sock_send`/`efi_sock_close`; `dns_uefi.c` `kl_uefi_dns_resolve` | A **failed** `Cancel`+drain (token never reaches a terminal state) was still followed by ordinary cleanup (`CloseEvent`/`DestroyChild`/`kl_free`) releasing storage the firmware may still write into (UAF / firmware-write-after-free). | **Quarantine model.** On a drain that does not confirm the token retired, set `c->quarantined` (DNS: `g_dns_quarantined`): never `CloseEvent`/`DestroyChild`/reclaim the slot; its **stable, provider-owned** storage (`static KlUefiConn g_conns[]`; DNS `g_dns_op`) is deliberately leaked until ExitBootServices. DNS fails closed on every subsequent `resolve`. | `t_cancel_fails_quarantine`, `t_dns_cancel_fails_quarantine` (child NOT destroyed; slot not reused; resolve fails-closed) |
+| U1b | **Critical** | `dns_uefi.c` `kl_uefi_dns_resolve` (2nd review) | The DNS quarantine preserved the query buffer + descriptor but the **completion tokens themselves** (`tx_tok`/`rx_tok`) were still **stack-local**: on `goto quarantine` the frame died while firmware held their addresses (and would later write `Status`/`Packet.RxData` into freed stack). | Encapsulate the entire one-shot DNS op (tokens + descriptor + query buffer) in **one stable file-scope struct** `g_dns_op`. Invariant: nothing reachable from a submitted token lives on the stack. | `t_dns_cancel_fails_quarantine` extended to **model a delayed firmware write into the quarantined token after `dns_resolve()` returns**; negative control (tokens forced back to stack) reproduces the ASan **stack-use-after-return**, confirming the test bites |
 | U2 | **High** | `socket_efi_tcp4.c` `efi_sock_close` | Close used `configured && !connected` as a proxy for "connect token outstanding"; because `CheckEvent` **consumes** the signal, close could wait ~60 s on an already-consumed event. | **Explicit token-state**: `conn_posted`/`tx_posted`/`close_posted` (+ existing `rx_posted`), set only after a successful submit, cleared only after the terminal event is observed. Close drains **only** flagged tokens. | `t_close_no_spin_on_consumed_connect` (`g_tcp_poll_calls` bounded; the mock models `CheckEvent` de-signalling) |
 | U3 | **High** | `socket_efi_tcp4.c` `efi_sock_close` | Close ignored failed receive/connect cancellation drains (same root as U1 for the non-tx tokens). | Close tracks `drained_ok` across every posted token; `!drained_ok` → quarantine + early return (no teardown). | covered by U1 close paths + `receive pending during close` |
 | U4 | **High** | `socket_efi_tcp4.c` `kl_uefi_socket_recv_ready` | Received `rx_data.DataLength` (and `FragmentTable[0].FragmentLength`) trusted without validating `<= KL_EFI_RXBUF` → OOB read on a malicious/buggy stack. | Validate both against `KL_EFI_RXBUF`; on violation latch `rx_err = EFI_DEVICE_ERROR` and surface a fatal `recv` -1. | `t_bad_rx_length` (recv -1, no OOB under ASan) |
-| U5 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_configure`/`_connect_post`; `mbedtls_platform_uefi.c` heap | Post-EBS coverage incomplete: two data-path entries unguarded; mbedTLS heap retained the Boot Services pointer with no shutdown hook (TLS teardown after EBS could `FreePool` torn-down firmware). | `kl_uefi_after_ebs()` guard on the two entries; `uefi_mbed_calloc`/`_free` fail closed post-EBS; new `kl_uefi_mbedtls_platform_shutdown()` drops `g_bs` — U-4 calls it after destroying every TLS object, before EBS. | `calls after simulated EBS` (zero firmware calls across all entries) |
-| U6 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_provider_reset` | Reset assumed all conns closed and blanket-zeroed the pool — corrupting quarantined/live firmware-owned slots. | Reset no longer zeroes the pool (preserves quarantined + live slots; only already-free slots are reused). New `kl_uefi_socket_provider_live_count()` exposes the "all-closed-before-shutdown" contract; U-7 asserts it observably. | `stale-guard no-UAF` + U-7 live-count line |
-| U7 | **Medium** (load-bearing) | `mock_efi_test.c` (new) | The adversarial host harness itself was missing — the earlier passes could not have caught U1–U6. | Added the 18-scenario mock-EFI harness (cancel succeeds/fails/races, consumed connect event during close, receive outstanding during close, impossible receive length, post-EBS, slot reuse with stale generation, delayed firmware write into a quarantined DNS token). | itself |
-| U9 | **Medium** | `build_mock_efi_test.sh` / `mbedtls_platform_uefi.c` (2nd review) | The advertised 13th (entropy fail-closed) test was gated behind `MOCK_WITH_MBEDTLS`, which the build never set — the harness silently ran 12, and the entropy path was "verified by inspection" only. Also: script not executable (0644); `detect_leaks=1` aborts under Apple ASan on Darwin. | Split `mbedtls_hardware_poll` into a mbedTLS-free `entropy_uefi.c` so the harness links + runs the fail-closed test **unconditionally** (genuinely 13). `chmod +x`; select `detect_leaks=0` on Darwin (Linux container keeps the real leak check). | `t_entropy_fail_closed` (now always runs: `r!=0, olen=0` without the insecure macro) |
+| U5 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_configure`/`_connect_post`; `mbedtls_platform_uefi.c` heap | Post-EBS coverage incomplete: two data-path entries unguarded; mbedTLS heap retained the Boot Services pointer with no shutdown hook (TLS teardown after EBS could `FreePool` torn-down firmware). | `kl_uefi_after_ebs()` guard on the two entries; `uefi_mbed_calloc`/`_free` fail closed post-EBS; new `kl_uefi_mbedtls_platform_shutdown()` drops `g_bs`; U-4 calls it after destroying every TLS object, before EBS. | `calls after simulated EBS` (zero firmware calls across all entries) |
+| U6 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_provider_reset` | Reset assumed all conns closed and blanket-zeroed the pool; corrupting quarantined/live firmware-owned slots. | Reset no longer zeroes the pool (preserves quarantined + live slots; only already-free slots are reused). New `kl_uefi_socket_provider_live_count()` exposes the "all-closed-before-shutdown" contract; U-7 asserts it observably. | `stale-guard no-UAF` + U-7 live-count line |
+| U7 | **Medium** (load-bearing) | `mock_efi_test.c` (new) | The adversarial host harness itself was missing; the earlier passes could not have caught U1–U6. | Added the 18-scenario mock-EFI harness (cancel succeeds/fails/races, consumed connect event during close, receive outstanding during close, impossible receive length, post-EBS, slot reuse with stale generation, delayed firmware write into a quarantined DNS token). | itself |
+| U9 | **Medium** | `build_mock_efi_test.sh` / `mbedtls_platform_uefi.c` (2nd review) | The advertised 13th (entropy fail-closed) test was gated behind `MOCK_WITH_MBEDTLS`, which the build never set; the harness silently ran 12, and the entropy path was "verified by inspection" only. Also: script not executable (0644); `detect_leaks=1` aborts under Apple ASan on Darwin. | Split `mbedtls_hardware_poll` into a mbedTLS-free `entropy_uefi.c` so the harness links + runs the fail-closed test **unconditionally** (genuinely 13). `chmod +x`; select `detect_leaks=0` on Darwin (Linux container keeps the real leak check). | `t_entropy_fail_closed` (now always runs: `r!=0, olen=0` without the insecure macro) |
 | U8 | Low (tooling) | `build_u{3,4,5,7}.sh` | `declare -A` fails silently on macOS Bash 3. | Explicit `BASH_VERSINFO < 4` guard with a clear error. | n/a |
-| U10 | **Medium** | `mbedtls_config_uefi.h`; new `civil_time`, `wallclock_uefi`, `clock_snapshot`, `time_uefi`; `platform_uefi.c`; `spikes/uefi/efi_min.h` | Certificate **validity-time was not enforced** (`MBEDTLS_HAVE_TIME` off) — TLS accepted expired / not-yet-valid certs (CA + hostname only). | Enable `HAVE_TIME`/`HAVE_TIME_DATE`; bind mbedTLS's clock to Runtime Services **GetTime** → pure `civil_time` math. Trust boundary (3rd–5th review): **one TLS-platform-lifetime SNAPSHOT** (`clock_snapshot.c`) captured once **inside `kl_uefi_mbedtls_platform_init()`** (mbedTLS's time callback is global — no session context — so per-session would let concurrent sessions clobber each other's basis), shared by all sessions + advanced by the monotonic clock, cleared at platform shutdown — `mbedtls_time` never calls GetTime mid-handshake (closes the "GetTime fails after setup → epoch 0 → 1970-cert" loophole); **structural fail-closed gate in the mandatory initializer** (no app choreography) — untrustworthy clock ⇒ init fails ⇒ no `KlTlsCtx`; **`EFI_TIME` field validation** rejects malformed firmware pre-conversion; **unspecified-TZ rejected by default** (UEFI §8.3 local-time; app offset or `KL_UEFI_ASSUME_UNSPECIFIED_UTC` test flag to opt in), sign `UTC = local + TimeZone`. | `t_civil_time` + `t_wallclock_decode` (unspecified-TZ policy, malformed fields) + `t_clock_snapshot` (snapshot read-not-GetTime; **post-snapshot GetTime failure does not reopen epoch-0**; failed refresh → epoch 0). + t_clock_snapshot platform-not-ready case (frozen monotonic timer → snapshot refused → TLS init fails). **QEMU U-4 prod: valid+good-clock → 200; valid+bad-clock (RTC 2000) → TLS refused, no 200; expired (2020) → `status -1`/`KL_ERR_TLS_HANDSHAKE`/no 200.** |
+| U10 | **Medium** | `mbedtls_config_uefi.h`; new `civil_time`, `wallclock_uefi`, `clock_snapshot`, `time_uefi`; `platform_uefi.c`; `spikes/uefi/efi_min.h` | Certificate **validity-time was not enforced** (`MBEDTLS_HAVE_TIME` off), TLS accepted expired / not-yet-valid certs (CA + hostname only). | Enable `HAVE_TIME`/`HAVE_TIME_DATE`; bind mbedTLS's clock to Runtime Services **GetTime** → pure `civil_time` math. Trust boundary (3rd–5th review): **one TLS-platform-lifetime SNAPSHOT** (`clock_snapshot.c`) captured once **inside `kl_uefi_mbedtls_platform_init()`** (mbedTLS's time callback is global, no session context, so per-session would let concurrent sessions clobber each other's basis), shared by all sessions + advanced by the monotonic clock, cleared at platform shutdown; `mbedtls_time` never calls GetTime mid-handshake (closes the "GetTime fails after setup → epoch 0 → 1970-cert" loophole); **structural fail-closed gate in the mandatory initializer** (no app choreography), untrustworthy clock ⇒ init fails ⇒ no `KlTlsCtx`; **`EFI_TIME` field validation** rejects malformed firmware pre-conversion; **unspecified-TZ rejected by default** (UEFI §8.3 local-time; app offset or `KL_UEFI_ASSUME_UNSPECIFIED_UTC` test flag to opt in), sign `UTC = local + TimeZone`. | `t_civil_time` + `t_wallclock_decode` (unspecified-TZ policy, malformed fields) + `t_clock_snapshot` (snapshot read-not-GetTime; **post-snapshot GetTime failure does not reopen epoch-0**; failed refresh → epoch 0). + t_clock_snapshot platform-not-ready case (frozen monotonic timer → snapshot refused → TLS init fails). **QEMU U-4 prod: valid+good-clock → 200; valid+bad-clock (RTC 2000) → TLS refused, no 200; expired (2020) → `status -1`/`KL_ERR_TLS_HANDSHAKE`/no 200.** |
 
 **No open findings from this pass.** Certificate validation is now complete (CA chain + hostname +
 validity-time); the previously-documented cert-time gap (U10) is closed. Remaining items are
 operational (real-firmware RTC quality), not missing checks.
 
 > **Retirement note (2026-08):** `dns_uefi.c` (the U1/U1b findings above, and the
-> `t_dns_cancel_fails_quarantine` test) has since been **retired** — the stock async
+> `t_dns_cancel_fails_quarantine` test) has since been **retired**: the stock async
 > `src/dns_resolver.c` now runs over the EFI_UDP4 datagram provider (`socket_efi_udp4.c`, 6.4b/6.4c).
 > The cancel / quarantine / stable-token disciplines the U1/U1b findings hardened now live in
 > `socket_efi_udp4.c`, whose 6.4b mock cases cover them; `t_dns_cancel_fails_quarantine` was removed
@@ -145,7 +145,7 @@ host-test-covered under ASan+UBSan; cert-time enforcement is proven with a valid
 The two originally-Critical token-lifetime findings (and the 2nd-review DNS-token + entropy-test
 gaps) are closed.
 
-## Tenth pass — freestanding portability phase (2026-08-05)
+## Tenth pass: freestanding portability phase (2026-08-05)
 
 **Scope:** the freestanding phase merged since the ninth pass (PRs #199–#210): the allocator split
 (A1), `completion.h`→`KlSockAddr` (A2), freestanding public headers + `kl_ssize_t`/off_t (A3/F0),
@@ -153,12 +153,12 @@ gaps) are closed.
 `client.c`→common/sync/async **TU splits** (B2a/B2b) behind `KlEventCtx` hooks + `src/event_ctx.c`,
 F-4 formatted-I/O elimination (`src/kl_cstr.c`) + the optional reference mem*/strlen
 (`src/kl_cstr_builtin.c`), and the multi-arch + PE-link gates (B1+B2). The lwip-raw accept-window
-UAF (M1, #208) was the ninth pass's M1 — now **fixed**.
+UAF (M1, #208) was the ninth pass's M1; now **fixed**.
 
 **Method:** the TU splits are pure code movement (nm-proven client_async.o/completion_core.o have
-no cross-stack deps; full suite + harness green) — not re-audited. A focused reviewer took the
-genuinely-NEW hand-written logic — `kl_cstr.c` (bounded parsers/formatters on **untrusted** URL/
-response input), `kl_cstr_builtin.c` (reference mem*), `event_ctx.c` (the split watcher API) — plus
+no cross-stack deps; full suite + harness green), not re-audited. A focused reviewer took the
+genuinely-NEW hand-written logic; `kl_cstr.c` (bounded parsers/formatters on **untrusted** URL/
+response input), `kl_cstr_builtin.c` (reference mem*), `event_ctx.c` (the split watcher API), plus
 mechanical sweeps and the automated gate in the Apple container.
 
 **Automated tools + mechanical: CLEAN.** cppcheck **0 err/warn**; scan-build **"No bugs found"**;
@@ -170,34 +170,34 @@ unsafe libc funcs, no raw malloc/free, no VLAs in the new TUs; hardening unchang
 
 | # | File:Line | Sev | Issue | Fix |
 |---|-----------|-----|-------|-----|
-| L1 | `include/keel/client.h:42` | Low (cosmetic) | `KL_CLIENT_CHUNK_HDR_SIZE 16` commented "Fits `FFFFFFFFFFFFFFFF\r\n`" — that line is 18B+NUL, doesn't fit 16. **No overflow**: `chunk_buf`=4096 → real chunk sizes ≤3 hex digits, and `kl_buf_append_hex` is bounded (returns -1→error) even adversarially. **Fixed**: bumped to 24 + accurate comment. |
+| L1 | `include/keel/client.h:42` | Low (cosmetic) | `KL_CLIENT_CHUNK_HDR_SIZE 16` commented "Fits `FFFFFFFFFFFFFFFF\r\n`"; that line is 18B+NUL, doesn't fit 16. **No overflow**: `chunk_buf`=4096 → real chunk sizes ≤3 hex digits, and `kl_buf_append_hex` is bounded (returns -1→error) even adversarially. **Fixed**: bumped to 24 + accurate comment. |
 
 ### Verdict (verified clean)
-- **`kl_cstr.c`** — the append builders never compute `off+len` directly (guard order `o>cap` →
+- **`kl_cstr.c`**: the append builders never compute `off+len` directly (guard order `o>cap` →
   `len>cap-o`), so no additive overflow and no NUL off-by-one; `kl_u64_to_dec/hex` bound the
   `tmp[20]`/`tmp[16]` reversal + reject `n>cap`; `kl_parse_u16_decimal` rejects at the exact u16
   boundary before any uint32 overflow; `kl_strstr`/`kl_strchr`/`kl_streq`/`kl_str_startswith` match
   libc (empty needle, NUL, short strings). Every caller (sockaddr/url/client_common/client_async)
-  passes `sizeof(buf)` as cap and aborts on append failure — an adversarial oversized host/path/
+  passes `sizeof(buf)` as cap and aborts on append failure; an adversarial oversized host/path/
   header yields a clean failure, not an overflow. `kl_u64_to_*` don't NUL-terminate; the one raw
   caller (`sockaddr.c` v6 formatter) memcpys exactly `r` + terminates itself; all others go through
   `kl_buf_append_*` which write the NUL. **Clean.**
-- **`kl_cstr_builtin.c`** — memmove both directions + `d==s`/`n==0` early-out; unsigned memcmp
+- **`kl_cstr_builtin.c`**: memmove both directions + `d==s`/`n==0` early-out; unsigned memcmp
   ordering; the self-referential-lowering foot-gun is disarmed (`-fno-builtin` base +
   `-fno-tree-loop-distribute-patterns` on the self-contained target, probe-gated); out of CORE_SRC
   so no duplicate-def on hosted/EDK2. **Clean.**
-- **`event_ctx.c`** — the split preserved the watcher-list invariants + the **H1 liveness guard**
+- **`event_ctx.c`**: the split preserved the watcher-list invariants + the **H1 liveness guard**
   (which lives in the `event_ctx.h` inline, so both `kl_event_ctx_run` and the completion driver
   see it); add-failure unlinks+frees; `kl_event_ctx_run` heap path SIZE_MAX-guarded. **Clean.**
 
-Overall: **Low** risk — one cosmetic comment (fixed), no Critical/High/Medium. The new
+Overall: **Low** risk; one cosmetic comment (fixed), no Critical/High/Medium. The new
 freestanding logic is correctly bounded, overflow-guarded, and NUL-termination-correct.
 
 ---
 
-## Ninth pass — lwIP-raw client axis (LC-0..LC-5) + full re-sweep (2026-08-05)
+## Ninth pass: lwIP-raw client axis (LC-0..LC-5) + full re-sweep (2026-08-05)
 
-**Scope:** the completion-native lwIP-raw **client** work merged since the eighth pass —
+**Scope:** the completion-native lwIP-raw **client** work merged since the eighth pass;
 LC-0 completion-CONNECT contract (`KL_COMP_CONNECT` + `post_connect` across `completion.h`/
 `completion_dispatch.c`/`completion_driver.c`/`event_pollcomp.c`/`event_iouring.c`/
 `event_iocp.c`/`src/client.c`/`src/async.c`), LC-1/LC-2 plaintext + Happy-Eyeballs raw client,
@@ -218,7 +218,7 @@ unchanged (`-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 -fstack-pro
 **Automated tools: CLEAN.** cppcheck (0), scan-build (No bugs), no unsafe libc calls in
 `src/`+`parsers/` (only `allocator.c`'s stdlib wrapper legitimately wraps `realloc`), no VLAs,
 allocator discipline intact in the new backend (all Keel-owned memory via `KlAllocator`, no
-hot-path allocation — TX window pre-allocated, only lwIP's own `pbuf_alloc` for a UDP send).
+hot-path allocation; TX window pre-allocated, only lwIP's own `pbuf_alloc` for a UDP send).
 
 ### High
 
@@ -236,24 +236,24 @@ hot-path allocation — TX window pre-allocated, only lwIP's own `pbuf_alloc` fo
 
 | # | File:Line | Issue | Fix |
 |---|-----------|-------|-----|
-| L1 | `src/redirect.c:77` (`is_cross_origin`) | **UBSan: NULL passed to `strncasecmp` (declared nonnull).** When both URLs have `host_len==0`, the equal-length guard falls through to `strncasecmp(a->host, b->host, 0)` with NULL hosts — defined-behavior-pedantic UB (0 length, no actual read), but it trips `UBSAN_OPTIONS=halt_on_error=1`. CI stays green only because its UBSan job runs recover-mode (prints, doesn't fail). **Fix:** `if (a->host_len == 0) return 0;` (or guard `a->host && b->host`) before the `strncasecmp`. |
-| L2 | `integrations/lwip/event_lwip_raw.c:672-677` | **False EOF vs explicit overflow on a full non-TLS `read_buf`.** When `space==0` with `rx_queued>0`, the drain surfaces `bytes=0` → the driver reads it as peer-close (EOF), where the readiness backend (`event_pollcomp.c:248`) deliberately signals a header-overflow failure. Converges to a close either way — cosmetic (wrong reason). **Fix:** surface a failed READ when `space==0`. |
+| L1 | `src/redirect.c:77` (`is_cross_origin`) | **UBSan: NULL passed to `strncasecmp` (declared nonnull).** When both URLs have `host_len==0`, the equal-length guard falls through to `strncasecmp(a->host, b->host, 0)` with NULL hosts; defined-behavior-pedantic UB (0 length, no actual read), but it trips `UBSAN_OPTIONS=halt_on_error=1`. CI stays green only because its UBSan job runs recover-mode (prints, doesn't fail). **Fix:** `if (a->host_len == 0) return 0;` (or guard `a->host && b->host`) before the `strncasecmp`. |
+| L2 | `integrations/lwip/event_lwip_raw.c:672-677` | **False EOF vs explicit overflow on a full non-TLS `read_buf`.** When `space==0` with `rx_queued>0`, the drain surfaces `bytes=0` → the driver reads it as peer-close (EOF), where the readiness backend (`event_pollcomp.c:248`) deliberately signals a header-overflow failure. Converges to a close either way; cosmetic (wrong reason). **Fix:** surface a failed READ when `space==0`. |
 | L3 | `src/completion_driver.c:768`, `event_pollcomp.c:358`, `event_iouring.c:695` | **Stale comments** claim the client re-reads `SO_ERROR` for `KL_COMP_CONNECT`; the actual path (`he_on_connect_result`, `client.c`) trusts the mask-carried win/fail and does **not** read `SO_ERROR` (correct for io_uring, which drops it). Comment-only. **Fix:** correct the comments to reference `he_on_connect_result` + the mask. |
 
 ### Verdict
 The new code is disciplined on overflow, allocation, backpressure, and the neutral seam
 (`event_lwip_raw.c` stays lwIP-free; all `tcp_*`/`udp_*` in the glue), and the automated tools
 are clean. Two real use-after-frees (H1 same-batch HE connect race; M1 accept-window pcb) are
-edge-timing bugs a happy-path sanitizer run misses — both warrant fixes; H1 is the priority as
+edge-timing bugs a happy-path sanitizer run misses; both warrant fixes; H1 is the priority as
 it sits on the outbound connect path for any completion backend. L1 is a trivial UBSan fix. The
 underlying feature (raw client + HE + DNS + HTTPS) is functionally sound and end-to-end verified.
 
 ---
 
-## Eighth pass — datagram data-plane folded onto the socket provider (2026-08-03)
+## Eighth pass: datagram data-plane folded onto the socket provider (2026-08-03)
 
 **Scope:** the four-stage "datagram provider" refactor (#168–#172) that resolves
-axis-audit **A2** — the UDP datagram data-plane moves from the compile/link
+axis-audit **A2**: the UDP datagram data-plane moves from the compile/link
 `udp_io_*` seam onto an optional `KlDatagramOps` vtable on `KlSocketProvider`, so
 one runtime provider owns stream **and** datagram I/O. Files: `include/keel/datagram.h`
 (the new vtable + `KlDgramRxSlot`/`KlDgramTxDesc`/`KlDgramRxMeta`), `src/socket_dgram_posix.c`
@@ -272,19 +272,19 @@ build/parse bounds, mmsg-batch alloc/index/free symmetry, the data-oriented
 recv_batch/send_batch slot/descriptor arrays, address marshalling on untrusted
 recv addresses, callback re-entrancy in the machine loops, and the dgram-default
 resolution; mechanical sweeps (no `strcpy`/`sprintf`/`atoi`, no raw `malloc`/`free`
-in the new TUs); and the Stage-4 gate — **cppcheck + scan-build clean, the full unit
+in the new TUs); and the Stage-4 gate; **cppcheck + scan-build clean, the full unit
 suite under ASan+UBSan (891 tests, 0 failures, 0 sanitizer hits)**, gcc-14 +
 cosmocc + MinGW (iocp/wsapoll), and the Apple container: epoll (0 fails, UDP
 batching 5/5 via real `recvmmsg`/`sendmmsg`), io_uring (`smoke-iouring-asan`
 UDP-over-completion), and the lwIP loopback + HTTPS.
 
 **Verdict: clean.** No Critical or High findings. The memory-safety surface of the
-refactor — cmsg bounds, the mmsg batch blocks, the data-oriented slot/descriptor
-arrays, address marshalling, and machine-loop callback re-entrancy — is sound. One
+refactor (cmsg bounds, the mmsg batch blocks, the data-oriented slot/descriptor
+arrays, address marshalling, and machine-loop callback re-entrancy) is sound. One
 **Low** correctness item was **fixed this pass**; the rest are Low/Informational,
 pre-existing or unreachable via the public API.
 
-### Low — fixed this pass
+### Low: fixed this pass
 
 | # | File(s) | Issue | Fix |
 |---|---------|-------|-----|
@@ -294,11 +294,11 @@ pre-existing or unreachable via the public API.
 
 | # | Area | Note |
 |---|------|------|
-| R1 | `src/udp.c` completion-loop src-pin/TOS send | A source-pinned or per-packet-TOS send on a **completion** loop skips the overlapped `kl_comp_post_udp_send` branch (which is plain-send only) and takes the synchronous provider `send()`; on `EAGAIN` it `udp_enqueue`s, which arms a **readiness** WRITE watcher that a completion loop never drives → the datagram stalls. **Pre-existing** (the pre-refactor path did the same via `kl_udp_io_raw_send` + `udp_enqueue`); IOCP-only, and only under transient send-buffer pressure on a source-pinned/marked datagram. Fix would be an overlapped `WSASendMsg` path for src/TOS — deferred as its own change. |
+| R1 | `src/udp.c` completion-loop src-pin/TOS send | A source-pinned or per-packet-TOS send on a **completion** loop skips the overlapped `kl_comp_post_udp_send` branch (which is plain-send only) and takes the synchronous provider `send()`; on `EAGAIN` it `udp_enqueue`s, which arms a **readiness** WRITE watcher that a completion loop never drives → the datagram stalls. **Pre-existing** (the pre-refactor path did the same via `kl_udp_io_raw_send` + `udp_enqueue`); IOCP-only, and only under transient send-buffer pressure on a source-pinned/marked datagram. Fix would be an overlapped `WSASendMsg` path for src/TOS; deferred as its own change. |
 | R2 | `src/udp.c` batch machine loops | `udp_recv_dgram`/`udp_flush_dgram` put a `KlDgramRxSlot[64]`/`KlDgramTxDesc[64]` (~17 KB) on the stack **inside the batch branch only** (mmsg batching is Linux + opt-in `mmsg_batch>1`); the per-datagram path (lwIP/embedded) never allocates them. Fine on host stacks; noted for tiny-stack targets. Optionally cap `UDP_MMSG_MAX` or heap the arrays. |
-| R3 | `src/socket_dgram_posix.c` `configure` (macOS IPv4) | Sets `IP_PKTINFO`/`IP_RECVPKTINFO` and reports `KL_DGRAM_RX_PKTINFO`, but macOS delivers the IPv4 local address via `IP_RECVDSTADDR` (not `IP_PKTINFO`), so `meta.has_local` stays 0 there — graceful degradation, but the cap bit overstates. Pre-existing (matches the old `setup_recv_opts`). |
+| R3 | `src/socket_dgram_posix.c` `configure` (macOS IPv4) | Sets `IP_PKTINFO`/`IP_RECVPKTINFO` and reports `KL_DGRAM_RX_PKTINFO`, but macOS delivers the IPv4 local address via `IP_RECVDSTADDR` (not `IP_PKTINFO`), so `meta.has_local` stays 0 there; graceful degradation, but the cap bit overstates. Pre-existing (matches the old `setup_recv_opts`). |
 | R4 | Winsock length casts (`wdg_send`/`wdg_recv`) | `size_t len`/`buflen` cast to `ULONG`/`int` without a guard; unreachable for UDP (≤65507 B). |
-| R5 | `cfg->tos == 0` in `configure` | `if (cfg->tos)` treats 0 as "OS default / unset" (documented in `udp.h`), so 0 can't be an explicit clear — by design. |
+| R5 | `cfg->tos == 0` in `configure` | `if (cfg->tos)` treats 0 as "OS default / unset" (documented in `udp.h`), so 0 can't be an explicit clear; by design. |
 
 ### Areas audited clean (no findings)
 
@@ -311,7 +311,7 @@ pre-existing or unreachable via the public API.
   sub-allocs so a mid-alloc NULL frees cleanly (no partial leak); `recv_batch`/
   `send_batch` clamp to `min(b->n, max/n)`; all per-slot indexing is `< n <= b->n`.
 - **data-oriented slots**: `KlDgramRxSlot.data` points into the batch payload and is
-  delivered synchronously before the next `recv_batch` — lifetime honored by
+  delivered synchronously before the next `recv_batch`; lifetime honored by
   `udp_recv_dgram`.
 - **machine loops** (`udp.c`): batch fill double-bounded (`cnt < mmsg_batch && cnt <
   UDP_MMSG_MAX`); `udp_drop_front(sent)` drops exactly what was sent; EAGAIN vs
@@ -329,9 +329,9 @@ pre-existing or unreachable via the public API.
   guards correct; batch NULL → per-datagram; no leak.
 - scan-build: clean. cppcheck: clean. ASan+UBSan unit suite: 891 tests, 0 failures.
 
-## Seventh pass — KlSockAddr address-ABI neutralization + lwIP platform (2026-08-02)
+## Seventh pass: KlSockAddr address-ABI neutralization + lwIP platform (2026-08-02)
 
-**Scope:** everything added/changed since the sixth pass — the runtime event-provider seam
+**Scope:** everything added/changed since the sixth pass; the runtime event-provider seam
 (#150/#151), the **KlSockAddr address-ABI neutralization** series (#153–#159: canonical type +
 pure helpers, socket-vtable currency, resolver, udp public API, accept + proxy_protocol + peer
 addr, protocol-TU purge + grep-gate, lwIP payoff), and the **lwIP platform** (#152, #160–#165:
@@ -347,35 +347,35 @@ marshalling), `integrations/lwip/*`, and the `integrations/mbedtls` socket-provi
 completion-backend UDP marshalling; resolver + socket providers) tracing marshalling bounds,
 op/buffer/node lifetime, integer math, and untrusted-input parsing; mechanical sweeps
 (`src/`+`parsers/`: no `strcpy`/`sprintf`/`gets`, no `atoi`/`atol`/`atof`, raw `malloc`/`free`
-only in the allocator wrapper); **scan-build — "No bugs found"**; **cppcheck — clean**; the
-**full unit suite under ASan+UBSan (`make debug` + `make test`) — 891 tests, 0 failures, 0
+only in the allocator wrapper); **scan-build: "No bugs found"**; **cppcheck: clean**; the
+**full unit suite under ASan+UBSan (`make debug` + `make test`), 891 tests, 0 failures, 0
 sanitizer hits**; gcc-14 + cosmocc + MinGW (IOCP/WSAPoll) compile gates; and the Apple container
 for Linux epoll/io_uring + the lwIP loopback/HTTPS runtime tests.
 
 **Verdict: clean after fixes.** No Critical or High findings. Four **Medium** memory-safety
 defects on untrusted-input (network) paths were found **and fixed this pass**, plus one Low
 hardening fix and the cppcheck gate made version-robust. The KlSockAddr marshalling boundary is
-the right place to have caught these — the neutralization concentrated all host↔neutral address
+the right place to have caught these; the neutralization concentrated all host↔neutral address
 conversion into one reviewed seam.
 
-### Medium — fixed this pass
+### Medium: fixed this pass
 
 | # | File(s) | Issue | Concrete risk | Fix |
 |---|---------|-------|---------------|-----|
 | M1 | `src/sockaddr_native.h` `kl_sockaddr_from_native` | AF_INET/AF_INET6 cases cast an **untrusted** `struct sockaddr` (from `accept`/`recvfrom`) to `sockaddr_in`/`sockaddr_in6` and `memcpy`'d the address **without a lower-bound `len` check** (only AF_UNIX checked `len`). | A short/garbage `socklen` from the kernel or a foreign provider → up to 16-byte out-of-bounds read past the caller's address buffer. | Added `if (len < sizeof(struct sockaddr_in{,6})) return -1;` before each cast/`memcpy`. |
 | M2 | `src/udp_io_posix.c` (batched + single recv), `src/udp_io_win.c`, `src/completion_driver.c` (`KL_COMP_UDP_RECV`) | The four datagram-recv paths passed `&ksrc` to the `on_recv` callback **unconditionally**. When `kl_sockaddr_from_native` fails (unrecognised family, or `peer_len == 0` on a connected socket) it leaves the scratch **untouched** → an **uninitialised `KlSockAddr` (stack garbage) delivered as the datagram source** to application code. | Info-leak of stack contents into the app's source-address logic / reply targeting, reachable from network input. | Honor the return value: pass `NULL` (unknown source) instead of uninitialised stack; guard the local (pktinfo) address the same way. |
-| M3 | `integrations/lwip/event_lwip.c` `lwev_mod` / `lwev_del` | Negative-fd guard used `!kl_handle_valid(fd)`, which only rejects `-1`; an `fd <= -2` passed and indexed `fd_to_idx[(int)fd]` — a **negative-index OOB** read (and an OOB write in `del`). `src/event_poll.c` guards the full negative range. | Memory corruption from a bogus/underflowed lwIP descriptor reaching mod/del. | `(int)fd < 0 || (int)fd >= cap`, matching `event_poll.c`. |
+| M3 | `integrations/lwip/event_lwip.c` `lwev_mod` / `lwev_del` | Negative-fd guard used `!kl_handle_valid(fd)`, which only rejects `-1`; an `fd <= -2` passed and indexed `fd_to_idx[(int)fd]`; a **negative-index OOB** read (and an OOB write in `del`). `src/event_poll.c` guards the full negative range. | Memory corruption from a bogus/underflowed lwIP descriptor reaching mod/del. | `(int)fd < 0 || (int)fd >= cap`, matching `event_poll.c`. |
 
 (M2 is one defect across four sites. Its readiness-posix instance predates this series but shares
 the marshalling pattern introduced here and was fixed for completeness.)
 
-### Low / tooling — fixed this pass
+### Low / tooling: fixed this pass
 
 | # | File(s) | Issue | Fix |
 |---|---------|-------|-----|
 | L1 | `src/resolver_cache.c` `cache_insert` | Fixed `host[]` buffer filled via `memcpy(strlen+1)` with no self-check (callers bound it, but the function wasn't self-defending). | `strlen(host) >= KL_CLIENT_HOSTNAME_MAX` early return. |
-| L2 | `Makefile` `cppcheck` | A newer cppcheck than CI's failed `make cppcheck` on `staticFunction` **false-positives** (public-API `kl_*` functions flagged should-be-static because cppcheck can't see the header consumers) and `normalCheckLevelMaxBranches` **informational** notes. | Added `--suppress=staticFunction --suppress=normalCheckLevelMaxBranches` — keeps the gate green across cppcheck versions without hiding real defects. |
-| L3 | `src/async.c`, `src/dns_resolver.c`, `src/server.c` (×2), `src/body_reader_buffer.c` | Newer-cppcheck `constParameterPointer`/`constVariablePointer` on read-only pointers/params. | Added `const` (4 sites). The `kl_body_reader_buffer` factory param stays `void*` to match the `KlBodyReaderFactory` typedef — inline-suppressed with justification. |
+| L2 | `Makefile` `cppcheck` | A newer cppcheck than CI's failed `make cppcheck` on `staticFunction` **false-positives** (public-API `kl_*` functions flagged should-be-static because cppcheck can't see the header consumers) and `normalCheckLevelMaxBranches` **informational** notes. | Added `--suppress=staticFunction --suppress=normalCheckLevelMaxBranches`; keeps the gate green across cppcheck versions without hiding real defects. |
+| L3 | `src/async.c`, `src/dns_resolver.c`, `src/server.c` (×2), `src/body_reader_buffer.c` | Newer-cppcheck `constParameterPointer`/`constVariablePointer` on read-only pointers/params. | Added `const` (4 sites). The `kl_body_reader_buffer` factory param stays `void*` to match the `KlBodyReaderFactory` typedef; inline-suppressed with justification. |
 
 ### Reported, not changed (accepted / by design)
 
@@ -399,18 +399,18 @@ the marshalling pattern introduced here and was fixed for completeness.)
   GRO-split loop + cmsg build/parse bounds (runt-cmsg underflow guarded); recvmmsg/sendmmsg batch
   alloc/index/partial-free.
 - **Completion backends** (pollcomp / io_uring / IOCP): op sockaddr-buffer sizes vs the socklen
-  used in send/recv, recv name/control-buffer bounds, and op alloc/free lifetime — including the
+  used in send/recv, recv name/control-buffer bounds, and op alloc/free lifetime; including the
   immediate-failure early-return paths and cancelled / zero-byte completions (no stale-buffer
   parse, no double-free/leak).
 - **mbedTLS socket-provider routing**: NULL `sp` is byte-for-byte the prior behaviour
   (`kl_sockdef_*` fallback); per-session inheritance from the ctx; borrowed (not owned) provider
-  pointer — no leak, no dangling copy; the completion memory-BIO path is unaffected.
+  pointer; no leak, no dangling copy; the completion memory-BIO path is unaffected.
 - **socket_posix/winsock accept marshalling**: untrusted-peer `socklen` bounded before
   `kl_sockaddr_from_native`; `writev` iovcnt bounded before the stack `iovec[]`.
 
-## Sixth pass — completion-axis feature work (PROXY / streaming / TransmitFile / TLS) (2026-08-01)
+## Sixth pass: completion-axis feature work (PROXY / streaming / TransmitFile / TLS) (2026-08-01)
 
-**Scope:** everything added/changed since the fifth pass — the completion-backend feature run
+**Scope:** everything added/changed since the fifth pass; the completion-backend feature run
 (PRs #128, #130, #133, #134, #135, #136): the completion driver's PROXY-header phase
 (`comp_drive_proxy` + `kl_conn_ingest_proxy`) and overlapped streaming flush (`comp_stream_pump`,
 8g-1); `event_iocp.c` (overlapped `WSARecvMsg` UDP local-addr, chunked `TransmitFile`, the
@@ -423,14 +423,14 @@ platform-neutral mbedTLS backend on Windows.
 tracing op/buffer/connection lifetime, integer/offset math, and bounds; mechanical sweeps across
 `src/`+`parsers/` (no `strcpy`/`sprintf`/`gets`, no `atoi`/`atol`/`atof`, raw `malloc`/`free` only
 in the allocator wrapper, `kl_malloc` NULL-check + free-size discipline); `cppcheck` (clean on the
-changed TUs); the **full 55-suite unit test under ASan+UBSan (`make debug-test`) — 0 failures, 0
+changed TUs); the **full 55-suite unit test under ASan+UBSan (`make debug-test`), 0 failures, 0
 sanitizer hits**; and a MinGW compile-gate on the touched Windows TUs.
 
 **Verdict: clean.** No Critical/High/Medium findings. Two **Low** allocator-discipline defects
 (free-size mismatch on a zero-length completion send, latent under a bring-your-own *sized*
 allocator; harmless under the default stdlib allocator) were found **and fixed this pass**.
 
-### Low — fixed this pass
+### Low: fixed this pass
 
 | # | File | Issue | Fix |
 |---|------|-------|-----|
@@ -445,7 +445,7 @@ allocator; harmless under the default stdlib allocator) were found **and fixed t
 - **I2** `event_iouring.c` `kl_comp_cancel` leaves an op in-flight if the SQ is full at cancel
   time (liveness edge under SQ pressure, not a safety bug).
 - **I3** `dns_resolver.c:976` write-buffer growth omits the project's `SIZE_MAX/2` doubling idiom;
-  safe today (values bounded to a few KB) — add the guard for uniformity.
+  safe today (values bounded to a few KB), add the guard for uniformity.
 
 ### Verified correct (explicitly not findings)
 
@@ -461,26 +461,26 @@ guards intact.
 
 ---
 
-## Fifth pass — io_uring completion backend + provider auto-wire + stop-wakeup (2026-07-30)
+## Fifth pass: io_uring completion backend + provider auto-wire + stop-wakeup (2026-07-30)
 
 **Scope:** the code added/changed across the io_uring-completion migration (PRs #101–#110):
-`src/event_iouring.c` (the new ~750-line completion backend — hand-written op/registered-
+`src/event_iouring.c` (the new ~750-line completion backend, hand-written op/registered-
 buffer/splice/watcher lifecycle, the highest-risk new C), the 5a provider auto-wire
 (`kl_event_native_provider` in every event backend + `kl_server_init`/client), the
 `kl_server_stop` self-pipe wakeup (`src/server.c`), and the `iouringcomp`→`iouring` rename.
 
 **Method:** mechanical sweeps (unsafe string/parse funcs, raw `malloc`/`free`, VLAs, `kl_malloc`
-NULL-check discipline, integer-overflow guards) across `src/`; `cppcheck` on the new TUs; and —
-the decisive step — an **ASan + UBSan + LeakSanitizer** run of the io_uring smokes on Linux
+NULL-check discipline, integer-overflow guards) across `src/`; `cppcheck` on the new TUs; and,
+the decisive step, an **ASan + UBSan + LeakSanitizer** run of the io_uring smokes on Linux
 (Apple `container` VM, kernel 6.18), which the plain CI smokes don't provide.
 
-**Issues found: 1** (Critical: 0, **High: 1**, Medium: 0, Low: 0) — **fixed + verified.**
+**Issues found: 1** (Critical: 0, **High: 1**, Medium: 0, Low: 0), **fixed + verified.**
 
 ### High
 
 | # | File | Issue | Fix |
 |---|------|-------|-----|
-| H1 | `src/event_iouring.c` (`kl_event_del`) | **Memory leak** — a readiness watch (`KlIouWatch`) removed while its `IORING_OP_POLL_ADD` was in flight was *unlinked* from `st->watches` with its free *deferred* to the poll-cancel CQE. At shutdown `kl_event_close`→`io_uring_queue_exit` drops that CQE, so the unlinked watch was never freed (and `kl_event_close`, freeing `st->watches`, no longer saw it). Surfaced as the `kl_server_stop` self-pipe watch leaking 48 B per server (2× in the async smoke). LeakSanitizer-confirmed; missed by CI because the io_uring backend was never run under LSan (only pollcomp was). | Keep the removed watch **linked** (skipped by `add`/`mod` via `!w->removed`); free it in the drain CQE (unlink+free) on the normal path, or in `kl_event_close` if the CQE never arrives (shutdown). Re-verified: both io_uring smokes pass under ASan+UBSan+LSan with **zero leaks**. |
+| H1 | `src/event_iouring.c` (`kl_event_del`) | **Memory leak**: a readiness watch (`KlIouWatch`) removed while its `IORING_OP_POLL_ADD` was in flight was *unlinked* from `st->watches` with its free *deferred* to the poll-cancel CQE. At shutdown `kl_event_close`→`io_uring_queue_exit` drops that CQE, so the unlinked watch was never freed (and `kl_event_close`, freeing `st->watches`, no longer saw it). Surfaced as the `kl_server_stop` self-pipe watch leaking 48 B per server (2× in the async smoke). LeakSanitizer-confirmed; missed by CI because the io_uring backend was never run under LSan (only pollcomp was). | Keep the removed watch **linked** (skipped by `add`/`mod` via `!w->removed`); free it in the drain CQE (unlink+free) on the normal path, or in `kl_event_close` if the CQE never arrives (shutdown). Re-verified: both io_uring smokes pass under ASan+UBSan+LSan with **zero leaks**. |
 
 **Systemic fix:** added `make smoke-iouring-asan` + a CI step in the *Completion (io_uring)*
 job, so the io_uring op/buffer/splice/watcher lifecycle is now under LeakSanitizer in CI (the
@@ -490,38 +490,38 @@ gap that let H1 reach `main`).
 
 - **No unsafe functions** (`strcpy`/`strcat`/`sprintf`/`gets`/`atoi`/`atol`/`atof`) anywhere in
   `src/`+`parsers/`; raw `malloc`/`free` only in the default allocator wrapper (`allocator.c`).
-- **`event_iouring.c` allocations** — all `kl_malloc` sites NULL-checked (registered pool is
+- **`event_iouring.c` allocations**: all `kl_malloc` sites NULL-checked (registered pool is
   best-effort with malloc+SEND fallback; the rest fail cleanly via `iou_op_free`+`-1`).
-- **Integer overflow** — `kl_comp_post_sendfile` guards `count`/`head_total` against `SIZE_MAX/2`;
+- **Integer overflow**: `kl_comp_post_sendfile` guards `count`/`head_total` against `SIZE_MAX/2`;
   `sendcap` tracks the exact allocation for a correctly-sized free.
 - **`cppcheck`** clean on the new TUs. **Hardening** intact (`-Werror -Wall -Wextra -Wpedantic
   -Wshadow -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=3`; ASan/UBSan debug build).
 - `LIBURING_UDATA_TIMEOUT` / cancel sentinels handled in the drain (no `(void*)-1` deref);
   single in-flight op per conn (driver invariant); idle-timeout cancel via `ASYNC_CANCEL` + abort.
 
-## Fourth pass — mbedTLS backend + test shim + parser re-audit (2026-07-26)
+## Fourth pass: mbedTLS backend + test shim + parser re-audit (2026-07-26)
 
-**Scope:** the surface that changed since the third pass — `src/tls_mbedtls.c`
+**Scope:** the surface that changed since the third pass; `src/tls_mbedtls.c`
 (significantly refactored: BIO callbacks routed through the socket seam, fds
 retyped to `KlSocketHandle`, a shared `server_ctx_from_mem` + new
 `kl_tls_mbedtls_ctx_create_from_buf`), the new test-network shim
 (`tests/net_compat.{h,c}` posix/win + `tests/smoke_tls.c`), and a regression
 re-audit of the untrusted-input parsers after the Winsock seam sweep + socket-
 handle retype.
-**Method:** three parallel source-level auditors — (1) deep `tls_mbedtls.c`
+**Method:** three parallel source-level auditors; (1) deep `tls_mbedtls.c`
 memory-safety (peer-cert extraction on untrusted mTLS input, error-path free
 discipline, allocator/key-material handling), (2) the `net_compat` shim +
 `smoke_tls` resource safety, (3) a regression re-check of `dns_resolver`,
-`proxy_protocol`, `url`, `websocket`, `chunked`, `connection` — plus a tooling
+`proxy_protocol`, `url`, `websocket`, `chunked`, `connection`; plus a tooling
 sweep (dangerous functions, VLAs, raw alloc, cppcheck, and an ASan+UBSan real-
 handshake run of the mbedTLS backend).
 
-**Issues found: 3** (Critical: 0, High: 0, Medium: 0, **Low: 2, Doc: 1**) —
+**Issues found: 3** (Critical: 0, High: 0, Medium: 0, **Low: 2, Doc: 1**),
 **all fixed.**
 
 The TLS backend came through clean. The auditors confirmed the hard parts sound:
 the peer-cert CN/SAN extraction (`x509_extract_cn`/`x509_extract_san`) is
-bounds-safe on attacker-controlled certs — every `memcpy` into the fixed `subject_cn`/
+bounds-safe on attacker-controlled certs; every `memcpy` into the fixed `subject_cn`/
 `issuer_cn`(256)/`san`(512) buffers is length-clamped before the copy, the
 comma-separated SAN accumulator checks `off + ilen (+1) >= outlen` *before* every
 write and always NUL-terminates, and the SHA-256 fingerprint fits its `char[65]`
@@ -531,7 +531,7 @@ key buffer (success and every early return); `read_file`'s length handling
 (negative `ftell`, 1 MB cap, `len+1`) is safe; the BIO `kl_sockdef_send`/`recv`
 errno→mbedTLS mapping is correct on both platforms; allocator create/destroy is
 paired with the right sizes and the shared ctx is never double-freed. The
-untrusted-input parsers showed **no regression** from the seam/handle changes —
+untrusted-input parsers showed **no regression** from the seam/handle changes;
 the seam preserves the POSIX `ssize_t` contract and every `fd < 0` check migrated
 to `kl_handle_valid`. Tooling: no dangerous functions, no VLAs, no unsanctioned
 allocation, cppcheck clean, and the mbedTLS backend runs a real loopback handshake
@@ -541,68 +541,68 @@ clean under ASan+UBSan.
 
 ### Low
 
-**L1 — `x509_extract_cn` / `x509_extract_san`: defensive `outlen == 0` guard**
-**`src/tls_mbedtls.c`** — *fixed.* Both peer-cert extractors wrote `out[0] = '\0'`
+**L1: `x509_extract_cn` / `x509_extract_san`: defensive `outlen == 0` guard**
+**`src/tls_mbedtls.c`**: *fixed.* Both peer-cert extractors wrote `out[0] = '\0'`
 unconditionally and (CN) computed `outlen - 1`; safe with today's callers (fixed
 256/512 buffers), but a future `outlen == 0` caller would write OOB / underflow.
-Added `if (outlen == 0) return;` at the top of each — defense-in-depth on
+Added `if (outlen == 0) return;` at the top of each; defense-in-depth on
 untrusted-input functions.
 
-**L2 — `tests/smoke_tls.c`: client URL hard-coded the port instead of `SMOKE_PORT`**
-**`tests/smoke_tls.c`** — *fixed.* The HTTPS URL literal duplicated `18443`; if
+**L2: `tests/smoke_tls.c`: client URL hard-coded the port instead of `SMOKE_PORT`**
+**`tests/smoke_tls.c`**: *fixed.* The HTTPS URL literal duplicated `18443`; if
 `SMOKE_PORT` changed, the client would silently target the old port and the test
 would fail confusingly. Now built with `snprintf` from `SMOKE_PORT`.
 
 ### Documentation
 
-**D1 — `tests/net_compat_win.c`: undocumented WSAStartup precondition**
-**`tests/net_compat_win.c`** — *fixed.* The loopback-pair helper needs Winsock
+**D1: `tests/net_compat_win.c`: undocumented WSAStartup precondition**
+**`tests/net_compat_win.c`**: *fixed.* The loopback-pair helper needs Winsock
 initialized; the library's load-time `WSAStartup` (socket_winsock.c) covers every
 test, but that was implicit. Added a precondition note to the file comment.
 
 ### Areas audited clean (no findings)
-- **`tls_mbedtls.c` peer-cert extraction** — bounds-safe on untrusted mTLS certs
+- **`tls_mbedtls.c` peer-cert extraction**: bounds-safe on untrusted mTLS certs
   (clamped CN/SAN copies, pre-write accumulator bound, exact-fit fingerprint).
-- **`tls_mbedtls.c` ctx error paths** — each mbedTLS struct freed once; key
+- **`tls_mbedtls.c` ctx error paths**: each mbedTLS struct freed once; key
   material scrubbed on all owning paths; no double-free/leak/UAF; correct free
   sizes; shared ctx not freed per-connection.
-- **`tls_mbedtls.c` BIO + fd** — seam-routed I/O, correct errno mapping,
+- **`tls_mbedtls.c` BIO + fd**: seam-routed I/O, correct errno mapping,
   `KlSocketHandle`/`KL_INVALID_SOCKET` throughout, transport owns the fd.
-- **`net_compat_win.c` `kl_test_socketpair`** — each of listener/client/server
+- **`net_compat_win.c` `kl_test_socketpair`**: each of listener/client/server
   closed exactly once on every `goto fail`, no double-close on success, no SOCKET
   leak, `addrlen` initialized before `getsockname`.
-- **`smoke_tls.c` lifetimes** — server ctx freed on all paths (direct on init
+- **`smoke_tls.c` lifetimes**: server ctx freed on all paths (direct on init
   fail; via `kl_server_free` otherwise), per-iteration client ctx destroyed once,
   server stopped+joined before ctx destroy.
 - **Untrusted-input parsers** (`dns_resolver`, `proxy_protocol`, `url`,
-  `websocket`, `chunked`, `connection`) — no regression; all bounds checks,
+  `websocket`, `chunked`, `connection`), no regression; all bounds checks,
   length math, anti-spoof, and smuggling guards intact after the seam/handle sweep.
-- **Tooling** — no `strcpy`/`sprintf`/`atoi`/`alloca`/…; no VLAs; no libc alloc
+- **Tooling**: no `strcpy`/`sprintf`/`atoi`/`alloca`/…; no VLAs; no libc alloc
   outside `allocator.c`; `make cppcheck` clean; mbedTLS backend real-handshake
   ASan+UBSan green; full ASan+UBSan gauntlet green in CI on `main`.
 
 ## Recommendation
-All three findings fixed. The mbedTLS backend — including the untrusted-input
-peer-cert parsers and the refactored error paths — is well-bounded and now
+All three findings fixed. The mbedTLS backend, including the untrusted-input
+peer-cert parsers and the refactored error paths, is well-bounded and now
 platform-neutral. No further action.
 
 ---
 
-## Third pass — Windows/Winsock PAL surface (2026-07-25)
+## Third pass: Windows/Winsock PAL surface (2026-07-25)
 
 **Scope:** the Windows platform TUs that landed with PAL Phase 6 (the Winsock
-port) — `src/socket_winsock.c`, `src/dns_sys_win.c`, `src/udp_io_win.c`,
+port), `src/socket_winsock.c`, `src/dns_sys_win.c`, `src/udp_io_win.c`,
 `src/event_wsapoll.c`, `src/platform_win.c`, `src/server_plat_win.c`, and the
 compatibility-boundary headers `src/sockcompat.h` / `src/socket.h` /
 `src/dns_sys.h` / `src/platform.h` (Windows branches).
 **Method:** three parallel source-level auditors (these TUs are Windows-only and
-cannot be compiled on the macOS host — no MinGW), each cross-checking the Windows
+cannot be compiled on the macOS host; no MinGW), each cross-checking the Windows
 implementation against its POSIX sibling's contract: (1) `udp_io_win.c` cmsg /
 WSARecvMsg / batching; (2) `event_wsapoll.c` + `platform_win.c` +
 `server_plat_win.c`; (3) the header shims + re-verification of the two fixes that
 were already in the working tree.
 
-**Issues found: 3** (Critical: 0, High: 0, **Medium: 3**, Low: several/Doc) —
+**Issues found: 3** (Critical: 0, High: 0, **Medium: 3**, Low: several/Doc),
 **all three Medium fixed.** The two fixes already present in the working tree
 (`socket_winsock.c` errno translation on the seam ops + writev fail-loud;
 `dns_sys_win.c` hosts-path truncation) were re-verified **correct and complete.**
@@ -612,19 +612,19 @@ were already in the working tree.
 > The POSIX build + full test suite remain green (the only shared header edit,
 > `sockcompat.h`, is inside the `#if defined(_WIN32)` branch).
 
-### M1 — `event_wsapoll.c`: `kl_event_wait` returned `-1` without setting `errno`
-**`src/event_wsapoll.c` (`kl_event_wait`)** — *fixed.*
+### M1: `event_wsapoll.c`: `kl_event_wait` returned `-1` without setting `errno`
+**`src/event_wsapoll.c` (`kl_event_wait`)**: *fixed.*
 
 On `WSAPoll` → `SOCKET_ERROR` the backend returned `-1` without touching `errno`
 (Winsock reports via `WSAGetLastError()` and never sets the CRT `errno`). The
 server accept loop (`server.c:582`) branches on `errno == EINTR` to decide
 retry-vs-abort and then feeds `errno` to `kl_log_errno`; on a genuine poll error
-it would read a **stale** `errno` — spuriously `continue`-looping if the stale
+it would read a **stale** `errno`; spuriously `continue`-looping if the stale
 value happened to be `EINTR`, or logging a bogus reason otherwise. **Fix:**
 translate via the now-shared `kl_wsa_set_errno()` before returning `-1`.
 
-### M2 — `platform_win.c`: `kl_plat_poll1` returned `-1` without setting `errno`
-**`src/platform_win.c` (`kl_plat_poll1`)** — *fixed.*
+### M2: `platform_win.c`: `kl_plat_poll1` returned `-1` without setting `errno`
+**`src/platform_win.c` (`kl_plat_poll1`)**: *fixed.*
 
 Same root cause as M1 on the sync-client single-fd poll wrapper: returned
 `WSAPoll`'s `-1` verbatim with no `errno`. **Fix:** `kl_wsa_set_errno()` on
@@ -636,8 +636,8 @@ Same root cause as M1 on the sync-client single-fd poll wrapper: returned
 identically to the socket seam ops. No behavior change on the existing 14 seam
 call sites.
 
-### M3 — `udp_io_win.c`: truncated-datagram path parsed an indeterminate cmsg buffer
-**`src/udp_io_win.c` (`kl_udp_io_recv_drain`)** — *fixed.*
+### M3: `udp_io_win.c`: truncated-datagram path parsed an indeterminate cmsg buffer
+**`src/udp_io_win.c` (`kl_udp_io_recv_drain`)**: *fixed.*
 
 On the `WSAEMSGSIZE` (truncated) return of `WSARecvMsg`, `msg.Control.buf/len`
 are **not** reliably populated, yet the code fell through to
@@ -647,78 +647,78 @@ size and the control buffer never zero-initialized. The additive
 delivered `recv_local` / `recv_tos_val` could be derived from indeterminate stack
 bytes for a truncated datagram. **Fix:** a `have_control` flag set only on the
 successful recv path now gates the cmsg parse, so truncated datagrams report no
-local-addr/TOS (correct — that control data is unreliable).
+local-addr/TOS (correct, that control data is unreliable).
 
 ### Low / Doc (noted, not fixed)
-- **`event_wsapoll.c`** — empty pollset with an *infinite* timeout (`count==0 &&
+- **`event_wsapoll.c`**: empty pollset with an *infinite* timeout (`count==0 &&
   timeout_ms<0`) returns 0 immediately rather than blocking (POSIX `poll(...,-1)`
   blocks). Not reachable on the server path (the listen socket is always
   registered and the server passes a finite computed timeout). Low.
-- **`platform_win.c`** — `kl_plat_random` casts `len` to `ULONG` for
+- **`platform_win.c`**: `kl_plat_random` casts `len` to `ULONG` for
   `BCryptGenRandom`; a `len > 4 GiB` would truncate. Callers use tiny buffers
   (mask keys, DNS txn-ids); not exploitable. The RNG return **is** checked and
   the buffer is never left uninitialized. Doc/Low.
-- **Best-effort non-block failures** — `ioctlsocket(FIONBIO)` on the wakeup
+- **Best-effort non-block failures**: `ioctlsocket(FIONBIO)` on the wakeup
   socket-pair read end ignores failure, matching the POSIX sibling's lenient
   `fcntl(O_NONBLOCK)` contract. Low, symmetry only.
-- **`sockcompat.h`** — the `WSAE* → E*` mapping depends on the socket `E*`
+- **`sockcompat.h`**: the `WSAE* → E*` mapping depends on the socket `E*`
   constants existing in `<errno.h>`; MinGW-w64 (the Makefile target) provides
   them but MSVC's `<errno.h>` historically does not. Worth a one-line "MinGW-w64
   required" note. Doc.
-- **`kl_sockdef_close`** — returns `closesocket()`'s value without
+- **`kl_sockdef_close`**: returns `closesocket()`'s value without
   `kl_wsa_set_errno()`; no caller branches on errno after close. Doc.
 
 ### Verified sound (Windows PAL)
-- **`socket_winsock.c`** — every seam op a caller tests for
+- **`socket_winsock.c`**: every seam op a caller tests for
   `EWOULDBLOCK`/`EINPROGRESS`/`EINTR` sets `errno` on `-1`; `connect` overrides
   `WSAEWOULDBLOCK→EINPROGRESS`; the tuning knobs that intentionally skip errno
   have no errno-inspecting caller; the writev `EINVAL`-on-`iovcnt>16` guard fails
   loud and can never overrun `stackbufs[16]` (real callers use `iov[7]`); the
   translation switch covers all tested codes.
-- **`dns_sys_win.c`** — the hosts-path fix's `memcpy`s are bounds-safe (full
+- **`dns_sys_win.c`**: the hosts-path fix's `memcpy`s are bounds-safe (full
   default is 40 B into a `MAX_PATH`=260 buffer); build-once `static` buffer
   lifetime sound under the single-threaded loop.
-- **`udp_io_win.c`** — TX/RX cmsg buffer sizing exact (`WSA_CMSG_SPACE`
+- **`udp_io_win.c`**: TX/RX cmsg buffer sizing exact (`WSA_CMSG_SPACE`
   additive, no subtraction/underflow); all received-cmsg lengths additively
   checked; no dynamic alloc in the TU; matched `kl_free` size on the send queue;
   `kl_handle_valid` (not `<0`) re-check; `WSAEMSGSIZE` translated. The GSO-unsup
   `EIO` return correctly trips `udp.c:434`'s `!= EAGAIN/EWOULDBLOCK` predicate
   (no retry loop).
-- **`platform_win.c`** — `kl_monotonic_ms` sec/rem decomposition avoids
+- **`platform_win.c`**: `kl_monotonic_ms` sec/rem decomposition avoids
   `ctr*1000` overflow, divide-by-zero guarded; socket-pair emulation closes all
   fds on every error path with no double-close; `kl_plat_file_pread` clamps
   `count > INT_MAX`.
-- **`server_plat_win.c`** — `kl_srv_bind_unix` bounds `sun_path` before the
+- **`server_plat_win.c`**: `kl_srv_bind_unix` bounds `sun_path` before the
   `+1`-NUL `memcpy`; bind-failure closes + resets the fd; atomic console-ctrl
   handler registration sound.
-- **`event_wsapoll.c`** — `grow_arrays` `INT_MAX/2` overflow guard + `size_t`
+- **`event_wsapoll.c`**: `grow_arrays` `INT_MAX/2` overflow guard + `size_t`
   math + fds-shrink-back on udata realloc failure; full unwind in init; matched
   free sizes in close.
-- **Header shims** (`sockcompat.h`/`socket.h`/`dns_sys.h`/`platform.h`) — `ssize_t`
+- **Header shims** (`sockcompat.h`/`socket.h`/`dns_sys.h`/`platform.h`), `ssize_t`
   = `intptr_t` (pointer-width); all handle-carrying ops use `KlSocketHandle`
-  (intptr_t) with `KL_INVALID_SOCKET` — no `SOCKET→int` truncation; no
+  (intptr_t) with `KL_INVALID_SOCKET`; no `SOCKET→int` truncation; no
   identifier-hijacking macros; every inline wrapper NULL-guards + falls back to
   `kl_sockdef_*`.
 
 ---
 
-## Second pass — UDP feature surface (2026-07-19)
+## Second pass: UDP feature surface (2026-07-19)
 
-**Date:** 2026-07-19 (second pass — UDP feature surface)
-**Scope:** the UDP stack that landed since the first pass — `src/udp.c` (roughly
+**Date:** 2026-07-19 (second pass, UDP feature surface)
+**Scope:** the UDP stack that landed since the first pass; `src/udp.c` (roughly
 doubled: multicast, `recvmmsg`/`sendmmsg` batching, GSO/GRO offload, ECN/TOS/DSCP
 marking, and a send-path cmsg refactor), `src/udp_server.c`, a re-audit of the
 `src/dns_resolver.c` untrusted-input parsers, and a full tooling/hardening sweep.
-**Method:** three parallel auditors — (1) deep `udp.c` memory-safety/bounds,
+**Method:** three parallel auditors; (1) deep `udp.c` memory-safety/bounds,
 (2) `udp_server.c` + DNS parser re-check, (3) automated tooling.
 
-**Issues found: 2** (Critical: 0, High: 0, Medium: 0, Low: 1, Doc: 1) — **both fixed.**
+**Issues found: 2** (Critical: 0, High: 0, Medium: 0, Low: 1, Doc: 1), **both fixed.**
 
 The UDP surface came through clean. The auditors confirmed the hard parts are
 sound: RX/TX control-message buffer sizing (`UDP_RX_CMSG_SPACE` fits pktinfo +
 UDP_GRO + TOS simultaneously; `UDP_TX_CMSG_SPACE` fits pktinfo + TOS exactly),
 the `udp_build_control` CMSG_NXTHDR construction walk, batch alloc/free integer
-safety (n∈[1,64], bufsz∈[1,65535] — products well under SIZE_MAX; matched
+safety (n∈[1,64], bufsz∈[1,65535], products well under SIZE_MAX; matched
 free-sizes; partial-alloc cleanup), the recvmmsg/sendmmsg lifecycle and the
 mid-batch use-after-free rechecks, `udp_drop_front`'s self-bounding dequeue (the
 prior scan-build fix is genuinely sound), GSO/GRO split bounds, per-packet
@@ -730,8 +730,8 @@ ASan+UBSan green, cppcheck only benign false positives.
 
 ## Low
 
-### L1 — `udp_parse_tos` computed a length by subtraction (size_t underflow risk)
-**`src/udp.c` (`udp_parse_tos`)** — *fixed.*
+### L1: `udp_parse_tos` computed a length by subtraction (size_t underflow risk)
+**`src/udp.c` (`udp_parse_tos`)**: *fixed.*
 
 ```c
 size_t dl = cm->cmsg_len - CMSG_LEN(0);   /* wraps if cmsg_len < CMSG_LEN(0) */
@@ -743,14 +743,14 @@ would underflow `dl` to a huge value and read `CMSG_DATA(cm)` past a runt cmsg.
 Not reachable in practice (these cmsgs originate from the kernel, which always
 sets a valid `cmsg_len`, and `CMSG_NXTHDR` won't advance into a runt trailer),
 but it was the only one of the three cmsg parsers to subtract rather than use the
-safe additive comparison. **Fix:** mirror `udp_parse_local`/`udp_parse_gro` —
+safe additive comparison. **Fix:** mirror `udp_parse_local`/`udp_parse_gro`;
 `if (cm->cmsg_len >= CMSG_LEN(sizeof(int)))` / `>= CMSG_LEN(1)`. No subtraction,
 matches the codebase idiom.
 
 ## Documentation
 
-### D1 — `kl_dns_parse_all` referenced but never implemented
-**`CLAUDE.md`, `docs/dns_parity_design.md`** — *fixed.*
+### D1: `kl_dns_parse_all` referenced but never implemented
+**`CLAUDE.md`, `docs/dns_parity_design.md`**: *fixed.*
 
 The Phase 2a design proposed a separate `kl_dns_parse_all()`; the implementation
 instead folded multi-address collection directly into `kl_dns_parse_response`
@@ -763,31 +763,31 @@ plan-vs-implementation deviation in the design doc.
 
 ## Areas audited clean (no findings)
 
-- **`udp.c` cmsg buffer sizing** — RX (64B) and TX (48B) buffers exactly cover the
+- **`udp.c` cmsg buffer sizing**: RX (64B) and TX (48B) buffers exactly cover the
   worst-case simultaneous cmsg sets; `udp_build_control` sets `msg_controllen`
   before the CMSG_NXTHDR walk, NULL-guards every write, and `used ≤ bufsz` always.
-- **`udp.c` batch lifecycle** — no integer overflow (clamped n/bufsz), matched
+- **`udp.c` batch lifecycle**: no integer overflow (clamped n/bufsz), matched
   alloc/free sizes, correct partial-failure cleanup, mid-batch UAF rechecks after
   every callback (recv), self-bounding `udp_drop_front` (send).
-- **`udp.c` GSO/GRO** — arg validation + fallback loop bounds; GRO split rechecks
+- **`udp.c` GSO/GRO**: arg validation + fallback loop bounds; GRO split rechecks
   `recv_active` between segments.
-- **`udp.c` public API** — NULL/`fd<0` guards on every entry; idempotent
+- **`udp.c` public API**: NULL/`fd<0` guards on every entry; idempotent
   `kl_udp_free`; no double-close; fd freed on all `kl_udp_init` error paths.
-- **`udp_server.c`** — all public entries NULL-checked; reply source-pinning
+- **`udp_server.c`**: all public entries NULL-checked; reply source-pinning
   bounds-checked and reset per datagram; all config fields forwarded with correct
   types; no fd leak on partial init.
-- **`dns_resolver.c` response parser** — `dns_skip_name` /
+- **`dns_resolver.c` response parser**: `dns_skip_name` /
   `kl_dns_parse_response` / `dns_question_matches`: every packet read length-checked
   before dereference; compression pointers skipped in place (no forward-follow, no
   loop); RDATA length validated before the fixed 4/16-byte memcpy; additive
   bounds math (no underflow); `naddrs` capped; anti-spoof (txn-id + source +
   question echo) intact. No regression.
-- **Tooling** — no `strcpy`/`sprintf`/`atoi`/`alloca`/… ; no VLAs; no libc
+- **Tooling**: no `strcpy`/`sprintf`/`atoi`/`alloca`/… ; no VLAs; no libc
   allocation outside `allocator.c`; `make` `-Werror` clean; `make debug-test`
   ASan+UBSan green; `make cppcheck` only benign `staticFunction`/const-suggestion
   false positives; production hardening flags all present.
 
 ## Recommendation
 
-Both findings are fixed. The UDP feature surface — including the untrusted-input
-cmsg parsers and the batched/offload paths — is well-bounded. No further action.
+Both findings are fixed. The UDP feature surface, including the untrusted-input
+cmsg parsers and the batched/offload paths, is well-bounded. No further action.

@@ -1,16 +1,16 @@
-# Client-Identity Trio — Design
+# Client-Identity Trio: Design
 
 Status: **A + B + C done**.
 Author: design agreed 2026-07-17.
 
-Exposes *who is on the other end* of a connection to handlers — the TCP/TLS
+Exposes *who is on the other end* of a connection to handlers, the TCP/TLS
 analogs of the UNIX-socket peer-credential work shipped in 2.8.0. Three
 independent features:
 
-- **A. Remote address** — expose the client IP/port to handlers.
-- **B. PROXY protocol (v1 + v2)** — recover the real client address behind an
+- **A. Remote address**: expose the client IP/port to handlers.
+- **B. PROXY protocol (v1 + v2)**: recover the real client address behind an
   L4 load balancer, trust-gated by a CIDR allowlist.
-- **C. TLS client certificate** — surface the verified mTLS client identity.
+- **C. TLS client certificate**: surface the verified mTLS client identity.
 
 Decisions taken:
 - PROXY trust: **CIDR allowlist** (nginx `set_real_ip_from` semantics), not a
@@ -106,7 +106,7 @@ Testing: `tests/test_peer_cert.c` validates the handler→vtable plumbing with a
 passthrough TLS mock (runs in the default/CI build). The real mbedtls
 extraction was verified end-to-end against a live mTLS handshake and
 cross-checked field-by-field against `openssl x509` output (fingerprint,
-validity timestamps, SANs all matched) — the mbedtls backend is not in the
+validity timestamps, SANs all matched), the mbedtls backend is not in the
 default/CI build, so that check is run manually with `KEEL_TLS=mbedtls`.
 
 Optional vtable method on `KlTls` (NULL-able like `alpn_protocol`):
@@ -134,8 +134,8 @@ Handler API: `int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out);`
 ---
 
 ## Sequencing & effort
-1. **A — remote addr** (~½ day): standalone, no deps.
-2. **B — PROXY protocol** (~1.5 days): CIDR util + v1/v2 parser + pre-TLS phase.
-3. **C — mTLS cert** (~1.5 days): vtable slot + mbedtls extraction + config.
+1. **A, remote addr** (~½ day): standalone, no deps.
+2. **B, PROXY protocol** (~1.5 days): CIDR util + v1/v2 parser + pre-TLS phase.
+3. **C, mTLS cert** (~1.5 days): vtable slot + mbedtls extraction + config.
 
 Each ships as its own commit, CI-green, mirroring the UNIX-socket rollout.

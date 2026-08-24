@@ -28,7 +28,7 @@ endif
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
-  # APE binaries have their own non-relocatable layout — no PIE / RELRO / FORTIFY here.
+  # APE binaries have their own non-relocatable layout; no PIE / RELRO / FORTIFY here.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
@@ -36,13 +36,13 @@ ifdef COSMO
   FILE_IO_SRC = src/file_io.c
 else ifdef WINDOWS
   # Windows (MinGW-w64): WSAPoll event backend + Winsock socket provider, its own
-  # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c — no #ifdef in the
+  # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c; no #ifdef in the
   # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -fstack-protector-strong -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
   # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
-  # The IOCP TU is the only place the completion model lives — no #ifdef leaks into
+  # The IOCP TU is the only place the completion model lives; no #ifdef leaks into
   # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
   # defaults + the Winsock load constructor the IOCP provider reuses).
   ifeq ($(BACKEND),iocp)
@@ -67,9 +67,9 @@ else ifdef WINDOWS
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
-  #   -fPIE / -pie           — ASLR for executables linking libkeel.a
-  #   -fstack-protector-strong — stack canaries on functions with buffers
-  #   -D_FORTIFY_SOURCE=3    — runtime checks on str/mem calls (glibc 2.34+ / gcc 12+ / clang 9+).
+  #   -fPIE / -pie           : ASLR for executables linking libkeel.a
+  #   -fstack-protector-strong : stack canaries on functions with buffers
+  #   -D_FORTIFY_SOURCE=3    : runtime checks on str/mem calls (glibc 2.34+ / gcc 12+ / clang 9+).
   #                            Older toolchains emit a noisy warning and behave as =2; leave loud.
   # Some toolchain spec files (Alpine/musl, hardened Debian, etc.) pre-set
   # _FORTIFY_SOURCE at the command line. Undefine first so our value wins
@@ -81,7 +81,7 @@ else
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
-  # it as "unused during compilation" — Keel's one-shot compile+link
+  # it as "unused during compilation"; Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise
   # promote that warning to a hard error.
   LDFLAGS += -Wl,-pie
@@ -91,7 +91,7 @@ else
     ifeq ($(BACKEND),iouring)
       # io_uring is completion-native (PAL 8f): BACKEND=iouring builds the completion backend
       # (event_iouring.c driving completion.h via SQE/CQE + completion_driver.c). The old
-      # readiness-adapted io_uring TU + file_io_iouring.c were retired (8f-5d) — benchmarks put
+      # readiness-adapted io_uring TU + file_io_iouring.c were retired (8f-5d); benchmarks put
       # the readiness POLL_ADD adapter ~2–2.3× slower than completion on both x86 and ARM
       # (docs/phase8f5_iouring_default_migration_design.md). File responses ride zero-copy
       # splice (8f-2), so the io_uring file backend is gone; FILE_IO_SRC is the POSIX file_io.c.
@@ -108,7 +108,7 @@ else
       # Windows. The generic driver + dispatch (COMPLETION_CORE) are always linked; this
       # flag suppresses the readiness kl_comp_ops_builtin stub.
       # event_pollcomp.c is now a PURE runtime provider (no kl_event_*_builtin /
-      # kl_comp_ops_builtin — so it can be injected into a default libkeel, RC-2); the
+      # kl_comp_ops_builtin; so it can be injected into a default libkeel, RC-2); the
       # compiled-in-default glue (kl_event_*_builtin + kl_comp_ops_builtin, forwarding to
       # the provider ops) lives in event_pollcomp_builtin.c, linked ONLY for this BACKEND.
       EVENT_SRC = src/event_pollcomp.c src/event_pollcomp_builtin.c
@@ -121,14 +121,14 @@ else
     CFLAGS += -D_DEFAULT_SOURCE
     VENDOR_CFLAGS += -D_DEFAULT_SOURCE
     FUZZ_PLATFORM_CFLAGS += -D_DEFAULT_SOURCE
-    # Linux linker hardening — RELRO + BIND_NOW + non-executable stack.
+    # Linux linker hardening: RELRO + BIND_NOW + non-executable stack.
     # ld64 (macOS) rejects -z flags, so gate to Linux.
     LDFLAGS += -lpthread -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
   else
     ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
     else ifeq ($(BACKEND),pollcomp)
-      # Portable completion backend over poll() (PAL 8d-0.5) — see the Linux branch.
+      # Portable completion backend over poll() (PAL 8d-0.5); see the Linux branch.
       # event_pollcomp.c = pure runtime provider; event_pollcomp_builtin.c = the compiled-in
       # glue (kl_event_*_builtin + kl_comp_ops_builtin). See the Linux pollcomp block (RC-2).
       EVENT_SRC = src/event_pollcomp.c src/event_pollcomp_builtin.c
@@ -144,7 +144,7 @@ endif
 CFLAGS += -MMD -MP
 VENDOR_CFLAGS += -MMD -MP
 
-# Core library — parser-agnostic
+# Core library: parser-agnostic
 # Socket provider + platform services: POSIX defaults; the Windows branch sets
 # the socket_winsock.c / platform_win.c siblings.
 SOCKET_SRC ?= src/socket_posix.c
@@ -163,15 +163,15 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # and runs over the udp + socket.h seams.
 DNS_SYS_SRC ?= src/protocols/dns/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
-# (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
+# (completion_core.c: kl_comp_run, routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
 # server/TLS leg (completion_http_server.c: the KlHttpConn state machine + kl_http_comp_* orchestration
 # + the HTTP kl_comp_* wrappers) + the h2/ws legs (completion_http2.c / completion_ws.c) + the
 # runtime-dispatch surface (completion_dispatch.c: the neutral kl_comp_*_raw primitives, routed to the
 # compiled-in backend or a runtime provider) are linked on EVERY build. On a readiness build they are
 # never called (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
-# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs — the neutral surface in
-# completion_absent.c + the HTTP surface in completion_http_absent.c (R2f) — the axis is compiled out.
+# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs: the neutral surface in
+# completion_absent.c + the HTTP surface in completion_http_absent.c (R2f); the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c src/protocols/http/completion_http_absent.c
 else
@@ -208,7 +208,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
 LLHTTP_SRC = src/protocols/http/http1_parser_llhttp.c src/protocols/http/http1_response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
-# Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
+# Optional mbedTLS backend (bring-your-own; mbedTLS is not vendored). The adapter
 # now lives in integrations/tls/mbedtls/ (out of the dependency-light core); it still
 # builds on POSIX and Windows (its BIO I/O goes through the socket seam). Point
 # MBEDTLS_DIR at a source tree (include/ + library/) OR a system prefix (include/ +
@@ -240,7 +240,7 @@ ifdef KEEL_COMPRESS
 ifeq ($(KEEL_COMPRESS),miniz)
   MINIZ_DIR ?= ../miniz
   # -Iintegrations/codec/miniz: the adapter TUs + examples reach the miniz ADAPTER headers
-  # (compress_miniz.h/decompress_miniz.h, now beside the adapter TUs — R3.1/§10.1 P2) via a bare
+  # (compress_miniz.h/decompress_miniz.h, now beside the adapter TUs, R3.1/§10.1 P2) via a bare
   # include; -I$(MINIZ_DIR): the external BYO <miniz.h>.
   MINIZ_CFLAGS = -Iintegrations/codec/miniz -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
   CFLAGS += $(MINIZ_CFLAGS)
@@ -278,7 +278,7 @@ endif
 # coordination seam (http_internal.h, http_proto_hooks.h, completion_internal.h) via -Isrc/protocols/http.
 # Substrate recipes get NEITHER (empty EXTRA_INC), keeping the boundary honest (check-substrate-purity).
 # EXTRA_INC (target-specific, never a command-line var) survives builds that OVERRIDE CFLAGS on the
-# sub-make command line (debug/asan/coverage) — unlike a target-specific `CFLAGS +=`, and portably
+# sub-make command line (debug/asan/coverage), unlike a target-specific `CFLAGS +=`, and portably
 # across GNU Make 3.81 (macOS) which does not prefer the more-specific `src/protocols/%.o` pattern.
 %.o: %.c
 	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
@@ -290,7 +290,7 @@ src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 # the core lib (BACKEND=lwipraw was retired in RC-3). Its object build rules live in
 # integrations/platform/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
 
-# Vendor code — relaxed warnings
+# Vendor code: relaxed warnings
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
 	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
 vendor/llhttp/api.o: vendor/llhttp/api.c
@@ -314,22 +314,22 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
 examples/%: examples/%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-# TLS example — only built when KEEL_TLS=mbedtls
+# TLS example: only built when KEEL_TLS=mbedtls
 ifeq ($(KEEL_TLS),mbedtls)
 EXAMPLES += examples/tls_server examples/tls_client
 endif
 
-# Compression example — only built when KEEL_COMPRESS=miniz
+# Compression example: only built when KEEL_COMPRESS=miniz
 ifeq ($(KEEL_COMPRESS),miniz)
 EXAMPLES += examples/compress_server examples/decompress_client
 endif
 
 examples: $(EXAMPLES)
 
-# Tests — relax pedantic warnings triggered by utest.h vendor macros
+# Tests: relax pedantic warnings triggered by utest.h vendor macros
 # test_iocp_engine.c requires the IOCP backend (asserts COMPLETION caps +
-# kl_socket_provider_iocp) — exclude by default, add back only for that backend.
-# Discovery is recursive over the protocol test dirs (one family level deep — no `**`
+# kl_socket_provider_iocp); exclude by default, add back only for that backend.
+# Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
 TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
@@ -338,7 +338,7 @@ ifeq ($(BACKEND),iocp)
 endif
 # test_datagram_public.c drives a scripted COMPLETION mock (a KL_EVENT_CAP_COMPLETION loop +
 # kl_comp_post_dgram_*) with no readiness path; the KEEL_NO_COMPLETION build stubs those entry points
-# to abort() (completion_absent.c), so these completion-axis tests cannot run there — exclude them
+# to abort() (completion_absent.c), so these completion-axis tests cannot run there; exclude them
 # (mirrors the readiness-adapting test_datagram_live, which DOES run under KEEL_NO_COMPLETION).
 ifdef KEEL_NO_COMPLETION
   TEST_SRC := $(filter-out tests/test_datagram_public.c tests/test_stream_single_shot.c \
@@ -349,13 +349,13 @@ TEST_BIN = $(TEST_SRC:.c=)
 # Curated-suite resolver (§9.4/§9.5): map a BARE suite name to its source wherever it lives
 # (flat tests/ or nested tests/protocols/<fam>/), then derive the platform binary WITH $(EXE).
 # Keeps the curated suite-name lists stable while the binaries resolve to nested paths and carry the
-# correct Windows extension. Fail-loud — the resolver requires EXACTLY ONE source, so a misspelled/
+# correct Windows extension. Fail-loud: the resolver requires EXACTLY ONE source, so a misspelled/
 # stale suite name cannot silently drop coverage and a duplicate basename cannot build an ambiguous
 # target: zero matches -> unknown-suite error; >1 -> ambiguity error; one -> the binary.
 # Resolves against the FILESYSTEM ($(wildcard ...)), NOT the config-filtered $(TEST_SRC): a curated set
 # legitimately names suites a given config excludes from the default `make test` (e.g. iocp_engine is
 # absent unless BACKEND=iocp), and a curated BIN var is expanded at PARSE time via its target's
-# prerequisites — filtering by TEST_SRC would false-error every build. This matches the original
+# prerequisites; filtering by TEST_SRC would false-error every build. This matches the original
 # `addprefix` behavior (which never filtered by config), now with path resolution + fail-loud checks.
 test_src_for = $(wildcard tests/test_$(1).c tests/protocols/*/test_$(1).c)
 test_bin_for = $(patsubst %.c,%$(EXE),$(if $(call test_src_for,$(1)),$(if $(word 2,$(call test_src_for,$(1))),$(error curated test suite '$(1)' is ambiguous: $(call test_src_for,$(1))),$(call test_src_for,$(1))),$(error curated test suite '$(1)' is unknown: no tests/test_$(1).c or tests/protocols/*/test_$(1).c)))
@@ -383,14 +383,14 @@ test: $(TEST_BIN)
 # 55 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
 # socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
 # network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
-# are routed through tests/net_compat.h — including the mock-TLS suites (tls,
+# are routed through tests/net_compat.h, including the mock-TLS suites (tls,
 # tls_integration, peer_cert), which exercise the TLS server/client integration
 # against an in-test mock KlTls and need no mbedTLS.
 #
 # A few suites are not listed. Genuinely POSIX/Linux-only: unix_socket (SO_PEERCRED), file_io (POSIX
 # file-path assumptions), datagram_socket (copy-POSIX provider fixture). 2 build clean but have runtime failures needing Windows-native
 # iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
-# harness) and proxy (CONNECT tunnel timing) — both still covered on Windows by
+# harness) and proxy (CONNECT tunnel timing); both still covered on Windows by
 # smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
 # by `make KEEL_TLS=mbedtls smoke-tls`; mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress drain \
@@ -426,12 +426,12 @@ test-win: $(WIN_TEST_BIN)
 	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
 
 # Windows IOCP backend (BACKEND=iocp) test subset. The completion connection driver
-# does not exist over IOCP yet, so a server cannot run over IOCP — hence the
+# does not exist over IOCP yet, so a server cannot run over IOCP; hence the
 # backend-lifecycle + negotiation suite (no server-over-IOCP). stream_single_shot is a
 # BARE-stream test (raw kl_comp_post_recv/_send + drain, no HTTP connection driver), so
 # it validates the IOCP single-shot completion contract natively (R3b-T1); it skips on a
 # readiness build. Build with BACKEND=iocp so libkeel.a carries event_iocp.o.
-# (test_event_caps is a *readiness*-backend suite — it asserts READINESS caps — so it
+# (test_event_caps is a *readiness*-backend suite, it asserts READINESS caps, so it
 # runs in the WSAPoll/POSIX jobs, NOT here.)
 WIN_IOCP_TEST_SUITES = iocp_engine stream_single_shot
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
@@ -443,7 +443,7 @@ test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS IOCP TESTS FAILED"; exit 1; fi
 
-# Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
+# Plaintext TCP link + roundtrip smoke test: the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone
 # (not a utest suite), so it needs -lpthread explicitly (Windows LDFLAGS omits it).
 SMOKE_BIN = tests/protocols/http/smoke_tcp$(EXE)
@@ -453,7 +453,7 @@ $(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
-# the completion connection driver — build libkeel with BACKEND=iocp first so the
+# the completion connection driver; build libkeel with BACKEND=iocp first so the
 # server runs on the IOCP completion loop.
 SMOKE_IOCP_BIN = tests/smoke_iocp$(EXE)
 smoke-iocp: $(SMOKE_IOCP_BIN)
@@ -461,7 +461,7 @@ smoke-iocp: $(SMOKE_IOCP_BIN)
 $(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# TLS-over-IOCP roundtrip (Windows, BACKEND=iocp) via the identity mock TLS — runtime
+# TLS-over-IOCP roundtrip (Windows, BACKEND=iocp) via the identity mock TLS: runtime
 # gate for event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV, feed-in-drain,
 # overlapped ciphertext WSASend). No mbedTLS needed.
 SMOKE_IOCP_TLS_BIN = tests/smoke_iocp_tls$(EXE)
@@ -470,7 +470,7 @@ smoke-iocp-tls: $(SMOKE_IOCP_TLS_BIN)
 $(SMOKE_IOCP_TLS_BIN): tests/smoke_iocp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Async/thread-pool over IOCP (Windows, BACKEND=iocp) — runtime gate for the IOCP watcher
+# Async/thread-pool over IOCP (Windows, BACKEND=iocp): runtime gate for the IOCP watcher
 # relay (overlapped WSARecv on the loopback wakeup surfaces KL_COMP_WATCHER). 8e-2c.
 SMOKE_IOCP_ASYNC_BIN = tests/smoke_iocp_async$(EXE)
 smoke-iocp-async: $(SMOKE_IOCP_ASYNC_BIN)
@@ -479,7 +479,7 @@ $(SMOKE_IOCP_ASYNC_BIN): tests/smoke_iocp_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # End-to-end HTTP-over-completion roundtrip on POSIX (BACKEND=pollcomp). The runtime
-# gate for the platform-independent completion driver off Windows — build libkeel with
+# gate for the platform-independent completion driver off Windows; build libkeel with
 # BACKEND=pollcomp first so the server runs on the poll() completion loop. Proves the
 # completion axis is portable (driver reused verbatim) and makes it CI-testable.
 SMOKE_POLLCOMP_BIN = tests/smoke_pollcomp$(EXE)
@@ -496,14 +496,14 @@ smoke-pollcomp-tls: $(SMOKE_POLLCOMP_TLS_BIN)
 $(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# WebSocket-over-completion roundtrip on POSIX via pollcomp — runs comp_ws_drive (8e-1).
+# WebSocket-over-completion roundtrip on POSIX via pollcomp; runs comp_ws_drive (8e-1).
 SMOKE_POLLCOMP_WS_BIN = tests/protocols/websocket/smoke_pollcomp_ws$(EXE)
 smoke-pollcomp-ws: $(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_WS_BIN)
 $(SMOKE_POLLCOMP_WS_BIN): tests/protocols/websocket/smoke_pollcomp_ws.c $(LIB)
 	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Async/thread-pool handler over completion via pollcomp — runs the watcher relay + async
+# Async/thread-pool handler over completion via pollcomp; runs the watcher relay + async
 # resume (8e-2b): a thread-pool wakeup watcher fires on the completion loop and resumes.
 SMOKE_POLLCOMP_ASYNC_BIN = tests/smoke_pollcomp_async$(EXE)
 smoke-pollcomp-async: $(SMOKE_POLLCOMP_ASYNC_BIN)
@@ -511,12 +511,12 @@ smoke-pollcomp-async: $(SMOKE_POLLCOMP_ASYNC_BIN)
 $(SMOKE_POLLCOMP_ASYNC_BIN): tests/smoke_pollcomp_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# LC-0 PROOF: async KlHttpClient connect+GET over the pollcomp completion loop — the completion
+# LC-0 PROOF: async KlHttpClient connect+GET over the pollcomp completion loop: the completion
 # CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect) driving the client's connect over
 # the completion axis instead of the readiness WRITE-watcher shim. Build with BACKEND=pollcomp
 # first so both the server and the client's KlEventCtx run on the poll() completion loop.
 SMOKE_POLLCOMP_CLIENT_BIN = tests/smoke_pollcomp_client$(EXE)
-# The async KlHttpClient connect+GET over a pollcomp COMPLETION loop — the LC-0 proof. The smoke
+# The async KlHttpClient connect+GET over a pollcomp COMPLETION loop: the LC-0 proof. The smoke
 # wires kl_socket_provider_pollcomp() + the compiled-in ctx, so it is built BACKEND=pollcomp
 # (the completion backend compiled in), mirroring smoke-pollcomp-asan.
 smoke-pollcomp-client:
@@ -528,7 +528,7 @@ smoke-pollcomp-client:
 
 # Completion roundtrips (plaintext, TLS-via-mock, and WebSocket) under ASan+UBSan with
 # leak detection (Linux CI). Builds the pollcomp lib + the smokes WITH sanitizer flags (so
-# they link the ASan runtime the instrumented lib needs), then runs them — leak/UAF/
+# they link the ASan runtime the instrumented lib needs), then runs them: leak/UAF/
 # overflow coverage of the completion driver, the pollcomp op-table, and the TLS/h2/WS
 # buffers the plain build can't give.
 smoke-pollcomp-asan:
@@ -552,7 +552,7 @@ smoke-pollcomp-asan:
 	./$(SMOKE_POLLCOMP_CLIENT_BIN)
 
 # RC-2 PROOF: a DEFAULT (epoll/kqueue, readiness-compiled) libkeel serving GET / over a
-# RUNTIME-INJECTED pollcomp completion backend — impossible before the provider/glue split.
+# RUNTIME-INJECTED pollcomp completion backend; impossible before the provider/glue split.
 # Build the default lib (NO BACKEND=), compile event_pollcomp.c as an EXTRA object (the pure
 # provider form: no kl_event_*_builtin / kl_comp_ops_builtin → no clash with the default
 # backend's _builtin or the readiness kl_comp_ops_builtin stub already in libkeel.a), then
@@ -564,7 +564,7 @@ SMOKE_INJECT_OBJ = src/event_pollcomp.inject.o
 smoke-completion-inject:
 	$(MAKE) clean
 	$(MAKE) $(LIB)
-	# The injected provider TU — compiled against the SAME CFLAGS as the default lib.
+	# The injected provider TU, compiled against the SAME CFLAGS as the default lib.
 	$(CC) $(CFLAGS) -Isrc -c -o $(SMOKE_INJECT_OBJ) src/event_pollcomp.c
 	$(CC) $(CFLAGS) -Isrc -o $(SMOKE_INJECT_BIN) tests/smoke_completion_inject.c \
 	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread $(LDFLAGS)
@@ -581,8 +581,8 @@ smoke-completion-inject-asan:
 	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread
 	ASAN_OPTIONS=detect_leaks=1 ./$(SMOKE_INJECT_BIN)
 
-# Same, for the io_uring completion backend (Linux only — needs io_uring). LeakSanitizer here
-# covers the io_uring op/registered-buffer/splice/watcher lifecycle the plain smoke can't —
+# Same, for the io_uring completion backend (Linux only, needs io_uring). LeakSanitizer here
+# covers the io_uring op/registered-buffer/splice/watcher lifecycle the plain smoke can't:
 # the gap that let an 8f-5d/teardown watch leak reach main before this target existed.
 smoke-iouring-asan:
 	$(MAKE) clean
@@ -598,7 +598,7 @@ smoke-iouring-asan:
 	./$(SMOKE_IOURING_CLIENT_BIN)
 
 # End-to-end HTTP-over-completion roundtrip on the completion-native io_uring backend
-# (Linux, BACKEND=iouring). The runtime gate for event_iouring.c — build libkeel
+# (Linux, BACKEND=iouring). The runtime gate for event_iouring.c; build libkeel
 # with BACKEND=iouring first so the server runs on the io_uring completion loop. The
 # THIRD completion backend proving the driver is reused verbatim (after IOCP + pollcomp),
 # and the first production Linux one.
@@ -608,7 +608,7 @@ smoke-iouring: $(SMOKE_IOURING_BIN)
 $(SMOKE_IOURING_BIN): tests/smoke_iouring.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Async/thread-pool over the io_uring completion loop — the watcher relay via a single-shot
+# Async/thread-pool over the io_uring completion loop: the watcher relay via a single-shot
 # IORING_OP_POLL_ADD (a thread-pool wakeup fires on the completion loop and resumes).
 SMOKE_IOURING_ASYNC_BIN = tests/smoke_iouring_async$(EXE)
 smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
@@ -616,7 +616,7 @@ smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# LC-0: async KlHttpClient connect+GET over the io_uring completion loop — connect driven via
+# LC-0: async KlHttpClient connect+GET over the io_uring completion loop: connect driven via
 # IORING_OP_CONNECT (kl_comp_post_connect → KL_COMP_CONNECT → he_on_writable). Build with
 # BACKEND=iouring first.
 SMOKE_IOURING_CLIENT_BIN = tests/smoke_iouring_client$(EXE)
@@ -625,40 +625,40 @@ smoke-iouring-client: $(SMOKE_IOURING_CLIENT_BIN)
 $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Phase 8f-3: unit-test suites that run over the io_uring completion backend — a
+# Phase 8f-3: unit-test suites that run over the io_uring completion backend: a
 # regression gate alongside the smokes. Two groups: backend-agnostic logic suites (they
 # don't touch the event loop) + protocol/loop suites that drive the loop through the
 # backend-neutral kl_http_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 56 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
-# client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
+# 56 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire:
+# client_happy_eyeballs, client_pool, error, server_stats, timeout; a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_http_server_init) → +2 (integration, server_integration) once the completion
 # run loop got prompt teardown (kl_http_server_stop self-pipe wakeup) and graceful-drain progress
-# (kl_http_server_drain_progress ran in the completion branch too — it previously never exited
+# (kl_http_server_drain_progress ran in the completion branch too; it previously never exited
 # drain mode, hanging server_integration's drain tests) → +1 (request) once the completion
 # path null-terminated parsed request fields: that was done at the shared conn_dispatch_request
 # core (not the readiness call site), so both event models get it and can't drift) → +1
 # (the datagram completion UDP recv captured the datagram's local (dest) address via an IP_PKTINFO
-# cmsg — a shared kl_udp_parse_local() reused by the readiness recv and the completion backends
+# cmsg, a shared kl_udp_parse_local() reused by the readiness recv and the completion backends
 # (io_uring/pollcomp), so source-pinned reply-from works over completion; the completion recv cmsg
-# parity — GRO segment size via kl_udp_parse_gro + MSG_TRUNC truncation counting — is exercised through
+# parity, GRO segment size via kl_udp_parse_gro + MSG_TRUNC truncation counting, is exercised through
 # the datagram suites). D2 note: the former udp / udp_server / udp_multicast suites were migrated to
 # datagram_socket + datagram_multicast (broadcast is now a deterministic getsockopt check, not a
 # readiness-only synchronous-EACCES send probe).
 # → +4 (client, client_stream, redirect, dns_resolver) once kl_comp_run fired due timers
-# (kl_timer_fire) like the readiness kl_event_ctx_run does — without it every timer-driven async
+# (kl_timer_fire) like the readiness kl_event_ctx_run does; without it every timer-driven async
 # op stalled over completion (client Happy-Eyeballs delay + request deadline, DNS timeout /
 # retransmit / deferred completion, redirect chains).
 # → +4 (tls_integration, peer_cert, cross_module, unix_socket) once their per-file readiness-only
 # mock TLS was replaced by the shared completion-capable tests/mock_tls.h (feed_input/drain_output),
-# so comp_on_accept accepts the TLS conn and comp_tls_drive runs — the TLS-over-completion path the
+# so comp_on_accept accepts the TLS conn and comp_tls_drive runs, the TLS-over-completion path the
 # smokes already cover, now at unit granularity too (peer_cert installs its canned cert via the
 # mock's mock_tls_peer_cert_fn hook). See docs/archive/audits/keel_axis_audit.md third pass.
 #
 # Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3 + the axis-audit third pass):
-# raw kl_event_wait drivers (event, event_ctx — a completion loop has no readiness kl_event_wait,
+# raw kl_event_wait drivers (event, event_ctx; a completion loop has no readiness kl_event_wait,
 # only kl_comp_run) and readiness-cap / provider-negotiation assertions (event_caps,
 # socket_provider) are inherently readiness-axis. udp_multicast: broadcast_flag_gates_send asserts
 # a *synchronous* EACCES that only holds for readiness (completion sends are queued async).
@@ -667,18 +667,18 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # kl_http_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
 # recv is plaintext during KL_HTTP_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
 # tests pass. (This replaced the #134 fail-loud init rejection.)
-# → +5 (alpn, event_provider, sockaddr, stream_transport, version) — backend-agnostic unit/seam
+# → +5 (alpn, event_provider, sockaddr, stream_transport, version): backend-agnostic unit/seam
 # suites with no readiness kl_event_wait driver: pure value tests (sockaddr, version), the ALPN
 # selection + stream-transport vtables (mock-TLS / in-memory, no event model), and the event-
-# PROVIDER injection seam (which is backend-neutral — unlike the readiness-axis event/event_caps/
+# PROVIDER injection seam (which is backend-neutral, unlike the readiness-axis event/event_caps/
 # event_ctx below). Verified passing under `make BACKEND=iouring test-iouring` in the Apple
 # container (kernel 6.18) on an ext4 checkout. See docs/phase8f5_iouring_default_migration_design.md §3.
 #
-# → +1 (async) once two fixes landed (2026-08-03): (a) a TEST-FIXTURE gap — the suspend/resume
+# → +1 (async) once two fixes landed (2026-08-03): (a) a TEST-FIXTURE gap: the suspend/resume
 # tests acquired a bare conn and left conn->ctx NULL, so the completion resume path NULL-derefed in
 # kl_comp_post_send (iou_state = c->ctx->loop._backend); now the fixtures set conn->ctx = &s.ev
 # mirroring http_server.c:419, and the watcher/loop tests drive kl_event_ctx_run (the portable wait+
-# dispatch tick) instead of a raw readiness kl_event_wait; and (b) a real io_uring BACKEND bug —
+# dispatch tick) instead of a raw readiness kl_event_wait; and (b) a real io_uring BACKEND bug:
 # kl_event_mod re-arming an already-armed watch to a new mask no-op'd (iou_arm_watch's
 # `if (w->armed) return 0`), so READ→WRITE interest never fired when the old condition couldn't
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
@@ -703,7 +703,7 @@ test-iouring: $(IOURING_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME iouring TESTS FAILED"; exit 1; fi
 
-# Public KlDatagram link + roundtrip smoke — the runtime proof of the facade's completion fd↔loop
+# Public KlDatagram link + roundtrip smoke: the runtime proof of the facade's completion fd↔loop
 # registration (7B-7). On BACKEND=iocp it exercises CreateIoCompletionPort (the Windows IOCP CI gate);
 # pollcomp/io_uring/readiness run it too (their kl_event_add is inert / a readiness watcher).
 SMOKE_DATAGRAM_BIN = tests/smoke_datagram$(EXE)
@@ -712,7 +712,7 @@ smoke-datagram: $(SMOKE_DATAGRAM_BIN)
 $(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-# DNS resolver link + init/resolve smoke test — the Windows CI gate for
+# DNS resolver link + init/resolve smoke test: the Windows CI gate for
 # dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
 SMOKE_DNS_BIN = tests/protocols/dns/smoke_dns$(EXE)
 smoke-dns: $(SMOKE_DNS_BIN)
@@ -720,7 +720,7 @@ smoke-dns: $(SMOKE_DNS_BIN)
 $(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-# TLS handshake smoke test — a real mbedTLS handshake + request/response over
+# TLS handshake smoke test: a real mbedTLS handshake + request/response over
 # loopback with an embedded self-signed cert. The local/BYO validation gate for
 # the mbedTLS backend on both POSIX and Windows (mbedTLS stays out of CI). Needs
 # KEEL_TLS=mbedtls (else tls_mbedtls.o isn't in the lib). Standalone → -lpthread
@@ -732,7 +732,7 @@ smoke-tls: $(SMOKE_TLS_BIN)
 $(SMOKE_TLS_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
 	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Buffered-BIO (completion-mode) TLS validation for 8b-5 — a full mbedTLS handshake
+# Buffered-BIO (completion-mode) TLS validation for 8b-5: a full mbedTLS handshake
 # + app data via feed_input/drain_output, no socket. Local/BYO gate (KEEL_TLS=mbedtls).
 SMOKE_TLS_COMP_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion$(EXE)
 smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
@@ -751,7 +751,7 @@ smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
 $(SMOKE_TLS_E2E_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
 	$(CC) $(CFLAGS) -Isrc -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Optional first-party integrations (integrations/) — bring-your-own libraries,
+# Optional first-party integrations (integrations/): bring-your-own libraries,
 # never required by `make` / `make test`. Each target skips with a notice when
 # its BYO library var is unset (MBEDTLS_DIR / NGHTTP2_DIR), so `integrations` and
 # `integration-test` are safe with only some libraries present.
@@ -807,13 +807,13 @@ clean:
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	# Nested protocol-test artifacts (§9): $(TEST_BIN) already covers the extensionless
 	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles
-	# (never .c/.h — a `test_*` glob would delete the sources too).
+	# (never .c/.h; a `test_*` glob would delete the sources too).
 	rm -f tests/protocols/*/test_*.exe tests/protocols/*/smoke_*.exe tests/protocols/*/*.d
 	rm -rf tests/protocols/*/*.dSYM
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
 	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
-	# escape $(CORE_OBJ) on a default clean — remove them unconditionally to prevent a
+	# escape $(CORE_OBJ) on a default clean; remove them unconditionally to prevent a
 	# stale cross-toolchain object (e.g. a MinGW completion_core.o) surviving into a
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o
@@ -891,7 +891,7 @@ analyze:
 	scan-build --status-bugs $(MAKE) clean all
 
 # Address-neutrality gate (PAL: KlSockAddr). The HTTP/connection protocol layer
-# must speak KlSockAddr only — no platform struct sockaddr, no getaddrinfo/inet_*,
+# must speak KlSockAddr only; no platform struct sockaddr, no getaddrinfo/inet_*,
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/archive/designs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
@@ -914,8 +914,8 @@ check-sockaddr-neutral:
 # Tier-1 transport-boundary gate (R1). Complements check-sockaddr-neutral (host socket-ADDRESS types).
 # DEFAULT-DENY: EVERY src/*.c + src/protocols/*/*.c is treated as an above-transport (protocol/util) TU that
 # must NOT reach below the Tier-1 transports (KlListener/KlStream/KlDatagram) into engine/provider
-# internals — no platform networking/event system header, no raw completion seam (completion.h), no
-# completion tick (completion_io.h) or HTTP completion seam (completion_http.h) — UNLESS it is in
+# internals; no platform networking/event system header, no raw completion seam (completion.h), no
+# completion tick (completion_io.h) or HTTP completion seam (completion_http.h); UNLESS it is in
 # TIER1_INFRA: the layer that legitimately bridges
 # Tier-1 to the engine/provider (event backends, socket providers, platform glue, the completion
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
@@ -927,7 +927,7 @@ check-sockaddr-neutral:
 # only in explanatory comments (http_connection.c / http_response.c / http_client_sync.c). Backstop for
 # docs/architecture/invariants.md I10; mirrors axis-audit Goal 4.
 #
-# TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
+# TIER1_INFRA: the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
 # for the transport machines + run-loop/async drivers). http_server.c / http_client_async.c live here because
 # they drive the loop / async connect via the Keel completion tick (completion_io.h). Everything NOT here
 # is governed.
@@ -948,16 +948,16 @@ check-tier1-boundary:
 	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
 	  fi; \
 	done; \
-	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED — an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
+	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED, an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
 	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"completion_io.h"' '"completion_http.h"'; do \
 	  if ! printf '#include %s\n' "$$h" | grep -qE '$(TIER1_FORBIDDEN_RE)'; then \
-	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
+	    echo "check-tier1-boundary: SELF-TEST FAILED, the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \
 	done; \
 	echo "check-tier1-boundary: OK (default-deny: every src/ + src/protocols/ TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
-# resolve to a file that exists — so an architecture claim can never point at code/contract/gate
+# resolve to a file that exists; so an architecture claim can never point at code/contract/gate
 # that has been renamed or deleted. Narrow by construction: only the two living docs are scanned,
 # only markdown links (`](target)`), and each target is resolved relative to the doc's directory
 # (so `../include/keel/stream.h`, `datagram_contract.md`, `audits/README.md` all check). External
@@ -984,7 +984,7 @@ check-doc-refs:
 # Test-layout ownership gate (§9.6). Enforces the EXACT authorized test-source layout recorded in
 # tests/test-layout.manifest (basename→path map), so a protocol test cannot drift to the wrong home
 # and a new/renamed/duplicated test cannot land unclassified. Rejects: (a) a file whose real path is
-# not the manifested one (mismatch — wrong family/dir), (b) a basename at two paths (duplicate/leftover
+# not the manifested one (mismatch, wrong family/dir), (b) a basename at two paths (duplicate/leftover
 # copy), (c) any test_*.c/smoke_*.c not in the manifest (unknown), (d) a tests/protocols/<x>/ dir where
 # <x> is not one of the five frozen families. Scopes to test_*.c + smoke_*.c (helpers/fixtures/
 # freestanding harnesses are not suites). Self-canary included.
@@ -1003,10 +1003,10 @@ check-test-layout:
 	  case " $(TEST_LAYOUT_FAMILIES) " in *" $$d "*) ;; *) echo "  UNKNOWN family dir: tests/protocols/$$d/"; bad=1 ;; esac; \
 	done; \
 	if ! grep -qxF 'tests/protocols/http/test_http_overflow.c' tests/test-layout.manifest; then \
-	  echo "check-test-layout: SELF-TEST FAILED — manifest lost a known split file"; exit 1; fi; \
+	  echo "check-test-layout: SELF-TEST FAILED, manifest lost a known split file"; exit 1; fi; \
 	if grep -qxF 'tests/test_overflow.c' tests/test-layout.manifest; then \
-	  echo "check-test-layout: SELF-TEST FAILED — manifest still lists a retired pre-split path"; exit 1; fi; \
-	if [ $$bad -ne 0 ]; then echo "check-test-layout: FAILED — the test tree diverges from tests/test-layout.manifest (§9.6); update the manifest in the SAME commit that moves a test"; exit 1; fi; \
+	  echo "check-test-layout: SELF-TEST FAILED, manifest still lists a retired pre-split path"; exit 1; fi; \
+	if [ $$bad -ne 0 ]; then echo "check-test-layout: FAILED, the test tree diverges from tests/test-layout.manifest (§9.6); update the manifest in the SAME commit that moves a test"; exit 1; fi; \
 	echo "check-test-layout: OK (`wc -l < tests/test-layout.manifest | tr -d ' '` authorized test sources; families: $(TEST_LAYOUT_FAMILIES))"
 
 # Stale-name gate (D3-3): the KlUdp/KlUdpServer object API was deleted; fail if it reappears in the
@@ -1014,13 +1014,13 @@ check-test-layout:
 # line can NEVER conceal a forbidden name (a whole-line `grep -v` filter would let `KlUdp x; kl_udp_parse_tos()`
 # through):
 #   1. Object TYPES (KlUdp / KlUdpServer / KlUdpConfig / KlUdpTransport / KlUdpDatagram / KlUdpHandlerFn /
-#      KlUdpRxMeta) — rejected EVERYWHERE, no allowlist, no file exclusion (they are fully deleted, incl.
+#      KlUdpRxMeta); rejected EVERYWHERE, no allowlist, no file exclusion (they are fully deleted, incl.
 #      inside the cmsg TUs).
-#   2. Function TOKENS (kl_udp_<name>) — each occurrence extracted INDIVIDUALLY (grep -o → one token per
+#   2. Function TOKENS (kl_udp_<name>): each occurrence extracted INDIVIDUALLY (grep -o → one token per
 #      output line, keeping its file:line), then only the EXACT retained shared-cmsg helper FAMILIES are
 #      allowed: kl_udp_parse_*, kl_udp_build_control, kl_udp_send_family, the Winsock kl_udp_win_*. A token
 #      like kl_udp_init on a mixed line is surfaced on its own output line and cannot be masked.
-# Historical design docs under docs/ are NOT scanned — their recorded history stands. Binary files are
+# Historical design docs under docs/ are NOT scanned; their recorded history stands. Binary files are
 # skipped (-I). Permanent mixed-line canary proves an allowed helper conceals neither KlUdp nor kl_udp_init.
 KLUDP_TYPES_RE = \bKlUdp(Server|Config|Transport|Datagram|HandlerFn|RxMeta)?\b
 KLUDP_FN_RE    = kl_udp_[A-Za-z0-9_]+
@@ -1029,14 +1029,14 @@ check-no-kludp:
 	@bad=0; \
 	canary='KlUdp x; kl_udp_parse_tos(a); kl_udp_init(b)'; \
 	if ! printf '%s\n' "$$canary" | grep -qE '$(KLUDP_TYPES_RE)'; then \
-	  echo "check-no-kludp: SELF-TEST FAILED — object-type regex no longer detects KlUdp on a mixed line"; exit 1; fi; \
+	  echo "check-no-kludp: SELF-TEST FAILED, object-type regex no longer detects KlUdp on a mixed line"; exit 1; fi; \
 	leak=`printf '%s\n' "$$canary" | grep -oE '$(KLUDP_FN_RE)' | grep -vxE '$(KLUDP_FN_ALLOW)'`; \
 	if [ "$$leak" != "kl_udp_init" ]; then \
-	  echo "check-no-kludp: SELF-TEST FAILED — a cmsg helper concealed kl_udp_init on a mixed line (surfaced: '$$leak')"; exit 1; fi; \
+	  echo "check-no-kludp: SELF-TEST FAILED, a cmsg helper concealed kl_udp_init on a mixed line (surfaced: '$$leak')"; exit 1; fi; \
 	types=`grep -rInE '$(KLUDP_TYPES_RE)' src include tests integrations 2>/dev/null`; \
-	if [ -n "$$types" ]; then echo "$$types"; echo "check-no-kludp: FAILED — a deleted KlUdp object TYPE reappeared (rejected tree-wide)"; bad=1; fi; \
+	if [ -n "$$types" ]; then echo "$$types"; echo "check-no-kludp: FAILED, a deleted KlUdp object TYPE reappeared (rejected tree-wide)"; bad=1; fi; \
 	fns=`grep -rInoE '$(KLUDP_FN_RE)' src include tests integrations 2>/dev/null | grep -vE ':($(KLUDP_FN_ALLOW))$$'`; \
-	if [ -n "$$fns" ]; then echo "$$fns"; echo "check-no-kludp: FAILED — a deleted kl_udp_* object function reappeared (allowlist: cmsg helper families only)"; bad=1; fi; \
+	if [ -n "$$fns" ]; then echo "$$fns"; echo "check-no-kludp: FAILED, a deleted kl_udp_* object function reappeared (allowlist: cmsg helper families only)"; bad=1; fi; \
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-no-kludp: OK (object types rejected tree-wide; every kl_udp_* token is a retained cmsg helper)"
 
@@ -1106,17 +1106,17 @@ check-no-httplegacy:
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
 	echo "check-no-httplegacy: OK (types/constants/functions/filenames -- no legacy HTTP name or deleted-module path in code or living docs)"
 
-# ── R4 boundary gates (frozen §6.2) — FINAL src/protocols/ + integrations/<role>/<backend>/ layout ──
+# ── R4 boundary gates (frozen §6.2): FINAL src/protocols/ + integrations/<role>/<backend>/ layout ──
 # Permanently enforce the three-axis ownership split. Default-deny, self-canaried, file:line, binary-
 # skip, BSD+GNU-portable. G1–G3 classify EVERY #include token (both <...> and "...") against
 # inventories DERIVED FROM THE TREE (tools/check_boundaries.sh), so neither an include-search-path
 # escape (<http_internal.h>) nor a newly named header can slip past a fixed regex. G4 is a committed
 # ownership manifest (src/substrate-tus.manifest) so a NEW bare-src .c fails until it is declared
-# substrate or moved under src/protocols/<fam>/ — the case dynamic derivation cannot decide.
-#   G1 check-substrate-purity        — src/*.{c,h} (substrate) may not include a protocol header
-#   G2 check-protocol-no-integration — src/protocols/**/*.{c,h} may not include an integration adapter header
-#   G3 check-integration-seam        — integrations reach src/ only via the frozen §6.3 seam allowlist; never a protocol header
-#   G4 check-protocol-home           — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/
+# substrate or moved under src/protocols/<fam>/; the case dynamic derivation cannot decide.
+#   G1 check-substrate-purity        : src/*.{c,h} (substrate) may not include a protocol header
+#   G2 check-protocol-no-integration : src/protocols/**/*.{c,h} may not include an integration adapter header
+#   G3 check-integration-seam        : integrations reach src/ only via the frozen §6.3 seam allowlist; never a protocol header
+#   G4 check-protocol-home           : every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/
 check-substrate-purity:
 	@sh tools/check_boundaries.sh G1
 
@@ -1131,16 +1131,16 @@ check-protocol-home:
 	git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort > /tmp/keel_g4_tracked; \
 	grep -vE '^[[:space:]]*(#|$$)' src/substrate-tus.manifest | LC_ALL=C sort > /tmp/keel_g4_manifest; \
 	if grep -qxF 'src/http_router.c' /tmp/keel_g4_manifest; then \
-	  echo "check-protocol-home: SELF-TEST FAILED — manifest unexpectedly declares a protocol .c (src/http_router.c) as substrate"; rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; exit 1; fi; \
+	  echo "check-protocol-home: SELF-TEST FAILED, manifest unexpectedly declares a protocol .c (src/http_router.c) as substrate"; rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; exit 1; fi; \
 	unclassified=`grep -vxFf /tmp/keel_g4_manifest /tmp/keel_g4_tracked`; \
-	if [ -n "$$unclassified" ]; then echo "$$unclassified"; echo "check-protocol-home: FAILED (G4) — bare-src .c not declared in src/substrate-tus.manifest (unclassified addition — declare it substrate there OR move it under src/protocols/<fam>/)"; bad=1; fi; \
+	if [ -n "$$unclassified" ]; then echo "$$unclassified"; echo "check-protocol-home: FAILED (G4), bare-src .c not declared in src/substrate-tus.manifest (unclassified addition; declare it substrate there OR move it under src/protocols/<fam>/)"; bad=1; fi; \
 	stale=`grep -vxFf /tmp/keel_g4_tracked /tmp/keel_g4_manifest`; \
-	if [ -n "$$stale" ]; then echo "$$stale"; echo "check-protocol-home: FAILED (G4) — src/substrate-tus.manifest lists a bare-src .c that no longer exists"; bad=1; fi; \
+	if [ -n "$$stale" ]; then echo "$$stale"; echo "check-protocol-home: FAILED (G4), src/substrate-tus.manifest lists a bare-src .c that no longer exists"; bad=1; fi; \
 	rm -f /tmp/keel_g4_tracked /tmp/keel_g4_manifest; \
 	if [ $$bad -ne 0 ]; then exit 1; fi; \
-	echo "check-protocol-home: OK (G4 — every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/)"
+	echo "check-protocol-home: OK (G4, every bare-src .c is manifest-declared substrate; protocol impl .c lives only under src/protocols/<fam>/)"
 
-# check-old-layout (S4-1) — the single authoritative resurrection gate. Rejects re-introduction of
+# check-old-layout (S4-1): the single authoritative resurrection gate. Rejects re-introduction of
 # every deleted layout: top-level protocols/, old flat integration homes, spikes/, parsers/, and an
 # unclassified integration file at a backend root (exact ownership via integrations/non-test-files.
 # manifest, case 5). Absorbs the former check-no-interim-paths. Protocol test placement inside the
@@ -1149,14 +1149,14 @@ check-old-layout:
 	@sh tools/check_old_layout.sh
 
 # Comments-only milestone/phase archaeology gate (C2-6). Scans every tracked first-party .c/.h
-# (vendor/ excluded), extracting COMMENT text only via a real C-comment state machine — so string
+# (vendor/ excluded), extracting COMMENT text only via a real C-comment state machine; so string
 # literals, including the UEFI/lwIP self-test CI-oracle output markers ("6.4c: GO", "S-4: GO",
-# "P9-3 PASS"), are naturally ignored — and rejects historical milestone/phase/finding/step token
+# "P9-3 PASS"), are naturally ignored, and rejects historical milestone/phase/finding/step token
 # families. Historical matching is PRECISE so legitimate local scenario catalogs pass (raw_send
 # B1..B11, raw_dns B1/B2) and ordinary text is not caught (UTF-8 is not F-8, E2E is not E2, lowercase
 # "phase 1"/"two-phase" prose is not a milestone). NO file, line, or marker exceptions. Positive +
 # negative self-canaries run first and abort if the scanner regresses. Design/history docs under
-# docs/ are NOT scanned — their recorded milestone history stands (as the other stale-name gates do).
+# docs/ are NOT scanned; their recorded milestone history stands (as the other stale-name gates do).
 check-no-milestones:
 	@perl tools/check_no_milestones.pl
 
@@ -1168,7 +1168,7 @@ check-no-milestones:
 #    returns 0 (no filesystem). Both are fully used in the hosted build; the findings exist only in
 #    that stub config.
 #  - event_{iocp,iouring,pollcomp}.c constParameterCallback: `life` on cancel_dgram/retire_dgram is
-#    fixed non-const by the KlCompletionOps vtable signature — const-ing one impl would mismatch the
+#    fixed non-const by the KlCompletionOps vtable signature; const-ing one impl would mismatch the
 #    vtable and require casting the installed function pointers, which cppcheck itself warns about.
 cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
@@ -1192,10 +1192,10 @@ cppcheck:
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
 	     src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/completion_http_server.c \
-	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
+	  && echo "readiness-identity: OK, all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
-# and a clean fixture (must PASS) — proving the gate actually detects multiline regressions.
+# and a clean fixture (must PASS), proving the gate actually detects multiline regressions.
 check-readiness-identity-selftest:
 	@perl tools/check_readiness_identity.pl tests/fixtures/readiness_identity_good.c \
 	  && echo "selftest: good fixture PASSED (as expected)" \
@@ -1220,7 +1220,7 @@ FUZZ_CFLAGS = -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined \
 # The fuzzers link a SEPARATE instrumented build of the library: every library
 # object is compiled with SanitizerCoverage (-fsanitize=fuzzer-no-link) + ASan +
 # UBSan, so libFuzzer actually explores the parsers AND memory-checks them.
-# Linking the plain libkeel.a (uninstrumented) would fuzz only the harness — no
+# Linking the plain libkeel.a (uninstrumented) would fuzz only the harness: no
 # coverage feedback and, worse, no ASan on the library code. Objects use a
 # .fuzz.o suffix so they never collide with the normal build. `-w` because the
 # production build already enforces -Werror; here we only want instrumentation.
@@ -1279,7 +1279,7 @@ BENCH_SERVER = bench/bench_server
 $(BENCH_SERVER): bench/bench_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-# Compile-only benchmark build (no wrk run) — a public-API consumer outside src/tests/examples,
+# Compile-only benchmark build (no wrk run): a public-API consumer outside src/tests/examples,
 # so headline renames (KlHttpServer/Request/Response, …) that miss bench/ are caught at compile time.
 # Part of the per-increment validation matrix.
 bench-build: $(BENCH_SERVER)
@@ -1289,7 +1289,7 @@ bench: $(BENCH_SERVER)
 	./bench/bench.sh
 
 # Compare the Linux event backends (epoll / io_uring readiness / io_uring completion) on
-# one host — PAL 8f step 4. Builds + benchmarks each in turn; see bench/bench_compare.sh.
+# one host, PAL 8f step 4. Builds + benchmarks each in turn; see bench/bench_compare.sh.
 bench-compare:
 	./bench/bench_compare.sh
 
@@ -1299,14 +1299,14 @@ smoke: examples
 
 # ── Freestanding public-header gate (step A3) ──────────────────────────────
 # Proves the client/protocol subset of the public headers compiles with NO
-# hosted libc — -ffreestanding, full -Werror — and that none of them pull a
+# hosted libc (-ffreestanding, full -Werror) and that none of them pull a
 # POSIX socket/system header. The in-gate vs out-of-gate header list (http_response.h
 # and file_io.h are now in-gate after off_t→uint64_t; why resolver.h / udp*.h /
 # http_server.h stay out) is documented at the top of tests/freestanding_headers.c.
 #
 # The dep proof matches the FORBIDDEN header paths *exactly at a leaf boundary*
 # (e.g. .../sys/socket.h, .../strings.h) so it flags only headers our code
-# actually includes — never the C-standard-header machinery a libc's <stddef.h>/
+# actually includes, never the C-standard-header machinery a libc's <stddef.h>/
 # <stdint.h> legitimately uses (macOS pulls sys/_types/_size_t.h; glibc pulls
 # bits/*). That keeps the gate portable across libc implementations.
 FREESTANDING_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
@@ -1333,7 +1333,7 @@ freestanding-headers:
 	  fi; \
 	done; \
 	if [ $$bad -ne 0 ]; then echo "freestanding-headers: FAILED"; rm -f /tmp/keel_freestanding.deps; exit 1; fi; \
-	echo "  zero POSIX headers pulled — gate deps (keel + C-standard only):"; \
+	echo "  zero POSIX headers pulled, gate deps (keel + C-standard only):"; \
 	grep -E 'include/keel/' /tmp/keel_freestanding.deps | sed 's/^/    /'; \
 	rm -f /tmp/keel_freestanding.deps; \
 	echo "freestanding-headers (tests/freestanding_headers.c): OK"
@@ -1358,14 +1358,14 @@ freestanding-headers:
 
 # ── Freestanding client archive + undefined-symbol whitelist gate (F0) ─────────
 # Builds libkeel_freestanding.a from a client-only, completion-only source
-# manifest and proves — via nm + tests/freestanding_symbol_gate.sh — that the
+# manifest and proves, via nm + tests/freestanding_symbol_gate.sh, that the
 # archive's undefined-symbol closure is within a documented whitelist: the
 # C-runtime memory/string surface (memcpy/memmove/memset/memcmp/strlen/strcmp/
 # strncmp/strcasecmp/strchr/strstr/strtol/snprintf + their FORTIFY __*_chk
 # wrappers, + malloc/free/realloc + fprintf/abort/stderr), the KEEL platform +
 # resolution hooks (kl_plat_* / kl_monotonic_ms / kl_resolve_sync), and the
 # socket/event/completion PROVIDER ops reached via vtable (kl_sockdef_* /
-# kl_event_*_builtin / kl_comp_ops_builtin) — the injection points a freestanding
+# kl_event_*_builtin / kl_comp_ops_builtin), the injection points a freestanding
 # build fills with its own provider. It contains NO server (kl_http_conn_*/kl_http_server_*/
 # comp_on_*/router), thread_pool/pthread, kl_udp_*, kl_dns_*, file_io, or
 # OS-syscall/errno symbol; the gate FAILS if any appears. This is the concrete
@@ -1373,17 +1373,17 @@ freestanding-headers:
 # (docs/phase10_uefi_feasibility_design.md, F-0).
 #
 # The manifest is genuinely client + completion only: the KlEventCtx/watcher half
-# of async.c was split into event_ctx.c (the server-suspend half — which pulls the
-# server connection driver — stays in async.c and is EXCLUDED), and the built-in
+# of async.c was split into event_ctx.c (the server-suspend half, which pulls the
+# server connection driver, stays in async.c and is EXCLUDED), and the built-in
 # DNS auto-create in http_client_async.c is #ifdef'd out under KEEL_FREESTANDING (a
 # freestanding client resolves via cfg->resolver or a numeric address; DNS/UDP is
 # out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
-# deliberately NOT in the manifest — a freestanding build supplies its own
+# deliberately NOT in the manifest; a freestanding build supplies its own
 # provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
 # datagram_life.c is a hard LINK dependency of completion_core.c: the generic
 # completion loop's datagram-completion release site (7B-2a) calls
 # kl_dgram_life_dispatch/target/release. That branch is dead on the client (no
-# KL_COMP_DGRAM_* events ever arrive), but the symbols must resolve — and
+# KL_COMP_DGRAM_* events ever arrive), but the symbols must resolve; and
 # datagram_life.c is a transport-neutral refcount token (alloc-only, no UDP/DNS
 # I/O, no syscall), so it is completion infrastructure, not the UDP/DNS surface
 # the gate forbids. Every archive carrying completion_core.c must carry it.
@@ -1403,13 +1403,13 @@ FREESTANDING_LIB_CC := $(shell command -v clang >/dev/null 2>&1 && echo clang ||
 # ── MULTI-ARCH (B1, F-6 "test AArch64 early") ────────────────────────────────
 # The archive is cross-compiled + symbol-gated for BOTH x86_64 AND aarch64 PE
 # targets: UEFI ships on ARM64 too, and the compiler-runtime helper closure
-# differs by arch (this is exactly what B1 proves — see the __chkstk note in
+# differs by arch (this is exactly what B1 proves; see the __chkstk note in
 # tests/freestanding_symbol_gate.sh, and that NO __aarch64_* outline atomics /
 # division helpers appear). Each triple is built with clang --target=<triple>,
 # archived, and run through the symbol gate. A triple whose clang backend/headers
 # are unavailable is SKIPPED with a printed note (never a build failure), and the
 # recipe reports which triples actually ran. When clang is not the freestanding
-# toolchain (the cc/gcc fallback — no cross --target without a sysroot), the list
+# toolchain (the cc/gcc fallback, no cross --target without a sysroot), the list
 # collapses to the single native host target, preserving the pre-B1 behavior.
 FREESTANDING_TARGETS ?= x86_64-unknown-windows aarch64-unknown-windows
 FREESTANDING_IS_CLANG := $(shell $(FREESTANDING_LIB_CC) --version 2>/dev/null | grep -qi clang && echo yes)
@@ -1422,7 +1422,7 @@ FREESTANDING_AR := $(shell command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar ||
 # Freestanding cross-target shim headers: the few hosted C-library headers clang's
 # -ffreestanding does NOT provide (string.h / stdlib.h / stdio.h / sys/types.h /
 # errno.h) + the Winsock type/constant shims src/sockcompat.h's _WIN32 branch
-# expects. Declarations only, no logic — a real UEFI/EDK2 build supplies the
+# expects. Declarations only, no logic; a real UEFI/EDK2 build supplies the
 # equivalents. Injected via -isystem for the cross-target builds only; see
 # tests/freestanding/shim/README.md.
 FREESTANDING_SHIM = tests/freestanding/shim
@@ -1438,10 +1438,10 @@ FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar \
                           -Iinclude -Ivendor/llhttp -Isrc
 FREESTANDING_LIB = libkeel_freestanding.a
 
-# Server-only include dirs — the protocol-internal headers http_connection.c pulls
+# Server-only include dirs: the protocol-internal headers http_connection.c pulls
 # (http_internal.h via source-dir search; http2_internal.h from the sibling http2/
 # dir, which source-dir search cannot reach). Kept OUT of the global flags so the
-# client / datagram / DNS archives never see protocol internals — passed only to the
+# client / datagram / DNS archives never see protocol internals; passed only to the
 # server archive builds (fs_build_and_gate arg 4).
 FREESTANDING_SERVER_INC = -Isrc/protocols/http -Isrc/protocols/http2
 FREESTANDING_LIB_OBJ = $(FREESTANDING_CLIENT_SRC:.c=.freestanding.o)
@@ -1502,7 +1502,7 @@ freestanding-lib:
 # the request parser, proxy_protocol.c) + the ws/h2 upgrade-seam storage
 # (http_proto_hooks.c, tables NOT installed → HTTP/1.1 only). NO http_server.c (hosted:
 # bind/listen/systemd/signals/readiness loop), NO http_server_ws.c/http2_server.c
-# (WebSocket/HTTP-2 out of scope), NO OS sockets — a freestanding build injects its
+# (WebSocket/HTTP-2 out of scope), NO OS sockets; a freestanding build injects its
 # own socket + completion providers (EFI_TCP4 + the EFI completion backend). The
 # symbol gate proves the undefined closure is the SAME documented whitelist as the
 # client archive (C-runtime mem*/str* + kl_plat_*/kl_monotonic_ms + provider ops):
@@ -1523,16 +1523,16 @@ freestanding-lib-server:
 	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,$(FREESTANDING_SERVER_INC))
 
 # ── Freestanding DATAGRAM archive (Phase 10 6.4a-1: KlUdp + the Tier-1 machine) ──
-# OPT-IN layer — the DNS/UDP surface is deliberately OUT of the minimal client
+# OPT-IN layer: the DNS/UDP surface is deliberately OUT of the minimal client
 # archive (FREESTANDING_CLIENT_SRC), so a datagram-free EFI client stays small; a
 # consumer that wants KlUdp over a freestanding datagram provider (the future
 # EFI_UDP4 backend, 6.4b) links THIS archive instead. The Tier-1 datagram machine
 # (slots/send/recv/close/life) + KlUdp + the base TUs they need (allocator/sockaddr/
 # event_ctx/event_dispatch/completion_dispatch+core). NO dns_resolver.c (that rides ON
-# TOP of this layer — see the freestanding DNS layer / FREESTANDING_DNS_SRC below), NO
+# TOP of this layer; see the freestanding DNS layer / FREESTANDING_DNS_SRC below), NO
 # socket PROVIDER (a freestanding build injects EFI_UDP4). The symbol gate proves the
 # undefined closure is the SAME documented whitelist as the client/server archives
-# (C-runtime mem* + kl_plat_*/provider ops) — no OS-syscall/errno/getaddrinfo/fopen.
+# (C-runtime mem* + kl_plat_*/provider ops): no OS-syscall/errno/getaddrinfo/fopen.
 FREESTANDING_DGRAM_SRC = \
     src/error.c src/allocator.c src/kl_cstr.c src/sockaddr.c src/timer.c \
     src/event_ctx.c src/event_dispatch.c \
@@ -1547,13 +1547,13 @@ freestanding-lib-dgram:
 
 # The full 6.4a-1 gate: compile (fs archive, per target) + undefined-host-symbol
 # (freestanding_symbol_gate.sh, run inside fs_build_and_gate) + COMPOSITION link
-# (freestanding-dgram-link — the client + datagram archives link together with no
+# (freestanding-dgram-link, the client + datagram archives link together with no
 # duplicate/unresolved across their overlapping base objects) + forbidden-header
 # (below). The cross-target build already proves no host POSIX header is reachable
 # (the macOS/host include tree is off the --target=windows search path), so the
 # dep-scan is belt-and-suspenders: it FAILS if any FREESTANDING_FORBIDDEN header is
-# pulled from OUTSIDE the freestanding shim (the shim's winsock2.h/ws2tcpip.h — the
-# intended replacements sockcompat's _WIN32 branch selects — are allowed).
+# pulled from OUTSIDE the freestanding shim (the shim's winsock2.h/ws2tcpip.h, the
+# intended replacements sockcompat's _WIN32 branch selects, are allowed).
 freestanding-dgram: freestanding-lib-dgram freestanding-dgram-link
 	@echo "== dep proof: datagram TUs pull no HOST forbidden header (shim replacements OK) =="
 	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
@@ -1614,14 +1614,14 @@ freestanding-dgram-link:
 	  rm -f $$cobjs $$carc $$dobjs $$darc $$mo; \
 	done; \
 	if [ -z "$$linked" ]; then echo "freestanding-dgram-link: no arch linked"; exit 1; fi; \
-	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
+	echo "== freestanding-dgram-link: OK, client + datagram archives compose:$$linked =="
 
 # ── Freestanding DNS layer (6.4a-2) ───────────────────────────────────────────
 # The stock async resolver (src/protocols/dns/dns_resolver.c) freestanding-enabled: it rides the
 # datagram layer (KlUdp over a freestanding provider) for UDP-only Do53 against an
 # EXPLICIT cfg->nameserver. dns_resolver.c compiles its three hosted-only surfaces
-# out under KEEL_FREESTANDING — RFC 7766 TCP fallback, /etc/hosts, resolv.conf
-# discovery — so the archive's undefined closure stays the SAME documented whitelist
+# out under KEEL_FREESTANDING (RFC 7766 TCP fallback, /etc/hosts, resolv.conf
+# discovery), so the archive's undefined closure stays the SAME documented whitelist
 # as the dgram archive (mem* + kl_cstr helpers + kl_plat_*/provider ops): NO fopen /
 # errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
 # EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c was
@@ -1694,12 +1694,12 @@ freestanding-dns-link:
 	  rm -f $$cobjs $$carc $$nobjs $$narc $$mo; \
 	done; \
 	if [ -z "$$linked" ]; then echo "freestanding-dns-link: no arch linked"; exit 1; fi; \
-	echo "== freestanding-dns-link: OK — client + DNS archives compose:$$linked =="
+	echo "== freestanding-dns-link: OK, client + DNS archives compose:$$linked =="
 
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply
 # (libc / EDK2 BaseMemoryLib). This variant ALSO links the optional reference
-# impls (src/kl_cstr_builtin.c) so the archive provides them itself — for a bare
+# impls (src/kl_cstr_builtin.c) so the archive provides them itself, for a bare
 # target that has neither. The gate runs in "selfcontained" mode: mem*/strlen must
 # be DEFINED (not undefined) and the ONLY undefined symbols are the KEEL platform/
 # provider hooks + the vendored-llhttp residual (+ the PE __chkstk on the cross
@@ -1718,7 +1718,7 @@ freestanding-lib-selfcontained:
 
 # Self-contained SERVER archive (Phase 10 UEFI server, S-4): the server core +
 # protocol layer + in-archive mem*/strlen (kl_cstr_builtin.c), for a bare EFI target
-# with no libc/EDK2 BaseMemoryLib. Same selfcontained gate as the client variant —
+# with no libc/EDK2 BaseMemoryLib. Same selfcontained gate as the client variant:
 # mem*/strlen must be DEFINED; the only undefined symbols are the KEEL platform/
 # provider hooks + the vendored-llhttp residual (+ PE __chkstk/_fltused). This is
 # what build_s4.sh links the EFI_TCP4 plaintext HTTP server against.
@@ -1733,7 +1733,7 @@ freestanding-lib-server-selfcontained:
 # Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
 # (udp + datagram_* + completion) + the STOCK src/protocols/dns/dns_resolver.c + in-archive mem*/
 # strlen (kl_cstr_builtin.c), for a bare EFI target with no libc/EDK2 BaseMemoryLib.
-# Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
+# Same selfcontained gate: mem*/strlen must be DEFINED; the only undefined symbols are
 # the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links
 # this against the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4) + event_efi so the
 # stock resolver runs over KlUdp-over-EFI_UDP4 on real firmware (superseding the now-retired
@@ -1747,7 +1747,7 @@ freestanding-lib-dns-selfcontained:
 
 # Self-contained freestanding DATAGRAM archive: the FREESTANDING_DGRAM_SRC layer (udp +
 # datagram_* + the PUBLIC kl_datagram_* facade src/datagram.c + completion + event_ctx) +
-# in-archive mem*/strlen (kl_cstr_builtin.c), with NO dns_resolver dead weight — for a bare
+# in-archive mem*/strlen (kl_cstr_builtin.c), with NO dns_resolver dead weight, for a bare
 # EFI target with no libc/EDK2 BaseMemoryLib. Same selfcontained gate as the DNS variant.
 # build_dgram_public.sh links this against the unified EFI socket provider (SOCK_DGRAM →
 # EFI_UDP4) + event_efi so the PUBLIC KlDatagram close (7B-9) runs on real firmware.
@@ -1758,14 +1758,14 @@ freestanding-lib-dgram-selfcontained:
 	@rm -f $(FREESTANDING_DGRAM_SC_LIB)
 	$(call fs_build_and_gate,$(FREESTANDING_DGRAM_SC_SRC),libkeel_freestanding_dgram_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
-# ── CRT-less PE/COFF link (B2 — the milestone's last literal) ─────────────────
+# ── CRT-less PE/COFF link (B2, the milestone's last literal) ─────────────────
 # LINKS libkeel_freestanding_selfcontained.a (mem*/strlen in-archive) into a
 # PE/COFF EFI image with NO hosted CRT (-nostdlib, lld PE), proving the archive
 # links freestanding. tests/freestanding_link_main.c is a minimal efi_main that
 # references the client public API (pulling client_async/common + transitive
 # objects) and DEFINES every seam the archive leaves undefined (platform hooks,
 # kl_sockdef_*, kl_event_*_builtin/kl_comp_ops_builtin, the llhttp abort/fprintf/
-# stderr residual, and __chkstk). It need not RUN — it must LINK with an empty
+# stderr residual, and __chkstk). It need not RUN; it must LINK with an empty
 # undefined set. Success criterion: the link resolves with NO hosted CRT; the
 # recipe prints the readobj header proving PE32+ EFI. Requires clang + lld (lld
 # is clang's -fuse-ld=lld PE backend). If lld PE is unavailable, the recipe emits
@@ -1780,7 +1780,7 @@ FREESTANDING_READOBJ := $(shell command -v llvm-readobj >/dev/null 2>&1 && echo 
 freestanding-link:
 	@echo "== CRT-less PE/COFF link (B2): toolchain = $(FREESTANDING_LIB_CC) =="
 	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
-	  echo "  freestanding-link requires clang (PE cross target + lld); toolchain is $(FREESTANDING_LIB_CC) — SKIP"; exit 0; \
+	  echo "  freestanding-link requires clang (PE cross target + lld); toolchain is $(FREESTANDING_LIB_CC); SKIP"; exit 0; \
 	fi
 	@lld_ok=0; \
 	if echo 'int mainCRTStartup(void){return 0;}' | $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -nostdlib -fuse-ld=lld -Wl,-entry:mainCRTStartup -Wl,-subsystem:efi_application -x c - -o /tmp/keel_lld_probe.efi >/dev/null 2>&1; then lld_ok=1; fi; \
@@ -1814,23 +1814,23 @@ freestanding-link:
 	      echo "  LINK FAILED for $$tgt"; rm -f $$objs $$arc $$mo; exit 1; \
 	    fi; \
 	  else \
-	    echo "== [$$tgt] lld PE UNAVAILABLE — fallback proof: COFF entry object + archive built, gate its undefined set =="; \
+	    echo "== [$$tgt] lld PE UNAVAILABLE; fallback proof: COFF entry object + archive built, gate its undefined set =="; \
 	    file $$mo 2>/dev/null || true; \
 	    sh tests/freestanding_symbol_gate.sh $$arc $(FREESTANDING_NM) selfcontained | grep -E 'OK|FAILED'; \
-	    echo "  (documented fallback: PE image NOT produced — lld PE backend unavailable in this toolchain)"; \
+	    echo "  (documented fallback: PE image NOT produced; lld PE backend unavailable in this toolchain)"; \
 	  fi; \
 	  rm -f $$objs $$arc $$mo; \
 	done; \
 	if [ $$lld_ok -eq 1 ]; then \
 	  if [ -z "$$linked" ]; then echo "freestanding-link: no arch linked"; exit 1; fi; \
-	  echo "== freestanding-link: OK — CRT-less PE/COFF EFI image(s) linked:$$linked =="; \
+	  echo "== freestanding-link: OK, CRT-less PE/COFF EFI image(s) linked:$$linked =="; \
 	else \
-	  echo "== freestanding-link: fallback proof only (lld PE unavailable) — see note above =="; \
+	  echo "== freestanding-link: fallback proof only (lld PE unavailable); see note above =="; \
 	fi
 
 # ── Freestanding host mock harness (F-7) ──────────────────────────────────────
 # Proves libkeel_freestanding.a's async client actually RUNS end-to-end on the
-# host over MOCKED platform hooks + socket provider + completion event provider —
+# host over MOCKED platform hooks + socket provider + completion event provider:
 # no real syscalls, no loopback socket, deterministic (advanceable mock clock).
 # The acceptance milestone from docs/phase10_uefi_feasibility_design.md ("performs
 # an HTTP/1.1 GET over a mock completion provider") before any UEFI work.
@@ -1840,7 +1840,7 @@ freestanding-link:
 # the SAME FREESTANDING_CLIENT_SRC manifest with the HOST ASan/UBSan toolchain +
 # -DKEEL_FREESTANDING into the harness. That way ASan/UBSan instrument the LIBRARY
 # code too (not just the harness), so a use-after-free / leak inside the client's
-# completion state machine — the whole point of F-7 — is actually caught. The
+# completion state machine, the whole point of F-7, is actually caught. The
 # archive's link closure is still enforced separately by `make freestanding-lib`.
 FREESTANDING_HARNESS_BIN = tests/freestanding_harness$(EXE)
 FREESTANDING_HARNESS_SAN = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
@@ -1880,17 +1880,17 @@ freestanding-dns-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_DNS_HARNESS_BIN)
 	@rm -f $(FREESTANDING_DNS_HARNESS_BIN)
 
-# ── EFI_UDP4 datagram provider — freestanding-PE compile gate (6.4b step 4) ────────────
+# ── EFI_UDP4 datagram provider: freestanding-PE compile gate (6.4b step 4) ────────────
 # The BYO EFI datagram-provider TUs (socket_efi_tcp4 unified stream+datagram, socket_efi_udp4,
-# event_efi datagram completion wiring) must keep compiling for the REAL UEFI target — a PE/COFF
-# cross build with no hosted libc — on BOTH arches UEFI ships (x86_64 + AArch64). This gate compiles
+# event_efi datagram completion wiring) must keep compiling for the REAL UEFI target, a PE/COFF
+# cross build with no hosted libc, on BOTH arches UEFI ships (x86_64 + AArch64). This gate compiles
 # them with the SAME flags the QEMU build (build_s4.sh) uses (-ffreestanding -fshort-wchar
 # -mno-red-zone -DKEEL_FREESTANDING + the freestanding shim), plus -Wpedantic -Werror. Compile-only
 # (-c); the actual EFI link + run is the QEMU/OVMF e2e (6.4c). Skips with a note off clang / a missing
 # PE backend. Host correctness is covered by the mock-EFI harness (build_mock_efi_test.sh).
 # Datagram build (KEEL_UEFI_DATAGRAM on): the unified provider + event_efi datagram completion +
 # the EFI_UDP4 substrate. TCP-only build (KEEL_UEFI_DATAGRAM off): event_efi + socket_efi_tcp4 must
-# compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references — the boundary that keeps
+# compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references, the boundary that keeps
 # U-3/U-4/U-7 + S-4/S-6/S-7 (which link event_efi.c but not the UDP provider) building. The gate
 # proves BOTH configs compile, both arches. socket_efi_udp4.c is datagram-only (no TCP-only pass).
 UEFI_DGRAM_TU     = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/socket_efi_udp4.c \
@@ -1900,7 +1900,7 @@ UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-
                          -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
                          -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/platform/uefi \
                          -Wall -Wextra -Wpedantic -Werror
-# UEFI_GATE_STRICT (set by CI, .github/workflows/ci.yml): every FREESTANDING_TARGETS arch MUST compile —
+# UEFI_GATE_STRICT (set by CI, .github/workflows/ci.yml): every FREESTANDING_TARGETS arch MUST compile;
 # no toolchain-absence SKIP is allowed to green-pass. Locally it is unset, so a dev without the clang PE
 # cross target still gets an (announced) skip rather than a hard failure. Either way the gate counts the
 # arches it actually compiled and refuses to print OK for arches it skipped (no false-green no-op).
@@ -1908,7 +1908,7 @@ uefi-dgram-gate:
 	@echo "== EFI_UDP4 datagram provider: freestanding-PE compile gate (x86_64 + aarch64, -Werror -Wpedantic) =="
 	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
 	  if [ -n "$(UEFI_GATE_STRICT)" ]; then echo "  FAIL: strict gate requires a clang PE cross target"; exit 1; fi; \
-	  echo "  SKIP (needs a clang PE cross target — set UEFI_GATE_STRICT=1 to require it)"; exit 0; \
+	  echo "  SKIP (needs a clang PE cross target; set UEFI_GATE_STRICT=1 to require it)"; exit 0; \
 	fi
 	@want=0; got=0; \
 	for tgt in $(FREESTANDING_TARGETS); do \

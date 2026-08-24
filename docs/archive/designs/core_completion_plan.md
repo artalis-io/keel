@@ -1,4 +1,4 @@
-# Keel Core Completion & Integration Plan — gap analysis (Phase 0)
+# Keel Core Completion & Integration Plan: gap analysis (Phase 0)
 
 Status: **audit / gap analysis (2026-08-01).** No core rewrite proposed. This is the Phase 0
 deliverable for the "architecturally complete + behaviorally validated networking core" roadmap.
@@ -12,7 +12,7 @@ Cross-references (do not duplicate): `docs/keel_axis_audit.md` (orthogonality, 4
 
 ---
 
-## 1. Baseline — what is already complete
+## 1. Baseline: what is already complete
 
 The PAL/completion migration (Phase 8) plus this session's follow-ups landed most of Phase 1 and
 all of Phase 3's completion-side wiring:
@@ -48,7 +48,7 @@ vtables are generic; all h2 tests use a mock echo session). **mbedTLS already ex
 
 ---
 
-## 2. Readiness vs completion — behavior deltas (the parity gap)
+## 2. Readiness vs completion: behavior deltas (the parity gap)
 
 | Behavior | Readiness | Completion | Delta |
 |---|---|---|---|
@@ -71,13 +71,13 @@ single spec.
 
 - **Completion send buffers are copied.** `kl_comp_post_send` copies the caller iovec into an
   op-owned buffer in all three backends → callers may pass transient/stack memory and free the
-  source immediately. (`KlDrain` bytes are consumed after the copy — safe.) This already satisfies
+  source immediately. (`KlDrain` bytes are consumed after the copy; safe.) This already satisfies
   the roadmap's write-side "copied immediately" contract; it is **not yet documented as a promise**.
 - **Recv buffers** are op-owned (TLS ciphertext) or the conn's `read_buf` (plaintext).
 - **≤1 in-flight op per conn** (recv XOR send, posted only from a completion) → `kl_comp_cancel`
   yields exactly one aborting completion → one `comp_close`/release. No double-free (audit-verified).
 - **`KlAsyncOp`** (`async.h`) is caller-owned, must outlive suspension; three callbacks
-  (`on_resume`/`on_deadline`/`on_cancel`) — exactly one fires per suspension in practice, but this
+  (`on_resume`/`on_deadline`/`on_cancel`); exactly one fires per suspension in practice, but this
   is not stated as a formal "one terminal result" contract.
 
 ## 4. Current cancellation & terminal-result rules
@@ -93,7 +93,7 @@ single spec.
 
 ## 5. Gaps by roadmap phase, with proposed increments
 
-**Phase 1 — finish completion streaming (mostly done; two real gaps).**
+**Phase 1: finish completion streaming (mostly done; two real gaps).**
 - (a) **Read-side flow control:** add explicit `continue / pause / abort` to the body-read path.
   Today `on_data` returns 0 (continue) / -1 (abort); **pause** (stop posting recvs without
   aborting, resume explicitly + idempotently) is missing on both axes. Smallest change: a
@@ -107,8 +107,8 @@ single spec.
   paused, cancel while write outstanding, shutdown-during-stream, peer reset, timeout, alloc
   failure, no-callback-after-destroy) as model-independent tests over pollcomp first.
 
-**Phase 2 — first-party integrations (net-new scaffolding; mbedTLS relocation decision).**
-- Create `integrations/{Makefile,README.md,mbedtls/,nghttp2/}` — optional, own Makefiles, own
+**Phase 2: first-party integrations (net-new scaffolding; mbedTLS relocation decision).**
+- Create `integrations/{Makefile,README.md,mbedtls/,nghttp2/}`; optional, own Makefiles, own
   tests, version matrix, `*_CFLAGS`/`*_LIBS` + optional `pkg-config`. Root convenience targets
   `integration-mbedtls|nghttp2|integrations|integration-test`. `make`/`make test` stay
   dependency-light.
@@ -117,33 +117,33 @@ single spec.
   way it already implements the generic `KlTls` vtable with no mbedTLS types in core headers; the
   gaps vs. the roadmap's test list are mostly **test coverage** (SNI/ALPN/mTLS/WANT_*/cancel-during-
   handshake/streamed bodies over completion), not new code.
-- **nghttp2:** net-new adapter implementing `KlH2ClientSession`/`KlH2ServerSession` — the demanding
+- **nghttp2:** net-new adapter implementing `KlH2ClientSession`/`KlH2ServerSession`; the demanding
   real consumer that will exercise the generic h2 + streaming + flow-control contracts.
 
-**Phase 3 — parity matrix (largely done).** Refactor test fixtures so model-independent suites take
+**Phase 3: parity matrix (largely done).** Refactor test fixtures so model-independent suites take
 a backend by fixture, not source edit; produce ONE authoritative capability matrix (extend the one
 in `keel_axis_audit.md` §4 rather than adding a competing list). Most coverage exists; the delta is
 fixture ergonomics + a single matrix.
 
-**Phase 4 — normalize async semantics (design + selective migration).** Define a minimal common
+**Phase 4: normalize async semantics (design + selective migration).** Define a minimal common
 lifecycle (pending → exactly-one terminal: success/failure/cancel/timeout/peer-close; explicit
 cancel; optional monotonic deadline; error retrieval; no futures). Document cancel sync-vs-requested,
 callback ordering, reentrancy, destruction, parent/child shutdown, deadline-vs-cancel precedence,
 completion-races-cancel. Migrate only where it removes real duplication (`KlAsyncOp` is the anchor).
 
-**Phase 5 — generic transport surface (genuine gap).** Today protocol authors have the socket
+**Phase 5: generic transport surface (genuine gap).** Today protocol authors have the socket
 *provider* API (`keel/socket.h`, bring-your-own stack) and `KlEventCtx`/watchers, but **no
 high-level listener / connected-byte-stream / datagram-endpoint API**; non-HTTP authors would reach
 into `KlServer`/`KlConn`. Propose the smallest coherent public surface over existing primitives
 (accept/connect/read/write/half-close/cancel/deadline/backpressure/TLS-wrap) + one framed-echo
 test consumer proving no HTTP dependency. Design-first; no HTTP rewrite.
 
-**Phase 6 — API hardening.** Decide + document the compatibility promise (source / ABI / static-
+**Phase 6: API hardening.** Decide + document the compatibility promise (source / ABI / static-
 relink). Add `struct_size`/`api_version` to integration-facing vtables/configs **only** if we
 promise more than static-relink. Document ownership/thread-affinity/reentrancy on integration APIs.
 
 **External conformance.** Add documented targets (not runtime deps) for h2spec, nghttp2 tools
-(`nghttp`/`nghttpd`/`h2load`), OpenSSL `s_client`/`s_server`, Autobahn, and a smuggling corpus —
+(`nghttp`/`nghttpd`/`h2load`), OpenSSL `s_client`/`s_server`, Autobahn, and a smuggling corpus,
 wired into CI where the tools are available.
 
 ---
@@ -153,9 +153,9 @@ wired into CI where the tools are available.
 - Backpressure/drain: server streaming uses `KlDrain.on_drain`; the client has its own streaming
   callbacks (`KlClientStreamCfg`). Normalize the *vocabulary* (accepted/would-block/closed/error)
   in Phase 1/4 without forcing a single callback where protocols legitimately differ.
-- Proxy ingest: two axis-specific wrappers over one shared parser (`kl_proxy_parse`) — correct
+- Proxy ingest: two axis-specific wrappers over one shared parser (`kl_proxy_parse`); correct
   split, not duplication.
-- HTTP/2: `h2.h` + `h2_client.h` + `h2_server.h` — verify the nghttp2 adapter implements both
+- HTTP/2: `h2.h` + `h2_client.h` + `h2_server.h`; verify the nghttp2 adapter implements both
   client and server through these without a third surface.
 
 ## 7. Design decisions to confirm (maintainer's call)
@@ -164,21 +164,21 @@ wired into CI where the tools are available.
    into `integrations/mbedtls/` (single canonical home, matches the roadmap; requires Makefile +
    `KEEL_TLS=mbedtls` → `integration-mbedtls` migration and updating the BYO smokes), **or** keep it
    in `src/` (no churn) and make `integrations/mbedtls/` the tests/version-matrix/README wrapper
-   that builds it? Recommendation: **relocate** — it's what the roadmap intends and gives one home,
+   that builds it? Recommendation: **relocate**; it's what the roadmap intends and gives one home,
    but it touches the build + the smoke targets, so confirm before moving.
 2. **Compatibility promise (Phase 6).** Given static-linking + W^X goals, recommend **source +
    static-relink compatibility only** (no ABI promise), and add `struct_size`/`api_version` only to
    the new integration vtables. Confirm.
 3. **Pacing.** This is a 6-phase, multi-PR effort. Recommend: land Phase 1 (read-side flow control +
    streaming contract doc + tests) and the Phase 2 `integrations/` scaffolding + nghttp2 adapter as
-   the first substantive PRs, checking in between phases — rather than one large branch.
+   the first substantive PRs, checking in between phases; rather than one large branch.
 
 ## 8. Risks of changing public structures
 
-- `KlBodyReader` (read-side pause) — adding a return value or a pause/resume call is additive but
+- `KlBodyReader` (read-side pause); adding a return value or a pause/resume call is additive but
   touches a public vtable; prefer a new function + a new `on_data` return code over changing the
   signature.
-- `KlAsyncOp` — widely used (server, Hull); normalize via docs + helpers, avoid struct-layout
+- `KlAsyncOp`; widely used (server, Hull); normalize via docs + helpers, avoid struct-layout
   changes.
-- `KlResponse`/`KlConn` — internal-ish but large; Phase 5's transport surface must not require
+- `KlResponse`/`KlConn`; internal-ish but large; Phase 5's transport surface must not require
   exposing them. Keep additive.

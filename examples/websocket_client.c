@@ -1,5 +1,5 @@
 /*
- * websocket_client.c — WebSocket echo client
+ * websocket_client.c: WebSocket echo client
  *
  * Connects to a WebSocket server, sends a message, prints the echo,
  * and cleanly closes.

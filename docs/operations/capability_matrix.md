@@ -17,7 +17,7 @@ holds today.
 
 ## 1. Backend combinations (socket × event)
 
-Legend: ✅ yes · ⚠️ partial/conditional · ➖ n/a. The last column states **factual status** —
+Legend: ✅ yes · ⚠️ partial/conditional · ➖ n/a. The last column states **factual status**,
 default selection, runtime validation, and known limitations. A backend-confidence /
 production-readiness classification is deferred to the roadmap's Phase E3 and is deliberately **not**
 asserted here.
@@ -41,10 +41,10 @@ downgraded (see `docs/archive/audits/keel_axis_audit.md` §feature-detection).
 providers extend the axes to environments with no OS sockets; both keep core `libkeel` unchanged
 and are injected at runtime, and the datagram axis is STABLE over them as of Step 7:
 
-- **lwIP raw (`NO_SYS`)** — `integrations/platform/lwip` (`event_lwip_raw.c`): the whole HTTP stack
+- **lwIP raw (`NO_SYS`)**: `integrations/platform/lwip` (`event_lwip_raw.c`): the whole HTTP stack
   and `KlDatagram` over lwIP's raw callback API, with no OS sockets or threads. Validated by the
   `loopback-raw` / `loopback-raw-asan` gates (HTTP + datagram over loopback, ASan/UBSan/LSan).
-- **UEFI EFI_TCP4/UDP4** — `integrations/platform/uefi` (`event_efi.c`): a stock async
+- **UEFI EFI_TCP4/UDP4**: `integrations/platform/uefi` (`event_efi.c`): a stock async
   `KlHttpClient` and `KlDatagram` inside UEFI firmware, before any OS. Validated by the mock-EFI
   host harness (ASan/UBSan) and a QEMU/OVMF end-to-end boot (DNS over EFI_UDP4 → HTTPS GET; a
   public-`KlDatagram` send/recv roundtrip).
@@ -95,7 +95,7 @@ completion* on the completion axis (queued async). `datagram_multicast`'s
 | `async`, `event`, `event_ctx`, `event_caps` | Drive raw `kl_event_wait` / assert readiness capability + provider negotiation; a completion loop has no `kl_event_wait`, only `kl_comp_run`. |
 | `socket_provider` | Asserts native-fd provider semantics (readiness contract). |
 | `iocp_engine` | Windows/IOCP-specific engine unit test (not a cross-axis suite). |
-| `datagram_multicast` (`broadcast_flag_gates_send` case) | Asserts a synchronous `EACCES` — only holds on readiness (see §2). |
+| `datagram_multicast` (`broadcast_flag_gates_send` case) | Asserts a synchronous `EACCES`; only holds on readiness (see §2). |
 
 The async-over-completion *path* is covered despite `test_async` being excluded:
 `smoke-pollcomp-async` and the io_uring `/astream` case drive
@@ -108,22 +108,22 @@ The async-over-completion *path* is covered despite `test_async` being excluded:
 The mbedTLS TLS backend and the nghttp2 HTTP/2 session adapter are exercised by a **standing CI
 job** ("Integrations (mbedTLS + nghttp2)", `.github/workflows/ci.yml`), while the ordinary core
 build stays dependency-light. **"Bring-your-own" (BYO) means the dependency/provider is not vendored
-— it does not mean out-of-CI.** Standing CI coverage per integration:
+it does not mean out-of-CI.** Standing CI coverage per integration:
 
-- **lwIP** — its own CI job ("Integration (lwIP)"): stock-`libkeel` loopback with the lwIP
+- **lwIP**: its own CI job ("Integration (lwIP)"): stock-`libkeel` loopback with the lwIP
   server / client / UDP-echo providers, HTTPS-over-lwIP via the mbedTLS BIO, and the raw-completion
   backend (`loopback-raw`) under ASan+UBSan+LSan (`loopback-raw-asan`).
-- **UEFI (EFI_UDP4)** — the strict PE datagram-provider gate in the **Static Analysis** job
+- **UEFI (EFI_UDP4)**: the strict PE datagram-provider gate in the **Static Analysis** job
   (`make uefi-dgram-gate UEFI_GATE_STRICT=1`, both PE arches); the QEMU/OVMF boot e2e is a local
   harness, outside standing CI.
-- **OpenSSL / BoringSSL / LibreSSL** TLS backends and the **miniz** codec — BYO with no standing job
+- **OpenSSL / BoringSSL / LibreSSL** TLS backends and the **miniz** codec; BYO with no standing job
   (see `integrations/README.md`).
 
 | Adapter | Vtable | Validation |
 |---|---|---|
 | mbedTLS (`integrations/tls/mbedtls`) | `KlTls` | **CI-gated**: real mbedTLS 3.6.x built from source → `make KEEL_TLS=mbedtls smoke-tls`; also real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`) and the `tls`/`tls_integration`/`peer_cert` suites. |
 | nghttp2 client (`integrations/http2/nghttp2`) | `KlHttp2ClientSession` | **CI-gated** (`make -C integrations/http2/nghttp2 test`): in-memory roundtrip + **real-socket e2e** via `kl_http2_client_connect` (h2c), plus `h2load` and the ALPN e2e (`alpn-interop`). ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
-| nghttp2 server (`integrations/http2/nghttp2`) | `KlHttp2ServerSession` | **CI-gated**: real-socket e2e via `KlHttpServerConfig.h2` (h2c prior-knowledge), **h2spec** conformance (pass-count floor 130 of ~146), and **third-party interop** — `curl --http2-prior-knowledge` (`interop-curl`) + `nghttpd` (`interop-nghttpd`); same sanitizer coverage. |
+| nghttp2 server (`integrations/http2/nghttp2`) | `KlHttp2ServerSession` | **CI-gated**: real-socket e2e via `KlHttpServerConfig.h2` (h2c prior-knowledge), **h2spec** conformance (pass-count floor 130 of ~146), and **third-party interop**; `curl --http2-prior-knowledge` (`interop-curl`) + `nghttpd` (`interop-nghttpd`); same sanitizer coverage. |
 
 ---
 
@@ -134,15 +134,15 @@ build stays dependency-light. **"Bring-your-own" (BYO) means the dependency/prov
   consistent with the mbedTLS policy.
 - **HTTP/2 over completion**: the h2 server/client run over the completion axis
   through the same session vtable; nghttp2-backed HTTP/2 is validated over a real
-  socket on readiness (§4) — completion-axis nghttp2 e2e is not yet a standing test.
+  socket on readiness (§4); completion-axis nghttp2 e2e is not yet a standing test.
 
 ---
 
 ## 6. Where the rationale lives
 
-- `docs/archive/audits/keel_axis_audit.md` — running architectural audit (orthogonality litmus,
+- `docs/archive/audits/keel_axis_audit.md`: running architectural audit (orthogonality litmus,
   per-pass findings, why each combination is sound).
-- `docs/archive/designs/core_completion_plan.md` — Phase 0 gap analysis and design decisions.
-- `docs/contracts/streaming.md` — the authoritative streaming / body-read contract
+- `docs/archive/designs/core_completion_plan.md`: Phase 0 gap analysis and design decisions.
+- `docs/contracts/streaming.md`: the authoritative streaming / body-read contract
   (write-side ownership, backpressure outcomes, read-side flow control,
   termination taxonomy) shared by both axes.

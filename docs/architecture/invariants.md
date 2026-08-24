@@ -1,10 +1,10 @@
-# KEEL — Architecture Invariants
+# KEEL: Architecture Invariants
 
 **Status:** living document (R0). These are the *enforceable* invariants of Keel's networking
-architecture — the rules every increment must preserve. Each is stated once, with why it matters
+architecture; the rules every increment must preserve. Each is stated once, with why it matters
 and an **anchor**: a header contract, a source seam, an executable gate, or a test that pins it to
 real code. If an anchor and the code disagree, the code is authoritative and the anchor is a bug to
-fix — not the other way round.
+fix; not the other way round.
 
 This document is deliberately about the **three-axis transport core**, not the whole HTTP feature
 set. For the layered internals (parsing, routing, body readers, response modes) see
@@ -27,7 +27,7 @@ Introductory reasoning uses three nouns (see [keel_improvement_roadmap.md](../ro
 
 ## The invariants
 
-### I1 — Semantic transports do not expose readiness/completion differences
+### I1: Semantic transports do not expose readiness/completion differences
 
 A protocol built on `KlStream`/`KlDatagram`/`KlListener` sees the *same* Keel-level behavior
 regardless of whether the loop underneath is readiness or completion. The engine model is an
@@ -38,18 +38,18 @@ implementation detail of the driver, never a branch in protocol code.
 - **Anchor:** the transport banners in [stream.h](../../include/keel/stream.h) and
   [datagram.h](../../include/keel/datagram.h) both declare a *model-agnostic* contract; the datagram
   facade proves it by feeding two capability-selected adapter tables into one state machine
-  ([datagram.c](../../src/datagram.c) — `dg_comp_*` vs `dg_rdy_*`).
+  ([datagram.c](../../src/datagram.c); `dg_comp_*` vs `dg_rdy_*`).
 - **Enforced by:** the same-facade live test runs over readiness and completion via
   `kl_event_ctx_init` (`tests/test_datagram_live.c`); the axis matrix in
   [keel_axis_audit.md](../archive/audits/keel_axis_audit.md).
 
-### I2 — Readiness registers interest; completion submits owned operations
+### I2: Readiness registers interest; completion submits owned operations
 
 The two engine models keep their native semantics. Readiness = register interest → wait → perform
 op → handle `EAGAIN` → re-arm. Completion = construct owned op → submit → track lifetime → receive
 completion → retire/cancel/resubmit. No **production** backend is emulated in terms of the other
 (epoll/kqueue/WSAPoll/poll stay readiness; io_uring/IOCP stay completion). The one deliberate
-exception is **pollcomp** — a portable *test double* that implements the completion contract over
+exception is **pollcomp**; a portable *test double* that implements the completion contract over
 `poll()` so the completion driver can be exercised under ASan on any POSIX host. It is explicitly a
 CI/testing backend; the invariant this states is that production backends preserve their native
 model, not that no adapter may ever bridge them for testing.
@@ -63,7 +63,7 @@ model, not that no adapter may ever bridge them for testing.
 - **Enforced by:** [event_provider_design.md](../archive/designs/event_provider_design.md); the capability negotiation
   `kl_event_ctx_sockets_compatible()`.
 
-### I3 — Logical close is distinct from physical retirement
+### I3: Logical close is distinct from physical retirement
 
 Calling close/cancel on a transport is a *logical* request. The underlying storage (op state,
 buffers, the transport object) must not be reused or freed until the backend proves the operation
@@ -72,13 +72,13 @@ retired.
 
 - **Why:** on a completion engine a "cancelled" op can still complete later; freeing on the logical
   close is a use-after-free.
-- **Anchor:** the CLOSE facet in [stream.h](../../include/keel/stream.h) ("CONFIRMED DETACHMENT — on_close
+- **Anchor:** the CLOSE facet in [stream.h](../../include/keel/stream.h) ("CONFIRMED DETACHMENT; on_close
   fires once, only after both the receive and send ops are physically retired") and lifetime #1 in
   [listener.h](../../include/keel/listener.h).
 - **Enforced by:** [datagram_contract.md](../contracts/datagram.md) close section;
   [datagram_step7b9_efi_close_design.md](../archive/designs/datagram_step7b9_efi_close_design.md) (the hardest close case).
 
-### I4 — Callback reentrancy and synchronous completion are supported
+### I4: Callback reentrancy and synchronous completion are supported
 
 An arm/submit may complete *synchronously*, before it returns, and a callback may run reentrantly
 or earlier in the same drained completion batch than a related event. Transport state machines are
@@ -86,31 +86,31 @@ written to survive this (iterative arm trampolines, not recursive re-arm).
 
 - **Why:** several providers (and the resolver contract) legitimately complete inline; code that
   assumes async-only delivery corrupts state under them.
-- **Anchor:** the READ facet in [stream.h](../../include/keel/stream.h) ("sync-completion-safe —
+- **Anchor:** the READ facet in [stream.h](../../include/keel/stream.h) ("sync-completion-safe,
   iterative arm trampoline"); the resolver sync-completion contract in [CLAUDE.md](../../CLAUDE.md).
 - **Enforced by:** the pollcomp double drives synchronous/scripted completions
   (`make smoke-pollcomp-asan`); public-facade mock tests (`tests/test_datagram_public.c`).
 
-### I5 — Completion-batch targets outlive every event that can reference them
+### I5: Completion-batch targets outlive every event that can reference them
 
 Any object a completion event references (op, buffer, transport core, life token) stays valid until
 *after* every event in the drained batch that could reach it has been dispatched. Ownership of a
 life reference transfers into the op on submit and releases exactly once at its terminal event.
 
 For classes that carry a raw `target` instead of a life token (stream, accept, connect, watcher),
-the equivalent guarantee comes from **single-shot completion** — every backend emits exactly one
-completion per submitted op, with no duplicate and no post-retirement completion — combined with the
+the equivalent guarantee comes from **single-shot completion**; every backend emits exactly one
+completion per submitted op, with no duplicate and no post-retirement completion; combined with the
 class-specific guard (stream inflight-pin, accept force-reap, connect physical-abort). **Single-shot
 is therefore a load-bearing contract:** a new completion backend must uphold it or supply its own
 stale-completion guard (R3a inventory; R3b decision). **Covered** by `tests/test_stream_single_shot.c`
-(R3b-T1) — a real-seam regression over pollcomp (deterministic oracle) + native io_uring / IOCP:
+(R3b-T1); a real-seam regression over pollcomp (deterministic oracle) + native io_uring / IOCP:
 post one READ / one WRITE, drain the sole completion, then trigger more peer activity and drain again,
 asserting no second completion.
 
 The **watcher** guard is the `kl_event_dispatch` ctx-list scan **plus batch-bracketed deferred
 reclamation** (R3b-W): the scan alone matched by pointer identity and had a pointer-reuse ABA hole
 (a freed node's address reused within the same drained batch misdelivered the stale event; single-
-shot did not prevent it — the stale event is the legitimate one completion). **Resolved** by
+shot did not prevent it; the stale event is the legitimate one completion). **Resolved** by
 `kl_watcher_del` deferring a node's free while a dispatch bracket is open
 (`kl_event_ctx_dispatch_begin`/`end` around all three internal loops), so the address cannot be
 reused mid-batch. Regression: `tests/test_watcher_aba.c` (readiness / completion / server loops +
@@ -121,17 +121,17 @@ nested / overflow / depth-0), demonstrated to fail against the pre-fix behavior.
   for raw-`target` classes, single-shot + the class guard makes the freed-then-referenced sequence
   unreachable rather than merely survivable.
 - **Anchor:** [completion.h](../../src/completion.h) `KlCompletionEvent.life` + `retain_life` (the
-  borrowed-vs-transferred rule), released *iff* `!retain_life` at both sites —
+  borrowed-vs-transferred rule), released *iff* `!retain_life` at both sites,
   [completion_core.c](../../src/completion_core.c), [datagram.c](../../src/datagram.c).
 - **Enforced by:** ASan/UBSan/LSan over the completion driver (`make smoke-pollcomp-asan`,
   container `make smoke-iouring-asan`); the R3 lifetime audit builds the full target table.
 
-### I6 — Platform backends are transport-mechanical, not protocol-aware
+### I6: Platform backends are transport-mechanical, not protocol-aware
 
 Event/completion backends and socket providers move bytes and deliver ops. They contain no HTTP,
 TLS, WebSocket, HTTP/2, or PROXY knowledge, and no host socket-address types leak up into protocol
 TUs. The backend receives operation kind, opaque target/lifetime, buffers, lengths, and mechanical
-flags — never protocol-state enums.
+flags; never protocol-state enums.
 
 - **Why:** protocol knowledge in a backend duplicates decisions per engine and couples the axes.
 - **Anchor:** completion ops are neutral by-value descriptors (`KlDgramSendOp`/`KlDgramRecvOp` in
@@ -140,7 +140,7 @@ flags — never protocol-state enums.
 - **Enforced by:** `make check-sockaddr-neutral` ([Makefile](../../Makefile)) + the protocol-header grep
   in [keel_axis_audit.md](../archive/audits/keel_axis_audit.md) Goal 4. (R4 extends this to a protocol-state check.)
 
-### I7 — Integration-owned types do not enter `include/keel/*.h`
+### I7: Integration-owned types do not enter `include/keel/*.h`
 
 Optional third-party/platform implementations (nghttp2, mbedtls, lwIP, EFI) live under
 `integrations/` and implement Keel-owned seams. Their dependency headers and types never appear in
@@ -149,27 +149,27 @@ the installed public API.
 - **Why:** the core `libkeel` must build and install without any integration's dependency present.
 - **Anchor:** `include/keel/*.h` references no `nghttp2_*`/`mbedtls_*`/`lwip`/`efi` type;
   integrations sit in `integrations/` (see [event_provider_design.md](../archive/designs/event_provider_design.md)).
-- **Enforced by:** the freestanding-header gate `make freestanding-headers` ([Makefile](../../Makefile)) —
+- **Enforced by:** the freestanding-header gate `make freestanding-headers` ([Makefile](../../Makefile)),
   the public subset compiles with no hosted libc and no integration present.
 
-### I8 — Hot transport paths allocate no memory
+### I8: Hot transport paths allocate no memory
 
 Steady-state send/recv/accept allocate nothing. Buffers and op slots are preallocated at init;
 backpressure is a bounded, fixed-capacity queue, not a growing one.
 
 - **Why:** allocation on the data path is a latency and failure-mode hazard; bounded queues are also
   the backpressure mechanism.
-- **Anchor:** the datagram fixed-slot send queue ([datagram.h](../../include/keel/datagram.h) —
+- **Anchor:** the datagram fixed-slot send queue ([datagram.h](../../include/keel/datagram.h),
   "packet-slot bounded send queue"); the pre-allocated connection pool and inline `read_buf`
   ([architecture.md](overview.md), "No `malloc` during request handling"). All allocation goes
   through [allocator.h](../../include/keel/allocator.h).
 - **Enforced by:** ASan/LSan smokes show no per-request allocation churn; the fixed-slot admission
   tests in [datagram_contract.md](../contracts/datagram.md).
 
-### I9 — Uncertain retirement quarantines storage rather than guessing
+### I9: Uncertain retirement quarantines storage rather than guessing
 
 When a backend cannot prove an operation has retired (an abandoned firmware token that may still
-write an inbound buffer), it *quarantines* the storage — retains the reference fail-closed — instead
+write an inbound buffer), it *quarantines* the storage, retains the reference fail-closed, instead
 of releasing and risking a UAF.
 
 - **Why:** on exotic providers (EFI) physical retirement is genuinely unprovable at close; leaking a
@@ -180,40 +180,40 @@ of releasing and risking a UAF.
 - **Enforced by:** the EFI host-mock quarantine tests (`integrations/platform/uefi/tests/mock_efi_test.c`); the
   release invariant in I5 honors `retain_life` uniformly.
 
-### I10 — Protocols depend downward only through the Tier-1 transports
+### I10: Protocols depend downward only through the Tier-1 transports
 
 `KlListener`, `KlStream`, and `KlDatagram` are the **canonical Tier-1 semantic transports**. A
 protocol-layer TU (HTTP/1.1, HTTP/2, WebSocket, SSE, client, redirect, …) reaches the network *only*
-through them plus the socket/event abstractions — the dependency direction is
+through them plus the socket/event abstractions; the dependency direction is
 **`protocol → transport → driver/adapter → engine + provider`, one way**. A protocol TU includes no
 platform networking/event system header and no raw completion seam (`completion.h`); it uses a lower
 seam only when a missing semantic is documented and reviewed.
 
 - **Why:** a protocol that reached `epoll_ctl`/`WSARecv`/the completion vtable directly would be
-  pinned to one engine — the whole point of the three-axis split is that a protocol is written once,
+  pinned to one engine; the whole point of the three-axis split is that a protocol is written once,
   above the transport, and runs over every backend unchanged.
-- **Anchor:** `make check-tier1-boundary` ([Makefile](../../Makefile)) — the complement of
+- **Anchor:** `make check-tier1-boundary` ([Makefile](../../Makefile)); the complement of
   `make check-sockaddr-neutral` (host socket-*address* types, I6). It is **default-deny**: *every*
   `src/*.c` + `src/protocols/*/*.c` is governed (no platform networking/event header, no `completion.h`
-  / `completion_io.h` / `completion_http.h`) **except** the allowlisted `TIER1_INFRA` — the engine/provider/bridge layer (event
+  / `completion_io.h` / `completion_http.h`) **except** the allowlisted `TIER1_INFRA`; the engine/provider/bridge layer (event
   backends, socket providers, platform glue, the completion driver/adapters, the transport state
   machines, and the run-loop / async-connect drivers). This is the **mechanical classification rule**:
-  a newly added protocol TU is governed automatically, so the whole protocol layer — including the
-  pure-byte TUs `http_router.c`/`http_cors.c`/`http1_chunked.c`/`http_body_reader_*.c`/`http1_parser_llhttp.c` — is covered, not just
+  a newly added protocol TU is governed automatically, so the whole protocol layer; including the
+  pure-byte TUs `http_router.c`/`http_cors.c`/`http1_chunked.c`/`http_body_reader_*.c`/`http1_parser_llhttp.c`; is covered, not just
   the network-facing subset. Include-based, so robust against the `WSA*`/overlapped mentions that
   appear only in explanatory comments (`http_connection.c`/`http_response.c`/`http_client_sync.c`).
 - **`TIER1_INFRA` allowlist (with reason):** the bridge layer legitimately includes these headers.
   Notably `http_server.c` and `http_client_async.c` sit there because they drive the run loop / async connect
-  via the Keel completion **tick** (`completion_io.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
+  via the Keel completion **tick** (`completion_io.h`: `kl_comp_run` / `kl_comp_post_connect`); a Keel
   orchestration seam, not a backend internal. A new infrastructure TU that needs the headers is added
   to `TIER1_INFRA` with a reason; nothing else may include them.
 - **Address exceptions (separate, I6):** `dns_resolver.c` (the freestanding DNS-over-TCP fallback)
-  carries a deliberate, documented *address* exception — which is why it sits outside the
-  address-neutral set — and is governed by the Tier-1 boundary (it includes no platform/backend header).
+  carries a deliberate, documented *address* exception; which is why it sits outside the
+  address-neutral set; and is governed by the Tier-1 boundary (it includes no platform/backend header).
 - **Enforced by:** `make check-tier1-boundary` (found zero defects); the protocol-independence
   inventory in [keel_axis_audit.md](../archive/audits/keel_axis_audit.md) (Goal 4).
 
-### I11 — Files own their axis: substrate, protocols, and integrations do not cross
+### I11: Files own their axis: substrate, protocols, and integrations do not cross
 
 The tree is three disjoint homes, and code only depends *inward*. Generic substrate lives directly
 under `src/`; protocol implementations under `src/protocols/<family>/` (http, http2, websocket, dns,
@@ -223,19 +223,19 @@ integration adapter header; an integration reaches core only through the public 
 surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers (`socket.h`,
 `platform.h`, `completion.h`, `completion_io.h`, `event_caps.h`, `event_builtin.h`,
 `sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
-`datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`) — never a protocol header. The deleted layouts
+`datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`); never a protocol header. The deleted layouts
 (the interim top-level `protocols/…` tree, the old flat `parsers/` backend directory, and bare
 `src/<proto>.c` protocol modules) cannot return.
 
 - **Enforced by:** five default-deny, self-canaried gates ([Makefile](../../Makefile)), all run in the
   CI Static-Analysis job. **G1** `make check-substrate-purity`, **G2** `make check-protocol-no-integration`,
-  and **G3** `make check-integration-seam` classify *every* `#include` token — both `<...>` and
-  `"..."` — against inventories derived from the tree (`tools/check_boundaries.sh`), so neither an
+  and **G3** `make check-integration-seam` classify *every* `#include` token; both `<...>` and
+  `"..."`; against inventories derived from the tree (`tools/check_boundaries.sh`), so neither an
   include-search-path escape nor a newly named header slips past. **G4** `make check-protocol-home`
   is a committed ownership manifest (`src/substrate-tus.manifest`): a new bare-`src/` `.c` fails until
-  it is declared substrate there or moved under `src/protocols/<fam>/` — the case dynamic derivation
+  it is declared substrate there or moved under `src/protocols/<fam>/`; the case dynamic derivation
   cannot decide. **G5** `make check-old-layout` (`tools/check_old_layout.sh`) is the single authoritative
-  resurrection gate: it rejects re-introduction of the deleted layouts — a top-level `protocols`
+  resurrection gate: it rejects re-introduction of the deleted layouts; a top-level `protocols`
   directory, old flat integration homes (structural role allowlist), the `spikes` tree, a `parsers`
   directory, and any unclassified integration file at a backend root (exact ownership via
   `integrations/non-test-files.manifest`);
@@ -261,5 +261,5 @@ surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers 
 | I10 protocols depend only through Tier-1 | `make check-tier1-boundary` |
 | I11 substrate/protocol/integration ownership | `make check-substrate-purity` / `-protocol-no-integration` / `-integration-seam` / `-protocol-home` / `-old-layout` (G1–G5) |
 
-Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
+Every markdown link above to an in-repo path is checked by `make check-doc-refs`; a claim that
 points at a file which no longer exists fails the gate.

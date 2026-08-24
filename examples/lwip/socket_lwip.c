@@ -1,12 +1,12 @@
 /*
- * socket_lwip.c — reference KlSocketProvider over the lwIP socket API.
+ * socket_lwip.c: reference KlSocketProvider over the lwIP socket API.
  *
- * BYO / opt-in: lwIP is NOT vendored — build this against your own lwIP
+ * BYO / opt-in: lwIP is NOT vendored; build this against your own lwIP
  * (LWIP_DIR) with your lwipopts.h. This is a reference that validates Keel's
  * public provider API (<keel/socket.h>) is sufficient to run Keel on lwIP; it is
  * not a shipped/default platform. See docs/lwip_platform_design.md.
  *
- * Uses only the public authoring API — kl_ssize_t / KlIoVec / KlSocketHandle,
+ * Uses only the public authoring API: kl_ssize_t / KlIoVec / KlSocketHandle,
  * never internal or host-POSIX types. struct iovec here is lwIP's own (from
  * lwip/sockets.h), translated from KlIoVec inside this TU.
  */
@@ -37,7 +37,7 @@ static int lw_set_ipv6only(void *c, KlSocketHandle fd, int on) {
 #if defined(IPPROTO_IPV6) && defined(IPV6_V6ONLY)
     return lw_setopt_int((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, on);
 #else
-    (void)fd; (void)on; return -1;   /* IPv4-only lwIP build — best-effort */
+    (void)fd; (void)on; return -1;   /* IPv4-only lwIP build; best-effort */
 #endif
 }
 static int lw_set_tcp_nodelay(void *c, KlSocketHandle fd, int on) { (void)c; return lw_setopt_int((int)fd, IPPROTO_TCP, TCP_NODELAY, on); }
@@ -72,7 +72,7 @@ static kl_ssize_t lw_writev(void *c, KlSocketHandle fd, const KlIoVec *iov, int 
     }
     return lwip_writev((int)fd, v, iovcnt);
 }
-/* No sendfile op — lwIP has none; without KL_SOCK_CAP_SENDFILE Keel pread-sends. */
+/* No sendfile op; lwIP has none; without KL_SOCK_CAP_SENDFILE Keel pread-sends. */
 
 static const KlSocketOps lwip_ops = {
     .set_nonblocking = lw_set_nonblocking, .set_blocking = lw_set_blocking,
@@ -91,7 +91,7 @@ static const KlSocketOps lwip_ops = {
  * (event_lwip.c, lwip_poll). WRITEV: lwip_writev is available. No SENDFILE. */
 static const KlSocketProvider lwip_provider = {
     &lwip_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV,
-    NULL,   /* dgram — datagram ops added in the lwIP datagram-provider stage */
+    NULL,   /* dgram: datagram ops added in the lwIP datagram-provider stage */
 };
 
 const KlSocketProvider *kl_socket_provider_lwip(void) { return &lwip_provider; }

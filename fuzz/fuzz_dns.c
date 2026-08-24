@@ -1,5 +1,5 @@
 /*
- * fuzz_dns.c — libFuzzer target for the DNS response parser.
+ * fuzz_dns.c: libFuzzer target for the DNS response parser.
  *
  * The parser consumes untrusted network input (server responses). This target
  * feeds arbitrary bytes through kl_dns_parse_response for both address families

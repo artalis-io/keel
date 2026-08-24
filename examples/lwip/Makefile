@@ -1,6 +1,6 @@
 # Opt-in BYO build of the Keel lwIP reference.
 #
-# lwIP is NOT vendored — point LWIP_DIR at your own lwIP checkout (the main repo,
+# lwIP is NOT vendored; point LWIP_DIR at your own lwIP checkout (the main repo,
 # which also carries contrib/ports/unix for the host arch headers):
 #     make LWIP_DIR=/path/to/lwip
 #
@@ -9,7 +9,7 @@
 # it proves Keel's public provider/event API (<keel/socket.h>, <keel/event.h>) is
 # sufficient to author an lwIP platform using no internal Keel or host-POSIX
 # types. Running a full server/client over lwIP means building libkeel with these
-# two TUs as the platform's socket + event backend — the promotion path in
+# two TUs as the platform's socket + event backend: the promotion path in
 # docs/lwip_platform_design.md; see README.md.
 
 LWIP_DIR ?= ../../../lwip

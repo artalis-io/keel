@@ -1,5 +1,5 @@
 #!/bin/sh
-# KEEL multi-endpoint benchmark — build + run 4 wrk benchmarks
+# KEEL multi-endpoint benchmark: build + run 4 wrk benchmarks
 #
 # Usage:
 #   make bench                  # default: 4 threads, 100 connections, 10s
@@ -72,7 +72,7 @@ fi
 wrk -t2 -c10 -d2s "$BASE/hello" >/dev/null 2>&1
 
 if [ -n "$JSON" ]; then
-    # JSON mode — array of 4 results
+    # JSON mode: array of 4 results
     echo "["
 
     printf '{"endpoint":"GET /hello","label":"baseline","results":'

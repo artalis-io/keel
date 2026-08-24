@@ -1,10 +1,10 @@
 #!/usr/bin/env perl
-# tools/check_no_milestones.pl — permanent comments-only milestone/phase archaeology gate (C2-6).
+# tools/check_no_milestones.pl: permanent comments-only milestone/phase archaeology gate (C2-6).
 #
 # Scans every tracked first-party .c/.h (vendor/ excluded) and rejects historical milestone /
 # phase / finding / step token families in COMMENTS. Real C-comment extraction (a per-file state
-# machine over /* */, //, "strings", 'chars') means string literals — including the UEFI/lwIP
-# self-test CI-oracle output markers ("6.4c: GO", "S-4: GO", "P9-3 PASS") — are NATURALLY ignored;
+# machine over /* */, //, "strings", 'chars') means string literals, including the UEFI/lwIP
+# self-test CI-oracle output markers ("6.4c: GO", "S-4: GO", "P9-3 PASS"), are NATURALLY ignored;
 # only comment text is matched. There are NO file, line, or marker exceptions.
 #
 # Historical-token matching is deliberately PRECISE so legitimate local scenario catalogs pass
@@ -12,7 +12,7 @@
 #   - "UTF-8" is not F-8 (the F families require a word boundary before F),
 #   - "E2E" is not E2, "phase10_foo.md" is not "Phase 1" (the phase family requires a separator),
 #   - "two-phase" / "lifecycle phase" never reach a digit.
-# Design/history docs under docs/ are NOT scanned — their recorded milestone history stands, exactly
+# Design/history docs under docs/ are NOT scanned; their recorded milestone history stands, exactly
 # as the other stale-name gates treat docs.
 #
 # Positive AND negative self-canaries run BEFORE the tree scan and abort loudly if the extractor or
@@ -56,13 +56,13 @@ my $TOKEN_RE = qr{
 
 # ── Comment extractor. Returns [physical_line, comment_fragment, matched_token] for every milestone
 #    match in COMMENT text (only). Implements C translation phase 2 (backslash-newline line splicing)
-#    BEFORE tokenizing, so lexical state — string/char literals, // and /* */ comments — is preserved
+#    BEFORE tokenizing, so lexical state (string/char literals, // and /* */ comments) is preserved
 #    across a spliced line exactly as a C compiler sees it. This closes both a false-positive (a
 #    /* ... */ that lives inside a string continued over a splice) and a bypass (a banned token on the
 #    continued physical line of a // comment). Diagnostics report the ORIGINAL physical line: the
 #    splice deletes the backslash+newline but each surviving character keeps its source line number,
 #    and a comment "run" (a maximal /* */ or // span) is scanned as one string with every match mapped
-#    back to the physical line of its first character — so a token split across the splice, or one on a
+#    back to the physical line of its first character, so a token split across the splice, or one on a
 #    continued line, is reported where it truly sits. ─────────────────────────────────────────────────
 sub scan_text {
     my ($text) = @_;
@@ -134,7 +134,7 @@ sub scan_text {
 }
 
 # ── Self-canaries: MUST flag every milestone form; MUST NOT flag valid catalogs, ordinary text, or
-#    string literals. Any failure means the scanner regressed — abort before trusting a clean tree. ─
+#    string literals. Any failure means the scanner regressed; abort before trusting a clean tree. ─
 sub selftest {
     my @must_flag = (
         '/* Phase 8g streaming */', '/* step 6B-1 */', '/* 7B-2a carve */', '/* 8f-5a provider */',
@@ -159,7 +159,7 @@ sub selftest {
         'const char *m = "6.4c: DONE Phase 8g";',
         "char q = '\"'; /* an escaped quote must not swallow the next token: fine */",
         # line-splicing: a milestone-looking /* ... */ INSIDE a string continued over a backslash-newline
-        # is still string content — the splice must not let it be seen as a comment.
+        # is still string content; the splice must not let it be seen as a comment.
         "const char *s = \"start \\\n/* Phase 8g */ still inside the string\";\n",
         # line-splicing: an escaped quote formed across a continuation must not terminate the string, so
         # the following /* ... */ stays string content and is ignored.
@@ -175,7 +175,7 @@ sub selftest {
     for my $t (@must_ignore_string) {
         if (my @h = scan_text($t)) { print "  SELF-TEST FAILED: string-literal token WRONGLY flagged ($h[0][2]): $t\n"; $bad = 1; }
     }
-    if ($bad) { print "check-no-milestones: SELF-TEST FAILED — scanner regressed; not trusting the tree scan\n"; exit 1; }
+    if ($bad) { print "check-no-milestones: SELF-TEST FAILED; scanner regressed; not trusting the tree scan\n"; exit 1; }
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ for my $f (@files) {
 }
 
 if ($fail) {
-    print "check-no-milestones: FAILED — a comment carries a historical milestone/phase/finding/step\n";
+    print "check-no-milestones: FAILED; a comment carries a historical milestone/phase/finding/step\n";
     print "token. State the current behavior or invariant instead (the string literals + CI oracles are\n";
     print "untouched; only the comment must change). If this is a legitimate local scenario catalog,\n";
     print "make its labels descriptive rather than a bare milestone ID.\n";

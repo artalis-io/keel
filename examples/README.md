@@ -91,9 +91,9 @@ websocat ws://localhost:8080/ws
 | `streaming_client` | `hello_server` on :8080 | Response + request body streaming | `kl_http_client_request_s`, `KlHttpClientStreamCfg`, `KlHttpClientBodyFn`, `KlHttpClientReadFn` |
 | `async_client` | `hello_server` on :8080 | Concurrent async requests (fan-out) | `kl_http_client_start`, `KlEventCtx` standalone loop |
 | `websocket_client` | `websocket_server` on :8080 | WebSocket echo client | `KlWsClientConn`, `KlWsClientCallbacks` |
-| `h2_client` | — | HTTP/2 client with mock session | `KlHttp2ClientConn`, `KlHttp2ClientSession` vtable |
-| `redirect_client` | — (self-contained) | Redirect following: 301, chain, 303 POST→GET | `kl_http_redirect_request`, `kl_http_redirect_start`, `KlHttpRedirectConfig` |
-| `proxy_client` | — (self-contained) | HTTP proxy: forwarding + CONNECT tunnel | `KlHttpProxyConfig`, `kl_http_client_request`, `kl_http_client_start` |
+| `h2_client` | -- | HTTP/2 client with mock session | `KlHttp2ClientConn`, `KlHttp2ClientSession` vtable |
+| `redirect_client` | -- (self-contained) | Redirect following: 301, chain, 303 POST→GET | `kl_http_redirect_request`, `kl_http_redirect_start`, `KlHttpRedirectConfig` |
+| `proxy_client` | -- (self-contained) | HTTP proxy: forwarding + CONNECT tunnel | `KlHttpProxyConfig`, `kl_http_client_request`, `kl_http_client_start` |
 
 ### Running Client Examples
 
@@ -110,7 +110,7 @@ websocat ws://localhost:8080/ws
 ./examples/websocket_server &
 ./examples/websocket_client
 
-# Proxy client (self-contained — starts its own target server + proxy):
+# Proxy client (self-contained: starts its own target server + proxy):
 ./examples/proxy_client
 ```
 
@@ -141,7 +141,7 @@ make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
 | `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_http_response_body_compress`, `KlHttpCompressStream` |
-| `decompress_client` | — (self-contained) | Compress → decompress round-trip | `KlDecompressConfig`, `kl_decompress_body`, `KlDecompressStream` |
+| `decompress_client` | -- (self-contained) | Compress → decompress round-trip | `KlDecompressConfig`, `kl_decompress_body`, `KlDecompressStream` |
 
 Set `KlHttpClientConfig.decompress` to automatically decompress gzip responses from servers.
 
@@ -168,7 +168,7 @@ make examples KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
 | `tls_server` | 8443 | HTTPS server | `KlTlsConfig`, `KlTls` vtable, cert/key loading |
-| `tls_client` | — | HTTPS client | `kl_http_client_request` with TLS, CA skip for self-signed |
+| `tls_client` | -- | HTTPS client | `kl_http_client_request` with TLS, CA skip for self-signed |
 
 ```bash
 # Generate self-signed cert:

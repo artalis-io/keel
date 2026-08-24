@@ -1,13 +1,13 @@
 # KEEL Networking Architecture Axis Audit
 
-> **Historical, append-only evidence log — newest pass first.** Each pass records what was verified
+> **Historical, append-only evidence log: newest pass first.** Each pass records what was verified
 > on its date; verify any specific claim against current code before acting on it. Current-state
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
-## Twelfth pass — the public `KlDatagram` STABLE facade (datagram Phase B) preserves the three-axis separation (2026-08-17)
+## Twelfth pass: the public `KlDatagram` STABLE facade (datagram Phase B) preserves the three-axis separation (2026-08-17)
 
-**Verdict: architecturally sound — the datagram transport consolidation (Phase B, Step 7B) added
+**Verdict: architecturally sound, the datagram transport consolidation (Phase B, Step 7B) added
 the largest new axis surface since the eleventh pass and it EXEMPLIFIES the three-axis design
 rather than eroding it.** Fresh `/axis-audit` over the merged branch (`186691f`, now in
 `origin/main` as PR #240 + dependabot follow-ups). The new public `kl_datagram_*` API is a pure
@@ -17,12 +17,12 @@ seam-level adapter that runs, model-blind, over all five completion/readiness ba
 
 - Working tree = `transport/datagram-phase-b` @ `186691f`, confirmed an ancestor of `origin/main`
   (merged). This is the shipped tree.
-- New since the eleventh pass: the whole Phase B datagram arc — `KlUdp` → `KlUdpServer` →
+- New since the eleventh pass: the whole Phase B datagram arc; `KlUdp` → `KlUdpServer` →
   built-in `dns_resolver` → the internal `KlDgramCore` → the **public `KlDatagram` fixed-slot
   facade** (`include/keel/datagram.h`, `src/datagram.c`) wired live to pollcomp, io_uring,
   readiness (epoll/kqueue/poll), IOCP, and lwIP-raw + EFI_UDP4.
 
-### Mechanical independence (Goal 4) — PASS
+### Mechanical independence (Goal 4): PASS
 
 - **Protocol + datagram TUs name no platform networking header or event-engine symbol.** grep over
   `connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `websocket_client.c`, `sse.c`,
@@ -42,7 +42,7 @@ seam-level adapter that runs, model-blind, over all five completion/readiness ba
 
 `src/datagram.c` holds **two adapter tables selected by capability**, both feeding the *same*
 model-blind `KlDgramCore` state machine (`kl_dgram_core_recv_on_complete` /
-`kl_dgram_core_send_on_complete` / inbound-slot) — i.e. semantic consistency ABOVE the axis,
+`kl_dgram_core_send_on_complete` / inbound-slot), i.e. semantic consistency ABOVE the axis,
 native mechanism BELOW:
 
 | Concern | Completion (`dg_comp_*`) | Readiness (`dg_rdy_*`) |
@@ -52,47 +52,47 @@ native mechanism BELOW:
 | Backpressure | interest rides the posted op (no watcher) | `dg_reconcile_write` toggles the WRITE bit from send-queue depth |
 | Registration vs submission | one op = one in-flight submission (Goal 12 preserved) | one persistent watcher spanning many ops |
 
-Completion never dereferences a transport object — the neutral `KlDgramSendOp`/`KlDgramRecvOp`
+Completion never dereferences a transport object, the neutral `KlDgramSendOp`/`KlDgramRecvOp`
 descriptors (7B-2b) carry everything by value; the B.6 token routes each completion back to the
 live `KlDgramCore` (NULL once dead) so a stale wrapper is never touched.
 
-### Operation lifetime + ownership (Goal 6) — the invariant that got amended this arc
+### Operation lifetime + ownership (Goal 6): the invariant that got amended this arc
 
-- **`KlCompletionEvent.retain_life` is single-sourced across all three release sites** —
+- **`KlCompletionEvent.retain_life` is single-sourced across all three release sites**:
   `completion_core.c` (router no-handler fallback), `datagram.c` (`kl_datagram_comp_dispatch`),
   `udp.c` (`kl_udp_comp_dispatch`) each release the borrowed life ref *iff* `!retain_life`. This
   is a deliberate, documented amendment to the completion release invariant so the EFI QUARANTINE
   case (an abandoned firmware RxToken that may still write the inbound buffer) can keep its ref
   fail-closed while every other backend passes `retain_life=0` (memset default) unchanged.
 - **Retain-transfer-on-success / release-on-failure** is applied uniformly in both `dg_comp_submit`
-  and `dg_comp_arm` — the op takes the ref only when the post succeeds.
+  and `dg_comp_arm`, the op takes the ref only when the post succeeds.
 - **A real operation-lifetime bug was found and fixed this arc (IOCP):** a send-only `KlUdp`
   socket (`kl_udp_send_to` with no `kl_udp_recv_start`) was never associated with the completion
   port, so its `WSASendTo` completion never posted and teardown hung forever. Fixed by associating
-  at `kl_udp_init()` (completion mode), covering send-only + recv — the general lesson (a
+  at `kl_udp_init()` (completion mode), covering send-only + recv, the general lesson (a
   completion socket must be port-associated at CREATE, not lazily at first-recv) is exactly the
   Goal-6 "close-while-outstanding / shutdown ordering" class this audit targets, and it is now
   proven on real Windows IOCP CI.
 
 ### Validation run this pass
 
-- **Native completion-driver double** — `make smoke-pollcomp-asan`: GET/POST/file/stream/UDP/h2c/
+- **Native completion-driver double**, `make smoke-pollcomp-asan`: GET/POST/file/stream/UDP/h2c/
   WebSocket/async/client/TLS over the `poll()` completion facade, **ASan+UBSan+LSan clean**.
-- **Production completion backend** — in the Apple `container` Linux VM (kernel 6.18):
+- **Production completion backend**, in the Apple `container` Linux VM (kernel 6.18):
   `make smoke-iouring-asan` → **ASan/UBSan clean** (GET/POST/file/bigfile-splice/stream/astream/
   bigstream/UDP/h2c/h2-pk/idle/keepalive/resilience/large + async/thread-pool + KlClient). The
   curated `test-iouring` completion gate (56/56) was validated at this exact commit earlier in the
   branch's history; re-running it in the same tree hit only the documented ASan-archive
   contamination gotcha (plain build linking a leftover `-fsanitize` `libkeel.a`), not a regression.
-- **Readiness axis** — native default (kqueue) `make smoke-pollcomp-asan` peer + the
+- **Readiness axis**: native default (kqueue) `make smoke-pollcomp-asan` peer + the
   `test_datagram_live` loopback round-trip adapt to the build backend (pollcomp/io_uring/readiness)
   via `kl_event_ctx_init`, proving one facade over both models.
 
-### Findings — 0 new critical / high / medium
+### Findings: 0 new critical / high / medium
 
 | # | Severity | Area | Note |
 |---|----------|------|------|
-| — | informational | `src/socket_dgram_posix.c:500-504` | `pdg_rx_batch_new` computes `(size_t)n * sizeof(...)` for the `recvmmsg` batch without an explicit overflow guard on `n`. **This is a socket-layer robustness nit, not an axis issue** — `n` is the app-set `mmsg_batch` config knob (not network input) and is 64-bit-safe; batch-then-check + free-on-error is otherwise correct. Cross-referenced from the same-day `/c-audit` (L1). |
+| - | informational | `src/socket_dgram_posix.c:500-504` | `pdg_rx_batch_new` computes `(size_t)n * sizeof(...)` for the `recvmmsg` batch without an explicit overflow guard on `n`. **This is a socket-layer robustness nit, not an axis issue**: `n` is the app-set `mmsg_batch` config knob (not network input) and is 64-bit-safe; batch-then-check + free-on-error is otherwise correct. Cross-referenced from the same-day `/c-audit` (L1). |
 
 All prior-pass informational items (per-server event-loop state for the declined Finding 2, etc.)
 remain as previously dispositioned. No axis regression introduced by the datagram arc.
@@ -119,7 +119,7 @@ public facade). All other cells are runtime-tested, not merely present.
 
 The socket-ownership / loop-affinity / completion-delivery / cancellation / close / backpressure
 contract from prior passes stands. **Amendment (this arc):** a completion terminal may set
-`KlCompletionEvent.retain_life=1` to signal that the life ref is BORROWED (not transferred) — the
+`KlCompletionEvent.retain_life=1` to signal that the life ref is BORROWED (not transferred), the
 dispatch handler retires the op's state machine but abandons the ref (fail-closed for
 abandoned-token backends). Backends that don't need it leave it 0. The terminal-result rule
 (exactly one terminal per op; late/duplicate events discarded via the B.6 generation token)
@@ -132,18 +132,18 @@ is unchanged.
 2. *Optional hardening:* an explicit `mmsg_batch` cap or overflow guard at `pdg_rx_batch_new`
    (informational; 64-bit-safe today).
 
-No code changes were made in this pass — it is a re-verification; the architecture is sound.
+No code changes were made in this pass; it is a re-verification; the architecture is sound.
 
 ---
 
-## Eleventh pass — orchestration-layer refactors re-verify the three-axis separation (2026-08-08)
+## Eleventh pass: orchestration-layer refactors re-verify the three-axis separation (2026-08-08)
 
-**Verdict: architecturally sound — the client/server orchestration refactors (this session's
+**Verdict: architecturally sound, the client/server orchestration refactors (this session's
 review rounds) STRENGTHENED axis separation; no regressions.** Fresh `/axis-audit` after the
 Finding-1 dispatch unification, the `client_proxy.c` extraction, the `server_activation.c`
 split, and the EFI server data-plane fixes.
 
-### Mechanical independence (Goal 4) — PASS
+### Mechanical independence (Goal 4): PASS
 
 - **Protocol-layer TUs name no platform networking header or event-engine symbol.** grep over
   `connection.c`, `response.c`, `client_{common,sync,async,proxy}.c`, `h2_client.c`,
@@ -156,23 +156,23 @@ split, and the EFI server data-plane fixes.
   `kl_ws_server_*`/`kl_h2_server_*`/`kl_cidr_match`/`c->h2->`/`c->ws->` → only the `_hooks()`
   getters). Finding 1 (this session) routed the readiness data plane through the same
   `proto_hooks.h` seam the completion driver already used, so **both event models now dispatch
-  WebSocket/HTTP-2/PROXY identically** — the asymmetry the review flagged is closed. This is a
+  WebSocket/HTTP-2/PROXY identically**, the asymmetry the review flagged is closed. This is a
   positive axis result: `server.c` (readiness) and `completion_server.c` (completion) are now
   peers above the protocol seam, neither owning protocol internals.
 
 ### Axis-relevant refactors this session (all confirmed non-regressive)
 
-- **Finding 1 — readiness ws/h2/proxy via hooks.** Extended `KlWsServerHooks`/`KlH2ServerHooks`
+- **Finding 1: readiness ws/h2/proxy via hooks.** Extended `KlWsServerHooks`/`KlH2ServerHooks`
   with the readiness data-plane entrypoints; `server.c` dispatches through them (NULL-guarded,
   symmetric with `completion_server.c`). `kl_server_ws` moved to `server_ws.c`. server.c dropped
   `websocket_server.h`/`h2_server.h`/`h2_internal.h`.
-- **`client_proxy.c`** — the sync/async proxy CONNECT is now one transport-independent module;
-  the two event models differ only in byte movement (blocking vs the async state machine) — the
+- **`client_proxy.c`**, the sync/async proxy CONNECT is now one transport-independent module;
+  the two event models differ only in byte movement (blocking vs the async state machine), the
   same "protocol above the axis" principle, applied to the client.
-- **`server_activation.c`** — the systemd socket-activation surface is its own TU. It reads
-  `LISTEN_*` env + `getpid` (platform, hosted) — that is the *activation* responsibility, not a
+- **`server_activation.c`**, the systemd socket-activation surface is its own TU. It reads
+  `LISTEN_*` env + `getpid` (platform, hosted), that is the *activation* responsibility, not a
   protocol or event-model concern; it names no event engine.
-- **EFI server data plane** — accept backpressure (capacity-gated arming), alloc-free send, and
+- **EFI server data plane**: accept backpressure (capacity-gated arming), alloc-free send, and
   `el_close` teardown live entirely in the EFI socket/completion provider (`integrations/uefi/`),
   below the axis; the server core is unchanged. See the review-round subsection of the tenth pass.
 
@@ -182,7 +182,7 @@ The `proto_hooks.h` tables are **process-wide install-once registrations of comp
 capabilities** (which protocol *implementation* to dispatch to), guarded by `hooks_set_once`
 (commit `61bddb1`: idempotent same-table install / NULL reset allowed; a different live
 replacement rejected). This is NOT global *configuration*: protocol **enablement is per-server**
-and orthogonal to the registry —
+and orthogonal to the registry,
 - WebSocket fires only when the matched route has `ws_config` (`connection.c:520`), set per
   server via `kl_server_ws`;
 - HTTP/2 is gated by per-connection `h2_config` (`connection.c:347/527/799`), copied from that
@@ -190,15 +190,15 @@ and orthogonal to the registry —
 - PROXY by that server's `cfg.proxy_trusted_cidrs` → `s->proxy_cidr_count`.
 
 So two `KlServer`s in one process **can** run different *enabled* protocol sets today (e.g. A =
-ws+h2, B = plain HTTP/1.1 — B never sets `ws_config`, so the global ws table is never consulted
+ws+h2, B = plain HTTP/1.1: B never sets `ws_config`, so the global ws table is never consulted
 for it). The only thing the global registry precludes is two *different implementations of the
-same protocol* selected per-server — exotic and unneeded. This is why de-globalizing the tables
+same protocol* selected per-server: exotic and unneeded. This is why de-globalizing the tables
 into per-`KlServer` state (the review's declined Finding 2) buys ~nothing for real Keel usage.
 
 ### Sanitizer / driver checks
 
 - Completion-axis driver under ASan (`make smoke-pollcomp-asan`): async/thread-pool over-completion
-  roundtrip + async `KlClient` connect+GET over the completion loop — **both OK**.
+  roundtrip + async `KlClient` connect+GET over the completion loop; **both OK**.
 - Full suite under ASan+UBSan (`make debug-test`): **65/65, 0 leaks/UB** (see c-audit twelfth pass).
 - mock-EFI failure-path harness (ASan/UBSan): PASS incl. the new backpressure test.
 
@@ -215,17 +215,17 @@ deferred cross-backend work (recorded in `event_efi.h` + the review triage).
 
 ---
 
-## Tenth pass — the UEFI HTTP(S) **server** validates the model-blind server core (2026-08-08)
+## Tenth pass: the UEFI HTTP(S) **server** validates the model-blind server core (2026-08-08)
 
-**Verdict: architecturally sound — the inbound direction is the mirror of the ninth pass and,
+**Verdict: architecturally sound, the inbound direction is the mirror of the ninth pass and,
 if anything, a stronger validation of the axis model.** A STOCK freestanding `KlServer` serves
-`GET / → 200` — **plaintext (S-4) and HTTPS (S-6)** — and tears down cleanly (S-7) over EFI_TCP4
+`GET / → 200`, **plaintext (S-4) and HTTPS (S-6)**, and tears down cleanly (S-7) over EFI_TCP4
 on bare UEFI firmware (QEMU/OVMF, verified in an Ubuntu 24.04 container), with **zero protocol
 edits**. The whole S-1..S-7 effort added no platform coupling to `src/`.
 
 ### What this pass confirms about the axes
 
-1. **Protocol + server core stayed above both axes (Goal 4) — mechanical PASS.** The core server
+1. **Protocol + server core stayed above both axes (Goal 4): mechanical PASS.** The core server
    TUs (`src/server_core.c`, `src/server.c`) contain no platform-networking or event-engine code
    (`grep` for `sys/epoll`/`sys/event`/`io_uring_`/`epoll_`/`kevent(`/`WSA`/`EFI_TCP4_PROTOCOL`/
    `efi_sock_` finds only comment prose). No EFI/UEFI TU lives in `src/`; every EFI symbol is under
@@ -233,28 +233,28 @@ edits**. The whole S-1..S-7 effort added no platform coupling to `src/`.
 2. **The `KlCompletionOps` vtable hosts a SERVER backend, not just a client (Goals 1, 12).** S-3/S-4
    added `prime_accepts`/`post_accept` + the completion-native `post_recv`/`post_send` to the EFI
    backend (`event_efi.c`), surfaced as `KL_COMP_ACCEPT`/`KL_COMP_READ`/`KL_COMP_WRITE` and consumed
-   by the model-blind `completion_server.c` — the exact shape io_uring/IOCP/pollcomp use. The client
+   by the model-blind `completion_server.c`, the exact shape io_uring/IOCP/pollcomp use. The client
    rode the watcher relay and never needed these; adding them left the client path untouched.
 3. **Completion-mode server TLS needed nothing below the axis (Goals 4, 9).** S-6 required only the
-   two documented completion-TLS obligations in the backend — feed received *ciphertext* to
+   two documented completion-TLS obligations in the backend; feed received *ciphertext* to
    `tls->feed_input` and a synchronous send for `kl_comp_tls_flush` (already `efi_sock_send`). The
-   `KlTls` memory-BIO ops (`feed_input`/`drain_output`) served the server verbatim — **no
+   `KlTls` memory-BIO ops (`feed_input`/`drain_output`) served the server verbatim; **no
    TLS-vtable change**. The one fix was a client-only mbedTLS config missing `MBEDTLS_SSL_SRV_C`.
-4. **Server operation-lifetime + teardown (Goals 6, 10) — clean.** S-7 carved a freestanding
+4. **Server operation-lifetime + teardown (Goals 6, 10): clean.** S-7 carved a freestanding
    `kl_server_free`; `kl_conn_pool_free` closes every accepted-child socket (draining its EFI
-   tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown — the precondition for
+   tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown, the precondition for
    `kl_uefi_shutdown()` / ExitBootServices. Firmware-verified: served → clean teardown, 0 live
    sockets, providers released. The `post_recv`/`post_send` ops are generation-stale-guarded (an
    accepted child that closes mid-op is dropped, never delivered) and freed on completion/cancel.
 
 The only core deltas were the `KEEL_FREESTANDING`-guarded `kl_server_init`/`kl_server_free` carve
 into `server_core.c` (the freestanding server archive now constructs + tears down a `KlServer`
-from itself) — a build-axis guard, not a platform `#ifdef` in a dispatch path.
+from itself), a build-axis guard, not a platform `#ifdef` in a dispatch path.
 
 **Compatibility-matrix delta:** `EFI_TCP4 server (plaintext + HTTPS)` moves from *not-started* to
 **firmware-verified (QEMU/OVMF, container): S-4 plaintext + S-6 HTTPS + S-7 clean teardown**.
 
-### Review round (post-S-7) — three seam fixes, one documented boundary
+### Review round (post-S-7): three seam fixes, one documented boundary
 
 A follow-up server-side review found three concrete implementation bugs at the inbound seam
 (all now fixed + verified; commit `71573dd`):
@@ -265,7 +265,7 @@ A follow-up server-side review found three concrete implementation bugs at the i
   capacity-gated (`want` = free Keel slots), driven every tick by `el_prime_accepts`. New mock
   test `t_accept_backpressure` proves excess connections are not accepted.
 - **Alloc-free send (op/buffer lifetime, Goal 6).** `post_send` had `kl_malloc`'d per response;
-  it now copies into an inline per-op buffer. NB: the copy is *mandatory* — `comp_tls_post_encrypted`
+  it now copies into an inline per-op buffer. NB: the copy is *mandatory*; `comp_tls_post_encrypted`
   frees its ciphertext right after posting, so a "reference stable segments" optimization is a
   use-after-free on the TLS path (caught in the container as HTTPS-000; a good reminder the send
   contract is copy-required across all completion backends).
@@ -280,17 +280,17 @@ is deferred cross-backend work, recorded here and in `event_efi.h`.
 
 ---
 
-## Ninth pass — the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
+## Ninth pass: the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
 
-**Verdict: architecturally sound — and the F-8 hardening is a direct, positive stress-test of
+**Verdict: architecturally sound, and the F-8 hardening is a direct, positive stress-test of
 the completion axis's *operation-lifetime* contract (Goals 6 & 10).** The EFI provider is a
 completion-native backend of exactly the shape the axis model anticipates (`event_efi.c` posts
 EFI tokens ≈ SQEs/OVERLAPPEDs; `socket_efi_tcp4.c` is the socket axis; the protocol layer above
 is unchanged and platform-blind). No axis-separation regressions; the review found real *lifetime*
-bugs in the new provider — precisely the class Goal 6 ("operation ownership and lifetime correct —
+bugs in the new provider, precisely the class Goal 6 ("operation ownership and lifetime correct,
 completion makes these dangerous: close-while-outstanding, cancellation, timeout races, stale
 completion after handle reuse, UAF/double-free") and Goal 10 ("cancel racing completion → exactly-
-one terminal result") name — and they are now fixed and host-test-covered.
+one terminal result") name, and they are now fixed and host-test-covered.
 
 ### What this pass confirms about the axes
 
@@ -298,57 +298,57 @@ one terminal result") name — and they are now fixed and host-test-covered.
    socket/completion seam. The `KlClient` HTTP path, the parser, and the DNS `KlResolver` consumer
    are byte-identical to the POSIX build; the fixes live entirely in the EFI socket provider + its
    completion backend + the mbedTLS platform TU. A completion provider's token-lifetime bug did not
-   leak upward — the abstraction held.
+   leak upward, the abstraction held.
 
 2. **The completion lifetime contract is now honored by a third backend (Goal 6/10).** io_uring and
    IOCP already encode "every submitted op reaches exactly one terminal state (completion or
    cancel→drain) before its buffers/state are freed." The EFI provider originally violated this on
    the *failed-cancel* edge (a token that refuses to drain was freed anyway). The **quarantine
-   model** — stable provider-owned slot storage (`static KlUefiConn g_conns[]`) that is never
-   reclaimed once a token cannot be confirmed retired — is the EFI-specific realization of the same
+   model**: stable provider-owned slot storage (`static KlUefiConn g_conns[]`) that is never
+   reclaimed once a token cannot be confirmed retired; is the EFI-specific realization of the same
    contract, mirroring io_uring's cancel-sentinel discipline. Explicit per-token state
    (`conn_posted`/`tx_posted`/`rx_posted`/`close_posted`) is the registration-vs-submission
    distinction (Goal 12) made concrete: each flag is one in-flight submission, set on submit,
    cleared on the observed terminal.
 
 3. **Close-with-outstanding-work is correct under the completion model (Goal 6, required trace).**
-   `efi_sock_close` now cancels, drains **only** posted tokens, and — critically — if any drain
+   `efi_sock_close` now cancels, drains **only** posted tokens, and, critically, if any drain
    fails, quarantines instead of tearing down. This is the EFI analogue of the io_uring
    close-with-pending-CQE path, and it fixed a real ~60 s stall rooted in `CheckEvent` consuming the
    signal (a completion-delivery honesty issue, Goal 2: readiness/completion semantics represented
-   honestly — the code must not treat a consumed event as still-signalled).
+   honestly, the code must not treat a consumed event as still-signalled).
 
 4. **Error normalization + bounds at the seam (Goal 9, security).** The impossible-`DataLength`
    validation (U4) is the completion-axis instance of "platform error/length values treated as byte
-   counts" — a completion event's reported length is untrusted and now bounds-checked against
+   counts", a completion event's reported length is untrusted and now bounds-checked against
    `KL_EFI_RXBUF` before any copy.
 
 5. **Backend selection / post-EBS fail-closed (Goal 13).** ExitBootServices is the EFI equivalent of
    "the event engine went away." The provider now fails closed on every data-path + heap entry after
-   EBS (`kl_uefi_after_ebs()`), so no post-teardown firmware call is made — the selected backend's
+   EBS (`kl_uefi_after_ebs()`), so no post-teardown firmware call is made, the selected backend's
    unavailability is observable and safe, never a silent partial.
 
 **Method:** the same 18-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
-pass exercises these axis paths directly — cancel-succeeds/fails/races, close-with-outstanding-
-receive, consumed-connect-event-during-close, post-EBS — under ASan+UBSan. See the eleventh C-audit
+pass exercises these axis paths directly: cancel-succeeds/fails/races, close-with-outstanding-
+receive, consumed-connect-event-during-close, post-EBS: under ASan+UBSan. See the eleventh C-audit
 pass for the finding table.
 
 **Compatibility-matrix delta:** `EFI_TCP4 + EFI completion backend` moves from *buildable/
 happy-path-tested* to *failure-path host-tested* (cancel/close/timeout/post-EBS) **plus full TLS
 cert validation** (CA + hostname + validity-time over Runtime Services GetTime, fail-closed; proven
-by a valid/expired QEMU pair — U-8). No change to the POSIX/io_uring/IOCP/pollcomp rows.
+by a valid/expired QEMU pair: U-8). No change to the POSIX/io_uring/IOCP/pollcomp rows.
 
-**U-8 postscript (2026-08-06) — certificate validity-time (the last open item).** Enabling
+**U-8 postscript (2026-08-06): certificate validity-time (the last open item).** Enabling
 `MBEDTLS_HAVE_TIME_DATE` bound mbedTLS's clock to Runtime Services `GetTime` via a small pure
 conversion (`civil_time.c`) + glue (`time_uefi.c`). Axis note: this touched only the socket/platform
-side — the *protocol* layer (KlClient, the TLS vtable contract) is unchanged (Goal 4 holds), and the
+side, the *protocol* layer (KlClient, the TLS vtable contract) is unchanged (Goal 4 holds), and the
 clock is fail-closed (Goal 9/13: an unavailable/implausible RTC degrades safely to "reject all
 certs", never silently accepts). `GetTime` is a Runtime Service (valid across ExitBootServices), so
 it does not reintroduce a boot-services dependency in the post-EBS window.
 
-## Eighth pass — the freestanding portability phase strengthens all three axes (2026-08-05)
+## Eighth pass: the freestanding portability phase strengthens all three axes (2026-08-05)
 
-**Verdict: architecturally sound — every change in the freestanding phase (PRs #199–#211) either
+**Verdict: architecturally sound; every change in the freestanding phase (PRs #199–#211) either
 preserved or *improved* the axis separation.** No new findings; three concrete improvements + one
 future-provider validation. This pass reviews the phase's axis impact (the TU splits are movement,
 nm-proven; the new mechanisms are what matter).
@@ -359,41 +359,41 @@ nm-proven; the new mechanisms are what matter).
    split into `completion_core.c` (the generic tick `kl_comp_run`: drain → WATCHER/CONNECT via
    `kl_event_dispatch`, ACCEPT/READ/WRITE + UDP routed out, then timers) / `completion_server.c`
    (KlConn/HTTP-1 + TLS memory-BIO) / `completion_h2.c` / `completion_ws.c`, decoupled via **two
-   opaque `KlEventCtx` hooks** — `comp_conn_dispatch` (set by the server) and `comp_udp_dispatch`
+   opaque `KlEventCtx` hooks**: `comp_conn_dispatch` (set by the server) and `comp_udp_dispatch`
    (set by `kl_udp_init`). The hooks take `const void *ev` so `KlCompletionEvent` (internal
-   `src/completion.h`) never reaches the public header — no backend-internal type leaks upward
+   `src/completion.h`) never reaches the public header: no backend-internal type leaks upward
    (avoids the "generic event object exposing backend unions" smell). They're **per-loop fields,
    not file-scope globals** (avoids "hidden global event-loop state"). nm-proven: `completion_core.o`
-   has no static ref to `comp_on_accept/read/write` or `kl_udp_comp_on_recv/send` — a client-only
+   has no static ref to `comp_on_accept/read/write` or `kl_udp_comp_on_recv/send`, a client-only
    completion link (the freestanding archive) pulls neither the server nor UDP. This is the cleanest
    possible expression of "protocols/features sit above the generic completion axis."
-2. **Error classification is now a first-class SEAM op, not an errno leak (Goal 9 — the big win).**
+2. **Error classification is now a first-class SEAM op, not an errno leak (Goal 9, the big win).**
    B1 added `KlIoStatus` + `kl_sock_io_status(p)` (`src/socket.h`): the socket provider classifies
    the last -1 (WOULD_BLOCK/INTERRUPTED/PENDING/CLOSED/RESET/FATAL); the errno mapping lives in
    ONE place (`kl_sockdef_io_status`, the POSIX/Winsock seam), reached via the op-or-sockdef inline
    exactly like `kl_sock_get_so_error`. The client (`client_async/sync/pool`, 16 sites) now reads
-   `kl_sock_io_status` — **NOT `errno`** (client_async.c: 0 errno). Previously the protocol/client
-   read `errno`, a platform detail, on every would-block/connect-pending — a real axis leak. Now a
+   `kl_sock_io_status`, **NOT `errno`** (client_async.c: 0 errno). Previously the protocol/client
+   read `errno`, a platform detail, on every would-block/connect-pending, a real axis leak. Now a
    non-errno provider (EFI, a pure mock) classifies natively; hosted providers fall back to the
    errno map with zero behavior change. U-0 confirmed `EFI_STATUS → KlIoStatus` is a clean switch.
 3. **The completion event carries only `KlSockAddr` (Goal 5).** A2 removed `<keel/net.h>` +
    `struct sockaddr_storage` from `src/completion.h`; backends convert native→Keel once at their
    seam. One fewer host-ABI seam in the core event; benefits lwIP + EFI alike.
 
-### Mechanical independence (Goal 4) — PASS
+### Mechanical independence (Goal 4): PASS
 The new client TUs (`client_common/async/sync.c`) + `completion_core.c` + `event_ctx.c` include NO
 platform networking/event header and call no `epoll_*`/`kevent`/`io_uring_*`/`WSA*`/`OVERLAPPED`
-(the sole hit is `event_ctx.c`'s `kl_socket_provider_has_cap` — a capability query through the
+(the sole hit is `event_ctx.c`'s `kl_socket_provider_has_cap`, a capability query through the
 seam). `event_lwip_raw.c` remains lwIP-free (7th pass). The H1 watcher-liveness guard (9th c-audit
-/ #198) survived the `async.c`→`event_ctx.c` split intact — it lives in the `event_ctx.h` inline,
+/ #198) survived the `async.c`→`event_ctx.c` split intact; it lives in the `event_ctx.h` inline,
 so both `kl_event_ctx_run` and the completion driver see it.
 
-### Goal 14 (future providers) — VALIDATED, not just assessed
+### Goal 14 (future providers): VALIDATED, not just assessed
 U-0 (#211) ran a **raw EFI_TCP4 GET → 200 under QEMU/OVMF**, empirically confirming the completion
 + pointer-handle model maps onto EFI tokens. The 6 lifecycle findings (type-0 token events;
 `Poll()`+`CheckEvent()` pump = "the loop IS the firmware pump"; opened-child-protocol; DHCP async;
 `EFI_STATUS`→KlIoStatus clean switch; teardown ordering) show the existing `KlCompletionOps`
-contract (`post_connect`/`cancel`/`drain`) needs no new abstraction for EFI_TCP4 — a client-driving
+contract (`post_connect`/`cancel`/`drain`) needs no new abstraction for EFI_TCP4, a client-driving
 backend uses only `post_connect` + `cancel` + a `drain` emitting `KL_COMP_CONNECT`/`WATCHER`. The
 UEFI blocker is now the freestanding LIBC surface (delivered: mem*/strlen, self-contained archive),
 not the axis model.
@@ -401,7 +401,7 @@ not the axis model.
 ### Automated gate
 cppcheck 0; scan-build "No bugs found"; 64 suites under ASan+UBSan (incl the split TUs + the new
 `test_kl_cstr`/`test_kl_cstr_builtin`); the freestanding archive symbol-gated for x86_64 + aarch64;
-the freestanding harness runs the client over a mock completion provider 57/57 (ASan+UBSan+LSan) —
+the freestanding harness runs the client over a mock completion provider 57/57 (ASan+UBSan+LSan),
 the "equivalent protocol behavior over a mock event/socket provider" this skill asks for; io_uring
 (56) + loopback-raw gates green across the phase's PRs.
 
@@ -415,15 +415,15 @@ the "equivalent protocol behavior over a mock event/socket provider" this skill 
 | **Freestanding client archive (mock completion provider)** | **host harness 57/57 (ASan+UBSan+LSan); CRT-less PE/COFF link x86_64+aarch64; U-0 raw EFI_TCP4 GET in QEMU** |
 | EFI_TCP4 provider (real KlClient over EFI) | designed + U-0-validated; U-1..U-3 pending |
 
-No changes made in this pass (review-only; the one code touch this session — `KL_CLIENT_CHUNK_HDR_SIZE`
-— is a cosmetic c-audit L1, not an axis issue).
+No changes made in this pass (review-only; the one code touch this session: `KL_CLIENT_CHUNK_HDR_SIZE`
+; is a cosmetic c-audit L1, not an axis issue).
 
 ---
 
-## Seventh pass — the lwIP-raw CLIENT axis validates the third event model end to end (2026-08-05)
+## Seventh pass: the lwIP-raw CLIENT axis validates the third event model end to end (2026-08-05)
 
-**Verdict: architecturally sound.** The completion-native lwIP-raw provider — the third event
-model (Phase 9) — now carries the full **client** axis (plaintext, Happy-Eyeballs, DNS, HTTPS)
+**Verdict: architecturally sound.** The completion-native lwIP-raw provider, the third event
+model (Phase 9): now carries the full **client** axis (plaintext, Happy-Eyeballs, DNS, HTTPS)
 in addition to the server, and it did so with **zero `src/` changes** for the UDP/DNS transport
 (LC-3a/LC-3: `src/udp.c` and `src/dns_resolver.c` run verbatim over the raw completion loop) and
 only **backend-conforming** fixes for TLS (LC-4: the raw backend was made to satisfy the existing
@@ -435,36 +435,36 @@ socketless, fd-less, `NO_SYS=1` callback stack.
 ### What the LC-0..LC-5 work added to the axes
 
 1. **A new completion primitive, honestly modeled: `KL_COMP_CONNECT` + `KlCompletionOps.post_connect`**
-   (`src/completion.h`). This is the **outbound counterpart of `KL_COMP_ACCEPT`** — construct a
+   (`src/completion.h`). This is the **outbound counterpart of `KL_COMP_ACCEPT`**, construct a
    connect op on a client-owned nonblocking socket, submit, receive completion, interpret win/fail.
    It is a genuine completion concept (not synthetic readiness): the result is carried in the
    delivered event mask (`KL_EVENT_WRITE`=connected, `0`=failed), *not* re-derived from
-   `getsockopt(SO_ERROR)` on the client side — deliberately, because io_uring drops `SO_ERROR`
+   `getsockopt(SO_ERROR)` on the client side: deliberately, because io_uring drops `SO_ERROR`
    after a failed `IORING_OP_CONNECT`. Implemented on all three completion backends
-   (`event_pollcomp.c` PC_CONNECT, `event_iouring.c` IOU_CONNECT, `event_iocp.c` ConnectEx — the
+   (`event_pollcomp.c` PC_CONNECT, `event_iouring.c` IOU_CONNECT, `event_iocp.c` ConnectEx, the
    latter also fixed the previously-broken IOCP async client). **Goal 2 (honest semantics): PASS.**
 2. **The client's completion-vs-readiness connect branch** (`src/client.c`
    `client_comp_connect`/`he_proceed_after_connect`) + `kl_watcher_add_detached` (`src/async.c`):
    a ctx-owned watcher node with no readiness arm, so a completion loop can carry the connect
    result to the client without the client thinking in either event model. **Goal 3 (no model
-   leak): PASS** — the client never sees SQEs/CQEs/OVERLAPPED/POLLOUT; it registers a tagged
+   leak): PASS**, the client never sees SQEs/CQEs/OVERLAPPED/POLLOUT; it registers a tagged
    watcher and receives a Keel-level connect result.
-3. **`KlUdp` over the raw loop (LC-3a)** — the raw socket provider gained `KlDatagramOps`
+3. **`KlUdp` over the raw loop (LC-3a)**, the raw socket provider gained `KlDatagramOps`
    (`SOCK_DGRAM → udp_new`; `post_udp_recv/send → udp_recv/udp_sendto`), so `src/udp.c`'s machine
    runs unchanged. **DNS (LC-3)** then rides that KlUdp via `kl_dns_resolver_create` on a ctx whose
-   `sockets = kl_socket_provider_lwip_raw()` — one DNS path, no lwIP `dns_gethostbyname`.
-4. **HTTPS (LC-4)** — client TLS is socket-BIO routed through the provider (`t->sp =
+   `sockets = kl_socket_provider_lwip_raw()`: one DNS path, no lwIP `dns_gethostbyname`.
+4. **HTTPS (LC-4)**: client TLS is socket-BIO routed through the provider (`t->sp =
    ev_ctx->sockets` → `lwr_sock_send/recv`); server TLS is the generic memory-BIO
    completion-TLS leg. Both reuse existing legs; the backend only moves bytes.
 
-### Mechanical independence checks (Goal 4) — PASS
+### Mechanical independence checks (Goal 4): PASS
 
 - **No protocol TU** (`connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`,
   `websocket_client.c`, `sse.c`, `response.c`, `router.c`, `redirect.c`, `client_pool.c`,
   `dns_resolver.c`) includes a platform networking/event header or calls `epoll_*`/`kevent`/
   `io_uring_*`/`WSA*`/`OVERLAPPED`/`GetQueuedCompletion*` directly (only `client.c` pulls
   `platform.h` for the abstracted `kl_plat_poll1` sync wait; the remaining hits are comments).
-- **The raw completion backend `event_lwip_raw.c` is lwIP-free** — it includes only the neutral
+- **The raw completion backend `event_lwip_raw.c` is lwIP-free**: it includes only the neutral
   seam headers (`keel_lwip_raw.h`, `lwip_raw_glue.h`); **no `<lwip/*>`**. Every `tcp_*`/`udp_*`
   call is confined to `lwip_raw_glue.c`. No `<lwip/*>` appears anywhere in `src/` (the sole
   `sockcompat.h` `#include "lwip/sockets.h"` is the guarded non-raw lwIP-*socket* ABI seam,
@@ -490,7 +490,7 @@ socketless, fd-less, `NO_SYS=1` callback stack.
 
 ### Findings
 
-- **HIGH (axis lifetime) — same-batch Happy-Eyeballs connect UAF.** `kl_comp_run`
+- **HIGH (axis lifetime): same-batch Happy-Eyeballs connect UAF.** `kl_comp_run`
   (`src/completion_driver.c`) drains a *batch* of completions and dispatches them sequentially;
   `kl_event_dispatch` (`include/keel/event_ctx.h`) derefs the tagged `KlWatcher*` with **no
   liveness check**. Dispatching a winning `KL_COMP_CONNECT` frees the losing attempts' watcher
@@ -501,17 +501,17 @@ socketless, fd-less, `NO_SYS=1` callback stack.
   fix: validate the tagged watcher is still linked in `ctx->watchers` before deref (backend-
   agnostic). Same latent shape exists for `KL_COMP_WATCHER`; the guard covers both. (Mirrors the
   c-audit H1; see `docs/keel_audit.md` ninth pass.)
-- **MEDIUM — lwip-raw accept→post_recv dangling-pcb** (`lwip_raw_glue.c`): a stack abort in the
+- **MEDIUM, lwip-raw accept→post_recv dangling-pcb** (`lwip_raw_glue.c`): a stack abort in the
   pre-owner window is misrouted; the driver can adopt a freed pcb. Goal 6 lifetime. Fix:
   `tcp_arg(newpcb, slot)` at accept. (c-audit M1.)
-- **INFORMATIONAL — stale `SO_ERROR` comments** in `completion_driver.c`/`event_pollcomp.c`/
+- **INFORMATIONAL: stale `SO_ERROR` comments** in `completion_driver.c`/`event_pollcomp.c`/
   `event_iouring.c` describe a connect win/fail mechanism the client no longer uses (it trusts
   the mask). Comment-only; correct them. (c-audit L3.)
 
-Everything else — honest readiness vs completion semantics, no model leak in the public API,
+Everything else: honest readiness vs completion semantics, no model leak in the public API,
 protocol platform-independence, error normalization at the seam, model-independent backpressure
 (the raw retained-rx ERR_MEM flow-control is the completion analog of readiness interest
-reduction), registration-vs-submission distinction — holds.
+reduction), registration-vs-submission distinction: holds.
 
 ### Compatibility matrix (updated)
 
@@ -523,37 +523,37 @@ reduction), registration-vs-submission distinction — holds.
 | Winsock + WSAPoll | buildable + MinGW-gated |
 | Winsock + IOCP | buildable + MinGW-gated; async client fixed (LC-0 ConnectEx) |
 | pollcomp (portable completion double) | CI/ASan gate |
-| **lwIP-raw completion — server** | loopback-verified, ASan+UBSan+LSan, CI-gated |
-| **lwIP-raw completion — client (plaintext + HE)** | loopback-verified (LC-1/LC-2), ASan-clean; **H1 fix pending** for racing dual-stack connect |
-| **lwIP-raw completion — UDP + DNS** | loopback-verified (LC-3a/LC-3), ASan-clean, `src/` unchanged |
-| **lwIP-raw completion — HTTPS (client + server)** | loopback-verified (LC-4), ASan-clean, BYO mbedTLS (local/hull gate) |
+| **lwIP-raw completion: server** | loopback-verified, ASan+UBSan+LSan, CI-gated |
+| **lwIP-raw completion: client (plaintext + HE)** | loopback-verified (LC-1/LC-2), ASan-clean; **H1 fix pending** for racing dual-stack connect |
+| **lwIP-raw completion: UDP + DNS** | loopback-verified (LC-3a/LC-3), ASan-clean, `src/` unchanged |
+| **lwIP-raw completion: HTTPS (client + server)** | loopback-verified (LC-4), ASan-clean, BYO mbedTLS (local/hull gate) |
 
-### Future-provider compatibility (Goal 14) — UEFI
+### Future-provider compatibility (Goal 14): UEFI
 
 The lwip-raw client axis is a near-exact precedent for a UEFI provider (completion-native,
 socketless, fd-less, single-loop, pointer-handle). The concrete blockers are now only the
-freestanding toolchain + the EFI event/token lifecycle — assessed in the new
+freestanding toolchain + the EFI event/token lifecycle; assessed in the new
 `docs/phase10_uefi_feasibility_design.md` (roadmap Phase 10). No new abstraction is needed; the
 `KlCompletionOps` + `KlSocketProvider` seams map directly onto `EFI_TCP4` tokens/events.
 
 ### Automated gate
 
 cppcheck 0, scan-build "No bugs found," 60 suites under ASan+UBSan (`make debug-test`), the
-loopback-raw + raw-tls ASan runs, epoll + io_uring (56-suite) gates — all green (one UBSan
+loopback-raw + raw-tls ASan runs, epoll + io_uring (56-suite) gates; all green (one UBSan
 finding, `redirect.c:77` NULL-to-`strncasecmp`, is a protocol-layer nit tracked as c-audit L1,
 not an axis issue).
 
 ---
 
-## Sixth pass — datagram data-plane folded onto the socket provider (2026-08-03)
+## Sixth pass: datagram data-plane folded onto the socket provider (2026-08-03)
 
-**Verdict: architecturally sound — this pass *removed the last link-time coupling on the socket
+**Verdict: architecturally sound, this pass *removed the last link-time coupling on the socket
 axis*.** The fifth pass (same day) reviewed the `udp_io` seam once it spoke `KlSockAddr`. Since
 then the datagram data-plane has been **folded onto `KlSocketProvider`** (PRs #169–#172, the A2
 refactor): the `kl_udp_io_*` seam and its per-platform TUs (`udp_io_posix.c`, `udp_io_win.c`,
 `udp_io_lwip.c`, `udp_io.h`) are **deleted**, replaced by an optional `KlDatagramOps` vtable hung
 off the provider (`KlSocketProvider.dgram`, present iff `capabilities & KL_SOCK_CAP_DATAGRAM`).
-One runtime object now owns *all* of a stack's socket I/O — stream **and** datagram. This directly
+One runtime object now owns *all* of a stack's socket I/O; stream **and** datagram. This directly
 dissolves the asymmetry that motivated the work: previously TCP was runtime-injected via the
 provider while UDP was paired at *link time* with a matching `udp_io_*.o`. Both planes are now
 selected by the same runtime `KlEventCtx.sockets` pointer.
@@ -561,13 +561,13 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
 ### What changed in the axis structure (all improvements)
 
 1. **The socket axis is now fully runtime-injectable for both I/O planes.** `include/keel/datagram.h`
-   defines `KlDatagramOps` — a **primitive-only** vtable whose every op takes `(void *ctx,
+   defines `KlDatagramOps`, a **primitive-only** vtable whose every op takes `(void *ctx,
    KlSocketHandle fd, …)` + `KlSockAddr` and **never `KlUdp`**. The provider therefore holds no UDP
-   machine state. Ops: `send`/`recv`/`send_gso`/`configure` (folds all socket-option setup —
-   reuse/bufs/broadcast/TOS/multicast/pktinfo/GRO — and returns the accepted `KL_DGRAM_RX_*`
+   machine state. Ops: `send`/`recv`/`send_gso`/`configure` (folds all socket-option setup,
+   reuse/bufs/broadcast/TOS/multicast/pktinfo/GRO, and returns the accepted `KL_DGRAM_RX_*`
    capability bitmask)/`set_tos`/`mcast_membership`, plus a **data-oriented** batch surface
    (`rx_batch_new`/`tx_batch_new`/`recv_batch` filling `KlDgramRxSlot[]` / `send_batch` taking
-   `KlDgramTxDesc[]`) — no thunks, so `recvmmsg`/`sendmmsg` batching survives the fold intact.
+   `KlDgramTxDesc[]`): no thunks, so `recvmmsg`/`sendmmsg` batching survives the fold intact.
 
 2. **All datagram machine logic stays in `udp.c`** (the model-blind layer): the send-queue walk +
    ordering (`udp_send_common`/`udp_enqueue`/`udp_flush_dgram`), delivery + GRO split
@@ -575,7 +575,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
    multicast-group validation (`udp_group_ok`, preserving the public `KL_ERR_INVALID_ARG` contract).
    `udp.c` dispatches through `udp_dg(udp)` → `sp->dgram`. Mechanical check this pass: `udp.c`
    contains **zero** non-comment platform net/event symbols (`epoll`/`kqueue`/`io_uring`/`WSA`/
-   `recvmsg`/`sendto`/…) — every match is explanatory prose.
+   `recvmsg`/`sendto`/…): every match is explanatory prose.
 
 3. **Readiness vs completion is chosen honestly, via the event-caps abstraction, not platform
    mechanics.** `udp.c` branches on `kl_event_caps(&loop) & KL_EVENT_CAP_COMPLETION`: a completion
@@ -584,7 +584,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
    funnel into the *same* model-blind `kl_udp_deliver` (`udp.c:156`). No synthetic readiness, no
    "readable ⇒ completed" pretense. Plain sends on a completion loop post overlapped
    (`kl_comp_post_udp_send`); source-pinned / TOS sends fall through to the synchronous `dg->send`
-   seam (documented, works on a completion socket) — an explicit, narrow, honest deviation.
+   seam (documented, works on a completion socket), an explicit, narrow, honest deviation.
 
 4. **Shared cmsg parsers extracted to always-linked TUs.** The pktinfo/GRO parsers the *completion*
    backends still need (`event_iouring.c`, `event_pollcomp.c`, `event_iocp.c`) moved from the
@@ -611,9 +611,9 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
   `kl_comp_post_udp_recv` (overlapped `WSARecvFrom` / io_uring recv) → backend fills host `peer` +
   cmsgs into the completion event → `completion_driver.c` `KL_COMP_UDP_RECV` marshals once via
   `kl_sockaddr_from_native` → `kl_udp_comp_on_recv` → **same** `kl_udp_deliver` → re-post.
-- **Send + backpressure:** readiness — `dg->send`; on `EAGAIN` → `udp_enqueue`, `q_bytes` grows,
+- **Send + backpressure:** readiness; `dg->send`; on `EAGAIN` → `udp_enqueue`, `q_bytes` grows,
   interest gains `KL_EVENT_WRITE`, `udp_flush_dgram` drains on writability, `on_drain` at empty.
-  Completion — `kl_comp_post_udp_send`, `q_bytes` tracks outstanding overlapped bytes against
+  Completion: `kl_comp_post_udp_send`, `q_bytes` tracks outstanding overlapped bytes against
   `max_send_queue`, `kl_udp_comp_on_send` releases + fires `on_drain`. Same Keel-level semantics.
 - **Close with outstanding work:** `kl_udp_free` frees the send queue, rx/tx batch blocks (via
   `dg->rx_batch_free`/`tx_batch_free`), and unregisters interest; `recv_active`/`kl_handle_valid`
@@ -621,7 +621,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
 
 ### Findings
 
-- **[Low — FIXED this pass, via /c-audit 8th pass] TOS control-message family guess.** In
+- **[Low: FIXED this pass, via /c-audit 8th pass] TOS control-message family guess.** In
   `pdg_send` (`socket_dgram_posix.c`) and `wdg_send` (`socket_dgram_win.c`) a source-pinned/TOS
   send on a *connected* socket (dest `UNSPEC`) hard-coded `AF_INET` when building the TOS cmsg,
   which would attach an `IP_TOS` cmsg to an IPv6 flow. Fixed to derive the family from dest, else
@@ -634,7 +634,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
   small transient over-allocation, not a leak or correctness bug. Left as-is to avoid churn; a
   one-line `!(caps & KL_EVENT_CAP_COMPLETION)` guard would remove it if ever measured.
 
-- **[Informational — FIXED this pass] Stale seam references in comments.** With `udp_io_*` deleted,
+- **[Informational: FIXED this pass] Stale seam references in comments.** With `udp_io_*` deleted,
   several comments still named it (`udp.c:20/29/158`, `socket_dgram_posix.c`, `include/keel/udp.h`).
   Corrected to reference the datagram provider / `socket_dgram_posix.c`. A stray untracked build
   artifact (`src/udp_io_win.o`) was removed.
@@ -643,7 +643,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
   greps: `datagram.h` includes no platform networking headers (only `allocator`/`handle`/`sockaddr`
   + `stddef`/`stdint`/`sys/types` for `ssize_t`, matching `socket.h`); it references `KlUdp` only in
   prose and `struct KlUdpConfig` only as a borrowed forward-declared config pointer. The
-  `check-sockaddr-neutral` invariant from the fifth pass is unaffected — the fold happens *inside*
+  `check-sockaddr-neutral` invariant from the fifth pass is unaffected, the fold happens *inside*
   the provider boundary that was already permitted to see host sockaddrs.
 
 ### Compatibility matrix (datagram plane, updated)
@@ -658,7 +658,7 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
 | pollcomp double (POSIX)       | ✅ test | ✅ inherits `posix->dgram`; completion post path | ASan gate |
 | lwIP (foreign stack)          | ✅ test | ✅ `lwip_dgram_ops` (public headers only) | loopback CI |
 
-### Contract clarified this pass — the datagram data-plane
+### Contract clarified this pass: the datagram data-plane
 
 - **Ownership split:** the provider supplies **primitives** (`send`/`recv`/`configure`/`set_tos`/
   `mcast_membership`/`send_gso` + optional data-oriented batch), taking only `(ctx, fd, KlSockAddr,
@@ -684,25 +684,25 @@ selected by the same runtime `KlEventCtx.sockets` pointer.
 
 ### Changes made this pass
 
-- `src/udp.c`, `src/socket_dgram_posix.c`, `include/keel/udp.h` — corrected stale `udp_io`
+- `src/udp.c`, `src/socket_dgram_posix.c`, `include/keel/udp.h`: corrected stale `udp_io`
   comments to reference the datagram provider (comment-only; no code change).
-- `src/socket_dgram_posix.c`, `src/socket_dgram_win.c` — L1 TOS-family fix (from the /c-audit pass).
+- `src/socket_dgram_posix.c`, `src/socket_dgram_win.c`: L1 TOS-family fix (from the /c-audit pass).
 - Removed stray untracked `src/udp_io_win.o`.
 - Verified: `make` (kqueue) clean; 61 test suites pass; `make smoke-pollcomp-asan` (completion
   axis) clean; `make cppcheck` clean.
 
 ---
 
-## Fifth pass — address-ABI neutralization, event-provider seam, lwIP as a third stack (2026-08-03)
+## Fifth pass: address-ABI neutralization, event-provider seam, lwIP as a third stack (2026-08-03)
 
-**Verdict: architecturally sound — the recent work *strengthened* the three-axis separation rather
+**Verdict: architecturally sound, the recent work *strengthened* the three-axis separation rather
 than eroding it, and empirically validated it.** This pass reviews everything since the fourth pass
 (PRs #150–#165): the runtime **event-provider** seam, the **KlSockAddr address-ABI
 neutralization**, the `udp_io` seam flip to KlSockAddr, **TLS-over-`KlSocketProvider`** routing,
 and the **lwIP platform** (server + client + UDP + TLS on a stock `libkeel.a`). The headline: the
 "future provider compatibility" goal (Goal 14) that prior passes could only reason about
 hypothetically is now **realized and CI-tested** by a real third stack that is neither POSIX nor
-Winsock — the strongest possible evidence the socket/event axes are genuinely independent.
+Winsock, the strongest possible evidence the socket/event axes are genuinely independent.
 
 ### What changed in the axis structure (all improvements)
 
@@ -713,7 +713,7 @@ Winsock — the strongest possible evidence the socket/event axes are genuinely 
    flagged before (a host-layout `sockaddr` baked into `KlConn`/`KlUdp`/resolver structs). It is
    **mechanically enforced**: `make check-sockaddr-neutral` confirms 12 protocol TUs are
    KlSockAddr-only, and `sockaddr_native.h` is `#include`d **only** by the marshalling boundary
-   (socket providers, the `udp_io` TUs, the completion backends, the resolver seam, server bind) —
+   (socket providers, the `udp_io` TUs, the completion backends, the resolver seam, server bind):
    never by a protocol/core TU (verified this pass).
 
 2. **Event axis is now runtime-injectable**, symmetric with the socket axis: `KlEventProvider`
@@ -724,14 +724,14 @@ Winsock — the strongest possible evidence the socket/event axes are genuinely 
 3. **The `udp_io` seam speaks KlSockAddr** (this session): the datagram-I/O boundary and the
    queued-datagram node carry `KlSockAddr`; each platform `udp_io` TU marshals its own host
    layout, exactly mirroring the socket vtable. `KlUdp` no longer embeds a host `sockaddr_storage`
-   (recv scratch moved to stack locals) — the struct is now layout-neutral, which is what lets a
+   (recv scratch moved to stack locals), the struct is now layout-neutral, which is what lets a
    foreign stack share its ABI.
 
 4. **TLS transport is socket-axis-agnostic.** The mbedTLS socket-BIO now routes ciphertext through
    `kl_sock_send`/`kl_sock_recv(t->sp, …)` (opt-in via `kl_tls_mbedtls_ctx_set_socket_provider`),
    so TLS composes with **any** socket provider. Crucially this is a clean axis split: `bio_send`/
    `bio_recv` check `comp_mode` **first** and return on the memory-BIO path, so the provider (`sp`)
-   only ever affects the readiness/socket-BIO path — the completion (`feed_input`/`drain_output`)
+   only ever affects the readiness/socket-BIO path, the completion (`feed_input`/`drain_output`)
    transport is untouched. The generic `KlTls` vtable is **unchanged** (the provider is
    integration-config, not a vtable field), so no event/socket model leaks into the protocol
    contract.
@@ -753,17 +753,17 @@ Winsock — the strongest possible evidence the socket/event axes are genuinely 
 
 | # | Severity | Area | Finding | Status |
 |---|----------|------|---------|--------|
-| A1 | Medium | `sockaddr_native.h` marshalling boundary | The neutralization concentrates all untrusted host→neutral conversion into one seam — which makes that seam's robustness load-bearing. Two defects there (missing `len` lower-bound before the `sockaddr_in{,6}` cast → OOB read; uninitialised `KlSockAddr` delivered when `from_native` fails) were the highest-value issues of the companion C audit. | **Fixed** in the 7th C-audit pass (`docs/keel_audit.md`, commit this session). Architecturally, the fix reinforces the boundary contract: *the marshalling seam must reject/deflect any address it cannot represent, never emit garbage upward.* |
-| A2 | Informational | `udp_io` injection is link-time, not a runtime vtable | **UDP fully works on lwIP** (`udp_io_lwip.c`, CI-tested loopback echo) — this is **not** a functional gap. The only asymmetry: the socket + event axes are **runtime** vtables (one binary can hold both the posix and lwIP providers and choose per-`KlEventCtx`), whereas `udp_io` is **link-selected** (the linker resolves `kl_udp_io_*` once; a foreign stack link-overrides `udp_io_*.o`, as lwIP does). A runtime `KlUdpIoProvider` would only add *per-socket mixed-stack UDP within one process* (some datagrams on the kernel, some on lwIP simultaneously) — not a real use case, since a process runs on one network stack. **No action needed.** | Accepted — justified no-action. |
-| A3 | Low | TLS provider-routing should be a generic `KlTls` hook | Socket-provider routing was opt-in **per TLS backend** (`kl_tls_mbedtls_ctx_set_socket_provider`), so each future backend would reinvent it and the app had to manually match the TLS ctx's provider to the connection's `KlConfig.sockets`/`KlClientConfig.sockets` — a footgun: forget it and TLS silently falls back to **host** sockets on a foreign stack. | **Fixed** — added an optional `KlTls.set_socket_provider` vtable method that `connection.c` (`kl_conn_on_handshake`) and `client.c` (sync + async) **auto-wire** from the connection's own provider before the handshake; mbedTLS implements it. TLS-over-any-provider now works with zero per-app config; the generic contract stays neutral (backends may leave it NULL). Proven: the lwIP HTTPS loopback dropped its explicit ctx calls and still handshakes over lwIP. |
-| A4 | Informational | completion UDP backpressure accounting | `udp.c` reserves `q_bytes` on `kl_comp_post_udp_send` and releases it in `kl_udp_comp_on_send`. This relies on every posted overlapped send surfacing exactly one completion (incl. cancellation-via-close). The backends honor that (a cancelled/failed `WSASendTo`/`sendmsg` still surfaces `KL_COMP_UDP_SEND` with the reserved `len`), so the reservation cannot leak — but the invariant is contract-enforced, not structurally guaranteed. | Accepted; documented in the contract (§5, "completion delivery"). |
+| A1 | Medium | `sockaddr_native.h` marshalling boundary | The neutralization concentrates all untrusted host→neutral conversion into one seam, which makes that seam's robustness load-bearing. Two defects there (missing `len` lower-bound before the `sockaddr_in{,6}` cast → OOB read; uninitialised `KlSockAddr` delivered when `from_native` fails) were the highest-value issues of the companion C audit. | **Fixed** in the 7th C-audit pass (`docs/keel_audit.md`, commit this session). Architecturally, the fix reinforces the boundary contract: *the marshalling seam must reject/deflect any address it cannot represent, never emit garbage upward.* |
+| A2 | Informational | `udp_io` injection is link-time, not a runtime vtable | **UDP fully works on lwIP** (`udp_io_lwip.c`, CI-tested loopback echo), this is **not** a functional gap. The only asymmetry: the socket + event axes are **runtime** vtables (one binary can hold both the posix and lwIP providers and choose per-`KlEventCtx`), whereas `udp_io` is **link-selected** (the linker resolves `kl_udp_io_*` once; a foreign stack link-overrides `udp_io_*.o`, as lwIP does). A runtime `KlUdpIoProvider` would only add *per-socket mixed-stack UDP within one process* (some datagrams on the kernel, some on lwIP simultaneously), not a real use case, since a process runs on one network stack. **No action needed.** | Accepted: justified no-action. |
+| A3 | Low | TLS provider-routing should be a generic `KlTls` hook | Socket-provider routing was opt-in **per TLS backend** (`kl_tls_mbedtls_ctx_set_socket_provider`), so each future backend would reinvent it and the app had to manually match the TLS ctx's provider to the connection's `KlConfig.sockets`/`KlClientConfig.sockets`, a footgun: forget it and TLS silently falls back to **host** sockets on a foreign stack. | **Fixed**, added an optional `KlTls.set_socket_provider` vtable method that `connection.c` (`kl_conn_on_handshake`) and `client.c` (sync + async) **auto-wire** from the connection's own provider before the handshake; mbedTLS implements it. TLS-over-any-provider now works with zero per-app config; the generic contract stays neutral (backends may leave it NULL). Proven: the lwIP HTTPS loopback dropped its explicit ctx calls and still handshakes over lwIP. |
+| A4 | Informational | completion UDP backpressure accounting | `udp.c` reserves `q_bytes` on `kl_comp_post_udp_send` and releases it in `kl_udp_comp_on_send`. This relies on every posted overlapped send surfacing exactly one completion (incl. cancellation-via-close). The backends honor that (a cancelled/failed `WSASendTo`/`sendmsg` still surfaces `KL_COMP_UDP_SEND` with the reserved `len`), so the reservation cannot leak, but the invariant is contract-enforced, not structurally guaranteed. | Accepted; documented in the contract (§5, "completion delivery"). |
 | A5 | Informational | error normalization across providers | The Winsock `EAGAIN != EWOULDBLOCK` split (`kl_wsa_set_errno`) is safe only because every would-block test ORs both codes. Cross-provider error normalization otherwise routes through `kl_sock_errno_to_error` → `KlError`. | Accepted (see C-audit R1); keep the OR convention. |
 
 No Critical/High. No new coupling violations: the mechanical protocol-independence grep is clean
 (protocol TUs reference `WSARecv`/`WSASend` only in doc comments; no platform-net headers, no
 event-engine symbols), and the address-neutrality grep-gate passes.
 
-### Compatibility matrix (updated — lwIP added)
+### Compatibility matrix (updated, lwIP added)
 
 | Combination | Implemented | Buildable | Tested | Production-ready |
 |---|---|---|---|---|
@@ -773,8 +773,8 @@ event-engine symbols), and the address-neutrality grep-gate passes.
 | Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (891) | ✅ (default macOS) |
 | Winsock + WSAPoll | ✅ | ✅ | ✅ Windows CI subset | ✅ |
 | Winsock + IOCP | ✅ | ✅ | ✅ lifecycle + smokes | ⚠️ plaintext prod; real-mbedTLS BYO/out-of-CI |
-| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + ASan/LSan | n/a — test double |
-| **lwIP + lwip_poll (readiness) — server + client + UDP + TLS** | ✅ | ✅ | ✅ **loopback + HTTPS runtime test in CI** (Integration (lwIP), stock libkeel) | ⚠️ reference/BYO — sample-tunable `lwipopts.h`, CSPRNG-for-`LWIP_RAND` required per deployment |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + ASan/LSan | n/a; test double |
+| **lwIP + lwip_poll (readiness), server + client + UDP + TLS** | ✅ | ✅ | ✅ **loopback + HTTPS runtime test in CI** (Integration (lwIP), stock libkeel) | ⚠️ reference/BYO, sample-tunable `lwipopts.h`, CSPRNG-for-`LWIP_RAND` required per deployment |
 
 lwIP is **readiness-only** (its sockets layer is `lwip_poll`); the lwIP *raw* callback (completion)
 API remains out of scope. Still not built (by design): Winsock+io_uring (N/A), IOCP+non-Winsock
@@ -783,20 +783,20 @@ API remains out of scope. Still not built (by design): Winsock+io_uring (N/A), I
 ### Roadmap delta
 
 - **Immediate correctness:** none open (A1 fixed this session in the C-audit pass).
-- **A3 — done:** added the optional `KlTls.set_socket_provider` vtable method, auto-wired from the
+- **A3, done:** added the optional `KlTls.set_socket_provider` vtable method, auto-wired from the
   connection's provider in `connection.c`/`client.c` (mbedTLS implements it). The TLS transport is
   now socket-provider-agnostic *by the framework* rather than by per-app config, and the
   host-socket-fallback footgun on a foreign stack is gone.
-- **A2 — no action:** a runtime `KlUdpIoProvider` vtable is **not** pursued. UDP-on-lwIP already
+- **A2, no action:** a runtime `KlUdpIoProvider` vtable is **not** pursued. UDP-on-lwIP already
   works via the link-override; the only thing a runtime vtable would add (mixed-stack UDP within one
   process) is not a real use case.
 - **Everything else** from the prior passes' roadmaps stands unchanged.
 
 ---
 
-## Fourth pass — PROXY / streaming / TransmitFile over completion; full parity (2026-08-01)
+## Fourth pass: PROXY / streaming / TransmitFile over completion; full parity (2026-08-01)
 
-**Verdict: architecturally sound — the completion axis is now at full functional AND test parity
+**Verdict: architecturally sound, the completion axis is now at full functional AND test parity
 with readiness, with no new coupling violations.** This pass re-runs the orthogonality litmus and
 assesses the code added since the third pass (PRs #130 streaming HOL, #133 TransmitFile chunking,
 #136 PROXY-over-completion; #135 TLS suites over completion). All three axes remain separately
@@ -813,33 +813,33 @@ Protocols stay above both axes.
 
 **New-code orthogonality (assessed correct):**
 - **PROXY-over-completion (#136).** The model-blind parse (`kl_proxy_parse`) is shared; only the
-  I/O wrapper is axis-specific — readiness `kl_conn_read_proxy_header` (socket peek+consume) vs.
+  I/O wrapper is axis-specific: readiness `kl_conn_read_proxy_header` (socket peek+consume) vs.
   completion `kl_conn_ingest_proxy` (parse from `read_buf`). This is the *correct* axis split (same
   shape as recv itself: shared parser, per-axis I/O), not duplication of a state machine. The
   accept gate (`comp_on_accept` → `kl_cidr_match`) and the header phase (`comp_drive_proxy`) live in
-  `completion_driver.c` — the integration layer — mirroring the readiness gate in `server.c`; no
+  `completion_driver.c`, the integration layer, mirroring the readiness gate in `server.c`; no
   protocol TU is touched.
 - **Streaming HOL fix (#130).** `comp_stream_pump` drives the transport-neutral `KlDrain` via
   `kl_comp_post_send`; producers (SSE / chunked / response) write to the drain, never a socket or
   engine. Backpressure is the drain cap + `stream_inflight` (≤1 send), model-independent. The two
   new `KlDrain` accessors (`kl_drain_data`/`kl_drain_consume`) are generic buffer ops.
 - **TransmitFile chunking (#133).** Entirely inside `event_iocp.c`; the offset-advancing re-post is
-  internal and surfaces a single `KL_COMP_WRITE` to the driver — the completion abstraction (one
+  internal and surfaces a single `KL_COMP_WRITE` to the driver, the completion abstraction (one
   op = one whole-transfer completion) is preserved. IOCP-only; io_uring (splice) / pollcomp
   (pread+send) have no DWORD limit.
 
-**Finding (Informational — I1):** the completion backends' `kl_comp_post_recv`
+**Finding (Informational, I1):** the completion backends' `kl_comp_post_recv`
 (`event_pollcomp.c:224`, `event_iouring.c:421`, `event_iocp.c:255`) now branch on
 `c->state != KL_CONN_PROXY_HEADER` to recv plaintext before TLS, extending the pre-existing
 `c->tls` branch. This has the backend read a protocol/connection state enum. It is **consistent
-with the established, deliberate coupling** — the completion backends are not pure socket providers;
+with the established, deliberate coupling**, the completion backends are not pure socket providers;
 they are the completion-axis connection drivers that already operate on `KlConn` (8–11 field refs
 each: `c->tls`, `c->read_buf`, `c->read_len`, `c->read_cap`). So this is not a new axis violation.
 An optional future cleanup would replace both conditions with one driver-owned boolean (e.g.
 `c->tls_active`, false during the PROXY header) so the backend needn't name a protocol state; not
 worth a change now. No fix applied.
 
-**Changes made this pass:** none to the axis (report-only — orthogonality is sound). Separately,
+**Changes made this pass:** none to the axis (report-only, orthogonality is sound). Separately,
 the concurrent c-audit sixth pass fixed two Low allocator free-size mismatches on a zero-length
 completion send (`pc_op_free`, `iocp_op_free`); see `docs/keel_audit.md`.
 
@@ -860,19 +860,19 @@ the Apple container (`test-iouring` incl. `peer_addr` 6/6 + the four TLS suites;
 | Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (macOS CI) | ✅ (default macOS) |
 | Winsock + WSAPoll | ✅ | ✅ | ✅ 47-suite subset (Windows CI) | ✅ |
 | Winsock + IOCP (completion) | ✅ | ✅ | ✅ lifecycle + smokes: plaintext, **TLS-via-mock**, **PROXY**, **chunked TransmitFile**, UDP-local | ⚠️ prod-ready plaintext + PROXY; real-mbedTLS TLS is BYO/out-of-CI (F3) |
-| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + **proxy** + **bigstream**, ASan/LSan | n/a — **test double** |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + **proxy** + **bigstream**, ASan/LSan | n/a; **test double** |
 
 Net vs. the third pass: the completion row's *Tested* column now covers TLS (mock), PROXY, and
-chunked file bodies — the earlier "per-suite behavioural gaps" are closed. The only standing
+chunked file bodies, the earlier "per-suite behavioural gaps" are closed. The only standing
 limitation is real-mbedTLS-over-IOCP (F3, BYO/out-of-CI by policy).
 
 ---
 
-## Third pass — completion test-coverage-gap triage (2026-08-01)
+## Third pass: completion test-coverage-gap triage (2026-08-01)
 
 **Verdict: no hidden backend bug.** This pass triaged the low/informational test-coverage gaps
-from §3 (F2/F3/F4) — the default-provider unit suites *excluded* from the completion test set
-(`IOURING_TEST_SUITES`) — by running each over the completion backend (pollcomp, the shared
+from §3 (F2/F3/F4), the default-provider unit suites *excluded* from the completion test set
+(`IOURING_TEST_SUITES`): by running each over the completion backend (pollcomp, the shared
 `completion_driver.c` double) and root-causing every failure. All but one are fixture limitations
 or inherent axis-semantics differences, not backend defects; the one real functional gap (PROXY
 protocol over a completion loop) is now made safe (fail-loud at init) rather than silently
@@ -883,16 +883,16 @@ mis-served.
 | Suite | Over completion | Root cause | Disposition |
 |---|---|---|---|
 | `tls_integration`, `peer_cert`, `cross_module`, `unix_socket` | TLS tests failed | Each defined its **own per-file passthrough mock TLS** that implemented only the *readiness* vtable (`read`/`write` on the socket), not the completion-mode `feed_input`/`drain_output`; `comp_on_accept` correctly rejects a TLS conn whose backend can't do memory-BIO mode. **Not a backend bug.** | **Now enabled (2026-08-01 follow-up):** ported all four to the shared completion-capable `tests/mock_tls.h` (the same mock `smoke-pollcomp-tls`/`smoke-iocp-tls` use; `peer_cert` installs its canned cert via the new `mock_tls_peer_cert_fn` hook). They now pass over readiness *and* completion (pollcomp + real io_uring) and are in `IOURING_TEST_SUITES` (44 → 48). Unit-level TLS-over-completion coverage, complementing the smokes. |
-| `peer_addr` | 4/6 pass; `proxy_v1/v2_trusted` fail | **Real gap (now fixed):** PROXY-protocol header handling (`KL_CONN_PROXY_HEADER`) originally lived only in the readiness run loop; the completion driver had no PROXY-header phase, so a trusted-source PROXY header was misparsed as HTTP. | **Fully supported (2026-08-01 follow-up):** the completion driver grew a PROXY-header phase — `comp_on_accept` enters `KL_CONN_PROXY_HEADER` for a trusted peer, `comp_drive_proxy` parses the plaintext header from `read_buf` via the model-blind `kl_conn_ingest_proxy` and then enters the real initial state (TLS handshake feeding the buffered ClientHello, or HTTP read). The header recv is plaintext even for a TLS conn (`post_recv` skips the TLS branch while `state == KL_CONN_PROXY_HEADER`, all three backends). `peer_addr` now passes 6/6 over completion and is in `IOURING_TEST_SUITES`; a PROXY-v1 roundtrip is in `smoke-pollcomp` + `smoke-iocp`. The #134 fail-loud init guard was removed. |
+| `peer_addr` | 4/6 pass; `proxy_v1/v2_trusted` fail | **Real gap (now fixed):** PROXY-protocol header handling (`KL_CONN_PROXY_HEADER`) originally lived only in the readiness run loop; the completion driver had no PROXY-header phase, so a trusted-source PROXY header was misparsed as HTTP. | **Fully supported (2026-08-01 follow-up):** the completion driver grew a PROXY-header phase; `comp_on_accept` enters `KL_CONN_PROXY_HEADER` for a trusted peer, `comp_drive_proxy` parses the plaintext header from `read_buf` via the model-blind `kl_conn_ingest_proxy` and then enters the real initial state (TLS handshake feeding the buffered ClientHello, or HTTP read). The header recv is plaintext even for a TLS conn (`post_recv` skips the TLS branch while `state == KL_CONN_PROXY_HEADER`, all three backends). `peer_addr` now passes 6/6 over completion and is in `IOURING_TEST_SUITES`; a PROXY-v1 roundtrip is in `smoke-pollcomp` + `smoke-iocp`. The #134 fail-loud init guard was removed. |
 | `udp_multicast` | 4/5 pass; `broadcast_flag_gates_send` fails | Inherent axis semantics: the test asserts a *synchronous* `EACCES` on a broadcast send without `SO_BROADCAST`, which only holds for readiness; completion sends are queued async, so the error surfaces on the send completion, not the post. **Not a backend bug.** | Excluded by design (already documented in the Makefile). |
 | `async`, `event`, `event_ctx`, `event_caps`, `socket_provider` | n/a | Inherently readiness-axis: raw `kl_event_wait` drivers / readiness-cap + provider-negotiation assertions (a completion loop has no `kl_event_wait`, only `kl_comp_run`); `async` also hand-builds a `KlConn` with a NULL `ctx`. | Excluded by design (not applicable to a completion loop). |
 
-**F3 (mbedTLS-over-IOCP, real TLS):** unchanged — BYO / out-of-CI. The IOCP TLS *code path* is
+**F3 (mbedTLS-over-IOCP, real TLS):** unchanged; BYO / out-of-CI. The IOCP TLS *code path* is
 exercised by `smoke-iocp-tls` (the completion-mode `tests/mock_tls.h`); real mbedTLS-over-IOCP is
 a bring-your-own concern consistent with the mbedTLS policy. Accepted, not a gap to close in CI.
 
 **F4 (`test_async` over completion):** confirmed a test-harness artifact (a hand-built conn with
-NULL `ctx` driven through the resume path — would equally hit any completion backend), not a
+NULL `ctx` driven through the resume path; would equally hit any completion backend), not a
 backend bug. The async-over-completion path itself *is* covered: `smoke-pollcomp-async` and the
 io_uring `/astream` case (#127) drive `kl_async_suspend`/resume + timer over the completion loop.
 `test_async` stays excluded (a completion-aware async fixture would be the enabling work).
@@ -908,9 +908,9 @@ BYO mbedTLS-over-IOCP (F3, out-of-CI by policy).
 
 ---
 
-## Second pass — completion-axis parity + robustness follow-up (2026-07-31)
+## Second pass: completion-axis parity + robustness follow-up (2026-07-31)
 
-**Verdict: unchanged — architecturally sound.** No new architectural findings; the orthogonality
+**Verdict: unchanged; architecturally sound.** No new architectural findings; the orthogonality
 map, honest-model-representation, and grep litmus from the first pass all still hold. This pass
 records two completion-axis items closed since 2026-07-30 and one Windows-IOCP robustness fix, and
 re-confirms the remaining gaps are the same low/informational items (no criticals).
@@ -924,14 +924,14 @@ re-confirms the remaining gaps are the same low/informational items (no critical
   end-stream entirely over io_uring, closing the open question from the 8g scoping (the outbound
   stream buffer was wired by default in #126/8g-0).
 
-- **Streaming head-of-line blocking over the completion loop is fixed (#130, Phase 8g-1) — the
+- **Streaming head-of-line blocking over the completion loop is fixed (#130, Phase 8g-1), the
   last *functional* gap in the completion backends is now closed.** `comp_send_stream` used to
   flush a streaming response by busy-spinning `kl_drain_flush`; on a slow client whose socket send
   buffer is full, the non-blocking send returned would-block while `stream_ended`, spinning the
   loop thread and starving every other connection. Streaming now rides the same overlapped drive as
   buffered/file responses: `comp_stream_pump` posts the outbound buffer as one overlapped send
   (`kl_comp_post_send` copies it; the backend surfaces one `KL_COMP_WRITE` when it is fully out) and
-  `comp_on_write` re-pumps — posting freshly-produced bytes or completing once the stream ended and
+  `comp_on_write` re-pumps: posting freshly-produced bytes or completing once the stream ended and
   the buffer drained. At most one send is in flight (`KlResponse.stream_inflight`), memory stays
   bounded by the drain cap, and the loop is free between sends. Purely completion-side
   (`completion_driver.c` + two `KlDrain` peek/consume accessors); readiness, protocols, and the
@@ -946,7 +946,7 @@ re-confirms the remaining gaps are the same low/informational items (no critical
   pollcomp (#118/#119). Previously `kl_comp_post_udp_recv` used `WSARecvFrom` (source only), so
   `kl_udp_send_to_from` reply-from delivered a NULL local over IOCP. The Keel-level `KlUdpRxMeta`
   contract (source + local + gro_seg + truncated) is now honoured identically across all three
-  completion backends — a parity win *above* the axis, with the platform mechanics staying in the
+  completion backends, a parity win *above* the axis, with the platform mechanics staying in the
   Windows TUs + the include-scoped header (no `#ifdef` in cross-platform code, no public-API change).
 
 **Robustness fix made this pass (unlike the report-only first pass):** the overlapped `WSARecvMsg`
@@ -956,8 +956,8 @@ parsed that buffer unconditionally, and the cmsg walk spun forever (`WSA_CMSG_NX
 `WSA_CMSG_ALIGN(cmsg_len)`, so `cmsg_len == 0` yields the same pointer), wedging the loop thread so
 `kl_server_run` never returned. `WSARecvFrom` never read control data, so this only surfaced once
 `WSARecvMsg` landed. Fixed two ways: `kl_udp_win_parse_local`/`udp_parse_tos` now stop the walk on
-a runt cmsg (`cmsg_len < sizeof(WSACMSGHDR)`) — a general loop-safety fix that also hardens the
-readiness path — and the IOCP `KL_IOCP_UDP_RECV` handler only parses source + pktinfo metadata when
+a runt cmsg (`cmsg_len < sizeof(WSACMSGHDR)`), a general loop-safety fix that also hardens the
+readiness path, and the IOCP `KL_IOCP_UDP_RECV` handler only parses source + pktinfo metadata when
 `bytes > 0` (a cancelled/failed op carries no valid name/control). This maps to Goal 6 (op
 lifetime: close-while-outstanding) and Goal 7 (partial/zero-length completions handled honestly):
 a completion event is not a received datagram. Validated by the Windows-IOCP `smoke-iocp` job,
@@ -975,23 +975,23 @@ cap are now sent as several offset-advancing `TransmitFile` chunks re-posted fro
 rejected. A `/bigfile` smoke case with a test-lowered per-call cap (`KEEL_IOCP_TF_CHUNK`) verifies
 the multi-chunk path delivers every byte at the right offset without needing a >2 GiB fixture.
 
-**Still open (all low/informational — see §3/§6):** F2 (per-suite triage so the default-provider
+**Still open (all low/informational, see §3/§6):** F2 (per-suite triage so the default-provider
 integration suites run over completion), F3 (a self-hosted mbedTLS Windows-IOCP TLS smoke, or
 document the BYO gap), F4 (a completion-aware async test fixture). Non-functional, explicitly
 deferred: io_uring multishot recv / registered buf-rings (benchmark showed no current need). (The
-completion-streaming HOL and TransmitFile >2 GiB items are no longer open — closed by #130 / 8g-1
+completion-streaming HOL and TransmitFile >2 GiB items are no longer open; closed by #130 / 8g-1
 and the TransmitFile chunking above.)
 
 ---
 
-## First pass — event / socket / protocol orthogonality (2026-07-30)
+## First pass: event / socket / protocol orthogonality (2026-07-30)
 
 **Verdict: architecturally sound.** The event axis (readiness + completion), the socket/
 platform axis, and the protocol layer are genuinely orthogonal. The mechanical litmus tests
 pass, both event models are represented honestly, and every supported backend combination is
 CI-tested (not merely present). No critical/high findings. The two real defects that a
-lifetime/semantics audit would surface — an io_uring watch leak and a completion graceful-drain
-hang — were already found + fixed earlier the same day (PRs #111, #113); they are recorded here
+lifetime/semantics audit would surface, an io_uring watch leak and a completion graceful-drain
+hang: were already found + fixed earlier the same day (PRs #111, #113); they are recorded here
 as resolved. Remaining items are test-coverage gaps (low) and one informational API note.
 
 **Method:** repo map + mechanical grep litmus (protocol TUs vs platform headers/event symbols;
@@ -1015,10 +1015,10 @@ the just-completed 8d–8f completion migration + `/c-audit` fifth pass.
   `kl_io_engine_run_completion`) + `src/io_engine.h` (run-loop dispatch seam).
 - Readiness backends: `event_epoll.c`, `event_kqueue.c`, `event_wsapoll.c`, `event_poll.c`.
 - Completion backends: `event_iouring.c` (Linux, SQE/CQE), `event_iocp.c` (Windows), and
-  `event_pollcomp.c` (portable `poll()` facade — the CI/ASan test double). Each implements
+  `event_pollcomp.c` (portable `poll()` facade, the CI/ASan test double). Each implements
   `kl_event_caps` + `kl_event_native_provider` + the `completion.h` post/drain contract.
 
-**Socket axis:** `src/socket.h` — `KlSocketProvider {const KlSocketOps *ops; void *context;
+**Socket axis:** `src/socket.h`; `KlSocketProvider {const KlSocketOps *ops; void *context;
 unsigned capabilities;}` (`KL_SOCK_CAP_NATIVE_FD | _OVERLAPPED`). Providers: `socket_posix.c`,
 `socket_winsock.c`; overlapped providers (`kl_socket_provider_iouring/iocp/pollcomp`) live in
 their event TUs. Native handle: `KlSocketHandle = intptr_t` (`include/keel/handle.h`),
@@ -1037,7 +1037,7 @@ on `KlEventCtx.sockets` + public `KlConfig.sockets` / `KlClientConfig.sockets`. 
 (`kl_io_engine_run_completion` → `kl_comp_run`). Both drive the *same* model-blind protocol core.
 `kl_server_init` negotiates the loop against the provider (`kl_event_ctx_sockets_compatible`) and,
 since 8f-5a, auto-adopts the backend's overlapped provider (`kl_event_native_provider`) when a
-completion loop is paired with the default provider — so protocols/consumers never name the axis.
+completion loop is paired with the default provider, so protocols/consumers never name the axis.
 
 ---
 
@@ -1056,14 +1056,14 @@ or `kl_sockdef_recv`) → `kl_conn_ingest_body`/`kl_conn_dispatch_request` → h
 `kl_conn_dispatch_request`/`ingest_body` core → `kl_comp_post_recv` (next) or pause. No synthetic
 readiness; bytes are real kernel-delivered data.
 
-**Accept:** readiness — `kl_event_wait` on the listen fd → `accept` via the seam →
-`kl_conn_acquire`. Completion — `kl_comp_post_accept` (`io_uring_prep_accept` / `AcceptEx`) →
+**Accept:** readiness; `kl_event_wait` on the listen fd → `accept` via the seam →
+`kl_conn_acquire`. Completion: `kl_comp_post_accept` (`io_uring_prep_accept` / `AcceptEx`) →
 CQE → `KL_COMP_ACCEPT{accepted_fd, peer}` → `comp_on_accept` → `kl_conn_acquire` +
 `kl_comp_post_recv` + `kl_comp_post_accept` (refill; single accept outstanding).
 
-**Send + backpressure:** readiness — `kl_response_send`/`try_writev` with `send_offset` for
+**Send + backpressure:** readiness; `kl_response_send`/`try_writev` with `send_offset` for
 partial writes; on EAGAIN the remainder buffers in `KlDrain` (bounded, `on_drain` callback);
-listen paused (`listen_paused`) when the pool is full. Completion — `kl_comp_post_send` copies the
+listen paused (`listen_paused`) when the pool is full. Completion: `kl_comp_post_send` copies the
 iovec into an owned buffer (or a registered pool buffer, io_uring 8f-2); a short `cqe->res` re-preps
 the tail (`iou_prep_send_tail`) so only a fully-completed send surfaces a `KL_COMP_WRITE`; UDP send
 queue caps outstanding overlapped bytes. Equivalent Keel-level semantics, different mechanism.
@@ -1071,10 +1071,10 @@ queue caps outstanding overlapped bytes. Equivalent Keel-level semantics, differ
 **Close with outstanding work:** idle sweep `kl_server_sweep_conn_timeouts` → `kl_comp_cancel`
 (io_uring `prep_cancel` by `user_data` + `aborted` flag) → the op completes `-ECANCELED`/error →
 `comp_close` releases the conn through its normal completion (invariant: a conn is released only
-from a completion — no dangling op, no double release). A removed readiness watch is kept LINKED in
+from a completion: no dangling op, no double release). A removed readiness watch is kept LINKED in
 `st->watches` until its poll-cancel CQE frees it, or `kl_event_close` frees it at shutdown
-(the #111 fix — otherwise it leaked). Graceful drain runs in *both* run-loop branches via
-`kl_server_drain_progress` (the #113 fix — the completion branch previously never exited drain).
+(the #111 fix, otherwise it leaked). Graceful drain runs in *both* run-loop branches via
+`kl_server_drain_progress` (the #113 fix, the completion branch previously never exited drain).
 
 ---
 
@@ -1085,43 +1085,43 @@ from a completion — no dangling op, no double release). A removed readiness wa
 | F1 | **Informational** | `include/keel/event.h` `KlEventLoop.fd` (public `int`, "epoll_fd or kqueue_fd, -1 for io_uring") | G3 (no event-model leak) | Not a real leak: `KlEventLoop` is the loop object, not consumed by protocols; the field is documented backend-internal and frozen (PAL Appendix A). No protocol reads it. A future non-fd backend (lwIP raw) would want a portable handle here. | None now; revisit at Phase 9 (lwIP raw) with a `KlSocketHandle`-style widening if needed. |
 | F2 | **Low** | `IOURING_TEST_SUITES` (Makefile) vs the ~14 default-provider suites (`client`, `client_stream`, `redirect`, `peer_*`, `tls_integration`, `udp*`, `unix_socket`, `dns_resolver`, `request`, `cross_module`) | Decision std: combos *tested*, not assumed | Test-coverage gap, not an architecture defect. These init over completion (5a) but have per-suite behavioural gaps; the completion backend is covered by 36 unit suites + full smokes + benchmark. | Incremental per-suite triage (deferred, documented in `phase8f5` §3). |
 | F3 | **Low** | Windows + IOCP + **real mbedTLS** TLS runtime (BYO, out of CI) | Decision std: tested | The IOCP TLS *code path* is exercised via the identity mock-TLS (`smoke-iocp-tls`); real mbedTLS-over-IOCP is not CI-gated (mbedTLS is BYO everywhere). Consistent with the mbedTLS policy, but the combo's production-readiness is asserted, not proven. | A local/self-hosted `KEEL_TLS=mbedtls` Windows-IOCP smoke, or document the gap explicitly (already noted in `phase6_winsock_design.md`). |
-| F4 | **Informational** | `tests/test_async` over completion (manual `KlConn` with NULL `ctx`) | G6 (lifetime) / testing | Crashes over completion because the test hand-builds a conn without `ctx` and drives the resume path — a test-harness artifact (would equally hit pollcomp/IOCP), not a backend bug. | A completion-aware async test fixture (or exclude, as now). |
+| F4 | **Informational** | `tests/test_async` over completion (manual `KlConn` with NULL `ctx`) | G6 (lifetime) / testing | Crashes over completion because the test hand-builds a conn without `ctx` and drives the resume path, a test-harness artifact (would equally hit pollcomp/IOCP), not a backend bug. | A completion-aware async test fixture (or exclude, as now). |
 | R1 | **Resolved (this session)** | `event_iouring.c` `kl_event_del` | G6 (lifetime) | A removed watch with an in-flight `POLL_ADD` was unlinked + its free deferred to a CQE dropped at `io_uring_queue_exit` → 48 B leak/server. Fixed (#111): keep linked, free in CQE or `kl_event_close`. LSan-clean. | Done. |
 | R2 | **Resolved (this session)** | `server.c` completion run-loop branch | G2/G7 (semantics) | Graceful drain (`draining` → close-idle/deadline → stop) ran only in the readiness path, so a completion-loop server with `drain_timeout_ms` never exited drain → deadlock. Fixed (#113): shared `kl_server_drain_progress` in both branches. | Done. |
 
 **Clean (verified, no finding):**
-- **G1** — event backends reference zero protocol symbols; socket providers reference zero event
+- **G1**: event backends reference zero protocol symbols; socket providers reference zero event
   engines/protocols (only a descriptive comment). No `#ifdef` merges the two axes (Makefile
   selects `EVENT_SRC` and `SOCKET_SRC` independently; POSIX socket TU builds under every POSIX
   event backend).
-- **G4** — protocol TUs import **no** platform net/event headers, make **no** direct
+- **G4**: protocol TUs import **no** platform net/event headers, make **no** direct
   epoll/kqueue/io_uring/WSA/OVERLAPPED calls, and do **no** raw socket syscalls (all via
   `conn_read`/`conn_write` + the seam). Mechanically grep-clean.
-- **G2** — completion delivers real kernel bytes (never synthetic readiness); readiness handles
+- **G2**: completion delivers real kernel bytes (never synthetic readiness); readiness handles
   EAGAIN and never claims completion on mere readability. The event.h `kl_event_wait` on a
   completion loop is a documented no-op (the loop uses `kl_comp_run`).
-- **G3** — no event-model mechanics in `include/keel/` consumable types; `KL_EVENT_CAP_COMPLETION`
+- **G3**: no event-model mechanics in `include/keel/` consumable types; `KL_EVENT_CAP_COMPLETION`
   / `KL_SOCK_CAP_OVERLAPPED` are internal. Readiness/completion are explicit *internal* axis
   concepts; protocols consume the stable `KlConn`/`conn_read`/`conn_write` contract.
-- **G5** — `KlSocketHandle = intptr_t`, `KL_INVALID_SOCKET`, `kl_handle_valid()` (never `<0`);
+- **G5**: `KlSocketHandle = intptr_t`, `KL_INVALID_SOCKET`, `kl_handle_valid()` (never `<0`);
   `closesocket`/`WSAGetLastError` are confined to `event_iocp.c` + the `*_win` TUs; the seam has
   real `writev`/`sendfile` ops (POSIX + `WSASend`/`TransmitFile`). Winsock is first-class.
-- **G6/G7** — single in-flight op per conn (driver invariant); partial send re-prep in every
+- **G6/G7**: single in-flight op per conn (driver invariant); partial send re-prep in every
   backend; sentinels handled; release-only-from-completion. (R1/R2 were the exceptions, now fixed.)
-- **G8** — `KlDrain` (bounded write buffer + `on_drain`), `listen_paused` accept gating, capped
-  UDP send queue, growable-but-capped read buffer (`max_header_size`) — model-independent.
-- **G9** — `kl_sock_errno_to_error` maps to stable `KlError`; the Winsock seam translates
+- **G8**: `KlDrain` (bounded write buffer + `on_drain`), `listen_paused` accept gating, capped
+  UDP send queue, growable-but-capped read buffer (`max_header_size`): model-independent.
+- **G9**: `kl_sock_errno_to_error` maps to stable `KlError`; the Winsock seam translates
   `WSAGetLastError` → errno first. Equivalent errors across axes.
-- **G10** — `kl_comp_cancel` (native `ASYNC_CANCEL` + `aborted` sentinel) vs readiness
+- **G10**: `kl_comp_cancel` (native `ASYNC_CANCEL` + `aborted` sentinel) vs readiness
   registration teardown; idle/read timeouts in both branches; release only from a terminal
   completion.
-- **G11** — single-threaded event loop per worker (Node/Redis/Nginx model); cross-thread work via
+- **G11**: single-threaded event loop per worker (Node/Redis/Nginx model); cross-thread work via
   `KlThreadPool` + a `KlPlatWakeup` self-pipe relayed as `KL_COMP_WATCHER`/watcher; `kl_server_stop`
   wakes the loop from any thread/signal (async-signal-safe write).
-- **G12** — registration vs submission preserved: readiness `kl_event_add` = persistent interest;
+- **G12**, registration vs submission preserved: readiness `kl_event_add` = persistent interest;
   completion `kl_comp_post_*` = one op with its own buffer/`user_data`; the `KL_COMP_WATCHER` relay
   bridges a readiness watch onto a completion loop without conflating the two.
-- **G13** — `BACKEND=` selection; `kl_event_caps` observable; `io_uring_queue_init` failure → init
+- **G13**: `BACKEND=` selection; `kl_event_caps` observable; `io_uring_queue_init` failure → init
   `-1` (no silent bad combo); the negotiation rejects incompatible loop×provider pairings.
 
 ---
@@ -1136,7 +1136,7 @@ from a completion — no dangling op, no double release). A removed readiness wa
 | Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (macOS CI) | ✅ (default macOS) |
 | Winsock + WSAPoll | ✅ | ✅ | ✅ 47-suite subset (Windows CI) | ✅ |
 | Winsock + IOCP (completion) | ✅ | ✅ | ✅ lifecycle + smokes (plaintext, TLS-via-mock) | ⚠️ prod-ready plaintext; real-mbedTLS TLS is BYO/out-of-CI (F3) |
-| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + ASan/LSan | n/a — **test double**, not a production backend |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + ASan/LSan | n/a; **test double**, not a production backend |
 
 Not built (by design / future): Winsock+io_uring (N/A), IOCP+non-Winsock (N/A), lwIP-raw
 (Phase 9), UEFI (Phase 10).
@@ -1145,30 +1145,30 @@ Not built (by design / future): Winsock+io_uring (N/A), IOCP+non-Winsock (N/A), 
 
 ## 5. Proposed internal contract (from the existing design)
 
-- **Socket ownership** — a `KlConn`/`KlUdp` owns its `KlSocketHandle` for its lifetime; the
+- **Socket ownership**, a `KlConn`/`KlUdp` owns its `KlSocketHandle` for its lifetime; the
   `KlSocketProvider` is *borrowed* (must outlive its transports; owner calls
   `kl_socket_provider_destroy` after). Close routes through `kl_sock_close` (→ `closesocket` on
   Winsock).
-- **Event-loop affinity** — one `KlEventCtx` per thread; a socket/op/watcher belongs to the loop
+- **Event-loop affinity**: one `KlEventCtx` per thread; a socket/op/watcher belongs to the loop
   it was registered/posted on. Cross-thread work enters via `KlThreadPool` + `KlPlatWakeup`; no
   op is submitted or completed off-loop.
-- **Readiness notification** — level/edge interest via `kl_event_add/mod`; the consumer performs
+- **Readiness notification**: level/edge interest via `kl_event_add/mod`; the consumer performs
   the op and handles EAGAIN; re-arm via `kl_watcher_rearm`/`kl_event_mod`.
-- **Completion delivery** — one `kl_comp_post_*` = one op owning its buffer + `user_data`;
+- **Completion delivery**: one `kl_comp_post_*` = one op owning its buffer + `user_data`;
   `kl_comp_drain` surfaces exactly one `KlCompletionEvent` per finished op (partial sends re-prep
   internally; only whole-op completion surfaces).
-- **Operation lifetime** — a conn holds ≤1 in-flight op; the op is freed when its completion is
+- **Operation lifetime**, a conn holds ≤1 in-flight op; the op is freed when its completion is
   reaped; a conn is released **only** from a completion (cancel makes the op complete with error).
-- **Cancellation** — `kl_comp_cancel` (native `ASYNC_CANCEL` / `poll_remove` + an `aborted`/
+- **Cancellation**: `kl_comp_cancel` (native `ASYNC_CANCEL` / `poll_remove` + an `aborted`/
   `removed` sentinel); exactly one terminal result per op; late/duplicate CQEs are discarded via
   the sentinel; a removed watch is freed by its cancel CQE or by `kl_event_close`.
-- **Timeout races** — idle/read timeouts cancel the pending op; the cancellation completion is the
+- **Timeout races**: idle/read timeouts cancel the pending op; the cancellation completion is the
   single terminal event (a datum arriving first just completes normally).
-- **Error normalization** — platform error → `kl_sock_errno_to_error` → stable `KlError`, native
+- **Error normalization**: platform error → `kl_sock_errno_to_error` → stable `KlError`, native
   detail retained; equivalent across axes.
-- **Close semantics** — `comp_close`/`kl_conn_release` after the terminal completion; no I/O after
+- **Close semantics**: `comp_close`/`kl_conn_release` after the terminal completion; no I/O after
   close; `kl_event_close` tears down the loop + frees any watch whose cancel CQE never arrived.
-- **Backpressure** — bounded write buffer (`KlDrain`), accept gating (`listen_paused`), capped
+- **Backpressure**: bounded write buffer (`KlDrain`), accept gating (`listen_paused`), capped
   read/send buffers; identical Keel-level limits regardless of axis.
 
 ---
@@ -1179,22 +1179,22 @@ Not built (by design / future): Winsock+io_uring (N/A), IOCP+non-Winsock (N/A), 
 - **Test coverage:** finish the F2 per-suite triage so the default-provider integration suites run
   over completion; add a completion-aware async fixture (F4); consider a self-hosted mbedTLS
   Windows-IOCP TLS smoke (F3).
-- **Small architectural cleanup:** none warranted — the axes are clean; do not refactor.
-- **Deferred:** Phase 9 (lwIP raw — a third event model; would revisit F1's `KlEventLoop.fd` as a
+- **Small architectural cleanup:** none warranted, the axes are clean; do not refactor.
+- **Deferred:** Phase 9 (lwIP raw, a third event model; would revisit F1's `KlEventLoop.fd` as a
   portable handle), Phase 10 (UEFI). QUIC/HTTP-3 rides the existing UDP + completion groundwork.
 
 ---
 
 ## 7. Changes made
 
-**None.** This pass is report-only — the decision standard is met and no clear, low-risk fix was
+**None.** This pass is report-only, the decision standard is met and no clear, low-risk fix was
 outstanding (the two real defects were already fixed under PRs #111 and #113 the same day). The
 findings are a test-coverage gap (F2/F3), a test-harness artifact (F4), and one informational
 API note (F1); none justify a code change under the "narrow, low-risk, design-clear" bar.
 
 ---
 
-## Decision standard — met
+## Decision standard: met
 
 Socket + event providers are separately replaceable ✅ · readiness + completion keep native
 semantics ✅ · higher layers get consistent Keel-level behavior ✅ · protocols contain no

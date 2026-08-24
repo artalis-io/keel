@@ -1,9 +1,9 @@
 /*
- * fuzz_url.c — libFuzzer target for the URL parser.
+ * fuzz_url.c: libFuzzer target for the URL parser.
  *
  * kl_url_parse is untrusted on the client side: redirect Location headers are
  * server-controlled, and the parser has a CRLF-injection guard, IPv6/host/port
- * splitting, and an AF_UNIX path decoder (http+unix://) — all exercised here
+ * splitting, and an AF_UNIX path decoder (http+unix://); all exercised here
  * against arbitrary bytes (NUL-terminated).
  *
  * Build:  make fuzz CC=clang

@@ -1,6 +1,6 @@
 # Fuzzing KEEL
 
-KEEL ships libFuzzer targets over its **untrusted-input attack surface** — the parsers that touch
+KEEL ships libFuzzer targets over its **untrusted-input attack surface**, the parsers that touch
 bytes straight off the network. Every command below is real; the sample output is from an actual run.
 For the full test story see [testing.md](testing.md).
 
@@ -25,14 +25,14 @@ is built on demand.
 libFuzzer needs clang. The targets link a **separately-instrumented** build of the library
 (`libkeel_fuzz.a`, built from `.fuzz.o` objects): every library object is compiled with
 SanitizerCoverage (`-fsanitize=fuzzer-no-link`) plus ASan + UBSan, so libFuzzer both *explores* and
-*memory-checks* the parsers. (Linking the plain `libkeel.a` would fuzz only the harness — no coverage,
+*memory-checks* the parsers. (Linking the plain `libkeel.a` would fuzz only the harness, no coverage,
 no ASan on library code.)
 
 ```sh
 # Linux
 make fuzz CC=clang
 
-# macOS (Homebrew LLVM — the system clang lacks libFuzzer)
+# macOS (Homebrew LLVM, the system clang lacks libFuzzer)
 make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
 ```
 
@@ -46,11 +46,11 @@ make fuzz-decompress KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz CC=clang
 
 libFuzzer treats the corpus directory as **read-write**: it mutates from the seeds *and* writes every
 new coverage-increasing input back into that directory. Pointing it at the tracked `fuzz/corpus_*/`
-therefore **adds files to your working tree** — a short run can add hundreds. Keep the tracked corpus
+therefore **adds files to your working tree**, a short run can add hundreds. Keep the tracked corpus
 clean one of two ways:
 
 ```sh
-# Preferred: explore against a scratch copy of the seeds — the tracked corpus is untouched.
+# Preferred: explore against a scratch copy of the seeds, the tracked corpus is untouched.
 mkdir -p /tmp/kc && cp fuzz/corpus_parser/* /tmp/kc/
 ./fuzz/fuzz_parser /tmp/kc/ -max_total_time=60 -artifact_prefix=/tmp/
 
@@ -63,7 +63,7 @@ Bound a run with `-max_total_time=<seconds>` (or `-runs=<n>`), and use `-artifac
 crash/timeout reproducers land there (e.g. `/tmp/`) rather than the current directory / repo root.
 
 A clean run ends with a `Done … runs` line and exits `0`. Representative short local runs (macOS,
-Homebrew clang 18, 8 s each) — no crashes, no sanitizer reports:
+Homebrew clang 18, 8 s each), no crashes, no sanitizer reports:
 
 ```
 fuzz_parser : Done 1026491 runs in 9 second(s)
@@ -92,5 +92,5 @@ is not in the standing job (it needs the miniz dependency) and is run on demand.
 2. Seed `fuzz/corpus_<name>/` with a few valid inputs.
 3. Add the target to the `fuzz:` list in the Makefile, and add a 60 s step to the CI fuzz job.
 
-Keep each harness to a single parser with no I/O — the point is to explore that parser's byte handling,
+Keep each harness to a single parser with no I/O, the point is to explore that parser's byte handling,
 not the network stack.

@@ -12,22 +12,22 @@ Producers (the `KlHttpResponseWriteFn` returned by `kl_http_response_begin_strea
 per-connection **outbound buffer** (`KlDrain`), never a
 socket or event engine.
 
-**Ownership — bytes are copied immediately.** A streaming write copies the supplied bytes before
+**Ownership: bytes are copied immediately.** A streaming write copies the supplied bytes before
 returning; the caller may pass transient/stack memory and reuse or free it at once. The completion
 backends copy again into the op at post time (`kl_comp_post_send` in all three backends), so no
 submitted completion op ever references caller or `KlDrain` memory after the call returns. Keel
 never borrows or takes ownership of the caller's write buffer.
 
-**Backpressure — four outcomes** (via the drain, `KlDrain.max_size` bound):
-- *accepted* — buffered (and, on readiness, opportunistically sent inline);
-- *would-block / queue-full* — the write hit `max_size`; the producer must stop and wait for drain;
-- *stream closed* — the peer/connection is gone;
-- *error* — allocation or transport failure.
+**Backpressure: four outcomes** (via the drain, `KlDrain.max_size` bound):
+- *accepted*: buffered (and, on readiness, opportunistically sent inline);
+- *would-block / queue-full*: the write hit `max_size`; the producer must stop and wait for drain;
+- *stream closed*: the peer/connection is gone;
+- *error*: allocation or transport failure.
 
 There is **one** writable/drain notification: the drain empties → the producer may write more. On
 the completion axis the overlapped flush keeps ≤1 send in flight (`KlHttpResponse.stream_inflight`) and
 re-pumps from the WRITE completion (`comp_stream_pump`); on readiness it flushes on writability.
-Both surface the same "buffer drained, resume producing" signal — no parallel callbacks with
+Both surface the same "buffer drained, resume producing" signal; no parallel callbacks with
 divergent meaning.
 
 ## Read side (request-body streaming / inbound)
@@ -35,32 +35,32 @@ divergent meaning.
 A body reader (`KlHttpBodyReader`: `on_data` / `on_complete` / `on_error` / `destroy`) receives body
 chunks. `on_data` returns `0` to continue or `-1` to **abort** (→ 413 / connection teardown).
 
-**Flow control — continue / pause / abort:**
-- *continue* — `on_data` returns 0.
-- *pause* — `kl_http_request_pause_body(req)`: stop reading more body bytes off the connection, bounding
+**Flow control: continue / pause / abort:**
+- *continue*: `on_data` returns 0.
+- *pause*: `kl_http_request_pause_body(req)`: stop reading more body bytes off the connection, bounding
   accumulation, without aborting. Idempotent; loop-thread only; callable from `on_data` or later
   (a watcher/timer/thread-pool completion when a downstream sink drains). Readiness drops READ
-  interest immediately; completion stops posting the next recv — the one already-submitted recv may
+  interest immediately; completion stops posting the next recv; the one already-submitted recv may
   still deliver ≤1 more chunk (bounded). A paused conn holds no unbounded buffer: unread bytes stay
   in the kernel socket buffer, and the parser retains only its partial frame.
-- *resume* — `kl_http_request_resume_body(req)`: re-enable reading. Idempotent (a no-op unless a pause is
+- *resume*: `kl_http_request_resume_body(req)`: re-enable reading. Idempotent (a no-op unless a pause is
   in effect). Readiness re-arms READ; completion posts a fresh recv (`kl_http_comp_post_read`).
-- *abort* — `on_data` → -1.
+- *abort*: `on_data` → -1.
 
 A conn that stays paused is **not** exempt from the idle-read timeout: an indefinitely paused
 consumer is eventually timed out (backpressure/slowloris defense).
 
-## Termination (both sides) — exactly one terminal outcome
+## Termination (both sides): exactly one terminal outcome
 
-- **orderly finish** — response fully sent / body fully read → `on_complete`.
-- **protocol/application abort** — `on_data` → -1, or the handler errors.
-- **cancellation** — the consumer is no longer interested (aborts the body / closes the stream).
-- **peer close** — recv 0 / reset → `on_error` then teardown.
-- **timeout** — idle/read deadline → teardown.
+- **orderly finish**: response fully sent / body fully read → `on_complete`.
+- **protocol/application abort**: `on_data` → -1, or the handler errors.
+- **cancellation**: the consumer is no longer interested (aborts the body / closes the stream).
+- **peer close**: recv 0 / reset → `on_error` then teardown.
+- **timeout**: idle/read deadline → teardown.
 
 The connection driver guarantees a single terminal path: the body reader gets `on_complete` XOR
 `on_error` (never both), then `destroy`. On teardown while paused, the conn releases through the
-normal completion/close path (no dangling op, no double release — verified under ASan by
+normal completion/close path (no dangling op, no double release; verified under ASan by
 `test_read_flow_control.shutdown_while_paused`).
 
 ## Lifecycle & reentrancy

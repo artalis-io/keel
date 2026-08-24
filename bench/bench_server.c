@@ -1,11 +1,11 @@
 /*
- * bench_server.c — Dedicated benchmark server (4 endpoints)
+ * bench_server.c: Dedicated benchmark server (4 endpoints)
  *
  * Endpoints:
- *   GET  /hello       — baseline: minimal JSON, no params, no middleware
- *   GET  /users/:id   — router: param extraction + snprintf response
- *   GET  /mw/hello    — middleware: same response through 2 pass-through middleware
- *   POST /echo        — body reading: KlHttpBufReader + echo body back
+ *   GET  /hello       - baseline: minimal JSON, no params, no middleware
+ *   GET  /users/:id   - router: param extraction + snprintf response
+ *   GET  /mw/hello    - middleware: same response through 2 pass-through middleware
+ *   POST /echo        - body reading: KlHttpBufReader + echo body back
  *
  * Build:  make bench
  * Run:    ./bench/bench_server [port]
@@ -14,11 +14,11 @@
 #include <keel/keel.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>   /* fork, getpid — multi-worker (SO_REUSEPORT) mode */
+#include <unistd.h>   /* fork, getpid: multi-worker (SO_REUSEPORT) mode */
 
 /* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_http_server_init auto-adopts the
  * backend's overlapped provider, so this default-provider server serves every backend
- * unchanged — no explicit provider needed. */
+ * unchanged; no explicit provider needed. */
 
 static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
 
     /* Multi-worker: fork (workers-1) children; every process runs its own KlHttpServer on the
      * same port. Each listen socket sets SO_REUSEPORT (http_server.c), so the kernel load-balances
-     * incoming connections across the workers — Keel's horizontal-scaling model (one
+     * incoming connections across the workers, Keel's horizontal-scaling model (one
      * single-threaded accept loop per core), demonstrated here for the connection-churn bench. */
     for (int w = 1; w < workers; w++) {
         pid_t pid = fork();

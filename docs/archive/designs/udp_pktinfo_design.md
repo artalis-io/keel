@@ -1,16 +1,16 @@
-# UDP source-address on wildcard binds (IP_PKTINFO) — Design
+# UDP source-address on wildcard binds (IP_PKTINFO): Design
 
 Status: **done.**
 Decisions taken (2026-07-18):
 - Expose the datagram's **local (destination) address** by **extending the
-  `KlUdpRecvFn` signature** (breaking — `KlUdp` is unreleased).
+  `KlUdpRecvFn` signature** (breaking, `KlUdp` is unreleased).
 - `KlUdpServer` replies **automatically** from the captured local address.
 - `KlUdpServer` **auto-enables** pktinfo when bound to a wildcard address.
 
 ## Problem
 
 A UDP socket bound to `0.0.0.0` / `::` on a multi-homed host replies via
-`sendto`, whose source address the kernel picks from the routing table — which
+`sendto`, whose source address the kernel picks from the routing table, which
 can differ from the address the client actually sent to, so the client drops the
 reply. Correct behavior requires capturing the *local* address each datagram
 arrived on (`IP_PKTINFO` / `IPV6_PKTINFO` control messages on `recvmsg`) and
@@ -48,12 +48,12 @@ also a hard requirement for a QUIC server.
   binds skip it (no overhead, source is unambiguous).
 - **Automatic reply source:** the trampoline records each datagram's local
   address; `kl_udp_server_reply` uses `kl_udp_send_to_from` with it, so replies
-  egress from the address the client hit. `KlUdpHandlerFn` is **unchanged** —
+  egress from the address the client hit. `KlUdpHandlerFn` is **unchanged**;
   the correctness is transparent to the handler.
 
 ## Portability
 
-- v6 (`IPV6_RECVPKTINFO` / `IPV6_PKTINFO`) is RFC 3542 — Linux + macOS.
+- v6 (`IPV6_RECVPKTINFO` / `IPV6_PKTINFO`) is RFC 3542: Linux + macOS.
 - v4 enable-option differs (`IP_PKTINFO` on Linux, `IP_RECVPKTINFO` on BSD/
   macOS); the cmsg type is `IP_PKTINFO`. Both guarded by `#ifdef`; absence is a
   graceful no-op (local address absent, replies fall back to `sendto`).
@@ -70,6 +70,6 @@ also a hard requirement for a QUIC server.
 
 ## Non-goals
 
-- GSO/GRO, `recvmmsg` batching, ECN/TOS — separate roadmap items (the recv
+- GSO/GRO, `recvmmsg` batching, ECN/TOS: separate roadmap items (the recv
   callback can gain those later without another signature break by carrying them
   in the same call).

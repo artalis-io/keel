@@ -1,8 +1,8 @@
 # Runtime event-backend provider (KlEventProvider)
 
 Makes the **readiness event backend runtime-pluggable**, parallel to the socket
-seam (`KlSocketProvider`). The motivation is a bring-your-own event backend —
-lwIP (`lwip_poll`) — that can be linked as a separate `.a` and installed at
+seam (`KlSocketProvider`). The motivation is a bring-your-own event backend;
+lwIP (`lwip_poll`), that can be linked as a separate `.a` and installed at
 runtime, without recompiling the Keel core. Companion to
 `docs/lwip_platform_design.md` and `docs/capability_matrix.md`.
 
@@ -41,7 +41,7 @@ IOCP / pollcomp / lwIP-raw) drives its loop through the `kl_comp_*` primitives
 `kl_event_*` ops (for watcher fds + `native_provider` auto-wiring), routed through
 this dispatcher like any other.
 
-**Update — completion is now runtime-injectable too** (see
+**Update: completion is now runtime-injectable too** (see
 `docs/completion_axis_runtime_design.md`, RC-1..RC-4). The `kl_comp_*` primitives
 are an internal `KlCompletionOps` sub-vtable reached via one opaque `const void
 *completion` on `KlEventOps`, dispatched by `completion_dispatch.c` exactly like
@@ -49,7 +49,7 @@ this readiness dispatcher (`loop->ops ? loop->ops->completion : kl_comp_ops_buil
 `completion_driver.c` is always-linked (`KEEL_NO_COMPLETION` opt-out). A completion
 backend split into a pure-provider TU (no `_builtin`) + an optional builtin-glue TU
 (only when it is the compiled-in `BACKEND`) can be injected at runtime on a stock
-`libkeel` — **realized**: `kl_event_provider_pollcomp()` serves on a default build,
+`libkeel`, **realized**: `kl_event_provider_pollcomp()` serves on a default build,
 and `kl_event_provider_lwip_raw()` runs the full P9 suite on a stock `libkeel` (the
 old build-time-only policy below is superseded). `BACKEND=` remains the compiled-in
 default-selector.
@@ -66,7 +66,7 @@ capability bits for a future negotiated pairing.
 ## Compatibility
 
 `KlEventLoop` gains a trailing `ops` field and `keel/event.h` gains
-`KlEventOps` / `KlEventProvider` / `kl_event_init_provider` — additive,
+`KlEventOps` / `KlEventProvider` / `kl_event_init_provider`: additive,
 source + static-relink compatible (see `docs/compatibility.md`). Callers that
 allocate a `KlEventLoop` on the stack and call `kl_event_init()` are unaffected
 (it zeroes `ops`).

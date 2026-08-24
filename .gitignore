@@ -42,7 +42,7 @@ examples/*
 # Test binaries
 tests/test_*
 !tests/test_*.c
-# Nested protocol-test binaries (§9: tests/protocols/<fam>/) — binaries/.d/.dSYM ignored,
+# Nested protocol-test binaries (§9: tests/protocols/<fam>/); binaries/.d/.dSYM ignored,
 # sources (.c) stay tracked.
 tests/protocols/*/test_*
 !tests/protocols/*/test_*.c
@@ -53,7 +53,7 @@ tests/protocols/*/smoke_*
 tests/smoke_*
 !tests/smoke_*.c
 
-# Integration test binaries (§10: integrations/<role>/<backend>/tests/) — sources .c stay tracked.
+# Integration test binaries (§10: integrations/<role>/<backend>/tests/); sources .c stay tracked.
 integrations/tls/mbedtls/tests/smoke_tls*
 !integrations/tls/mbedtls/tests/smoke_tls*.c
 

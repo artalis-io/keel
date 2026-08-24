@@ -1,25 +1,25 @@
-# Phase 8b — completion-axis breadth (bodies, streaming, files, UDP, TLS) — Design
+# Phase 8b, completion-axis breadth (bodies, streaming, files, UDP, TLS), Design
 
 **Status:** designed, implementation gated. Builds on Phase 8a (the completion
 connection driver, currently serving plaintext GET/HEAD HTTP over IOCP). Additive,
 high risk, completion-backend validated by the Windows-IOCP CI job.
 
-**Two governing constraints (from the user) — both are orthogonality axes:**
+**Two governing constraints (from the user), both are orthogonality axes:**
 
 1. **Non-invasive to surface public APIs.** Extending the completion path to request
    bodies, TLS, UDP, and streaming/file responses must **not percolate the
    completion model into the public APIs** of those surfaces. `KlBodyReader`,
-   `KlTls`, `KlUdp`, and `KlResponse` (file/stream) stay model-agnostic — a body
+   `KlTls`, `KlUdp`, and `KlResponse` (file/stream) stay model-agnostic, a body
    reader / TLS backend / UDP handler / streaming response never learns whether its
    bytes came from a readiness `recv` or a completed `WSARecv`.
 
 2. **Completion is a platform-independent *concept*, not an IOCP detail.** Completion
-   is an event **axis**, a peer to readiness — exactly as `event.h` is the abstract
+   is an event **axis**, a peer to readiness; exactly as `event.h` is the abstract
    readiness axis with epoll / kqueue / poll / WSAPoll as interchangeable
    *implementations*, completion has an abstract axis with **IOCP as one
    implementation** (io_uring-completion and POSIX AIO are future siblings). The
    generic completion **driver logic** (the connection state machine over
-   completions) must therefore be **platform-independent** — `WSARecv`/`WSASend`/
+   completions) must therefore be **platform-independent**: `WSARecv`/`WSASend`/
    `AcceptEx`/`TransmitFile`/`GetQueuedCompletionStatusEx`/`OVERLAPPED` must **not
    percolate** beyond the IOCP implementation TU and induce platform dependency
    where the concept, not the mechanism, belongs.
@@ -38,8 +38,8 @@ high risk, completion-backend validated by the Windows-IOCP CI job.
 
 8a proved the **model-blind core** reuse (both axes call `kl_conn_dispatch_request`
 etc.). 8b adds the missing separation on the completion side: split 8a's
-`event_iocp.c` — which today mixes the generic driver logic with the IOCP
-mechanics — into a **platform-independent completion driver** + an **IOCP
+`event_iocp.c`, which today mixes the generic driver logic with the IOCP
+mechanics: into a **platform-independent completion driver** + an **IOCP
 implementation of the completion axis**. Then every 8b surface is added to the
 *generic* driver, with each platform supplying only its overlapped-op primitive.
 
@@ -47,7 +47,7 @@ implementation of the completion axis**. Then every 8b surface is added to the
 
 ## 2. The abstract completion axis (internal, platform-independent)
 
-A new internal `src/completion.h` — the completion counterpart of `event.h`. It
+A new internal `src/completion.h`, the completion counterpart of `event.h`. It
 names **what** a completion transport does, never **how** (no Win32 types):
 
 ```c
@@ -65,7 +65,7 @@ typedef struct {
     socklen_t   peer_len;
 } KlCompletionEvent;
 
-/* A completion transport (one impl per completion-capable platform). Opaque —
+/* A completion transport (one impl per completion-capable platform). Opaque,
  * the backend owns its OVERLAPPED pools / port / SQEs. Post primitives are the
  * only way the generic driver expresses async intent; drain yields finished ops. */
 int kl_comp_post_accept(KlEventLoop *loop, struct KlServer *s);
@@ -76,7 +76,7 @@ int kl_comp_post_sendfile(KlEventLoop *loop, KlConn *c, int file_fd,
 int kl_comp_drain(KlEventLoop *loop, KlCompletionEvent *out, int max, int timeout_ms);
 ```
 
-The **generic driver** `src/completion_driver.c` (platform-independent — contains
+The **generic driver** `src/completion_driver.c` (platform-independent, contains
 **no** Win32/IOCP symbol) is the completion tick, driving connections via the
 model-blind core and the abstract post primitives:
 
@@ -112,7 +112,7 @@ or POSIX-AIO backend implements the same `completion.h` and **reuses
 | **8b-4** | UDP | generic datagram completion dispatch (reuse `KlUdp` callback) | `WSARecvFrom`/`WSASendTo` (+ a Windows-only `udp_io` sibling) |
 | **8b-5** | TLS | internal buffered BIO (byte source only; `KlTls` vtable unchanged) | `WSARecv`/`WSASend` of ciphertext |
 
-**8b-0 is first and is a pure refactor** — POSIX byte-identical (it doesn't touch
+**8b-0 is first and is a pure refactor**: POSIX byte-identical (it doesn't touch
 the readiness path), the IOCP smoke stays green, and it establishes the
 platform-independent axis every later increment builds on. 8b-1..4 are tractable;
 8b-5 (TLS) is the deepest inversion and is sequenced last (may become its own phase).
@@ -145,7 +145,7 @@ platform-independent axis every later increment builds on. 8b-1..4 are tractable
 - **Axis 1 (public APIs):** no `include/keel/*.h` change in any 8b changeset.
 - **Axis 2 (concept vs implementation):** **no Win32/IOCP symbol** (`OVERLAPPED`,
   `WSA*`, `AcceptEx`, `TransmitFile`, `GetQueuedCompletionStatus*`, `iocp`) appears
-  in `completion_driver.c`, `completion.h`, or any shared/POSIX TU — they live
+  in `completion_driver.c`, `completion.h`, or any shared/POSIX TU; they live
   **only** in `event_iocp.c` (and a Windows-only `udp_io` sibling). `completion.h`
   pulls no `<windows.h>`.
 - Every exposed model-blind core is called identically by the readiness path →
@@ -157,7 +157,7 @@ platform-independent axis every later increment builds on. 8b-1..4 are tractable
 
 - **8b-0 driver extraction** is the structural crux: if the generic driver cannot be
   lifted without an IOCP concept leaking into `completion_driver.c` (litmus axis 2),
-  **stop** — the abstraction boundary is wrong.
+  **stop**, the abstraction boundary is wrong.
 - **TLS buffered-BIO (8b-5)**: if it needs a public `KlTls` change, **stop** (a
   completion-aware TLS transport is a separate, bigger design).
 - **Streaming back-pressure** over completion must preserve the public
@@ -168,9 +168,9 @@ platform-independent axis every later increment builds on. 8b-1..4 are tractable
 
 ## 7. Out of scope (beyond 8b)
 
-- A second completion *implementation* (io_uring-completion / POSIX AIO) — the axis
+- A second completion *implementation* (io_uring-completion / POSIX AIO), the axis
   is designed to accept one, but building it is future work.
 - IOCP as the Windows default (WSAPoll stays default; IOCP opt-in via `BACKEND=iocp`).
-- Any *public* completion API (frozen until a second consumer needs it — Phase 7
+- Any *public* completion API (frozen until a second consumer needs it, Phase 7
   internal-first rule holds).
 - HTTP/2 and WebSocket completion drivers (they ride the readiness path today).

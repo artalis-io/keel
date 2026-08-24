@@ -1,5 +1,5 @@
 /*
- * sse.c — Server-Sent Events (SSE) streaming
+ * sse.c: Server-Sent Events (SSE) streaming
  *
  * Concepts: KlHttpSse, kl_http_sse_begin, kl_http_sse_event, kl_http_sse_comment, kl_http_sse_end.
  * Demonstrates the SSE helper for streaming events to a browser or curl.

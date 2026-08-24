@@ -4,7 +4,7 @@ Keel's networking core is not HTTP-only. A protocol author can build an arbitrar
 TCP (or datagram) server on the **same public primitives** the HTTP server is
 built on, with no HTTP machinery (`KlHttpServer`, router, request/response) and no
 internal headers. This document is the authoritative map of that surface; the
-working proof is `tests/test_stream_transport.c` — a length-prefixed framed-echo
+working proof is `tests/test_stream_transport.c`, a length-prefixed framed-echo
 server built entirely from what is described here.
 
 ## The surface (all public)
@@ -19,8 +19,8 @@ server built entirely from what is described here.
 | Connection suspension | `KlAsyncOp` (`kl_async_suspend`/`_complete`/`_cancel`) | `async.h` |
 | Datagram primitive | `KlDatagram` (`kl_datagram_socket_init` / `kl_datagram_connect` / `kl_datagram_send` / `kl_datagram_recv_start` / `kl_datagram_close_begin`) | `datagram.h` (opt-in layout `datagram_detail.h`) |
 
-The socket ops are reached through the provider on the context —
-`ctx->sockets` (or `kl_socket_provider_posix()` when it is NULL) —
+The socket ops are reached through the provider on the context;
+`ctx->sockets` (or `kl_socket_provider_posix()` when it is NULL):
 `sp->ops->accept(sp->context, lfd, ...)`, etc. This is the same seam that lets you
 swap in a custom stack (lwIP, a test transport); a plain TCP protocol just uses
 the built-in POSIX/Winsock provider.
@@ -51,7 +51,7 @@ empties. Bound the buffer with `kl_drain_set_max_size` for untrusted peers.
 
 ## Scope
 
-This is the **readiness** transport surface (watcher + provider ops + drain) — the
+This is the **readiness** transport surface (watcher + provider ops + drain), the
 default `KlEventCtx` on epoll/kqueue/poll/WSAPoll. It is what a protocol author
 targets to build a server today. The completion axis drives Keel's *own*
 protocols through the internal completion driver; a public completion-model
@@ -61,14 +61,14 @@ supported protocol-author API).
 ## What Phase 5 did *not* add
 
 No new server framework. The exercise confirmed the existing public primitives
-are sufficient and ergonomic enough to build a real framed protocol — so the only
+are sufficient and ergonomic enough to build a real framed protocol, so the only
 deliverables are this document and the `stream_transport` test. If a future
 protocol needs a convenience (e.g. a `kl_tcp_listen` one-liner), it can be added
 without disturbing this surface.
 
 ## Reference
 
-`tests/test_stream_transport.c` — a 4-byte-length-prefixed framed echo server on
+`tests/test_stream_transport.c`, a 4-byte-length-prefixed framed echo server on
 the surface above, exercised by a raw-socket client with tiny, empty, medium
 (8 KiB), and large (128 KiB, exceeds the socket buffer → drain buffering +
 writable-driven flush) frames plus back-to-back pipelining. ASan+UBSan clean

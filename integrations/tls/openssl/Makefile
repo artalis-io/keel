@@ -1,17 +1,17 @@
-# integrations/tls/openssl — standalone build of the OpenSSL/BoringSSL KlTls adapter.
+# integrations/tls/openssl: standalone build of the OpenSSL/BoringSSL KlTls adapter.
 #
 # Produces libkeel_openssl.a, a static archive containing the shared adapter
-# object (tls_openssl.c). Bring-your-own OpenSSL 3.x (or BoringSSL — see
+# object (tls_openssl.c). Bring-your-own OpenSSL 3.x (or BoringSSL, see
 # integrations/tls/boringssl/, which compiles THIS source against a BoringSSL
 # prefix). Nothing here is vendored or downloaded. The core `make` / `make test`
-# never build this — it is opt-in.
+# never build this; it is opt-in.
 #
 # Usage:
 #   make OPENSSL_DIR=$(brew --prefix openssl@3)        # build libkeel_openssl.a
 #   make test OPENSSL_DIR=$(brew --prefix openssl@3)   # relocation/link smoke
 #   make e2e  OPENSSL_DIR=$(brew --prefix openssl@3)   # both-axes ASan+UBSan e2e
 #
-# Link into a consumer (order matters — adapter before core, OpenSSL last):
+# Link into a consumer (order matters: adapter before core, OpenSSL last):
 #   cc app.c -L<keel> -lkeel -L. -lkeel_openssl \
 #            -L$(OPENSSL_DIR)/lib -lssl -lcrypto
 #

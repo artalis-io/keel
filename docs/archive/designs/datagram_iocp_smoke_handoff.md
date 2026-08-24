@@ -1,8 +1,8 @@
-# Handoff — Windows IOCP `smoke-udp` teardown hang (RESOLVED — 7B-7 IOCP firm ✅)
+# Handoff, Windows IOCP `smoke-udp` teardown hang (RESOLVED, 7B-7 IOCP firm ✅)
 
 **Status: RESOLVED.** Root cause found via the `KL_IOCP_TEARDOWN_TRACE` instrumentation run on the real
 Windows IOCP CI runner (no local Windows rig needed): a **send-only KlUdp socket** (`kl_udp_send_to` with
-no `kl_udp_recv_start`) was **never associated with the IOCP completion port** — association lived only in
+no `kl_udp_recv_start`) was **never associated with the IOCP completion port**: association lived only in
 `kl_udp_recv_start`. So its `WSASendTo` completion had nowhere to post (never reaped during the pump), and
 `closesocket` could not post an aborted completion for an unassociated socket either, so
 `iocp_quiesce_port_for_close`'s `INFINITE` wait blocked forever on that one `DGRAM_SEND` op. **Fix
@@ -16,7 +16,7 @@ _Original handoff (investigation record):_
 
 The Windows IOCP runtime gate ran for the first time
 (PR #240) and the `smoke-udp` step HANGS in teardown, so `smoke-datagram` (the public KlDatagram-over-IOCP
-proof) never runs. Needs debugging on a **real Windows / IOCP** environment — it does not reproduce on
+proof) never runs. Needs debugging on a **real Windows / IOCP** environment; it does not reproduce on
 macOS/Linux (pollcomp/io_uring pass) and must NOT be "fixed" by bounding the infinite drain speculatively
 (that would convert a visible hang into leaked ops / a use-after-free during teardown).
 
@@ -32,21 +32,21 @@ make OS=windows BACKEND=iocp CC=gcc smoke-udp
   **bounded** pump `for (i<200 && g_got<1) kl_event_ctx_run(&ctx,16,10)` (≈2 s max), then
   `kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);` then the `printf`.
 - The IOCP drain **honours its timeout** (`event_iocp.c:779`, `GetQueuedCompletionStatusEx(..., (DWORD)timeout_ms, ...)`),
-  and the pump is bounded — so the pump **cannot** be the 3-min hang. No output appears because every
+  and the pump is bounded, so the pump **cannot** be the 3-min hang. No output appears because every
   `printf/fprintf` is AFTER the teardown calls. **Therefore the hang is in teardown**
   (`kl_udp_free` and/or `kl_event_ctx_free`), not the round-trip.
   - First empirical step to confirm: add a `fprintf(stderr,...)+fflush` right after the pump loop and
     before each teardown call to pin the exact hanging call. (Whether `g_got` reached 1 also tells you if
-    the datagram was even delivered over IOCP — `smoke-udp` on the **WSAPoll** job succeeds, so the
+    the datagram was even delivered over IOCP; `smoke-udp` on the **WSAPoll** job succeeds, so the
     WSARecvMsg/WSASendTo logic itself is fine; this is completion-teardown-specific.)
 
 ## Suspected path
 `kl_udp_free` / `kl_event_ctx_free` → op cancellation → **`iocp_quiesce_port_for_close`** (`src/event_iocp.c` ~line 1009).
 It `CancelIoEx`s every op in the global registry `st->ops`, then drains with an **`INFINITE`** wait
 (`GetQueuedCompletionStatusEx(..., INFINITE, ...)`, `event_iocp.c:1022`) in `while (st->ops)` until the
-registry empties. If a UDP overlapped op's cancelled completion never dequeues — e.g. the datagram
+registry empties. If a UDP overlapped op's cancelled completion never dequeues, e.g. the datagram
 recv/send op is (a) left in `st->ops` after `kl_udp_free` closed its socket, (b) never `CancelIoEx`-reached,
-or (c) its completion is dequeued but the op is never unlinked from `st->ops` — this loop blocks forever.
+or (c) its completion is dequeued but the op is never unlinked from `st->ops`, this loop blocks forever.
 The KlUdp teardown is the legacy path (it does NOT call `cancel_dgram`), so the interaction to inspect is
 `kl_udp_free`'s socket close + overlapped-op accounting vs. the port-quiesce registry, NOT the 7B-2c
 `cancel_dgram`/`retire_dgram` seam.
@@ -62,9 +62,9 @@ The registry-vs-dequeue mismatch (an op that's in `st->ops` but whose completion
 
 ## Evidence (PR #240, run 31971146006)
 - Run: https://github.com/artalis-io/keel/actions/runs/31971146006
-- **Windows (MinGW / WSAPoll)** — PASS, incl. `smoke-datagram` (public KlDatagram roundtrip):
+- **Windows (MinGW / WSAPoll)**: PASS, incl. `smoke-datagram` (public KlDatagram roundtrip):
   https://github.com/artalis-io/keel/actions/runs/31971146006/job/95223688785
-- **Windows (IOCP)** — FAIL: `smoke-udp` times out (teardown hang) → `smoke-datagram` **skipped**:
+- **Windows (IOCP)**, FAIL: `smoke-udp` times out (teardown hang) → `smoke-datagram` **skipped**:
   https://github.com/artalis-io/keel/actions/runs/31971146006/job/95223688800
   - IOCP steps that PASS before it: build (IOCP link gate), `test-win-iocp`, `smoke-iocp` (HTTP),
     `smoke-iocp-tls`, `smoke-iocp-async`. Only the UDP/datagram completion teardown hangs.
@@ -76,7 +76,7 @@ purely the IOCP overlapped-op teardown accounting. IOCP remains provisional unti
 `smoke-udp`→`smoke-datagram` run is green.
 
 ## Not this investigation (tracked separately)
-- **Linux (no completion)** websocket_client crash — a pre-existing regression (branch was already CI-red
+- **Linux (no completion)** websocket_client crash, a pre-existing regression (branch was already CI-red
   at `5e290ac`, last green `3edd29aa`). Bisected/handled separately; do NOT fold into the IOCP fix.
 - **Static Analysis (cppcheck)** style findings in `src/dns_resolver.c` (`unusedStructMember`,
-  `knownConditionTrueFalse`) — separate; blocks a fully-green PR but not the IOCP gate.
+  `knownConditionTrueFalse`): separate; blocks a fully-green PR but not the IOCP gate.

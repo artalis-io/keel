@@ -1,5 +1,5 @@
 /*
- * h2_client.c — HTTP/2 client demo with mock session
+ * h2_client.c: HTTP/2 client demo with mock session
  *
  * Demonstrates the KlHttp2ClientSession vtable interface using a stub
  * session. In a real deployment, replace StubH2ClientSession with

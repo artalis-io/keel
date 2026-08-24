@@ -11,7 +11,7 @@ counts as suites are added). For *what runs on which backend*, see
 make test        # build libkeel.a + every unit suite, run them all (default backend)
 ```
 
-The default backend is the platform readiness engine — **epoll** on Linux, **kqueue** on macOS. On a
+The default backend is the platform readiness engine: **epoll** on Linux, **kqueue** on macOS. On a
 clean tree `make test` builds the library and each test binary, then runs every suite:
 
 ```
@@ -29,10 +29,10 @@ A passing run exits `0`; a representative macOS/kqueue run reports **89 suites, 
 Tests use Sheredom's [utest.h](../../vendor/utest.h) (single header). Each `tests/test_*.c` compiles
 to a **standalone binary** and is auto-discovered by the Makefile (`$(wildcard ...)`):
 
-- `tests/test_*.c` — substrate, shared, and backend-axis unit suites (allocator, event, event_ctx,
+- `tests/test_*.c`: substrate, shared, and backend-axis unit suites (allocator, event, event_ctx,
   event_caps, socket_provider, stream, listener, datagram, connect_op, timer, drain, url, …).
-- `tests/protocols/<family>/test_*.c` — protocol suites, mirroring `src/protocols/<family>/`
-  (`http/`, `http2/`, `websocket/`, `dns/`, `proxy_protocol/`) — including the HTTP client/server
+- `tests/protocols/<family>/test_*.c`: protocol suites, mirroring `src/protocols/<family>/`
+  (`http/`, `http2/`, `websocket/`, `dns/`, `proxy_protocol/`), including the HTTP client/server
   suites under `tests/protocols/http/`.
 
 Run one suite directly:
@@ -62,26 +62,26 @@ and shift overflow. The production build (`make`) uses `-O2 -fstack-protector-st
 
 The unit suites are model-independent by design, but the two axes are **not** covered the same way.
 Readiness runs the full suite on the default build. The completion axis is covered by a **curated
-suite set plus dedicated smokes** — not a full-suite parity run: some suites are readiness-shaped by
+suite set plus dedicated smokes**, not a full-suite parity run: some suites are readiness-shaped by
 design (they drive `kl_event_wait`, or assert readiness-capability negotiation) and are deliberately
 excluded from the completion gate (see [capability_matrix.md §3](capability_matrix.md)).
 
-Note that `make` variables do not persist across invocations — pass the **same** `BACKEND=`/`OS=`/`CC=`
+Note that `make` variables do not persist across invocations; pass the **same** `BACKEND=`/`OS=`/`CC=`
 on every command that builds or runs, or you may test a differently-configured library.
 
 | Backend | Command | Coverage |
 |---|---|---|
-| epoll / kqueue (readiness, default) | `make test` | full suite — Linux / macOS locally + CI |
-| poll (universal readiness fallback) | `make BACKEND=poll test` | full suite — any POSIX host + CI |
+| epoll / kqueue (readiness, default) | `make test` | full suite -- Linux / macOS locally + CI |
+| poll (universal readiness fallback) | `make BACKEND=poll test` | full suite -- any POSIX host + CI |
 | **pollcomp** (portable completion double) | `make BACKEND=pollcomp smoke-pollcomp` (+ `-tls`/`-ws`/`-async`/`-client`); `make smoke-pollcomp-asan` | dedicated completion smokes + the stream single-shot oracle + an ASan/UBSan/LSan leak run (CI). `make BACKEND=pollcomp test` builds and runs the completion driver locally, but the *standing* coverage is the smokes + the io_uring curated suite below. |
 | **io_uring** (Linux completion) | `make BACKEND=iouring test-iouring`; `make BACKEND=iouring smoke-iouring` (+ `-async`/`-client`/`-asan`) | the curated `IOURING_TEST_SUITES` (readiness-shaped suites excluded) + the io_uring smokes. Best in an Apple/Linux container (unrestricted io_uring) |
-| **IOCP** (Windows completion) | `make OS=windows BACKEND=iocp CC=gcc` then `make OS=windows BACKEND=iocp CC=gcc test-win-iocp` | the IOCP lifecycle + negotiation suite + HTTP / TLS / async / KlDatagram smokes — Windows CI |
+| **IOCP** (Windows completion) | `make OS=windows BACKEND=iocp CC=gcc` then `make OS=windows BACKEND=iocp CC=gcc test-win-iocp` | the IOCP lifecycle + negotiation suite + HTTP / TLS / async / KlDatagram smokes -- Windows CI |
 
 The **pollcomp** double lets the completion driver (and its ASan/leak checks) run on macOS/Linux
 without io_uring or Windows:
 
 ```sh
-make smoke-pollcomp-asan     # completion driver + roundtrips under ASan/UBSan/LSan — leak-clean
+make smoke-pollcomp-asan     # completion driver + roundtrips under ASan/UBSan/LSan -- leak-clean
 ```
 
 ## Smoke tests
@@ -138,7 +138,7 @@ CI (`.github/workflows/ci.yml`) runs on push / PR to `main`. Standing jobs:
 
 | Job | Covers |
 |---|---|
-| **build** (matrix) | Linux epoll, Linux poll fallback, macOS kqueue, Linux `KEEL_NO_COMPLETION` — build + full suite + example smokes |
+| **build** (matrix) | Linux epoll, Linux poll fallback, macOS kqueue, Linux `KEEL_NO_COMPLETION` -- build + full suite + example smokes |
 | **completion** | the pollcomp double: HTTP/TLS/WebSocket/async roundtrips, the stream single-shot oracle, ASan+UBSan leak run, runtime-injected provider |
 | **completion-iouring** / **-suite** | io_uring roundtrips + ASan/LSan, and the `IOURING_TEST_SUITES` unit gate |
 | **windows** / **windows-iocp** | Winsock/WSAPoll full-core build + `WIN_TEST_SUITES` subset; IOCP lifecycle suite + HTTP/TLS/async/KlDatagram roundtrips |
@@ -146,8 +146,8 @@ CI (`.github/workflows/ci.yml`) runs on push / PR to `main`. Standing jobs:
 | **fuzz** | the parser fuzzers, 60 s each (see [fuzzing.md](fuzzing.md)) |
 | **analyze** | scan-build, cppcheck, all boundary/stale-name gates, the freestanding + EFI PE gates, W^X guard, hardening-flag assertion |
 | **musl** / **cosmo** | Alpine/musl build + suite; Cosmopolitan APE build + example smokes |
-| **integrations** | mbedTLS + nghttp2 — roundtrip, real-socket e2e, h2spec (pass-floor 130/146), h2load, curl + nghttpd interop, ALPN, real-TLS smoke |
-| **lwip** | lwIP providers — loopback (server/client/UDP echo), HTTPS-over-lwIP, raw-completion backend under ASan+UBSan+LSan |
+| **integrations** | mbedTLS + nghttp2 -- roundtrip, real-socket e2e, h2spec (pass-floor 130/146), h2load, curl + nghttpd interop, ALPN, real-TLS smoke |
+| **lwip** | lwIP providers -- loopback (server/client/UDP echo), HTTPS-over-lwIP, raw-completion backend under ASan+UBSan+LSan |
 
-The io_uring and IOCP axes and the integration jobs are CI-gated, not merely buildable — see the
+The io_uring and IOCP axes and the integration jobs are CI-gated, not merely buildable; see the
 [capability matrix](capability_matrix.md) for the per-backend, per-feature detail.

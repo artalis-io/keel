@@ -1,5 +1,5 @@
 /*
- * body_readers.c — Buffer and multipart body readers
+ * body_readers.c: Buffer and multipart body readers
  *
  * Concepts: kl_http_body_reader_buffer, kl_http_body_reader_multipart,
  * KlHttpBufReader, kl_http_multipart_next streaming iterator,
@@ -48,7 +48,7 @@ static void handle_index(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, html, strlen(html));
 }
 
-/* POST /echo — buffer reader echoes body back */
+/* POST /echo: buffer reader echoes body back */
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
@@ -61,7 +61,7 @@ static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-/* POST /upload — multipart streaming iterator parses form-data.
+/* POST /upload: multipart streaming iterator parses form-data.
  *
  * Drives kl_http_multipart_next() to walk the events. The full body has
  * been received by the time the handler runs, so NEED_DATA never

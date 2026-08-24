@@ -1,5 +1,5 @@
 /*
- * url_parser.c — URL parsing demo
+ * url_parser.c: URL parsing demo
  *
  * Concepts: kl_url_parse, http/https/ws/wss schemes, IPv6 addresses,
  * default port selection, KlUrl field inspection, error handling,

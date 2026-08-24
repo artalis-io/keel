@@ -36,7 +36,7 @@ for the life of the connection; there is no post-negotiation protocol switch.
     (`KL_HTTP_CONN_READING`).
 - **No-ALPN policy: accept as HTTP/1.1** (compatibility). A TLS client that does
   not use ALPN gets HTTP/1.1. This is deliberate, not accidental.
-- An unsupported ALPN value never engages HTTP/2 — it falls back to HTTP/1.1
+- An unsupported ALPN value never engages HTTP/2; it falls back to HTTP/1.1
   rather than failing, matching the no-ALPN policy.
 - If the server does **not** advertise `h2` (or has no `KlHttpServerConfig.h2`), it serves
   HTTP/1.1 only; a client that somehow selected `h2` would not be misrouted
@@ -49,7 +49,7 @@ consumes the client connection preface itself.
 
 ## Client policy
 
-- **Offer, in preference order: `h2`, then `http/1.1`** — set on the client TLS
+- **Offer, in preference order: `h2`, then `http/1.1`**, set on the client TLS
   context with `kl_tls_mbedtls_ctx_set_alpn`.
 - The HTTP/2 client (`kl_http2_client_connect`) verifies the negotiated protocol
   after the handshake:
@@ -68,7 +68,7 @@ consumes the client connection preface itself.
 HTTP/1.1 and HTTP/2 are transport adapters over one application model. Both build
 the same `KlHttpRequest`/`KlHttpResponse`, match on the same `KlHttpRouter`, run the same
 middleware, and call the same `KlHttpHandler`. Handlers see no ALPN result, HTTP/2
-frames, stream IDs, HPACK state, or HTTP/1.1 parser internals — only
+frames, stream IDs, HPACK state, or HTTP/1.1 parser internals, only
 `KlHttpRequest`/`KlHttpResponse`.
 
 **Authority convergence:** HTTP/2's `:authority` pseudo-header is injected as a
@@ -87,7 +87,7 @@ authority identically over both protocols (HTTP/1.1 `Host` and HTTP/2
 - **`make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR=... NGHTTP2_DIR=...`**
   (BYO, real TLS): a Keel server advertising `{h2, http/1.1}` verified with
   `openssl s_client -alpn …`, `curl --http2`, `curl --http1.1`, **and** the Keel
-  HTTP/2 client over TLS — all four negotiation directions land on one shared
+  HTTP/2 client over TLS; all four negotiation directions land on one shared
   handler. This is the end-to-end ALPN regression guard.
 
 Matrix proven:

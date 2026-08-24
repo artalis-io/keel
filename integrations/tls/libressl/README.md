@@ -1,7 +1,7 @@
 # Keel ⇄ LibreSSL integration
 
 LibreSSL is API-compatible enough with OpenSSL that the **same** Keel adapter
-source serves it. This directory contains **no adapter source** — it compiles the
+source serves it. This directory contains **no adapter source**; it compiles the
 shared adapter, `integrations/tls/openssl/tls_openssl.c`, against a LibreSSL prefix.
 That is the point: it demonstrates the identical `KlTls` implementation works
 against LibreSSL, with only the peer-cert accessor gated by
@@ -15,9 +15,9 @@ re-exports `../openssl/keel_tls_openssl.h`.
 
 Exactly **one** site: OpenSSL 3.0 renamed the ref-taking peer-cert accessor to
 `SSL_get1_peer_certificate`; LibreSSL (like BoringSSL) keeps
-`SSL_get_peer_certificate` (ref-taking, `X509_free`d after use). Everything else —
+`SSL_get_peer_certificate` (ref-taking, `X509_free`d after use). Everything else,
 the custom `BIO_METHOD`, `SSL_CTX`/`SSL` lifecycle, ALPN, `SSL_set1_host`,
-`ASN1_TIME_to_tm`, the memory-BIO feed/drain rings — is shared verbatim.
+`ASN1_TIME_to_tm`, the memory-BIO feed/drain rings, is shared verbatim.
 
 ## Bring your own LibreSSL
 
@@ -47,7 +47,7 @@ leaf generated at runtime:
   (h2), app-data round-trip both directions, and mTLS `peer_cert` returning the
   verified client identity.
 - **Completion / memory-BIO**: a full handshake and round-trip with **no sockets
-  at all** — ciphertext shuttled only via `feed_input`/`drain_output` — plus a
+  at all**, ciphertext shuttled only via `feed_input`/`drain_output`, plus a
   clean `shutdown` surfacing `read()==-1` with `at_eof()==1`.
 
 Both pass under ASan+UBSan.

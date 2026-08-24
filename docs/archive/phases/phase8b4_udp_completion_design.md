@@ -1,4 +1,4 @@
-# Phase 8b-4 — UDP over the completion loop — Design
+# Phase 8b-4, UDP over the completion loop, Design
 
 **Status:** designed, implementation gated. Builds on 8b-0..3 (the platform-independent
 completion axis + the TCP connection driver). Larger than 8b-1..3: `KlUdp` is
@@ -6,10 +6,10 @@ readiness/watcher-based, so completion support generalizes the completion axis a
 the `KlEventCtx` run model. Windows-runtime-validated (Windows-IOCP CI).
 
 **Scope (locked with the user):**
-- **Standalone `KlUdp` too**, not just a `udp_server` sharing the TCP loop — so
+- **Standalone `KlUdp` too**, not just a `udp_server` sharing the TCP loop, so
   `kl_event_ctx_run` (the generic/standalone tick) gains a completion path, and
   client-side UDP (e.g. the DNS resolver) can run over a completion loop.
-- **Overlapped sends** — `kl_udp_send_to` posts `WSASendTo` and the capped send
+- **Overlapped sends**: `kl_udp_send_to` posts `WSASendTo` and the capped send
   queue drains on send-completions (not just synchronous `sendto`).
 
 **Governing orthogonality (the whole point):**
@@ -17,7 +17,7 @@ the `KlEventCtx` run model. Windows-runtime-validated (Windows-IOCP CI).
    `recvmsg`/`sendmsg` path exactly as today; only a completion loop takes the new
    path. Byte-identical on POSIX.
 2. **`KlUdp` public API untouched.** `kl_udp_recv_start` / `kl_udp_send_to` / the
-   `on_recv`(`_segments`) callbacks / every config knob are unchanged — a handler
+   `on_recv`(`_segments`) callbacks / every config knob are unchanged, a handler
    never learns whether a datagram arrived via `recvmsg` or `WSARecvFrom`. No
    `include/keel/*.h` change.
 3. **Completion is a concept; IOCP is one implementation.** The datagram completion
@@ -32,14 +32,14 @@ the `KlEventCtx` run model. Windows-runtime-validated (Windows-IOCP CI).
 `KlUdp` receives by arming a **readiness watcher** on its `KlEventCtx`:
 `kl_watcher_add(udp->ctx, udp->fd, KL_EVENT_READ, udp_on_ready, udp)` (`udp.c:42`),
 and `udp_on_ready` does `recvmsg`. On a **completion** loop (`event_iocp.c`),
-readiness watchers never fire — `kl_event_wait` reports nothing; the kernel only
+readiness watchers never fire: `kl_event_wait` reports nothing; the kernel only
 delivers *completions* for posted overlapped ops. So datagrams must arrive via a
 posted `WSARecvFrom` completion, not a watcher.
 
 Two consumers must work on a completion loop:
 - a **`udp_server`** sharing the TCP server's loop (the server run loop already runs
   the completion tick), and
-- a **standalone `KlUdp`** on its own `KlEventCtx`, driven by `kl_event_ctx_run` —
+- a **standalone `KlUdp`** on its own `KlEventCtx`, driven by `kl_event_ctx_run`,
   which today is readiness-only (`kl_event_wait` + watcher dispatch), so it too needs
   a completion path. This is the generalization the broad scope requires: today
   *only the TCP server* runs on a completion loop.
@@ -50,11 +50,11 @@ Two consumers must work on a completion loop:
 
 8b-0's `KlCompletionEvent` is TCP-connection-shaped (`KlConn *conn` + ACCEPT/READ/
 WRITE). To carry datagram completions to a `KlUdp`, the event becomes
-**consumer-agnostic** — a `void *target` + a widened kind set — while the *generic
+**consumer-agnostic**, a `void *target` + a widened kind set, while the *generic
 driver* routes each event to the right handler:
 
 ```c
-/* completion.h (internal) — additions, no Win32 type */
+/* completion.h (internal): additions, no Win32 type */
 typedef enum {
     KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE,   /* TCP conn (target = KlConn* / KlServer* for accept) */
     KL_COMP_UDP_RECV, KL_COMP_UDP_SEND             /* datagram (target = KlUdp*) */
@@ -77,11 +77,11 @@ int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
                           const struct sockaddr *dst, socklen_t dlen);   /* overlapped WSASendTo */
 ```
 
-**One generic completion tick, shared by both run loops** — the routing lives in the
+**One generic completion tick, shared by both run loops**, the routing lives in the
 platform-independent `completion_driver.c`:
 
 ```c
-/* completion_driver.c — platform-independent. Drains the ctx's loop and routes each
+/* completion_driver.c: platform-independent. Drains the ctx's loop and routes each
  * event to its consumer. No Win32 symbol. Used by BOTH the server run loop and the
  * standalone kl_event_ctx_run. */
 int kl_comp_run(KlEventCtx *ctx, int max, int timeout_ms) {
@@ -102,7 +102,7 @@ int kl_comp_run(KlEventCtx *ctx, int max, int timeout_ms) {
   field: `containerof(c->ctx, KlServer, ev)` (every pooled conn's `ctx == &server->ev`;
   internal idiom, no `KlConn`/`KlServer` layout change on the public API).
 - `kl_comp_drain(ctx, …)` takes the **ctx** (not the server) so it is server-agnostic
-  — a standalone UDP loop drains the same way. (The server-scoped accept priming from
+  , a standalone UDP loop drains the same way. (The server-scoped accept priming from
   8b-0..3 moves to server startup, §4.)
 
 The existing `kl_io_engine_run_completion(s)` (the server's io_engine seam) becomes a
@@ -124,8 +124,8 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max, int timeout) {
 ```
 
 `kl_comp_run` is defined in `completion_driver.c` (completion builds) and **stubbed**
-in `io_engine.c` (non-completion builds — never reached, since no readiness backend
-advertises `COMPLETION`), exactly like `kl_io_engine_run_completion` today — so async.c
+in `io_engine.c` (non-completion builds, never reached, since no readiness backend
+advertises `COMPLETION`), exactly like `kl_io_engine_run_completion` today, so async.c
 links on every platform with no `#ifdef`.
 
 ---
@@ -145,7 +145,7 @@ else
   outstanding `WSARecvFrom`s into the udp recv buffer + a per-op source-addr buffer).
   On completion, `kl_udp_comp_on_recv(udp, ev)` calls the **existing** datagram
   delivery core (the GRO-split / `on_recv_segments` / `on_recv` logic in `udp.c`,
-  lifted behind an internal `kl_udp_deliver(udp, buf, len, src, …)` — model-blind,
+  lifted behind an internal `kl_udp_deliver(udp, buf, len, src, …)`: model-blind,
   shared with `udp_on_ready`), then re-posts. `on_recv` is fed identical bytes.
 - **Send (overlapped):** `kl_udp_send_to` on a completion loop enqueues then posts
   `kl_comp_post_udp_send` (`WSASendTo`); the capped send queue drains on
@@ -182,7 +182,7 @@ core carry **zero** Win32 symbols.
 
 ## 6. Orthogonality litmus (grep-assertable)
 
-- **Axis 1 (public API):** no `include/keel/*.h` change — `KlUdp`/`KlConn` public
+- **Axis 1 (public API):** no `include/keel/*.h` change; `KlUdp`/`KlConn` public
   layout and the udp/response/server APIs are untouched (`server_of` uses
   `containerof`, not a new field).
 - **Axis 2 (readiness untouched):** `udp_on_ready` / `recvmsg` / watcher path
@@ -212,18 +212,18 @@ job).
 
 - **`server_of` containerof** assumes every completion-driven conn's `ctx` is a
   `KlServer.ev`. True for pooled server conns (the only source of conn ops); asserted.
-  If a non-server conn ever posts completion ops, stop — the assumption breaks.
+  If a non-server conn ever posts completion ops, stop, the assumption breaks.
 - **Datagram buffer lifetime** across an outstanding `WSARecvFrom`/`WSASendTo` (the op
-  owns the send copy; the recv buffer must not be reused until completion — bound by
+  owns the send copy; the recv buffer must not be reused until completion; bound by
   a small fixed outstanding-op count).
-- **`kl_event_ctx_run` generalization** touches the shared standalone tick — must stay
+- **`kl_event_ctx_run` generalization** touches the shared standalone tick; must stay
   byte-identical on readiness (the branch is dead there). Litmus + `make test`.
 - **Runtime-only validation** for 8b-4c/d via the Windows-IOCP UDP smoke, iterated
   against CI as in 8a.
 
 ## 9. Out of scope
 
-- Batch/offload datagram paths (`recvmmsg`/GSO/GRO) over completion — the completion
+- Batch/offload datagram paths (`recvmmsg`/GSO/GRO) over completion, the completion
   recv is one-datagram-per-op first; batching is a later refinement.
-- Full HTTP client over IOCP (the async client's own completion path) — separate.
+- Full HTTP client over IOCP (the async client's own completion path): separate.
 - TLS over IOCP (8b-5), the last and deepest increment.

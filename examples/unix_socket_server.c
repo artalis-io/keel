@@ -1,5 +1,5 @@
 /*
- * unix_socket_server.c — Serving HTTP over a UNIX domain socket
+ * unix_socket_server.c: Serving HTTP over a UNIX domain socket
  *
  * Concepts: KL_HTTP_SERVER_TRANSPORT_UNIX, socket activation (inherited fd via
  * kl_systemd_listen_fd), and peer-credential access (kl_http_request_peer_cred).
@@ -10,7 +10,7 @@
  *     ./examples/unix_socket_server /tmp/keel.sock
  *     curl --unix-socket /tmp/keel.sock http://localhost/whoami
  *
- * Run (socket activation — systemd/launchd/inherited fd 3):
+ * Run (socket activation, systemd/launchd/inherited fd 3):
  *     systemd-socket-activate -l /tmp/keel.sock ./examples/unix_socket_server
  *     curl --unix-socket /tmp/keel.sock http://localhost/whoami
  */

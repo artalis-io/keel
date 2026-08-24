@@ -1,4 +1,4 @@
-# DNS TCP fallback (RFC 7766) + Cookies (RFC 7873) — Design
+# DNS TCP fallback (RFC 7766) + Cookies (RFC 7873): Design
 
 Status: **Phase 1 (persistent TCP fallback) and Phase 2 (cookies) implemented
 (2026-07-19).**
@@ -14,7 +14,7 @@ Delivered as **two CI-green commits**: Phase 1 (TCP fallback), Phase 2 (cookies)
 
 ---
 
-## Background — current resolver
+## Background: current resolver
 
 UDP-only, leg-based: each resolve fires an A leg and an AAAA leg over one shared
 unconnected `KlUdp sock`, rotating nameservers (`ns[DNS_MAX_NS]`) with per-leg
@@ -23,22 +23,22 @@ payload). `dns_on_recv` matches a response to a leg by txn-id, checks
 source-is-nameserver + QR + rcode + 0x20 question-echo, and settles the leg. The
 **TC (truncation) bit is not inspected**, and there is no cookie state.
 
-## Phase 1 — persistent TCP fallback (RFC 7766) — **implemented**
+## Phase 1, persistent TCP fallback (RFC 7766), **implemented**
 
 Landed in `src/dns_resolver.c` as a self-contained `KlDnsTcp tcp[DNS_MAX_NS]`
 connection manager. All transport I/O goes through `dns_tcp_write`/`dns_tcp_read`,
-which branch on `t->tls` (NULL today — the DoT hook). Tests:
+which branch on `t->tls` (NULL today, the DoT hook). Tests:
 `dns.tcp_fallback` (TC → recover over TCP), `dns.tcp_persistent_reuse` (two A+AAAA
 legs pipeline over one connection; a second resolve reuses the idle-cached
-connection — single accept), `dns.tcp_drop` (connection drop → pending legs settle
+connection: single accept), `dns.tcp_drop` (connection drop → pending legs settle
 empty, resolve completes rather than hanging).
 
 ### Trigger
 In `dns_on_recv`, after matching the leg, test `pkt[2] & 0x02` (TC). If set,
-don't settle — route the leg to the TCP path for the nameserver it used.
+don't settle: route the leg to the TCP path for the nameserver it used.
 
 ### Per-nameserver persistent connection
-A `KlDnsTcp tcp[DNS_MAX_NS]` on the resolver — one reusable connection per NS:
+A `KlDnsTcp tcp[DNS_MAX_NS]` on the resolver, one reusable connection per NS:
 
 ```c
 typedef struct {
@@ -61,23 +61,23 @@ Flow (driven by a `KlWatcher` on `fd`):
   response timer, and flag `leg->tcp_pending`.
 - **Writable:** on CONNECTING, check `SO_ERROR` → READY (or fail all pending
   legs). Flush `wbuf`; drop WRITE interest when drained.
-- **Readable:** append to `rbuf`; frame by the 2-byte length prefix — for each
+- **Readable:** append to `rbuf`; frame by the 2-byte length prefix: for each
   complete message, `kl_dns_parse_response`, `dns_find_leg(id)`, settle it,
   `outstanding--`. Multiple pipelined responses (out of order) are handled by
   txn-id matching.
 - **Idle:** when `outstanding == 0`, arm `idle_timer` (a few seconds); on fire,
   close. Any late byte re-opens on the next fallback.
 - **Drop/error:** on read EOF or a socket error with pending legs, settle those
-  legs empty (best effort — the other family's leg may still have answered) and
+  legs empty (best effort, the other family's leg may still have answered) and
   close. `rbuf`/`wbuf` freed on close (lazily allocated on first use).
 
 ### Leg additions
 `KlDnsLeg` gains `int tcp_pending`. It reuses its existing `id`/`question`; the
-TCP query is rebuilt (fresh 0x20 casing is fine — the response echoes what we
+TCP query is rebuilt (fresh 0x20 casing is fine, the response echoes what we
 send, and `leg->question` is updated to match). The per-leg timer bounds the TCP
 exchange; TCP settle reuses the existing `dns_leg_settle` path.
 
-## Phase 2 — DNS cookies (RFC 7873) — **implemented**
+## Phase 2, DNS cookies (RFC 7873), **implemented**
 
 Landed in `src/dns_resolver.c`: per-NS `KlDnsCookie cookie[DNS_MAX_NS]` (lazy
 8-byte client cookie from the entropy pool + learned server cookie);
@@ -99,7 +99,7 @@ typedef struct {
 } KlDnsCookie;               /* cookie[DNS_MAX_NS] on the resolver */
 ```
 Client cookie: 8 random bytes from the existing entropy pool, per nameserver
-(RFC-compliant; we do not use the §B.2 keyed-hash derivation — noted non-goal).
+(RFC-compliant; we do not use the §B.2 keyed-hash derivation; noted non-goal).
 
 ### Query build
 `dns_build_query` takes the NS index and adds a COOKIE option to the OPT rdata:
@@ -116,7 +116,7 @@ a mismatched client cookie is treated as a spoof and ignored.
 
 ### BADCOOKIE
 Full rcode = `(OPT extended-rcode << 4) | header rcode`; `23` = BADCOOKIE. On
-BADCOOKIE the response carries a fresh server cookie — store it and re-transmit
+BADCOOKIE the response carries a fresh server cookie; store it and re-transmit
 the query once with the updated cookie (bounded so it can't loop).
 
 ## Orthogonality & long-term fit (DoT / DoH)
@@ -125,19 +125,19 @@ Reviewed before implementing so the TCP transport composes cleanly and doesn't
 have to be rewritten for encrypted DNS.
 
 **Orthogonal to the UDP path.** TCP is a *separate transport* attached to the
-existing leg state machine at exactly one seam — the settle point in
+existing leg state machine at exactly one seam, the settle point in
 `dns_on_recv`, where a `TC`-bit response switches the leg from "UDP settle" to
 "TCP settle". The UDP transmit/retransmit/rotation logic is untouched; the
 `KlDnsTcp` connection manager is self-contained; a leg gains a single
-`tcp_pending` flag. Cookies are likewise orthogonal — an EDNS0 OPT option +
+`tcp_pending` flag. Cookies are likewise orthogonal, an EDNS0 OPT option +
 per-NS state, invisible to the transport.
 
-**Builds on the existing connection/transport primitives — not a parallel stack.**
+**Builds on the existing connection/transport primitives, not a parallel stack.**
 - The DNS-over-TCP connection carries `int fd` + `KlTls *tls` and does *all* I/O
   through a `(fd, KlTls*)` read/write helper with the same shape as the HTTP
   client's `io_read`/`io_write` (plain `send`/`recv` when `tls == NULL`, else the
   `KlTls` vtable). Idle timeout uses `KlTimer`, events use `KlWatcher`, timing
-  uses the monotonic clock — the same shared primitives, no reinvention.
+  uses the monotonic clock, the same shared primitives, no reinvention.
 - It reuses the pluggable **`KlTls`** transport vtable that TLS server/client
   already use, so encryption is a wrapping concern, not a fork.
 
@@ -150,7 +150,7 @@ helpers so the hook drops in. Same 2-byte framing, same pipelining, same idle
 pool.
 
 **DoH stays a separate resolver (correct layering).** DNS-over-HTTPS is *not*
-part of the built-in UDP/TCP resolver — per the roadmap it "rides the existing
+part of the built-in UDP/TCP resolver: per the roadmap it "rides the existing
 HTTPS client" as its own `KlResolver` implementation. That is precisely how it
 reuses `KlClientPool`: a DoH resolver issues pooled HTTPS requests
 (`kl_client_start_pooled`), inheriting HTTP keep-alive connection reuse for free.
@@ -166,7 +166,7 @@ already-pooled HTTP client. All three compose without touching each other.
 
 ## Non-goals
 
-DoT/DoH transports (separate roadmap items — this design only ensures they slot
+DoT/DoH transports (separate roadmap items, this design only ensures they slot
 in), TCP pipelining fairness/limits beyond basic id-multiplexing, and RFC 7873
 §B.2 keyed client-cookie derivation.
 

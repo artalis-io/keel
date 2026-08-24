@@ -1,10 +1,10 @@
 #!/bin/sh
-# bench_compare.sh — compare KEEL's Linux event backends on ONE machine.
+# bench_compare.sh: compare KEEL's Linux event backends on ONE machine.
 #
 # Builds the library + bench_server for epoll (default) and io_uring (completion-native,
 # BACKEND=iouring), then runs the SAME wrk workload against each and prints a comparison.
 # Back-to-back on one host keeps it RELATIVE-fair (same CPU, same noise floor). (The
-# readiness-adapted io_uring backend was retired in 8f-5d — it benchmarked ~2–2.3× slower
+# readiness-adapted io_uring backend was retired in 8f-5d; it benchmarked ~2–2.3× slower
 # than completion; see docs/phase8f5_iouring_default_migration_design.md.)
 #
 # Usage:  bench/bench_compare.sh          (needs wrk, curl, liburing-dev, gcc)
@@ -67,7 +67,7 @@ bench_backend "BACKEND=iouring" "io_uring (completion)" ""
 # production one). Included as a reference: it runs completion_driver.c WITHOUT
 # io_uring's kernel offload, so its delta from epoll isolates the completion-driver
 # cost and io_uring's delta from it isolates the kernel-offload win. Skip with
-# NO_POLLCOMP=1 (no extra deps — plain poll()).
+# NO_POLLCOMP=1 (no extra deps; plain poll()).
 [ "${NO_POLLCOMP:-0}" = 1 ] || bench_backend "BACKEND=pollcomp" "pollcomp (completion double)" ""
 
 echo ""

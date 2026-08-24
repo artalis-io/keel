@@ -1,21 +1,21 @@
-# DNS Resolver Hardening + Default Wiring — Design
+# DNS Resolver Hardening + Default Wiring: Design
 
-Status: **done** — hardening (#2) and opt-out default wiring (#4) both shipped.
+Status: **done**; hardening (#2) and opt-out default wiring (#4) both shipped.
 Decisions taken (2026-07-18):
-- **#4 wiring:** *opt-out default* — the async client uses the built-in async
+- **#4 wiring:** *opt-out default*, the async client uses the built-in async
   resolver by default; a flag restores blocking `getaddrinfo`.
-- **#2 hardening:** *core + DNS 0x20* — randomized transaction IDs, response
+- **#2 hardening:** *core + DNS 0x20*; randomized transaction IDs, response
   question verification, and 0x20 case randomization.
 
 Two focused commits (hardening first, then wiring on top), or one bundle.
 
 ---
 
-## #2 — Anti-spoofing hardening (`dns_resolver`)
+## #2: Anti-spoofing hardening (`dns_resolver`)
 
 Today the resolver matches responses on the 16-bit transaction ID alone, and
 that ID is a predictable sequence (`next_id` from 1). The socket is `connect()`-ed
-to the nameserver, so the kernel already drops any datagram not from that peer —
+to the nameserver, so the kernel already drops any datagram not from that peer,
 which defeats *off-path* spoofers who can't forge the nameserver's source IP.
 The hardening below closes the remaining gaps (predictable ID, no question
 binding) and adds defense-in-depth.
@@ -35,11 +35,11 @@ Replace the sequential counter with OS entropy:
 Bind each response to its query, not just the ID:
 
 - The request stores the exact **question-section wire bytes** it transmitted
-  (encoded QNAME + QTYPE + QCLASS — including 0x20 case, see 2c).
+  (encoded QNAME + QTYPE + QCLASS, including 0x20 case, see 2c).
 - On receipt, after the ID matches, the parser verifies the response's question
   section equals the stored bytes **exactly**. Mismatch → the response is
   ignored (not completed); the query keeps waiting until timeout.
-- `kl_dns_parse_response` gains two optional params — `const uint8_t *expect_q,
+- `kl_dns_parse_response` gains two optional params: `const uint8_t *expect_q,
   size_t expect_q_len`. When non-NULL it byte-compares the response question
   against them; NULL preserves the current answer-only behavior (tests/fuzz).
   The parser already walks the question section bounds-safely, so this is a
@@ -49,7 +49,7 @@ Bind each response to its query, not just the ID:
 
 - When building a query, randomly upper/lower-case each ASCII letter of the
   QNAME (using entropy bits). Compliant recursive resolvers echo the question
-  verbatim, so the exact-case compare in 2b enforces the echo — an off-path
+  verbatim, so the exact-case compare in 2b enforces the echo, an off-path
   spoofer must reproduce the case pattern as well as the ID and source port.
 - **Compatibility:** a minority of resolvers/middleboxes normalize case and
   would fail the exact-case check. Because our connected socket already blocks
@@ -74,7 +74,7 @@ local port is assigned at `connect()`). No change; noted for completeness.
 
 ---
 
-## #4 — Opt-out default wiring (`client`)
+## #4: Opt-out default wiring (`client`)
 
 ### Resolution selection (async client)
 
@@ -87,7 +87,7 @@ Precedence, highest first:
 3. **default** (resolver NULL, `system_dns` 0) → the async client **lazily
    creates and owns** a built-in `KlDnsResolver` from its `KlEventCtx`.
 
-The sync client is unchanged — it always uses blocking `getaddrinfo` (an async
+The sync client is unchanged: it always uses blocking `getaddrinfo` (an async
 UDP resolver is meaningless without an event loop).
 
 ### Lifecycle
@@ -96,13 +96,13 @@ UDP resolver is meaningless without an event loop).
   `kl_dns_resolver_create(ev_ctx, NULL)` (nameserver from `/etc/resolv.conf`),
   stored on the `KlClient`, and freed on client teardown.
 - **Ownership is per-client** (one UDP socket per client). For many concurrent
-  clients, share one explicit `resolver` (precedence #1) — documented, since the
+  clients, share one explicit `resolver` (precedence #1): documented, since the
   default trades a little efficiency for zero-config non-blocking DNS.
 
 ### Why this is still a net win
 
 The previous NULL path did a **blocking** `getaddrinfo` *inside the async client*
-— stalling the whole event loop during every lookup. The new default is
+, stalling the whole event loop during every lookup. The new default is
 non-blocking end to end. The behavioral change is resolution *semantics*
 (`/etc/hosts`, search domains), addressed below.
 
@@ -111,12 +111,12 @@ non-blocking end to end. The behavioral change is resolution *semantics*
 Our resolver doesn't yet do `/etc/hosts` or search domains (roadmap #5), so
 opt-out could break names that `getaddrinfo` resolves. Mitigations shipped here:
 
-- **`localhost` shortcut** — resolve `localhost` → `127.0.0.1` / `::1` directly
+- **`localhost` shortcut**, resolve `localhost` → `127.0.0.1` / `::1` directly
   (it's usually not in DNS). Covers the most common breakage.
-- **Literal IPs** — already shortcut.
-- **`system_dns` escape hatch** — anyone needing `/etc/hosts`/search *now* sets
+- **Literal IPs**: already shortcut.
+- **`system_dns` escape hatch**: anyone needing `/etc/hosts`/search *now* sets
   the flag and gets the old behavior.
-- **Compatibility note in the changelog** — existing async-client users (incl.
+- **Compatibility note in the changelog**: existing async-client users (incl.
   Hull) switch from inline blocking `getaddrinfo` to built-in UDP DNS. Strictly
   better for loop responsiveness; different resolution semantics.
 
@@ -148,7 +148,7 @@ ASan+UBSan, scan-build, cppcheck, `fuzz_dns`) per commit.
 
 ## Non-goals (this work)
 
-- `/etc/hosts`, `resolv.conf` `search`/`ndots`, multiple-nameserver failover —
+- `/etc/hosts`, `resolv.conf` `search`/`ndots`, multiple-nameserver failover:
   **roadmap #5**.
-- EDNS0, TCP fallback on truncation, DNSSEC, DoT/DoH — roadmap.
-- DNS cookies (RFC 7873) — a stronger anti-spoof than 0x20; roadmap if needed.
+- EDNS0, TCP fallback on truncation, DNSSEC, DoT/DoH; roadmap.
+- DNS cookies (RFC 7873), a stronger anti-spoof than 0x20; roadmap if needed.

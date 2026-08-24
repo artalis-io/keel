@@ -1,7 +1,7 @@
 # Keel integrations
 
 First-party, **optional** adapters that connect Keel's pluggable vtables to
-specific third-party libraries. They live here — outside `src/` — so the core
+specific third-party libraries. They live here, outside `src/`, so the core
 stays dependency-light: plain `make` and `make test` in the repo root build and
 pass with **no** external library present.
 
@@ -15,7 +15,7 @@ pass with **no** external library present.
 - **Bring your own library.** Nothing here is vendored, and nothing is
   downloaded at build time. You point the build at a library you supply.
 - **Core stays pure.** No integration is required by `make` / `make test`. No
-  third-party type ever appears in a Keel *core* public header — an integration
+  third-party type ever appears in a Keel *core* public header; an integration
   only ever implements a vtable already defined in `include/keel/`.
 - **No dynamic loading, no plugin registry, no executable memory.** Adapters are
   ordinary static objects you link. This preserves Keel's W^X and static-linking
@@ -46,7 +46,7 @@ exercises them on `ubuntu-latest` so they cannot silently rot, running:
   and curl / nghttpd interop (system `libnghttp2` via pkg-config);
 - mbedTLS adapter: a real TLS handshake smoke;
 - **ALPN e2e**: `openssl s_client -alpn`, `curl --http2` / `--http1.1`, and the
-  Keel HTTP/2 client over TLS — all on one shared handler.
+  Keel HTTP/2 client over TLS; all on one shared handler.
 
 **Versions exercised in CI:** nghttp2 = the Ubuntu system package (currently
 1.59). mbedTLS is **built from source at v3.6.2**, because Ubuntu ships the 2.28

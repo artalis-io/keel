@@ -1,11 +1,11 @@
-# integrations/platform/lwip — Keel on the lwIP TCP/IP stack (socket + event providers).
+# integrations/platform/lwip: Keel on the lwIP TCP/IP stack (socket + event providers).
 #
 # Bring-your-own lwIP: NOT vendored. Point LWIP_DIR at an lwIP checkout that also
 # carries contrib/ports/unix (the host arch/sys port), e.g.:
 #     make check LWIP_DIR=/path/to/lwip                 # build-gate (no lwIP lib)
 #     make test  LWIP_DIR=/path/to/lwip                 # loopback runtime test
 #
-# `check` compiles the providers against your lwIP + the public Keel headers — a
+# `check` compiles the providers against your lwIP + the public Keel headers; a
 # clean compile proves Keel's public KlSocketProvider + KlEventProvider API is
 # sufficient to author an lwIP platform using no internal Keel or host types.
 # `test` builds a small lwIP (core + unix port) and runs a real Keel server +
@@ -32,7 +32,7 @@ check: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o
 	@echo "integrations/platform/lwip: providers compile against $(LWIP_DIR) (public API sufficient)"
 
 # socket_lwip now carries the datagram data-plane too (KlDatagramOps folded onto the
-# provider — Stage 3 of the A2 refactor), so it uses only public Keel headers; there
+# provider, Stage 3 of the A2 refactor), so it uses only public Keel headers; there
 # is no separate udp_io_lwip link artifact.
 socket_lwip.o: socket_lwip.c keel_lwip.h lwipopts.h
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -46,7 +46,7 @@ platform_wakeup_lwip.o: platform_wakeup_lwip.c lwipopts.h
 	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -c -o $@ $<
 
 # ── loopback runtime test: a real Keel server + client over lwIP loopback ─────
-# Runs against a STOCK libkeel.a — no -DKEEL_PLATFORM_LWIP library build. Since the
+# Runs against a STOCK libkeel.a: no -DKEEL_PLATFORM_LWIP library build. Since the
 # KlSockAddr neutralization (docs/keel_sockaddr_design.md) core speaks KlSockAddr
 # only; socket_lwip.c marshals KlSockAddr <-> lwIP sockaddr at the provider
 # boundary and server bind parses the numeric address via kl_sockaddr_parse, so no
@@ -73,7 +73,7 @@ loopback: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o 
 
 # ── optional HTTPS phase: TLS over lwIP (mbedTLS BIO → lwIP socket provider) ───
 # Builds the mbedTLS adapter (../../tls/mbedtls) and links it into the loopback with
-# -DLWT_TLS, so the test adds a genuine TLS handshake + request over lwIP — proving
+# -DLWT_TLS, so the test adds a genuine TLS handshake + request over lwIP, proving
 # the mbedTLS socket-BIO routed through kl_socket_provider_lwip() (no lwIP-specific
 # TLS code). BYO mbedTLS via MBEDTLS_DIR (a source tree or a system prefix):
 #     make loopback-tls LWIP_DIR=/path/to/lwip MBEDTLS_DIR=/path/to/mbedtls
@@ -93,7 +93,7 @@ loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwi
 	@echo "integrations/platform/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"
 
 # ── NO_SYS=1 raw (tcp_*) lwIP archive: shared foundation for the raw provider ──
-# Builds a NO_SYS=1 lwIP (liblwip_raw.a) from lwipopts_raw.h — the base the KEEL
+# Builds a NO_SYS=1 lwIP (liblwip_raw.a) from lwipopts_raw.h: the base the KEEL
 # lwIP-raw completion provider + its raw_*_test suite (loopback-raw, below) run
 # on, entirely in-process (no tap, no root). (The original standalone feasibility
 # proof, raw_loopback_spike.c, was retired once the provider suite subsumed it.)
@@ -101,12 +101,12 @@ loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwi
 # The trick to make the raw build pick up lwipopts_raw.h (lwIP's opt.h does an
 # unconditional `#include "lwipopts.h"`): compile in a scratch dir (raw_build/)
 # that contains a one-line lwipopts.h forwarding to ../lwipopts_raw.h, and put
-# that dir FIRST on the include path — so it wins over the NO_SYS=0 lwipopts.h
+# that dir FIRST on the include path; so it wins over the NO_SYS=0 lwipopts.h
 # in `.`. Raw build uses ONLY src/core + src/core/ipv4 (+ netif/loopif when it
 # exists as a .c; in STABLE-2_2_0 the loopif lives in core/netif.c under
 # LWIP_HAVE_LOOPIF, so no extra netif file is needed). No src/api, no sys_arch.
 # A self-contained arch port for NO_SYS=1: we deliberately do NOT use lwIP's
-# contrib unix port (that's the threaded sys_arch — it defines LWIP_RAND() to
+# contrib unix port (that's the threaded sys_arch; it defines LWIP_RAND() to
 # lwip_port_rand() and drags in sys_arch.c). NO_SYS=1 needs only cc.h (compiler
 # abstraction: byte order + printf format defines) and a trivial sys_arch.h.
 RAW_BUILD  = raw_build
@@ -118,7 +118,7 @@ $(RAW_BUILD)/lwipopts.h:
 	@mkdir -p $(RAW_BUILD)/arch
 	@echo '#include "../lwipopts_raw.h"' > $@
 
-# Minimal compiler-abstraction header (cc.h) — no contrib port needed.
+# Minimal compiler-abstraction header (cc.h), no contrib port needed.
 $(RAW_BUILD)/arch/cc.h: $(RAW_BUILD)/lwipopts.h
 	@printf '%s\n' \
 	  '#ifndef LWIP_ARCH_CC_H' \
@@ -141,7 +141,7 @@ $(RAW_BUILD)/arch/cc.h: $(RAW_BUILD)/lwipopts.h
 	  '#define SZT_F "zu"' \
 	  '#endif' > $@
 
-# Trivial sys_arch.h — NO_SYS=1 uses none of the sys_* prototypes, but lwIP still
+# Trivial sys_arch.h: NO_SYS=1 uses none of the sys_* prototypes, but lwIP still
 # #includes this header. Empty guard is enough.
 $(RAW_BUILD)/arch/sys_arch.h: $(RAW_BUILD)/lwipopts.h
 	@printf '%s\n' \
@@ -158,7 +158,7 @@ liblwip_raw.a: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) $(RAW_SRCS)
 
 # ── Phase 9 / RC-3: lwIP raw COMPLETION backend as a RUNTIME PROVIDER on a STOCK libkeel ──
 # The completion counterpart of `loopback` (which rides a STOCK libkeel over the readiness
-# lwIP provider) — and now built the SAME way. RC-3 retired BACKEND=lwipraw: event_lwip_raw.c
+# lwIP provider); and now built the SAME way. RC-3 retired BACKEND=lwipraw: event_lwip_raw.c
 # is a pure runtime KlEventProvider (no kl_event_*_builtin / kl_comp_ops_builtin), so it drops
 # onto a STOCK libkeel whose always-linked completion driver + dispatch (completion_driver.c /
 # completion_dispatch.c, present since RC-1) reach it via loop->ops->completion. See
@@ -166,8 +166,8 @@ liblwip_raw.a: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) $(RAW_SRCS)
 #
 # Steps:
 #   1. Build the NO_SYS=1 lwIP archive (liblwip_raw.a) + the raw_build scratch dir
-#      (lwipopts.h forwarder + arch/cc.h) — reusing the NO_SYS raw-build mechanism.
-#   2. Build a STOCK libkeel (the DEFAULT readiness backend — epoll/kqueue; always carries
+#      (lwipopts.h forwarder + arch/cc.h), reusing the NO_SYS raw-build mechanism.
+#   2. Build a STOCK libkeel (the DEFAULT readiness backend, epoll/kqueue; always carries
 #      the completion driver + dispatch from RC-1). NO BACKEND= override.
 #   3. Compile the lwip-raw PROVIDER objects (event_lwip_raw.o + lwip_raw_glue.o) against
 #      the raw lwIP includes + the internal src/ seams.
@@ -175,16 +175,16 @@ liblwip_raw.a: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) $(RAW_SRCS)
 #
 # raw_tick_test injects the provider at runtime: kl_event_ctx_init_ex(.., kl_event_provider_
 # lwip_raw()) for P9-1, and KlHttpServerConfig.event_provider = kl_event_provider_lwip_raw() for the
-# server cases (P9-2/3/4) — the server auto-wires the paired overlapped socket provider from
+# server cases (P9-2/3/4); the server auto-wires the paired overlapped socket provider from
 # the loop's native_provider(). Existing readiness targets (loopback/loopback-tls)
 # are untouched.
 LWIPRAW_KEEL_LIB = $(KEEL_ROOT)/libkeel.a
-# The lwip-raw provider objects. event_lwip_raw.c is OUR code (no lwIP headers) — build it
+# The lwip-raw provider objects. event_lwip_raw.c is OUR code (no lwIP headers); build it
 # -Wall -Wextra -Werror against the internal src/ seams (completion.h/socket.h) + keel_lwip_raw.h.
-# lwip_raw_glue.c is the lwIP-only TU — relaxed warnings (-w) against the NO_SYS=1 lwIP headers.
+# lwip_raw_glue.c is the lwIP-only TU, relaxed warnings (-w) against the NO_SYS=1 lwIP headers.
 # event_lwip_raw.c is OUR code (no lwIP headers). lwip_raw_glue.c + lwip_raw_testclient.c are
-# the lwIP-only TUs — relaxed warnings (-w) against the NO_SYS=1 lwIP headers. The glue also
-# includes keel/allocator.h (KlAllocator only — no socket/net type, so the header seam holds),
+# the lwIP-only TUs, relaxed warnings (-w) against the NO_SYS=1 lwIP headers. The glue also
+# includes keel/allocator.h (KlAllocator only, no socket/net type, so the header seam holds),
 # so it needs -I$(KEEL_ROOT)/include.
 event_lwip_raw.o: event_lwip_raw.c keel_lwip_raw.h lwip_raw_glue.h
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_DEFAULT_SOURCE \
@@ -200,7 +200,7 @@ tests/lwip_raw_testclient.o: tests/lwip_raw_testclient.c tests/lwip_raw_testclie
 # raw_tick_test (lifetime/close/cancel) + raw_recv_test (Stage A: receive/concurrency/saturation/
 # context) + raw_send_test (Stage B: bounded send/file) + raw_caps_test (Stage C: fail-early
 # connect/bind/UDP capability contract). All use the public API + two internal seams (event_caps.h
-# for the compatibility negotiation; the glue/testclient headers) — hence -Isrc alongside -I. for
+# for the compatibility negotiation; the glue/testclient headers); hence -Isrc alongside -I. for
 # keel_lwip_raw.h.
 LWIPRAW_OBJS = event_lwip_raw.o lwip_raw_glue.o tests/lwip_raw_testclient.o
 loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
@@ -262,11 +262,11 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	./tests/raw_datagram_test
 	@echo "integrations/platform/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK (runtime injection on stock libkeel)"
 
-# ASan+UBSan+LSan variant — the lifetime/close/cancel + Stage-A receive/context cases need it.
+# ASan+UBSan+LSan variant: the lifetime/close/cancel + Stage-A receive/context cases need it.
 # Builds a STOCK DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + tests.
 LWIPRAW_ASAN = -std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -D_DEFAULT_SOURCE
 # `make -C $(KEEL_ROOT) debug` runs the root `clean`, whose integrations-clean cascade removes this
-# backend's raw_build tree — so re-materialize it (liblwip_raw.a pulls lwipopts.h + RAW_ARCH via its
+# backend's raw_build tree; so re-materialize it (liblwip_raw.a pulls lwipopts.h + RAW_ARCH via its
 # own prerequisites) AFTER the root build, before anything here compiles against $(RAW_INC).
 loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
@@ -337,7 +337,7 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 # ── LC-4: HTTPS (TLS) over the lwIP-raw COMPLETION backend (BYO mbedTLS, out of CI) ──
 # The TLS counterpart of loopback-raw. Combines how loopback-tls (non-raw) links the mbedTLS adapter
 # (../../tls/mbedtls/libkeel_mbedtls.a + $(MBEDTLS_LIB)) with how loopback-raw builds the raw provider
-# objects ($(LWIPRAW_OBJS) + liblwip_raw.a on a STOCK libkeel). No lwip-raw TLS code exists — TLS
+# objects ($(LWIPRAW_OBJS) + liblwip_raw.a on a STOCK libkeel). No lwip-raw TLS code exists. TLS
 # rides two existing generic legs (client socket-BIO through the raw socket provider; server
 # memory-BIO through completion_driver.c). See docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4.
 #
@@ -355,7 +355,7 @@ loopback-raw-tls: $(LWIPRAW_OBJS) liblwip_raw.a
 	./tests/raw_tls_test
 	@echo "integrations/platform/lwip: LC-4 HTTPS over lwIP raw completion OK (stock libkeel + lwIP raw + mbedTLS)"
 
-# ASan+UBSan+LSan variant — the TLS handshake + memory-BIO drain path is the new memory surface.
+# ASan+UBSan+LSan variant: the TLS handshake + memory-BIO drain path is the new memory surface.
 loopback-raw-tls-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
 	$(MAKE) -C $(KEEL_ROOT) debug

@@ -1,5 +1,5 @@
 /*
- * event_lwip.c — reference KlEventLoop backend over lwip_poll (lwIP 2.1+,
+ * event_lwip.c: reference KlEventLoop backend over lwip_poll (lwIP 2.1+,
  * LWIP_SOCKET_POLL). The readiness half of the lwIP platform reference: pair it
  * with socket_lwip.c (the socket provider) so both agree on what a "native,
  * pollable" fd is (the NATIVE_FD contract). lwIP socket fds are small dense ints,

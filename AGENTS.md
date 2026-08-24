@@ -1,4 +1,4 @@
-# KEEL — Agent Guidelines
+# KEEL: Agent Guidelines
 
 Guidelines for AI agents working on keel: code review, auditing, testing, and contributing.
 
@@ -6,33 +6,33 @@ Guidelines for AI agents working on keel: code review, auditing, testing, and co
 
 Every PR should be checked for:
 
-- [ ] **Overflow guards** — All arithmetic on sizes/lengths checked against `SIZE_MAX/2` or `INT_MAX/2` before addition/multiplication
-- [ ] **NULL checks** — Every pointer from allocation, lookup, or parameter is checked before dereference
-- [ ] **Resource cleanup** — Every `_init` has a matching `_free`, every `open` has a `close`, every acquired connection is released
-- [ ] **Bounds checking** — Array indices validated, buffer writes bounded by capacity, `snprintf` not `sprintf`
-- [ ] **Return value checks** — `read`, `write`, `sendfile`, allocation functions all checked for errors
-- [ ] **No allocation in hot path** — The event loop, connection state machine, and response send path must not call `malloc`
-- [ ] **Allocator discipline** — All allocation goes through `KlAllocator`, never raw `malloc`/`free`
-- [ ] **State machine correctness** — Connection state transitions are valid, no state reached without proper setup
-- [ ] **Keep-alive safety** — Response reset clears all state, no stale pointers across requests
-- [ ] **Header pointer lifetime** — After body reading starts, header pointers may be invalidated; don't access them in body reader callbacks
-- [ ] **Middleware safety** — Middleware that short-circuits must write a complete response; short-circuit disables keep-alive (body unread)
-- [ ] **Middleware order** — Registration order = execution order; global middleware (`/*`) before specific (`/api/*`) if intended
-- [ ] **Request context cleanup** — `req->ctx` set by middleware is the application's responsibility to clean up in the handler
-- [ ] **TLS orthogonality** — TLS changes must not affect middleware, router, body readers, or handlers
-- [ ] **TLS shutdown** — Connections must call tls->shutdown() before close(fd)
-- [ ] **Pending drain** — After TLS reads, tls->pending() must be checked to drain internal buffers
-- [ ] **Async safety** — `kl_async_complete()` only called from event loop thread, never from workers
-- [ ] **Watcher API** — All `kl_watcher_*` calls use `KlEventCtx *` (via `&server->ev` or standalone), never raw `KlHttpServer *`
-- [ ] **Thread pool callbacks** — `work_fn` must not touch connection/event loop state; `done_fn` runs on event loop thread
-- [ ] **Thread pool creation** — `kl_thread_pool_create` takes `KlEventCtx *` (not `KlHttpServer *`)
-- [ ] **Thread pool shutdown** — `kl_thread_pool_free` called before `kl_http_server_free` or event loop teardown
-- [ ] **Client response lifetime** — `KlHttpClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
-- [ ] **Client async cleanup** — `kl_http_client_cancel()` + `kl_http_client_free()` called on error/deadline paths
-- [ ] **URL injection** — URLs passed to `kl_url_parse()` / `kl_http_client_request()` are validated (CRLF rejection)
-- [ ] **Proxy buffer cleanup** — connect_buf and proxy_recv freed on all error/success paths
-- [ ] **Proxy auth isolation** — Proxy-Authorization header not forwarded to target after CONNECT
-- [ ] **Pool proxy key** — kl_http_client_pool_acquire/release include proxy_host/proxy_port for cache isolation
+- [ ] **Overflow guards**: All arithmetic on sizes/lengths checked against `SIZE_MAX/2` or `INT_MAX/2` before addition/multiplication
+- [ ] **NULL checks**: Every pointer from allocation, lookup, or parameter is checked before dereference
+- [ ] **Resource cleanup**: Every `_init` has a matching `_free`, every `open` has a `close`, every acquired connection is released
+- [ ] **Bounds checking**: Array indices validated, buffer writes bounded by capacity, `snprintf` not `sprintf`
+- [ ] **Return value checks**: `read`, `write`, `sendfile`, allocation functions all checked for errors
+- [ ] **No allocation in hot path**: The event loop, connection state machine, and response send path must not call `malloc`
+- [ ] **Allocator discipline**: All allocation goes through `KlAllocator`, never raw `malloc`/`free`
+- [ ] **State machine correctness**: Connection state transitions are valid, no state reached without proper setup
+- [ ] **Keep-alive safety**: Response reset clears all state, no stale pointers across requests
+- [ ] **Header pointer lifetime**: After body reading starts, header pointers may be invalidated; don't access them in body reader callbacks
+- [ ] **Middleware safety**: Middleware that short-circuits must write a complete response; short-circuit disables keep-alive (body unread)
+- [ ] **Middleware order**: Registration order = execution order; global middleware (`/*`) before specific (`/api/*`) if intended
+- [ ] **Request context cleanup**: `req->ctx` set by middleware is the application's responsibility to clean up in the handler
+- [ ] **TLS orthogonality**: TLS changes must not affect middleware, router, body readers, or handlers
+- [ ] **TLS shutdown**: Connections must call tls->shutdown() before close(fd)
+- [ ] **Pending drain**: After TLS reads, tls->pending() must be checked to drain internal buffers
+- [ ] **Async safety**: `kl_async_complete()` only called from event loop thread, never from workers
+- [ ] **Watcher API**: All `kl_watcher_*` calls use `KlEventCtx *` (via `&server->ev` or standalone), never raw `KlHttpServer *`
+- [ ] **Thread pool callbacks**: `work_fn` must not touch connection/event loop state; `done_fn` runs on event loop thread
+- [ ] **Thread pool creation**: `kl_thread_pool_create` takes `KlEventCtx *` (not `KlHttpServer *`)
+- [ ] **Thread pool shutdown**: `kl_thread_pool_free` called before `kl_http_server_free` or event loop teardown
+- [ ] **Client response lifetime**: `KlHttpClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
+- [ ] **Client async cleanup**: `kl_http_client_cancel()` + `kl_http_client_free()` called on error/deadline paths
+- [ ] **URL injection**: URLs passed to `kl_url_parse()` / `kl_http_client_request()` are validated (CRLF rejection)
+- [ ] **Proxy buffer cleanup**: connect_buf and proxy_recv freed on all error/success paths
+- [ ] **Proxy auth isolation**: Proxy-Authorization header not forwarded to target after CONNECT
+- [ ] **Pool proxy key**: kl_http_client_pool_acquire/release include proxy_host/proxy_port for cache isolation
 
 ## Security Audit Patterns
 
@@ -50,11 +50,11 @@ grep -rn 'atoi\b' src/          # use strtol with validation
 ### Integer overflow patterns to check
 
 ```c
-/* BAD — can overflow */
+/* BAD: can overflow */
 size_t new_cap = cap * 2;
 char *buf = alloc(len + extra);
 
-/* GOOD — overflow-safe */
+/* GOOD: overflow-safe */
 if (cap > SIZE_MAX / 2) return -1;
 size_t new_cap = cap * 2;
 
@@ -64,24 +64,24 @@ char *buf = alloc(len + extra);
 
 ### Buffer boundary checks
 
-- `read_buf` is heap-allocated, growable up to `max_header_size` — verify no write exceeds `read_cap`
-- `hdr_buf` in multipart reader is 2048 — verify header overflow is caught
-- Response header buffer grows — verify growth arithmetic is overflow-safe
-- Body reader buffer grows — verify `max_size` is checked before growth
+- `read_buf` is heap-allocated, growable up to `max_header_size`; verify no write exceeds `read_cap`
+- `hdr_buf` in multipart reader is 2048; verify header overflow is caught
+- Response header buffer grows; verify growth arithmetic is overflow-safe
+- Body reader buffer grows; verify `max_size` is checked before growth
 
 ### Thread safety
 
 KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worker threads, but thread safety is maintained by construction:
-- Workers only touch the work queue (mutex-protected) and a pipe fd — never the event loop or connection state
-- `done_fn` callbacks run on the event loop thread (via pipe watcher) — safe to call `kl_async_complete`
-- `kl_async_complete()` is NOT thread-safe — must only be called from the event loop thread
+- Workers only touch the work queue (mutex-protected) and a pipe fd; never the event loop or connection state
+- `done_fn` callbacks run on the event loop thread (via pipe watcher); safe to call `kl_async_complete`
+- `kl_async_complete()` is NOT thread-safe; must only be called from the event loop thread
 - No global mutable state (except `_Atomic int running`/`draining` for signal handling)
 - Integration tests that use threads properly synchronize server start/stop
 - No `static` mutable variables in any module (except test files)
 
 ### Graceful degradation
 
-- **No built-in 503**: `kl_http_server_stats()` exposes `active_connections` / `max_connections` / `async_suspended` / `listen_paused` — users implement load shedding as middleware (threshold, `Retry-After`, etc. are policy decisions)
+- **No built-in 503**: `kl_http_server_stats()` exposes `active_connections` / `max_connections` / `async_suspended` / `listen_paused`; users implement load shedding as middleware (threshold, `Retry-After`, etc. are policy decisions)
 - **No global memory monitoring**: allocator is pluggable, so the framework can't reliably track total memory; existing caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors
 - **No automatic 503 or adaptive load shedding**: too opinionated for a transport library; users know their workload
 
@@ -89,7 +89,7 @@ KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worke
 
 - `KlResolver.resolve()` may call `done_fn` synchronously before returning
 - Decorators (e.g. `resolver_cache.c`) use `in_resolve`/`completed` sentinel flags to detect sync completion and defer freeing the per-request handle
-- This is the canonical pattern — any new resolver decorator must replicate it
+- This is the canonical pattern; any new resolver decorator must replicate it
 
 ## Testing Requirements
 
@@ -129,18 +129,18 @@ UTEST(suite_name, test_name) {
 UTEST_MAIN();
 ```
 
-Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Makefile wildcard.
+Add the test file as `tests/test_<module>.c`; it's auto-discovered by the Makefile wildcard.
 
 ## Performance Considerations
 
-- **No allocation in the hot path** — the event loop, state machine transitions, and response sending must work with pre-allocated buffers
-- **writev batching** — response headers and body are sent in a single writev call, not separate writes
-- **sendfile for files** — never read a file into a buffer to write it to a socket
-- **TCP_CORK on Linux** — coalesce headers + file data into minimal packets
-- **TCP_NODELAY** — no Nagle delay on response writes
-- **Edge-triggered events** — fewer syscalls than level-triggered
-- **Pre-built status lines** — "HTTP/1.1 200 OK\r\n" is a compile-time constant, not formatted per-request
-- **Fast integer formatting** — Content-Length is formatted without snprintf
+- **No allocation in the hot path**: the event loop, state machine transitions, and response sending must work with pre-allocated buffers
+- **writev batching**: response headers and body are sent in a single writev call, not separate writes
+- **sendfile for files**: never read a file into a buffer to write it to a socket
+- **TCP_CORK on Linux**: coalesce headers + file data into minimal packets
+- **TCP_NODELAY**: no Nagle delay on response writes
+- **Edge-triggered events**: fewer syscalls than level-triggered
+- **Pre-built status lines**: "HTTP/1.1 200 OK\r\n" is a compile-time constant, not formatted per-request
+- **Fast integer formatting**: Content-Length is formatted without snprintf
 
 ## Adding a New Module
 
@@ -157,7 +157,7 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 1. Implement the `KlHttpBodyReader` vtable (4 functions: `on_data`, `on_complete`, `on_error`, `destroy`)
 2. Define a concrete struct embedding `KlHttpBodyReader base` as the first field
 3. Write a factory function: `KlHttpBodyReader *kl_http_body_reader_<name>(KlAllocator *alloc, KlHttpRequest *req, void *user_data)`
-4. The factory inspects headers (Content-Type, Content-Length) to validate — return NULL to reject (triggers 415)
+4. The factory inspects headers (Content-Type, Content-Length) to validate; return NULL to reject (triggers 415)
 5. Register per-route: `kl_http_server_route(&s, method, pattern, handler, user_data, kl_http_body_reader_<name>)`
 6. Create header in `include/keel/body_reader_<name>.h`, source in `src/body_reader_<name>.c`
 7. Add to `CORE_SRC` in Makefile, include in `keel.h`
@@ -174,11 +174,11 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
      LDFLAGS += <any required libraries>
    endif
    ```
-4. Test on the target platform — event backends are platform-specific
+4. Test on the target platform; event backends are platform-specific
 
 ## Adding a New Middleware
 
-Middleware uses the `KlHttpMiddleware` function signature — return `0` to continue, non-zero to short-circuit:
+Middleware uses the `KlHttpMiddleware` function signature: return `0` to continue, non-zero to short-circuit:
 
 ```c
 int my_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
@@ -215,7 +215,7 @@ int auth_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     if (!key || key_len != expect_len ||
         memcmp(key, cfg->api_key, expect_len) != 0) {
         kl_http_response_error(res, 401, "Unauthorized");
-        return 1;  /* short-circuit — stop chain, send response */
+        return 1;  /* short-circuit: stop chain, send response */
     }
     return 0;
 }

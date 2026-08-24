@@ -4,7 +4,7 @@ A first-party adapter implementing Keel's `KlTls` transport vtable
 (`include/keel/tls.h`) on top of [OpenSSL](https://www.openssl.org/) 3.x. The
 **same** source (`tls_openssl.c`) also builds against
 [LibreSSL](https://www.libressl.org/) and
-[BoringSSL](https://boringssl.googlesource.com/boringssl/) — the handful of API
+[BoringSSL](https://boringssl.googlesource.com/boringssl/); the handful of API
 divergences are gated with `#if defined(...)` and driven from
 `integrations/tls/libressl/` and `integrations/tls/boringssl/` (see their READMEs).
 Provides TLS 1.2/1.3 server support (with optional mTLS client-cert verification)
@@ -27,14 +27,14 @@ the repo root never touch OpenSSL. You opt in explicitly.
 
 ## Bring your own OpenSSL
 
-OpenSSL is **not vendored and never downloaded**. Supply it yourself — e.g.
+OpenSSL is **not vendored and never downloaded**. Supply it yourself, e.g.
 Homebrew: `OPENSSL_DIR=$(brew --prefix openssl@3)`, or a distro's `libssl-dev`.
 If `OPENSSL_DIR` is unset, the compiler's default search paths are used.
 
 ### Version matrix
 
-This one adapter source (`tls_openssl.c`) is shared by three integration dirs —
-`integrations/tls/openssl/`, `integrations/tls/boringssl/`, `integrations/tls/libressl/` — which
+This one adapter source (`tls_openssl.c`) is shared by three integration dirs (
+`integrations/tls/openssl/`, `integrations/tls/boringssl/`, `integrations/tls/libressl/`) which
 just compile it against their respective library. The public API is the
 `kl_tls_openssl_*` names for all three (the name denotes the adapter family).
 
@@ -84,7 +84,7 @@ KlHttpServerConfig config = {
 ### Client (verifying by default)
 
 Client contexts **verify the server certificate by default**. Pass a CA bundle
-path (or `NULL` to use the system trust store — still verifying), then set the
+path (or `NULL` to use the system trust store, still verifying), then set the
 expected hostname before the handshake:
 
 ```c
@@ -96,7 +96,7 @@ kl_tls_openssl_set_hostname(tls, "example.com");   /* SNI + hostname match */
 ```
 
 To **disable** verification (tests, or cert-pinning done elsewhere) you must opt
-in explicitly — this is encrypted but MITM-vulnerable:
+in explicitly; this is encrypted but MITM-vulnerable:
 
 ```c
 KlTlsCtx *ctx = kl_tls_openssl_client_ctx_create_insecure(&alloc);  /* verify-none */
@@ -106,7 +106,7 @@ For a client that must present a cert to an mTLS server, load it onto the client
 ctx: `kl_tls_openssl_client_ctx_set_cert(ctx, cert, clen, key, klen)`.
 
 By default a transport EOF without a TLS `close_notify` is treated as an error
-(strict — a truncated close-delimited HTTPS response is not silently accepted).
+(strict: a truncated close-delimited HTTPS response is not silently accepted).
 Opt into the lenient legacy behavior with
 `kl_tls_openssl_ctx_set_allow_truncation(ctx, 1)`.
 
@@ -124,12 +124,12 @@ make e2e  OPENSSL_DIR=$(brew --prefix openssl@3)
 server + client leaf at runtime (OpenSSL library API, no files, no CLI) and
 proves:
 
-1. **Axis 1 — socket-BIO**: a `socketpair()` carries ciphertext; both sessions
+1. **Axis 1 (socket-BIO)**: a `socketpair()` carries ciphertext; both sessions
    handshake to completion on non-blocking fds; a payload round-trips both ways;
    **ALPN** negotiates `h2` (server preference); **mTLS** `peer_cert()` returns
    the verified client identity (CN, issuer, SAN, SHA-256 fingerprint, validity,
    DER).
-2. **Axis 2 — memory-BIO**: NO sockets; ciphertext is shuttled purely via
+2. **Axis 2 (memory-BIO)**: NO sockets; ciphertext is shuttled purely via
    `feed_input`/`drain_output`; handshake + app-data round-trip both ways; a
    clean `shutdown()` surfaces on the peer as `read()==-1` with `at_eof()==1`.
 

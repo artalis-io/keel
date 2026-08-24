@@ -1,5 +1,5 @@
 /*
- * proxy_client.c — HTTP proxy client (all 4 modes)
+ * proxy_client.c: HTTP proxy client (all 4 modes)
  *
  * Self-contained: starts a local target server and proxy relay,
  * then demonstrates sync/async × HTTP/HTTPS proxy modes.

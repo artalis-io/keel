@@ -1,6 +1,6 @@
-# UDP Support — Design
+# UDP Support: Design
 
-Status: **All three layers done** — `KlUdp`, `KlUdpServer`, and the async
+Status: **All three layers done**; `KlUdp`, `KlUdpServer`, and the async
 `dns_resolver` (with a `fuzz_dns` target) are shipped.
 Decisions taken (2026-07-18):
 - Deliver **three layers**: the `KlUdp` socket primitive, a built-in async DNS
@@ -13,15 +13,15 @@ Decisions taken (2026-07-18):
 
 ## Motivation
 
-UDP is the one missing *primitive* in Keel's event model — everything today is
+UDP is the one missing *primitive* in Keel's event model; everything today is
 `SOCK_STREAM`. Adding it unblocks, in priority order:
 
 1. **A truly non-blocking async DNS resolver.** Today `KlClient` falls back to
    blocking `getaddrinfo` (on the thread pool) unless the user brings c-ares.
    A UDP DNS resolver makes the async client non-blocking out of the box.
-2. **HTTP/3 / QUIC** (separate future epic) — needs a UDP datagram loop first.
-3. **Datagram services** — syslog, statsd/metrics push, service discovery,
-   DTLS, game/telemetry protocols — served on the *same* event loop as HTTP.
+2. **HTTP/3 / QUIC** (separate future epic); needs a UDP datagram loop first.
+3. **Datagram services**: syslog, statsd/metrics push, service discovery,
+   DTLS, game/telemetry protocols; served on the *same* event loop as HTTP.
 
 It sits directly on the existing `KlEventCtx` / `KlWatcher` abstraction: a UDP
 socket is a non-blocking fd registered for `KL_EVENT_READ` (and `KL_EVENT_WRITE`
@@ -41,17 +41,17 @@ allocator, zero allocation on the success hot path):
 | `dns_resolver` | `dns_resolver.h` | `udp`, `resolver` (implements the vtable), `timer` |
 | `udp_server`   | `udp_server.h`   | `udp` |
 
-`dns_resolver` and `udp_server` are thin consumers of `udp` — the primitive
+`dns_resolver` and `udp_server` are thin consumers of `udp`; the primitive
 carries all the socket/backpressure complexity.
 
 **Allocation discipline.** The recv buffer is pre-allocated at `init`. The
 success path (immediate `sendto`, `recvfrom` into the fixed buffer) allocates
 nothing. The *only* allocation is a queued datagram node under backpressure
-(EAGAIN) — the same trade `KlDrain` already makes, and off the hot path.
+(EAGAIN); the same trade `KlDrain` already makes, and off the hot path.
 
 ---
 
-## A. `KlUdp` — socket primitive
+## A. `KlUdp`: socket primitive
 
 ```c
 typedef struct KlUdp KlUdp;
@@ -65,7 +65,7 @@ typedef void (*KlUdpRecvFn)(KlUdp *udp, const void *data, size_t len,
 typedef void (*KlUdpDrainFn)(KlUdp *udp, void *user_data);
 
 typedef struct {
-    KlEventCtx  *ctx;            /* event loop (borrowed — must outlive udp) */
+    KlEventCtx  *ctx;            /* event loop (borrowed; must outlive udp) */
     int          family;        /* AF_INET / AF_INET6 / AF_UNSPEC (auto from bind_addr) */
     const char  *bind_addr;     /* NULL = unbound (client sockets) */
     uint16_t     bind_port;     /* 0 = ephemeral */
@@ -108,10 +108,10 @@ edge-triggered backends, cap at **N datagrams per tick** (default 64); if more
 remain, leave READ armed / re-post so the loop round-robins other fds instead of
 starving on one busy socket. Oversized datagrams (`> recv_buf_size`, flagged by
 `MSG_TRUNC`) are delivered truncated with `last_error = KL_ERR_TOO_LARGE` and a
-counter bump — never a buffer overflow.
+counter bump; never a buffer overflow.
 
 `src` points into a per-`udp` scratch `sockaddr_storage`, valid only for the
-duration of the `on_recv` call — copy it to keep it.
+duration of the `on_recv` call; copy it to keep it.
 
 ### Send semantics + backpressure (KlDrain-style)
 
@@ -165,11 +165,11 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
   resend up to `attempts`, then `done_fn(..., KL_ERR_TIMEOUT, ...)`.
 - **Literal IPs** short-circuit (no query). Because the `KlResolver` contract
   permits **synchronous completion** (see `resolver.h` / `resolver_cache.c`), the
-  literal-IP path may call `done_fn` inside `resolve()` — documented, and the
+  literal-IP path may call `done_fn` inside `resolve()`; documented, and the
   cache decorator already handles it.
 - Errors: `NXDOMAIN`/`SERVFAIL` → `KL_ERR_DNS`; truncated (`TC` bit) response →
   `KL_ERR_DNS` for now (TCP-fallback deferred; note below).
-- **Security:** the response parser consumes untrusted network input — it gets a
+- **Security:** the response parser consumes untrusted network input; it gets a
   dedicated **libFuzzer target** (`fuzz_dns`) alongside the existing parser/multipart
   fuzzers, and bounds every pointer against the packet end (compression-pointer
   loops capped, no unbounded label chains).
@@ -180,7 +180,7 @@ from `resolv.conf` can be a fast follow.
 
 ---
 
-## C. `KlUdpServer` — datagram dispatch
+## C. `KlUdpServer`: datagram dispatch
 
 A bind + handler surface symmetric with `KlServer`, for line/datagram services.
 A thin wrapper over `KlUdp`.
@@ -210,7 +210,7 @@ int   kl_udp_server_reply(KlUdpServer *s, const void *data, size_t len,
 void  kl_udp_server_free(KlUdpServer *s);
 ```
 
-Crucially it **shares a `KlEventCtx`** — it does not own a thread or loop. One
+Crucially it **shares a `KlEventCtx`**; it does not own a thread or loop. One
 process can serve TCP HTTP (`KlServer`) *and* a UDP service on a single event
 loop, or run standalone via `kl_event_ctx_run`. Multi-core scaling is the same
 horizontal `SO_REUSEPORT` story as the TCP server.
@@ -222,16 +222,16 @@ horizontal `SO_REUSEPORT` story as the TCP server.
 The general-purpose API is chosen so the QUIC-specific bits slot in additively,
 without breaking callers:
 
-- **Source addr on wildcard binds** — QUIC servers bound to `0.0.0.0`/`::` must
+- **Source addr on wildcard binds**: QUIC servers bound to `0.0.0.0`/`::` must
   reply *from the exact local address* the client hit. This needs
   `IP_PKTINFO`/`IPV6_RECVPKTINFO` (capture local addr on recv) and setting it on
   send. Added later as a `KlUdpConfig` opt-in flag plus a richer recv variant
-  (`KlUdpRecvMeta { local_addr, ecn, tos }`) that supplements — not replaces —
+  (`KlUdpRecvMeta { local_addr, ecn, tos }`) that supplements, not replaces,
   `KlUdpRecvFn`.
 - **GSO/GRO segmentation offload** (`UDP_SEGMENT`/`UDP_GRO`) and **`recvmmsg`
-  batching** — throughput features, opt-in flags on the config; transparent to
+  batching**; throughput features, opt-in flags on the config; transparent to
   existing consumers.
-- **ECN** — carried in the future `KlUdpRecvMeta`.
+- **ECN**: carried in the future `KlUdpRecvMeta`.
 
 None of these change the v1 surface; they are strictly additive.
 
@@ -253,7 +253,7 @@ codes needed for v1.
   assert queue growth → `on_drain` → dropped counter past the cap); oversized
   datagram truncation; recv fairness cap. Under ASan/UBSan + `BACKEND=poll`.
 - **`dns_resolver`**: stand up a `KlUdpServer` as a **mock nameserver** returning
-  canned responses — resolve → correct A/AAAA; timeout + retransmit; NXDOMAIN →
+  canned responses; resolve → correct A/AAAA; timeout + retransmit; NXDOMAIN →
   `KL_ERR_DNS`; CNAME chase; literal-IP shortcut (sync-completion path);
   end-to-end (`KlClient` fetch-by-name through the mock resolver against a local
   `KlServer`). Plus the `fuzz_dns` libFuzzer target on the response parser.
@@ -264,11 +264,11 @@ codes needed for v1.
 
 ## Sequencing & effort
 
-1. **`KlUdp` primitive** (~1.5 days) — socket + recv drain + capped send queue +
+1. **`KlUdp` primitive** (~1.5 days); socket + recv drain + capped send queue +
    tests.
-2. **`KlUdpServer`** (~0.5 day) — thin wrapper + tests (also serves as the DNS
+2. **`KlUdpServer`** (~0.5 day); thin wrapper + tests (also serves as the DNS
    mock harness).
-3. **`dns_resolver`** (~2 days) — query build + response parse + `fuzz_dns` +
+3. **`dns_resolver`** (~2 days); query build + response parse + `fuzz_dns` +
    timeout/retry + client integration.
 
 Each ships as its own CI-green commit, mirroring the client-identity trio
@@ -278,8 +278,8 @@ rollout. Total ≈ 4 days.
 
 ## Non-goals (this iteration)
 
-- QUIC / HTTP-3 itself — this unblocks it; the transport is a separate epic.
-- Multicast group membership (`IP_ADD_MEMBERSHIP`) — add on demand.
+- QUIC / HTTP-3 itself; this unblocks it; the transport is a separate epic.
+- Multicast group membership (`IP_ADD_MEMBERSHIP`); add on demand.
 - DoT / DoH resolvers (DoH would ride the existing HTTP client), DNSSEC, mDNS.
-- Native Windows datagram support — consistent with Keel's POSIX/Cosmopolitan target.
+- Native Windows datagram support; consistent with Keel's POSIX/Cosmopolitan target.
 ```
