@@ -1,6 +1,6 @@
 # R3b — Completion-target lifetime: decision + coverage freeze (docs-only)
 
-**Status:** R3b of [keel_improvement_roadmap.md](keel_improvement_roadmap.md) — **design freeze,
+**Status:** R3b of [keel_improvement_roadmap.md](../../roadmap/roadmap.md) — **design freeze,
 docs-only.** No production-code and no test changes are made here. R3b records the decision that
 follows from the [R3a inventory](r3a_completion_lifetime_inventory.md), inventories the existing
 regression coverage per lifetime mechanism, and proposes the *smallest* missing coverage — each as a
@@ -29,7 +29,7 @@ classes; one required remedy for the watcher ABA, frozen separately":**
 4. **Single-shot completion is a load-bearing stream contract.** The safety of the stream
    raw-`containerof` recovery depends on every completion backend emitting **exactly one** completion
    per submitted op (no duplicate, no post-retirement completion). Stated explicitly in
-   [architecture_invariants.md](architecture_invariants.md) I5. **This does not cover the watcher
+   [architecture_invariants.md](../../architecture/invariants.md) I5. **This does not cover the watcher
    ABA** — the stale watcher event *is* B's one legitimate single completion; single-shot is
    satisfied and the misdelivery still occurs. The watcher gap is orthogonal to single-shot.
 5. **Define the smallest missing regression coverage per mechanism** (below).

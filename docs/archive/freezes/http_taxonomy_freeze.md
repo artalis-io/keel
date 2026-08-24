@@ -1,7 +1,7 @@
 # HTTP Taxonomy Freeze (T1) — `KlServer`/`KlClient`/`KlRequest`/`KlResponse` → `KlHttp*`
 
 Status: **docs-only design freeze**, branch `roadmap/r0-architecture-baseline`, unpushed.
-Source brief: [`claude_code_transport_taxonomy_prompt.md`](claude_code_transport_taxonomy_prompt.md).
+Source brief: `claude_code_transport_taxonomy_prompt.md`.
 
 This freeze covers the **HTTP protocol-family rename** (prompt steps T2–T4). The prompt's datagram
 portion (D1–D3: public `KlDatagram` socket/connect conveniences, `KlUdp`/`KlUdpServer` removal,

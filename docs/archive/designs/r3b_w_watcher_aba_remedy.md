@@ -4,7 +4,7 @@
 R3b-T2). This document scopes the watcher ABA gap ([R3a](r3a_completion_lifetime_inventory.md)
 finding 1a), compares the two candidate mechanisms, and records the chosen one; see the
 Implementation & validation section at the end. Sibling docs: the [R3b decision](r3b_lifetime_decision.md)
-and invariant I5 in [architecture_invariants.md](architecture_invariants.md).
+and invariant I5 in [architecture_invariants.md](../../architecture/invariants.md).
 
 ## The defect (grounded in code)
 

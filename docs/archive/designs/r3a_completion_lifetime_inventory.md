@@ -1,13 +1,13 @@
 # R3a — Completion-target lifetime inventory (read-only)
 
-**Status:** R3a of [keel_improvement_roadmap.md](keel_improvement_roadmap.md) — **inventory only, no
+**Status:** R3a of [keel_improvement_roadmap.md](../../roadmap/roadmap.md) — **inventory only, no
 remedy.** This document traces, from actual code, every object a completion event can reference, how
 its lifetime is protected, and whether each known-dangerous sequence is prevented. It proposes **no
 code change**: choosing the smallest remedy for any gap is R3b, a separate reviewed increment.
 
 Method: traced from source (not comments or historical audits), one target class at a time, across
 the completion backends (pollcomp, io_uring, IOCP, lwIP-raw, EFI). Related invariants:
-[architecture_invariants.md](architecture_invariants.md) I3 (logical close ≠ physical retirement),
+[architecture_invariants.md](../../architecture/invariants.md) I3 (logical close ≠ physical retirement),
 I5 (batch targets outlive referencing events), I9 (quarantine on uncertain retirement).
 
 ## How a completion event names its target

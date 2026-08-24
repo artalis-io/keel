@@ -2,8 +2,8 @@
 
 > **Historical, append-only evidence log — newest pass first.** Each pass records what was verified
 > on its date; verify any specific claim against current code before acting on it. Current-state
-> docs: [architecture.md](architecture.md), [architecture_invariants.md](architecture_invariants.md).
-> Index: [audits/README.md](audits/README.md).
+> docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
+> Index: [audits/README.md](README.md).
 
 ## Twelfth pass — the public `KlDatagram` STABLE facade (datagram Phase B) preserves the three-axis separation (2026-08-17)
 

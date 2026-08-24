@@ -1,6 +1,6 @@
 # `KlDatagram` vs `KlUdp` — which datagram API to use
 
-**Status:** positioning + decision table (R2 of [keel_improvement_roadmap.md](keel_improvement_roadmap.md)).
+**Status:** positioning + decision table (R2 of [keel_improvement_roadmap.md](../../roadmap/roadmap.md)).
 Documentation only — **no source or ABI change**, and **no consumer migration**; migrations, if any,
 are proposed and implemented separately (see the consumer inventory below).
 
@@ -65,9 +65,9 @@ consumer to `KlDatagram` if it relies on any extension, and never silently reint
 > they require a documented `KlUdp` extension (batching, GSO/GRO, multicast/broadcast, per-packet
 > TOS, source-pinned send, `recvmmsg`/`sendmmsg`). If a `KlUdp` extension is required, say which one
 > and why in the design note. This mirrors invariant I10's dependency direction
-> ([architecture_invariants.md](architecture_invariants.md)) at the datagram layer.
+> ([architecture_invariants.md](../../architecture/invariants.md)) at the datagram layer.
 
-(Also recorded in [CONTRIBUTING.md](../CONTRIBUTING.md).)
+(Also recorded in [CONTRIBUTING.md](../../../CONTRIBUTING.md).)
 
 ## Consumer inventory (migrations proposed separately — NOT in this increment)
 

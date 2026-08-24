@@ -2,7 +2,7 @@
 
 Status: frozen design. Docs-only. This document authorizes the S4-1 and S4-2 implementation
 increments; it changes no build, code, or CI behavior by itself. Governing roadmap:
-[keel_improvement_roadmap.md](keel_improvement_roadmap.md), Phase S / S4.
+[keel_improvement_roadmap.md](../../roadmap/roadmap.md), Phase S / S4.
 
 Each S4 implementation increment lands with its build, CI, cleanup, documentation, and enforcement
 updates in the same commit (roadmap principle #9) and is validated and paused for review.
