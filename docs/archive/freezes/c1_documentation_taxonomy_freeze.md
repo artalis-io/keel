@@ -3,7 +3,7 @@
 Status: frozen design, docs-only inventory. Classifies every tracked document and defines the target
 `docs/` taxonomy. It performs **no moves, deletions, or content rewrites** — those land in the reviewed
 C1-1/C1-2/C1-3 increments after this freeze is accepted. No executable C behavior changes anywhere in
-Phase C. Governing roadmap: [keel_improvement_roadmap.md](keel_improvement_roadmap.md), Phase C / C1.
+Phase C. Governing roadmap: [keel_improvement_roadmap.md](../../roadmap/roadmap.md), Phase C / C1.
 
 ## 0. Scope
 

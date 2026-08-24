@@ -4,7 +4,7 @@ Status: frozen design, docs-only inventory. Classifies the *active source and he
 carry stale milestone / migration / deleted-path narration and defines the rules for removing or
 rewriting them. It performs **no code edits** — those land in the reviewed C2-1…C2-4 increments after
 this freeze is accepted. **No behavioral code changes anywhere in C2**: every edit is comment-only
-(a compile per increment proves it). Governing roadmap: [roadmap/roadmap.md](roadmap/roadmap.md),
+(a compile per increment proves it). Governing roadmap: [roadmap/roadmap.md](../../roadmap/roadmap.md),
 Phase C / C2.
 
 ## 0. Goal
