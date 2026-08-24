@@ -16,31 +16,34 @@ gate so it cannot return. The em-dash is a stylistic tell; the house style uses 
 This is text-only for logic, but it is NOT universally code-byte-identical: emitted string literals
 change too, so it carries an output-to-oracle obligation (below).
 
-## 2. Inventory (tracked, vendor/ excluded)
+## 2. Inventory (the single scope definition)
 
-U+2014 population by area (files / occurrences):
+Scope is defined ONCE and shared by this freeze, the sweep, and the gate: **every tracked file
+(`git ls-files`), minus `vendor/`, minus binaries (any file containing a NUL byte).** There is no
+format allowlist - the set is derived from the tree, so a future extension (`.css`, `.js`, `.svg`,
+`.json`, or any new site asset) is covered automatically and cannot smuggle the code point back.
 
-| Area          | files | occ.  |
-|---------------|-------|-------|
-| include/      | 45    | 282   |
-| src/ (incl. src/protocols) | 133 | 1283 |
-| tests/        | 184   | 1382  |
-| integrations/ | 142   | 1347  |
-| examples/     | 34    | 87    |
-| bench/        | 5     | 15    |
-| fuzz/         | 5     | 10    |
-| docs/ (active + archived) | 76 | 3858 |
-| tools/        | 3     | 37    |
-| shell (*.sh)  | 28    | 158   |
-| .github/workflows/ci.yml (YAML) | 1 | some |
-| site/index.html (HTML) | 0 | 0 |
-| README*.md    | 12    | 241   |
-| CLAUDE.md     | 1     | 82    |
-| CONTRIBUTING.md | 1   | 10    |
-| Makefile(s)   | 10    | 205   |
+U+2014 population over that population, by extension (complete, not an allowlist):
 
-Total: ~600 files, ~9300 occurrences. Spacing is uniform (7586 spaced forms vs 1 tight across
-`.c/.h/.md`), but per D2 the replacement is context-dependent, not a single glyph (see §4).
+| Ext / kind      | files | occ.  |
+|-----------------|-------|-------|
+| `.md`           | 92    | 4257  |
+| `.c`            | 294   | 2793  |
+| `.h`            | 141   | 797   |
+| no-ext (Makefiles, etc.) | 10 | 205 |
+| `.sh`           | 28    | 158   |
+| `.yml`          | 1     | 39    |
+| `.pl`           | 2     | 17    |
+| `.manifest`     | 1     | 2     |
+| `.lua`          | 2     | 2     |
+| `.gitignore`    | 1     | 2     |
+
+Total: **572 files, 8272 occurrences.** This population explicitly includes the text the earlier
+allowlist missed: Perl tooling (`tools/*.pl` - note `tools/check_no_milestones.pl` itself carries 11),
+Lua (`bench/*.lua`), a manifest (`src/substrate-tus.manifest`), and `.gitignore`. Tracked site assets
+with zero em-dashes today (`site/index.html`) are in scope by construction. Spacing is uniform
+(7586 spaced forms vs 1 tight across `.c/.h/.md`), but per D2 the replacement is context-dependent,
+not a single glyph (see §4).
 
 ## 3. Handling model (D1 resolved: include everything, no exemptions)
 
@@ -103,9 +106,11 @@ gates.
 
 - **Full-text** scan (NOT comment-only): the entire file content, because emitted literals are in
   scope too. No contextual, string-literal, directory, or historical exceptions.
-- **Formats:** the roadmap-specified active and archived prose-bearing text: `.c`, `.h`, `.md`,
-  `.html`, Makefiles, shell (`.sh`), YAML (`.yml`/`.yaml`), and any site text formats. `vendor/`
-  excluded.
+- **File set (no format allowlist):** derived from `git ls-files`, excluding only `vendor/` (`.git/`
+  is untracked and never appears). Each file is checked for a NUL byte and skipped if binary; every
+  remaining text file is searched in full. This is the SAME scope definition as §2, so freeze, sweep,
+  and gate share one population - and any future tracked text format (`.css`, `.js`, `.svg`, `.json`,
+  a new site asset) is covered automatically, with no gate edit.
 - **Rejects** exactly U+2014. Prints `file:line` on a hit and fails. No exceptions of any kind.
 - **Self-canaried**, positive and negative, run before the tree scan: a positive (a U+2014 anywhere,
   in prose OR a string literal, MUST flag); negatives that MUST pass (a box-drawing U+2500 banner; an
@@ -125,11 +130,17 @@ separated when they materially increase review risk:
    density (marker strings + `run_*.sh`), so the emitted-literal rewrites and their oracle updates
    are grouped with, or split into a dedicated sub-commit from, the comment rewrites when that lowers
    review risk (per the ruling).
-6. **C3-6** - prose and config: `docs/**` (active + archived), `README*.md`, `CLAUDE.md`,
-   `CONTRIBUTING.md`, `site/index.html`, `.github/workflows/*.yml`, `tools/*.sh`, Makefile comments
-   and `@echo`/`printf` recipe strings.
-7. **C3-7** - permanent `check-no-em-dash` gate, run green over the whole tree; archive the C3 freeze
-   to `docs/archive/freezes/`.
+6. **C3-6** - ALL remaining tracked text outside the C/H area increments above. Explicitly:
+   `docs/**` (active + archived), `README*.md`, `CLAUDE.md`, `CONTRIBUTING.md`,
+   `.github/workflows/*.yml`, all shell (`tools/*.sh` and the harness `run_*.sh`/`build_*.sh` not
+   already taken with C3-5), **Perl tooling (`tools/*.pl`, including this gate's sibling
+   `check_no_milestones.pl`)**, **Lua (`bench/*.lua`)**, **manifests (`*.manifest`)**, **ignore/config
+   files (`.gitignore`)**, `site/index.html` and any future site assets (SVG/CSS/JS/JSON), and Makefile
+   comments plus `@echo`/`printf` recipe strings. This is defined as "the tracked-text population of
+   §2 minus what earlier increments already cleared," so nothing tracked is left carrying the code
+   point.
+7. **C3-7** - permanent `check-no-em-dash` gate (itself em-dash-free), run green over the whole
+   tracked-text population; archive the C3 freeze to `docs/archive/freezes/`.
 
 ## 8. Validation (per increment; adjusted for D1)
 
@@ -158,8 +169,9 @@ proof obligation splits:
 - **D2 - RESOLVED: context-appropriate ASCII punctuation** (sentence break: period/semicolon;
   explanation or list intro: colon; parenthetical: parentheses/commas; genuine label or range: hyphen
   or `--`), never a universal replacement.
-- **D3 - RESOLVED: full-text exact-codepoint gate** over C/H, Markdown, HTML, Makefiles, shell, YAML,
-  and site text; no contextual, string-literal, directory, or historical exceptions. Box-drawing,
-  en-dashes, and mathematical minus remain outside C3.
+- **D3 - RESOLVED: full-text exact-codepoint gate** over EVERY tracked, non-binary file (derived from
+  `git ls-files`, NUL-skip for binaries, only `vendor/` excluded) - no format allowlist, so future
+  site assets are covered automatically. No contextual, string-literal, directory, or historical
+  exceptions. Box-drawing, en-dashes, and mathematical minus remain outside C3.
 
 No source or doc text is edited until this amended freeze is accepted.
