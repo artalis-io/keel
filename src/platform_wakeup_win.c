@@ -1,5 +1,5 @@
 /*
- * platform_wakeup_win.c — the Windows run-loop wakeup channel.
+ * platform_wakeup_win.c: the Windows run-loop wakeup channel.
  *
  * A separate TU (mirrors platform_wakeup_posix.c)
  * so the wakeup is an independently-overridable seam. Windows has no pipe(2) that

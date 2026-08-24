@@ -1,5 +1,5 @@
 /*
- * allocator.c — allocator DISPATCH only (no default implementation).
+ * allocator.c: allocator DISPATCH only (no default implementation).
  *
  * This TU is pure vtable dispatch over KlAllocator and pulls in NO libc: a
  * bring-your-own-allocator build (and a future freestanding/UEFI profile) links

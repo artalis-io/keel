@@ -1,9 +1,9 @@
 /*
- * datagram.c — the public KlDatagram facade.
+ * datagram.c: the public KlDatagram facade.
  *
  * A thin forwarding layer over the internal KlDgramCore assembly. Its only real work is the TWO
  * adapter builders of the frozen §2.5 boundary: it manufactures the core's neutral hooks (submit / arm /
- * disarm / pull / cancel / retire / close_transport / deliver) by WRAPPING the existing backend seams —
+ * disarm / pull / cancel / retire / close_transport / deliver) by WRAPPING the existing backend seams;
  * NO per-backend code here. The mode is selected by the loop's capability; exactly two implementations:
  *
  *   completion (KL_EVENT_CAP_COMPLETION): submit → kl_comp_post_dgram_send; arm → kl_comp_post_dgram_recv;
@@ -17,10 +17,10 @@
  * the close machine's backend-retirement step closes it exactly once.
  *
  * The COMPLETION adapter additionally uses the GENERIC fd↔loop registration (kl_event_add at init,
- * kl_event_del at close) — the generic completion-loop lifecycle. This is NOT part of the
+ * kl_event_del at close): the generic completion-loop lifecycle. This is NOT part of the
  * post/cancel/retire datagram seam; it is inert on io_uring/pollcomp and CreateIoCompletionPort on IOCP.
  * Register once before posting; on registration failure init fails without adopting the fd; at close the
- * coordinator retires every op, then kl_event_del, then the socket close — exactly once.
+ * coordinator retires every op, then kl_event_del, then the socket close; exactly once.
  */
 
 #include <keel/datagram.h>
@@ -29,7 +29,7 @@
 #include <keel/event.h>         /* KL_EVENT_READ / KL_EVENT_WRITE */
 
 #include "datagram_core.h"
-#include "datagram_batch.h"     /* KlDatagramBatch layout — send_batch drives the core send queue */
+#include "datagram_batch.h"     /* KlDatagramBatch layout: send_batch drives the core send queue */
 #include "completion.h"         /* KlCompletionEvent + kl_comp_* + KL_COMP_DGRAM_* */
 #include "completion_io.h"          /* KlDgramSendOp / KlDgramRecvOp descriptors */
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
@@ -89,7 +89,7 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
     case KL_COMP_DGRAM_RECV:
         if (!core) break;
         if (!ev->ok) {
-            (void)kl_dgram_core_recv_on_complete(core, 0, 0);   /* failed/cancelled — retire, no delivery */
+            (void)kl_dgram_core_recv_on_complete(core, 0, 0);   /* failed/cancelled: retire, no delivery */
         } else {
             KlDgramSlot *in = kl_dgram_core_inbound_slot(core);
             if (in) {
@@ -117,7 +117,7 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
         break;
     default: break;
     }
-    /* Release the event's ref UNLESS it is a BORROWED quarantine ref (retain_life=1) — then the
+    /* Release the event's ref UNLESS it is a BORROWED quarantine ref (retain_life=1): then the
      * backend op keeps it forever (fail-closed; the recv machine still retired above via ok=0). Honoured
      * uniformly, including the dead-owner (core==NULL) break above. */
     if (!ev->retain_life)
@@ -140,11 +140,11 @@ static KlDgramSubmitResult dg_comp_submit(void *ctx, const void *data, size_t le
 static int dg_comp_arm(void *ctx) {
     KlDatagram *dg = ctx;
     KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
-    /* Capture the local (dest) address on the completion recv — consistent with the readiness recv,
-     * which always parses the pktinfo cmsg — so a wildcard-bound source-pinned reply can learn its
+    /* Capture the local (dest) address on the completion recv (consistent with the readiness recv,
+     * which always parses the pktinfo cmsg), so a wildcard-bound source-pinned reply can learn its
      * local addr. Harmless when the socket has no IP_PKTINFO (no cmsg → no local). ALSO request
      * the received-TOS cmsg when the socket has RX_TOS capture enabled (accepted_rx_caps), so
-     * kl_datagram_recv_tos can surface it — the capture mask only tells the backend which cmsgs to parse. */
+     * kl_datagram_recv_tos can surface it; the capture mask only tells the backend which cmsgs to parse. */
     unsigned capture = KL_DGRAM_RX_PKTINFO;
     if (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) capture |= KL_DGRAM_RX_TOS;
     KlDgramRecvOp op = { .fd = dg->fd, .buf = in ? in->data : NULL, .cap = in ? in->cap : 0,
@@ -205,7 +205,7 @@ static int dg_rdy_pull(void *ctx, size_t *out_len) {
     if (meta.has_local) { in->local = meta.local; in->flags |= KL_DGRAM_HAS_LOCAL; }
     if (meta.truncated) in->flags |= KL_DGRAM_TRUNCATED;
     /* Received TOS (read by kl_datagram_recv_tos in on_recv). GATE on the socket's accepted RX_TOS
-     * mask (as the completion dispatch does) so behavior is backend-INDEPENDENT — a provider that surfaces
+     * mask (as the completion dispatch does) so behavior is backend-INDEPENDENT; a provider that surfaces
      * meta.tos on a socket that never enabled TOS capture must NOT leak it. */
     in->tos = (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) ? meta.tos : -1;
     *out_len = (size_t)n;
@@ -247,13 +247,13 @@ static int dg_rdy_pull_batch(void *ctx, KlDgramRxView *v, int allow_refill) {
 
     KlDgramRxSlot *slot = &b->rx_slots[b->cursor_i];
     /* Defensive bound: a provider over-reporting length past the slot buffer delivers a captured prefix
-     * with TRUNCATED — set the flag when EITHER the provider marked it OR the length was clamped. */
+     * with TRUNCATED; set the flag when EITHER the provider marked it OR the length was clamped. */
     int    over  = slot->len > b->slot_bufsz;
     size_t slen  = over ? b->slot_bufsz : slot->len;
     int    trunc = slot->meta.truncated || over;
 
-    /* LATCH the GRO delivery mode when entering a slot (seg_off == 0) and keep it until the slot advances
-     * — a callback that (un)registers on_recv_segments mid-split cannot change the mode for the remaining
+    /* LATCH the GRO delivery mode when entering a slot (seg_off == 0) and keep it until the slot advances;
+     * a callback that (un)registers on_recv_segments mid-split cannot change the mode for the remaining
      * segments. GRO split is active only under the two-part gate (b->gro_active); otherwise the
      * provider's meta.gro_seg is IGNORED. */
     if (b->seg_off == 0) {
@@ -269,7 +269,7 @@ static int dg_rdy_pull_batch(void *ctx, KlDgramRxView *v, int allow_refill) {
     v->flags = 0;
     if (slot->meta.has_local) { v->local = slot->meta.local; v->flags |= KL_DGRAM_HAS_LOCAL; }
     if (trunc)                  v->flags |= KL_DGRAM_TRUNCATED;
-    /* Keep kl_datagram_recv_tos correct in batch mode too — the accessor reads the inbound slot,
+    /* Keep kl_datagram_recv_tos correct in batch mode too; the accessor reads the inbound slot,
      * which the batch path does not otherwise fill, so mirror this datagram's TOS onto it. GATE on the
      * accepted RX_TOS mask (same as the single-recv + completion paths) so it is backend-independent. */
     { KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
@@ -299,7 +299,7 @@ static void dg_close_transport(void *ctx, KlSocketHandle fd) {
     KlDatagram *dg = ctx;
     /* The close machine has already retired every op (cancel + drained) before this backend-retirement
      * step. Now, EXACTLY ONCE: remove the fd↔loop registration, then close the socket. Completion mode
-     * uses the generic kl_event_del (symmetric with the init kl_event_add — inert on
+     * uses the generic kl_event_del (symmetric with the init kl_event_add; inert on
      * io_uring/pollcomp, the IOCP association drops on the close); readiness removes its watcher. */
     if (dg->completion) {
         if (dg->registered && kl_handle_valid(dg->fd)) { kl_event_del(&dg->ctx->loop, dg->fd); dg->registered = 0; }
@@ -331,7 +331,7 @@ static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     KlDatagram *dg = user_data;
     /* Hold a frame for the WHOLE dispatch: send_flush/recv_on_readable deliver callbacks (on_drain /
      * on_writable / on_recv) from which the consumer may destroy the owner (kl_datagram_teardown). The
-     * bracket keeps busy > 0 so that teardown's terminal DEFERS to dispatch_end below — the last action —
+     * bracket keeps busy > 0 so that teardown's terminal DEFERS to dispatch_end below (the last action)
      * instead of firing inside the inner op leave and freeing `dg`/`core` while we still touch them
      * (dg_reconcile_write). `core` is captured up front; the body cannot free it (deferred), and
      * dispatch_end may. */
@@ -342,13 +342,13 @@ static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     if (ready & KL_EVENT_READ)
         (void)kl_dgram_core_recv_on_readable(core);
     dg_reconcile_write(dg);
-    kl_dgram_core_dispatch_end(core);   /* LAST touch of `dg`/`core` — may run the deferred terminal + free */
+    kl_dgram_core_dispatch_end(core);   /* LAST touch of `dg`/`core`: may run the deferred terminal + free */
 }
 
 /* Final PRE-ADOPTION hook: register the fd with the loop as the LAST fallible init step (after all
  * of KlDgramCore's allocations), immediately before adoption. Completion mode does the generic
  * kl_event_add (inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP); readiness registers
- * per-arm via a watcher, so nothing here. On failure the core unwinds without adopting the fd — so on
+ * per-arm via a watcher, so nothing here. On failure the core unwinds without adopting the fd; so on
  * IOCP the fd was never associated (CreateIoCompletionPort failed) and stays clean/re-usable. */
 static int dg_prepare_register(void *ctx) {
     KlDatagram *dg = ctx;
@@ -364,7 +364,7 @@ static int dg_prepare_register(void *ctx) {
 /* ══ public API ═══════════════════════════════════════════════════════════════════════════════ */
 
 int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
-    return kl_datagram_init_ex(dg, cfg, 0);   /* 0 = SLOT policy (byte gate off) — the STABLE default */
+    return kl_datagram_init_ex(dg, cfg, 0);   /* 0 = SLOT policy (byte gate off): the STABLE default */
 }
 
 int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget) {
@@ -383,7 +383,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
 
     /* Derive the provider's capabilities for THIS fd, then fail-loud gate want_caps. A NULL caps op
      * reports NO optional caps (a function signature never proves behavior). A want_caps requesting a cap
-     * the provider does not support fails init HERE — before fd adoption — so the caller retains the fd. */
+     * the provider does not support fails init HERE (before fd adoption), so the caller retains the fd. */
     {
         void *sp_ctx = cfg->sockets ? cfg->sockets->context : NULL;
         unsigned provider_caps = (ops && ops->caps) ? ops->caps(sp_ctx, cfg->fd) : 0;
@@ -407,7 +407,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     cc.send_slots = cfg->send_slots; cc.send_slot_cap = cfg->send_slot_cap; cc.recv_cap = cfg->recv_cap;
     cc.send_byte_budget = send_byte_budget;   /* 0 = SLOT, >0 = BOTH */
     cc.caps = granted_caps;   /* want_caps + opportunistically-granted optional_caps */
-    /* Store the enabled-per-socket RX mask, masked to KNOWN KL_DGRAM_RX_* bits — separate
+    /* Store the enabled-per-socket RX mask, masked to KNOWN KL_DGRAM_RX_* bits, separate
      * from provider support; drives the GRO-activation predicate (provider GRO support AND this). */
     cc.accepted_rx_caps = cfg->accepted_rx_caps &
         (KL_DGRAM_RX_PKTINFO | KL_DGRAM_RX_GRO | KL_DGRAM_RX_TOS);
@@ -430,7 +430,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
 
     if (kl_dgram_core_init(core, &cc) != 0) {
         /* fd NOT adopted (caller keeps it). Registration was the last fallible step: it either did not
-         * run (an earlier allocation failed) or failed itself — so the fd is NEVER left associated, and
+         * run (an earlier allocation failed) or failed itself; so the fd is NEVER left associated, and
          * dg->registered is 0. No kl_event_del is needed or correct here (IOCP cannot detach an ordinary
          * socket from its port; only closing it does). */
         kl_free(cfg->alloc, core, sizeof(*core));
@@ -459,12 +459,12 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     int completion = (kl_event_caps(&cfg->ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
     KlAllocator *alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
     /* Resolve ONE effective provider. "NULL = ctx default" means the EVENT CONTEXT's provider
-     * (cfg->ctx->sockets), not the built-in POSIX default — else a custom lwIP/EFI event context would be
+     * (cfg->ctx->sockets), not the built-in POSIX default; else a custom lwIP/EFI event context would be
      * mixed with POSIX datagram ops. Use it consistently for open, adoption, and every pre-adoption close. */
     const KlSocketProvider *sockets = cfg->sockets ? cfg->sockets : cfg->ctx->sockets;
 
     /* Socket prep takes the socket config directly (single config type). Only two adjustments vs the
-     * caller's config: GRO is readiness-only — never enable UDP_GRO capture on a completion loop
+     * caller's config: GRO is readiness-only, never enable UDP_GRO capture on a completion loop
      * (the completion recv cannot split a coalesced datagram); and multicast_group is joined post-init,
      * never at configure(). (Batch sizing is a kl_datagram_batch_create arg, not a socket option.) */
     size_t recv_cap = cfg->recv_cap ? cfg->recv_cap : 2048;
@@ -476,7 +476,7 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
 
     KlDatagramPrep prep;
     if (kl_datagram_open(sockets, &oc, &prep) != 0) {
-        dg->last_error = prep.err;   /* open closed its own fd on failure — nothing to reclaim */
+        dg->last_error = prep.err;   /* open closed its own fd on failure; nothing to reclaim */
         return -1;
     }
     /* Required RX-capture gate: fail-loud, close the prepared fd exactly once. */
@@ -486,7 +486,7 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
         return -1;
     }
 
-    /* Sizing — explicit units, documented defaults. */
+    /* Sizing: explicit units, documented defaults. */
     int slot_policy = (cfg->queue_policy == KL_DATAGRAM_QUEUE_SLOT);
     size_t slot_cap = cfg->send_slot_cap ? cfg->send_slot_cap : 65507u;
     size_t budget   = slot_policy ? 0u : (cfg->send_byte_budget ? cfg->send_byte_budget : (256u * 1024u));
@@ -532,11 +532,11 @@ int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer) {
         return -1;
     }
     /* Only an OPEN datagram may connect. Once close has begun the core + fd are still live, so
-     * without this a closing/closed datagram could issue a connect syscall — refuse without one. */
+     * without this a closing/closed datagram could issue a connect syscall; refuse without one. */
     if (kl_dgram_core_close_state(dg->core) != KL_DGRAM_CLOSE_OPEN) {
         dg->last_error = KL_ERR_INVALID_ARG; return -1;
     }
-    if (kl_dgram_core_connected(dg->core)) {   /* reconnect is UNSUPPORTED — refuse without a syscall */
+    if (kl_dgram_core_connected(dg->core)) {   /* reconnect is UNSUPPORTED; refuse without a syscall */
         dg->last_error = KL_ERR_INVALID_ARG; return -1;
     }
     if (!(kl_datagram_caps(dg) & KL_DGRAM_CAP_CONNECTED)) {   /* the GRANTED cap, consistent with the send gate */
@@ -553,7 +553,7 @@ int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer) {
 KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m) {
     if (!dg || !dg->core) return KL_DATAGRAM_ERROR;
     /* A peerless (connected-mode) send requires the granted CAP_CONNECTED AND an ACTUAL successful
-     * connect — enforced uniformly in the core send machine's admission (send_validate), so the single,
+     * connect; enforced uniformly in the core send machine's admission (send_validate), so the single,
      * batch, and GSO paths share the one rule (KL_DATAGRAM_UNSUPPORTED covers both "not granted"
      * and "not connected"). No separate facade gate here. */
     KlDatagramSendStatus st = kl_dgram_core_send(dg->core, m);
@@ -567,7 +567,7 @@ static const KlSockAddr *dg_addr_or_null(const KlSockAddr *a) {
     return (a && kl_sockaddr_family(a) != KL_AF_UNSPEC) ? a : NULL;
 }
 
-/* Wired as the send machine's on_drop: a recoverable batch datagram was dropped (a hard send error) —
+/* Wired as the send machine's on_drop: a recoverable batch datagram was dropped (a hard send error);
  * record it so kl_datagram_last_error / the dropped count surface it. Fired from ANY drain path (the
  * batch flush, or the ordinary writable-edge single-flight when a retained bad slot reaches the head),
  * so a bad-middle datagram is reported wherever it is finally submitted. */
@@ -626,7 +626,7 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
      * is the LAST access to dg/core here (only the local `accepted` is touched after). */
     kl_dgram_core_dispatch_begin(core);
 
-    /* Admit an accepted prefix (enqueue-only — no per-datagram submit, no fast path). */
+    /* Admit an accepted prefix (enqueue-only: no per-datagram submit, no fast path). */
     KlDatagramSendStatus st = KL_DATAGRAM_ACCEPTED;
     int accepted = 0;
     for (; accepted < n; accepted++) {
@@ -641,7 +641,7 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
 
     /* One drain attempt (one batch attempt per call): the readiness batch-drain over the head-
      * run, or the completion single-flight pump. A retained remainder (backpressure) arms WRITE and
-     * drains via the ordinary writable-edge single-flight path — a retained batch slot keeps its
+     * drains via the ordinary writable-edge single-flight path; a retained batch slot keeps its
      * recoverable provenance there (its slot flag), and dropped datagrams are reported via on_drop
      * (dg_on_send_drop) regardless of which path submits them. */
     if (dg->completion) {
@@ -652,14 +652,14 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
     }
     dg_reconcile_write(dg);   /* arm WRITE if anything is still queued (as the single send path does) */
 
-    kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core — may run the deferred teardown/free */
-    return accepted;                    /* a local — safe even if dg/core were just freed */
+    kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core: may run the deferred teardown/free */
+    return accepted;                    /* a local: safe even if dg/core were just freed */
 }
 
 /* ── GSO ────────────────────────────────────────────────────────────────────────────────── */
 
 /* KlDgramSubmitGsoFn: one whole-buffer provider send_gso (readiness). GSO carries no per-packet TOS
- * (the public API has none) — the socket default applies; `owner`/`tos` are unused here. */
+ * (the public API has none): the socket default applies; `owner`/`tos` are unused here. */
 static KlDgramSubmitResult dg_submit_gso(void *ctx, void *owner, const void *buf, size_t total,
                                          size_t seg, const KlSockAddr *peer, int tos) {
     (void)owner; (void)tos;
@@ -762,7 +762,7 @@ int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {
     if (!dg || !dg->core) return -1;
     /* Fail-loud guard: a socket with GRO capture ENABLED (accepted RX_GRO) must have an
      * actively-splitting RECV batch attached, or a coalesced buffer would be delivered UNSPLIT as one
-     * datagram (a boundary-corruption bug). Refuse recv_start rather than deliver corrupt data —
+     * datagram (a boundary-corruption bug). Refuse recv_start rather than deliver corrupt data;
      * GRO-without-splitting is thus unrepresentable. (An attached-but-inactive batch, gro_active == 0,
      * counts as no splitter.) */
     if (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_GRO) {
@@ -790,11 +790,11 @@ int kl_datagram_free(KlDatagram *dg) {
     if (core->ext) { KlDatagramBatch *xb = (KlDatagramBatch *)core->ext; core->ext = NULL; xb->reclaim(xb); }
     if (kl_dgram_core_free(core) != 0) return -1;
     kl_free(a, core, sizeof(*core));
-    memset(dg, 0, sizeof(*dg));   /* fully-detached — reusable (invariant 8) */
+    memset(dg, 0, sizeof(*dg));   /* fully-detached: reusable (invariant 8) */
     return 0;
 }
 
-/* The abandon reclaim (DESTRUCTIVE TAIL of the silent terminal) — frees the object-owned machines +
+/* The abandon reclaim (DESTRUCTIVE TAIL of the silent terminal): frees the object-owned machines +
  * this heap core + memsets the handle, then invokes the owner reclaim to free the embedding container.
  * Runs synchronously (no busy frame) or at the outermost leave (deferred); nothing accesses the core or
  * the machines after this returns. */
@@ -802,21 +802,21 @@ static void dg_abandon_reclaim(void *ctx) {
     KlDatagram *dg = ctx;
     KlAllocator *a = dg->alloc;
     KlDgramCore *core = dg->core;
-    /* Capture the owner reclaim BEFORE freeing the core (its source). Scope cannot be narrowed — it spans
+    /* Capture the owner reclaim BEFORE freeing the core (its source). Scope cannot be narrowed; it spans
      * the free below. cppcheck-suppress variableScope */
     KlDatagramReclaimFn owner = (KlDatagramReclaimFn)core->abandon_owner;
     /* cppcheck-suppress variableScope */
     void               *owner_ctx = core->abandon_owner_ctx;
-    kl_dgram_core_free_object_owned(core);   /* close + send(abandon) + slots — NOT the rx holder */
+    kl_dgram_core_free_object_owned(core);   /* close + send(abandon) + slots: NOT the rx holder */
     if (core->ext) { KlDatagramBatch *xb = (KlDatagramBatch *)core->ext; core->ext = NULL; xb->reclaim(xb); }
     kl_free(a, core, sizeof(*core));         /* free the heap core block */
-    memset(dg, 0, sizeof(*dg));              /* fully-detached — reusable */
-    if (owner) owner(owner_ctx);             /* free the embedding owner (e.g. the resolver) — last */
+    memset(dg, 0, sizeof(*dg));              /* fully-detached: reusable */
+    if (owner) owner(owner_ctx);             /* free the embedding owner (e.g. the resolver): last */
 }
 
 /* Internal (src/datagram_open.h): SYNCHRONOUS owner-destruction teardown. Arms the
  * silent-abandon terminal on the core; the close coordinator's busy handshake runs it immediately (no
- * active frame) or DEFERS it to the outermost leave (invoked from within a delivery frame) — so it is
+ * active frame) or DEFERS it to the outermost leave (invoked from within a delivery frame); so it is
  * reentrancy-safe. Idempotent. See datagram_open.h for the full contract. */
 int kl_datagram_teardown(KlDatagram *dg, KlDatagramReclaimFn reclaim, void *reclaim_ctx) {
     if (!dg) return -1;
@@ -836,7 +836,7 @@ void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud) {
 
 unsigned kl_datagram_caps(const KlDatagram *dg) { return (dg && dg->core) ? dg->core->caps : 0; }
 unsigned kl_datagram_provider_caps(const KlDatagram *dg) { return dg ? dg->provider_caps : 0; }
-/* The KL_DGRAM_RX_* capture mask the socket actually accepted (socket prep) — complements want_rx_caps. */
+/* The KL_DGRAM_RX_* capture mask the socket actually accepted (socket prep); complements want_rx_caps. */
 unsigned kl_datagram_accepted_rx_caps(const KlDatagram *dg) {
     return (dg && dg->core) ? kl_dgram_core_accepted_rx_caps(dg->core) : 0u;
 }
@@ -864,7 +864,7 @@ static int dg_multicast(KlDatagram *dg, const char *group, unsigned iface_index,
     return 0;
 }
 /* Socket-default outgoing TOS/Traffic-Class (IP_TOS / IPV6_TCLASS), the socket-wide default
- * applied to every send that carries no per-message tos — distinct from the per-message KlDatagramMessage.
+ * applied to every send that carries no per-message tos; distinct from the per-message KlDatagramMessage.
  * tos. Routed to the provider's set_tos op; the family is derived from the adopted fd (getsockname), so
  * KlDatagram need not store it. Error precedence: bad handle/arg → KL_ERR_INVALID_ARG; TOS capability
  * absent OR no provider op → KL_ERR_UNSUPPORTED (no provider call); undeterminable/non-IP family →
@@ -877,13 +877,13 @@ int kl_datagram_set_tos(KlDatagram *dg, int tos) {
     const KlDatagramOps *ops = dg_ops(dg);
     /* Capability truthfulness (exact-fd contract): require BOTH the op AND the per-fd/family TOS
      * capability. A reduced provider may expose set_tos while correctly omitting KL_DGRAM_CAP_TOS for
-     * this fd — fail UNSUPPORTED without invoking the provider. */
+     * this fd; fail UNSUPPORTED without invoking the provider. */
     if (!ops || !ops->set_tos || !(dg->provider_caps & KL_DGRAM_CAP_TOS)) {
         dg->last_error = KL_ERR_UNSUPPORTED; return -1;
     }
     KlSockAddr la;
     if (kl_sock_get_local_addr(dg->sockets, dg->fd, &la) != 0) { dg->last_error = KL_ERR_SOCKET; return -1; }
-    /* Switch explicitly — NEVER guess a family. An unspecified/non-IP/malformed local address must fail
+    /* Switch explicitly; NEVER guess a family. An unspecified/non-IP/malformed local address must fail
      * without calling set_tos (else the wrong socket option level could be applied). */
     int family;
     switch (kl_sockaddr_family(&la)) {
@@ -917,7 +917,7 @@ size_t kl_datagram_send_queued_bytes(const KlDatagram *dg) {
 uint64_t kl_datagram_dropped(const KlDatagram *dg)     { return dg ? dg->dropped   : 0; }
 uint64_t kl_datagram_truncated(const KlDatagram *dg)   { return dg ? dg->truncated : 0; }
 KlError  kl_datagram_last_error(const KlDatagram *dg)  { return dg ? dg->last_error : KL_ERR_INVALID_ARG; }
-/* Only report the fd/port once it is ADOPTED (a live core) and the handle is valid — never a
+/* Only report the fd/port once it is ADOPTED (a live core) and the handle is valid; never a
  * zeroed-but-not-inited handle, nor a stale fd after a failed init or after teardown (core == NULL). */
 KlSocketHandle kl_datagram_fd(const KlDatagram *dg) {
     return (dg && dg->core && kl_handle_valid(dg->fd)) ? dg->fd : KL_INVALID_SOCKET;

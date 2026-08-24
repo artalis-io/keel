@@ -1,5 +1,5 @@
 /*
- * version.c — runtime version accessors.
+ * version.c: runtime version accessors.
  *
  * The KL_VERSION_* macros in keel.h describe the headers a consumer compiled
  * against; these functions report the version compiled into the *library*, so a

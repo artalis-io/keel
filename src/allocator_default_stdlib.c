@@ -1,5 +1,5 @@
 /*
- * allocator_default_stdlib.c — the default KlAllocator backed by the C stdlib.
+ * allocator_default_stdlib.c: the default KlAllocator backed by the C stdlib.
  *
  * Kept in its own TU so a bring-your-own-allocator or
  * freestanding/UEFI build can exclude the hosted heap entirely. A freestanding

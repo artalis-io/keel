@@ -110,7 +110,7 @@ static int drain_crossed_low_water(const KlDrain *d, size_t prev_len) {
 
 /* Fire AT MOST ONE externally-reentrant callback after state is fully updated, per the
  * sequencing rule (docs/contracts/stream.md §4). Precedence: a low-water writable crossing
- * (on_writable) suppresses on_drain for that transition — a caller using both gets the
+ * (on_writable) suppresses on_drain for that transition; a caller using both gets the
  * writable signal, not a duplicate empty one. on_writable is a *writable* signal (it may
  * synchronously refill the buffer but must NOT free the drain), so d stays live and the
  * caller re-checks buf_len afterwards. on_drain is the legacy empty callback and is treated
@@ -123,7 +123,7 @@ static int drain_notify(KlDrain *d, size_t prev_len) {
     }
     int drained = (d->buf_len == 0);
     if (drained && d->on_drain)
-        d->on_drain(d->drain_ctx);            /* destructive tail — do NOT touch d after */
+        d->on_drain(d->drain_ctx);            /* destructive tail: do NOT touch d after */
     return drained ? 0 : 1;
 }
 
@@ -151,7 +151,7 @@ int kl_drain_flush(KlDrain *d) {
             memmove(d->buf, d->buf + written, d->buf_len);
     }
 
-    /* State fully updated — now fire at most one callback (may refill on_writable). */
+    /* State fully updated: now fire at most one callback (may refill on_writable). */
     return drain_notify(d, prev_len);
 }
 
@@ -179,12 +179,12 @@ void kl_drain_consume(KlDrain *d, size_t n) {
         d->buf_len -= n;
         memmove(d->buf, d->buf + n, d->buf_len);
     }
-    /* State fully updated — fire at most one callback (on_writable crossing precedes the
+    /* State fully updated: fire at most one callback (on_writable crossing precedes the
      * empty on_drain; see drain_notify). */
     (void)drain_notify(d, prev_len);
 }
 
-/* ── reservation + low-water extension (drain_reserve.h) ─────────────── */
+/* ── reservation + low-water extension (drain_reserve.h): ─────────────── */
 
 void kl_drain_set_low_water(KlDrain *d, size_t low_water) {
     if (!d) return;
@@ -199,12 +199,12 @@ void kl_drain_on_writable(KlDrain *d, KlDrainCb cb, void *ctx) {
 
 int kl_drain_prealloc(KlDrain *d, size_t capacity) {
     if (!d || !d->alloc || capacity == 0) return -1;
-    /* Init-time only: a fresh, unused drain. No conversion/resize of an in-use drain — that
-     * would make the logical capacity ambiguous. A later explicit resize op can add defined
+    /* Init-time only: a fresh, unused drain. No conversion/resize of an in-use drain; that
+     * would make the logical capacity ambiguous; a later explicit resize op can add defined
      * grow/shrink semantics if ever needed. */
     if (d->buf || d->buf_len != 0 || d->buf_cap != 0 || d->prealloc) return -1;
     char *nb = kl_malloc(d->alloc, capacity);   /* exactly one allocation, here */
-    if (!nb) return -1;                         /* failure — non-prealloc mode preserved */
+    if (!nb) return -1;                         /* failure: non-prealloc mode preserved */
     d->buf      = nb;
     d->buf_cap  = capacity;
     d->prealloc = 1;
@@ -218,23 +218,23 @@ KlDrainWriteStatus kl_drain_reserve_write(KlDrain *d, const char *data, size_t l
     if (!data) return KL_DRAIN_WERROR;
 
     /* Reservation requires the FULL invariant: preallocated fixed buffer. max_size alone must
-     * NOT enable it (an ordinary growable drain has no reserved storage — copying a remainder
+     * NOT enable it (an ordinary growable drain has no reserved storage; copying a remainder
      * into d->buf == NULL would crash). Fail closed otherwise. */
     if (!d->prealloc || !d->buf || d->buf_cap == 0) return KL_DRAIN_WERROR;
     if (d->buf_len > d->buf_cap) { d->error = 1; return KL_DRAIN_WERROR; }  /* corrupt state */
     size_t capacity = d->buf_cap;
 
-    if (len > capacity) return KL_DRAIN_TOO_LARGE;          /* permanent — caller must chunk */
+    if (len > capacity) return KL_DRAIN_TOO_LARGE;          /* permanent: caller must chunk */
     if (len > capacity - d->buf_len) return KL_DRAIN_WOULD_BLOCK;  /* no room now; nothing taken */
 
-    /* Reservation succeeded: the whole remainder is guaranteed to fit. Preserve ordering —
+    /* Reservation succeeded: the whole remainder is guaranteed to fit. Preserve ordering:
      * append while the buffer is non-empty; otherwise try one direct send, then buffer the
      * remainder. Neither path allocates (space is reserved within buf_cap). */
     if (d->buf_len == 0) {
         kl_ssize_t n = d->write_fn(data, len, d->write_ctx);
         if (n < 0) { d->error = 1; return KL_DRAIN_WERROR; }
         if ((size_t)n > len) { d->error = 1; return KL_DRAIN_WERROR; }
-        if ((size_t)n == len) return KL_DRAIN_ACCEPTED;    /* all sent inline — zero-copy fast path */
+        if ((size_t)n == len) return KL_DRAIN_ACCEPTED;    /* all sent inline: zero-copy fast path */
         size_t remain = len - (size_t)n;
         memcpy(d->buf, data + n, remain);                  /* into the reserved space; no alloc */
         d->buf_len = remain;
@@ -271,5 +271,5 @@ void kl_drain_free(KlDrain *d) {
         d->buf_len = 0;
         d->buf_cap = 0;
     }
-    d->prealloc = 0;   /* buffer gone — no longer in reservation mode */
+    d->prealloc = 0;   /* buffer gone: no longer in reservation mode */
 }

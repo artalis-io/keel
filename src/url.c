@@ -1,5 +1,5 @@
 /*
- * url.c — HTTP/HTTPS URL parser
+ * url.c: HTTP/HTTPS URL parser
  *
  * Parses URLs into scheme, host, port, and path components.
  * All output pointers reference the original URL string (zero-copy).
@@ -164,7 +164,7 @@ int kl_url_parse(const char *url, KlUrl *out)
     if (has_crlf(out->host, out->host_len))
         return -1;
 
-    /* Port (optional) — bounded decimal, locale-free (no strtol) */
+    /* Port (optional): bounded decimal, locale-free (no strtol) */
     if (*url == ':') {
         url++;
         const char *pstart = url;
@@ -181,7 +181,7 @@ int kl_url_parse(const char *url, KlUrl *out)
         out->port = out->is_https ? 443 : 80;
     }
 
-    /* Path (rest of URL, or "/" if empty) — reject CRLF (header injection) */
+    /* Path (rest of URL, or "/" if empty): reject CRLF (header injection) */
     if (*url == '/') {
         out->path = url;
         out->path_len = strlen(url);
@@ -221,7 +221,7 @@ int kl_url_resolve(const char *base_url, const char *location,
     if (loc_len == 0)
         return -1;
 
-    /* 1. Absolute URL — starts with http:// or https:// */
+    /* 1. Absolute URL: starts with http:// or https:// */
     if (kl_str_startswith(location, "http://") ||
         kl_str_startswith(location, "https://")) {
         size_t n = strip_fragment(location, loc_len);
@@ -232,7 +232,7 @@ int kl_url_resolve(const char *base_url, const char *location,
         return 0;
     }
 
-    /* 2. Protocol-relative — starts with // */
+    /* 2. Protocol-relative: starts with // */
     if (location[0] == '/' && location[1] == '/') {
         /* Extract scheme from base_url */
         const char *colon = kl_strchr(base_url, ':');
@@ -249,7 +249,7 @@ int kl_url_resolve(const char *base_url, const char *location,
         return 0;
     }
 
-    /* 3. Absolute path — starts with / */
+    /* 3. Absolute path: starts with / */
     if (location[0] == '/') {
         /* Extract scheme://host[:port] from base_url */
         const char *auth = kl_strstr(base_url, "://");
@@ -257,7 +257,7 @@ int kl_url_resolve(const char *base_url, const char *location,
             return -1;
         auth += 3; /* past "://" */
 
-        /* Find end of authority (host[:port]) — first / or end */
+        /* Find end of authority (host[:port]): first / or end */
         const char *auth_end = auth;
         while (*auth_end && *auth_end != '/')
             auth_end++;

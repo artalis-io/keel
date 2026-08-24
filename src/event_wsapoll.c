@@ -1,14 +1,14 @@
 /*
- * event_wsapoll.c — Windows event backend (WSAPoll).
+ * event_wsapoll.c: Windows event backend (WSAPoll).
  *
  * An INDEPENDENT backend TU, sibling to event_epoll.c / event_kqueue.c /
- * event_poll.c — one is selected by the Makefile per build.
+ * event_poll.c; one is selected by the Makefile per build.
  * There is NO cross-platform #ifdef here or in the POSIX backends: this file is
  * compiled only on Windows (see the Makefile OS=windows branch).
  *
  * Unlike event_poll.c, this does not use an fd-indexed slot map: a Winsock
  * SOCKET is a large, sparse kernel handle (not a small dense fd), so the
- * WSAPOLLFD array is scanned linearly to find a socket's slot — O(n) per
+ * WSAPOLLFD array is scanned linearly to find a socket's slot: O(n) per
  * add/mod/del, in line with Keel's O(n) router / O(n) timeout sweep. See
  * docs/archive/phases/phase6_winsock_design.md §B.2.
  */
@@ -164,14 +164,14 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     KlWsaPollState *st = loop->_backend;
 
     if (st->count == 0) {
-        /* WSAPoll requires nfds >= 1; nothing to wait on — honor the timeout. */
+        /* WSAPoll requires nfds >= 1; nothing to wait on, so honor the timeout. */
         if (timeout_ms > 0) Sleep((DWORD)timeout_ms);
         return 0;
     }
 
     int n = WSAPoll(st->fds, (ULONG)st->count, timeout_ms);
     if (n == SOCKET_ERROR) {
-        /* Translate so the caller's post-`-1` errno check works — the server's
+        /* Translate so the caller's post-`-1` errno check works; the server's
          * accept loop tests `errno == EINTR` to decide retry-vs-abort; without
          * this it would read a stale errno (WSAPoll leaves errno untouched). */
         kl_wsa_set_errno();
@@ -219,7 +219,7 @@ unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* Readiness loop — the default Winsock provider works; nothing to auto-wire. */
+/* Readiness loop: the default Winsock provider works; nothing to auto-wire. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;

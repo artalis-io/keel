@@ -1,12 +1,12 @@
 /*
- * stream_close.c — the KlStream graceful-close / confirmed-detachment lifecycle.
+ * stream_close.c: the KlStream graceful-close / confirmed-detachment lifecycle.
  * See stream_close.h.
  *
  * The whole module exists to enforce one invariant: on_close (detachment) fires exactly once,
  * only after BOTH the receive and the send operation are PHYSICALLY retired. It reads the write
  * machinery's send_inflight (src/stream_write.c) and the read machinery's recv_inflight
  * (src/stream_read.c) directly, and drives finalization from the retirement points via the
- * generic on_retire hook it installs at init — so the read/write TUs carry no static dependency
+ * generic on_retire hook it installs at init, so the read/write TUs carry no static dependency
  * on this module.
  *
  * Cancellation obeys the same synchronous-completion discipline as the read pause/resume arm trampoline:
@@ -31,7 +31,7 @@ static void stream_detach(KlStream *s) {
 /* Are both operations physically retired? The receive is retired when no recv is armed/posted
  * (recv_inflight == 0); the send when no async send is in flight (send_inflight == 0). For a
  * GRACEFUL close we additionally require the write queue to have fully drained (nothing left to
- * send); an ABORTIVE close does not wait on the queue — queued-but-unsubmitted bytes are the
+ * send); an ABORTIVE close does not wait on the queue; queued-but-unsubmitted bytes are the
  * stream's own memory, freed by the owner at on_close. */
 static int stream_fully_retired(const KlStream *s) {
     if (s->recv_inflight) return 0;                    /* a receive op is still outstanding */
@@ -41,7 +41,7 @@ static int stream_fully_retired(const KlStream *s) {
 }
 
 /* Re-check the close condition and detach if it holds. Deferred while ANY cancel frame is on the
- * stack (in_close_cancel depth > 0, incl. a reentrant kl_stream_cancel from a hook) — the
+ * stack (in_close_cancel depth > 0, incl. a reentrant kl_stream_cancel from a hook); the
  * OUTERMOST cancel frame's unwinding re-attempts it. No-op unless CLOSING. */
 static void stream_close_finalize(KlStream *s) {
     if (s->close_state != KL_STREAM_STATE_CLOSING) return;   /* not closing, or already detached */
@@ -90,7 +90,7 @@ int kl_stream_set_cancel(KlStream *s, KlStreamCancelFn cancel_recv, KlStreamCanc
  * cancel completion cannot detach mid-cancel), then finalizes once. */
 static int stream_close_common(KlStream *s, int abort) {
     if (!s || !s->close_inited) return -1;
-    if (s->close_state == KL_STREAM_STATE_CLOSED) return 0;  /* already detached — idempotent */
+    if (s->close_state == KL_STREAM_STATE_CLOSED) return 0;  /* already detached; idempotent */
 
     if (abort) s->close_abort = 1;                     /* graceful → abortive escalation is allowed */
     if (s->close_state == KL_STREAM_STATE_OPEN) {
@@ -100,12 +100,12 @@ static int stream_close_common(KlStream *s, int abort) {
             kl_stream_read_close(s);                   /* logical read close; readiness retires recv */
     }
 
-    /* Abortive: request cancellation of any physically-outstanding op — AT MOST ONCE per op
+    /* Abortive: request cancellation of any physically-outstanding op, AT MOST ONCE per op
      * (recv/send_cancel_requested). The requested flag is set BEFORE the hook so a synchronous
      * retirement is safe; a repeated kl_stream_cancel() while the op is still outstanding does NOT
      * re-invoke the hook. A hook may retire its op synchronously (→ on_retire → finalize) or even
      * re-enter kl_stream_cancel; both are DEFERRED by the in_close_cancel DEPTH counter and the
-     * finalize is re-attempted when the outermost cancel frame unwinds — so on_close fires at most
+     * finalize is re-attempted when the outermost cancel frame unwinds, so on_close fires at most
      * once and never mid-cancellation. */
     if (s->close_abort) {
         s->in_close_cancel++;

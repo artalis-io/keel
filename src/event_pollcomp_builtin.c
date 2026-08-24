@@ -1,5 +1,5 @@
 /*
- * event_pollcomp_builtin.c — the compiled-in-backend glue for pollcomp.
+ * event_pollcomp_builtin.c: the compiled-in-backend glue for pollcomp.
  *
  * Linked ONLY when BACKEND=pollcomp (the Makefile appends it to EVENT_SRC). It adapts
  * the pure-runtime provider in event_pollcomp.c to the compiled-in-default contract:
@@ -8,7 +8,7 @@
  *   - kl_comp_ops_builtin() the completion dispatch (completion_dispatch.c) falls back to.
  * Both just forward to the provider's named ops (kl_pollcomp_ev_* / kl_pollcomp_completion_ops).
  *
- * Keeping these here — NOT in event_pollcomp.c — is what lets event_pollcomp.o be injected
+ * Keeping these here (NOT in event_pollcomp.c) is what lets event_pollcomp.o be injected
  * into a DEFAULT (epoll/kqueue) libkeel at runtime: that lib already defines its own
  * kl_event_*_builtin (its readiness backend) + kl_comp_ops_builtin (the readiness stub), so
  * a second copy in event_pollcomp.o would be a duplicate-symbol link error. In this separate TU,

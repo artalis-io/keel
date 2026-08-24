@@ -1,8 +1,8 @@
 /*
- * stream_read.c — the KlStream strict read pause/resume machinery. See
+ * stream_read.c: the KlStream strict read pause/resume machinery. See
  * stream_read.h. Model-agnostic: received bytes land in the stable read_buf; while paused a
  * completed receive (bytes or terminal) is held undelivered until resume, which delivers it
- * exactly once then re-arms — unless the deliver callback paused/closed the stream. No TLS
+ * exactly once then re-arms, unless the deliver callback paused/closed the stream. No TLS
  * state here (the adapter's deliver hook decrypts).
  *
  * Async discipline (mirrors the write side): an arm hook may complete SYNCHRONOUSLY (EFI/lwIP/
@@ -10,7 +10,7 @@
  * and the outer frame never clobbers state a synchronous completion/pause/close already changed.
  * A receive is delivered only when recv_inflight was set (duplicate/spurious completions are
  * dropped, never delivered). Logical close stops delivery but does NOT claim retirement of a
- * physically-outstanding completion receive — that clears only on the completion (or a future
+ * physically-outstanding completion receive; that clears only on the completion (or a future
  * cancel-retirement path).
  */
 #include "stream_read.h"
@@ -42,7 +42,7 @@ int kl_stream_read_init(KlStream *s, int completion_mode,
 /* Arm the next receive. ITERATIVE trampoline so a provider that completes synchronously inside
  * read_arm() (EFI/lwIP/future) cannot grow the C stack: a re-arm requested during a synchronous
  * delivery sets rearm_pending and returns immediately (no recursion), and this loop performs it.
- * Synchronous completion RETIRES that particular arm (on_recv sets completed_inline) — read_arm's
+ * Synchronous completion RETIRES that particular arm (on_recv sets completed_inline); read_arm's
  * subsequent return can no longer fail it; only a hook that did NOT complete inline and returns
  * < 0 fails+closes. recv_inflight is set BEFORE the hook so a synchronous on_recv sees it.
  * Precondition: the caller decided arming is due. Returns 0, or -1 if a (non-inline) arm failed. */
@@ -53,7 +53,7 @@ static int stream_arm(KlStream *s) {
     for (;;) {
         if (s->read_closed || s->read_paused || s->recv_inflight || s->recv_held) break;
         s->recv_inflight    = 1;
-        s->recv_cancel_requested = 0;   /* a genuinely new recv op — not yet cancel-requested */
+        s->recv_cancel_requested = 0;   /* a genuinely new recv op; not yet cancel-requested */
         s->completed_inline = 0;
         s->rearm_pending    = 0;
         s->arming           = 1;
@@ -61,24 +61,24 @@ static int stream_arm(KlStream *s) {
         s->arming = 0;
         if (s->completed_inline) {
             /* This arm retired synchronously; its return cannot retroactively fail it. If the
-             * delivery requested another receive (and the stream is still open/active), loop —
+             * delivery requested another receive (and the stream is still open/active), loop:
              * iteratively, not recursively. Pause/close during the delivery leaves rearm_pending
              * clear, suppressing the re-arm. */
             if (s->rearm_pending) continue;
             break;
         }
-        if (rc < 0) {                        /* genuine arm failure — no sync completion happened */
+        if (rc < 0) {                        /* genuine arm failure; no sync completion happened */
             if (s->recv_inflight) s->recv_inflight = 0;
             s->read_closed = 1;
             result = -1;
             break;
         }
-        break;                               /* posted async — await the completion */
+        break;                               /* posted async; await the completion */
     }
     return result;
 }
 
-/* Deliver one completed receive, then re-arm the next — UNLESS the completion was terminal
+/* Deliver one completed receive, then re-arm the next, UNLESS the completion was terminal
  * (ok == 0), or the deliver callback synchronously paused/closed the stream. Terminal state is
  * set BEFORE the callback (so a terminal callback that calls start()/resume() cannot re-arm a
  * closed stream), and a terminal carries no data (len normalized to 0). State is re-checked
@@ -86,8 +86,8 @@ static int stream_arm(KlStream *s) {
 static int stream_deliver_and_continue(KlStream *s, size_t len, int ok) {
     if (!ok) { s->read_closed = 1; len = 0; }         /* terminal: closed before callback, no data */
     s->read_deliver(s->read_ctx, s->read_buf, len, ok);
-    if (!ok) return 0;                                /* terminal delivered — never re-arm */
-    if (s->read_closed || s->read_paused) return 0;   /* callback closed/paused — do not re-arm */
+    if (!ok) return 0;                                /* terminal delivered; never re-arm */
+    if (s->read_closed || s->read_paused) return 0;   /* callback closed/paused; do not re-arm */
     if (s->recv_inflight) return 0;                   /* a synchronous completion already re-armed */
     return stream_arm(s);
 }
@@ -100,17 +100,17 @@ int kl_stream_read_start(KlStream *s) {
 
 int kl_stream_on_recv(KlStream *s, size_t len, int ok) {
     if (!s || !s->read_inited) return -1;
-    if (!s->recv_inflight) return 0;                  /* duplicate/spurious — drop, never deliver */
+    if (!s->recv_inflight) return 0;                  /* duplicate/spurious; drop, never deliver */
     s->recv_inflight = 0;                             /* this receive op has retired */
     if (s->arming) s->completed_inline = 1;           /* synchronous completion of the current arm */
-    if (s->read_closed) {                             /* retirement of a closed op — drop data */
-        if (s->on_retire) s->on_retire(s);            /* recv physically retired — let close finalize */
+    if (s->read_closed) {                             /* retirement of a closed op; drop data */
+        if (s->on_retire) s->on_retire(s);            /* recv physically retired; let close finalize */
         return 0;
     }
 
-    if (ok && len > s->read_cap) {                    /* backend contract violation — fail closed */
+    if (ok && len > s->read_cap) {                    /* backend contract violation; fail closed */
         s->read_closed = 1;
-        if (s->on_retire) s->on_retire(s);            /* recv retired (into error) — notify */
+        if (s->on_retire) s->on_retire(s);            /* recv retired (into error); notify */
         return -1;                                    /* not delivered as data; caller tears down */
     }
     if (!ok) len = 0;                                 /* terminal carries no data */
@@ -138,7 +138,7 @@ void kl_stream_pause(KlStream *s) {
         s->read_disarm(s->read_ctx);
         s->recv_inflight = 0;
     }
-    /* Completion: leave a posted recv physically in flight — it completes into read_buf and is
+    /* Completion: leave a posted recv physically in flight; it completes into read_buf and is
      * held; recv_inflight stays set until that completion (retirement). */
 }
 
@@ -155,16 +155,16 @@ int kl_stream_resume(KlStream *s) {
         s->held_ok   = 0;
         return stream_deliver_and_continue(s, len, ok);  /* deliver once, then re-arm per re-check */
     }
-    /* No held data — re-arm to fetch more, unless a receive is already physically in flight
+    /* No held data: re-arm to fetch more, unless a receive is already physically in flight
      * (completion mode: a recv posted before pause may still be outstanding). */
     if (s->recv_inflight) return 0;
     return stream_arm(s);
 }
 
 void kl_stream_read_close(KlStream *s) {
-    if (!s || !s->read_inited || s->read_closed) return;   /* idempotent — no repeat disarm */
+    if (!s || !s->read_inited || s->read_closed) return;   /* idempotent; no repeat disarm */
     s->read_closed = 1;                              /* LOGICAL close: no future delivery/re-arm */
-    s->recv_held   = 0;                              /* discard held completion — not delivered */
+    s->recv_held   = 0;                              /* discard held completion; not delivered */
     s->held_len    = 0;
     s->held_ok     = 0;
     if (!s->read_completion_mode) {
@@ -174,7 +174,7 @@ void kl_stream_read_close(KlStream *s) {
         s->recv_inflight = 0;
     }
     /* Completion: a posted recv may still be PHYSICALLY outstanding (kernel/provider owns the
-     * buffer + target). Do NOT clear recv_inflight here — retirement happens when its completion
+     * buffer + target). Do NOT clear recv_inflight here; retirement happens when its completion
      * reaches on_recv (dropped), or via the close cancel-retirement path. This logical/physical
      * split is what close detachment builds on. */
 }

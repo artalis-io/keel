@@ -1,5 +1,5 @@
 /*
- * event_builtin.h — the compiled-in event backend's implementation entry points.
+ * event_builtin.h: the compiled-in event backend's implementation entry points.
  *
  * Exactly one backend TU (event_epoll.c / event_kqueue.c / event_poll.c /
  * event_wsapoll.c / event_iouring.c / event_iocp.c / event_pollcomp.c) is built
@@ -8,7 +8,7 @@
  * event_dispatch.c, which calls these directly on the default path (loop->ops ==
  * NULL) or dispatches through loop->ops for a runtime-injected provider (lwIP).
  *
- * Internal — not part of the public API.
+ * Internal: not part of the public API.
  */
 #ifndef KEEL_EVENT_BUILTIN_H
 #define KEEL_EVENT_BUILTIN_H

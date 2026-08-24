@@ -1,11 +1,11 @@
 /*
- * datagram_close.c — INTERNAL close/cancel + confirmed-detachment lifecycle.
+ * datagram_close.c: INTERNAL close/cancel + confirmed-detachment lifecycle.
  * See datagram_close.h. Coordinates the borrowed send + recv machines.
  *
  * BUSY HANDSHAKE. The coordinator counts active frames: each send/recv public op brackets itself
  * with on_activity(+1/-1) (installed at init) and every coordinator entry brackets its own body.
- * Detachment (the destructive on_close) runs ONLY when `busy` returns to 0 — i.e. once the OUTERMOST
- * send/recv provider/callback or coordinator frame has unwound — so a close/cancel initiated from
+ * Detachment (the destructive on_close) runs ONLY when `busy` returns to 0 (i.e. once the OUTERMOST
+ * send/recv provider/callback or coordinator frame has unwound), so a close/cancel initiated from
  * any callback (delivery, on_writable, on_drain, an inline arm/submit) is deferred, and no machine
  * or coordinator state is touched after on_close.
  *
@@ -26,7 +26,7 @@ static void close_detach(KlDgramClose *c, KlDatagramCloseResult result) {
     if (!c->notified) {
         c->notified = 1;
         c->result   = result;
-        if (c->on_close) c->on_close(c->close_ctx, result);   /* DESTRUCTIVE TAIL — no c access after */
+        if (c->on_close) c->on_close(c->close_ctx, result);   /* DESTRUCTIVE TAIL: no c access after */
     }
 }
 
@@ -40,7 +40,7 @@ static int close_fully_retired(const KlDgramClose *c) {
     return 1;
 }
 
-/* The outbound side has quiesced — queue empty and no in-flight send. This (NOT full retirement) is
+/* The outbound side has quiesced: queue empty and no in-flight send. This (NOT full retirement) is
  * the frozen trigger for backend retirement + fd close: a datagram RECV has no natural EOF, so the fd
  * close is what finally retires it; for EFI closing the child is also what CLASSIFIES the ops. */
 static int close_send_drained(const KlDgramClose *c) {
@@ -52,7 +52,7 @@ static int close_send_drained(const KlDgramClose *c) {
 /* The §4.3 object-result join, computed only when fully retired. Without a backend classifier every
  * op is confirmed RETIRED → DETACHED. With one: any QUARANTINED op ⇒ QUARANTINED (retain its life ref
  * forever); else a transport error with ALL ops RETIRED ⇒ CLOSE_ERROR; else DETACHED. A classifier
- * that still reports PENDING ⇒ KL_DGRAM_CLOSE_NONE (stay CLOSING — re-run via a machine retirement OR
+ * that still reports PENDING ⇒ KL_DGRAM_CLOSE_NONE (stay CLOSING; re-run via a machine retirement OR
  * an explicit kl_dgram_close_retry() from the backend drain path).
  * CLOSE_ERROR is legal ONLY when every op is RETIRED, so a failed close never frees storage whose
  * ownership is unknown (that is what QUARANTINED is for). */
@@ -93,7 +93,7 @@ static void close_abort_cleanup(KlDgramClose *c) {
     }
 }
 
-/* The terminal logic — runs ONLY when busy returns to 0 (outermost frame unwound). A `detaching`
+/* The terminal logic: runs ONLY when busy returns to 0 (outermost frame unwound). A `detaching`
  * guard blocks reentry from a machine op that a cleanup cancel retires synchronously. */
 static void close_run_terminal(KlDgramClose *c) {
     if (c->state != KL_DGRAM_CLOSE_CLOSING) return;
@@ -105,7 +105,7 @@ static void close_run_terminal(KlDgramClose *c) {
         (kl_dgram_send_inflight(c->send) || kl_dgram_send_queued(c->send) > 0)) {
         close_abort_cleanup(c);
     }
-    /* Backend retirement + fd close — EXACTLY ONCE, the moment the outbound side has quiesced (frozen
+    /* Backend retirement + fd close, EXACTLY ONCE, the moment the outbound side has quiesced (frozen
      * §4.1). A datagram recv has no natural EOF, so this is where the still-outstanding recv is retired
      * (cancel_recv) and the fd is closed; for EFI closing the child is also what CLASSIFIES the ops.
      * The busy/detaching handshake makes a synchronous recv retirement inside these hooks re-enter
@@ -121,7 +121,7 @@ static void close_run_terminal(KlDgramClose *c) {
     }
     /* Machine-level gate (no op physically outstanding), THEN classify the outcome. A classifier
      * still reporting PENDING yields NONE → stay CLOSING; the next retirement re-runs this.
-     * OWNER-DESTRUCTION (abandon, §4a): FORCE the terminal even with an in-flight op — the op is
+     * OWNER-DESTRUCTION (abandon, §4a): FORCE the terminal even with an in-flight op; the op is
      * harmless (recv buffer is life-token-owned + outlives; send payload is a backend-owned copy) and the
      * token is marked dead in the terminal so late completions drop. Honour the classifier for QUARANTINE
      * (the op's ref stays retained / pinned); a still-PENDING op is abandoned as DETACHED. */
@@ -149,8 +149,8 @@ static void close_activity(void *ctx, int delta) {
 
 /* Public frame bracket for a caller (the readiness dispatch) that runs send/recv ops AND then touches the
  * owning handle afterwards: holding the frame keeps `busy > 0` for the whole dispatch, so a teardown
- * requested from within a delivery callback defers its terminal to `kl_dgram_close_release` — the LAST
- * action — instead of firing inside the inner recv/send leave (which would free the handle mid-dispatch).
+ * requested from within a delivery callback defers its terminal to `kl_dgram_close_release` (the LAST
+ * action) instead of firing inside the inner recv/send leave (which would free the handle mid-dispatch).
  * `release` may run the terminal (and, for an abandon, free the object), so it must be the caller's last
  * touch of any state reachable through this close machine. */
 void kl_dgram_close_hold(KlDgramClose *c)    { if (c) close_enter(c); }
@@ -199,9 +199,9 @@ int kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn, 
 
 static int close_common(KlDgramClose *c, int abort) {
     if (!c) return -1;
-    if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already detached — idempotent */
+    if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already detached; idempotent */
 
-    close_enter(c);   /* our own frame — machine ops we call below cannot detach mid-body */
+    close_enter(c);   /* our own frame: machine ops we call below cannot detach mid-body */
     if (abort) c->abort = 1;                            /* graceful → abortive escalation allowed */
     if (c->state == KL_DGRAM_CLOSE_OPEN) {
         c->state = KL_DGRAM_CLOSE_CLOSING;
@@ -218,13 +218,13 @@ int kl_dgram_close_begin(KlDgramClose *c)  { return close_common(c, /*abort=*/0)
 int kl_dgram_close_cancel(KlDgramClose *c) { return close_common(c, /*abort=*/1); }
 
 /* Owner-destruction abandon (see datagram_close.h §4a). Arms the `abandon` flag, then requests the
- * terminal through close_common — reusing the busy handshake so the forced (silent) terminal fires
+ * terminal through close_common, reusing the busy handshake so the forced (silent) terminal fires
  * immediately if no frame is active, or is DEFERRED to the outermost leave if invoked from within a
  * delivery frame. No machine state is freed here (the terminal's destructive-tail reclaim does that at
  * the safe point). */
 int kl_dgram_close_abandon(KlDgramClose *c) {
     if (!c) return -1;
-    if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already terminal — idempotent */
+    if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already terminal; idempotent */
     c->abandon = 1;
     return close_common(c, /*abort=*/1);   /* stop/cancel/discard, then close_leave → (deferred) terminal */
 }

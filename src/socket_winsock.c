@@ -1,5 +1,5 @@
 /*
- * socket_winsock.c — the Winsock socket provider (implements the socket.h seam).
+ * socket_winsock.c: the Winsock socket provider (implements the socket.h seam).
  *
  * The Windows sibling of socket_posix.c: one provider per TU, compiled only on
  * Windows (Makefile OS=windows branch), so it uses Winsock directly with no
@@ -33,7 +33,7 @@ const struct KlDatagramOps *kl_sockdef_dgram(void) { return &kl_socket_winsock_d
 #define KL_WSK_SENDFILE_BUF 8192
 
 /* Winsock must be started before ANY socket call. The provider factory does it
- * too (refcounted), but the default path — kl_sockdef_* via a NULL provider —
+ * too (refcounted), but the default path (kl_sockdef_* via a NULL provider)
  * calls socket()/connect() directly, so without this an unconfigured process
  * would get WSANOTINITIALISED. A library constructor initializes it once at
  * load (socket_winsock.o is always linked in on Windows); WSAStartup is
@@ -55,14 +55,14 @@ static int clamp_int(size_t n) {
 /* Translate the last Winsock error into the CRT errno space. Winsock reports
  * failures via WSAGetLastError() and never touches the CRT errno, but the
  * seam's callers (server accept loop, client connect, connection read/write)
- * all branch on POSIX errno — EAGAIN/EWOULDBLOCK, EINPROGRESS, EINTR — exactly
+ * all branch on POSIX errno (EAGAIN/EWOULDBLOCK, EINPROGRESS, EINTR) exactly
  * as they do on POSIX. Without this, every non-blocking would-block/in-progress
  * check on Windows sees errno==0 and misfires (the accept loop spins logging
  * "accept: No error"; a pending connect looks like a hard failure). Reading
  * WSAGetLastError() does not clear it, so callers that additionally feed it to
  * kl_sock_errno_to_error() are unaffected. Shared (declared in sockcompat.h) so
  * the Winsock event backend (event_wsapoll.c) and kl_plat_poll1 translate the
- * same way — the server's `errno == EINTR` retry check depends on it. */
+ * same way; the server's `errno == EINTR` retry check depends on it. */
 void kl_wsa_set_errno(void) {
     switch (WSAGetLastError()) {
         /* NB: on MinGW EAGAIN (11) != EWOULDBLOCK (140), unlike POSIX where they
@@ -109,7 +109,7 @@ int kl_sockdef_set_blocking(KlSocketHandle fd) {
 }
 
 void kl_sockdef_set_cloexec(KlSocketHandle fd) {
-    /* Clear inherit so the socket isn't leaked into child processes — the
+    /* Clear inherit so the socket isn't leaked into child processes: the
      * Windows analog of FD_CLOEXEC. Best-effort. */
     (void)SetHandleInformation((HANDLE)(SOCKET)fd, HANDLE_FLAG_INHERIT, 0);
 }
@@ -124,7 +124,7 @@ int kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on) {
 }
 int kl_sockdef_set_reuseport(KlSocketHandle fd, int on) {
     (void)fd; (void)on;
-    return -1;   /* no SO_REUSEPORT on Windows — best-effort, caller ignores */
+    return -1;   /* no SO_REUSEPORT on Windows; best-effort, caller ignores */
 }
 int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
     return setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_V6ONLY,
@@ -168,7 +168,7 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
     if (listen((SOCKET)fd, backlog) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
-/* Return a non-blocking, non-inheritable socket — the Winsock analog of the POSIX
+/* Return a non-blocking, non-inheritable socket: the Winsock analog of the POSIX
  * accept4(SOCK_NONBLOCK|SOCK_CLOEXEC) default. There is no accept4 on Winsock, so fold the
  * two steps in here (accepted sockets inherit the listener's blocking mode, i.e. blocking).
  * Keeps the seam's accept contract identical across platforms so shared callers can rely on
@@ -202,7 +202,7 @@ int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
         kl_wsa_set_errno();
         return -1;
     }
-    *out_err = err;   /* WSA* error code — callers only test zero vs non-zero */
+    *out_err = err;   /* WSA* error code: callers only test zero vs non-zero */
     return 0;
 }
 
@@ -222,7 +222,7 @@ ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     return r;
 }
 
-/* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf) — WSABUF
+/* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf); WSABUF
  * stays inside this provider TU. */
 ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     if (iovcnt <= 0)
@@ -251,7 +251,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
 
 /* No TransmitFile yet (an offset-aware OVERLAPPED optimization); a
  * pread+send loop is correct and cross-compiles. Sends one chunk per call from
- * *offset, advancing it — same one-chunk-per-tick shape as the POSIX fallback. */
+ * *offset, advancing it; same one-chunk-per-tick shape as the POSIX fallback. */
 ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     char buf[KL_WSK_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
@@ -282,7 +282,7 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, 
     return nr;
 }
 
-/* ── Winsock provider — thin adapters over the kl_sockdef_* defaults ────── */
+/* ── Winsock provider: thin adapters over the kl_sockdef_* defaults ────── */
 
 static int wsk_set_nonblocking(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_set_nonblocking(fd);
@@ -434,7 +434,7 @@ KlError kl_sock_errno_to_error(int err) {
 
 /* Hosted default I/O-result classifier (Winsock). kl_wsa_set_errno() has already
  * translated the last WSAGetLastError() into `errno` on the seam (per the winsock
- * errno contract), so the mapping is the SAME errno-based one as POSIX — a
+ * errno contract), so the mapping is the SAME errno-based one as POSIX: a
  * NULL-io_status provider on Windows classifies identically. */
 KlIoStatus kl_sockdef_io_status(void) {
     switch (errno) {

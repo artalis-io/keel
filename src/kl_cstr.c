@@ -1,5 +1,5 @@
 /*
- * kl_cstr.c — locale-free, bounded C-string primitives (see kl_cstr.h).
+ * kl_cstr.c: locale-free, bounded C-string primitives (see kl_cstr.h).
  *
  * Intentionally uses ONLY strlen from the C runtime (plus its own byte loops);
  * no snprintf / strtol / strcasecmp / strstr / strchr. This is what lets the

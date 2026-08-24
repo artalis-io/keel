@@ -1,8 +1,8 @@
 /*
- * datagram_slots.c — INTERNAL packet-slot storage for the datagram transport.
+ * datagram_slots.c: INTERNAL packet-slot storage for the datagram transport.
  *
- * See datagram_slots.h. Storage separation: the OUTBOUND pool (KlDgramSlots — object-owned) and
- * the INBOUND slot (KlDgramInbound — life-token-ownable) are DISTINCT allocations with distinct
+ * See datagram_slots.h. Storage separation: the OUTBOUND pool (KlDgramSlots, object-owned) and
+ * the INBOUND slot (KlDgramInbound, life-token-ownable) are DISTINCT allocations with distinct
  * owners. One init-time allocation each; all size arithmetic overflow-checked; acquire/release
  * allocation-free.
  */
@@ -67,7 +67,7 @@ int kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a,
     unsigned char *pay = block + meta_bytes;   /* outbound payload region base */
     for (size_t i = 0; i < slot_count; i++) {
         memset(&s->out[i], 0, sizeof(s->out[i]));
-        s->out[i].data = pay + i * out_cap;    /* i*out_cap < outpay_bytes (checked) — no overflow */
+        s->out[i].data = pay + i * out_cap;    /* i*out_cap < outpay_bytes (checked); no overflow */
         s->out[i].cap  = out_cap;
         s->out[i].tos  = -1;
         /* Fill the free-list so acquire hands out index 0, 1, 2, … first (LIFO over a reversed
@@ -138,15 +138,15 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {
 void kl_dgram_slots_release(KlDgramSlots *s, KlDgramSlot *slot) {
     if (!s || !slot)
         return;
-    /* Must be one of THIS pool's outbound slots. Establish membership by pointer EQUALITY — which is
-     * defined for any two pointers — rather than relational `<`/`>=` against s->out, which is UB for a
+    /* Must be one of THIS pool's outbound slots. Establish membership by pointer EQUALITY (which is
+     * defined for any two pointers) rather than relational `<`/`>=` against s->out, which is UB for a
      * FOREIGN pointer (the API accepts one as a guarded no-op). The equality scan also yields the index
      * for the free-list without a (foreign-pointer) subtraction. slot_count is a small fixed bound. */
     size_t idx = s->slot_count;
     for (size_t i = 0; i < s->slot_count; i++) {
         if (&s->out[i] == slot) { idx = i; break; }
     }
-    if (idx == s->slot_count)   /* not one of our slots — no-op */
+    if (idx == s->slot_count)   /* not one of our slots; no-op */
         return;
     if (!slot->in_use)          /* not acquired → double-release, ignore */
         return;

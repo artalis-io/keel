@@ -2,18 +2,18 @@
 #define KEEL_SRC_DATAGRAM_SEND_H
 
 /*
- * datagram_send.h — INTERNAL atomic send machinery over KlDgramSlots.
+ * datagram_send.h: INTERNAL atomic send machinery over KlDgramSlots.
  *
  * The send-side state machine the frozen Tier-1 contract requires (docs/contracts/datagram.md §1):
- * a whole datagram is accepted (copied into a preallocated outbound slot) or refused — never
- * partial — with exact status mapping, FIFO send order over the LIFO free-slot allocator, a sticky
+ * a whole datagram is accepted (copied into a preallocated outbound slot) or refused (never
+ * partial), with exact status mapping, FIFO send order over the LIFO free-slot allocator, a sticky
  * error state, on_writable (full→non-full) / on_drain (non-empty→empty) edges, and free refused
  * while a provider-referenced send is outstanding.
  *
  * SINGLE-FLIGHT (Tier-1). At most ONE send is in flight at a time (contract §1: "exactly one send
  * batch submitted at a time"). The oldest queued datagram is the only one submitted; the next is
  * pumped when it retires. A bounded-N>1 window would require a per-submission stable token so
- * out-of-order completions retire the exact slot — that is a future capability, not this API.
+ * out-of-order completions retire the exact slot; that is a future capability, not this API.
  *
  * INLINE COMPLETION SAFE. The submit hook MAY synchronously call kl_dgram_send_on_complete (the op
  * is armed before submit); a synchronous readiness provider signals completion via DONE instead.
@@ -22,12 +22,12 @@
  * the outermost public call (a depth guard makes reentrant sends defer their callbacks back).
  * on_writable is reentrant but NON-DESTRUCTIVE. on_drain is the DESTRUCTIVE TAIL: it fires only if
  * the queue is STILL empty (a reentrant on_writable send may have refilled it), and the machine
- * makes no further access to itself afterwards — the callback may free/tear down the object.
+ * makes no further access to itself afterwards; the callback may free/tear down the object.
  *
- * INTERNAL and NOT exposed publicly — it drives an abstract
+ * INTERNAL and NOT exposed publicly; it drives an abstract
  * `submit` hook (a mock in tests) over a BORROWED KlDgramSlots; it owns only its FIFO ring.
  *
- * INTERNAL header — not installed, no ABI commitment.
+ * INTERNAL header: not installed, no ABI commitment.
  */
 
 #include "datagram_slots.h"
@@ -45,15 +45,15 @@
 /* Result of one provider submit attempt. A provider is EITHER synchronous (readiness: DONE /
  * WOULD_BLOCK) OR asynchronous (completion: INFLIGHT), never both. */
 typedef enum {
-    KL_DGRAM_SUBMIT_DONE = 0,    /* sent synchronously — retire now (readiness) */
-    KL_DGRAM_SUBMIT_INFLIGHT,    /* accepted async — retire via kl_dgram_send_on_complete (completion) */
-    KL_DGRAM_SUBMIT_WOULDBLOCK,  /* provider cannot accept now — keep queued (readiness EAGAIN) */
-    KL_DGRAM_SUBMIT_ERROR,       /* hard failure — sticky error; datagram retained */
-    KL_DGRAM_SUBMIT_UNSUPPORTED  /* the op is unavailable on this fd (GSO whole-submit) — the
+    KL_DGRAM_SUBMIT_DONE = 0,    /* sent synchronously: retire now (readiness) */
+    KL_DGRAM_SUBMIT_INFLIGHT,    /* accepted async: retire via kl_dgram_send_on_complete (completion) */
+    KL_DGRAM_SUBMIT_WOULDBLOCK,  /* provider cannot accept now: keep queued (readiness EAGAIN) */
+    KL_DGRAM_SUBMIT_ERROR,       /* hard failure: sticky error; datagram retained */
+    KL_DGRAM_SUBMIT_UNSUPPORTED  /* the op is unavailable on this fd (GSO whole-submit): the
                                   * caller latches + falls back; nothing was sent so retransmit is safe */
 } KlDgramSubmitResult;
 
-/* Submit one datagram to the provider (fields, not a slot — so the readiness fast path can submit
+/* Submit one datagram to the provider (fields, not a slot, so the readiness fast path can submit
  * the caller's buffer directly). `peer` is NULL for a connected-mode send. */
 typedef KlDgramSubmitResult (*KlDgramSubmitFn)(void *ctx, const void *data, size_t len,
                                                const KlSockAddr *peer, const KlSockAddr *local,
@@ -65,13 +65,13 @@ typedef void (*KlDgramDropFn)(void *ctx);       /* a recoverable per-datagram se
 
 /* Result of one batch submit (readiness sendmmsg, or the portable single-send loop). The adapter has
  * the provider, so it classifies a -1 into WOULD_BLOCK vs a hard error (via kl_sock_io_status) BEFORE
- * returning — the machine stays transport-neutral. On SENT, `*sent` ∈ [0, n] is the
+ * returning; the machine stays transport-neutral. On SENT, `*sent` ∈ [0, n] is the
  * prefix actually transmitted; WOULDBLOCK means nothing was sent (retain all); ERROR is a hard error on
  * the head descriptor (the machine isolates it via the single submit hook). */
 typedef enum {
     KL_DGRAM_BATCH_SENT = 0,     /* *sent datagrams of the prefix went out */
-    KL_DGRAM_BATCH_WOULDBLOCK,   /* EAGAIN with nothing sent — retain, re-arm */
-    KL_DGRAM_BATCH_ERROR         /* hard error on the head — isolate the head via the single hook */
+    KL_DGRAM_BATCH_WOULDBLOCK,   /* EAGAIN with nothing sent; retain, re-arm */
+    KL_DGRAM_BATCH_ERROR         /* hard error on the head; isolate the head via the single hook */
 } KlDgramBatchResult;
 typedef KlDgramBatchResult (*KlDgramSubmitBatchFn)(void *ctx, const KlDgramTxDesc *descs, int n,
                                                    int *sent);
@@ -86,16 +86,16 @@ typedef KlDgramSubmitResult (*KlDgramSubmitGsoFn)(void *ctx, void *owner, const 
 typedef void (*KlDgramGsoDoneFn)(void *ctx, void *owner);
 
 typedef struct {
-    KlDgramSlots     *slots;         /* borrowed — the OBJECT-owned outbound send pool */
+    KlDgramSlots     *slots;         /* borrowed: the OBJECT-owned outbound send pool */
     KlAllocator      *alloc;         /* the FIFO ring's allocator (init/free only) */
     KlDgramSlot     **ring;          /* [ring_cap] occupied slots in FIFO send order */
     size_t            ring_cap;      /* == slots->slot_count */
     size_t            head;          /* index of the oldest occupied slot */
     size_t            count;         /* occupied slots (queued + in-flight) */
-    size_t            inflight_n;    /* 0 or 1 — single-flight (Tier-1) */
+    size_t            inflight_n;    /* 0 or 1: single-flight (Tier-1) */
     /* BOTH queue policy: a scalar byte admission gate over the slot array. `byte_budget` == 0 is the
      * default SLOT policy (gate off). `bytes_used` == Σ slot->len over every OCCUPIED slot (queued +
-     * in-flight); it is ONLY an admission accumulator — NOT an emptiness predicate (a zero-length slot
+     * in-flight); it is ONLY an admission accumulator, NOT an emptiness predicate (a zero-length slot
      * contributes 0 bytes yet occupies a slot, so bytes_used == 0 can hold with count > 0; `count`
      * remains the sole drain predicate). See docs/archive/designs/datagram_m1_queue_policy_design.md. */
     size_t            byte_budget;   /* 0 = SLOT (off); >0 = BOTH with this byte budget */
@@ -103,7 +103,7 @@ typedef struct {
     int               completion;    /* 1 = async (submit→INFLIGHT); 0 = readiness (submit→DONE) */
     unsigned          caps;          /* KL_DGRAM_CAP_* for UNSUPPORTED mapping */
     int               connected;     /* the ACTUAL connected state (set after a successful connect).
-                                      * A peerless send needs BOTH (caps & CAP_CONNECTED) AND this — the
+                                      * A peerless send needs BOTH (caps & CAP_CONNECTED) AND this: the
                                       * single admission rule for kl_dgram_send / _enqueue / _enqueue_gso. */
     KlDgramSubmitFn   submit;   void *submit_ctx;
     KlDgramWritableFn on_writable; void *writable_ctx;
@@ -125,7 +125,7 @@ typedef struct {
     int               in_submit;     /* a submit() call is on the stack (inline-completion window) */
     int               submit_retired;/* an inline on_complete retired the in-flight op */
     size_t            dropped;       /* datagrams dropped by the recoverable per-datagram send-error
-                                      * policy (a hard error on an isolated head — NOT the sticky `err`).
+                                      * policy (a hard error on an isolated head, NOT the sticky `err`).
                                       * The facade reads the delta to set its last_error + dropped count. */
 } KlDgramSend;
 
@@ -145,7 +145,7 @@ void kl_dgram_send_set_gso_cbs(KlDgramSend *s, KlDgramSubmitGsoFn submit_gso, vo
 
 /* Atomically admit a GSO group of `nseg` contiguous segment slots (all-or-nothing against the
  * free-slot count AND the byte budget). Each segment references the caller's group buffer (`buf`, valid
- * until the group retires) via `gso_ext` at its offset — nothing is copied into the pool. `mode` = 0
+ * until the group retires) via `gso_ext` at its offset; nothing is copied into the pool. `mode` = 0
  * (GSO whole-submit) / 1 (FALLBACK per-segment). `owner` is the KlDatagramBatch whose gso_busy clears
  * when the group retires (on_gso_done). Returns ACCEPTED / WOULD_BLOCK (not enough free slots or byte
  * gate) / TOO_LARGE (nseg > slot count, or total > budget) / CLOSED / ERROR. Fires no callbacks. */
@@ -185,7 +185,7 @@ int  kl_dgram_send_flush(KlDgramSend *s);
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing);
 
 /* Close hooks. on_activity(delta) brackets every public op that can retire or fire a
- * callback (+1 entry, -1 as the LAST action) — the close coordinator counts frames and detaches
+ * callback (+1 entry, -1 as the LAST action); the close coordinator counts frames and detaches
  * only when the outermost unwinds. When an activity cb is set, any on_drain callback MUST be
  * non-destructive (the coordinator's on_close is the sole destructive tail). */
 void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int delta), void *ctx);
@@ -194,28 +194,28 @@ void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int del
 void kl_dgram_send_discard_queued(KlDgramSend *s);
 
 /* Free the FIFO ring and zero the object (the borrowed slots pool is NOT freed here, but every
- * queued-but-unsubmitted slot is RELEASED back to it first — symmetric teardown, so reuse of the
+ * queued-but-unsubmitted slot is RELEASED back to it first (symmetric teardown), so reuse of the
  * pool sees full capacity). REFUSES with -1 while the in-flight send is outstanding (slot storage
  * must not be freed under the provider). */
 int  kl_dgram_send_free(KlDgramSend *s);
 
 /* Owner-destruction teardown (docs/archive/designs/datagram_sync_teardown_design.md): free the FIFO ring +
- * zero the machine REGARDLESS of inflight_n. Safe ONLY under the abandon preconditions — a dead life
+ * zero the machine REGARDLESS of inflight_n. Safe ONLY under the abandon preconditions: a dead life
  * token (no late completion re-enters send_on_complete) AND the frozen copy-at-submit contract
  * (no backend references a slot after submit). The borrowed slot pool is freed separately by the caller
  * (kl_dgram_slots_free), which reclaims any still-occupied in-flight slot; this touches only the ring.
  * The ordinary kl_dgram_send_free (with its inflight_n guard) is UNCHANGED for the confirmed-detachment
- * path — abandon is an additional owner-destruction entry, never a substitute. */
+ * path; abandon is an additional owner-destruction entry, never a substitute. */
 void kl_dgram_send_abandon(KlDgramSend *s);
 
-/* Set the connected state (after a successful connect) — governs peerless-send admission for all of
+/* Set the connected state (after a successful connect): governs peerless-send admission for all of
  * kl_dgram_send / _enqueue / _enqueue_gso. */
 void kl_dgram_send_set_connected(KlDgramSend *s, int on);
 
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
 static inline size_t kl_dgram_send_queued(const KlDgramSend *s)   { return s ? s->count : 0; }
 static inline int    kl_dgram_send_connected(const KlDgramSend *s) { return s ? s->connected : 0; }
-/* Σ payload bytes over every OCCUPIED slot (queued + in-flight) — the byte view of the send backlog,
+/* Σ payload bytes over every OCCUPIED slot (queued + in-flight): the byte view of the send backlog,
  * distinct from the slot COUNT above. Exposed publicly as kl_datagram_send_queued_bytes. */
 static inline size_t kl_dgram_send_queued_bytes(const KlDgramSend *s) { return s ? s->bytes_used : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }

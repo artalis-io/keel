@@ -1,5 +1,5 @@
 /*
- * datagram_recv.c — INTERNAL serial receive + strict pause/resume over the dedicated inbound slot.
+ * datagram_recv.c: INTERNAL serial receive + strict pause/resume over the dedicated inbound slot.
  * See datagram_recv.h. Mirrors the KlStream read machinery: pre-arm before the
  * hook, iterative trampoline for synchronous (inline) completion, strict pause with a single held
  * datagram, and paused/stopped re-checked after every delivery.
@@ -90,7 +90,7 @@ static int recv_drive_view(KlDgramRecv *r, int allow_refill) {
     return ret;
 }
 static void recv_enter(KlDgramRecv *r) { if (r->on_activity) r->on_activity(r->activity_ctx, +1); }
-/* recv_leave is the LAST action of a public op — it may detach + free the object via the coordinator. */
+/* recv_leave is the LAST action of a public op; it may detach + free the object via the coordinator. */
 static void recv_leave(KlDgramRecv *r) { if (r->on_activity) r->on_activity(r->activity_ctx, -1); }
 
 int kl_dgram_recv_init(KlDgramRecv *r, KlDgramInbound *inbound, int completion,
@@ -117,7 +117,7 @@ int kl_dgram_recv_init(KlDgramRecv *r, KlDgramInbound *inbound, int completion,
 }
 
 /* Arm the next receive. ITERATIVE trampoline: a provider that completes synchronously inside arm()
- * (completion mode) cannot grow the C stack — a re-arm requested during a synchronous delivery sets
+ * (completion mode) cannot grow the C stack: a re-arm requested during a synchronous delivery sets
  * rearm_pending and returns; this loop performs it. recv_inflight is set BEFORE the hook so a
  * synchronous on_complete sees it. Precondition: the caller decided arming is due. */
 static int recv_arm(KlDgramRecv *r) {
@@ -137,23 +137,23 @@ static int recv_arm(KlDgramRecv *r) {
             if (r->rearm_pending) continue;  /* iterative, not recursive */
             break;
         }
-        if (rc < 0) {                        /* genuine arm failure — no sync completion */
+        if (rc < 0) {                        /* genuine arm failure: no sync completion */
             if (r->recv_inflight) r->recv_inflight = 0;
             r->stopped = 1;
             result = -1;
             break;
         }
-        break;                               /* posted async — await the completion */
+        break;                               /* posted async; await the completion */
     }
     return result;
 }
 
-/* Deliver one finalized datagram from the canonical inbound slot, then re-arm — unless the callback
+/* Deliver one finalized datagram from the canonical inbound slot, then re-arm, unless the callback
  * paused/stopped. A failed receive NEVER reaches here (routed through recv_fail); a truncated one
  * DOES (delivered with KL_DGRAM_TRUNCATED). State re-checked AFTER the callback. */
 static int recv_deliver_and_continue(KlDgramRecv *r) {
     recv_present(r);
-    if (r->stopped || r->paused) return 0;   /* callback stopped/paused — do not re-arm */
+    if (r->stopped || r->paused) return 0;   /* callback stopped/paused; do not re-arm */
     if (r->recv_inflight) return 0;          /* a synchronous completion already re-armed */
     return recv_arm(r);
 }
@@ -177,12 +177,12 @@ static void recv_fail(KlDgramRecv *r) {
 int kl_dgram_recv_start(KlDgramRecv *r) {
     if (!r || !r->inited)
         return -1;
-    r->started = 1;   /* latched regardless of the arm result / callback — attach is now refused */
+    r->started = 1;   /* latched regardless of the arm result / callback; attach is now refused */
     if (r->paused || r->stopped || r->recv_inflight || r->held)
         return 0;
     recv_enter(r);
     int ret = recv_arm(r);
-    recv_leave(r);                           /* LAST action — an inline completion may detach */
+    recv_leave(r);                           /* LAST action; an inline completion may detach */
     return ret;
 }
 
@@ -190,24 +190,24 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     if (!r || !r->inited)
         return -1;
     if (!r->recv_inflight)
-        return 0;                            /* duplicate/spurious — drop; do NOT disturb held data */
+        return 0;                            /* duplicate/spurious: drop; do NOT disturb held data */
     recv_enter(r);
     r->recv_inflight = 0;                    /* this receive op has retired */
     if (r->arming)
         r->completed_inline = 1;             /* synchronous completion of the current arm */
 
     int ret;
-    if (r->stopped)                          /* a stopped/cancelled op retired — drop the data */
+    if (r->stopped)                          /* a stopped/cancelled op retired; drop the data */
         ret = 0;
-    else if (!ok)                            /* a FAILED receive is not a datagram — never deliver */
+    else if (!ok)                            /* a FAILED receive is not a datagram; never deliver */
         { recv_fail(r); ret = -1; }
-    else if (!recv_finalize(r, len))         /* peer absent = provider contract violation — fail safe */
+    else if (!recv_finalize(r, len))         /* peer absent = provider contract violation; fail safe */
         { recv_fail(r); ret = -1; }
     else if (r->paused)                      /* STRICT: hold the finalized datagram (canonical slot) */
         { r->held = 1; r->held_len = kl_dgram_inbound_slot(r->inbound)->len; ret = 0; }
     else
         ret = recv_deliver_and_continue(r);
-    recv_leave(r);                           /* LAST action — coordinator finalize may detach (frees r) */
+    recv_leave(r);                           /* LAST action; coordinator finalize may detach (frees r) */
     return ret;
 }
 
@@ -230,15 +230,15 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
         size_t len = 0;
         int pr = r->pull(r->hook_ctx, &len);
         if (pr == 0)
-            break;                           /* would-block — drained */
-        if (pr < 0)                          /* fatal receive error — disarm + clear (recv_fail) */
+            break;                           /* would-block; drained */
+        if (pr < 0)                          /* fatal receive error: disarm + clear (recv_fail) */
             { recv_fail(r); ret = -1; break; }
-        if (!recv_finalize(r, len))          /* peer absent = provider contract violation — fail safe */
+        if (!recv_finalize(r, len))          /* peer absent = provider contract violation; fail safe */
             { recv_fail(r); ret = -1; break; }
         recv_present(r);                     /* one datagram (captured-prefix; TRUNCATED if oversized) */
         /* loop re-checks paused/stopped (the delivery may have set them) */
     }
-    recv_leave(r);                           /* LAST action — coordinator finalize may detach (frees r) */
+    recv_leave(r);                           /* LAST action; coordinator finalize may detach (frees r) */
     return ret;
 }
 
@@ -248,12 +248,12 @@ void kl_dgram_recv_pause(KlDgramRecv *r) {
     recv_enter(r);
     r->paused = 1;
     if (!r->completion && r->recv_inflight) {
-        /* Readiness: drop READ interest (only if armed); a pending readable is cancelled — a
+        /* Readiness: drop READ interest (only if armed); a pending readable is cancelled: a
          * SYNCHRONOUS physical retirement. */
         r->disarm(r->hook_ctx);
         r->recv_inflight = 0;
     }
-    /* Completion: leave a posted recv physically in flight — held on completion. */
+    /* Completion: leave a posted recv physically in flight; held on completion. */
     recv_leave(r);
 }
 
@@ -267,7 +267,7 @@ int kl_dgram_recv_resume(KlDgramRecv *r) {
         ret = 0;
     else if (r->view_pull) {
         /* Batch mode: pause dropped READ interest but the ext CURSOR may hold undelivered
-         * logical datagrams. Drain the held cursor FIRST (allow_refill=0 — deliver only buffered data,
+         * logical datagrams. Drain the held cursor FIRST (allow_refill=0: deliver only buffered data,
          * never read new kernel data), THEN re-arm READ interest if still active. Ordering matters: the
          * held data is delivered even if the re-arm fails, and no new socket data is consumed ahead of
          * the retained buffer. */
@@ -281,7 +281,7 @@ int kl_dgram_recv_resume(KlDgramRecv *r) {
         ret = 0;
     else
         ret = recv_arm(r);
-    recv_leave(r);                           /* LAST action — a delivery/inline completion may detach */
+    recv_leave(r);                           /* LAST action; a delivery/inline completion may detach */
     return ret;
 }
 
@@ -290,7 +290,7 @@ void kl_dgram_recv_stop(KlDgramRecv *r) {
         return;                              /* idempotent */
     recv_enter(r);
     r->stopped  = 1;
-    r->held     = 0;                         /* discard held completion — not delivered */
+    r->held     = 0;                         /* discard held completion; not delivered */
     r->held_len = 0;
     if (!r->completion) {
         if (r->recv_inflight) r->disarm(r->hook_ctx);   /* SYNCHRONOUS physical retirement */
@@ -305,7 +305,7 @@ int kl_dgram_recv_free(KlDgramRecv *r) {
     if (!r)
         return 0;
     if (r->recv_inflight)
-        return -1;   /* a receive references the inbound slot — must not free underneath it */
+        return -1;   /* a receive references the inbound slot; must not free underneath it */
     memset(r, 0, sizeof(*r));   /* reusable (borrows no heap; the slots are the caller's) */
     return 0;
 }

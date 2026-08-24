@@ -1,17 +1,17 @@
 /*
- * datagram_open.c — the provider-neutral datagram socket-preparation helper.
+ * datagram_open.c: the provider-neutral datagram socket-preparation helper.
  *
  * A standalone function that does the datagram socket create/configure/bind prep with per-step error
  * cleanup, but WITHOUT the send/receive machine and WITHOUT the completion-loop association
- * (kl_datagram_init owns that). It is transport INFRASTRUCTURE — it legitimately creates and binds a
- * platform datagram socket through the socket seam, exactly like listener.c / connect_op.c — so it
+ * (kl_datagram_init owns that). It is transport INFRASTRUCTURE: it legitimately creates and binds a
+ * platform datagram socket through the socket seam, exactly like listener.c / connect_op.c, so it
  * lives below the Tier-1 facade (datagram.c) and is on the TIER1_INFRA allowlist. See
  * src/datagram_open.h for the ownership-handoff contract and docs/archive/designs/datagram_consolidation_design.md §2.
  */
 
 #include "datagram_open.h"
 
-#include <keel/datagram.h>   /* KlDatagramSocketConfig + KlDatagramOps — the provider datagram data-plane (configure) */
+#include <keel/datagram.h>   /* KlDatagramSocketConfig + KlDatagramOps: the provider datagram data-plane (configure) */
 #include <keel/sockaddr.h>   /* kl_sockaddr_parse / kl_sockaddr_family / KL_AF_INET6 */
 
 #include "socket.h"          /* seam: kl_sock_socket/_bind/_close/_set_*, KlSocketProvider, kl_sockdef_dgram
@@ -27,29 +27,29 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     int have_bind = 0;
 
     if (!out)
-        return -1;   /* the fd is returned through out — nothing to do without it */
+        return -1;   /* the fd is returned through out; nothing to do without it */
     out->fd = KL_INVALID_SOCKET;
     out->rx_caps = 0;
     out->err = KL_ERR_INVALID_ARG;   /* default: the early-reject (bad-arg) reason */
 
     if (!cfg)
-        return -1;   /* nothing created — the caller reclaims nothing */
+        return -1;   /* nothing created; the caller reclaims nothing */
 
     /* The datagram data-plane the provider supplies. NULL sockets = the built-in default provider (its
      * default datagram ops), mirroring the datagram initializer's NULL handling. Reject BEFORE creating an fd a
-     * provider that either has no datagram vtable OR a partial one missing the required configure() op —
+     * provider that either has no datagram vtable OR a partial one missing the required configure() op:
      * a partial vtable would otherwise crash at the configure() call. */
     dg = sockets ? sockets->dgram : kl_sockdef_dgram();
     sp_ctx = sockets ? sockets->context : NULL;
     if (!dg || !dg->configure)
-        return -1;   /* KL_ERR_INVALID_ARG — no/partial datagram data-plane */
+        return -1;   /* KL_ERR_INVALID_ARG: no/partial datagram data-plane */
 
     /* Resolve family + optional bind address. A bind address is numeric (no DNS), so this stays pure
      * and works on lwIP too; its family wins. */
     family = cfg->family;
     if (cfg->bind_addr) {
         if (kl_sockaddr_parse(&bind_sa, cfg->bind_addr, cfg->bind_port) != 0)
-            return -1;   /* KL_ERR_INVALID_ARG — bad bind address; nothing created */
+            return -1;   /* KL_ERR_INVALID_ARG: bad bind address; nothing created */
         family = (kl_sockaddr_family(&bind_sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
         have_bind = 1;
     } else if (family != AF_INET && family != AF_INET6) {
@@ -72,7 +72,7 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     }
 
     /* 3. provider datagram socket-option setup (reuse/bufs, broadcast/TOS/multicast, per-datagram
-     *    capture). Best-effort and folded into one call before bind — best-effort, which never
+     *    capture). Best-effort and folded into one call before bind (best-effort), which never
      *    fails here. Its return value is the bitmask of KL_DGRAM_RX_* capture options the kernel
      *    accepted; surface it (it cannot be reconstructed later). */
     out->rx_caps = dg->configure(sp_ctx, out->fd, family, cfg);
@@ -84,7 +84,7 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     }
 
     out->err = KL_ERR_NONE;
-    return 0;   /* out->fd prepared + (optionally) bound — ownership transfers to the caller */
+    return 0;   /* out->fd prepared + (optionally) bound; ownership transfers to the caller */
 
 fail_close:
     /* A post-create step failed: close the fd we own so the caller reclaims nothing. */

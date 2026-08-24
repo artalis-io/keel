@@ -2,16 +2,16 @@
 #define KEEL_SRC_SOCKADDR_NATIVE_H
 
 /*
- * sockaddr_native.h — the ONLY bridge between KlSockAddr and a platform
+ * sockaddr_native.h: the ONLY bridge between KlSockAddr and a platform
  * `struct sockaddr`. Included exclusively by socket providers (socket_posix.c,
  * socket_winsock.c, the overlapped providers in the completion backends, and a
  * foreign stack's own provider e.g. integrations/platform/lwip/socket_lwip.c). Core /
- * protocol code never includes this — it speaks KlSockAddr only.
+ * protocol code never includes this; it speaks KlSockAddr only.
  *
  * Because the conversion is `static inline` and pulls the platform sockaddr via
  * sockcompat.h, each including TU gets a copy compiled against *its* sockaddr
  * layout. That is deliberate: an lwIP provider compiled with lwIP's headers gets
- * lwIP-layout marshalling (with sin_len) for free, with no core recompile — this
+ * lwIP-layout marshalling (with sin_len) for free, with no core recompile; this
  * is what makes the address ABI runtime-injectable (docs/archive/designs/keel_sockaddr_design.md).
  */
 #include <keel/sockaddr.h>

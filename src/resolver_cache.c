@@ -1,5 +1,5 @@
 /*
- * resolver_cache.c — Caching DNS resolver decorator
+ * resolver_cache.c: Caching DNS resolver decorator
  *
  * Flat array with linear scan (same pattern as KlHttpClientPool).
  * Cache sizes are small (default 64), so linear scan is cache-friendly.
@@ -28,7 +28,7 @@ typedef struct {
 /* ── Cache struct ────────────────────────────────────────────────── */
 
 typedef struct KlResolverCache {
-    KlResolver       base;       /* vtable — MUST be first for upcast */
+    KlResolver       base;       /* vtable: MUST be first for upcast */
     KlResolver      *inner;      /* borrowed */
     KlResCacheEntry *entries;
     int              capacity;
@@ -49,9 +49,9 @@ typedef struct KlResolverCache {
  *
  * Solution: cache_resolve sets in_resolve=1 before calling inner->resolve
  * and clears it after.  inner_done_fn checks in_resolve:
- *   - If 1 (sync): sets completed=1 and does NOT free — cache_resolve
+ *   - If 1 (sync): sets completed=1 and does NOT free; cache_resolve
  *     will see completed and knows the callback already fired.
- *   - If 0 (async): frees the request — it's unreferenced after callback.
+ *   - If 0 (async): frees the request; it's unreferenced after callback.
  *
  * This is the canonical pattern for decorators wrapping a KlResolver.
  * Any new decorator that forwards to an inner resolver must replicate it.
@@ -82,7 +82,7 @@ static const KlResolveResult *cache_lookup(KlResolverCache *c,
             strcmp(e->host, host) == 0) {
             if (e->deadline_ms > now)
                 return &e->result;
-            /* Expired — mark free and continue scanning.  The
+            /* Expired: mark free and continue scanning.  The
              * cache_insert invariant says there's at most one entry
              * per (host, port), so this loop terminates with the
              * single match either returned or evicted; but defensive
@@ -142,7 +142,7 @@ static void cache_insert(KlResolverCache *c, const char *host, int port,
             e->port = port;
             e->result = *result;
             e->deadline_ms = deadline;
-            /* count stays the same — replacing occupied entry */
+            /* count stays the same: replacing occupied entry */
             return;
         }
     }
@@ -161,7 +161,7 @@ static void cache_insert(KlResolverCache *c, const char *host, int port,
     e->port = port;
     e->result = *result;
     e->deadline_ms = deadline;
-    /* count stays the same — replacing occupied entry */
+    /* count stays the same: replacing occupied entry */
 }
 
 /* ── Inner resolver completion callback ──────────────────────────── */
@@ -179,12 +179,12 @@ static void inner_done_fn(KlResolveReq *req, const KlResolveResult *result,
 
     /* Snapshot the sync flag + allocator BEFORE user_done.  The user
      * MAY call cache_cancel(&cr->base) from inside their done handler
-     * — common when the calling stream is being torn down.  Without
+     * (common when the calling stream is being torn down).  Without
      * snapshots, any post-callback read of cr would be use-after-free.
      *
      * Set completed=1 before user_done so a re-entrant cancel sees a
      * coherent state (no double-cancel of inner).  Set in_user_done=1
-     * so cache_cancel knows to DEFER the free until we return — if it
+     * so cache_cancel knows to DEFER the free until we return; if it
      * freed now, our post-callback branch below would touch dead
      * memory. */
     int was_sync = cr->in_resolve;
@@ -200,14 +200,14 @@ static void inner_done_fn(KlResolveReq *req, const KlResolveResult *result,
         /* Sync completion: we're nested inside cache_resolve, which
          * still needs to read cr->* after we return (to set
          * cr->inner_req, etc.).  Never free cr here on the sync path
-         * — cache_resolve owns the post-call free decision (see the
+         * (cache_resolve owns the post-call free decision; see the
          * cancel_deferred check there). */
         return;
     }
 
     /* Async completion: cr is unreferenced after callback unless the
      * user already cancelled (which deferred to us). Free unconditionally
-     * — cancel_deferred=1 means the user called cancel but we held it
+     * (cancel_deferred=1 means the user called cancel but we held it
      * off; the free that cancel would've done happens here, exactly once. */
     kl_free(alloc, cr, sizeof(*cr));
 }
@@ -262,7 +262,7 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
         return &cr->base;
     }
 
-    /* Cache miss — delegate to inner resolver.
+    /* Cache miss: delegate to inner resolver.
      * Set in_resolve flag so inner_done_fn defers freeing if the inner
      * resolver completes synchronously (callback fires inside resolve). */
     cr->in_resolve = 1;
@@ -272,7 +272,7 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
 
     if (!inner) {
         /* inner_done_fn may have already run (sync completion) and called
-         * done_fn before we return NULL.  Free cr regardless — the
+         * done_fn before we return NULL.  Free cr regardless; the
          * inner_done_fn sync path is contracted to NOT free on its own. */
         kl_free(c->alloc, cr, sizeof(*cr));
         return NULL;
@@ -286,7 +286,7 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
          * because inner_done_fn's sync branch deferred the free to
          * us.  Honor the cancel now: inner has already completed
          * (we're past inner->resolve), so skip inner->cancel; just
-         * free cr and return NULL — the user has no need for a
+         * free cr and return NULL; the user has no need for a
          * handle to an already-dead request. */
         kl_free(c->alloc, cr, sizeof(*cr));
         return NULL;

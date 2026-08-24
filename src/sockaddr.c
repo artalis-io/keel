@@ -1,5 +1,5 @@
 /*
- * sockaddr.c — pure operations on KlSockAddr.
+ * sockaddr.c: pure operations on KlSockAddr.
  *
  * NO system socket headers: this TU is platform-neutral by construction (it
  * compiles unchanged on a freestanding / lwIP target). All platform sockaddr
@@ -44,7 +44,7 @@ int kl_sockaddr_from_unix(KlSockAddr *out, const char *path) {
     return 0;
 }
 
-/* ── numeric literal parsing (pure — no inet_pton / getaddrinfo) ──────────── */
+/* ── numeric literal parsing (pure: no inet_pton / getaddrinfo) ──────────── */
 
 /* Parse dotted-quad IPv4 into out[4]. Returns 0 on success, -1 otherwise. */
 static int parse_ipv4(const char *s, uint8_t out[4]) {
@@ -206,7 +206,7 @@ static int fmt_ipv6(const uint8_t ip[16], char *buf, size_t n) {
 
     /* Colon accounting per RFC 5952 (musl inet_ntop6 shape): a compressed run
      * emits a single ':' at its start; the separator before the group that
-     * follows supplies the second colon — except a trailing run, which needs an
+     * follows supplies the second colon, except a trailing run, which needs an
      * explicit closing ':' after the loop. */
     size_t off = 0;
     for (int i = 0; i < 8; i++) {

@@ -69,7 +69,7 @@ unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* Readiness loop — the default POSIX provider works; nothing to auto-wire. */
+/* Readiness loop: the default POSIX provider works; nothing to auto-wire. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;

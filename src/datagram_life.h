@@ -2,7 +2,7 @@
 #define KEEL_SRC_DATAGRAM_LIFE_H
 
 /*
- * datagram_life.h — TRANSPORT-NEUTRAL liveness + refcount token for datagram completion ops.
+ * datagram_life.h: TRANSPORT-NEUTRAL liveness + refcount token for datagram completion ops.
  *
  * A datagram completion (KL_COMP_DGRAM_RECV / _SEND) posted on a completion backend outlives the
  * transport owner (the KlDgramCore) that started it: the backend op is kernel-/backend-owned and its
@@ -12,13 +12,13 @@
  *
  *  - is allocated from the EVENT-CONTEXT / backend allocator (outlives the transport), before the
  *    first receive is posted;
- *  - holds a NULLABLE live `target` (the owner) — teardown marks it dead and clears the target FIRST;
+ *  - holds a NULLABLE live `target` (the owner); teardown marks it dead and clears the target FIRST;
  *    every completion path recovers the target through kl_dgram_life_target() and touches the owner
  *    ONLY while it is non-NULL;
  *  - owns the receive-side storage (the inbound slot + receive machine) via `on_final`, so that
  *    storage outlives every posted receive op that pins it;
  *  - is reference-counted: one OWNER ref (held by the transport) plus one ref per posted backend op. A
- *    posted op releases its ref exactly once — on genuine retirement/dequeue: post failure,
+ *    posted op releases its ref exactly once, on genuine retirement/dequeue: post failure,
  *    cancellation (silent drop OR dispatched error), normal completion, callback-free teardown,
  *    backend shutdown. If a completion EVENT is emitted, ownership TRANSFERS from the backend op to the
  *    event and is released after dispatch. Teardown drops the owner ref; the FINAL release runs
@@ -32,14 +32,14 @@
  * SINGLE-THREADED: every create/retain/release/mark_dead/target call MUST run on the event-loop
  * thread. The refcount is a plain int; there is no atomic/locking. (A datagram is single-loop-affine.)
  *
- * INTERNAL header — not installed, no ABI commitment.
+ * INTERNAL header: not installed, no ABI commitment.
  */
 
 #include <keel/allocator.h>
 
 typedef struct KlDgramLife KlDgramLife;
 
-struct KlCompletionEvent;   /* completion.h — the dispatch handler's event (fwd; avoids a header cycle) */
+struct KlCompletionEvent;   /* completion.h: the dispatch handler's event (fwd; avoids a header cycle) */
 
 /* Which side of a datagram op a completion-axis cancel/retire query targets. Shared by the
  * completion backend seam (KlCompletionOps.cancel_dgram/retire_dgram) and the close coordinator
@@ -50,7 +50,7 @@ typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
  * PENDING keeps the object CLOSING (a cancelled completion op not yet drained); RETIRED = physically
  * done (storage safe to free); QUARANTINED = could NOT be confirmed retired (EFI unconfirmed op →
  * fail-closed, ref abandoned). `transport_err` (out) is 1 iff a terminal transport error occurred on
- * the op — it becomes CLOSE_ERROR ONLY when every op is RETIRED (never under quarantine). */
+ * the op; it becomes CLOSE_ERROR ONLY when every op is RETIRED (never under quarantine). */
 typedef enum {
     KL_DGRAM_RETIRE_PENDING = 0,
     KL_DGRAM_RETIRE_RETIRED,
@@ -62,7 +62,7 @@ typedef enum {
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
 
 /* Create a token with ONE owner reference (refs=1, live=1, target set). `on_final` runs on the FINAL
- * release — it frees the owner-side receive storage (inbound slot + machine) via `final_ctx`; the
+ * release; it frees the owner-side receive storage (inbound slot + machine) via `final_ctx`; the
  * token then frees itself. `dispatch` is the completion routing identity (the driver calls
  * `dispatch(target, ev)` for this token's completions). `alloc` MUST outlive every posted op (the
  * event-ctx / backend allocator, never storage that disappears with the transport). Returns NULL

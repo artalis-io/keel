@@ -2,7 +2,7 @@
 #define KEEL_SRC_DATAGRAM_BATCH_H
 
 /*
- * datagram_batch.h — INTERNAL layout of KlDatagramBatch. Not installed, not ABI-stable.
+ * datagram_batch.h: INTERNAL layout of KlDatagramBatch. Not installed, not ABI-stable.
  * The public API is <keel/datagram_batch.h>; this header exists only so the wiring TUs and
  * the whitebox tests can see the fields.
  *
@@ -23,7 +23,7 @@ struct KlDatagramBatch {
     struct KlDatagram   *owner;      /* the datagram this batch is bound to (E1 owner check) */
     KlDgramBatchDir      dir;        /* RECV / SEND / BOTH */
     /* Set at create (in datagram_batch.c) to the unconditional teardown. The FACADE reclaims a
-     * core-adopted RECV batch by calling THIS pointer — an INDIRECT call, so the always-linked facade
+     * core-adopted RECV batch by calling THIS pointer (an INDIRECT call), so the always-linked facade
      * (datagram.c) carries no static reference to datagram_batch.c (keeps the freestanding lib, which
      * excludes this extension TU, closed). */
     void               (*reclaim)(struct KlDatagramBatch *b);
@@ -42,7 +42,7 @@ struct KlDatagramBatch {
     KlDgramRxSlot       *rx_slots;
     size_t               rx_slots_bytes;
     /* Fallback single-recv payload storage (`slot_bufsz` bytes), allocated ONLY when the recv side has
-     * no provider rx_block (RX_BATCH absent) — one recv writes here, then rx_slots[0] points at it. */
+     * no provider rx_block (RX_BATCH absent): one recv writes here, then rx_slots[0] points at it. */
     unsigned char       *rx_fallback;
     size_t               rx_fallback_bytes;
 
@@ -52,12 +52,12 @@ struct KlDatagramBatch {
      * mid-buffer pause (held buffer); discarded on stop/close. */
     int                  attached;   /* 1 once the core adopted this batch (recv attach) */
     int                  gro_active;  /* GRO split ON iff provider CAP_GRO AND accepted RX_GRO
-                                       * — set at attach; when 0 the provider meta.gro_seg is IGNORED. */
+                                       * set at attach; when 0 the provider meta.gro_seg is IGNORED. */
     int                  n_filled;
     int                  cursor_i;
     size_t               seg_off;
     /* The GRO delivery mode LATCHED when a slot is first entered (seg_off == 0) and kept until the
-     * slot advances — so a callback that (un)registers on_recv_segments mid-split does not change the
+     * slot advances, so a callback that (un)registers on_recv_segments mid-split does not change the
      * mode for the remaining segments of the current slot. `slot_gro` = this slot's segment size (0 =
      * plain); `slot_split` = 1 to split into per-segment on_recv, 0 to deliver whole. */
     int                  slot_gro;
@@ -68,7 +68,7 @@ struct KlDatagramBatch {
      * `tx_descs` is the neutral KlDgramTxDesc[] staging the send machine fills from the FIFO head-run
      * for one flush (input to send_batch / the portable loop); `tx_descs_bytes` is its validated size.
      * `gso_buf` is the copy-once GSO group buffer; `gso_bytes` is its VALIDATED byte
-     * size (`n_slots * slot_bufsz`, overflow-guarded at create) — used for both the alloc and the free. */
+     * size (`n_slots * slot_bufsz`, overflow-guarded at create); used for both the alloc and the free. */
     void                *tx_block;
     KlDgramTxDesc       *tx_descs;
     size_t               tx_descs_bytes;
