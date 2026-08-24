@@ -4,139 +4,162 @@ Status: PROPOSED (docs-only). No em-dash is removed and no gate lands until this
 accepted. Governing roadmap: [roadmap/roadmap.md](roadmap/roadmap.md), Phase C / C3. This file is
 written em-dash-free on purpose, so it models the target style and passes its own future gate.
 
+Amended after review: the roadmap resolves D1 (include string literals and program output, no
+exemptions), D2 (context-appropriate ASCII punctuation, not a universal hyphen), and D3 (full-text
+exact-codepoint gate over all prose-bearing formats, no exceptions). Those rulings are folded in
+below.
+
 ## 1. Goal
 
-Remove the em-dash (U+2014, "-") from authored KEEL text and add a permanent gate so it cannot
-return. The em-dash is a stylistic tell; the house style uses the ASCII hyphen-minus. This is a
-text-only pass with the same discipline as C2: mechanical, reviewed per increment, behavior
-preserved (a compile proves it for code).
+Remove the em-dash (U+2014) from ALL authored KEEL text, active and archived, and add a permanent
+gate so it cannot return. The em-dash is a stylistic tell; the house style uses ASCII punctuation.
+This is text-only for logic, but it is NOT universally code-byte-identical: emitted string literals
+change too, so it carries an output-to-oracle obligation (below).
 
 ## 2. Inventory (tracked, vendor/ excluded)
 
-Population of U+2014 by area (files / occurrences):
+U+2014 population by area (files / occurrences):
 
 | Area          | files | occ.  |
 |---------------|-------|-------|
 | include/      | 45    | 282   |
-| src/          | 133   | 1283  |
-| src/protocols (subset of src) | - | - |
+| src/ (incl. src/protocols) | 133 | 1283 |
 | tests/        | 184   | 1382  |
 | integrations/ | 142   | 1347  |
 | examples/     | 34    | 87    |
 | bench/        | 5     | 15    |
 | fuzz/         | 5     | 10    |
-| docs/         | 76    | 3858  |
+| docs/ (active + archived) | 76 | 3858 |
 | tools/        | 3     | 37    |
+| shell (*.sh)  | 28    | 158   |
+| .github/workflows/ci.yml (YAML) | 1 | some |
+| site/index.html (HTML) | 0 | 0 |
 | README*.md    | 12    | 241   |
 | CLAUDE.md     | 1     | 82    |
 | CONTRIBUTING.md | 1   | 10    |
 | Makefile(s)   | 10    | 205   |
 
-Total: 572 files, ~9100 occurrences.
+Total: ~600 files, ~9300 occurrences. Spacing is uniform (7586 spaced forms vs 1 tight across
+`.c/.h/.md`), but per D2 the replacement is context-dependent, not a single glyph (see §4).
 
-Spacing is uniform: **7586 spaced ` - ` forms vs 1 tight `x-y`** across `.c/.h/.md`. The canonical
-substitution is therefore trivial and safe (see §4).
+## 3. Handling model (D1 resolved: include everything, no exemptions)
 
-## 3. The safety split (the one real decision)
+Em-dashes in `.c/.h` divide by locus, and BOTH are in scope now:
 
-Not all em-dashes are authored prose. In `.c/.h` they divide into:
+- **Comments (3529 in `.c/.h`) and prose (docs, README, CLAUDE, CONTRIBUTING, shell/Makefile
+  comments):** authored text. Rewritten per D2. For code files the proof is code-token identity
+  (§8), not full byte-identity, because string literals may also change in the same file.
+- **String literals / program output (145 `.c/.h` lines, 23 Makefile `@echo`/`printf` recipes, and
+  emitted text in shell scripts):** behavior-bearing. Rewritten per D2 AND reconciled with every
+  consumer in the SAME increment.
 
-- **Comments: 3529 occurrences** - authored text. Safe to sweep, byte-identical-code provable
-  (exactly the C2 comment-only proof).
-- **String literals / program output: 145 lines** - behavior-bearing. Many are **CI-oracle markers**
-  that harness scripts grep for verbatim, e.g. `"PASS B (%s) - %zu bytes"`,
-  `"S-4: GO - served GET / (200)"`, `"PASS T6 (glue: one-held overflow - ...)"`. Rewriting these
-  changes program output and can break the oracle scripts. They are runtime text, not authored
-  style.
+### 3a. Output-to-oracle inventory (REQUIRED before editing any emitted literal)
 
-The Makefile has the same split: ~176 comment occurrences plus **23 `@echo`/`printf` recipe strings**
-that print to build output.
+Before an increment changes an emitted literal, it MUST first produce an inventory row per affected
+literal:
 
-**Recommendation (mirrors the accepted C2 ruling):** the removal and the gate cover **comments and
-prose docs only**; **string literals and program-output strings are out of scope** (exempt), exactly
-as C2 exempted string literals. The em-dash-as-AI-tell concern is about authored text, not runtime
-output, and the oracle risk is real. If instead the reviewer wants program output em-dashes gone
-too, that is a separate, later increment done in lockstep with the harness-oracle scripts (an
-explicit, non-mechanical change), and the gate would move to full-text - this freeze does not assume
-it.
+- `file:line` of the literal;
+- the emitted text (the marker/message);
+- its consumer(s): every harness / oracle / `grep` / `awk` / `expect` that reads it (for example the
+  `run_*.sh` oracles, `tests/e2e_examples.sh`, CI workflow asserts).
 
-Open decision D1 for review: **exempt string literals / program output (recommended), or include
-them with lockstep oracle updates.**
+Every consumer is updated in lockstep in the same commit, and the affected harness is run, so a CI
+marker can never silently diverge from its matcher.
 
-## 4. Canonical substitution
+Preliminary evidence (recorded, not a substitute for the per-literal inventory): a scan of all
+tracked `*.sh` shows **no oracle matches on the em-dash glyph** - consumers key on ASCII prefixes
+(`PASS`, `GO`, `DONE`, `FAIL`) and structural fields, never on `"... U+2014 ..."`. So most marker
+rewrites are expected to be oracle-neutral; the inventory proves it case by case rather than
+assuming it.
 
-- Spaced form ` - ` (space, U+2014, space) -> ` - ` (space, hyphen-minus, space). Covers 7586 of
-  7587 cases.
-- The single tight `x-y` case is handled by hand (most likely `x - y`).
-- Leading/trailing in-comment forms (` * - foo`, `foo -`) map to the hyphen-minus in place.
+## 4. Substitution (D2 resolved: context-appropriate ASCII punctuation, not a universal hyphen)
 
-Open decision D2 for review: the replacement glyph. **` - ` (single spaced hyphen-minus, recommended
-- cleanest, matches existing hyphen usage)** vs ` -- ` (double hyphen, unambiguously "was an
-em-dash"). One choice, applied uniformly.
+A blind replacement to ` - ` would strip the code point but degrade thousands of sentences. Each
+occurrence is rewritten by its grammatical role:
+
+- **Sentence break** (two independent clauses): period or semicolon.
+- **Explanation / list introduction** (the dash introduces what follows): colon.
+- **Parenthetical aside** (a dash pair, or a mid-sentence aside): parentheses or commas.
+- **Label / range / genuine dash** (compound label, numeric range, "A to B"): ASCII hyphen `-`, or
+  `--` where a longer dash genuinely reads better.
+
+This makes the sweep a per-occurrence judgment, not a `sed`. It is mechanical only in the sense that
+it changes no logic; it is editorial in that each site is read. Increments are sized accordingly
+(finer than a blind pass), and machine assistance may draft rewrites but every hunk is reviewed.
 
 ## 5. Explicitly NOT in scope
 
-- **Box-drawing characters** (U+2500 "-" horizontal, U+2502 "|", corners) used in `-- section --`
-  banners and boxed headers are NOT em-dashes and are preserved. The gate targets the exact codepoint
-  U+2014, so it can never match them.
-- **En-dash U+2013 (161 occ.)** and **minus sign U+2212 (11 occ.)** are a separate, smaller concern;
-  C3 is scoped to U+2014 only, per the "em-dash" mandate. They may be a later pass. (Noted so the
-  numbers are not a surprise.)
-- **vendor/** is never touched.
+- **Box-drawing characters** (U+2500 horizontal, U+2502 vertical, corners) in `-- section --` banners
+  and boxed headers: preserved. The gate targets the exact codepoint U+2014, so it never matches
+  them.
+- **En-dash U+2013 (161 occ.)** and **mathematical minus U+2212 (11 occ.)**: outside C3 (per the
+  ruling). Noted so the numbers are not a surprise; a later pass may address them.
+- **vendor/**: never touched.
 
-## 6. The permanent gate (`check-no-em-dash`)
+## 6. The permanent gate (`check-no-em-dash`) (D3 resolved: full-text, all formats, no exceptions)
 
 Lands in the final C3 increment, wired into `.PHONY` and the local gate set like the other `check-*`
-gates. Design, consistent with §3:
+gates.
 
-- **Scans** every tracked first-party file, `vendor/` excluded.
-- **Scope by file type**, honoring the §3 exemption:
-  - `.c` / `.h` (and Makefile): **comment text only**, reusing the C2 splice-aware C-comment
-    extractor (`tools/check_no_milestones.pl`'s proven state machine) so string literals / program
-    output are ignored naturally. (Makefile uses `#`-to-EOL comment extraction.)
-  - `.md` and other prose docs: **full text** (no string-literal concept).
-- **Rejects** exactly U+2014. Prints `file:line` on a hit and fails. **No file, line, or marker
-  exceptions.**
-- **Self-canaried**, positive and negative, run before the tree scan: a positive (an em-dash in a
-  comment MUST flag); negatives (an em-dash in a `.c` string literal MUST pass; a box-drawing U+2500
-  banner MUST pass; an en-dash U+2013 MUST pass). Abort loudly on any regression.
-
-Open decision D3 for review: whether the gate is **comment-only for code (recommended, per D1)** or
-full-text repository-wide (only if D1 chooses to include program output).
+- **Full-text** scan (NOT comment-only): the entire file content, because emitted literals are in
+  scope too. No contextual, string-literal, directory, or historical exceptions.
+- **Formats:** the roadmap-specified active and archived prose-bearing text: `.c`, `.h`, `.md`,
+  `.html`, Makefiles, shell (`.sh`), YAML (`.yml`/`.yaml`), and any site text formats. `vendor/`
+  excluded.
+- **Rejects** exactly U+2014. Prints `file:line` on a hit and fails. No exceptions of any kind.
+- **Self-canaried**, positive and negative, run before the tree scan: a positive (a U+2014 anywhere,
+  in prose OR a string literal, MUST flag); negatives that MUST pass (a box-drawing U+2500 banner; an
+  en-dash U+2013; a mathematical minus U+2212) - proving the gate is exact-codepoint and does not
+  over-reach into the out-of-scope glyphs. Abort loudly on any regression.
 
 ## 7. Increment sequence (proposed; per-increment review, no push)
 
-Mirrors C2's cadence; each is mechanical and compile-verified:
+Area-based, per D-ruling that the sequence may stay area-based but output/oracle changes are
+separated when they materially increase review risk:
 
-1. **C3-1** - public headers `include/keel/*.h` (comments).
-2. **C3-2** - substrate `src/*.{c,h}` (comments).
-3. **C3-3** - protocols `src/protocols/**/*.{c,h}` (comments).
-4. **C3-4** - integrations non-test `.c/.h` (comments).
-5. **C3-5** - tests + harnesses `.c/.h` (comments); string-literal oracle markers preserved per D1.
-6. **C3-6** - prose: `docs/**`, `README*.md`, `CLAUDE.md`, `CONTRIBUTING.md`, Makefile comments
-   (and `@echo` recipe strings only if D1 includes program output).
+1. **C3-1** - public headers `include/keel/*.h` (comments; any header string literals inventoried).
+2. **C3-2** - substrate `src/*.{c,h}` (comments + any emitted literals with their §3a inventory).
+3. **C3-3** - protocols `src/protocols/**/*.{c,h}`.
+4. **C3-4** - integrations non-test `.c/.h`.
+5. **C3-5** - tests + harnesses `.c/.h` AND their `.sh` oracles. This is the highest output/oracle
+   density (marker strings + `run_*.sh`), so the emitted-literal rewrites and their oracle updates
+   are grouped with, or split into a dedicated sub-commit from, the comment rewrites when that lowers
+   review risk (per the ruling).
+6. **C3-6** - prose and config: `docs/**` (active + archived), `README*.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`, `site/index.html`, `.github/workflows/*.yml`, `tools/*.sh`, Makefile comments
+   and `@echo`/`printf` recipe strings.
 7. **C3-7** - permanent `check-no-em-dash` gate, run green over the whole tree; archive the C3 freeze
    to `docs/archive/freezes/`.
 
-The reviewer may regroup (the substitution is uniform, so fewer increments are viable).
+## 8. Validation (per increment; adjusted for D1)
 
-## 8. Validation (per increment)
+Because string literals change, `.c/.h` increments are NOT universally code-byte-identical. The
+proof obligation splits:
 
+- **Code-token identity (new):** strip comments AND blank string-literal CONTENTS (keep delimiters
+  and code structure), then diff vs HEAD. The non-comment, non-string code tokens MUST be identical -
+  this proves no logic changed even though comments and literal text did. (A small helper extends the
+  C2 comment-stripper to also blank string contents.)
+- **Output/oracle lockstep:** for every changed emitted literal, the §3a inventory's consumers are
+  updated in the same commit and the affected harness is run (locally; the UEFI/QEMU and lwIP
+  harnesses where reachable, otherwise the ASCII-prefix invariant is shown to hold).
 - `git diff --check` (no whitespace damage).
-- For every `.c/.h` increment, the **comment-only byte-identical proof** (comment-strip diff vs HEAD)
-  - the code must not change; only comment bytes differ.
 - A **release compile** (`make`), plus `make test` on the substrate and tests increments.
 - The stale-name / layout / doc gates stay green, including `check-no-milestones` and, from C3-7, the
   new `check-no-em-dash`.
-- A repo-wide em-dash count reaches **zero in the scoped surface** (comments + prose; program output
-  excluded per D1).
+- A repo-wide U+2014 count reaches **zero** across the full scoped surface (all formats in §6).
 - No remote CI between C3 increments.
 
-## 9. Open decisions for review (summary)
+## 9. Decisions (resolved by review)
 
-- **D1** - string literals / program output: exempt (recommended) or include with lockstep oracle
-  updates.
-- **D2** - replacement glyph: ` - ` (recommended) or ` -- `.
-- **D3** - gate scope: comment-only for code (recommended, follows D1) or full-text.
+- **D1 - RESOLVED: include string literals and program output; no exemptions.** Rewrite emitted text
+  and update every dependent grep/oracle in the same increment; the §3a output-to-oracle inventory is
+  produced before editing so CI markers cannot silently diverge.
+- **D2 - RESOLVED: context-appropriate ASCII punctuation** (sentence break: period/semicolon;
+  explanation or list intro: colon; parenthetical: parentheses/commas; genuine label or range: hyphen
+  or `--`), never a universal replacement.
+- **D3 - RESOLVED: full-text exact-codepoint gate** over C/H, Markdown, HTML, Makefiles, shell, YAML,
+  and site text; no contextual, string-literal, directory, or historical exceptions. Box-drawing,
+  en-dashes, and mathematical minus remain outside C3.
 
-No source or doc text is edited until this freeze is accepted.
+No source or doc text is edited until this amended freeze is accepted.
