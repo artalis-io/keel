@@ -10,8 +10,8 @@ make BACKEND=iocp    # completion: IOCP (Windows)
 make BACKEND=pollcomp# completion: portable poll()-based double (test the completion driver on any POSIX host)
 make BACKEND=wsapoll # readiness: WSAPoll (Windows)
 make CC=cosmocc      # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test            # build and run all unit tests (84 suites)
-make examples     # build all 23 example programs (25 with TLS, 27 with compression)
+make test            # build and run the unit-test suites (tests/, tests/protocols/)
+make examples     # build the example programs under examples/
 make bench        # build bench server + run 4-endpoint wrk benchmark suite
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -30,7 +30,7 @@ make clean        # remove all build artifacts
 - `src/protocols/<family>/`: Protocol implementations, one dir per family: `http/` (incl. the llhttp parser backends `http1_parser_llhttp.c`/`http1_response_parser_llhttp.c`), `http2/`, `websocket/`, `dns/`, `proxy_protocol/`. Their unit tests mirror at `tests/protocols/<family>/`. Substrate never includes a protocol header (gate G1).
 - `vendor/`: Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/`: Unit tests using Sheredom's utest.h framework.
-- `examples/`: Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, unix_socket_server, compress_server, decompress_client).
+- `examples/`: Example programs (run `ls examples/*.c`). Covers the sync/async server and client, TLS, HTTP/2, WebSocket, SSE, streaming, body readers, thread pool, connection pool, redirect, proxy, compression, a custom socket provider, and the lwIP integration (`examples/lwip/`).
   - Compression backend also provides decompression (`decompress_miniz.c`) for client-side use.
 - `docs/`: Architecture and roadmap documentation.
 
@@ -40,7 +40,7 @@ make clean        # remove all build artifacts
 
 - **Event axis**: `event.h` (readiness) + `completion.h` + the completion driver (platform-independent). Readiness backends: `event_epoll.c` / `event_kqueue.c` / `event_wsapoll.c` / `event_poll.c`. Completion backends: `event_iouring.c` (Linux SQE/CQE + splice), `event_iocp.c` (Windows), `event_pollcomp.c` (a portable `poll()` completion double for CI/ASan). Capability negotiation (`src/event_caps.h`: `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) matches a loop to a compatible socket provider.
 - **Socket axis**: `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlHttpServerConfig.sockets` / `KlHttpClientConfig.sockets`.
-- **Protocol axis**: `http_connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `sse.c`, the `KlTls` vtable, body readers, `http_response.c`. These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
+- **Protocol axis**: `http_connection.c`, `http2_server.c`, `websocket.c`, the `http_client_*` TUs (`http_client_async.c` / `_sync.c` / `_common.c`), `http2_client.c`, `websocket_client.c`, `http_sse.c`, the `KlTls` vtable, body readers, `http_response.c` (all under `src/protocols/<family>/`). These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
 
 `integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged, grouped by role under `integrations/<role>/<backend>/`: `platform/lwip/` (BSD sockets + a raw NO_SYS completion provider), `platform/uefi/` (a freestanding EFI_TCP4/UDP4 provider, stock async `KlHttpClient` on bare firmware; see `docs/archive/phases/phase10_uefi_feasibility_design.md`), `tls/{mbedtls,openssl,boringssl,libressl}/` (TLS), `http2/nghttp2/` (HTTP/2 session), `codec/miniz/` (compression). Each backend's own tests live in `integrations/<role>/<backend>/tests/`. An integration reaches core only through the public `include/keel/*.h` surface or the frozen substrate-seam allowlist, never a protocol header (gates G2/G3).
 
@@ -105,8 +105,8 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlHttpMultipartConfig` | `http_body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
 | `KlHttp1ChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
 | `KlAllocator` | `allocator.h` | Vtable: malloc, realloc (with old_size), free (with size) |
-| `KlHttp1RequestParser` | `parser.h` | Vtable: parse (returns KlHttp1ParseResult), reset, destroy |
-| `KlHttp1ResponseParser` | `parser.h` | Client-side response parser vtable |
+| `KlHttp1RequestParser` | `http1_parser.h` | Vtable: parse (returns KlHttp1ParseResult), reset, destroy |
+| `KlHttp1ResponseParser` | `http1_parser.h` | Client-side response parser vtable |
 | `KlHttpConn` | `http_connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
 | `KlHttpRouter` | `http_router.h` | Route table + match function |
 | `KlHttpRoute` | `http_router.h` | Single route: method, pattern, handler, user_data, body_reader |
@@ -122,7 +122,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlTlsResult` | `tls.h` | Enum: OK, WANT_READ, WANT_WRITE, ERROR |
 | `KlTlsFactory` | `tls.h` | Factory: creates per-connection KlTls from shared context |
 | `KlWatcher` | `event_ctx.h` | Registered FD watcher: fd, callback, user_data, ctx-owned list |
-| `KlWatcherFn` | `event_ctx.h` | Watcher callback: `void (*)(int fd, KlEventMask ready, void *user_data)` |
+| `KlWatcherFn` | `event_ctx.h` | Watcher callback: `void (*)(KlSocketHandle fd, KlEventMask ready, void *user_data)` |
 | `KlAsyncOp` | `async.h` | In-flight async operation: conn, deadline, on_resume/deadline/cancel |
 | `KlAsyncFn` | `async.h` | Async callback: `void (*)(KlAsyncOp *op, void *user_data)` |
 | `KlThreadPool` | `thread_pool.h` | Opaque thread pool: workers, work/done queues, pipe watcher |
@@ -152,7 +152,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlHttp2ClientHeader` | `http2_client.h` | Request/response header: name, value |
 | `KlHttp2ClientResponse` | `http2_client.h` | Accumulated stream response: status, headers, body |
 | `KlHttpSse` | `http_sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
-| `KlError` | `error.h` | Diagnostic error enum: 25 codes (alloc, network, DNS, TLS, HTTP, redirect, proxy, event, thread, pipe) |
+| `KlError` | `error.h` | Diagnostic error enum (alloc, network, DNS, TLS, HTTP, redirect, proxy, event, thread, pipe categories) |
 | `KlTimerFn` | `timer.h` | Timer callback: `void (*)(void *user_data)` |
 | `KlTimerEntry` | `timer.h` | Timer heap entry: deadline_ms, cb, user_data, id |
 | `KlHttpClientPool` | `http_client_pool.h` | Connection pool: flat array, idle timers, per-host limits |
@@ -170,7 +170,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlDecompressConfig` | `decompress.h` | Decompression config: ctx, factory, ctx_destroy (shares KlCompressCtx) |
 | `KlDecompressStream` | `decompress.h` | Decompression stream handle: decomp, alloc, error |
 | `KlDrain` | `drain.h` | Backpressure write buffer: write_fn, buf, max_size, on_drain |
-| `KlDrainWriteFn` | `drain.h` | Writer callback: `ssize_t (*)(const char *data, size_t len, void *ctx)` |
+| `KlDrainWriteFn` | `drain.h` | Writer callback: `kl_ssize_t (*)(const char *data, size_t len, void *ctx)` |
 | `KlDrainCb` | `drain.h` | Drain callback: `void (*)(void *ctx)` |
 | `KlFileIO` | `file_io.h` | Pluggable async file I/O vtable: submit, cancel, tick, destroy |
 | `KlFileIOResult` | `file_io.h` | File I/O completion result: udata + bytes read |
@@ -266,9 +266,9 @@ KEEL provides two async primitives for non-blocking operations without stalling 
 Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread. Watchers operate on `KlEventCtx` (not `KlHttpServer` directly).
 
 ```c
-int  kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
-int  kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask);
-void kl_watcher_del(KlEventCtx *ctx, int fd);
+int  kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
+int  kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask);
+void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd);
 ```
 
 Watchers are heap-allocated and ctx-owned. `KlHttpServer` embeds `KlEventCtx ev`; use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
@@ -433,7 +433,7 @@ make debug && make test             # run under ASan + UBSan
 ./tests/test_body_reader            # run a single test suite
 ```
 
-Test files are auto-discovered via `$(wildcard tests/test_*.c)` in the Makefile.
+Test files are auto-discovered via `$(wildcard tests/test_*.c tests/protocols/*/test_*.c)` in the Makefile.
 
 Test naming: `UTEST(suite, test_name)`, e.g. `UTEST(mp, boundary_spanning)`.
 
@@ -463,6 +463,31 @@ make cppcheck       # cppcheck with --enable=all (--error-exitcode=1 fails on is
 ```
 
 Both targets should exit cleanly with no findings before merging.
+
+## Local Gates
+
+Fast, dependency-free `make` targets that enforce structure and hygiene. All should pass before a
+change is merged (they run in CI too):
+
+```bash
+# Text hygiene
+make check-no-milestones   # no milestone/phase/finding archaeology in C/H comments (comments-only, splice-aware)
+make check-no-em-dash      # no em-dash (U+2014) in any tracked non-binary file (byte-exact, self-canaried)
+# Layout + seams
+make check-old-layout      # no resurrected pre-restructure layout (protocols/, parsers/, flat integrations, ...)
+make check-test-layout     # tests live at their authorized homes (tests/, tests/protocols/<family>/)
+make check-protocol-home   # protocol code stays under src/protocols/<family>/
+make check-substrate-purity        # substrate never includes a protocol header (gate G1)
+make check-protocol-no-integration # protocols never include an integration header (gate G2)
+make check-integration-seam        # integrations reach core only via include/keel/ or the frozen seam (gate G3)
+make check-sockaddr-neutral        # no compile-time socket/address ABI assumptions
+make check-readiness-identity      # readiness registrations use &conn->stream (+ -selftest)
+# Stale-name + docs + W^X
+make check-no-kludp        # the deleted KlUdp/kl_udp_* object API cannot reappear
+make check-no-httplegacy   # the renamed HTTP taxonomy has no legacy KlServer/KlClient/... names
+make check-doc-refs        # every in-repo link in the living-architecture docs resolves
+make wx-guard              # no runtime-codegen surface (mmap PROT_EXEC, dlopen, JIT, popen, ...) under src/
+```
 
 ## Fuzz Testing
 
