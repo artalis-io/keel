@@ -91,6 +91,10 @@ KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worke
 - Decorators (e.g. `resolver_cache.c`) use `in_resolve`/`completed` sentinel flags to detect sync completion and defer freeing the per-request handle
 - This is the canonical pattern; any new resolver decorator must replicate it
 
+> The detailed lifecycle and policy contracts (async-op lifecycle, stream transport, streaming,
+> datagram, ALPN, backend compatibility) are maintained under `docs/contracts/`. Link to them rather
+> than restating policy here, which can drift.
+
 ## Testing Requirements
 
 ### Coverage expectations
@@ -129,7 +133,7 @@ UTEST(suite_name, test_name) {
 UTEST_MAIN();
 ```
 
-Add the test file as `tests/test_<module>.c`; it's auto-discovered by the Makefile wildcard.
+Add the test file as `tests/test_<module>.c` (a protocol test goes under `tests/protocols/<family>/test_<module>.c`); it is auto-discovered by the Makefile wildcard (`tests/test_*.c` + `tests/protocols/*/test_*.c`).
 
 ## Performance Considerations
 
@@ -144,13 +148,18 @@ Add the test file as `tests/test_<module>.c`; it's auto-discovered by the Makefi
 
 ## Adding a New Module
 
-1. Create header: `include/keel/<module>.h` with include guard `KEEL_<MODULE>_H`
-2. Create source: `src/<module>.c`
-3. Add to `CORE_SRC` in `Makefile`
+Genuine substrate modules (allocator, timer, event/completion, sockets, the datagram machine, ...)
+live under `src/`. Protocol implementations live under `src/protocols/<family>/` (`http`, `http2`,
+`websocket`, `dns`, `proxy_protocol`). Public headers are always flat under `include/keel/`.
+
+1. Create the public header `include/keel/<module>.h` with include guard `KEEL_<MODULE>_H`
+2. Create the source: substrate -> `src/<module>.c`; a protocol implementation ->
+   `src/protocols/<family>/<module>.c`
+3. Add it to `CORE_SRC` in `Makefile`
 4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
 5. Prefix all public functions with `kl_<module>_`
-6. Write tests: `tests/test_<module>.c`
-7. Update module count (currently 31) in `README.md` and `CLAUDE.md`
+6. Write tests: substrate / shared / backend-axis -> `tests/test_<module>.c`; a protocol
+   implementation -> `tests/protocols/<family>/test_<module>.c`
 
 ## Adding a New Body Reader
 
@@ -253,7 +262,7 @@ Middleware runs in registration order, after route matching, before body reading
 
 ## Adding a TLS Backend
 
-1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol` and `set_hostname` (NULL if not supported)
+1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol`, `set_hostname`, and `peer_cert` (mTLS identity; NULL if not supported). See `docs/contracts/alpn_policy.md` for ALPN negotiation.
 2. Create a `KlTlsCtx` struct for shared state (certificates, keys, ciphers)
 3. Write a factory function: `KlTls *my_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)`
 4. Register via `KlTlsConfig` in `KlHttpServerConfig`:
@@ -274,7 +283,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 671 unit + integration tests (41 suites)
+make test               # the unit + integration suites
 make debug-test         # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis
