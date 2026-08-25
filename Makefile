@@ -1160,6 +1160,14 @@ check-old-layout:
 check-no-milestones:
 	@perl tools/check_no_milestones.pl
 
+# Em-dash gate (C3-7). Rejects the exact codepoint U+2014 anywhere in a tracked, non-binary file
+# (git ls-files -z, only vendor/ excluded, binaries skipped by a raw-byte NUL check). Full-text, no format allowlist
+# and no other exceptions. The script is itself em-dash-free (the four
+# glyphs it reasons about are written as \x byte escapes). Positive + negative self-canaries
+# (U+2014 flags; box-drawing U+2500 / en-dash U+2013 / minus U+2212 do not) run before the tree scan.
+check-no-em-dash:
+	@perl tools/check_no_em_dash.pl
+
 
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
@@ -1934,7 +1942,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

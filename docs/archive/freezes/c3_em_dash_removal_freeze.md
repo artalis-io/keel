@@ -1,7 +1,7 @@
 # C3 - Em-dash removal + permanent no-em-dash gate (inventory + freeze)
 
 Status: PROPOSED (docs-only). No em-dash is removed and no gate lands until this freeze is
-accepted. Governing roadmap: [roadmap/roadmap.md](roadmap/roadmap.md), Phase C / C3. This file is
+accepted. Governing roadmap: [roadmap/roadmap.md](../../roadmap/roadmap.md), Phase C / C3. This file is
 written em-dash-free on purpose, so it models the target style and passes its own future gate.
 
 Amended after review: the roadmap resolves D1 (include string literals and program output, no
