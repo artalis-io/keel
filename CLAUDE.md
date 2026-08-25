@@ -40,7 +40,7 @@ make clean        # remove all build artifacts
 
 - **Event axis**: `event.h` (readiness) + `completion.h` + the completion driver (platform-independent). Readiness backends: `event_epoll.c` / `event_kqueue.c` / `event_wsapoll.c` / `event_poll.c`. Completion backends: `event_iouring.c` (Linux SQE/CQE + splice), `event_iocp.c` (Windows), `event_pollcomp.c` (a portable `poll()` completion double for CI/ASan). Capability negotiation (`src/event_caps.h`: `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) matches a loop to a compatible socket provider.
 - **Socket axis**: `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlHttpServerConfig.sockets` / `KlHttpClientConfig.sockets`.
-- **Protocol axis**: `http_connection.c`, `http2_server.c`, `websocket.c`, the `http_client_*` TUs (`http_client_async.c` / `_sync.c` / `_common.c`), `http2_client.c`, `websocket_client.c`, `http_sse.c`, the `KlTls` vtable, body readers, `http_response.c` (all under `src/protocols/<family>/`). These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
+- **Protocol axis**: `http_connection.c`, `http2_server.c`, `websocket.c`, the `http_client_*` TUs (`http_client_async.c` / `http_client_sync.c` / `http_client_common.c`), `http2_client.c`, `websocket_client.c`, `http_sse.c`, the `KlTls` vtable, body readers, `http_response.c` (all under `src/protocols/<family>/`). These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
 
 `integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged, grouped by role under `integrations/<role>/<backend>/`: `platform/lwip/` (BSD sockets + a raw NO_SYS completion provider), `platform/uefi/` (a freestanding EFI_TCP4/UDP4 provider, stock async `KlHttpClient` on bare firmware; see `docs/archive/phases/phase10_uefi_feasibility_design.md`), `tls/{mbedtls,openssl,boringssl,libressl}/` (TLS), `http2/nghttp2/` (HTTP/2 session), `codec/miniz/` (compression). Each backend's own tests live in `integrations/<role>/<backend>/tests/`. An integration reaches core only through the public `include/keel/*.h` surface or the frozen substrate-seam allowlist, never a protocol header (gates G2/G3).
 
@@ -103,7 +103,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlHttpMultipartReader` | `http_body_reader_multipart.h` | Multipart parser: parts array, state machine, overlap buffer |
 | `KlHttpMultipartPart` | `http_body_reader_multipart.h` | Single part: name, filename, content_type, data, data_len |
 | `KlHttpMultipartConfig` | `http_body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
-| `KlHttp1ChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
+| `KlHttp1ChunkedDecoder` | `http1_chunked.h` | Chunked TE decoder: state machine, no allocation |
 | `KlAllocator` | `allocator.h` | Vtable: malloc, realloc (with old_size), free (with size) |
 | `KlHttp1RequestParser` | `http1_parser.h` | Vtable: parse (returns KlHttp1ParseResult), reset, destroy |
 | `KlHttp1ResponseParser` | `http1_parser.h` | Client-side response parser vtable |

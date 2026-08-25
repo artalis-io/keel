@@ -6,7 +6,7 @@
 
 Minimal C11 HTTP client/server library over an async I/O core that spans **both** the readiness axis (epoll, kqueue, WSAPoll, poll) and the completion axis (io_uring, IOCP) behind one small event interface, on a platform-neutral socket seam (POSIX, Winsock, lwIP). The event model, the socket/platform implementation, and the protocol stack are three orthogonal axes: swap the event backend or the socket provider without touching a line of protocol code. Both the server and client support sync and async operation: sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **920+ tests** (65 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **Tested under ASan/UBSan.** **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -270,7 +270,7 @@ Keel is organized along **three orthogonal axes**, so any one can be replaced wi
 
 - **Event axis** (`event.h` + `completion.h`): how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
 - **Socket axis** (`socket.h`, the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`): where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.
-- **Protocol axis** (`http_connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `http_response.c`): HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/archive/audits/keel_axis_audit.md` audits this separation mechanically.
+- **Protocol axis** (`http_connection.c`, `http2_server.c`, `websocket.c`, the `http_client_*` TUs, the `KlTls` vtable, body readers, `http_response.c`): HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/archive/audits/keel_axis_audit.md` audits this separation mechanically.
 
 Below the axes sit orthogonal, independently testable modules:
 
@@ -281,14 +281,14 @@ Below the axes sit orthogonal, independently testable modules:
 | **socket** | `socket.h` | Platform-neutral socket seam (`KlSocketProvider`): POSIX / Winsock built in, lwIP + UEFI shipped |
 | **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
 | **request** | `http_request.h` | Parsed HTTP request struct (header-only, zero alloc) |
-| **parser** | `parser.h` | Pluggable request/response parser vtables |
+| **parser** | `http1_parser.h` | Pluggable request/response parser vtables |
 | **response** | `http_response.h` | Response builder: buffered, sendfile, or streaming chunked |
 | **router** | `http_router.h` | Route matching with `:param` capture + middleware chain |
 | **connection** | `http_connection.h` | Pre-allocated connection pool + state machine |
 | **server** | `http_server.h` | Top-level glue: TCP/UNIX bind, async event loop, stop |
 | **body_reader** | `http_body_reader.h` | Pluggable body reader vtable + buffer reader |
 | **body_reader_multipart** | `http_body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
-| **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
+| **chunked** | `http1_chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `http_cors.h` | Built-in CORS middleware with configurable origins |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
 | **async** | `async.h` | Connection suspension for async operations |
@@ -310,6 +310,9 @@ Below the axes sit orthogonal, independently testable modules:
 | **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
 | **file_io** | `file_io.h` | Pluggable async file I/O vtable |
 | **resolver_cache** | `resolver_cache.h` | Caching DNS resolver decorator with configurable TTL/capacity |
+| **datagram** | `datagram.h` | STABLE Tier-1 datagram primitive (`KlDatagram`): async recv, fixed-slot send queue, batching + GSO/GRO, multicast, confirmed-detachment close |
+| **dns_resolver** | `dns_resolver.h` | Built-in async DNS resolver (`KlResolver`) over `KlDatagram`: dual-family A+AAAA, EDNS0, cookies, TCP fallback |
+| **proxy_protocol** | `proxy_protocol.h` | PROXY protocol v1/v2 header parser + CIDR trust matching |
 
 **Deliberate design choices:**
 
@@ -819,7 +822,7 @@ The through-line: `KlHttpClient` is genuinely model-blind: the **same** client c
 
 ## Testing
 
-920+ tests across 65 test suites, covering every module and both event axes:
+The unit and integration suites cover every module and both event axes:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -932,7 +935,7 @@ Three embedded C HTTP libraries compared.
 | **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
 | **Bare-metal MCU** | lwIP BSD sockets, lwIP raw (no OS sockets), or UEFI firmware | Built-in TCP/IP stack | Requires OS networking |
 | **Cosmopolitan C** | Supported (APE binaries) | No | No |
-| **Tests** | 920+ (65 suites) | ~4K LOC tests | Fewer relative to size |
+| **Tests** | Comprehensive (ASan/UBSan) | ~4K LOC tests | Fewer relative to size |
 
 **Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 
