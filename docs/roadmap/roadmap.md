@@ -66,8 +66,25 @@ references in the same phase.
 
 ## Phase C: Consolidate documentation and repository hygiene
 
-Complete this phase before another broad source-layout change. Otherwise stale documentation will keep
-producing incorrect assumptions during later audits.
+### C1 through C5: completed work
+
+Phase C is complete and CI-protected; treat it as history rather than as future sequencing. The
+consolidation ran before any further broad source-layout change, so later audits no longer inherit
+stale documentation.
+
+- C1: one documentation taxonomy under `docs/` (architecture / contracts / operations / roadmap /
+  archive); every legacy document classified as living, archived, or deleted.
+- C2: implementation-history narration removed from active `.c` and `.h` comments, enforced by the
+  `check-no-milestones` gate.
+- C3: the Unicode em dash eliminated across all tracked files, enforced by the `check-no-em-dash` gate.
+- C4: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and the audit skills reconciled to current names,
+  paths, and ownership, with volatile suite and module counts removed.
+- C5: `site/` rebuilt around the transport-substrate architecture (offline, with no runtime
+  third-party dependencies), leading with `KlEventCtx` / `KlStream` / `KlListener` / `KlDatagram`, an
+  evidence-based backend coverage table, and an offline `check-site` gate.
+
+The `check-no-milestones`, `check-no-em-dash`, and `check-site` gates run together in the Static
+Analysis CI job. The subsection requirements below are retained as the delivered scope of record.
 
 ### C1: establish one documentation taxonomy
 
@@ -394,9 +411,9 @@ No new feature may push protocol-specific state into the neutral substrate.
 ## Recommended execution order
 
 ```text
-S4    structural gates and reconciliation
-C1-C5 documentation, comments, punctuation, guidance, and site
-F2-F3 public-surface and dead-code audits
+S4    structural gates and reconciliation                          [done]
+C1-C5 documentation, comments, punctuation, guidance, and site     [done]
+F2-F3 public-surface and dead-code audits                          (next)
 P1    platform-layout inventory
 P2-P3 optional platform moves and platform-owned tests
 E1    unified conformance harness

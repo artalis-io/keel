@@ -391,6 +391,15 @@ jobs:
       - name: Boundary gate G5 (check-old-layout - no resurrected protocols / flat-home / spikes / parsers / unclassified integration file)
         run: make check-old-layout
 
+      - name: Comment-history gate (no milestone/phase archaeology in active C/H comments)
+        run: make check-no-milestones
+
+      - name: Em-dash gate (no U+2014 in any tracked non-binary file)
+        run: make check-no-em-dash
+
+      - name: Site gate (offline site validation + reproducible build)
+        run: make check-site
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 

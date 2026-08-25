@@ -1,7 +1,7 @@
 # C5 - Site content and information-architecture rebuild (audit + freeze)
 
 Status: PROPOSED (docs-only). No site file is changed until this freeze is accepted. Governing
-roadmap: [roadmap/roadmap.md](roadmap/roadmap.md), Phase C / C5. Written em-dash-free so it passes
+roadmap: [roadmap/roadmap.md](../../roadmap/roadmap.md), Phase C / C5. Written em-dash-free so it passes
 the C3 gate. C5 is a genuine content and information-architecture rebuild against the final
 architecture, not a cosmetic name substitution.
 

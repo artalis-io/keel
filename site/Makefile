@@ -3,12 +3,18 @@
 # Builds the deployable site into build/. Mirrors the Hull site pattern
 # so deployment can stay consistent across artalis-io repos.
 
-.PHONY: all build clean serve
+.PHONY: all build check clean serve
 
 BUILD_DIR := build
 STATIC_FILES := index.html keel.css mark.svg og-card.svg
 
 all: build
+
+# Offline, dependency-free validation (core Perl only). Self-cleaning: the
+# reproducibility check builds into temporary directories and never reads,
+# writes, or removes an existing build/.
+check:
+	@perl check_site.pl
 
 build:
 	@mkdir -p $(BUILD_DIR)

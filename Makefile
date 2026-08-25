@@ -1168,6 +1168,15 @@ check-no-milestones:
 check-no-em-dash:
 	@perl tools/check_no_em_dash.pl
 
+# Site gate (C5-4). Offline, dependency-free validator for site/ (core Perl only):
+# required deployable assets, unique ids, internal-fragment + local-asset resolution,
+# JSON-LD parsing, required metadata, table captions/scopes, landmarks, decorative-SVG
+# treatment, absence of runtime third-party resources, full class-to-stylesheet coverage
+# (escaped selectors accounted for), and two isolated builds with matching manifests + hashes.
+# Delegates to the site Makefile so there is one implementation; never touches site/build/.
+check-site:
+	@$(MAKE) -C site check
+
 
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
@@ -1942,7 +1951,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

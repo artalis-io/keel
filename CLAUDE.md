@@ -484,7 +484,7 @@ make check-sockaddr-neutral        # no compile-time socket/address ABI assumpti
 make check-readiness-identity      # readiness registrations use &conn->stream (+ -selftest)
 # Stale-name + docs + W^X
 make check-no-kludp        # the deleted KlUdp/kl_udp_* object API cannot reappear
-make check-no-httplegacy   # the renamed HTTP taxonomy has no legacy KlServer/KlClient/... names
+make check-no-httplegacy   # the renamed HTTP taxonomy keeps no pre-rename object-type, constant, or function names
 make check-doc-refs        # every in-repo link in the living-architecture docs resolves
 make wx-guard              # no runtime-codegen surface (mmap PROT_EXEC, dlopen, JIT, popen, ...) under src/
 ```
