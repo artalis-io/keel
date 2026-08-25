@@ -6,7 +6,7 @@
 .PHONY: all build clean serve
 
 BUILD_DIR := build
-STATIC_FILES := index.html mark.svg og-card.svg
+STATIC_FILES := index.html keel.css mark.svg og-card.svg
 
 all: build
 
