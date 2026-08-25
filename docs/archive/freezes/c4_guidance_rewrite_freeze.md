@@ -1,7 +1,7 @@
 # C4 - Active-guidance rewrite (inventory + freeze)
 
 Status: PROPOSED (docs-only). No guidance file is rewritten until this freeze is accepted.
-Governing roadmap: [roadmap/roadmap.md](roadmap/roadmap.md), Phase C / C4. This file is written
+Governing roadmap: [roadmap/roadmap.md](../../roadmap/roadmap.md), Phase C / C4. This file is written
 em-dash-free and milestone-token-free so it passes the C2 and C3 gates.
 
 ## 1. Goal
