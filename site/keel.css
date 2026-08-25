@@ -58,7 +58,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consola
 .tk-key { color: #c4b5fd; }
 .tk-str { color: #86efac; }
 .tk-num { color: #fcd34d; }
-.tk-com { color: #71717a; font-style: italic; }
+.tk-com { color: #808089; font-style: italic; }
 .tk-fn  { color: #93c5fd; }
 .tk-kw  { color: #f0abfc; }
 .tk-id  { color: #e4e4e7; }
@@ -82,7 +82,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consola
 .stat-foot  { font-size: .75rem; color: #a1a1aa; margin-top: .375rem; line-height: 1.4; }
 .layer-card { border: 1px solid rgba(255,255,255,0.08); border-radius: .625rem; background: rgba(255,255,255,0.015); overflow: hidden; }
 .layer-card header { padding: .625rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: .5rem; }
-.layer-tag { font-size: .625rem; text-transform: uppercase; letter-spacing: .08em; color: #71717a; margin-left: auto; }
+.layer-tag { font-size: .625rem; text-transform: uppercase; letter-spacing: .08em; color: #808089; margin-left: auto; }
 
 /* ============================================================
    Tailwind v3 utility classes used by the page.
@@ -226,7 +226,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consola
 .text-paper-100 { color: #f4f4f5; }
 .text-paper-200 { color: #e4e4e7; }
 .text-mute-400 { color: #a1a1aa; }
-.text-mute-500 { color: #71717a; }
+.text-mute-500 { color: #808089; }
 
 /* ---- Opacity ---- */
 .opacity-80 { opacity: 0.8; }
@@ -297,6 +297,73 @@ code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consola
   .cmp-table th, .cmp-table td { padding: .5rem .625rem; font-size: .75rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; animation: none !important; }
-  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+  /* !important + universal selector so this beats the .scroll-smooth class on <html>. */
+  html { scroll-behavior: auto !important; }
+}
+
+/* ============================================================
+   Accessibility (C5-3): skip link, landmarks focus, visible
+   focus ring, screen-reader-only text, and a no-JS mobile nav.
+   ============================================================ */
+
+/* Screen-reader-only (used for table captions and off-screen labels). */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* Keyboard-visible skip link: off-screen until focused, then pinned top-left. */
+.skip-link {
+  position: fixed; left: .75rem; top: .75rem; z-index: 50;
+  transform: translateY(-160%);
+  background: #f4f4f5; color: #0a0a0a;
+  padding: .5rem .875rem; border-radius: .375rem;
+  font-size: .875rem; font-weight: 500; text-decoration: none;
+  transition: transform .15s ease;
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* Visible focus indicator across interactive controls. */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #22d3a8;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+/* main is focus target of the skip link but should not draw a ring on programmatic focus. */
+main:focus { outline: none; }
+
+/* No-JS mobile navigation via <details>/<summary> (shown below md only). */
+.nav-mobile { position: static; }
+.nav-mobile > summary {
+  display: inline-flex; align-items: center; gap: .375rem;
+  list-style: none; cursor: pointer;
+  padding: .375rem .625rem; border-radius: .375rem;
+  font-size: .8125rem; color: #d4d4d8;
+  border: 1px solid rgba(255,255,255,0.12); background: transparent;
+}
+.nav-mobile > summary::-webkit-details-marker { display: none; }
+.nav-mobile > summary:hover { background: rgba(255,255,255,0.04); color: #f4f4f5; }
+.nav-menu {
+  position: absolute; left: 0; right: 0; top: 100%;
+  display: flex; flex-direction: column;
+  padding: .25rem 1.5rem 1rem;
+  background: rgba(10,10,10,0.98);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+.nav-menu a { padding: .625rem 0; font-size: .9375rem; border-top: 1px solid rgba(255,255,255,0.06); }
+.nav-menu a:first-child { border-top: 0; }
+
+/* md: >= 768px - hide the mobile disclosure once the inline nav is available. */
+@media (min-width: 768px) {
+  .md\:hidden { display: none; }
 }
