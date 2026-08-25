@@ -57,9 +57,10 @@
 
       <nav class="hidden md:flex items-center gap-x-6 text-sm">
         <a href="#layers" class="link">Layers</a>
+        <a href="#evidence" class="link">Evidence</a>
         <a href="#principles" class="link">Principles</a>
         <a href="#protocols" class="link">Protocols</a>
-        <a href="#compare" class="link">Compare</a>
+        <a href="#unified" class="link">Unified</a>
         <a href="#performance" class="link">Performance</a>
         <a href="#roadmap" class="link">Roadmap</a>
         <a href="#security" class="link">Security</a>
@@ -87,15 +88,19 @@
           </a>
 
           <h1 class="text-[2rem] sm:text-4xl md:text-5xl lg:text-6xl font-semibold leading-[1.05] tracking-tight text-paper-50">
-            One runtime.
-            Every layer of the stack.
+            One event loop.
+            Every transport under it.
           </h1>
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
-            Keel is a portable, dependency-free C11 networking runtime: an async
-            I/O core (readiness <em>and</em> completion), TCP and UDP transports,
-            and a growing family of pluggable protocol stacks. HTTP is the
-            flagship, not the definition.
+            Keel is a portable, event-driven transport substrate for C: a
+            composable event context (<code class="text-paper-200">KlEventCtx</code>)
+            driving byte-stream (<code class="text-paper-200">KlStream</code>),
+            listener (<code class="text-paper-200">KlListener</code>), and datagram
+            (<code class="text-paper-200">KlDatagram</code>) transports, with
+            built-in protocol families layered on top. Readiness <em>and</em>
+            completion are orthogonal execution models behind one API. HTTP is the
+            flagship family, not the definition.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -112,7 +117,7 @@
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
             <div class="flex items-center gap-2">
               <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/></svg>
-              <span>339K req/s benchmark peak</span>
+              <span>Reproducible benchmarks (make bench)</span>
             </div>
             <div class="flex items-center gap-2">
               <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/><rect x="10" y="10" width="4" height="4"/><line x1="4" y1="10" x2="7" y2="10"/><line x1="4" y1="14" x2="7" y2="14"/><line x1="17" y1="10" x2="20" y2="10"/><line x1="17" y1="14" x2="20" y2="14"/><line x1="10" y1="4" x2="10" y2="7"/><line x1="14" y1="4" x2="14" y2="7"/><line x1="10" y1="17" x2="10" y2="20"/><line x1="14" y1="17" x2="14" y2="20"/></svg>
@@ -163,8 +168,8 @@
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
             The HTTP server is one protocol stack riding the runtime. The same
-            event loop, socket seam, and transports carry the UDP datagram
-            server, the WebSocket and SSE stacks, and Keel's own from-scratch
+            event loop, socket seam, and transports carry the datagram
+            transport, the WebSocket and SSE stacks, and Keel's own from-scratch
             async DNS resolver. Swap the event backend without changing a line
             of protocol code.
           </p>
@@ -215,39 +220,100 @@ $ make examples</pre>
     </div>
   </section>
 
-  <section class="hairline-t bg-ink-900/50">
-    <div class="max-w-6xl mx-auto px-6 py-8">
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
-        <div>
-          <div class="stat-num">339K</div>
-          <div class="stat-label">req/s peak</div>
-          <div class="stat-foot">Apple M1 Max, repo benchmark suite. Sub-millisecond p99.</div>
+  <section id="evidence" class="hairline-t bg-ink-900/50">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Evidence</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Every backend maps to a named gate.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Coverage is not a single number. Each execution model is exercised by
+            a specific, reproducible gate, and they are not equivalent: a hosted
+            CI unit suite, a sanitizer smoke, an integration harness, a strict
+            compile gate, and a local-only firmware emulation each prove
+            something different.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            The full matrix lives in
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/capability_matrix.md" class="link">docs/operations/capability_matrix.md</a>;
+            the gate inventory in
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/testing.md" class="link">testing.md</a>.
+          </p>
         </div>
-        <div>
-          <div class="stat-num">920+</div>
-          <div class="stat-label">tests</div>
-          <div class="stat-foot">65 suites under ASan/UBSan, plus 8 fuzz targets.</div>
-        </div>
-        <div>
-          <div class="stat-num">9</div>
-          <div class="stat-label">event backends</div>
-          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP, a portable completion double, an lwIP raw callback provider (NO_SYS), and a UEFI EFI_TCP4/UDP4 provider (firmware, no OS sockets).</div>
-        </div>
-        <div>
-          <div class="stat-num">0</div>
-          <div class="stat-label">forced deps</div>
-          <div class="stat-foot">BYO allocator, TLS, parser, compression. One vendored parser by default.</div>
+
+        <div class="lg:col-span-8">
+          <div class="code-block overflow-x-auto">
+            <table class="cmp-table maturity-table">
+              <thead>
+                <tr>
+                  <th>Backend / platform</th>
+                  <th>Model</th>
+                  <th>How it is exercised</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>epoll (Linux)</td>
+                  <td class="cmp-yes">readiness</td>
+                  <td>Unit + integration suites and example smokes on the Linux (epoll) CI job; ASan/UBSan via <code class="text-paper-200">make debug-test</code>.</td>
+                </tr>
+                <tr>
+                  <td>kqueue (macOS)</td>
+                  <td class="cmp-yes">readiness</td>
+                  <td>Unit + integration suites and example smokes on the macOS (kqueue) CI job.</td>
+                </tr>
+                <tr>
+                  <td>poll (POSIX fallback)</td>
+                  <td class="cmp-yes">readiness</td>
+                  <td>Unit suites on the Linux (poll fallback) CI job; the Cosmopolitan build auto-selects it.</td>
+                </tr>
+                <tr>
+                  <td>WSAPoll (Windows)</td>
+                  <td class="cmp-yes">readiness</td>
+                  <td>TCP, datagram, and DNS smokes plus a unit subset on the Windows (MinGW / Winsock) CI job.</td>
+                </tr>
+                <tr>
+                  <td>io_uring (Linux 5.6+)</td>
+                  <td class="cmp-part">completion</td>
+                  <td>A curated completion unit suite (<code class="text-paper-200">make test-iouring</code>) plus HTTP and async smokes under ASan/UBSan on the io_uring CI jobs.</td>
+                </tr>
+                <tr>
+                  <td>IOCP (Windows)</td>
+                  <td class="cmp-part">completion</td>
+                  <td>Lifecycle and capability-negotiation suite plus an HTTP-over-IOCP smoke on the Windows (IOCP) CI job.</td>
+                </tr>
+                <tr>
+                  <td>pollcomp (portable double)</td>
+                  <td class="cmp-part">completion</td>
+                  <td>HTTP / TLS / WebSocket / async smokes, a stream-contract oracle, ASan/UBSan, and runtime-injection on the completion (poll) CI job.</td>
+                </tr>
+                <tr>
+                  <td>lwIP raw (NO_SYS)</td>
+                  <td class="cmp-part">completion provider</td>
+                  <td>Runtime loopback smokes on CI: <code class="text-paper-200">loopback-raw</code> and <code class="text-paper-200">loopback-raw-asan</code> (the latter under ASan/UBSan/LSan) for the raw provider; <code class="text-paper-200">loopback</code> and <code class="text-paper-200">loopback-tls</code> for the lwIP BSD-socket provider. <code class="text-paper-200">make integration-lwip</code> is the provider compile gate only.</td>
+                </tr>
+                <tr>
+                  <td>UEFI EFI_TCP4/UDP4</td>
+                  <td class="cmp-part">completion provider</td>
+                  <td>A strict freestanding-PE compile gate on CI (<code class="text-paper-200">make uefi-dgram-gate UEFI_GATE_STRICT=1</code>, x86_64 + aarch64, <code class="text-paper-200">-Werror -Wpedantic</code>). The host-mock unit tests and the end-to-end QEMU/OVMF self-tests are local-only harnesses, not hosted CI.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
+            Benchmarks are reproducible rather than headline figures.
+            <a href="https://github.com/artalis-io/keel/blob/main/bench/bench.sh" class="link">make bench</a>
+            runs a local benchmark server across four endpoints with wrk latency
+            reporting (defaults: 4 threads, 100 connections, 10s). Sample results
+            with their environment are recorded in the
+            <a href="https://github.com/artalis-io/keel/blob/main/README.md" class="link">README</a>;
+            numbers depend on hardware, backend, and build, so run it yourself
+            rather than trusting a single quoted peak.
+          </p>
         </div>
       </div>
-      <p class="mt-6 text-[11px] text-mute-500 leading-relaxed">
-        Benchmark context:
-        <a href="https://github.com/artalis-io/keel/blob/main/bench/bench.sh" class="link">make bench</a>
-        runs a dedicated local benchmark server across four endpoints with wrk
-        latency reporting. Defaults are 4 threads, 100 connections, and 10s
-        duration; the
-        <a href="https://github.com/artalis-io/keel/blob/main/.github/workflows/benchmark.yml" class="link">benchmark workflow</a>
-        also runs Linux epoll, Linux io_uring, and macOS kqueue on CI.
-      </p>
     </div>
   </section>
 
@@ -270,6 +336,12 @@ $ make examples</pre>
             from scratch on the UDP layer. A runtime that already hosts a
             non-HTTP protocol is a runtime, not a web server.
           </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Living architecture docs:
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/architecture/overview.md" class="link">overview</a>,
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/architecture/invariants.md" class="link">invariants</a>,
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/architecture/public_api.md" class="link">public API</a>.
+          </p>
         </div>
 
         <div class="md:col-span-8 space-y-5">
@@ -291,30 +363,37 @@ $ make examples</pre>
             <header>
               <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><line x1="11" y1="7" x2="6" y2="16"/><line x1="13" y1="7" x2="18" y2="16"/><line x1="7" y1="18" x2="17" y2="18"/></svg>
               <span class="text-paper-50 font-medium text-sm">Transports</span>
-              <span class="layer-tag">first-class &amp; symmetric</span>
+              <span class="layer-tag">peers on one loop</span>
             </header>
             <div class="p-5 text-sm text-mute-400 leading-relaxed">
-              TCP and UDP as peers, not an afterthought. A datagram server
-              symmetric with the TCP server (shared event loop), source/dest
-              addressing, multicast join/leave, GSO/GRO segmentation offload,
-              <code class="text-paper-200">recvmmsg</code>/<code class="text-paper-200">sendmmsg</code>
-              batching, and ECN/DSCP marking.
+              Byte streams (<code class="text-paper-200">KlStream</code>),
+              listeners (<code class="text-paper-200">KlListener</code>), and
+              datagrams (<code class="text-paper-200">KlDatagram</code>) are peers
+              on the same loop, not an afterthought.
+              <code class="text-paper-200">KlDatagram</code> exposes async receive
+              with source and destination addressing; batching
+              (<code class="text-paper-200">recvmmsg</code>/<code class="text-paper-200">sendmmsg</code>),
+              GSO/GRO offload, multicast join/leave, and per-packet ECN/DSCP are
+              capability-gated extensions, available where the platform and
+              provider support them.
             </div>
           </div>
           <div class="layer-card">
             <header>
               <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/><rect x="10" y="10" width="4" height="4"/><line x1="4" y1="10" x2="7" y2="10"/><line x1="4" y1="14" x2="7" y2="14"/><line x1="17" y1="10" x2="20" y2="10"/><line x1="17" y1="14" x2="20" y2="14"/><line x1="10" y1="4" x2="10" y2="7"/><line x1="14" y1="4" x2="14" y2="7"/><line x1="10" y1="17" x2="10" y2="20"/><line x1="14" y1="17" x2="14" y2="20"/></svg>
               <span class="text-paper-50 font-medium text-sm">I/O runtime</span>
-              <span class="layer-tag">a libuv-class foundation</span>
+              <span class="layer-tag">readiness + completion core</span>
             </header>
             <div class="p-5 text-sm text-mute-400 leading-relaxed">
-              An orthogonal event core: <strong>readiness</strong>
-              (epoll/kqueue/WSAPoll/poll) and <strong>completion</strong>
-              (io_uring/IOCP), over a platform-neutral socket seam
-              (POSIX/Winsock). Single-threaded per worker, with timers, async
-              connection suspension, thread-pool offload, backpressure, and
-              zero-copy <code class="text-paper-200">splice</code> file sends.
-              Scale horizontally with <code class="text-paper-200">SO_REUSEPORT</code>.
+              A composable event context
+              (<code class="text-paper-200">KlEventCtx</code>) over an orthogonal
+              event core: <strong>readiness</strong> (epoll/kqueue/WSAPoll/poll)
+              and <strong>completion</strong> (io_uring/IOCP), on a
+              platform-neutral socket seam (POSIX/Winsock). Single-threaded per
+              worker, with timers, async connection suspension, thread-pool
+              offload, backpressure, and zero-copy
+              <code class="text-paper-200">splice</code> file sends. Scale
+              horizontally with <code class="text-paper-200">SO_REUSEPORT</code>.
             </div>
           </div>
         </div>
@@ -369,90 +448,65 @@ $ make examples</pre>
     </div>
   </section>
 
-  <section id="compare" class="hairline-t bg-ink-900/50">
+  <section id="unified" class="hairline-t bg-ink-900/50">
     <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
       <div class="max-w-2xl">
-        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Compare</div>
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Unified</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-          One runtime, not three libraries.
+          One seam under every layer.
         </h2>
         <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-          A typical C stack assembles an I/O loop, an HTTP server, and a DNS
-          resolver from separate projects with separate build systems and
-          dependency trees. Keel unifies that surface under one orthogonal,
-          dependency-free architecture.
+          A C service is often assembled from a separate event loop, HTTP
+          server, and DNS resolver, each with its own build system and
+          dependency tree. Keel puts the I/O core, the transports, the protocol
+          families, and its own resolver behind a single socket-and-event seam.
+          Swap the event model or the socket provider once, below everything.
         </p>
       </div>
 
-      <div class="mt-8 code-block overflow-x-auto">
-        <table class="cmp-table">
-          <thead>
-            <tr>
-              <th>Capability</th>
-              <th class="cmp-keel-col">Keel</th>
-              <th>libuv</th>
-              <th>h2o</th>
-              <th>c-ares</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Async I/O loop: readiness <em>and</em> completion</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-yes">yes</td>
-              <td class="cmp-part">via libuv</td>
-              <td class="cmp-no">no</td>
-            </tr>
-            <tr>
-              <td>TCP <em>and</em> UDP transports</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-yes">yes</td>
-              <td class="cmp-part">tcp</td>
-              <td class="cmp-no">no</td>
-            </tr>
-            <tr>
-              <td>HTTP/1.1 + HTTP/2 stack</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-            </tr>
-            <tr>
-              <td>WebSocket &amp; SSE</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-part">ws</td>
-              <td class="cmp-no">no</td>
-            </tr>
-            <tr>
-              <td>Built-in async DNS resolver</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-part">sync</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-yes">yes</td>
-            </tr>
-            <tr>
-              <td>Dependency-free (BYO TLS/parser/alloc)</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-yes">yes</td>
-            </tr>
-            <tr>
-              <td>Portable incl. Windows &amp; Cosmopolitan</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-yes">yes</td>
-              <td class="cmp-part">part</td>
-              <td class="cmp-yes">yes</td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="mt-8 grid md:grid-cols-3 gap-6">
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/><rect x="10" y="10" width="4" height="4"/><line x1="4" y1="10" x2="7" y2="10"/><line x1="4" y1="14" x2="7" y2="14"/><line x1="17" y1="10" x2="20" y2="10"/><line x1="17" y1="14" x2="20" y2="14"/><line x1="10" y1="4" x2="10" y2="7"/><line x1="14" y1="4" x2="14" y2="7"/><line x1="10" y1="17" x2="10" y2="20"/><line x1="14" y1="17" x2="14" y2="20"/></svg>
+            One I/O core
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            Readiness and completion behind one API, over a POSIX/Winsock socket
+            seam. A new event backend or socket provider is a drop-in below every
+            transport and protocol at once, verified by the axis audit.
+          </p>
+        </div>
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><line x1="11" y1="7" x2="6" y2="16"/><line x1="13" y1="7" x2="18" y2="16"/><line x1="7" y1="18" x2="17" y2="18"/></svg>
+            Both transports
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            <code class="text-paper-200">KlStream</code>,
+            <code class="text-paper-200">KlListener</code>, and
+            <code class="text-paper-200">KlDatagram</code> are peers on the same
+            loop, so TCP and UDP protocols share one connection model rather than
+            two runtimes.
+          </p>
+        </div>
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>
+            Protocols on top
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            HTTP/1.1, WebSocket, SSE, and a from-scratch async DNS resolver ship
+            in-tree; HTTP/2 and TLS are pluggable vtables. None of them include a
+            platform networking header or touch an event engine directly.
+          </p>
+        </div>
       </div>
       <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
-        A rough map, not a scoreboard: each of these projects is excellent at its
-        job. The point is architectural: Keel spans the I/O core (libuv), the
-        HTTP stack (h2o), and DNS (c-ares) behind one seam, so an alternate event
-        engine or socket stack drops in below <em>every</em> layer at once.
+        This is a description of Keel's own composition, not a scoreboard against
+        other projects. The load-bearing claim is architectural: the axes stay
+        orthogonal, so an alternate event engine or socket stack drops in below
+        <em>every</em> layer at once. See
+        <a href="https://github.com/artalis-io/keel/blob/main/docs/architecture/invariants.md" class="link">docs/architecture/invariants.md</a>.
       </p>
     </div>
   </section>
@@ -463,13 +517,19 @@ $ make examples</pre>
         <div class="lg:col-span-4">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Protocols &amp; maturity</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-          What's shipped, and how solid it is.
+          What's shipped, per surface.
         </h2>
         <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            An honest status per surface. The I/O core, transports, and the
-            HTTP/1.1 + WebSocket + SSE + DNS stacks are the mature center; HTTP/2
-            and TLS are deliberately pluggable so you choose the backend and
-            threat model.
+            A factual status per surface. The I/O core, transports, and the
+            HTTP/1.1 + WebSocket + SSE + DNS stacks are built in; HTTP/2 and TLS
+            are pluggable vtables so you choose the backend and threat model.
+        </p>
+        <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Frozen contracts:
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/contracts/stream.md" class="link">stream</a>,
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/contracts/datagram.md" class="link">datagram</a>,
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/contracts/streaming.md" class="link">streaming</a>,
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/contracts/async_lifecycle.md" class="link">async lifecycle</a>.
         </p>
         </div>
 
@@ -486,27 +546,27 @@ $ make examples</pre>
               <tbody>
                 <tr>
                   <td>I/O event core</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>Readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) behind one small API over a POSIX/Winsock socket seam; an orthogonality audit confirms the axes stay independent.</td>
                 </tr>
                 <tr>
                   <td>Timers &amp; worker wakeups</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>One-shot timers, async connection suspend/resume, thread-pool offload, and cross-thread event-loop wakeup.</td>
                 </tr>
                 <tr>
                   <td>TCP server &amp; client</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>Connection pool + state machine, keep-alive, timeouts, backpressure drain; blocking and async clients with pooling and redirects.</td>
                 </tr>
                 <tr>
-                  <td>UDP datagram server</td>
-                  <td class="cmp-yes">stable</td>
-                  <td>Symmetric with the TCP server on a shared loop; source/dest addressing, multicast, GSO/GRO, recvmmsg/sendmmsg batching, ECN/DSCP.</td>
+                  <td>Datagram transport</td>
+                  <td class="cmp-yes">built-in</td>
+                  <td><code class="text-paper-200">KlDatagram</code> on the shared event loop: async receive with source and destination addressing. Batching (recvmmsg/sendmmsg), GSO/GRO offload, multicast, and per-packet ECN/DSCP are capability-gated, provider-dependent extensions.</td>
                 </tr>
                 <tr>
                   <td>HTTP/1.1</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>Routing, middleware, keep-alive, buffered/file/stream responses; server and client covered by the main test and example suite.</td>
                 </tr>
                 <tr>
@@ -516,7 +576,7 @@ $ make examples</pre>
                 </tr>
                 <tr>
                   <td>Server-Sent Events</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>Zero-alloc SSE framing over chunked streaming responses.</td>
                 </tr>
                 <tr>
@@ -526,12 +586,12 @@ $ make examples</pre>
                 </tr>
                 <tr>
                   <td>Compression / decompression</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-part">optional extension</td>
                   <td>Pluggable vtables; miniz gzip/deflate backend ships in-tree.</td>
                 </tr>
                 <tr>
                   <td>HTTP proxy / PROXY protocol</td>
-                  <td class="cmp-yes">stable</td>
+                  <td class="cmp-yes">built-in</td>
                   <td>Client HTTP forwarding + HTTPS tunneling; PROXY v1/v2 parsing with CIDR trust to recover the real client behind an L4 balancer.</td>
                 </tr>
                 <tr>
@@ -547,7 +607,7 @@ $ make examples</pre>
                 <tr>
                   <td>Socket provider</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Capability-gated vtable, selectable per server or client. POSIX and Winsock built in; lwIP shipped (both a BSD-socket layer and a raw NO_SYS stack); a freestanding UEFI EFI_TCP4/UDP4 provider for firmware; AF_XDP-ready.</td>
+                  <td>Capability-gated vtable, selectable per server or client. POSIX and Winsock built in; lwIP shipped (both a BSD-socket layer and a raw NO_SYS stack); a freestanding UEFI EFI_TCP4/UDP4 provider for firmware.</td>
                 </tr>
               </tbody>
             </table>
@@ -563,41 +623,44 @@ $ make examples</pre>
         <div class="lg:col-span-5">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Performance</div>
           <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-            Fast because there's nothing in the way.
+            Bounded paths you can measure.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            No GC pauses, no async runtime, no goroutine scheduler. Just
+            Each connection runs a bounded path:
             <code class="text-paper-200">accept</code> &rarr;
             <code class="text-paper-200">read</code> &rarr;
-            <code class="text-paper-200">write</code> with zero-copy pointers into
-            read buffers and <code class="text-paper-200">splice</code>/<code class="text-paper-200">sendfile</code>
-            on the file path. Route params, middleware, and body reading land
-            within ~2% of the baseline.
+            <code class="text-paper-200">write</code>, with zero-copy pointers into
+            read buffers, <code class="text-paper-200">splice</code>/<code class="text-paper-200">sendfile</code>
+            on the file path, and
+            <code class="text-paper-200">recvmmsg</code>/<code class="text-paper-200">sendmmsg</code>
+            batching on the datagram path where the platform supports it. The
+            benchmark endpoints below measure what routing, middleware, and body
+            reading add over a bare baseline; run
+            <code class="text-paper-200">make bench</code> to measure the delta on
+            your own hardware.
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            On the completion axis, the io_uring backend runs the same
-            platform-independent driver as IOCP, measured 2 to 2.3&times;
-            faster than the retired readiness-io_uring adapter. epoll remains the
-            safe default on Linux; io_uring is one build flag away.
+            epoll is the default on Linux; io_uring is the completion-native path
+            one build flag away
+            (<code class="text-paper-200">make BACKEND=iouring</code>), and runs the
+            same protocol code. Which is faster depends on workload and kernel, so
+            the honest answer is to measure both.
           </p>
         </div>
 
         <div class="lg:col-span-7">
           <div class="grid sm:grid-cols-3 gap-5">
             <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-              <div class="stat-num">339K<small> req/s</small></div>
-              <div class="stat-label">peak throughput</div>
-              <div class="stat-foot">GET /hello, Apple M1 Max, repo bench suite.</div>
+              <div class="stat-label">baseline</div>
+              <div class="stat-foot">GET /hello: minimal JSON, no routing params, no middleware. The floor everything else is measured against.</div>
             </div>
             <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-              <div class="stat-num">&lt;1<small> ms</small></div>
-              <div class="stat-label">p99 latency</div>
-              <div class="stat-foot">Sub-millisecond tail at 100 connections.</div>
+              <div class="stat-label">feature cost</div>
+              <div class="stat-foot">Route params, a middleware chain, and body reading measured as a delta over that baseline, not an absolute claim.</div>
             </div>
             <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-              <div class="stat-num">~2<small> %</small></div>
-              <div class="stat-label">feature overhead</div>
-              <div class="stat-foot">Route params + middleware + body reading vs baseline.</div>
+              <div class="stat-label">reproducible</div>
+              <div class="stat-foot">One command, one local server, wrk latency reporting. Documented sample numbers with their environment live in the README.</div>
             </div>
           </div>
           <div class="mt-5 code-block">
@@ -608,10 +671,10 @@ $ make examples</pre>
             </header>
 <pre>$ make bench
 
-<span class="tk-com"># GET /hello        peak throughput, sub-ms p99</span>
-<span class="tk-com"># GET /users/:id    route params: within ~2% of baseline</span>
-<span class="tk-com"># GET /mw/hello     middleware chain: within ~2%</span>
-<span class="tk-com"># POST /echo        body reading: within ~2%</span></pre>
+<span class="tk-com"># GET /hello        baseline: minimal JSON</span>
+<span class="tk-com"># GET /users/:id    router: param extraction</span>
+<span class="tk-com"># GET /mw/hello     middleware: 2 pass-through layers</span>
+<span class="tk-com"># POST /echo        body reading: buffer + echo</span></pre>
           </div>
         </div>
       </div>
@@ -629,50 +692,61 @@ $ make examples</pre>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Because protocols ride the runtime and the axes stay orthogonal, the
             next steps are additive: a new stack on the existing core, or a new
-            provider below every stack, never a rewrite.
+            provider below every stack, never a rewrite. The QUIC and MQTT items
+            below are <strong>directions, not shipped features</strong>; the
+            alternate-stack card separates what already runs from what would slot
+            in next.
           </p>
         </div>
 
         <div class="lg:col-span-8 grid sm:grid-cols-3 gap-5">
           <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <div class="flex items-center gap-2 text-paper-50 font-medium">
-              <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 3 5 13 11 13 10 21 19 10 13 10"/></svg>
-              QUIC / HTTP-3
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 text-paper-50 font-medium">
+                <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 3 5 13 11 13 10 21 19 10 13 10"/></svg>
+                QUIC / HTTP-3
+              </div>
+              <span class="text-[10px] uppercase tracking-widest text-mute-500">planned</span>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              A protocol stack over UDP + TLS. The async UDP datagram layer, the
-              completion backends, and the TLS vtable already exist, so HTTP/3 is
-              "another stack," exactly like HTTP/2 was. Prerequisite:
-              UDP pktinfo/GSO/GRO parity on the completion path.
+              Not yet shipped. A protocol family over UDP + TLS. The async UDP
+              datagram layer, the completion backends, and the TLS vtable already
+              exist, so HTTP/3 would be "another stack," as HTTP/2 was.
+              Prerequisite: UDP pktinfo/GSO/GRO parity on the completion path.
             </p>
           </div>
           <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <div class="flex items-center gap-2 text-paper-50 font-medium">
-              <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M5.5 5.5a9 9 0 0 0 0 13"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
-              MQTT
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 text-paper-50 font-medium">
+                <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M5.5 5.5a9 9 0 0 0 0 13"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+                MQTT
+              </div>
+              <span class="text-[10px] uppercase tracking-widest text-mute-500">planned</span>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              A TCP pub/sub protocol that drops straight onto the existing
-              connection core as a peer to the HTTP stack. No runtime changes
-              needed.
+              Not yet shipped. A TCP pub/sub protocol that would drop onto the
+              existing connection core as a peer to the HTTP stack, with no
+              runtime changes needed.
             </p>
           </div>
           <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <div class="flex items-center gap-2 text-paper-50 font-medium">
-              <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 12 12 17 21 12"/></svg>
-              Alternate net stacks
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 text-paper-50 font-medium">
+                <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 12 12 17 21 12"/></svg>
+                Alternate net stacks
+              </div>
+              <span class="text-[10px] uppercase tracking-widest text-mute-500">shipped + planned</span>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Already proven in two places with no OS sockets underneath. The full
-              stack (server, client, UDP, DNS, HTTPS) runs on a stock
-              <code>libkeel.a</code> over a bare <strong>lwIP</strong> TCP/IP stack
-              (<code>NO_SYS</code> raw callbacks). And a stock async client runs
-              inside <strong>UEFI firmware, before any OS exists</strong>, over
-              EFI_TCP4/UDP4 tokens: plaintext, HTTPS (CA, hostname, and
-              certificate-validity-time verified), and DNS, proven and hardened on
-              QEMU/OVMF. AF_XDP or DPDK slot in the same way, <em>below</em> every
-              protocol stack, and none of them know. An architectural capability
-              HTTP libraries simply don't have.
+              <strong>Shipped:</strong> the stack (server, client, UDP, DNS,
+              HTTPS) runs on a stock <code class="text-paper-200">libkeel.a</code>
+              over a bare <strong>lwIP</strong> TCP/IP stack
+              (<code class="text-paper-200">NO_SYS</code> raw callbacks), and a
+              stock async client runs inside <strong>UEFI firmware</strong> over
+              EFI_TCP4/UDP4 tokens (plaintext, HTTPS with CA / hostname /
+              validity-time checks, and DNS), exercised on QEMU/OVMF.
+              <strong>Planned:</strong> AF_XDP or DPDK would slot in the same way,
+              below every protocol stack.
             </p>
           </div>
         </div>
@@ -776,9 +850,12 @@ $ make examples</pre>
             <div>
               <h3 class="text-paper-50 font-medium">Fuzzed protocol surfaces</h3>
               <p class="mt-1 text-sm text-mute-400 leading-relaxed">
-                Eight libFuzzer targets cover the untrusted-input attack surface:
+                Seven libFuzzer targets cover the untrusted-input attack surface:
                 the HTTP parser, response parser, multipart, WebSocket, DNS
-                responses, PROXY protocol, and URL parsing, all under ASan/UBSan.
+                responses, PROXY protocol, and URL parsing, all under ASan/UBSan;
+                an optional gzip/deflate decompression target builds on demand.
+                See
+                <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/fuzzing.md" class="link">docs/operations/fuzzing.md</a>.
               </p>
             </div>
           </div>
@@ -789,8 +866,8 @@ $ make examples</pre>
               <h3 class="text-paper-50 font-medium">Bring your own hardening</h3>
               <p class="mt-1 text-sm text-mute-400 leading-relaxed">
                 TLS, allocators, DNS, compression, file IO, and parsers are
-                vtables, so production users can choose the backend appropriate
-                for their threat model.
+                vtables, so teams can choose the backend appropriate for their
+                threat model.
               </p>
             </div>
           </div>
@@ -821,16 +898,21 @@ $ make examples</pre>
               <span>quality gates</span>
               <span class="ml-auto text-[10px] text-mute-500">repo workflow</span>
             </header>
-<pre>$ make debug      <span class="tk-com"># ASan + UBSan</span>
-$ make test       <span class="tk-com"># 863 tests across 56 suites</span>
+<pre>$ make debug-test <span class="tk-com"># unit + integration suites under ASan/UBSan</span>
 $ make analyze    <span class="tk-com"># clang static analyzer</span>
 $ make cppcheck   <span class="tk-com"># static analysis</span>
-$ make fuzz       <span class="tk-com"># 8 parser and protocol fuzz targets</span></pre>
+$ make fuzz       <span class="tk-com"># libFuzzer parser and protocol targets</span>
+$ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene gates</span></pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            CI runs the suite across Linux (epoll, poll, musl), macOS (kqueue),
-            Windows (WSAPoll + IOCP), the io_uring completion backend, and
-            Cosmopolitan APE builds.
+            CI runs the suite across Linux (epoll, poll fallback, and a
+            no-completion build), macOS (kqueue), the pollcomp and io_uring
+            completion backends, and Windows (MinGW / WSAPoll + IOCP). The
+            per-backend gates are enumerated in the
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/testing.md" class="link">testing</a>
+            and
+            <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/capability_matrix.md" class="link">capability-matrix</a>
+            docs.
           </p>
         </div>
       </div>
@@ -874,9 +956,9 @@ $ make fuzz       <span class="tk-com"># 8 parser and protocol fuzz targets</spa
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
-        A portable async networking runtime for C: I/O core, TCP/UDP transports,
-        and pluggable protocol stacks.
+        Page last updated <time datetime="2026-08">August&nbsp;2026</time>.
+        A portable, event-driven transport substrate for C: an I/O core, TCP/UDP
+        transports, and built-in protocol families.
       </p>
     </div>
   </footer>
