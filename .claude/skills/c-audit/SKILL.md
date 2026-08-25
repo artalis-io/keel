@@ -8,7 +8,7 @@ user-invocable: true
 
 Perform comprehensive security, safety, and quality audits on KEEL C code.
 
-**Target:** $ARGUMENTS (default: all `src/` and `parsers/` files)
+**Target:** $ARGUMENTS (default: all `src/` files, recursively, including `src/protocols/`)
 
 ## Usage
 
@@ -198,9 +198,8 @@ When `/c-audit` is invoked:
 
 1. **Locate Files**
    ```
-   src/*.c include/keel/*.h    # Core source and headers
-   parsers/*.c                 # Parser backends
-   tests/test_*.c              # Test files
+   src/*.c src/protocols/**/*.c include/keel/*.h   # Substrate + protocol source and headers
+   tests/test_*.c tests/protocols/*/test_*.c       # Test files
    Makefile                    # Build configuration
    ```
 

@@ -10,7 +10,7 @@ Review the KEEL codebase and verify its networking architecture consistently pre
 intended separation between **(1) the event model, (2) the socket/platform implementation,
 (3) the protocol layer.**
 
-**Target:** $ARGUMENTS (default: the whole repo; `src/`, `parsers/`, `include/keel/`, `tests/`).
+**Target:** $ARGUMENTS (default: the whole repo; `src/` incl. `src/protocols/`, `include/keel/`, `tests/`).
 
 **Do not begin with a large refactor.** First inspect the repo, identify the relevant modules
 and abstractions, trace representative execution paths, and produce a concrete findings report.
@@ -18,8 +18,8 @@ Only make narrowly-scoped fixes where the intended design is clear and the chang
 **Do not modify code until you can explain the current architecture and trace at least one
 readiness path and one completion path end to end.**
 
-Write the report to `docs/keel_axis_audit.md` (prepend a new dated pass if the file exists,
-mirroring `docs/keel_audit.md`).
+Write the report to `docs/archive/audits/keel_axis_audit.md` (prepend a new dated pass if the file exists,
+mirroring `docs/archive/audits/keel_audit.md`).
 
 ---
 
@@ -52,8 +52,8 @@ mirroring `docs/keel_audit.md`).
 
 **Event axis**: `include/keel/event.h` (readiness interface) + `src/event_caps.h` (capability
 negotiation, `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) + `src/completion.h` +
-`src/completion_driver.c` (the platform-independent completion axis + generic connection driver)
-+ `src/io_engine.h` (the run-loop dispatch seam). Backends, Makefile-selected via `BACKEND=`:
+`src/completion_core.c` (the platform-independent completion axis + generic connection driver)
++ `src/completion_dispatch.c` / `src/completion_io.h` (the run-loop completion dispatch seam; the old io_engine has been retired). Backends, Makefile-selected via `BACKEND=`:
 - **Readiness:** `event_epoll.c` (Linux default), `event_kqueue.c` (macOS default),
   `event_wsapoll.c` (Windows default), `event_poll.c` (universal fallback).
 - **Completion:** `event_iouring.c` (Linux, `BACKEND=iouring`; completion-native SQE/CQE),
@@ -67,18 +67,19 @@ negotiation, `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) + `src/complet
 `socket_winsock.c`; the overlapped providers (`kl_socket_provider_iouring/iocp/pollcomp`) live in
 their event TUs. Native handle is `KlSocketHandle` (`include/keel/handle.h`, pointer-width
 `intptr_t`, `KL_INVALID_SOCKET` sentinel, `kl_handle_valid()`). Selected on `KlEventCtx.sockets`
-+ public `KlConfig.sockets`/`KlClientConfig.sockets`.
++ public `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`.
 
-**Protocol layer**: `connection.c` (+ `conn_internal.h` model-blind core:
-`kl_conn_dispatch_request`/`kl_conn_ingest_body`/`kl_conn_send_complete`), `h2.c`,
-`websocket.c`, `client.c`, `h2_client.c`, `websocket_client.c`, `sse.c`, the `KlTls` vtable
-(`tls.h`), body readers, `response.c`. These sit above both axes and go through `conn_read`/
-`conn_write` (internal.h) + the socket seam.
+**Protocol layer** (all under `src/protocols/http/` unless noted): `http_connection.c` (+
+`http_conn_internal.h` model-blind core: `kl_http_conn_dispatch_request`/`kl_http_conn_ingest_body`/
+`kl_http_conn_send_complete`), `http2_server.c`, `websocket.c`, the `http_client_*` TUs,
+`http2_client.c`, `websocket_client.c`, `http_sse.c`, the `KlTls` vtable (`tls.h`), body readers,
+`http_response.c`. These sit above both axes and go through `conn_read`/`conn_write`
+(`http_internal.h`) + the socket seam.
 
-The event↔socket negotiation is `kl_event_ctx_sockets_compatible()` (async.c): a completion loop
+The event/socket negotiation is `kl_event_ctx_sockets_compatible()` (`src/event_ctx.c`): a completion loop
 requires an overlapped provider; a readiness loop requires a native-fd provider. See
-`docs/pal_transformation_design.md` (master roadmap), `docs/phase8*_*.md`,
-`docs/phase8f5_iouring_default_migration_design.md`.
+`docs/archive/designs/pal_transformation_design.md` (master roadmap), the `docs/archive/phases/phase8*` design docs,
+`docs/archive/phases/phase8f5_iouring_default_migration_design.md`.
 
 ---
 
