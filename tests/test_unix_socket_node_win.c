@@ -12,9 +12,15 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <afunix.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+#ifndef IO_REPARSE_TAG_AF_UNIX
+#define IO_REPARSE_TAG_AF_UNIX (0x80000023L)
+#endif
 
 /* The command helpers below always receive a literal format string; silence the (false) warning. */
 #if defined(__GNUC__)
@@ -231,6 +237,120 @@ UTEST(unix_node_win, parent_pinned_while_bound) {
     kl_unix_socket_node_teardown(&st, 1);
     rm_workdir(base);
     WSACleanup();
+}
+
+/* ── TEMPORARY runner diagnostic (removed once the happy-path failure is understood) ──────────── */
+
+static void diag_dump_acl(const char *label, HANDLE h) {
+    PSECURITY_DESCRIPTOR sd = NULL; PSID owner = NULL; PACL dacl = NULL;
+    DWORD r = GetSecurityInfo(h, SE_FILE_OBJECT,
+                              OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                              &owner, NULL, &dacl, NULL, &sd);
+    if (r != ERROR_SUCCESS) { printf("  [%s] GetSecurityInfo FAILED %lu\n", label, r); return; }
+    char *os = NULL; if (owner) ConvertSidToStringSidA(owner, &os);
+    printf("  [%s] owner=%s aces=%u\n", label, os ? os : "(null)", dacl ? dacl->AceCount : 0u);
+    if (os) LocalFree(os);
+    if (dacl) for (WORD i = 0; i < dacl->AceCount; i++) {
+        void *raw = NULL; if (!GetAce(dacl, i, &raw)) continue;
+        ACE_HEADER *hd = (ACE_HEADER *)raw;
+        const char *ty = hd->AceType == ACCESS_ALLOWED_ACE_TYPE ? "ALLOW"
+                       : hd->AceType == ACCESS_DENIED_ACE_TYPE  ? "DENY " : "OTHER";
+        if (hd->AceType == ACCESS_ALLOWED_ACE_TYPE || hd->AceType == ACCESS_DENIED_ACE_TYPE) {
+            ACCESS_ALLOWED_ACE *a = (ACCESS_ALLOWED_ACE *)raw;   /* DENY shares the layout */
+            char *ss = NULL; ConvertSidToStringSidA((PSID)&a->SidStart, &ss);
+            printf("    ACE[%u] %s flags=0x%02x mask=0x%08lx sid=%s\n",
+                   i, ty, (unsigned)hd->AceFlags, (unsigned long)a->Mask, ss ? ss : "?");
+            if (ss) LocalFree(ss);
+        } else {
+            printf("    ACE[%u] type=%u flags=0x%02x (non-basic)\n",
+                   i, (unsigned)hd->AceType, (unsigned)hd->AceFlags);
+        }
+    }
+    if (sd) LocalFree(sd);
+}
+
+UTEST(unix_node_win, zzz_runner_diagnostic) {
+    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
+    NodeStore st; kl_unix_socket_node_init(&st);
+    KlAllocator al = kl_allocator_default();
+    char dir[MAX_PATH]; mk_workdir(dir, sizeof(dir), "diag");
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s\\x.sock", dir);
+    printf("DIAG path=%s\n", path);
+
+    KlUnixNodePolicy pol = { .path = path, .unlink_stale = 1 };
+    KlSocketHandle fd = KL_INVALID_SOCKET; int err = 0;
+    KlUnixNodeStatus s = kl_unix_socket_node_bind(&pol, sk(), &al, &st, &fd, &err);
+    printf("DIAG bind status=%d err=%d gle=%lu fd_valid=%d\n",
+           (int)s, err, (unsigned long)GetLastError(), kl_handle_valid(fd));
+    if (kl_handle_valid(fd)) { kl_sock_close(sk(), fd); kl_unix_socket_node_teardown(&st, 1); }
+
+    /* Per-component walk dump of the parent chain (owner + every ACE + volume caps on the leaf). */
+    size_t len = strlen(path), cut = 0;
+    for (size_t k = 0; k < len; k++) if (path[k] == '\\' || path[k] == '/') cut = k;
+    size_t i = 0;
+    while (i <= cut) {
+        size_t j = i; while (j <= cut && path[j] != '\\' && path[j] != '/') j++;
+        size_t plen = j;
+        if (plen == 0) { i = j + 1; continue; }
+        char prefix[300]; memcpy(prefix, path, plen); prefix[plen] = '\0';
+        if (plen == 2 && prefix[1] == ':') { prefix[2] = '\\'; prefix[3] = '\0'; }
+        wchar_t wp[300]; MultiByteToWideChar(CP_ACP, 0, prefix, -1, wp, 300);
+        HANDLE d = CreateFileW(wp, READ_CONTROL | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                               OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (d == INVALID_HANDLE_VALUE) {
+            printf("COMP '%s' open FAILED gle=%lu\n", prefix, (unsigned long)GetLastError());
+            i = j + 1; if (j >= cut) break; continue;
+        }
+        BY_HANDLE_FILE_INFORMATION bi; memset(&bi, 0, sizeof(bi)); GetFileInformationByHandle(d, &bi);
+        printf("COMP '%s' attrs=0x%lx dir=%d reparse=%d\n", prefix, (unsigned long)bi.dwFileAttributes,
+               !!(bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY),
+               !!(bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+        diag_dump_acl(prefix, d);
+        if (j >= cut) {
+            wchar_t fsname[32]; DWORD ser = 0, mc = 0, fl = 0;
+            if (GetVolumeInformationByHandleW(d, NULL, 0, &ser, &mc, &fl, fsname, 32)) {
+                char fsn[64]; WideCharToMultiByte(CP_ACP, 0, fsname, -1, fsn, 64, NULL, NULL);
+                printf("VOL fsname=%s flags=0x%lx open_by_id=%d reparse=%d\n", fsn, (unsigned long)fl,
+                       !!(fl & FILE_SUPPORTS_OPEN_BY_FILE_ID), !!(fl & FILE_SUPPORTS_REPARSE_POINTS));
+            } else {
+                printf("VOL GetVolumeInformationByHandleW FAILED gle=%lu\n", (unsigned long)GetLastError());
+            }
+        }
+        CloseHandle(d);
+        i = j + 1; if (j >= cut) break;
+    }
+
+    /* Post-bind node probe: raw AF_UNIX bind, then reparse-tag + FileIdInfo on the node handle. */
+    {
+        SOCKET s2 = socket(AF_UNIX, SOCK_STREAM, 0);
+        SOCKADDR_UN a; memset(&a, 0, sizeof(a)); a.sun_family = AF_UNIX;
+        snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+        int brc = bind(s2, (struct sockaddr *)&a, sizeof(a));
+        printf("RAW bind rc=%d wsa=%d fileattr=0x%lx\n", brc, WSAGetLastError(),
+               (unsigned long)GetFileAttributesA(path));
+        wchar_t wp[300]; MultiByteToWideChar(CP_ACP, 0, path, -1, wp, 300);
+        HANDLE ln = CreateFileW(wp, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (ln == INVALID_HANDLE_VALUE) {
+            printf("NODE open FAILED gle=%lu\n", (unsigned long)GetLastError());
+        } else {
+            BYTE buf[MAXIMUM_REPARSE_DATA_BUFFER_SIZE]; DWORD got = 0;
+            BOOL rok = DeviceIoControl(ln, FSCTL_GET_REPARSE_POINT, NULL, 0, buf, sizeof(buf), &got, NULL);
+            printf("NODE fsctl_reparse ok=%d gle=%lu tag=0x%08lx (afunix=0x%08lx)\n",
+                   rok, (unsigned long)(rok ? 0 : GetLastError()),
+                   (unsigned long)(rok ? *(DWORD *)buf : 0), (unsigned long)IO_REPARSE_TAG_AF_UNIX);
+            FILE_ID_INFO fi;
+            BOOL iok = GetFileInformationByHandleEx(ln, FileIdInfo, &fi, sizeof(fi));
+            printf("NODE fileidinfo ok=%d gle=%lu\n", iok, (unsigned long)(iok ? 0 : GetLastError()));
+            CloseHandle(ln);
+        }
+        closesocket(s2); DeleteFileA(path);
+    }
+    rm_workdir(dir);
+    WSACleanup();
+    ASSERT_TRUE(1);
 }
 
 UTEST_MAIN();
