@@ -1,10 +1,15 @@
 # AF_UNIX node cleanup on Windows: spike findings and design
 
-Status: SPIKE (docs-only, investigative). No Windows code is written until the open questions below
-are resolved on real Windows. Companion to docs/unix_socket_cleanup_security_design.md (the POSIX
-contract); this is Increment 3 of issue #250. Scope: whether Windows can meet the same security
-guarantee the POSIX module now meets, and, if it cannot across supported targets, what fail-closed or
-caller-managed policy replaces the current behavior.
+**Status:** ARCHIVED (historical design record). The spike questions below were resolved on real
+Windows and the design was IMPLEMENTED and shipped as `src/unix_socket_node_win.c` (identity-anchored
+delete on modern Windows / local NTFS; fail-closed elsewhere), validated on the `windows-latest`
+MinGW and IOCP CI jobs. Preserved as the record of the investigation and the recorded runner results
+(section 9-10). Companion to `unix_socket_cleanup_security_design.md` (the POSIX contract, same
+directory); this was Increment 3 of issue #250.
+
+Original scope (retained for the record): whether Windows can meet the same security guarantee the
+POSIX module meets, and, if it cannot across supported targets, what fail-closed or caller-managed
+policy replaces the current behavior.
 
 Note on method: this is an API/behavior survey plus a decision framework. Several points require an
 empirical run on real Windows (marked EXPERIMENT); they are the gating work before any implementation.

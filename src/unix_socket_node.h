@@ -9,7 +9,7 @@
  * interface is HTTP-neutral and cross-platform: it names no protocol type, includes no protocol
  * header, and carries no POSIX types. The hardened implementation lives per platform
  * (unix_socket_node_posix.c; a Windows counterpart is the future home for that spike), all behind
- * this one contract. See docs/unix_socket_cleanup_security_design.md.
+ * this one contract. See docs/archive/designs/unix_socket_cleanup_security_design.md.
  */
 
 #include <stddef.h>

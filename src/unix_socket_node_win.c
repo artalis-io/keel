@@ -2,8 +2,8 @@
  * unix_socket_node_win.c: Windows implementation of the AF_UNIX filesystem-node lifecycle contract
  * (unix_socket_node.h). Substrate transport code: no protocol type, no protocol header.
  *
- * Security model (see docs/unix_socket_cleanup_security_design.md +
- * docs/unix_socket_cleanup_windows_spike.md): an IDENTITY-ANCHORED delete. The spike verified, on
+ * Security model (see docs/archive/designs/unix_socket_cleanup_security_design.md +
+ * docs/archive/designs/unix_socket_cleanup_windows_spike.md): an IDENTITY-ANCHORED delete. The spike verified, on
  * Windows 10 build 26100 / local NTFS, that an AF_UNIX socket node can be opened with a no-follow
  * handle, identified by a stable FILE_ID_INFO (volume serial + 128-bit file id), and deleted through
  * that verified handle (FileDispositionInfoEx POSIX). This module supports ONLY that verified

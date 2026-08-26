@@ -7,7 +7,7 @@
  * unix_socket_node_posix.c: POSIX implementation of the AF_UNIX filesystem-node lifecycle contract
  * (unix_socket_node.h). This is substrate transport code: it names no protocol type and includes no
  * protocol header. The security model is the trust boundary on EVERY directory component of the
- * socket path; see docs/unix_socket_cleanup_security_design.md.
+ * socket path; see docs/archive/designs/unix_socket_cleanup_security_design.md.
  *
  * Path anchoring: POSIX has no bindat(), so bind() re-resolves the textual pathname. The walk below
  * therefore validates the trust policy on every component from a trusted root to the parent, so no

@@ -134,7 +134,7 @@ static void rm_rf(const char *path) {
  * the cwd's trust. An environment-default cwd is NOT guaranteed to be trusted (a CI container owns
  * the workspace as a foreign uid, which is correctly refused). Run the suite from a private, verified
  * 0700 directory we own; restore the original cwd on the single exit path. See
- * docs/unix_socket_cleanup_security_design.md section 5.3.
+ * docs/archive/designs/unix_socket_cleanup_security_design.md section 5.3.
  */
 UTEST_STATE();
 

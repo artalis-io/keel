@@ -1,17 +1,16 @@
 # AF_UNIX node-lifecycle hardening: threat model and design
 
-Status: PROPOSED (docs-only). No code changes until this design is accepted. Scope: the security
-increment tracking issue #250 and CodeQL alert #43 (`cpp/toctou-race-condition`,
-`src/protocols/http/http_server_plat_posix.c:101`).
+**Status:** ARCHIVED (historical design record). IMPLEMENTED and shipped for issue #250 / CodeQL
+alert #43 (`cpp/toctou-race-condition`): the POSIX module (`src/unix_socket_node_posix.c`) and the
+identity-anchored Windows/NTFS module (`src/unix_socket_node_win.c`) both realize the trust-boundary
+guarantee below, validated across the cross-platform matrix (POSIX incl. musl, Windows MinGW + IOCP).
+This document is preserved as the design of record; the living caller contract is the doc-comment on
+`unix_socket_path` in `include/keel/http_server.h` (see section 5.3). The Windows realization is
+recorded in the companion `unix_socket_cleanup_windows_spike.md` (same directory).
 
-This branch (`security/unix-socket-cleanup`) is based on current `main`, which now includes the
-merged Phase C documentation work (PR #249 was merged at `7563556`). It is a separate security
-increment. CodeQL alert #43 remains open; alerts #44/#45 were separately triaged as intentional
-cleartext forward-proxy semantics (won't-fix) and are unrelated.
-
-This active design may remain at `docs/` root during implementation; it is archived under
-`docs/archive/designs/` when the security increment is finalized. After this design is accepted, the
-POSIX implementation and the Windows spike land as **separate reviewed increments**.
+Original scope (retained for the record): the security increment tracking issue #250 and CodeQL alert
+#43 (`src/protocols/http/http_server_plat_posix.c:101`). Alerts #44/#45 were separately triaged as
+intentional cleartext forward-proxy semantics (won't-fix) and are unrelated.
 
 ## 1. Scope
 

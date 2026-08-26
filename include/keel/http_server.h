@@ -90,7 +90,7 @@ typedef struct KlHttpServerConfig {
                                  *   refused); place the socket in an application-owned runtime directory
                                  *   with a restrictive owner/mode or ACL (e.g. a service-owned /run
                                  *   subdirectory, or a per-user runtime directory). See
-                                 *   docs/unix_socket_cleanup_security_design.md. */
+                                 *   docs/archive/designs/unix_socket_cleanup_security_design.md. */
     int unix_socket_unlink;     /**< unlink a stale, owned socket node before bind and on free after a
                                  *   successful bind. Only removes a validated socket the server owns,
                                  *   under the parent-directory precondition above; else fails closed. */
@@ -163,7 +163,7 @@ typedef struct KlHttpServer {
      * KL_UNIX_NODE_STORAGE; a static_assert in http_server_plat_posix.c verifies this storage is
      * large enough, and one in unix_socket_node_posix.c bounds the state. max_align_t gives the
      * storage suitable alignment for any member the module places in it.
-     * Adding this is a pre-3.0 source/ABI revision; see docs/unix_socket_cleanup_security_design.md. */
+     * Adding this is a pre-3.0 source/ABI revision; see docs/archive/designs/unix_socket_cleanup_security_design.md. */
     union { unsigned char opaque[192]; max_align_t _align; } unix_node;
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */

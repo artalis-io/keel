@@ -900,7 +900,7 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
     kl_http_server_free(&srv);
 }
 
-/* ── Hardened AF_UNIX node-cleanup (docs/unix_socket_cleanup_security_design.md) ──────────
+/* ── Hardened AF_UNIX node-cleanup (docs/archive/designs/unix_socket_cleanup_security_design.md) ──────────
  *
  * These verify the trust-boundary guarantee the implementation can actually provide: unsafe
  * parents are rejected before any mutation, a pre-validation replacement is refused, and a
@@ -1175,7 +1175,7 @@ static void rm_rf(const char *path) {
 
 /*
  * The hardened AF_UNIX bind validates the trust of EVERY component of the socket path (see
- * docs/unix_socket_cleanup_security_design.md section 5.3). The relative-path tests below
+ * docs/archive/designs/unix_socket_cleanup_security_design.md section 5.3). The relative-path tests below
  * bind "./keel-*.sock" under the process cwd, so they require a cwd whose whole ancestor chain is
  * trusted (owned by us, not group/other writable). An environment-default cwd is NOT guaranteed to
  * be trusted -- e.g. a CI container owns the workspace as a foreign uid, which the hardened walk
