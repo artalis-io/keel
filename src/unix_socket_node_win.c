@@ -115,9 +115,15 @@ static int acl_default_deny(HANDLE h, const struct TrustSids_ *t) {
     for (WORD i = 0; i < dacl->AceCount; i++) {
         void *raw = NULL;
         if (!GetAce(dacl, i, &raw)) goto out;
-        ACE_HEADER *hdr = (ACE_HEADER *)raw;
+        const ACE_HEADER *hdr = (const ACE_HEADER *)raw;
+        /* An INHERIT_ONLY ace confers NO access on this object; it only seeds what children inherit.
+         * Skip it: the question here is exactly who can substitute THIS component. (The default C:\
+         * DACL, for one, carries an inherit-only Modify for Authenticated Users, which does not grant
+         * them any right on C:\ itself.) An effective (non-inherit-only) inherited ace is still
+         * evaluated normally, so a directory that actually inherited a hostile grant is still caught. */
+        if (hdr->AceFlags & INHERIT_ONLY_ACE) continue;
         if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-            ACCESS_ALLOWED_ACE *ace = (ACCESS_ALLOWED_ACE *)raw;
+            const ACCESS_ALLOWED_ACE *ace = (const ACCESS_ALLOWED_ACE *)raw;
             PSID sid = (PSID)&ace->SidStart;
             if (!IsValidSid(sid)) goto out;
             if ((ace->Mask & KL_SUBSTITUTE_RIGHTS) &&
@@ -222,7 +228,7 @@ static void trust_sids_free(TrustSids *t) {
 /* Walk every component of the parent directory of @path, no-follow, rejecting reparse points and
  * ACL default-denying each; open + verify NTFS/caps on the final parent and HOLD it (no delete
  * sharing, pinning it). Returns OK (sets *out_parent) or a fail-closed status. */
-static KlUnixNodeStatus walk_hold_parent(const char *path, TrustSids *t, HANDLE *out_parent) {
+static KlUnixNodeStatus walk_hold_parent(const char *path, const TrustSids *t, HANDLE *out_parent) {
     *out_parent = INVALID_HANDLE_VALUE;
     size_t len = strlen(path);
     if (len == 0 || len >= KL_UNIX_NODE_PATH_MAX) return KL_UNIX_NODE_ERR_INVALID_PATH;

@@ -140,6 +140,29 @@ UTEST(unix_node_win, unsafe_acl_rejected) {
     WSACleanup();
 }
 
+/* An INHERIT_ONLY grant to an untrusted SID confers no access on the directory itself, so it must
+ * NOT reject (contrast unsafe_acl_rejected, which uses an effective (OI)(CI) grant). This mirrors the
+ * default C:\ DACL, which carries an inherit-only Modify for Authenticated Users. */
+UTEST(unix_node_win, inherit_only_ace_does_not_reject) {
+    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
+    NodeStore st; kl_unix_socket_node_init(&st);
+    KlAllocator al = kl_allocator_default();
+    char dir[MAX_PATH]; mk_workdir(dir, sizeof(dir), "io");
+    /* (IO) = inherit-only: applies only to children created here, not to the directory object. */
+    run_cmd("cmd /c icacls \"%s\" /grant *S-1-1-0:(OI)(CI)(IO)(M) >nul 2>&1", dir);
+
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s\\x.sock", dir);
+    KlUnixNodePolicy pol = { .path = path, .unlink_stale = 1 };
+    KlSocketHandle fd = KL_INVALID_SOCKET; int err = 0;
+    ASSERT_EQ(KL_UNIX_NODE_OK, kl_unix_socket_node_bind(&pol, sk(), &al, &st, &fd, &err));
+    ASSERT_TRUE(kl_handle_valid(fd));
+
+    kl_sock_close(sk(), fd);
+    ASSERT_EQ(KL_UNIX_NODE_OK, kl_unix_socket_node_teardown(&st, 1));
+    rm_workdir(dir);
+    WSACleanup();
+}
+
 /* Teardown refuses a node whose identity no longer matches (replaced after bind). */
 UTEST(unix_node_win, teardown_refuses_identity_mismatch) {
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
