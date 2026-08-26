@@ -236,11 +236,15 @@ KlUnixNodeStatus kl_unix_socket_node_bind(const KlUnixNodePolicy *policy,
     KlUnixNodeState *ns = state;
     if (out_errno) *out_errno = 0;
 
+    /* out_fd is required (it returns the listening handle). Reject the NULL misuse up front, so the
+     * bind path below can dereference it unconditionally. */
+    if (!out_fd) { if (out_errno) *out_errno = EINVAL; return KL_UNIX_NODE_ERR_BIND; }
+
     /* Reject bind on an already-open state (the caller must teardown first). Do this BEFORE touching
      * *out_fd, so a misuse neither leaks the held dir nor clobbers the caller's live handle. */
     if (ns->dir_open) { if (out_errno) *out_errno = EEXIST; return KL_UNIX_NODE_ERR_BIND; }
 
-    if (out_fd) *out_fd = KL_INVALID_SOCKET;   /* invalid until a bind actually succeeds */
+    *out_fd = KL_INVALID_SOCKET;   /* invalid until a bind actually succeeds */
 
     const char *path = policy->path;
     if (!path || path[0] == '\0') return KL_UNIX_NODE_ERR_INVALID_PATH;

@@ -19,6 +19,9 @@
 /* The command helpers below always receive a literal format string; silence the (false) warning. */
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
+/* Path builders compose bounded %TEMP% paths (well under MAX_PATH) into MAX_PATH buffers; GCC -O2
+ * cannot prove the source bound and warns about truncation. Deterministic test scaffolding. */
+#pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
 
 typedef union { unsigned char b[KL_UNIX_NODE_STORAGE]; double _a; void *_p; } NodeStore;
