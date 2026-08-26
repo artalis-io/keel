@@ -75,12 +75,24 @@ typedef struct KlHttpServerConfig {
     KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
                                  *   indistinguishable from unset, so a non-NULL path wins). */
-    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX */
-    int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
-    unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
-    const char *unix_socket_owner; /**< chown socket to this username; NULL = leave.
-                                    *   Changing owner needs privilege (CAP_CHOWN/root). */
-    const char *unix_socket_group; /**< chown socket to this group name; NULL = leave.
+    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX.
+                                 *   PRECONDITION for automatic cleanup/ownership below: the socket's
+                                 *   PARENT DIRECTORY must be within the server's trust domain (owned
+                                 *   by the server uid or root; not writable by untrusted actors, or
+                                 *   sticky). An untrusted parent fails bind closed rather than acting
+                                 *   on an ambiguous entry. See
+                                 *   docs/unix_socket_cleanup_security_design.md. */
+    int unix_socket_unlink;     /**< unlink a stale, owned socket node before bind and on free after a
+                                 *   successful bind. Only removes a validated socket the server owns,
+                                 *   under the parent-directory precondition above; else fails closed. */
+    unsigned int unix_socket_mode; /**< chmod socket node after bind; 0 = leave umask/default. Applied
+                                 *   under the trusted-parent precondition above. */
+    const char *unix_socket_owner; /**< chown socket node to this username; NULL = leave. Changing
+                                 *   owner needs privilege (CAP_CHOWN/root). Transferring ownership to a
+                                 *   DIFFERENT uid additionally requires a parent directory with no
+                                 *   group/other write (a sticky shared dir such as /tmp is not accepted
+                                 *   for that configuration). */
+    const char *unix_socket_group; /**< chown socket node to this group name; NULL = leave.
                                     *   Applied before listen(), so no exposure window. */
     const char *proxy_trusted_cidrs; /**< accept PROXY protocol (v1/v2) headers only from
                                       *   sources in this comma-separated CIDR allowlist
@@ -114,6 +126,11 @@ typedef struct {
 
 typedef struct KlAsyncOp KlAsyncOp;
 
+/* Upper bound on an AF_UNIX path's final component that the server copies into
+ * lifecycle-owned storage. sockaddr_un.sun_path is 108 on Linux and 104 on the
+ * BSDs/macOS; 108 bounds every hosted POSIX target (asserted in the POSIX TU). */
+#define KL_HTTP_UNIX_PATH_MAX 108
+
 typedef struct KlHttpServer {
     KlHttpServerConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
@@ -135,6 +152,19 @@ typedef struct KlHttpServer {
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
+    /* Hardened AF_UNIX node-cleanup state (POSIX). All-zero / dirfd = -1 on TCP
+     * transports and on Windows (which keeps its own by-name teardown). Adding these
+     * fields is a pre-3.0 source/ABI revision; see
+     * docs/unix_socket_cleanup_security_design.md. */
+    struct {
+        int dirfd;                          /**< lifetime-held, trust-validated parent dir; -1 = none */
+        int node_captured;                  /**< 1 = node_dev/node_ino below are valid */
+        int owner_set;                      /**< 1 = owner_uid is a resolved unix_socket_owner */
+        unsigned int owner_uid;             /**< resolved unix_socket_owner uid (accepted-owner set) */
+        unsigned long long node_dev;        /**< bound-node st_dev (teardown identity check) */
+        unsigned long long node_ino;        /**< bound-node st_ino */
+        char base[KL_HTTP_UNIX_PATH_MAX];   /**< owned copy of the socket path's final component */
+    } unix_node;
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */

@@ -27,6 +27,19 @@
 #include <grp.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <fcntl.h>        /* openat, O_DIRECTORY / O_NOFOLLOW / O_CLOEXEC, AT_SYMLINK_NOFOLLOW */
+
+/* Compile coverage for the hardened AF_UNIX lifecycle (see
+ * docs/unix_socket_cleanup_security_design.md): these POSIX.1-2008 flags must exist on every
+ * hosted POSIX target, and the leaf-copy buffer must bound sun_path. The openat / fstatat /
+ * unlinkat / fchownat / fchmodat CALLS are likewise -Werror-guarded against an implicit
+ * declaration if a target lacks them. */
+#if !defined(O_DIRECTORY) || !defined(O_NOFOLLOW) || !defined(O_CLOEXEC) || !defined(AT_SYMLINK_NOFOLLOW)
+#error "AF_UNIX node-cleanup hardening requires O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC, AT_SYMLINK_NOFOLLOW"
+#endif
+_Static_assert(sizeof(((struct sockaddr_un *)0)->sun_path) <= KL_HTTP_UNIX_PATH_MAX,
+               "KL_HTTP_UNIX_PATH_MAX must bound sockaddr_un.sun_path");
+
 #if !defined(KL_NO_SIGNAL)
 #include <signal.h>
 #include <stdatomic.h>
@@ -76,36 +89,14 @@ void kl_http_server_plat_signals_restore(KlHttpServer *s) {
 #endif
 }
 
-/* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
-
-static int unlink_stale_unix_socket(KlHttpServer *s, const char *path) {
-    struct stat st;
-    if (lstat(path, &st) < 0) {
-        if (errno == ENOENT)
-            return 0;
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "lstat unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    if (!S_ISSOCK(st.st_mode)) {
-        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
-               "refusing to unlink non-socket unix path '%s'", path);
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    /* A pathname race cannot make unlink follow or modify the replacement target: it removes only the
-     * directory entry.  The subsequent bind still fails safely if another process wins this path. */
-    // lgtm[cpp/toctou-race-condition]
-    if (unlink(path) < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "unlink unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    return 0;
-}
+/* ── AF_UNIX node lifecycle (hardened; docs/unix_socket_cleanup_security_design.md) ──────
+ *
+ * The security boundary is the socket's PARENT DIRECTORY. A component-walked,
+ * O_NOFOLLOW-opened, trust-validated parent dirfd is held for the socket's lifetime and every
+ * reclaim / owner / mode / teardown mutation is directory-relative (fstatat / unlinkat /
+ * fchownat / fchmodat) with identity revalidation. There is no atomic "act iff inode X" on a
+ * name, so the trusted-directory guarantee (not a per-call trick) is what actually protects the
+ * lifecycle; the helpers below minimize the residual final-component window and fail closed. */
 
 /* Resolve a username to a uid via getpwnam_r. Returns 0 on success, -1 if the
  * user is unknown or on allocation failure (sets last_error accordingly). */
@@ -150,134 +141,323 @@ static int resolve_gid(KlHttpServer *s, const char *name, gid_t *out) {
     }
 }
 
-int kl_http_server_plat_bind_unix(KlHttpServer *s) {
-    const char *path = s->config.unix_socket_path;
-    if (!path || path[0] == '\0') {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
+/* Reject unusable socket paths and split off the leaf. dirbuf receives a mutable copy of the
+ * path; *base_out points at the final component within it. Returns the index of the last '/'
+ * (>=0), or -1 when there is no '/'. On rejection returns -1 AND leaves *base_out NULL:
+ * empty path, overlong path, trailing slash (no leaf), or a "."/".." leaf. */
+static int split_and_check_path(KlHttpServer *s, const char *path, char *dirbuf, size_t dircap,
+                                const char **base_out) {
+    *base_out = NULL;
+    size_t len = strlen(path);
+    if (len == 0 || len >= dircap) { s->last_error = KL_ERR_INVALID_ARG; return -1; }
+    if (path[len - 1] == '/') { s->last_error = KL_ERR_INVALID_ARG; return -1; }  /* no final component */
+    memcpy(dirbuf, path, len + 1);
+    char *slash = strrchr(dirbuf, '/');
+    const char *base = slash ? slash + 1 : dirbuf;
+    if (base[0] == '\0' || strcmp(base, ".") == 0 || strcmp(base, "..") == 0) {
+        s->last_error = KL_ERR_INVALID_ARG; return -1;
     }
+    *base_out = base;
+    return slash ? (int)(slash - dirbuf) : -1;
+}
 
-    size_t path_len = strlen(path);
-    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
+/* Open the parent directory, walking EVERY component with O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC from a
+ * trusted root, so no intermediate component may be a symlink (a single O_NOFOLLOW open guards only
+ * the final component). @dir is the NUL-terminated, mutable parent portion ("" means the start dir
+ * itself); it is destructively tokenized. Returns a dirfd (>=0) or -1 (sets last_error). */
+static int open_parent_walk(KlHttpServer *s, char *dir, int start_absolute) {
+    int dirfd = open(start_absolute ? "/" : ".", O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dirfd < 0) {
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "open unix socket dir");
+        s->last_error = KL_ERR_BIND; return -1;
     }
+    char *p = dir;
+    while (*p == '/') p++;                       /* leading slash(es) already handled by the root open */
+    while (*p) {
+        char *seg = p;
+        char *next = strchr(p, '/');
+        if (next) { *next = '\0'; p = next + 1; while (*p == '/') p++; }
+        else p += strlen(p);
+        if (seg[0] == '\0' || strcmp(seg, ".") == 0) continue;   /* collapse // and skip . */
+        if (strcmp(seg, "..") == 0) {            /* refuse .. so the trusted walk cannot escape upward */
+            close(dirfd); s->last_error = KL_ERR_INVALID_ARG; return -1;
+        }
+        int nfd = openat(dirfd, seg, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(dirfd);
+        if (nfd < 0) {
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "walk unix socket dir");
+            s->last_error = KL_ERR_BIND; return -1;
+        }
+        dirfd = nfd;
+    }
+    return dirfd;
+}
 
+/* Enforce the trust tier (design section 4.1) on an opened parent dir. @tier_b = ownership transfers
+ * to a uid != euid, which forbids ANY group/other write (a sticky shared dir is not sufficient once
+ * the node is owned by the foreign uid, per fact 4). Returns 0 (trusted) or -1 (fail closed). */
+static int check_parent_trust(KlHttpServer *s, int dirfd, int tier_b) {
+    struct stat ds;
+    if (fstat(dirfd, &ds) < 0) { s->last_error = KL_ERR_BIND; return -1; }
+    if (ds.st_uid != geteuid() && ds.st_uid != 0) {
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+               "refusing unix socket cleanup: parent dir not owned by the server uid or root");
+        s->last_error = KL_ERR_BIND; return -1;
+    }
+    if (ds.st_mode & (S_IWGRP | S_IWOTH)) {
+        if (tier_b) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: parent dir is group/other-writable and ownership is transferred");
+            s->last_error = KL_ERR_BIND; return -1;
+        }
+        if (!(ds.st_mode & S_ISVTX)) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: parent dir is group/other-writable without the sticky bit");
+            s->last_error = KL_ERR_BIND; return -1;
+        }
+    }
+    return 0;
+}
+
+/* Directory-relative identity check for a leaf we may remove/mutate. Returns 0 (present: a socket
+ * owned by an accepted uid, *st filled), 1 (absent: ENOENT), or -1 (unsafe/foreign/non-socket/error;
+ * fail closed). Accepted owners: euid, plus owner_uid when owner_set. */
+static int stat_accepted_socket(KlHttpServer *s, int dirfd, const char *base,
+                                uid_t owner_uid, int owner_set, struct stat *st) {
+    if (fstatat(dirfd, base, st, AT_SYMLINK_NOFOLLOW) < 0) {
+        if (errno == ENOENT) return 1;
+        s->last_error = KL_ERR_BIND; return -1;
+    }
+    if (!S_ISSOCK(st->st_mode)) {
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "refusing to act on a non-socket unix path");
+        s->last_error = KL_ERR_BIND; return -1;
+    }
+    if (st->st_uid != geteuid() && !(owner_set && st->st_uid == owner_uid)) {
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+               "refusing to act on a unix socket owned by an unexpected uid");
+        s->last_error = KL_ERR_BIND; return -1;
+    }
+    return 0;
+}
+
+/* True iff the leaf is still exactly the node we bound: a socket whose dev+ino match the captured
+ * identity. Used to revalidate before each owner/mode mutation and before any failure/teardown
+ * unlink, so a substituted entry is never chowned/chmod-ed/removed. */
+static int leaf_is_bound_node(KlHttpServer *s) {
+    struct stat st;
+    if (!s->unix_node.node_captured) return 0;
+    if (fstatat(s->unix_node.dirfd, s->unix_node.base, &st, AT_SYMLINK_NOFOLLOW) < 0) return 0;
+    return S_ISSOCK(st.st_mode) &&
+           (unsigned long long)st.st_dev == s->unix_node.node_dev &&
+           (unsigned long long)st.st_ino == s->unix_node.node_ino;
+}
+
+/* Create the AF_UNIX socket + bind it at @path (umask-guarded when a mode is configured). Sets
+ * s->listen_fd on success; closes it and returns -1 on failure. bind() fails if the name already
+ * exists, so it cannot clobber an entry an attacker re-created after a reclaim. */
+static int create_and_bind_unix(KlHttpServer *s, const char *path, size_t path_len) {
     s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
     if (!kl_handle_valid(s->listen_fd)) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
-        s->last_error = KL_ERR_SOCKET;
-        return -1;
+        s->last_error = KL_ERR_SOCKET; return -1;
     }
     kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
-
-    if (s->config.unix_socket_unlink &&
-        unlink_stale_unix_socket(s, path) < 0) {
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     memcpy(addr.sun_path, path, path_len + 1);
+    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
 
-    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
-                                     path_len + 1);
-
-    /* Create the socket node with the requested mode atomically: bind()
-     * applies (0777 & ~umask), so a temporary umask closes the window in
-     * which the socket would otherwise be reachable with default (looser)
-     * permissions before the chmod below.  Restored immediately after bind. */
-    mode_t old_umask = 0;
-    int umask_set = 0;
+    mode_t old_umask = 0; int umask_set = 0;
     if (s->config.unix_socket_mode != 0) {
-        old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
-        umask_set = 1;
+        old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode); umask_set = 1;
     }
     KlSockAddr bind_sa;
     kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
-    int bind_rc = kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa);
-    if (umask_set)
-        umask(old_umask);
-    if (bind_rc < 0) {
+    int rc = kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa);
+    if (umask_set) umask(old_umask);
+    if (rc < 0) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
+    return 0;
+}
 
-    s->unix_socket_owned = 1;
+int kl_http_server_plat_bind_unix(KlHttpServer *s) {
+    const char *path = s->config.unix_socket_path;
+    if (!path || path[0] == '\0') { s->last_error = KL_ERR_INVALID_ARG; return -1; }
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        s->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
 
-    /* Ownership: resolve owner/group names to ids and chown the socket node.
-     * Done before listen() (where connections first become possible), so the
-     * socket is never reachable with the wrong owner/group.  chown to a
-     * different user needs privilege (CAP_CHOWN/root); setting group to one
-     * the process belongs to is generally allowed for the file owner. */
-    if (s->config.unix_socket_owner || s->config.unix_socket_group) {
-        uid_t uid = (uid_t)-1;   /* -1 = leave unchanged (chown semantics) */
-        gid_t gid = (gid_t)-1;
-        if (s->config.unix_socket_owner &&
-            resolve_uid(s, s->config.unix_socket_owner, &uid) < 0) {
+    /* Resolve owner/group ONCE, up front, and reuse the result for the trust-tier decision, the
+     * reclaim accepted-owner set, and the post-bind chown (no duplicate/inconsistent lookups). */
+    uid_t owner_uid = (uid_t)-1; gid_t owner_gid = (gid_t)-1;
+    int owner_set = 0, group_set = 0;
+    if (s->config.unix_socket_owner) {
+        if (resolve_uid(s, s->config.unix_socket_owner, &owner_uid) < 0) {
             if (s->last_error != KL_ERR_ALLOC) {
                 kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket owner '%s'",
                        s->config.unix_socket_owner);
                 s->last_error = KL_ERR_INVALID_ARG;
             }
-            goto fail;
+            return -1;
         }
-        if (s->config.unix_socket_group &&
-            resolve_gid(s, s->config.unix_socket_group, &gid) < 0) {
+        owner_set = 1;
+    }
+    if (s->config.unix_socket_group) {
+        if (resolve_gid(s, s->config.unix_socket_group, &owner_gid) < 0) {
             if (s->last_error != KL_ERR_ALLOC) {
                 kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket group '%s'",
                        s->config.unix_socket_group);
                 s->last_error = KL_ERR_INVALID_ARG;
             }
-            goto fail;
+            return -1;
         }
-        if (chown(path, uid, gid) < 0) {
-            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chown unix socket");
-            s->last_error = KL_ERR_BIND;
-            goto fail;
+        group_set = 1;
+    }
+    /* Tier B whenever ownership transfers to a foreign uid, including startup reclaim of a socket
+     * left by a prior chowned run. */
+    int tier_b = owner_set && owner_uid != geteuid();
+
+    /* The hardened directory machinery (component walk, trust tier, held dirfd, dev/ino) is only
+     * needed when this server MUTATES the pathname: stale-unlink, chown, or chmod. A plain bind
+     * performs no pathname mutation (bind fails safely if the name exists), so it takes the simple
+     * path and does not impose a trusted-directory requirement on unrelated callers. */
+    int will_mutate = s->config.unix_socket_unlink || owner_set || group_set ||
+                      s->config.unix_socket_mode != 0;
+    if (!will_mutate) {
+        if (create_and_bind_unix(s, path, path_len) < 0) return -1;
+        s->unix_socket_owned = 1;
+        s->bound_port = 0;
+        return 0;
+    }
+
+    /* Component-walk + hold the trusted parent dir; copy the leaf into lifecycle-owned storage. */
+    char dirbuf[KL_HTTP_UNIX_PATH_MAX];
+    const char *base = NULL;
+    int slash_at = split_and_check_path(s, path, dirbuf, sizeof(dirbuf), &base);
+    if (!base) return -1;
+    if (strlen(base) >= sizeof(s->unix_node.base)) { s->last_error = KL_ERR_INVALID_ARG; return -1; }
+    char base_copy[KL_HTTP_UNIX_PATH_MAX];
+    memcpy(base_copy, base, strlen(base) + 1);      /* copy BEFORE the walk NUL-splits dirbuf */
+    if (slash_at < 0) dirbuf[0] = '\0';             /* no '/': parent is the start dir */
+    else dirbuf[slash_at] = '\0';                   /* terminate the parent portion */
+    int dirfd = open_parent_walk(s, dirbuf, path[0] == '/');
+    if (dirfd < 0) return -1;
+    if (check_parent_trust(s, dirfd, tier_b) < 0) { close(dirfd); return -1; }
+    s->unix_node.dirfd = dirfd;
+    memcpy(s->unix_node.base, base_copy, strlen(base_copy) + 1);
+    s->unix_node.owner_uid = (unsigned int)owner_uid;
+    s->unix_node.owner_set = owner_set;
+    s->unix_node.node_captured = 0;
+
+    /* Reclaim a stale, validated, accepted-owner socket node (opt-in); fail closed otherwise. */
+    if (s->config.unix_socket_unlink) {
+        struct stat st;
+        int r = stat_accepted_socket(s, dirfd, s->unix_node.base, owner_uid, owner_set, &st);
+        if (r < 0) goto fail_close_dir;
+        if (r == 0 && unlinkat(dirfd, s->unix_node.base, 0) < 0) {
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "unlink stale unix socket");
+            s->last_error = KL_ERR_BIND; goto fail_close_dir;
         }
     }
 
-    /* Enforce the exact mode regardless of the platform's socket-creation
-     * base (some create nodes 0666, not 0777).  The umask above already
-     * closed the permissions window; this guarantees the precise bits, and
-     * re-asserts them after any chown (which clears set-gid on some OSes). */
-    if (s->config.unix_socket_mode != 0 &&
-        chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chmod unix socket");
-        s->last_error = KL_ERR_BIND;
-        goto fail;
+    /* Create + bind (on its own failure it closes listen_fd, so we only unwind the dirfd). */
+    if (create_and_bind_unix(s, path, path_len) < 0)
+        goto fail_close_dir;
+    s->unix_socket_owned = 1;
+
+    /* Capture the bound FILESYSTEM node identity via fstatat (NOT fstat(listen_fd): the socket fd
+     * names the kernel object, not the pathname inode). This is the chown/chmod + teardown identity. */
+    {
+        struct stat bnode;
+        if (fstatat(dirfd, s->unix_node.base, &bnode, AT_SYMLINK_NOFOLLOW) < 0 ||
+            !S_ISSOCK(bnode.st_mode)) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unix socket node not found after bind");
+            s->last_error = KL_ERR_BIND; goto fail_unlink;
+        }
+        s->unix_node.node_dev = (unsigned long long)bnode.st_dev;
+        s->unix_node.node_ino = (unsigned long long)bnode.st_ino;
+        s->unix_node.node_captured = 1;
+    }
+
+    /* Owner/group via fchownat (identity revalidated), before listen() so the socket is never
+     * reachable with the wrong owner. Directory-relative, not fchown(listen_fd) (fact 2). */
+    if (owner_set || group_set) {
+        if (!leaf_is_bound_node(s)) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unix socket identity changed before chown");
+            s->last_error = KL_ERR_BIND; goto fail_unlink;
+        }
+        uid_t uid = owner_set ? owner_uid : (uid_t)-1;
+        gid_t gid = group_set ? owner_gid : (gid_t)-1;
+        if (fchownat(dirfd, s->unix_node.base, uid, gid, AT_SYMLINK_NOFOLLOW) < 0) {
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chown unix socket");
+            s->last_error = KL_ERR_BIND; goto fail_unlink;
+        }
+    }
+
+    /* Exact mode via fchmodat, AFTER chown (chown can clear set-*id). Reasserting a privileged
+     * name operation after ownership transfer is safe only because Tier B forbids the foreign owner
+     * directory write, so it cannot substitute the entry between chown and chmod (fact 4). */
+    if (s->config.unix_socket_mode != 0) {
+        if (!leaf_is_bound_node(s)) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unix socket identity changed before chmod");
+            s->last_error = KL_ERR_BIND; goto fail_unlink;
+        }
+        if (fchmodat(dirfd, s->unix_node.base, (mode_t)s->config.unix_socket_mode, 0) < 0) {
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chmod unix socket");
+            s->last_error = KL_ERR_BIND; goto fail_unlink;
+        }
     }
 
     s->bound_port = 0;
     return 0;
 
-fail:
-    kl_sock_close(s->ev.sockets, s->listen_fd);
-    s->listen_fd = KL_INVALID_SOCKET;
-    unlink(path);
+fail_unlink:
+    /* Failure-path cleanup: remove ONLY the node we bound (validated identity), never a replacement,
+     * then fall through to close the listen fd (still open on a post-bind failure). */
+    if (leaf_is_bound_node(s))
+        (void)unlinkat(dirfd, s->unix_node.base, 0);
     s->unix_socket_owned = 0;
+    if (kl_handle_valid(s->listen_fd)) {
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
+    }
+fail_close_dir:
+    close(s->unix_node.dirfd);
+    s->unix_node.dirfd = -1;
+    s->unix_node.base[0] = '\0';
+    s->unix_node.node_captured = 0;
     return -1;
 }
 
 void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
+    KlError saved = s->last_error;   /* best-effort teardown must not clobber the caller's error */
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
-        s->config.unix_socket_path) {
-        /* Re-check that the path is still a socket before unlinking, so a
-         * regular file (or a socket from a different process) that replaced
-         * our path is not removed.  lstat (not stat) avoids following a
-         * symlink.  Best-effort teardown; no error reporting. */
+        s->unix_node.dirfd >= 0 && s->unix_node.base[0] != '\0' && s->unix_node.node_captured) {
+        int tier_b = s->unix_node.owner_set && (uid_t)s->unix_node.owner_uid != geteuid();
         struct stat st;
-        if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
-            unlink(s->config.unix_socket_path);
+        /* Fail closed unless the dir still passes its tier AND the leaf is still exactly our bound
+         * node (socket, accepted owner, dev+ino match). Otherwise leave the ambiguous entry. */
+        if (check_parent_trust(s, s->unix_node.dirfd, tier_b) == 0 &&
+            stat_accepted_socket(s, s->unix_node.dirfd, s->unix_node.base,
+                                 (uid_t)s->unix_node.owner_uid, s->unix_node.owner_set, &st) == 0 &&
+            (unsigned long long)st.st_dev == s->unix_node.node_dev &&
+            (unsigned long long)st.st_ino == s->unix_node.node_ino) {
+            (void)unlinkat(s->unix_node.dirfd, s->unix_node.base, 0);
+        }
     }
     s->unix_socket_owned = 0;
+    if (s->unix_node.dirfd >= 0) { close(s->unix_node.dirfd); s->unix_node.dirfd = -1; }
+    s->unix_node.base[0] = '\0';
+    s->unix_node.node_captured = 0;
+    s->last_error = saved;
 }
 
 /* ── Peer credentials ────────────────────────────────────────────────── */

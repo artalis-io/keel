@@ -82,6 +82,9 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    /* AF_UNIX hardened-cleanup parent dir: sentinel BEFORE any fallible init, so
+     * every unwind can close it exactly once (0 is a valid fd; memset is not enough). */
+    s->unix_node.dirfd = -1;
 
 #ifndef KEEL_FREESTANDING
     /* Register the WebSocket / HTTP-2 upgrade tables so http_connection.c's dispatch is

@@ -14,6 +14,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <grp.h>
+#include <pwd.h>
 
 /* Peer-credential capture (set inside the handler). */
 static KlPeerCred g_captured_cred;
@@ -896,6 +897,198 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_http_server_free(&srv);
+}
+
+/* ── Hardened AF_UNIX node-cleanup (docs/unix_socket_cleanup_security_design.md) ──────────
+ *
+ * These verify the trust-boundary guarantee the implementation can actually provide: unsafe
+ * parents are rejected before any mutation, a pre-validation replacement is refused, and a
+ * dev/ino mismatch at teardown is refused. They do NOT attempt to prove act-iff-inode atomicity
+ * (which does not exist); a same-trust-domain swap after validation is an accepted residual. */
+
+static void test_dir_path(char *buf, size_t buflen, const char *name) {
+    snprintf(buf, buflen, "./keel-%ld-%sdir", (long)getpid(), name);
+}
+
+/* A usable different-uid for Tier-B / chown tests, or 0 if none (skip). */
+static int test_foreign_uid(uid_t *out) {
+    struct passwd *pw = getpwnam("nobody");
+    if (!pw || pw->pw_uid == geteuid())
+        return 0;
+    *out = pw->pw_uid;
+    return 1;
+}
+
+/* Tier A: a group/other-writable, non-sticky parent dir must fail closed when cleanup is enabled. */
+UTEST(unix_socket, hardened_group_writable_parent_fails_closed) {
+    char dir[80], path[160];
+    test_dir_path(dir, sizeof(dir), "gw");
+    rmdir(dir);
+    ASSERT_EQ(0, mkdir(dir, 0700));
+    ASSERT_EQ(0, chmod(dir, 0777));                 /* world-writable, NO sticky bit */
+    snprintf(path, sizeof(path), "%s/x.sock", dir);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));        /* fail closed: no mutation attempted */
+    ASSERT_EQ(srv.last_error, KL_ERR_BIND);
+    kl_http_server_free(&srv);
+
+    ASSERT_NE(0, access(path, F_OK));               /* nothing was created */
+    rmdir(dir);
+}
+
+/* Tier B: transferring ownership to a foreign uid rejects a sticky shared parent (which Tier A
+ * would accept), because the foreign owner could then race entry substitution. */
+UTEST(unix_socket, hardened_tier_b_rejects_sticky_shared_parent) {
+    uid_t foreign;
+    if (!test_foreign_uid(&foreign)) {
+        UTEST_SKIP("no usable foreign uid (nobody) for the Tier-B check");
+        return;
+    }
+    char dir[80], path[160];
+    test_dir_path(dir, sizeof(dir), "sticky");
+    rmdir(dir);
+    ASSERT_EQ(0, mkdir(dir, 0700));
+    ASSERT_EQ(0, chmod(dir, 01777));                /* sticky + world-writable (a /tmp-like dir) */
+    snprintf(path, sizeof(path), "%s/x.sock", dir);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_owner = "nobody",              /* ownership transfer -> Tier B */
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));        /* Tier B rejects the sticky shared dir */
+    ASSERT_EQ(srv.last_error, KL_ERR_BIND);
+    kl_http_server_free(&srv);
+
+    ASSERT_NE(0, access(path, F_OK));
+    rmdir(dir);
+}
+
+/* Path validation: trailing slash and "."/".." leaves are rejected before any filesystem action. */
+UTEST(unix_socket, hardened_path_edge_cases_invalid) {
+    const char *bad[] = { "./keel-slash.sock/", ".", ".." };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        KlHttpServer srv;
+        KlHttpServerConfig cfg = {
+            .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+            .unix_socket_path = bad[i],
+            .unix_socket_unlink = 1,                /* force the hardened path */
+        };
+        ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+        ASSERT_EQ(-1, kl_http_server_run(&srv));
+        ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
+        kl_http_server_free(&srv);
+    }
+}
+
+/* Pre-validation replacement: a symlink at the path is refused (fstatat NOFOLLOW sees a non-socket)
+ * and neither the link nor its target is removed. */
+UTEST(unix_socket, hardened_symlink_at_path_refused) {
+    char path[108], target[108];
+    test_sock_path(path, sizeof(path), "symlink");
+    snprintf(target, sizeof(target), "./keel-%ld-symtarget", (long)getpid());
+    unlink(path); unlink(target);
+
+    FILE *f = fopen(target, "w");                   /* a real file the symlink points at */
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    ASSERT_EQ(0, symlink(target, path));
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));        /* non-socket leaf: fail closed */
+    ASSERT_EQ(srv.last_error, KL_ERR_BIND);
+    kl_http_server_free(&srv);
+
+    struct stat st;
+    ASSERT_EQ(0, lstat(path, &st));                 /* the symlink survives */
+    ASSERT_TRUE(S_ISLNK(st.st_mode));
+    ASSERT_EQ(0, access(target, F_OK));             /* the target was never followed/removed */
+    unlink(path); unlink(target);
+}
+
+/* Teardown identity: if the node is replaced (same uid) after bind, teardown refuses to remove the
+ * replacement because its dev/ino no longer match the bound node. */
+UTEST(unix_socket, hardened_teardown_keeps_replaced_node) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "devino");
+    unlink(path);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+
+    /* Replace the directory entry with a DIFFERENT socket inode (same uid, trusted cwd). */
+    ASSERT_EQ(0, unlink(path));
+    int replacement = create_bound_unix_socket(path);
+    ASSERT_TRUE(replacement >= 0);
+    struct stat before;
+    ASSERT_EQ(0, stat(path, &before));
+
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);                      /* teardown must refuse: dev/ino mismatch */
+
+    struct stat after;
+    ASSERT_EQ(0, stat(path, &after));               /* the replacement survives */
+    ASSERT_EQ(before.st_ino, after.st_ino);
+    close(replacement);
+    unlink(path);
+}
+
+/* Failure-path cleanup: when a post-bind mutation fails (chown to a foreign uid without
+ * privilege), the failure path removes ONLY the node we bound (validated), leaving no stray node. */
+UTEST(unix_socket, hardened_failure_path_removes_only_owned_node) {
+    uid_t foreign;
+    if (geteuid() == 0 || !test_foreign_uid(&foreign)) {
+        UTEST_SKIP("needs an unprivileged process and a foreign uid to force a chown failure");
+        return;
+    }
+    /* Private 0700 dir (owned by us, no group/other write) so Tier B passes and we reach chown. */
+    char dir[80], path[160];
+    test_dir_path(dir, sizeof(dir), "p4");
+    rmdir(dir);
+    ASSERT_EQ(0, mkdir(dir, 0700));
+    snprintf(path, sizeof(path), "%s/x.sock", dir);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_owner = "nobody",              /* chown to a foreign uid -> EPERM unprivileged */
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));        /* chown fails -> failure-path cleanup */
+    ASSERT_EQ(srv.last_error, KL_ERR_BIND);
+    kl_http_server_free(&srv);
+
+    ASSERT_NE(0, access(path, F_OK));               /* our bound node was removed, nothing stray left */
+    rmdir(dir);
 }
 
 UTEST_MAIN();
