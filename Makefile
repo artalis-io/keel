@@ -1291,6 +1291,29 @@ fuzz/fuzz_decompress: fuzz/fuzz_decompress.c $(FUZZ_LIB)
 	$(CC) $(FUZZ_CFLAGS) $(MINIZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 fuzz-decompress: fuzz/fuzz_decompress
 
+# Opt-in regression test for the streaming gzip trailer (CRC32 + ISIZE) verification in
+# decompress_miniz.c. Bring-your-own miniz (any source layout under MINIZ_DIR):
+#   make decompress-miniz-test MINIZ_DIR=/path/to/miniz
+# (The miniz codec backend is otherwise not exercised in CI.) Built with ASan+UBSan;
+# miniz sources are compiled with relaxed warnings, the adapters + test under -Werror.
+decompress-miniz-test: $(LIB)
+	@test -n "$(MINIZ_DIR)" || { echo "decompress-miniz-test: set MINIZ_DIR=/path/to/miniz"; exit 1; }
+	@set -e; mzobj=""; \
+	for f in $(MINIZ_DIR)/*.c; do \
+	  o="integrations/codec/miniz/tests/mz_$$(basename $$f .c).o"; \
+	  $(CC) -w -g -O1 -fsanitize=address,undefined -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO -c -o "$$o" "$$f"; \
+	  mzobj="$$mzobj $$o"; \
+	done; \
+	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -Wno-unused-function \
+	  -fsanitize=address,undefined -fno-sanitize-recover=all \
+	  -Iinclude -Iintegrations/codec/miniz -I$(MINIZ_DIR) -Ivendor -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
+	  -o integrations/codec/miniz/tests/test_decompress_trailer \
+	  integrations/codec/miniz/tests/test_decompress_trailer.c \
+	  integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c \
+	  $$mzobj -L. -lkeel; \
+	./integrations/codec/miniz/tests/test_decompress_trailer
+	@rm -f integrations/codec/miniz/tests/mz_*.o integrations/codec/miniz/tests/test_decompress_trailer
+
 fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \
       fuzz/fuzz_proxy fuzz/fuzz_url
 
