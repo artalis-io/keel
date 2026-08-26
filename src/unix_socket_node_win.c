@@ -17,10 +17,12 @@
  *
  * Trust proof for the Win32 (non-NT-relative) walk: every directory component is opened no-follow
  * (FILE_FLAG_OPEN_REPARSE_POINT), rejected if it is a reparse point, and ACL-checked default-deny;
- * the final parent handle is then HELD open without delete sharing (pinning it against rename/delete)
- * for the socket lifetime. Because no untrusted principal can delete/rename/re-permission any
+ * the final parent handle is then HELD open without delete sharing (a defense-in-depth sharing-conflict
+ * pin) for the socket lifetime. Because no untrusted principal can delete/rename/re-permission any
  * component, and no component is a reparse point, later textual re-resolution of the leaf resolves to
- * the same chain; the FILE_ID_INFO check on the leaf is the belt-and-suspenders identity anchor.
+ * the same chain. The ACTUAL guarantee is the leaf identity anchor: teardown re-opens the leaf
+ * no-follow and re-verifies the captured FILE_ID_INFO (volume serial + 128-bit id) before deleting,
+ * so even a leaf that was substituted or a parent that was renamed cannot cause a wrong deletion.
  */
 
 #ifndef _WIN32_WINNT

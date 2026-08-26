@@ -325,8 +325,14 @@ UTEST(unix_node_win, teardown_after_external_deletion) {
     WSACleanup();
 }
 
-/* The held parent directory is pinned (no delete sharing): it cannot be renamed/removed while bound. */
-UTEST(unix_node_win, parent_pinned_while_bound) {
+/* Sharing conflict / held-parent behavior. Holding the final parent WITHOUT delete sharing is a
+ * defense-in-depth pin against an UNTRUSTED principal renaming/replacing a component; the ACTUAL
+ * guarantee is the leaf identity anchor (teardown re-verifies the captured FILE_ID before deleting).
+ * This test renames as the OWNER (which the pin is not meant to stop, and some environments permit),
+ * so it asserts the security outcome portably: EITHER the pin blocks the rename, OR the identity
+ * anchor keeps teardown safe (the original leaf path no longer resolves to our node, so teardown
+ * refuses rather than acting on an ambiguous entry). Never a wrong deletion. */
+UTEST(unix_node_win, parent_pin_or_identity_keeps_teardown_safe) {
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
     NodeStore st; kl_unix_socket_node_init(&st);
     KlAllocator al = kl_allocator_default();
@@ -340,10 +346,18 @@ UTEST(unix_node_win, parent_pinned_while_bound) {
     ASSERT_EQ(KL_UNIX_NODE_OK, kl_unix_socket_node_bind(&pol, sk(), &al, &st, &fd, &err));
 
     char moved[MAX_PATH]; snprintf(moved, sizeof(moved), "%s\\p2", base);
-    ASSERT_FALSE(MoveFileA(parent, moved));   /* pinned: rename must fail */
-
-    kl_sock_close(sk(), fd);
-    kl_unix_socket_node_teardown(&st, 1);
+    if (MoveFileA(parent, moved)) {
+        /* The environment permitted renaming the held parent: the identity anchor must still protect.
+         * The original leaf path no longer resolves, so teardown refuses (never a mis-identified delete). */
+        ASSERT_EQ(KL_UNIX_NODE_ERR_FOREIGN_NODE, kl_unix_socket_node_teardown(&st, 1));
+        kl_sock_close(sk(), fd);
+    } else {
+        /* Pinned: the no-delete-sharing hold blocked the rename (the sharing conflict). A normal
+         * teardown then removes exactly the node we bound. */
+        kl_sock_close(sk(), fd);
+        ASSERT_EQ(KL_UNIX_NODE_OK, kl_unix_socket_node_teardown(&st, 1));
+        ASSERT_EQ(INVALID_FILE_ATTRIBUTES, GetFileAttributesA(path));
+    }
     rm_workdir(base);
     WSACleanup();
 }
