@@ -522,7 +522,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libnghttp2-dev \
-            curl openssl python3-jinja2 python3-jsonschema \
+            curl unzip openssl python3-jinja2 python3-jsonschema \
             nghttp2-client nghttp2-server
 
       - name: Install h2spec
@@ -539,6 +539,16 @@ jobs:
 
       - name: Build core (dependency-light, no TLS/HTTP2 libs)
         run: make
+
+      - name: miniz gzip-trailer integrity regression test (pinned miniz 3.0.2, ASan+UBSan)
+        timeout-minutes: 5
+        # Bring-your-own miniz, pinned to a release amalgamation (consistent with the BYO mbedTLS
+        # build above); enrolls the L3 CRC32/ISIZE trailer tests in standing CI without making miniz
+        # a core dependency. Runs against the plain core libkeel.a built above.
+        run: |
+          curl -fsSL https://github.com/richgel999/miniz/releases/download/3.0.2/miniz-3.0.2.zip -o /tmp/miniz.zip
+          mkdir -p "$HOME/miniz" && unzip -o -q /tmp/miniz.zip -d "$HOME/miniz"
+          make decompress-miniz-test MINIZ_DIR="$HOME/miniz"
 
       - name: nghttp2 adapter, roundtrip + real-socket e2e
         timeout-minutes: 5
