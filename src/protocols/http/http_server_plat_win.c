@@ -15,11 +15,15 @@
 #include "http_internal.h"   /* kl_http_server_log_errno + KlHttpServer; pulls socket.h -> winsock2/afunix */
 #include "socket.h"
 #include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
+#include "unix_socket_node.h" /* substrate AF_UNIX filesystem-node lifecycle (transport axis) */
 
 #include <windows.h>
 #include <string.h>
 #include <stddef.h>
 #include <stdatomic.h>
+
+_Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
+               "KlHttpServer.unix_node is too small for the AF_UNIX node-cleanup state");
 
 /* ── Signal handling (console control handler) ───────────────────────── */
 
@@ -57,63 +61,79 @@ void kl_http_server_plat_signals_restore(KlHttpServer *s) {
     }
 }
 
-/* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
+/* ── AF_UNIX node lifecycle: thin adapter over the substrate node module ─────────────────────
+ *
+ * Identical shape to the POSIX adapter: build a neutral policy, delegate the identity-anchored
+ * lifecycle (unix_socket_node_win.c: no-follow open + FILE_ID_INFO verify + delete-by-handle on
+ * local NTFS, fail closed elsewhere), and map the module status into KlError + server logging. This
+ * TU performs no filesystem or socket-path syscalls itself. Windows AF_UNIX has no owner/group/mode
+ * model, so those policy fields are ignored by the module. */
+
+static KlError unix_node_status_to_error(KlUnixNodeStatus st) {
+    switch (st) {
+        case KL_UNIX_NODE_ERR_INVALID_PATH:
+        case KL_UNIX_NODE_ERR_UNKNOWN_OWNER:    return KL_ERR_INVALID_ARG;
+        case KL_UNIX_NODE_ERR_SOCKET:           return KL_ERR_SOCKET;
+        case KL_UNIX_NODE_ERR_NOMEM:            return KL_ERR_ALLOC;
+        case KL_UNIX_NODE_ERR_UNTRUSTED_PARENT:
+        case KL_UNIX_NODE_ERR_FOREIGN_NODE:
+        case KL_UNIX_NODE_ERR_UNSUPPORTED:
+        case KL_UNIX_NODE_ERR_BIND:
+        default:                                return KL_ERR_BIND;
+    }
+}
+
+static void log_unix_node_failure(KlHttpServer *s, KlUnixNodeStatus st, int err) {
+    switch (st) {
+        case KL_UNIX_NODE_ERR_INVALID_PATH:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "invalid unix socket path");
+            break;
+        case KL_UNIX_NODE_ERR_UNTRUSTED_PARENT:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: a path component is untrusted or a reparse point");
+            break;
+        case KL_UNIX_NODE_ERR_FOREIGN_NODE:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: node is not the AF_UNIX node the server bound");
+            break;
+        case KL_UNIX_NODE_ERR_UNSUPPORTED:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "unix socket cleanup unsupported here: identity-anchored delete requires local NTFS "
+                   "with FileIdInfo + reparse + POSIX handle disposition");
+            break;
+        case KL_UNIX_NODE_ERR_SOCKET:
+        case KL_UNIX_NODE_ERR_BIND:
+        default:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unix socket bind failed (win32 error %d)", err);
+            break;
+    }
+}
 
 int kl_http_server_plat_bind_unix(KlHttpServer *s) {
-    const char *path = s->config.unix_socket_path;
-    if (!path || path[0] == '\0') {
-        s->last_error = KL_ERR_INVALID_ARG;
+    KlUnixNodePolicy policy = {
+        .path         = s->config.unix_socket_path,
+        .unlink_stale = s->config.unix_socket_unlink,
+        .owner        = s->config.unix_socket_owner,   /* ignored on Windows */
+        .group        = s->config.unix_socket_group,   /* ignored on Windows */
+        .mode         = s->config.unix_socket_mode,    /* ignored on Windows */
+        .set_mode     = s->config.unix_socket_mode != 0,
+    };
+    int err = 0;
+    KlUnixNodeStatus st = kl_unix_socket_node_bind(&policy, s->ev.sockets, &s->alloc_storage,
+                                                   &s->unix_node, &s->listen_fd, &err);
+    if (st != KL_UNIX_NODE_OK) {
+        log_unix_node_failure(s, st, err);
+        s->last_error = unix_node_status_to_error(st);
         return -1;
     }
-
-    size_t path_len = strlen(path);
-    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-
-    s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
-    if (!kl_handle_valid(s->listen_fd)) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
-        s->last_error = KL_ERR_SOCKET;
-        return -1;
-    }
-    kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
-
-    /* AF_UNIX on Windows creates a file at the path; bind fails if it exists.
-     * Best-effort removal (no S_ISSOCK guard, Windows has no such test). */
-    if (s->config.unix_socket_unlink)
-        (void)DeleteFileA(path);
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path, path, path_len + 1);
-
-    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
-                                     path_len + 1);
-
-    KlSockAddr bind_sa;
-    kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
-    if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
-        s->last_error = KL_ERR_BIND;
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
-
-    /* No node perms/ownership on Windows AF_UNIX (chmod/chown/getpwnam N/A). */
     s->unix_socket_owned = 1;
     s->bound_port = 0;
     return 0;
 }
 
 void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
-    if (s->unix_socket_owned && s->config.unix_socket_unlink &&
-        s->config.unix_socket_path) {
-        (void)DeleteFileA(s->config.unix_socket_path);
-    }
+    if (s->unix_socket_owned)
+        (void)kl_unix_socket_node_teardown(&s->unix_node, s->config.unix_socket_unlink);
     s->unix_socket_owned = 0;
 }
 

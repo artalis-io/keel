@@ -33,7 +33,10 @@ typedef enum {
     KL_UNIX_NODE_ERR_FOREIGN_NODE,      /* fail closed: existing node not a socket owned by an accepted uid */
     KL_UNIX_NODE_ERR_SOCKET,            /* socket() / provider setup failed (see out_errno) */
     KL_UNIX_NODE_ERR_BIND,              /* bind / reclaim / chown / chmod syscall failed (see out_errno) */
-    KL_UNIX_NODE_ERR_NOMEM              /* transient allocation failure during name resolution */
+    KL_UNIX_NODE_ERR_NOMEM,             /* transient allocation failure during name resolution */
+    KL_UNIX_NODE_ERR_UNSUPPORTED        /* fail closed: platform/filesystem/API cannot provide the
+                                         * identity-anchored guarantee (e.g. Windows on a non-NTFS
+                                         * volume, or missing FileIdInfo / reparse / POSIX disposition) */
 } KlUnixNodeStatus;
 
 /* Neutral policy: what the caller wants done with the AF_UNIX filesystem node. No POSIX or protocol

@@ -138,3 +138,36 @@ document caller-managed cleanup as the escape hatch. Under no outcome is pathnam
 retained as the mechanism.
 
 Implementation is deferred until these findings are reviewed and the EXPERIMENT is run.
+
+## 9. Recorded EXPERIMENT results (windows-latest, one run)
+
+The section 5 probes were run once on a GitHub `windows-latest` runner via a temporary probe-only
+workflow (`.github/workflows/windows-probe.yml` + `.github/windows-probe/win_unix_node_probe.c`; that
+machinery is removed before the security PR is finalized). Environment: Windows `10.0 build 26100`,
+filesystem **NTFS**, volume flags include `OPEN_BY_FILE_ID` and `REPARSE_POINTS`; the process token
+held none of SeBackup/SeRestore/SeTakeOwnership/SeSecurity.
+
+Results (all on the runner's local NTFS; no ReFS/SMB/FAT was probed, so no conclusion is drawn for
+those):
+
+- The AF_UNIX node is a reparse point (attributes include `FILE_ATTRIBUTE_REPARSE_POINT`).
+- It can be opened no-follow with `DELETE` + delete sharing (`FILE_FLAG_OPEN_REPARSE_POINT`), even
+  while the socket is live: OK.
+- `GetFileInformationByHandleEx(FileIdInfo)` returns a `FILE_ID_INFO`: OK; stable across two opens and
+  distinct after a rebind.
+- Delete through the verified handle via `FileDispositionInfoEx` (POSIX semantics) removes the node:
+  OK.
+- Open after external deletion fails cleanly.
+- A full-path open with `FILE_FLAG_OPEN_REPARSE_POINT` **traverses an intermediate junction**,
+  confirming that flag guards only the final component, so a per-component walk that rejects
+  intermediate reparse points is required.
+- The temp-directory ACL (SYSTEM, Administrators, and the process user, all full control, inherited)
+  showed why the trust check must weigh `WRITE_DAC`/`WRITE_OWNER`/`FILE_DELETE_CHILD`, not just
+  present write access.
+
+Conclusion: the identity-anchored delete is feasible on modern Windows / local NTFS. The
+implementation supports exactly that verified capability set and fails closed elsewhere
+(`KL_UNIX_NODE_ERR_UNSUPPORTED` for non-NTFS or missing FileIdInfo / reparse / POSIX disposition;
+`UNTRUSTED_PARENT` for an intermediate reparse point or an untrusted-writable component). It never
+falls back to `DeleteFileA`. Behavior on ReFS, SMB, FAT, and Windows versions below the probed build
+remains unverified and is therefore treated as unsupported until separately validated.

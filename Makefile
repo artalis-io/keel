@@ -58,13 +58,13 @@ else ifdef WINDOWS
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
-  UNIX_NODE_SRC =   # Windows keeps its inline AF_UNIX teardown until the node-module spike
+  UNIX_NODE_SRC = src/unix_socket_node_win.c   # identity-anchored AF_UNIX node lifecycle (NTFS)
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
   DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
-  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
+  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi -ladvapi32   # advapi32: ACL/SID/token APIs (unix_socket_node_win.c)
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
@@ -335,7 +335,7 @@ examples: $(EXAMPLES)
 # Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
-TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
+TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -404,7 +404,7 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
                   async http_async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  tls http_tls tls_integration peer_cert
+                  tls http_tls tls_integration peer_cert unix_socket_node_win
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
