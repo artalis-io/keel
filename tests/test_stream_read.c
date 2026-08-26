@@ -1,5 +1,5 @@
 /*
- * test_stream_read.c — Phase-B step 2B: strict read pause/resume machinery (src/stream_read.h).
+ * test_stream_read.c: strict read pause/resume machinery (src/stream_read.h).
  * Exercised in isolation with a mock deliver/arm/disarm and a stream whose read_buf is a plain
  * heap buffer (no live sockets). Covers the strict-pause invariants incl. reentrant pause/close
  * from the deliver callback and held terminal conditions.
@@ -99,7 +99,7 @@ UTEST(stream_read, completion_pause_holds_inflight_then_resume_delivers_once) {
     ASSERT_EQ((int)r.last_len, 5);
     ASSERT_EQ(kl_stream_read_held(&s), 0);
     ASSERT_EQ(r.arm_calls, 2);
-    ASSERT_EQ(kl_stream_resume(&s), 0);              /* idempotent — not paused, no re-deliver */
+    ASSERT_EQ(kl_stream_resume(&s), 0);              /* idempotent: not paused, no re-deliver */
     ASSERT_EQ(r.delivered, 1);
 
     free(buf);
@@ -155,7 +155,7 @@ UTEST(stream_read, repeated_pause_resume_before_completion) {
     kl_stream_pause(&s); ASSERT_EQ(kl_stream_resume(&s), 0);
     kl_stream_pause(&s); ASSERT_EQ(kl_stream_resume(&s), 0);
     ASSERT_EQ(r.delivered, 0);                        /* nothing completed yet */
-    ASSERT_EQ(r.arm_calls, 1);                        /* recv still in flight — no spurious re-arm */
+    ASSERT_EQ(r.arm_calls, 1);                        /* recv still in flight: no spurious re-arm */
 
     put(&s, "data", 4);
     ASSERT_EQ(kl_stream_on_recv(&s, 4, 1), 0);
@@ -223,14 +223,14 @@ UTEST(stream_read, recv_at_exact_capacity_delivers) {
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, 1, rc_deliver, rc_arm, rc_disarm, &r), 0);
     ASSERT_EQ(kl_stream_read_start(&s), 0);
-    ASSERT_EQ(kl_stream_on_recv(&s, 8, 1), 0);        /* exactly read_cap — fine */
+    ASSERT_EQ(kl_stream_on_recv(&s, 8, 1), 0);        /* exactly read_cap: fine */
     ASSERT_EQ(r.delivered, 1);
     ASSERT_EQ((int)r.last_len, 8);
     free(buf);
 }
 
 UTEST(stream_read, oversized_recv_fails_closed) {
-    /* Finding 5: len > read_cap is a backend contract violation — fail closed, never deliver. */
+    /* len > read_cap is a backend contract violation: fail closed, never deliver. */
     KlStream s; char *buf; mk_stream(&s, &buf, 8);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, 1, rc_deliver, rc_arm, rc_disarm, &r), 0);
@@ -242,7 +242,7 @@ UTEST(stream_read, oversized_recv_fails_closed) {
 }
 
 UTEST(stream_read, sync_arm_completion_start_resume_and_rearm) {
-    /* Finding 1: arm() may complete synchronously (calls on_recv inline). recv_inflight is set
+    /* arm() may complete synchronously (calls on_recv inline). recv_inflight is set
      * before arm and not clobbered afterward; delivery + re-arm happen correctly. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s; r.sync_len = 4;
@@ -263,7 +263,7 @@ UTEST(stream_read, sync_arm_completion_start_resume_and_rearm) {
 }
 
 UTEST(stream_read, sync_completion_then_hook_returns_error) {
-    /* Finding 1: a synchronous completion RETIRES that arm; a subsequent read_arm() return of -1
+    /* A synchronous completion RETIRES that arm; a subsequent read_arm() return of -1
      * must NOT retroactively fail/close it. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s; r.sync_len = 4;
@@ -330,14 +330,14 @@ UTEST(stream_read, close_during_sync_delivery_suppresses_rearm) {
 }
 
 UTEST(stream_read, double_close_is_idempotent) {
-    /* Finding 2: repeated close must not re-invoke disarm. */
+    /* Repeated close must not re-invoke disarm. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, /*completion=*/0, rc_deliver, rc_arm, rc_disarm, &r), 0);
     ASSERT_EQ(kl_stream_read_start(&s), 0);
     kl_stream_read_close(&s);
     ASSERT_EQ(r.disarm_calls, 1);
-    kl_stream_read_close(&s);                          /* idempotent — no second disarm */
+    kl_stream_read_close(&s);                          /* idempotent: no second disarm */
     ASSERT_EQ(r.disarm_calls, 1);
 
     /* Completion mode double close is also a no-op after the first. */
@@ -380,7 +380,7 @@ UTEST(stream_read, sync_arm_completion_on_resume_readiness) {
 }
 
 UTEST(stream_read, completion_close_leaves_inflight_until_retirement) {
-    /* Finding 2: logical close must not falsely retire a physically-outstanding completion recv. */
+    /* Logical close must not falsely retire a physically-outstanding completion recv. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, /*completion=*/1, rc_deliver, rc_arm, rc_disarm, &r), 0);
@@ -410,7 +410,7 @@ UTEST(stream_read, readiness_close_clears_inflight) {
 }
 
 UTEST(stream_read, duplicate_completion_dropped) {
-    /* Finding 3: a completion with recv_inflight already clear must be dropped, never delivered. */
+    /* A completion with recv_inflight already clear must be dropped, never delivered. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;
     ASSERT_EQ(kl_stream_read_init(&s, 1, rc_deliver, rc_arm, rc_disarm, &r), 0);
@@ -439,7 +439,7 @@ UTEST(stream_read, duplicate_completion_while_held_preserves_held) {
     ASSERT_EQ(kl_stream_read_held(&s), 1);
     ASSERT_EQ((int)s.held_len, 4);
 
-    ASSERT_EQ(kl_stream_on_recv(&s, 99, 1), 0);       /* spurious dup (inflight clear) — dropped */
+    ASSERT_EQ(kl_stream_on_recv(&s, 99, 1), 0);       /* spurious dup (inflight clear): dropped */
     ASSERT_EQ(kl_stream_read_held(&s), 1);            /* held completion NOT replaced */
     ASSERT_EQ((int)s.held_len, 4);
     ASSERT_EQ(kl_stream_resume(&s), 0);
@@ -448,7 +448,7 @@ UTEST(stream_read, duplicate_completion_while_held_preserves_held) {
 }
 
 UTEST(stream_read, terminal_callback_cannot_restart) {
-    /* Finding 4: terminal state is set BEFORE the callback, so a terminal callback calling
+    /* Terminal state is set BEFORE the callback, so a terminal callback calling
      * start()/resume() cannot re-arm a closed stream. */
     KlStream s; char *buf; mk_stream(&s, &buf, 64);
     RC r; memset(&r, 0, sizeof(r)); r.s = &s;

@@ -2,14 +2,14 @@
 #define KEEL_SRC_SOCKCOMPAT_H
 
 /*
- * sockcompat.h — the ONE contained platform-include boundary for socket types.
+ * sockcompat.h: the ONE contained platform-include boundary for socket types.
  *
  * This is the single place Keel resolves "where do struct sockaddr / socklen_t /
- * struct iovec / ssize_t come from" across platforms. It contains *no logic* —
+ * struct iovec / ssize_t come from" across platforms. It contains *no logic*:
  * only the system-header selection that is genuinely unavoidable for any file
  * referencing socket types on both POSIX and Windows. socket.h (and the per-
  * platform provider TUs) include this so they can stay logic-neutral. See
- * docs/phase6_winsock_design.md §B.0.
+ * docs/archive/phases/phase6_winsock_design.md §B.0.
  */
 
 #if defined(_WIN32)
@@ -43,12 +43,12 @@
 
   /* Translate WSAGetLastError() into the CRT errno space (defined in
    * socket_winsock.c). Shared so the Winsock event backend and kl_plat_poll1
-   * signal would-block/EINTR the same way the socket seam ops do — callers that
+   * signal would-block/EINTR the same way the socket seam ops do; callers that
    * branch on errno after a -1 return depend on it. */
   void kl_wsa_set_errno(void);
 #elif defined(KEEL_PLATFORM_LWIP)
   /* lwIP target: the stack provides its own BSD socket types (struct sockaddr{,_
-   * storage}, socklen_t, struct iovec) via lwip/sockets.h — do NOT pull the host
+   * storage}, socklen_t, struct iovec) via lwip/sockets.h; do NOT pull the host
    * <sys/socket.h>, which would clash. The internal counterpart of net.h's lwIP
    * branch, so an internal TU built with -DKEEL_PLATFORM_LWIP (e.g. the -Isrc lwIP
    * seam overrides resolve_sync_lwip.c / platform_wakeup_lwip.c) resolves socket

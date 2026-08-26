@@ -1,5 +1,5 @@
 /*
- * clock_snapshot.c — see clock_snapshot.h. ONE TLS-platform-lifetime UTC snapshot + monotonic
+ * clock_snapshot.c: see clock_snapshot.h. ONE TLS-platform-lifetime UTC snapshot + monotonic
  * advance that backs mbedTLS's clock. GetTime is consulted exactly once (captured inside
  * kl_uefi_mbedtls_platform_init()), never from the verification callback; the snapshot is shared
  * by all sessions, never refreshed while TLS is active, and cleared only at platform shutdown.
@@ -19,7 +19,7 @@ static int      g_snap_valid;
 int kl_uefi_clock_snapshot(void) {
     /* The snapshot is only meaningful if the monotonic clock ADVANCES (kl_uefi_mbedtls_time
      * advances the snapshot by it). If kl_uefi_platform_init() did not fully succeed, the timer
-     * is not armed and the monotonic clock is frozen — capturing a snapshot then would freeze
+     * is not armed and the monotonic clock is frozen; capturing a snapshot then would freeze
      * cert time for the TLS-platform lifetime (accepting expired certs). Refuse. */
     if (!kl_uefi_platform_ready()) {
         g_snap_valid = 0;

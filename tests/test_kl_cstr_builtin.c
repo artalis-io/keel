@@ -1,12 +1,12 @@
 /*
- * test_kl_cstr_builtin.c — the OPTIONAL reference mem* and strlen impls
+ * test_kl_cstr_builtin.c: the OPTIONAL reference mem* and strlen impls
  * (src/kl_cstr_builtin.c) linked only into the self-contained freestanding
  * archive. They carry the standard libc names, so to unit-test them on a hosted
  * build without a duplicate-symbol clash we pull the .c in under klb_* names and
  * cross-check each against the platform libc (the oracle).
  */
 #include "utest.h"
-#include <string.h>   /* libc mem* and strlen — the reference oracle (declared before the renames) */
+#include <string.h>   /* libc mem* and strlen: the reference oracle (declared before the renames) */
 #include <stdint.h>
 
 /* Rename the reference impls so they don't collide with libc, then compile them

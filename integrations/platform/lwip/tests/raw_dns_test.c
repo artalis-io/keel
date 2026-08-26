@@ -1,26 +1,26 @@
 /*
- * raw_dns_test.c — LC-3: KEEL's OWN async DNS resolver (src/protocols/dns/dns_resolver.c) resolving a name
+ * raw_dns_test.c: KEEL's OWN async DNS resolver (src/protocols/dns/dns_resolver.c) resolving a name
  * over the lwIP-raw completion backend, then a plaintext KlHttpClient GET / -> 200. In-process over
  * the loopback netif (NO_SYS=1, single-thread).
  *
- * The whole point of LC-3 (docs/phase10_lwip_raw_client_design.md, as corrected on review): the
- * built-in DNS resolver rides KEEL's OWN canonical KlDatagram — the same datagram path that LC-3a
- * (#194) made work over lwip-raw. So there is ONE UDP/DNS path everywhere. kl_dns_resolver_create(ctx,
+ * The whole point here (docs/archive/phases/phase10_lwip_raw_client_design.md, as corrected on review): the
+ * built-in DNS resolver rides KEEL's OWN canonical KlDatagram; the same datagram path that the
+ * completion-connect work made function over lwip-raw. So there is ONE UDP/DNS path everywhere. kl_dns_resolver_create(ctx,
  * cfg) on a ctx whose ctx.sockets = kl_socket_provider_lwip_raw() resolves names over lwIP with NO
  * changes to src/protocols/dns/dns_resolver.c: the resolver's KlDatagram query socket becomes a udp_pcb,
  * kl_datagram_send -> udp_sendto over loopif, the reply lands in the glue's udp recv ring and surfaces
  * as KL_COMP_DGRAM_RECV, and dns_on_recv parses it with KEEL's own kl_dns_parse_response. The TCP
- * fallback (RFC 7766) would ride ctx->sockets' SOCK_STREAM connect (LC-1) too, but a small UDP answer
+ * fallback (RFC 7766) would ride ctx->sockets' SOCK_STREAM connect too, but a small UDP answer
  * never triggers it here.
  *
  * The in-process DNS responder is a public KlDatagram (not lwIP's dns), riding the SAME canonical
- * datagram-over-raw path the resolver's own query socket uses (M3 migrated the production resolver to
- * KlDatagram) — responder and resolver genuinely share one datagram data-plane. It
+ * datagram-over-raw path the resolver's own query socket uses (the production resolver rides
+ * KlDatagram); responder and resolver genuinely share one datagram data-plane. It
  * binds 127.0.0.1:<dns_port>, parses each query's question section, and replies with a hard-coded
  * A record (test.local -> 127.0.0.1); AAAA queries get a NODATA (0-answer) reply so that leg
  * settles promptly (the loopif is IPv4-only). It echoes the question bytes VERBATIM (preserving
  * DNS 0x20 case randomization) and omits the EDNS0 COOKIE option (a cookie-less reply is accepted
- * for backward compat, dns_resolver.c) — so no cookie machinery is needed in the responder.
+ * for backward compat, dns_resolver.c); so no cookie machinery is needed in the responder.
  *
  * Coverage:
  *   A1  resolve("test.local") over lwip-raw via the KlDatagram responder -> 127.0.0.1 (the A leg).
@@ -29,8 +29,8 @@
  *   B1  a full KlHttpClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
  *         byte-exact body: resolve over raw + Happy-Eyeballs connect over raw + request/response.
  *
- * src/protocols/dns/dns_resolver.c is UNCHANGED — only the raw provider + glue (from LC-1/LC-3a) supply the
- * transport. Prints "LC-3 PASS". Must be ASan+UBSan+LSan-clean.
+ * src/protocols/dns/dns_resolver.c is UNCHANGED; only the raw provider + glue (the stream-connect and
+ * datagram-over-raw paths) supply the transport. Prints its PASS marker on success. Must be ASan+UBSan+LSan-clean.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -38,7 +38,7 @@
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* complete KlDatagram type — the responder embeds one */
+#include <keel/datagram_detail.h>   /* complete KlDatagram type; the responder embeds one */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -192,7 +192,7 @@ static void pump_until_done(KlEventCtx *ctx, int ticks) {
         kl_event_ctx_run(ctx, 16, 5);
 }
 
-/* A1 — resolve "test.local" over the raw UDP path via the KlDatagram responder. */
+/* A1: resolve "test.local" over the raw UDP path via the KlDatagram responder. */
 static int a1_resolve_name(KlEventCtx *ctx) {
     atomic_store(&g_done, 0);
     atomic_store(&g_error, -1);
@@ -223,8 +223,8 @@ static int a1_resolve_name(KlEventCtx *ctx) {
     return 0;
 }
 
-/* A2 — resolve a numeric literal: the resolver's deferred-literal fast path (no query, no
- * responder). dns_resolver.c completes a literal via a 0ms timer, so it fires on the next tick —
+/* A2 - resolve a numeric literal: the resolver's deferred-literal fast path (no query, no
+ * responder). dns_resolver.c completes a literal via a 0ms timer, so it fires on the next tick;
  * a non-blocking, no-network completion. Exercises the literal/no-query path over the raw loop. */
 static int a2_resolve_literal(KlEventCtx *ctx) {
     atomic_store(&g_done, 0);
@@ -366,7 +366,7 @@ int main(void) {
     KlEventCtx ctx;
     if (kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw()) != 0)
         return fail("ctx init (bring up lwIP raw)");
-    /* A standalone KlEventCtx leaves ctx.sockets NULL — a DNS/UDP consumer over raw MUST set it
+    /* A standalone KlEventCtx leaves ctx.sockets NULL; a DNS/UDP consumer over raw MUST set it
      * to the raw provider explicitly (the same auto-wire a KlHttpServer does via native_provider). */
     ctx.sockets = kl_socket_provider_lwip_raw();
 

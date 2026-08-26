@@ -1,8 +1,8 @@
 /*
- * test_transport_public.c — Phase-B step 6A conformance: exercise the candidate PUBLIC transport
+ * test_transport_public.c: conformance: exercise the candidate PUBLIC transport
  * API through the installed headers only.
  *
- * This TU deliberately includes ONLY <keel/...> headers — never a src/ internal header — to prove
+ * This TU deliberately includes ONLY <keel/...> headers, never a src/ internal header, to prove
  * the public surface (contract in <keel/{stream,listener,connect}.h>, layout in the matching
  * *_detail.h) is self-sufficient for an external transport author. It drives one representative
  * scenario per state machine through the public functions.
@@ -66,7 +66,7 @@ UTEST(transport_public, listener_accept_and_lease) {
 
     kl_slot_lease_release(&m.lease);          /* accepted-stream owner releases its slot */
     ASSERT_EQ(m.releases, 1);
-    kl_slot_lease_release(&m.lease);          /* consumed — no-op */
+    kl_slot_lease_release(&m.lease);          /* consumed; no-op */
     ASSERT_EQ(m.releases, 1);
 
     kl_listener_close(&l);
@@ -87,7 +87,7 @@ UTEST(transport_public, stream_write_read_close) {
     KlStream s;                                    /* stack storage (detail header = sizeof only) */
     STP m; memset(&m, 0, sizeof(m)); m.s = &s;
 
-    ASSERT_EQ(kl_stream_init(&s, buf, sizeof(buf)), 0);   /* base init — no detail field access */
+    ASSERT_EQ(kl_stream_init(&s, buf, sizeof(buf)), 0);   /* base init; no detail field access */
     ASSERT_EQ(kl_stream_write_init(&s, &a, 4096), 0);
     ASSERT_EQ(kl_stream_set_submit(&s, stp_submit, &m, 0), 0);
     ASSERT_EQ(kl_stream_read_init(&s, /*completion=*/1, stp_deliver, stp_arm, stp_disarm, &m), 0);
@@ -103,7 +103,7 @@ UTEST(transport_public, stream_write_read_close) {
     ASSERT_EQ(kl_stream_close_begin(&s), 0);       /* graceful: waits for the in-flight send */
     ASSERT_EQ(m.closed, 0);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
-    /* recv still physically in flight (completion mode) — retire it, then detach */
+    /* recv still physically in flight (completion mode); retire it, then detach */
     ASSERT_EQ(kl_stream_on_recv(&s, 0, 0), 0);
     ASSERT_EQ(m.closed, 1);
     ASSERT_EQ(kl_stream_is_detached(&s), 1);

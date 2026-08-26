@@ -3,12 +3,12 @@
 First-party adapters implementing Keel's HTTP/2 **session** vtables on top of
 [nghttp2](https://github.com/nghttp2/nghttp2):
 
-- **client** — `KlHttp2ClientSession` (`include/keel/http2_client.h`)
-- **server** — `KlHttp2ServerSession` (`include/keel/http2_server.h`)
+- **client**: `KlHttp2ClientSession` (`include/keel/http2_client.h`)
+- **server**: `KlHttp2ServerSession` (`include/keel/http2_server.h`)
 
 Keel's HTTP/2 code is framing-agnostic: it drives a session vtable and never
 speaks HPACK/frames itself. These adapters plug nghttp2 in behind that seam.
-nghttp2 is confined to the adapter `.c` files — **no nghttp2 type appears in
+nghttp2 is confined to the adapter `.c` files; **no nghttp2 type appears in
 `keel_http2_nghttp2.h` or any Keel core header**.
 
 This lives **outside** the dependency-light core: plain `make` / `make test`
@@ -22,7 +22,7 @@ nghttp2 is **not vendored and never downloaded**. Supply it yourself via
 
 The adapters use the **classic** nghttp2 API (`nghttp2_submit_request`,
 `nghttp2_session_mem_recv`, the `ssize_t` send / data-source callbacks), which is
-present and non-deprecated across a wide version range — no `*2` (`size_t`) API
+present and non-deprecated across a wide version range; no `*2` (`size_t`) API
 is required.
 
 ### Version matrix
@@ -84,19 +84,19 @@ make integration-nghttp2 NGHTTP2_DIR=... && \
 
 Three levels of coverage, all under [`tests/`](tests/):
 
-1. **`tests/test_roundtrip.c`** — pairs the client and server sessions **in memory**
+1. **`tests/test_roundtrip.c`**: pairs the client and server sessions **in memory**
    (no sockets, no Keel event loop), feeding each side's `on_send` output into the
    other's `recv`, so a full `GET / → 200`+body is exercised through real nghttp2
    framing. Validates both adapters against each other.
-2. **`tests/e2e_socket.c`** (`make e2e`) — end-to-end over a **real loopback socket +
+2. **`tests/e2e_socket.c`** (`make e2e`): end-to-end over a **real loopback socket +
    Keel event loop**: the Keel nghttp2 **client** (`kl_http2_client_connect`,
    cleartext h2c) against the Keel nghttp2 **server** (`KlHttpServerConfig.h2`, entered via
    h2c prior-knowledge). Drives both adapters through the actual Keel driver paths.
-3. **`make interop-curl`** (`tests/interop_server.c`) — third-party interop: stands
+3. **`make interop-curl`** (`tests/interop_server.c`): third-party interop: stands
    up the Keel nghttp2 server and hits it with `curl --http2-prior-knowledge`.
    Requires a curl built with HTTP2 (`curl -V`).
 
-> **Maintainer note — client connection preface.** The server session is created
+> **Maintainer note: client connection preface.** The server session is created
 > with `nghttp2_option_set_no_recv_client_magic`: Keel's h2c prior-knowledge path
 > (`http_connection.c`) consumes the 24-byte `PRI * HTTP/2.0...` magic *before* feeding
 > the session, and the h2c-Upgrade / ALPN paths never send it. Without this the
@@ -106,7 +106,7 @@ Three levels of coverage, all under [`tests/`](tests/):
 > **Client submit timing.** `kl_http2_client_request` returns `-1` until the async
 > connect reaches its ACTIVE state (no connection-ready callback is exposed), so
 > a caller submitting immediately after `kl_http2_client_connect` must retry until it
-> succeeds — see the loop in `e2e_socket.c`.
+> succeeds; see the loop in `e2e_socket.c`.
 
 ### Conformance + third-party interop
 
@@ -126,25 +126,25 @@ failed, all 2xx)**, and **KEEL client → nghttpd (HTTP/2 200)**.
 
 **h2spec conformance.** KEEL scores **~137/146** (a few `Timeout`-based cases are
 timing-sensitive and jitter 135–137). The residual failures are **shared with
-nghttp2's own reference server** — `nghttpd` itself scores **138/146**, failing
+nghttp2's own reference server**; `nghttpd` itself scores **138/146**, failing
 the same `STREAM_CLOSED`/`PROTOCOL_ERROR` cases (nghttp2 ignores late frames on
 closed streams, which RFC 7540 §5.1 permits; h2spec's strict expectation is not
 met by nghttp2 either). So KEEL is at reference-server parity within jitter. The
 one KEEL-specific delta is an abortive close (RST) where the reference does a
-graceful FIN — a core connection-teardown behavior, out of scope for the adapter.
+graceful FIN; a core connection-teardown behavior, out of scope for the adapter.
 
 Getting there fixed three real adapter/integration bugs, all in
 `http2_nghttp2_server.c` (+ a `want_read` vtable method in `http2_server.h`):
-- **`no_recv_client_magic`** (above) — the initial connect fix.
+- **`no_recv_client_magic`** (above): the initial connect fix.
 - **`want_read`** → KEEL (`h2.c`) closes once the session wants neither read nor
   write (a terminated session, e.g. after a GOAWAY), instead of lingering until
   the peer times out.
-- **deferred flush while inside `recv`** — KEEL's `h2.c` flushes from inside
+- **deferred flush while inside `recv`**: KEEL's `h2.c` flushes from inside
   `on_stream_end` (invoked within `nghttp2_session_mem_recv`); calling
   `nghttp2_session_send` re-entrantly there corrupted processing of later frames
   in the same batch. The adapter defers the flush; `h2.c` flushes again right
   after `mem_recv` returns.
-- **flush-on-fatal** — a fatal `mem_recv` queues a GOAWAY; flush it before
+- **flush-on-fatal**: a fatal `mem_recv` queues a GOAWAY; flush it before
   reporting close so the peer sees the GOAWAY, not a bare reset.
 
 Run the in-memory + e2e tests under ASan+UBSan+LSan in the Linux container for

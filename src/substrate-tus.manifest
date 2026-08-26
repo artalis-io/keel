@@ -1,7 +1,7 @@
-# src/substrate-tus.manifest — the exhaustive set of bare-src/ substrate .c files (G4).
+# src/substrate-tus.manifest: the exhaustive set of bare-src/ substrate .c files (G4).
 # Every tracked src/*.c that is NOT under src/protocols/ must be listed here. A new bare-src
 # .c fails check-protocol-home until it is declared substrate here OR moved under
-# src/protocols/<fam>/ — that is the default-deny that stops a protocol impl landing at bare src/.
+# src/protocols/<fam>/; that is the default-deny that stops a protocol impl landing at bare src/.
 # Regenerate intentionally: git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort
 src/allocator.c
 src/allocator_default_stdlib.c

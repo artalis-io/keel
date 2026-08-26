@@ -2,32 +2,30 @@
 #define KEEL_SRC_COMPLETION_INTERNAL_H
 
 /*
- * completion_internal.h — INTERNAL. The cross-TU surface shared by the split
- * completion driver (freestanding step B2a).
+ * completion_internal.h: INTERNAL. The cross-TU surface shared by the split completion driver.
  *
- * completion_driver.c was one 800-line TU bundling the generic completion tick with
- * the server/TLS/H2/WS connection processing, so referencing the generic tick pulled
- * the whole server + UDP stack. The split separates:
+ * The completion driver is split so that referencing the generic tick does not pull the
+ * whole server + UDP stack. The split separates:
  *
- *   completion_core.c   — the generic tick (kl_comp_run). Routes ACCEPT/READ/WRITE and
+ *   completion_core.c:   the generic tick (kl_comp_run). Routes ACCEPT/READ/WRITE and
  *                         UDP kinds through the two opaque KlEventCtx hooks
  *                         (comp_conn_dispatch / comp_udp_dispatch) so a client-only
  *                         build (CONNECT/WATCHER + timers only) links neither the
  *                         server nor UDP handlers.
- *   completion_http_server.c — the KlHttpConn/HTTP-1 server state machine over completions,
+ *   completion_http_server.c: the KlHttpConn/HTTP-1 server state machine over completions,
  *                         PLUS the server-side memory-BIO TLS leg (comp_tls_*). TLS is
  *                         folded in because comp_tls_drive ↔ comp_after_state ↔
- *                         comp_h2_drive mutually recurse — separating TLS would need a
+ *                         comp_h2_drive mutually recurse; separating TLS would need a
  *                         forward-declaration web with no real decoupling benefit.
  *                         Registers comp_server_conn_dispatch on the ctx hook.
- *   completion_http2.c     — comp_h2_drive (HTTP/2 over completions).
- *   completion_ws.c     — comp_ws_drive (WebSocket over completions).
+ *   completion_http2.c:     comp_h2_drive (HTTP/2 over completions).
+ *   completion_ws.c:     comp_ws_drive (WebSocket over completions).
  *
  * This header declares the handful of helpers that now cross those TU boundaries.
  * The shared surface is deliberately minimal:
  *   - server → h2/ws:  comp_h2_drive / comp_ws_drive
  *   - h2/ws → server:  comp_close, comp_tls_flush, comp_tls_drain_output
- * INTERNAL header — not installed, no ABI commitment.
+ * INTERNAL header: not installed, no ABI commitment.
  */
 
 #include <keel/http_connection.h>   /* KlHttpConn */

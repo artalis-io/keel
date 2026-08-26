@@ -1,5 +1,5 @@
 /*
- * test_http_client_proxy.c — HTTP proxy support tests
+ * test_http_client_proxy.c: HTTP proxy support tests
  *
  * Tests proxy config handling, CONNECT request format, absolute-form URLs,
  * pool key matching with proxy fields, and error handling.
@@ -279,7 +279,7 @@ UTEST(proxy, connect_success_transitions_to_tls) {
     char buf[2048];
     read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
 
-    /* Respond 200 — CONNECT succeeds */
+    /* Respond 200: CONNECT succeeds */
     const char *ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
     kl_test_sockwrite(client_fd, ok, strlen(ok));
 
@@ -373,7 +373,7 @@ UTEST(proxy, connect_buf_overflow) {
         if (n <= 0) break;
         off += n;
     }
-    /* No final \r\n\r\n — buffer fills without end-of-headers */
+    /* No final \r\n\r\n: buffer fills without end-of-headers */
     kl_test_sockwrite(client_fd, giant, (size_t)off);
     usleep(50000);
     kl_test_closesock(client_fd);
@@ -514,19 +514,19 @@ UTEST(proxy, pool_direct_no_match) {
 
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 2);
 
-    /* Acquire direct — should NOT return the proxied one */
+    /* Acquire direct: should NOT return the proxied one */
     KlHttpClientPoolConn acq;
     ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 NULL, 0, &acq), 0);
     ASSERT_EQ(acq.fd, fds[0][0]);
 
-    /* Acquire proxied — should return the proxied one */
+    /* Acquire proxied: should return the proxied one */
     KlHttpClientPoolConn acq2;
     ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 "proxy.com", 3128, &acq2), 0);
     ASSERT_EQ(acq2.fd, fds[1][0]);
 
-    /* Acquire with different proxy — miss */
+    /* Acquire with different proxy: miss */
     KlHttpClientPoolConn acq3;
     ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 "other-proxy.com", 3128, &acq3), 1);

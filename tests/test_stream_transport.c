@@ -1,5 +1,5 @@
 /*
- * test_stream_transport.c — Phase 5: a non-HTTP TCP protocol built entirely on
+ * test_stream_transport.c: a non-HTTP TCP protocol built entirely on
  * Keel's public transport surface, proving a protocol author needs no HTTP
  * machinery and no internal APIs.
  *
@@ -87,7 +87,7 @@ static void fc_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
 
     if (ready & KL_EVENT_READ) {
         for (;;) {
-            if (fc->rlen == ST_RBUF) break;    /* full — frame too big; drained below */
+            if (fc->rlen == ST_RBUF) break;    /* full: frame too big; drained below */
             kl_ssize_t n = fc->sp->ops->recv(fc->sp->context, fc->fd,
                                              fc->rbuf + fc->rlen, ST_RBUF - fc->rlen);
             if (n > 0) { fc->rlen += (size_t)n; continue; }
@@ -234,7 +234,7 @@ UTEST(stream_transport, framed_echo_roundtrip) {
     static unsigned char med[8192];
     for (size_t i = 0; i < sizeof(med); i++) med[i] = (unsigned char)(i * 31 + 7);
     ASSERT_EQ(st_roundtrip(fd, med, sizeof(med)), 0);
-    /* large (128 KiB) — exceeds the socket buffer, forces drain buffering + a
+    /* large (128 KiB): exceeds the socket buffer, forces drain buffering + a
      * writable-driven flush on the server side */
     static unsigned char big[128 * 1024];
     for (size_t i = 0; i < sizeof(big); i++) big[i] = (unsigned char)(i * 131 + 17);

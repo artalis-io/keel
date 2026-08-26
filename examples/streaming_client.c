@@ -1,5 +1,5 @@
 /*
- * streaming_client.c — HTTP/1.1 client with response and request streaming
+ * streaming_client.c: HTTP/1.1 client with response and request streaming
  *
  * Concepts: kl_http_client_request_s (sync streaming), KlHttpClientStreamCfg,
  * KlHttpClientBodyFn (response push), KlHttpClientReadFn (request pull).

@@ -1,5 +1,5 @@
 /*
- * HTTP/2 overflow boundary tests — the HTTP/2 slice of the former tests/test_overflow.c
+ * HTTP/2 overflow boundary tests: the HTTP/2 slice of the former tests/test_overflow.c
  * (T-split). Verifies the h2 per-stream allocation size guard. No network needed.
  */
 #include "utest.h"
@@ -12,7 +12,7 @@
 /* ── H2 struct size sanity ───────────────────────────────────────── */
 
 UTEST(overflow, h2_stream_alloc_guard) {
-    /* h2.c:463 — verify SIZE_MAX / sizeof(KlHttp2ServerStream) is bounded */
+    /* h2 stream-alloc overflow guard: verify SIZE_MAX / sizeof(KlHttp2ServerStream) is bounded */
     ASSERT_TRUE(sizeof(KlHttp2ServerStream) > 0);
     size_t max_safe = SIZE_MAX / sizeof(KlHttp2ServerStream);
     ASSERT_TRUE(max_safe > 0);

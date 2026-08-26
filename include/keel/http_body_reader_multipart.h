@@ -12,24 +12,24 @@
  * body callback. Each call to kl_http_multipart_next() advances the parser
  * by one event:
  *
- *   PART_BEGIN  — headers parsed; meta is populated. The pointers in
+ *   PART_BEGIN:  headers parsed; meta is populated. The pointers in
  *                 meta are owned by the reader and remain valid until
  *                 the NEXT call to kl_http_multipart_next().
- *   PART_DATA   — a chunk of the current part body is available. *data
+ *   PART_DATA:   a chunk of the current part body is available. *data
  *                 / *data_len are populated with a borrowed slice of
  *                 the internal input buffer. Valid until the next call.
- *   PART_END    — the current part finished (boundary hit). No data.
- *   DONE        — the closing boundary was seen. The reader is finished.
- *   NEED_DATA   — input buffer drained; the caller should yield and
+ *   PART_END:    the current part finished (boundary hit). No data.
+ *   DONE:        the closing boundary was seen. The reader is finished.
+ *   NEED_DATA:   input buffer drained; the caller should yield and
  *                 wait for more bytes to arrive via on_data.
- *   ERROR       — malformed input or a cap was exceeded. Call
+ *   ERROR:       malformed input or a cap was exceeded. Call
  *                 kl_http_multipart_last_error() for the specific code.
  *
  * Caps:
- *   max_part_size    — bytes of body per part. Exceeded → ERROR.
- *   max_total_size   — total bytes received from the socket.
- *   max_parts        — distinct parts; counted when PART_BEGIN is emitted.
- *   max_input_buffer — bytes the reader may hold internally. Exceeded
+ *   max_part_size:    bytes of body per part. Exceeded → ERROR.
+ *   max_total_size:   total bytes received from the socket.
+ *   max_parts:        distinct parts; counted when PART_BEGIN is emitted.
+ *   max_input_buffer: bytes the reader may hold internally. Exceeded
  *                      means the framework delivered data faster than
  *                      the handler consumed it. 0 = unlimited.
  *
@@ -110,7 +110,7 @@ KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttp
  * @param meta      On PART_BEGIN: populated with part metadata. Otherwise untouched.
  * @param data      On PART_DATA: set to a borrowed slice of the input buffer.
  *                  Borrowed pointer is valid only until the NEXT mutation of
- *                  the reader — that is, the next kl_http_multipart_next() call
+ *                  the reader: that is, the next kl_http_multipart_next() call
  *                  OR the next on_data callback. If your caller can yield
  *                  to the framework's read loop while holding the slice
  *                  (so on_data may fire), copy the bytes before yielding.

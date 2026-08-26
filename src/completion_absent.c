@@ -1,22 +1,22 @@
 /*
- * completion_absent.c — the KEEL_NO_COMPLETION build's NEUTRAL aborting stubs (RC-1; split in R2f).
+ * completion_absent.c: the KEEL_NO_COMPLETION build's NEUTRAL aborting stubs.
  *
  * A readiness-only build that opts out of the completion axis entirely
  * (KEEL_NO_COMPLETION=1) still links the shared callers that REFERENCE the neutral completion
- * entry points — async.c (kl_comp_run via kl_event_ctx_run), http_server_core.c (kl_comp_cancel),
+ * entry points: async.c (kl_comp_run via kl_event_ctx_run), http_server_core.c (kl_comp_cancel),
  * datagram.c (kl_comp_post_dgram_{recv,send} / cancel_dgram / retire_dgram), the async client
- * (kl_comp_post_connect) — even though, on a readiness loop, those branches are gated behind
+ * (kl_comp_post_connect), even though, on a readiness loop, those branches are gated behind
  * KL_EVENT_CAP_COMPLETION and never taken. This TU provides every such NEUTRAL symbol so the link
  * resolves without pulling in the completion driver / dispatch / backend. Reaching any of them means
- * the completion gate was bypassed — a build/logic error — so they abort() (fail-loud).
+ * the completion gate was bypassed (a build/logic error), so they abort() (fail-loud).
  *
- * It REPLACES the always-linked substrate completion TUs — completion_dispatch.c (the neutral
- * kl_comp_*_raw dispatchers + kl_completion_axis_available) and completion_core.c (kl_comp_run) —
+ * It REPLACES the always-linked substrate completion TUs: completion_dispatch.c (the neutral
+ * kl_comp_*_raw dispatchers + kl_completion_axis_available) and completion_core.c (kl_comp_run),
  * selected by the Makefile (COMPLETION_CORE = src/completion_absent.c under KEEL_NO_COMPLETION). The
  * HTTP-typed completion surface (the KlHttpServer/KlHttpConn wrappers + the kl_http_comp_* run-loop
  * orchestration) is stubbed separately in src/protocols/http/completion_http_absent.c, mirroring the hosted
- * split (substrate dispatch vs completion_http_server.c) so this substrate TU names NO HTTP type (R2f;
- * docs/protocols_restructure_freeze.md §4.8). No completion backend, driver, or dispatch is compiled in
+ * split (substrate dispatch vs completion_http_server.c) so this substrate TU names NO HTTP type
+ * (docs/archive/freezes/protocols_restructure_freeze.md §4.8). No completion backend, driver, or dispatch is compiled in
  * this configuration; kl_comp_ops_builtin is not referenced (completion_dispatch.c is absent).
  *
  * The negotiation (kl_event_init_provider / kl_event_ctx_sockets_compatible in async.c)
@@ -27,7 +27,7 @@
 #include "completion_io.h"
 #include <stdlib.h>   /* abort */
 
-/* The completion axis is compiled OUT — the negotiation (async.c) reads this to reject a
+/* The completion axis is compiled OUT: the negotiation (async.c) reads this to reject a
  * KL_EVENT_CAP_COMPLETION provider before it can be installed (fail-loud). */
 int kl_completion_axis_available(void) { return 0; }
 

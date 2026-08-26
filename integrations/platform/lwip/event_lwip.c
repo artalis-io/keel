@@ -1,12 +1,12 @@
 /*
- * event_lwip.c — lwIP readiness event backend over lwip_poll, packaged as a
+ * event_lwip.c: lwIP readiness event backend over lwip_poll, packaged as a
  * runtime KlEventProvider. The readiness half of the lwIP platform; pair it with
  * socket_lwip.c so both agree on what a "native, pollable" fd is. lwIP socket fds
  * are small dense ints, so this reuses the event_poll.c direct-index model with
  * poll → lwip_poll and struct pollfd / POLL* from lwip/sockets.h.
  *
  * BYO / opt-in: build against your own lwIP (LWIP_DIR). Uses only the public
- * <keel/event.h> + <keel/socket.h> contracts. See docs/lwip_platform_design.md.
+ * <keel/event.h> + <keel/socket.h> contracts. See docs/archive/designs/lwip_platform_design.md.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -128,7 +128,7 @@ static int lwev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void
 static int lwev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlLwipPollState *st = loop->_backend;
     /* Reject the full negative range (kl_handle_valid only rejects -1), not just
-     * the upper bound — else fd <= -2 indexes fd_to_idx[] out of bounds. */
+     * the upper bound; else fd <= -2 indexes fd_to_idx[] out of bounds. */
     if ((int)fd < 0 || (int)fd >= st->fd_to_idx_cap) return -1;
     int idx = st->fd_to_idx[(int)fd];
     if (idx < 0) return -1;
@@ -188,7 +188,7 @@ static unsigned lwev_caps(const KlEventLoop *loop) {
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* The socket provider this loop must be paired with — lwip_poll can only poll
+/* The socket provider this loop must be paired with: lwip_poll can only poll
  * lwIP socket fds, so the loop needs the lwIP socket provider. Returning it here
  * lets the server auto-wire the matched pair when only event_provider is set. */
 static const KlSocketProvider *lwev_native_provider(const KlEventLoop *loop) {
@@ -200,7 +200,7 @@ static const KlEventOps lwip_event_ops = {
     .init = lwev_init, .add = lwev_add, .mod = lwev_mod, .del = lwev_del,
     .wait = lwev_wait, .close = lwev_close, .caps = lwev_caps,
     .native_provider = lwev_native_provider,
-    .completion = NULL,   /* readiness provider — no completion axis (RC-1) */
+    .completion = NULL,   /* readiness provider: no completion axis */
 };
 
 static const KlEventProvider lwip_event_provider = { &lwip_event_ops, "lwip" };

@@ -1,5 +1,5 @@
 /*
- * lwipopts.h — SAMPLE lwIP config for the Keel lwIP reference (examples/lwip).
+ * lwipopts.h: SAMPLE lwIP config for the Keel lwIP reference (examples/lwip).
  *
  * This is a minimal host/loopback-oriented config, NOT a blessed production one:
  * a real target supplies its own lwipopts.h. Key points for the Keel provider:
@@ -20,7 +20,7 @@
 #define LWIP_NETCONN                1
 #define LWIP_SOCKET                 1
 #define LWIP_SOCKET_POLL            1
-#define LWIP_COMPAT_SOCKETS         0   /* only lwip_* names — no macro hijack */
+#define LWIP_COMPAT_SOCKETS         0   /* only lwip_* names; no macro hijack */
 #define LWIP_POSIX_SOCKETS_IO_NAMES 0
 #define LWIP_TCP_KEEPALIVE          1
 #define SO_REUSE                    1

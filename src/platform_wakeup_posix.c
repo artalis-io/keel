@@ -1,10 +1,10 @@
 /*
- * platform_wakeup_posix.c — the POSIX run-loop wakeup channel (self-pipe).
+ * platform_wakeup_posix.c: the POSIX run-loop wakeup channel (self-pipe).
  *
- * Split out of platform_posix.c into its own TU so a foreign stack whose event
+ * Kept in its own TU so a foreign stack whose event
  * backend cannot watch a host pipe (lwIP's lwip_poll, a UEFI SNP loop, …) can
  * OVERRIDE just the wakeup by linking its own kl_plat_wakeup_* object ahead of
- * libkeel.a — without touching the rest of the platform layer. Generic seam; the
+ * libkeel.a, without touching the rest of the platform layer. Generic seam; the
  * lwIP override lives in integrations/platform/lwip/platform_wakeup_lwip.c.
  */
 #include "platform.h"

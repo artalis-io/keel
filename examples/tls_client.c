@@ -1,5 +1,5 @@
 /*
- * tls_client.c — HTTPS client using mbedTLS backend
+ * tls_client.c: HTTPS client using mbedTLS backend
  *
  * Concepts: kl_http_client_request with TLS, kl_tls_mbedtls_client_ctx_create,
  * KlHttpClientConfig.tls, HTTPS GET.

@@ -1,5 +1,5 @@
 /*
- * datagram_life.c — transport-neutral liveness + refcount token for datagram completion ops.
+ * datagram_life.c: transport-neutral liveness + refcount token for datagram completion ops.
  * See datagram_life.h. Single-threaded (event-loop thread only); a plain-int refcount.
  */
 #include "datagram_life.h"

@@ -1,19 +1,19 @@
 /*
- * keel/connect_op.h — Outbound-connect terminal-once state machine (KlConnectOp).
+ * keel/connect_op.h: Outbound-connect terminal-once state machine (KlConnectOp).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ STABLE transport API. The function signatures + ownership contracts below are the            │
  * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
  * │ <keel/connect_op_detail.h> (opt-in, for embedders that stack/embed a KlConnectOp) and may     │
- * │ change between releases — embedders recompile. Use the accessors, never the detail fields.   │
+ * │ change between releases; embedders recompile. Use the accessors, never the detail fields.    │
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic state machine for establishing ONE outbound connection: name resolution
  * followed by Happy Eyeballs (RFC 8305) racing connect over the resolved address list. It owns no
- * timers, sockets, or event loop — the adapter arms the timers and drives the on_* entry points.
+ * timers, sockets, or event loop; the adapter arms the timers and drives the on_* entry points.
  *
  * Guarantees:
- *   - TERMINAL EXACTLY ONCE. on_done fires once — SUCCESS (winning fd), FAILED, or CANCELLED.
+ *   - TERMINAL EXACTLY ONCE. on_done fires once: SUCCESS (winning fd), FAILED, or CANCELLED.
  *   - SYNCHRONOUS COMPLETION SAFE. resolve(), a connect attempt, and the arm hooks may complete
  *     inline; the machine bounds the C stack and never re-fires or detaches mid-callback.
  *   - CANCELLATION ONCE PER ACTIVE OP. resolve + each racing attempt are cancel-requested at most
@@ -82,11 +82,11 @@ typedef void (*KlConnectCancelDelayFn)(void *ctx);
 typedef int (*KlConnectArmDeadlineFn)(void *ctx, int *out_err);
 /** Disarm the deadline. MUST synchronously retire the timer. Required iff arm_deadline is set. */
 typedef void (*KlConnectCancelDeadlineFn)(void *ctx);
-/** Terminal callback — fires EXACTLY ONCE. On SUCCESS, `fd` is the winning socket (ownership
+/** Terminal callback: fires EXACTLY ONCE. On SUCCESS, `fd` is the winning socket (ownership
  *  transfers) and `error` 0; else `fd` is KL_INVALID_SOCKET and `error` the failure code. The op is
- *  NOT yet reusable — wait for on_detach. It MAY reentrantly cancel/retire. */
+ *  NOT yet reusable; wait for on_detach. It MAY reentrantly cancel/retire. */
 typedef void (*KlConnectDoneFn)(void *ctx, KlConnectResult result, KlSocketHandle fd, int error);
-/** Detachment — fires EXACTLY ONCE after the terminal AND all ops AND both timers retire. Reuse/
+/** Detachment: fires EXACTLY ONCE after the terminal AND all ops AND both timers retire. Reuse/
  *  free legal only after this returns. */
 typedef void (*KlConnectDetachFn)(void *ctx);
 

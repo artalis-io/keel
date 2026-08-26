@@ -1,12 +1,12 @@
 /*
- * time_uefi.c — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build (U-8).
+ * time_uefi.c: the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build.
  *
  * The wall-clock time source (mbedtls_time == MBEDTLS_PLATFORM_TIME_MACRO) is the per-session
  * SNAPSHOT in clock_snapshot.c (which never calls GetTime from the verification callback).
  * This TU provides the other two hooks:
- *   mbedtls_platform_gmtime_r()   MBEDTLS_PLATFORM_GMTIME_R_ALT — breaks a Unix time down to
+ *   mbedtls_platform_gmtime_r()   MBEDTLS_PLATFORM_GMTIME_R_ALT: breaks a Unix time down to
  *                                 struct tm via the pure civil_time math (no libc gmtime).
- *   mbedtls_ms_time()             MBEDTLS_PLATFORM_MS_TIME_ALT — a monotonic ms timer.
+ *   mbedtls_ms_time()             MBEDTLS_PLATFORM_MS_TIME_ALT: a monotonic ms timer.
  */
 #include "time_uefi.h"
 #include "civil_time.h"          /* kl_unix_to_civil */
@@ -34,7 +34,7 @@ struct tm *mbedtls_platform_gmtime_r(const long long *tt, struct tm *tm_buf) {
 }
 
 /* mbedtls_ms_time_t is int64_t (default). This is the MONOTONIC millisecond timer mbedTLS
- * uses for internal timing (distinct from the wall clock) — back it with our monotonic tick
+ * uses for internal timing (distinct from the wall clock); back it with our monotonic tick
  * (MBEDTLS_PLATFORM_MS_TIME_ALT), avoiding the windows-target GetSystemTimeAsFileTime path. */
 int64_t mbedtls_ms_time(void);
 int64_t mbedtls_ms_time(void) {

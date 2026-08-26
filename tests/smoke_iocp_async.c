@@ -1,5 +1,5 @@
 /*
- * smoke_iocp_async.c — async/thread-pool handler over IOCP on Windows (8e-2c).
+ * smoke_iocp_async.c: async/thread-pool handler over IOCP on Windows.
  *
  * Runtime-tests the IOCP watcher relay: a KlHttpServer on the IOCP completion loop, a
  * KlThreadPool whose loopback-socket wakeup is registered as a watcher, and a handler

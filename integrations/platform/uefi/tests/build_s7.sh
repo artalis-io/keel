@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# build_s7.sh — build the S-7 KlHttpServer-over-EFI_TCP4 self-test into BOOTX64.EFI.
+# build_s7.sh: build the S-7 KlHttpServer-over-EFI_TCP4 self-test into BOOTX64.EFI.
 #
 # Links libkeel_freestanding_server_selfcontained.a (the model-blind server core +
 # protocol layer + mem*/strlen in-archive, `make freestanding-lib-server-selfcontained`)
 # with:
 #   - U-1 shims:        allocator_uefi.c, platform_uefi.c (+ errno/time support)
-#   - EFI socket:       socket_efi_tcp4.c (bind/listen/accept — S-2)
-#   - EFI completion:   event_efi.c (accept relay + prime_accepts — S-3)
+#   - EFI socket:       socket_efi_tcp4.c (bind/listen/accept, S-2)
+#   - EFI completion:   event_efi.c (accept relay + prime_accepts, S-3)
 #   - link residuals:   u1_link_stubs.c (abort/fprintf/__chkstk/_fltused + fail-closed
 #                       sockdef/event builtins the injected providers override)
 #   - entry:            s4_selftest.c
 #
-# The server pulls NO client / resolver objects (no resolve_uefi.c) — it serves, it does
+# The server pulls NO client / resolver objects (no resolve_uefi.c); it serves, it does
 # not connect. Produces a PE32+ EFI application, NO hosted CRT (-nostdlib, lld PE).
 #
 # Env:

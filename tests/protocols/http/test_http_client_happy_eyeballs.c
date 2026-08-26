@@ -1,4 +1,4 @@
-/* Happy Eyeballs (RFC 8305) — async client connect racing over the resolved
+/* Happy Eyeballs (RFC 8305): async client connect racing over the resolved
  * address list, plus the overall request deadline timer.
  *
  * A mock resolver returns a configurable list of 127.0.0.1 addresses (live
@@ -20,13 +20,13 @@
 #include <pthread.h>
 #include <string.h>
 
-/* Internal layout — the retirement/detachment assertions (6C review) inspect the embedded
+/* Internal layout: the retirement/detachment assertions (6C review) inspect the embedded
  * KlConnectOp + conn_racing directly. INTERNAL/UNSTABLE, test-only. */
 #include "http_client_internal.h"
 #include <keel/connect_op.h>
 
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending
- * (SYN dropped by the default gateway) until the deadline — used to exercise the
+ * (SYN dropped by the default gateway) until the deadline: used to exercise the
  * slow-first race and the overall deadline. Guarded by blackhole_stalls(). */
 #define BLACKHOLE_IP "192.0.2.1"
 
@@ -38,7 +38,7 @@ static int          g_res_n;
 static KlResolveReq g_mock_req;
 static int           g_res_defer;      /* 1 = do NOT complete inline (stays RESOLVING) */
 static int           g_res_return_null;/* 1 = resolve() returns NULL (could not start) */
-static int           g_res_cancelled;  /* set by he_resolve_cancel (no done_fn after — KEEL contract) */
+static int           g_res_cancelled;  /* set by he_resolve_cancel (no done_fn after: KEEL contract) */
 static KlResolveDoneFn g_res_done;     /* deferred: stored resolve callback */
 static void         *g_res_ud;         /* deferred: stored resolve user-data */
 
@@ -111,7 +111,7 @@ static void stop_server(KlHttpServer *srv, pthread_t tid) {
     kl_http_server_free(srv);
 }
 
-/* Reserve a loopback port then close it — connecting there yields a fast
+/* Reserve a loopback port then close it: connecting there yields a fast
  * ECONNREFUSED (nothing listening). */
 static int reserve_closed_port(void) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -168,7 +168,7 @@ static void pump(KlEventCtx *ev, int *done, int max_iters) {
 }
 
 static KlHttpClientConfig he_cfg(int delay_ms, int timeout_ms) {
-    /* Reset the deferred/null/cancel mock knobs — they persist across UTEST cases (file statics). */
+    /* Reset the deferred/null/cancel mock knobs: they persist across UTEST cases (file statics). */
     g_res_defer = 0;
     g_res_return_null = 0;
     g_res_cancelled = 0;
@@ -248,7 +248,7 @@ UTEST(he, fallback_on_refused) {
 }
 
 /* WSAPoll does not report a failed non-blocking connect via a writable event
- * (design doc §B.2), so a refused-connect race resolves only via the deadline —
+ * (design doc §B.2), so a refused-connect race resolves only via the deadline:
  * this all-fail expectation is POSIX connect-error semantics. */
 #if !defined(_WIN32)
 UTEST(he, all_fail) {
@@ -396,14 +396,14 @@ UTEST(he_detach, cancel_during_dns) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
     KlHttpClientConfig cfg = he_cfg(30, 2000);
-    g_res_defer = 1;                         /* resolve() defers — stays RESOLVING */
+    g_res_defer = 1;                         /* resolve() defers: stays RESOLVING */
     g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
-    ASSERT_FALSE(he_fully_detached(c));       /* still resolving — not yet retired */
+    ASSERT_FALSE(he_fully_detached(c));       /* still resolving: not yet retired */
 
     kl_http_client_cancel(c);
     ASSERT_TRUE(g_res_cancelled);             /* the resolver's cancel ran */
@@ -441,7 +441,7 @@ UTEST(he_detach, cancel_multiple_attempts) {
 
 /* Resolution failure (DNS phase) → detachment. A deferred resolver is completed with an error; the
  * op must go terminal FAILED and, with the resolve retired, reach confirmed detachment. (The overall
- * client deadline covers racing + post-connect, not the DNS phase — the resolver's own timeout does;
+ * client deadline covers racing + post-connect, not the DNS phase; the resolver's own timeout does;
  * a DNS-phase timeout surfaces here as this resolve-failure completion.) */
 UTEST(he_detach, resolve_failed_during_dns) {
     KlAllocator a = kl_allocator_default();
@@ -454,7 +454,7 @@ UTEST(he_detach, resolve_failed_during_dns) {
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
-    ASSERT_FALSE(he_fully_detached(c));        /* resolving — not retired */
+    ASSERT_FALSE(he_fully_detached(c));        /* resolving: not retired */
 
     ASSERT_TRUE(g_res_done != NULL);
     g_res_done(&g_mock_req, NULL, -1, g_res_ud);   /* resolver reports failure */

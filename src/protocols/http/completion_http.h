@@ -2,20 +2,18 @@
 #define KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H
 
 /*
- * completion_http.h — the HTTP leg of the completion axis (R2f). Owned by src/protocols/http/.
+ * completion_http.h: the HTTP leg of the completion axis. Owned by src/protocols/http/.
  *
  * The substrate completion axis (src/completion.h) is protocol-neutral: its vtable +
  * `kl_comp_*_raw` entry points speak only KlEventCtx / KlStream / KlSocketHandle. This
- * header is the HTTP adapter over it, in two tiers (docs/protocols_restructure_freeze.md §4.8):
+ * header is the HTTP adapter over it, in two tiers (docs/archive/freezes/protocols_restructure_freeze.md §4.8):
  *
- *   - `kl_comp_*` (KlHttpConn / KlHttpServer form) — thin wrappers that each mirror a neutral
+ *   - `kl_comp_*` (KlHttpConn / KlHttpServer form): thin wrappers that each mirror a neutral
  *     `kl_comp_*_raw` operation 1:1, extracting the neutral arg (&s->ev, s->listen_fd, &c->stream)
  *     and forwarding. Defined in completion_http_server.c (hosted) / completion_http_absent.c
  *     (KEEL_NO_COMPLETION). Consumed by the HTTP-1/h2/ws completion adapters.
- *   - `kl_http_comp_*` — HTTP-only completion orchestration with NO neutral counterpart (the run
- *     loop's completion tick, accept quiescence, async resume, body re-post). These are the former
- *     private io-engine run-loop functions (a name that was a header artifact, not a description),
- *     renamed on the move. Consumed by http_server_core.c (run/quiesce/post_read) + async.c (resume).
+ *   - `kl_http_comp_*`: HTTP-only completion orchestration with NO neutral counterpart (the run
+ *     loop's completion tick, accept quiescence, async resume, body re-post). Consumed by http_server_core.c (run/quiesce/post_read) + async.c (resume).
  *
  * The neutral run-loop tick kl_comp_run() and the neutral cancel/datagram/connect seam stay in
  * src/completion_io.h; TUs that need only those keep including it.
@@ -30,8 +28,8 @@ struct KlHttpServer;
 
 /* ── Tier 2: HTTP wrappers mirroring a neutral kl_comp_*_raw op 1:1 ─────────────────── */
 
-/* Choose the receive buffer for the connection's current phase — plaintext/PROXY →
- * c->stream.read_buf; TLS → the per-conn ciphertext scratch (c->comp_cipher) — then post the raw
+/* Choose the receive buffer for the connection's current phase: plaintext/PROXY →
+ * c->stream.read_buf; TLS → the per-conn ciphertext scratch (c->comp_cipher); then post the raw
  * receive (kl_comp_post_recv_raw). This is where all TLS/PROXY/state knowledge lives; the backend
  * sees only (stream, buf, cap). */
 int kl_comp_post_recv(KlHttpConn *c);
@@ -60,22 +58,20 @@ int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
 
 /* Run one completion-loop tick for the server: install the conn-dispatch hook, set up the accept
  * path once from the backend's window, then drive one generic tick (kl_comp_run) over its event ctx.
- * Returns 0 to continue the run loop, -1 to stop. (Formerly the private io-engine run-completion entry.) */
+ * Returns 0 to continue the run loop, -1 to stop. */
 int kl_http_comp_run(struct KlHttpServer *server, int timeout_ms);
 
 /* Teardown accept quiescence: force every posted accept to completion, then reap to confirmed
  * KlListener detachment with a teardown-specific dispatcher (no live tick). Returns 0, or -1 if the
- * force could not be guaranteed. Call once, after the listen socket is closed. (Formerly the private
- * io-engine quiesce-accepts entry.) */
+ * force could not be guaranteed. Call once, after the listen socket is closed. */
 int kl_http_comp_quiesce_accepts(struct KlHttpServer *server);
 
 /* Resume a suspended connection on a completion loop after an async op completed: drive the
- * completion send path for the state on_resume produced. (Formerly the private io-engine
- * resume-completion entry.) */
+ * completion send path for the state on_resume produced. */
 void kl_http_comp_resume(struct KlHttpServer *server, KlHttpConn *conn);
 
 /* Re-arm a body read on a completion loop after read-side flow control resumes: post a fresh recv.
- * (Formerly the private io-engine post-read entry.) */
+ * */
 void kl_http_comp_post_read(KlHttpConn *conn);
 
 #endif /* KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H */

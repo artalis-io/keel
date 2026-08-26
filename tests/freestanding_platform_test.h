@@ -1,6 +1,6 @@
 /*
- * freestanding_platform_test.h — the mock-clock test API exposed by
- * freestanding_host_platform.c (F-5). Lets the harness drive the advanceable
+ * freestanding_platform_test.h: the mock-clock test API exposed by
+ * freestanding_host_platform.c. Lets the harness drive the advanceable
  * monotonic clock so timer deadlines (Happy-Eyeballs delay, request deadline)
  * fire deterministically without sleeping. Test/harness-only.
  */

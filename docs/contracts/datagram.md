@@ -1,0 +1,527 @@
+# Keel Datagram Transport Contract
+
+**Status: NORMATIVE (Tier 1); implemented and STABLE.** The Tier-1 semantics below are the
+committed contract; the public `kl_datagram_*` surface that realizes them is STABLE across every
+supported backend (see the `<keel/datagram.h>` banner and §10). Changes to a Tier-1 clause require a
+new review round. Sibling of [stream.md](stream.md). The full historical design record (milestone
+chronology + the extraction roadmap) is preserved in
+[datagram_contract_design.md](../archive/designs/datagram_contract_design.md); the original rationale
+is in [generic_datagram_audit.md](../archive/audits/generic_datagram_audit.md) and
+[keel_datagram_ops_design.md](../archive/designs/keel_datagram_ops_design.md).
+
+> **`KlDatagram` is a sibling of `KlStream`, not an extension of it.** A stream is an ordered
+> byte sequence with partial writes, EOF, and byte-granular backpressure; a datagram is a
+> sequence of discrete whole messages with atomic sends, no EOF, and packet-granular
+> backpressure. They share the socket axis, the event axis, and the lifecycle *disciplines*
+> (bounded queue, strict pause, cancel-once, confirmed detachment), but not their data
+> contract. This document freezes the **Tier-1** datagram semantics and records the per-backend
+> compatibility matrix (§10), now complete and ✅ across every supported backend.
+
+---
+
+## Capability tiers
+
+- **Tier 1 (this contract)**, the neutral `KlDatagram` object + normative send/recv/pause/
+  close semantics + capability reporting. The data plane is the `KlDatagramOps` provider vtable
+  (`include/keel/socket_dgram.h`); the `KlDatagram` object + lifecycle is implemented in
+  `include/keel/datagram.h` (opt-in layout `<keel/datagram_detail.h>`).
+- **Tier 2 (opt-in capabilities)**: advanced provider capabilities that are opt-in and MUST NOT
+  change the Tier-1 facade: connected-mode, source-pinned send, multicast, ECN/TOS (per-object
+  caps), plus the **M5 high-throughput batch extension** (transactional mmsg send batching, UDP GSO,
+  readiness receive batching, GRO splitting) in `<keel/datagram_batch.h>`. All are exposed *as
+  capabilities* (`KL_DGRAM_CAP_*`) above the single-datagram baseline, never changing it.
+- **Out of contract**: QUIC (consumes `KlDatagram`), a variable-size byte-budget queue, and
+  any assumption that a datagram socket is connected or fd-backed. See §11.
+
+## Resolved decisions (frozen, the contract commits to these)
+
+1. **The facade delivers exactly one logical callback per datagram (all backends).** The Tier-1
+   facade calls `on_recv` once per datagram, never merging or splitting. Without the M5 receive
+   batch, a *receive operation* is one synchronous provider `recv` (readiness) or one posted
+   completion recv, each yielding exactly one datagram, performed **serially; never concurrently**
+   (a readiness READ interest is an *armed source*, not an in-flight op; the object drains ≤ N/tick,
+   re-checking pause/close **after every callback**). This one-at-a-time facade gives every backend
+   identical pause, cancel, buffer-ownership, and detachment semantics. The optional M5 receive batch
+   (`<keel/datagram_batch.h>`) sits **above** the facade: one provider batch operation (a `recvmmsg`
+   refill, or a GRO-coalesced buffer split per segment) may yield several logical callbacks, but pause
+   **retains a held cursor** into the batch and resumes from there (§2, §4): no datagram is
+   un-received or dropped, so the one-at-a-time delivery and strict-pause contract still hold.
+2. **Bounded queue measured in packet slots, with separate inbound storage.** The outbound send
+   queue is `slot_count` fixed slots, each holding bounded payload + peer/local + length +
+   flags. The receive side has **one dedicated inbound slot** (payload buffer + metadata),
+   *separate from the send slots*, a full send queue never starves the posted receive of stable
+   storage. That same inbound slot becomes the *held* packet while paused (§4); no receive is
+   re-armed until the held slot is delivered or discarded. Specify `slot_count`,
+   `payload_capacity` (outbound), and the inbound payload capacity at init with overflow-safe
+   validation of
+   `slot_count × (payload_capacity + metadata_size) + (inbound_payload_capacity + metadata_size)`.
+   **`TOO_LARGE`** = the packet exceeds a hard configured send-path capacity *permanently*; one
+   slot (`payload_capacity`), or, under the `BOTH` policy, the whole byte budget (caller error);
+   **`WOULD_BLOCK`** = admission refused *transiently*: no send slot, or the `BOTH` byte gate.
+   Allocation-free steady state.
+   **Send-queue policy.** The one-call `kl_datagram_socket_init` defaults to
+   `KL_DATAGRAM_QUEUE_DEFAULT` (== `BOTH`); the low-level `kl_datagram_init` fd-adopt path defaults to
+   `SLOT` (slot COUNT only). `BOTH` bounds admission by both the slot count AND a byte budget (bytes of
+   queued+in-flight payload), a scalar admission gate over the same fixed slots (it never changes
+   storage layout; zero-length packets are bounded by the slot count, so `count`, not the byte total;
+   remains the sole drain predicate). There is **no** pure byte-only policy: an allocation-free queue is
+   count-bounded, and zero-length datagrams make a byte budget unable to bound the packet count. (The
+   earlier separate byte-only/count-unbounded UDP object was consolidated into `KlDatagram` and removed.)
+3. **Addresses are `KlSockAddr`, never `struct sockaddr`.** Matches the neutral `KlDatagramOps`
+   vtable and the completion event fields. (A raw `struct sockaddr` is a provider-config detail,
+   not the neutral surface.)
+4. **One datagram observation per callback; boundaries never merged; payload complete unless
+   truncated.** Delivery is one datagram per callback; the payload is complete unless
+   `KL_DGRAM_TRUNCATED` is set (decision #7). The optional M5 extension's GRO handling still yields
+   one segment per callback by default; its whole-coalesced-buffer mode is opt-in via
+   `kl_datagram_recv_segments` (decision #1).
+5. **Atomic send.** A send is accepted completely or not at all; there is no partial datagram.
+6. **`WOULD_BLOCK` takes no ownership and mutates no state.** The caller's buffer is untouched
+   and may be retried or freed.
+7. **Truncation is reported explicitly, never silently delivered as complete.** Tier-1 freezes
+   **captured-prefix delivery**: an oversized datagram is delivered as the bytes that fit
+   (`len` = captured prefix) with `KL_DGRAM_TRUNCATED` set, not a metadata-only notification.
+   The callback distinguishes a genuinely short packet from a clipped one by the flag.
+8. **Connected UDP is a configuration mode, not an assumption** baked into the abstraction.
+
+---
+
+## 0. Objects and invariants
+
+### The object shape (sibling of `KlStream`)
+
+`KlDatagram` is an opaque, embeddable transport object. Its public header carries the boxed STABLE
+banner + ABI policy (as in `stream.h`); the layout lives in `<keel/datagram_detail.h>` (opt-in,
+embedders recompile). Facets (SEND-queue, RECV, CLOSE) are dormant until their `_init`, so a bare
+object is inert: mirroring the stream's base+facet decomposition.
+
+```c
+typedef struct KlDatagram KlDatagram;   /* opaque; layout in <keel/datagram_detail.h> */
+
+/* One outbound datagram (borrowed; COPIED before kl_datagram_send returns). */
+typedef struct {
+    const void       *data;
+    size_t            len;
+    const KlSockAddr *peer;    /* destination; NULL = connected-mode send */
+    const KlSockAddr *local;   /* source/interface pin; NULL = none */
+    int               tos;     /* per-packet TOS/ECN byte, or -1 = none */
+    unsigned          flags;   /* stored on the slot; opaque to the send machine */
+} KlDatagramMessage;
+
+/* Inbound delivery is a FLAT callback; there is no inbound struct. Every argument is borrowed
+   from the object's dedicated inbound slot and is valid ONLY for the duration of the call (copy
+   to retain). `peer` is always non-NULL; `local` is non-NULL iff KL_DGRAM_HAS_LOCAL is set in
+   `flags`; `flags` may carry KL_DGRAM_TRUNCATED; `len` is the captured-prefix length. */
+typedef void (*KlDatagramRecvFn)(void *ud, const void *data, size_t len,
+                                 const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
+
+typedef enum {
+    KL_DATAGRAM_ACCEPTED = 0,  /* whole datagram taken (sent or slot-queued) */
+    KL_DATAGRAM_WOULD_BLOCK,   /* transient: no free outbound slot, or the BOTH byte gate; nothing taken */
+    KL_DATAGRAM_TOO_LARGE,     /* permanent: exceeds one slot, or the whole BOTH byte budget; nothing taken */
+    KL_DATAGRAM_UNSUPPORTED,   /* an explicitly-requested capability is unavailable; nothing sent */
+    KL_DATAGRAM_CLOSED,        /* closing/closed: no further sends */
+    KL_DATAGRAM_ERROR          /* bad argument or sticky transport error */
+} KlDatagramSendStatus;
+```
+
+### Invariants (normative)
+
+1. **Serial receive.** At most one receive operation is outstanding per `KlDatagram` at any
+   instant; operations are serial, never concurrent. A readiness READ interest is an *armed
+   source*, not an operation (decision #1).
+2. **Datagram observation.** Exactly one datagram observation per callback; boundaries are
+   never merged or split; the payload is complete unless `KL_DGRAM_TRUNCATED` is set
+   (decisions #4, #7).
+3. **Atomic send.** `kl_datagram_send` accepts the whole packet or none (decision #5); the
+   return status is total, never partial.
+4. **No-ownership on refusal.** `WOULD_BLOCK`/`TOO_LARGE`/`UNSUPPORTED`/`CLOSED`/`ERROR` take no
+   ownership and mutate no queue state (decision #6).
+5. **Explicit truncation.** An oversized receive sets `KL_DGRAM_TRUNCATED`; the callback is
+   never handed a truncated payload disguised as complete (decision #7).
+6. **Confirmed detachment.** `on_close` fires exactly once, only after the in-flight recv AND
+   all in-flight sends are physically retired.
+7. **Source always present.** Every delivered packet carries `peer` (the source), because the
+   canonical consumer (DNS) uses it as the anti-spoof filter on an unconnected socket
+   (audit §2.4). `local` is present iff the pktinfo capability is active.
+8. **Reuse only after detachment.** `kl_datagram_init` (memset-zero) is the reuse reset, legal
+   only on a fully-detached object (mirror `stream.h:42-48`).
+9. **Callback confinement.** A receive or completion callback may pause or close the object,
+   but MUST NOT free or re-init it before `on_close` (invariants 6, 8). The readiness receive
+   loop re-checks paused/closing after every callback and stops the drain immediately.
+
+---
+
+## 1. Send semantics (ATOMIC, decision #5)
+
+- `kl_datagram_send(dg, const KlDatagramMessage *msg)` → `KlDatagramSendStatus`.
+- **Immediate path:** if the send queue is empty, attempt the provider `send` synchronously.
+  Full success → `ACCEPTED`. Transient would-block → copy the whole packet + destination into
+  one slot, arm WRITE interest / post a send op → `ACCEPTED` (queued). *(`ACCEPTED` may mean
+  "queued"; the caller learns backpressure from `kl_datagram_send_queued` / the queue-full
+  `WOULD_BLOCK`, not from a hidden 0.)*
+- **Ordering:** if anything is already queued, the new packet is queued behind it (FIFO); the
+  socket is not attempted out of order.
+- **`TOO_LARGE`:** `msg->len > payload_capacity`; permanent; the packet can never fit a slot. Under
+  the `BOTH` policy it *also* covers `msg->len > send_byte_budget` (a packet larger than the whole
+  budget can never be queued: refused after the readiness fast path's direct-send attempt, or upfront
+  in completion mode). Distinct from `WOULD_BLOCK`. (Fixes the audit's lossy-status finding.)
+- **`WOULD_BLOCK`:** all `slot_count` send slots occupied. Nothing copied, no counter bumped as
+  a drop, the caller retries after `on_writable` (the full→non-full transition, §3).
+- **Copy timing:** the caller's `msg->data` is borrowed only for the duration of the call
+  (copied at enqueue); safe to reuse/free immediately after return.
+- **Unsupported requested features fail; nothing is sent (§9).** A send that explicitly requests
+  a capability the object lacks returns `KL_DATAGRAM_UNSUPPORTED` and transmits **nothing**:
+  never a silent send with the feature dropped (a silent drop can send from the wrong interface
+  or with the wrong network policy). Specifically: a non-NULL `msg->local` without
+  `KL_DGRAM_CAP_SOURCE_PIN`; a per-packet TOS/ECN request without `KL_DGRAM_CAP_TOS`; a
+  connected-mode send (`peer == NULL`) without `KL_DGRAM_CAP_CONNECTED`. Fallback is legal only
+  for features the caller did **not** require.
+- **Completion mode:** exactly one send is submitted at a time; the next is pumped on
+  `on_send_complete`. (An M5 send batch drains on the completion axis through this single-flight
+  pump: `sendmmsg` is the readiness fast path.) The ownership policy (copy vs reference) is captured
+  *with the op* so a config change can't reinterpret a live op.
+
+### Connected-mode send (opt-in capability, decision #8)
+
+If the object is in connected mode, `msg->peer` MUST be NULL and the provider uses the
+kernel-fixed peer. Unconnected mode requires a non-NULL `peer`. Connected-mode is reported via
+`KL_DGRAM_CAP_CONNECTED` (§9); providers that lack it (lwIP-raw today rejects connected-send)
+report its absence rather than silently misbehaving.
+
+---
+
+## 2. Receive semantics (one datagram per callback, decisions #4, #7)
+
+- `kl_datagram_recv_start(dg, KlDatagramRecvFn on_recv, void *ud)` arms delivery. The callback is
+  flat: `void on_recv(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+  const KlSockAddr *local, unsigned flags)`, with no inbound struct; each argument is borrowed for
+  the call (§0).
+- **Baseline: serial receive, one datagram each** (decision #1). Without the M5 receive batch a
+  receive *operation* is one provider `recv` (readiness) or one posted completion recv, each yielding
+  exactly one datagram. On readiness a single READ interest is an *armed source*, the object performs
+  a bounded sequence of serial operations (drain ≤ N/tick, default 64), never concurrently. On
+  completion this is one posted recv op, re-posted after each delivery (self-re-arming, the DNS
+  requirement). Pause/resume mechanics are §4. (With an attached M5 receive batch, one provider batch
+  operation may instead yield several logical `on_recv` callbacks; see the batching bullet below.)
+- **Buffer ownership:** the `KlDatagram` owns the recv storage, the **single dedicated inbound
+  slot** (§3), universally, on every backend. The `data` argument is *borrowed* for the callback
+  only. The callback must copy to retain. Because the object owns the storage and its lifetime is
+  bound to detachment (§5, §6), no provider op can reference it after `on_close`. *(lwIP-raw stages a
+  received datagram through its own copy-ring before copying it into the inbound slot, a documented
+  ▲ in §10, not a lifetime hole.)*
+- **`peer` is always filled** (invariant 7). `local` is filled iff `KL_DGRAM_HAS_LOCAL` is set
+  in `flags` (pktinfo capability active).
+- **Truncation (decision #7):** if the datagram exceeded `inbound_payload_capacity`, deliver with
+  `KL_DGRAM_TRUNCATED` set and `len` = bytes captured; the counter `kl_datagram_truncated` also
+  increments. The callback can distinguish a genuine short packet from a clipped one. *(IOCP
+  MUST parse `WSAMSG.dwFlags` to honor this: audit §6.)*
+- **Batching / GRO, the facade vs the optional M5 extension.** The Tier-1 facade always delivers
+  **one logical `on_recv` callback per datagram**, whatever the provider did underneath. The optional
+  M5 batch extension (`<keel/datagram_batch.h>`) may make **one provider batch operation yield several
+  logical callbacks**: a readiness `recvmmsg` refill (one per readable edge, or a plain `recv` when
+  `KL_DGRAM_CAP_RX_BATCH` is absent) is dispatched one datagram at a time, and a GRO-coalesced buffer
+  is **split into per-segment `on_recv` calls by default**: register `kl_datagram_recv_segments` to
+  receive the whole coalesced buffer with its `segment_size` instead. Pause during a batch **retains a
+  held cursor** into the batch and resumes from there (§4); datagrams are never un-received or dropped.
+  Attaching a receive batch (`kl_datagram_recv_attach_batch`, before `kl_datagram_recv_start`) **transfers
+  ownership** of the batch to the core. **Completion-mode receive batching is not supported**, a RECV
+  batch requires a readiness datagram.
+- **Receive-loop rules.** The readiness drain re-checks paused/closing **after every callback**
+  and stops the operation sequence immediately if either is set (it reads no further datagram
+  that tick). A callback may pause or close the object, but MUST NOT free or re-init it before
+  `on_close` (invariant 9).
+
+---
+
+## 3. Backpressure (bounded, packet slots, decision #2)
+
+- Init specifies `slot_count` + `payload_capacity` (outbound send slots) **and** the inbound
+  payload capacity; the object validates
+  `slot_count × (payload_capacity + metadata_size) + (inbound_payload_capacity + metadata_size)`
+  overflow-safely and preallocates **both** the send slots and the one dedicated inbound slot.
+  Steady state is allocation-free.
+- Each outbound slot holds: bounded payload storage, `peer`, `local`, `len`, `flags` (and
+  per-packet TOS / gso hints as Tier-2 fields). The dedicated inbound slot holds one received
+  datagram's payload + `peer`/`local`/`len`/`flags`.
+- Send queue full → `WOULD_BLOCK` (transient, invariant 4).
+- **Writable notification (frozen):** `on_writable(dg)` fires **once when a full queue first
+  gains at least one free slot** (the full→non-full transition), so a producer that hit
+  `WOULD_BLOCK` resumes promptly rather than stalling until the queue empties.
+- **`on_drain(dg)` (optional, distinct):** fires on the non-empty→empty transition, mirroring
+  the `KlDrain` distinction. Both signals may be installed independently: use
+  `on_writable` to resume a backpressured producer, `on_drain` to know the queue is fully idle.
+- The receive side uses its **dedicated inbound slot**, separate from the send slots: at most
+  one receive operation is outstanding (decision #1), and while paused that same inbound slot
+  holds exactly one packet (§4). There is no unbounded receive accumulation, and a full send
+  queue never blocks the receive.
+
+---
+
+## 4. Receive pause / resume (STRICT)
+
+- `kl_datagram_pause(dg)` / `kl_datagram_resume(dg)`.
+- **Strict pause:** post/arm no further receive operation. Readiness drops READ interest and
+  cancels any pending readable (nothing completes). Completion leaves an *already-posted* recv
+  physically in flight; when it completes it is **held in the dedicated inbound slot** (§3) as
+  exactly one complete packet (captured in the inbound slot, not delivered): never dropped,
+  never a second op posted. **No receive is re-armed while a held slot is occupied.**
+- **Resume:** deliver the single held packet exactly once (freeing the inbound slot), then
+  re-arm one receive operation. At most one packet is ever
+  held; a discard (on close) frees the slot without delivery.
+- **With an M5 receive batch (readiness):** pause holds a **cursor** into the already-refilled batch
+  buffer instead of a single slot, the undelivered datagrams stay in the batch, no further `recvmmsg`
+  refill is issued, and resume delivers them one at a time from the cursor before re-arming. The
+  strict-pause guarantee is unchanged (no datagram is un-received or dropped); the held unit is a
+  batch cursor rather than one packet.
+- **Sync-completion safety:** set the in-flight sentinel before arming so a synchronous
+  delivery sees it; convert nested re-arms into an iterative loop to bound the C stack under
+  EFI/lwIP inline completion.
+
+---
+
+## 5. Completion in-flight ownership (decision #1)
+
+- At most one completion recv op posted, and at most one send batch outstanding, per object.
+- **Lifetime ownership is the UAF defense, NOT a generation guard.** A completion cannot
+  safely compare a generation against a `KlDatagram` that has already been freed; a stamp
+  cannot replace lifetime ownership. Tier-1 requires that **confirmed detachment (invariant 6)
+  guarantee no provider operation can reference the object or its buffers after `on_close`**:
+  free and re-init are prohibited before detachment (invariant 8). Each completion backend
+  satisfies this one of two ways:
+  1. **Reap before release**: cancel every posted op and dequeue its completion before the
+     object is released (IOCP's `iocp_quiesce_port_for_close` model, `event_iocp.c:942-976`); or
+  2. **Backend-owned stable token**: key each op on a token that outlives every operation and
+     lives in backend state (not the object), so a late completion lands on live backend state,
+     never freed object memory.
+  A generation/duplicate stamp MAY *additionally* reject a stale or duplicate completion **while
+  the object is still alive**, but under strict detachment a completion after legal reuse is
+  impossible, so the stamp is defensive, not the primary guarantee.
+- **Backend-owned stable token (the mechanism).** The neutral lifetime token lives in
+  `src/datagram_life.{h,c}` (a single-thread refcount + nullable target + `on_final`, allocated from
+  the event-ctx allocator so it outlives the `KlDatagram`); `KlCompletionEvent` carries it in `life`.
+  Each completion backend captures the recv buffer + flags at post and retains one token ref per
+  posted op; the completion transfers that ref to the event (released after dispatch), and the op-free
+  path releases a still-held ref on every drop-without-event path (post-failure unwind, silent cancel,
+  loop teardown). No completion backend dereferences the `KlDatagram` (or its internal `KlDgramCore`)
+  after post. A passive backend that stages into its own copy-ring (lwIP-raw) is lifetime-safe by
+  construction; the token replaces its owner recovery, the ref held in the slot (one per armed recv /
+  pending send, transferred on drain, released on close).
+- The recv buffer and any queued send slots are the object's own memory; a backend MUST NOT be
+  handed a pointer it can dereference after the object detaches. `kl_datagram_*_free` refuses
+  while an op is in flight.
+
+---
+
+## 6. Close, cancel-once, and confirmed detachment (invariant 6)
+
+- **Verbs:** `kl_datagram_close_begin(dg)` (graceful: refuse new sends, flush queued sends,
+  stop receiving) and `kl_datagram_close_cancel(dg)` (abortive escalation: discard the queue,
+  cancel in-flight ops now). Graceful→abortive escalation allowed.
+- **Fully-retired predicate:** `recv_inflight == 0 && send_inflight == 0`; graceful
+  additionally requires `kl_datagram_send_queued() == 0` (drain first). Abortive does not wait
+  on the queue (queued slots are the object's memory, freed by the owner at `on_close`).
+- **Cancel-once:** each in-flight op is cancel-requested at most once; the request flag is set
+  before the hook so a synchronous retirement is safe.
+- **Reentrancy:** an `in_close_cancel` depth counter defers finalize while a cancel hook is on
+  the stack; the outermost frame re-attempts on unwind.
+- **`on_close` fires exactly once, only after physical retirement** (invariant 6). State is set
+  to CLOSED before the callback so a late retirement is a no-op. After `on_close`, no provider
+  operation may reference the object or its buffers; free/re-init is legal only now
+  (invariant 8), so a completion after legal reuse is impossible (§5).
+- **Lifecycle-state enum + accessor** (mirror `KlStreamCloseState`):
+
+```c
+typedef enum {
+    KL_DGRAM_CLOSE_OPEN = 0,
+    KL_DGRAM_CLOSE_CLOSING,
+    KL_DGRAM_CLOSE_CLOSED
+} KlDgramCloseState;
+KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN / CLOSING / CLOSED */
+KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal: NONE until CLOSED,
+                                                                          then DETACHED / QUARANTINED /
+                                                                          CLOSE_ERROR (§4.3) */
+```
+
+Confirmed detachment is `kl_datagram_close_result(dg) == KL_DGRAM_DETACHED`. This replaces the
+removed UDP object's silent-discard free + the completion UAF window (audit §5).
+
+---
+
+## 7. Connected vs unconnected (decision #8)
+
+- Unconnected is the baseline (the DNS resolver, and any unconnected datagram server, need
+  send-to-arbitrary-peer on an unconnected socket, audit §2.4). `peer` is required on send;
+  `peer` is delivered on recv.
+- Connected is a config mode (`KL_DGRAM_CAP_CONNECTED`): `peer` NULL on send, kernel-fixed peer,
+  kernel inbound filtering. The abstraction never *assumes* connected; it reports the mode.
+
+---
+
+## 8. Source / destination metadata (invariant 7)
+
+- `peer` (source) is always filled: mandatory Tier-1 (the DNS anti-spoof filter, `dns_ns_index`
+  in `src/protocols/dns/dns_resolver.c`).
+- `local` (destination / receiving interface) is filled iff pktinfo is active
+  (`KL_DGRAM_RX_PKTINFO`); a datagram server uses it for source-pinned replies on wildcard binds.
+- `msg->local` on send optionally pins the source/interface (source-pinned send,
+  `KL_DGRAM_CAP_SOURCE_PIN`).
+- All addresses are `KlSockAddr` (decision #3).
+
+---
+
+## 9. Capability reporting (mirror `KlListener` state/caps conventions)
+
+Capabilities are reported per-object (folding the provider's `KL_SOCK_CAP_DATAGRAM` +
+`configure`-accepted `KL_DGRAM_RX_*` + provider op presence), queried via
+`kl_datagram_caps(dg)`. **A behavior the caller explicitly requests but the object does not
+support MUST fail, `KL_DATAGRAM_UNSUPPORTED` on send, or a config/init error at setup, and do
+nothing.** It is never silently dropped (a silent drop can send from the wrong interface or with
+the wrong network policy). Graceful degradation applies **only** to features the caller did not
+require, e.g. recv `local` is simply absent when pktinfo is off.
+
+| Capability flag | Meaning | Absent-behavior contract |
+|---|---|---|
+| `KL_DGRAM_RX_PKTINFO` | `local` on recv (not required → graceful) | `local` simply absent on recv |
+| `KL_DGRAM_CAP_SOURCE_PIN` | `msg->local` send pinning (required if requested) | non-NULL `msg->local` → send returns `UNSUPPORTED`, nothing sent |
+| `KL_DGRAM_CAP_TOS` | ECN/DSCP marking (required if requested) | requested TOS/ECN → send returns `UNSUPPORTED` (per-packet) or config error (default); nothing sent |
+| `KL_DGRAM_CAP_CONNECTED` | connected-mode send | connect config rejected with error; unconnected only |
+| `KL_DGRAM_CAP_MULTICAST` | join/leave membership | multicast config + join/leave rejected with error |
+| `KL_DGRAM_CAP_BROADCAST` | `SO_BROADCAST` sends | broadcast config rejected with error; a broadcast send returns `UNSUPPORTED` |
+| `KL_DGRAM_CAP_RX_BATCH` / `_TX_BATCH` (M5) | `recvmmsg` / `sendmmsg` batching | used by the M5 batch extension; absent → portable single-recv / single-send fallback |
+| `KL_DGRAM_CAP_GSO` / `_GRO` (M5) | UDP GSO segmentation / GRO coalescing | used by the M5 batch extension; absent → per-segment send / per-segment split delivery |
+
+**Truncation is not a capability.** Detecting and flagging truncation (invariant 5, decision #7)
+is **mandatory for every Tier-1 implementation**, its absence is non-conformance, not a
+runtime-degradable feature, so there is no `KL_DGRAM_CAP_TRUNCATION` to publish (a conforming
+object would always set it). The last backend to lack it, IOCP, now parses `WSAMSG.dwFlags` /
+`WSAEMSGSIZE` (via the pure `dgram_recv_classify.h` helper), so every completion backend
+is ✅ on the §10 truncation row.
+
+---
+
+## 10. Backend compatibility matrix
+
+For each backend, every Tier-1 requirement has a **defined implementation** or a **documented
+limitation**. Legend: ✅ implemented · ▲ fallback/degraded · ✖ documented limitation.
+
+| Tier-1 requirement | POSIX rdy | Winsock rdy | pollcomp | io_uring | IOCP | lwIP-raw | EFI_UDP4 |
+|---|---|---|---|---|---|---|---|
+| Serial recv, one per op (armed source ≠ op) | ✅ (drain≤N/tick) | ✅ | ✅ | ✅ | ✅ | ✅ (single held slot) | ✅ (self-rearming Rx token) |
+| Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Packet-slot bounded **send** queue | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Strict pause (post no more recv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ✅ (stable token + confirmed-retire-or-quarantine) |
+| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ✅ (stable token) |
+| `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (native `EFI_UDP4_SESSION_DATA`) |
+| Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✅ (`dwFlags`/`WSAEMSGSIZE`) | ✅ (ring flag) | ✅ |
+| Recv storage = object's dedicated inbound slot (no post-detach object deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ▲ (token-safe; copy-ring still stages into the inbound slot) | ✅ (token pins slot) |
+| **Capabilities** | | | | | | | |
+| pktinfo (`local`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ | ✅ (native dest in `EFI_UDP4_SESSION_DATA`) |
+| multicast | ✅ | ✅ (no v4 by-index ✖) | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
+| broadcast | ✅ | ✅ | ✅ | ✅(ctl) | ✅ | ✖ | ✖ |
+| TOS/ECN | ✅ | ✅ | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
+| mmsg batch (M5) | ✅(Linux) | ✖ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| GSO / GRO (M5) | ✅(Linux) | ✖ | ▲ | ✅ GRO / ✖ GSO | ✖ | ✖ | ✖ |
+| source-pin send | ✅ | ✅ | ✅ | ▲ (sync seam) | ▲ (sync seam) | ✖ | ✖ |
+| connected mode | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ (rejected) | ✖ (unconnected only) |
+
+**Reading the matrix.** Every Tier-1 requirement row is ✅ for every supported backend, the
+`kl_datagram_*` contract is **STABLE** across all of them (see the `<keel/datagram.h>` banner).
+EFI_UDP4 is a first-class provider (`socket_efi_udp4.c` + `event_efi.c`): serial recv, atomic send,
+cancel-once with confirmed retirement-or-quarantine, stable-token lifetime, native `peer`/`local`
+(from `EFI_UDP4_SESSION_DATA`), and truncation are all ✅. The remaining non-✅ cells are `▲`
+(implemented but degraded, with a documented bound, e.g. lwIP-raw still stages a received datagram
+through its copy-ring before copying into the dedicated inbound slot) or `✖` (a documented capability
+limitation the consumer queries via caps (§9) and degrades around). Neither is a contract gap.
+
+---
+
+## 11. Explicitly out of contract
+
+- **QUIC / HTTP-3.** QUIC consumes `KlDatagram` (it needs sessions, streams, timers, congestion
+  control, packet protection); it MUST NOT shape the baseline. The Tier-1 additive knobs
+  (source-addr on wildcard binds, GSO/GRO, ECN, batching) are the declared QUIC foundation
+  (`docs/archive/designs/udp_design.md:220-236`) but remain capabilities, not baseline.
+- **Variable-size byte-budget queue.** A future optional capability atop the packet-slot model
+  (decision #2), not Tier 1.
+- **DoT / TCP fallback / any stream transport.** The DNS TCP fallback + `(fd, KlTls*)` DoT hook
+  is a **byte-stream** helper (audit §2.4): it belongs to `KlStream`/the socket seam, never
+  folded into `KlDatagram`.
+- **Freestanding (UDP-only) DNS build.** When the built-in resolver (`src/protocols/dns/dns_resolver.c`) is
+  compiled `-DKEEL_FREESTANDING` (the datagram/DNS freestanding archive that a bare EFI_UDP4
+  consumer links), it performs **UDP-only Do53 against an explicitly configured
+  nameserver**, with three *documented, consumer-visible* limitations vs the hosted build:
+  1. **Explicit nameserver required**: there is no `resolv.conf` discovery; the caller MUST set
+     `KlDnsResolverConfig.nameserver` (a numeric NS address). Creation fails otherwise.
+  2. **No `/etc/hosts` lookup**: there is no filesystem, so the hosts-file shortcut is absent
+     (literal-IP and `localhost` shortcuts still work, they need no filesystem).
+  3. **No RFC 7766 TCP recovery on truncation**, a truncated (TC) response cannot be recovered
+     over TCP, so it **fails that query leg promptly and clearly** (the resolution completes with
+     `KL_ERR_DNS`), rather than opening a TCP socket or silently waiting for the leg timeout.
+     Runtime-proven by `tests/freestanding_dns_harness.c` (`make freestanding-dns-harness`).
+  The UDP query engine itself is otherwise identical (dual-family A+AAAA, 0x20, EDNS0, cookies,
+  the bounds-safe parser). The DoT/TCP hook above is the stream helper these limitations drop.
+- **Connected-socket assumptions.** Connected is a mode (§7), never assumed.
+- **fd exposure.** Raw-handle (fd) leaks are provider-specific; providers without fds (lwIP/EFI)
+  report the absence rather than fabricate one.
+
+---
+
+## 12. Conformance gates
+
+A backend conforms to Tier-1 iff, over that backend (readiness natively; completion via
+`pollcomp`/`iouring`/`iocp`; lwIP-raw + EFI via their harnesses):
+
+1. **Atomic send**, a `payload_capacity`-fits packet returns `ACCEPTED` and arrives whole; an
+   over-capacity packet returns `TOO_LARGE` and is never partially sent.
+2. **Backpressure**: filling `slot_count` send slots returns `WOULD_BLOCK` with no state
+   change; retiring a send frees a slot and `on_writable` fires on the full→non-full transition
+   (`on_drain` only on non-empty→empty); no packet is silently dropped under backpressure.
+3. **Serial recv, one per operation**: at most one receive operation is in flight at any
+   instant (a readiness interest is an armed source, not an op); a burst is delivered
+   one-datagram-per-callback in order per source, pause/close re-checked between operations.
+4. **Strict pause**: after `pause`, no further recv is posted; a completion posted before pause
+   is held and delivered exactly once on `resume`.
+5. **Truncation**, an oversized datagram is delivered with `KL_DGRAM_TRUNCATED` and clipped
+   `len`, never as a complete packet (explicit IOCP test).
+6. **Source present**: every delivery carries `peer`; an unconnected socket rejects a spoofed
+   source at the consumer (DNS-style filter test).
+7. **Close/detachment**: `close_begin` drains then detaches; `cancel` retires in-flight ops;
+   `on_close` fires exactly once after physical retirement; no leak/UAF under ASan+LSan with an
+   op in flight at close (the audit's completion-backend hazard).
+8. **Lifetime**: no provider operation references the object or its buffers after `on_close`;
+   with an op in flight at close, teardown reaps/cancels it before releasing the object
+   (ASan+LSan clean). A completion after legal reuse is impossible under strict detachment.
+9. **Capability honesty**: `kl_datagram_caps` matches actual behavior. A **required** feature
+   the caller explicitly requests but the object lacks MUST fail and send nothing;
+   `KL_DATAGRAM_UNSUPPORTED` on send (non-NULL `msg->local` without source-pin; per-packet
+   TOS/ECN without TOS) or a configuration/init error at setup (connected-mode, multicast/
+   broadcast config without support). Only **optional receive metadata** may be absent (e.g.
+   `local` when pktinfo is off). A capability is never silently ignored.
+
+The stream conformance suite (`docs/contracts/stream.md`) is the template. The datagram suite
+(`tests/test_datagram_socket.c`, `test_datagram_open.c`, `test_datagram_batch.c`,
+`test_datagram_multicast.c`, `test_datagram_life.c`, `test_dgram_{close,core,recv,recv_classify,send,slots}.c`,
+`test_udp_cmsg.c`, plus the live/public end-to-end suites `test_datagram_live.c` /
+`test_datagram_public.c`) adds packet-integrity, truncation, and source-presence gates, run over
+readiness (`make test`) and the completion backends (pollcomp, io_uring via `IOURING_TEST_SUITES`,
+IOCP on Windows CI).
+
+---
+
+## Architectural placement
+
+```
+Protocols / applications
+    ├── KlStream       ordered byte transport          (docs/contracts/stream.md)
+    ├── KlListener     stream admission
+    ├── KlConnectOp    outbound stream establishment
+    └── KlDatagram     atomic message transport         (this contract)
+             │
+             └── UDP / Unix datagram / lwIP UDP / EFI UDP   (KlDatagramOps providers)
+```
+
+`KlDatagram` completes the transport layer as a sibling of `KlStream`: same axes, same
+lifecycle disciplines, a deliberately different data contract. QUIC, when it comes, sits
+*above* `KlDatagram` as a consumer.

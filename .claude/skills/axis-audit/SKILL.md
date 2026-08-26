@@ -1,6 +1,6 @@
 ---
 name: axis-audit
-description: Audit KEEL's networking architecture — verify the event axis (readiness/completion), the socket/platform axis, and the protocol layer stay orthogonal; produce a findings report and only narrowly-scoped low-risk fixes. Use to assess/harden the event↔socket↔protocol separation.
+description: Audit KEEL's networking architecture; verify the event axis (readiness/completion), the socket/platform axis, and the protocol layer stay orthogonal; produce a findings report and only narrowly-scoped low-risk fixes. Use to assess/harden the event↔socket↔protocol separation.
 user-invocable: true
 ---
 
@@ -10,7 +10,7 @@ Review the KEEL codebase and verify its networking architecture consistently pre
 intended separation between **(1) the event model, (2) the socket/platform implementation,
 (3) the protocol layer.**
 
-**Target:** $ARGUMENTS (default: the whole repo — `src/`, `parsers/`, `include/keel/`, `tests/`).
+**Target:** $ARGUMENTS (default: the whole repo; `src/` incl. `src/protocols/`, `include/keel/`, `tests/`).
 
 **Do not begin with a large refactor.** First inspect the repo, identify the relevant modules
 and abstractions, trace representative execution paths, and produce a concrete findings report.
@@ -18,21 +18,21 @@ Only make narrowly-scoped fixes where the intended design is clear and the chang
 **Do not modify code until you can explain the current architecture and trace at least one
 readiness path and one completion path end to end.**
 
-Write the report to `docs/keel_axis_audit.md` (prepend a new dated pass if the file exists,
-mirroring `docs/keel_audit.md`).
+Write the report to `docs/archive/audits/keel_axis_audit.md` (prepend a new dated pass if the file exists,
+mirroring `docs/archive/audits/keel_audit.md`).
 
 ---
 
 ## How to run it (operational)
 
 1. **Map first.** Identify the event backends, socket providers, the abstract seams, and the
-   protocol modules (see "Repo axis map" below — verify it against current code; it drifts).
+   protocol modules (see "Repo axis map" below; verify it against current code; it drifts).
 2. **Trace before judging.** Trace one readiness path (epoll/kqueue) and one completion path
    (io_uring/pollcomp) for each of: accept, receive, send+backpressure, close-with-outstanding-work.
 3. **Exercise both axes.** Readiness runs natively (`make` = epoll/kqueue; `make BACKEND=poll`).
-   The completion axis has a **portable test double** — `BACKEND=pollcomp` (a `poll()` facade
+   The completion axis has a **portable test double**; `BACKEND=pollcomp` (a `poll()` facade
    over `completion.h`) runs the completion driver on macOS/Linux under ASan. The production
-   completion backend is `BACKEND=iouring` (Linux) — run it in an **Apple `container` Linux VM**
+   completion backend is `BACKEND=iouring` (Linux); run it in an **Apple `container` Linux VM**
    (see the `apple-container-for-linux` memory: kernel 6.18, unrestricted io_uring; Docker
    Desktop's shared VM blocks io_uring). IOCP (`BACKEND=iocp`) is Windows-only.
 4. **Use the sanitizers.** The strongest checks for the completion axis:
@@ -41,7 +41,7 @@ mirroring `docs/keel_audit.md`).
    `make BACKEND=iouring test-iouring` (the curated completion unit-suite gate). A prior pass
    caught a real watch leak this way that the plain smokes missed. Also `make cppcheck`,
    `make analyze`, `make debug && make test`.
-5. **Prove protocol independence mechanically** — grep protocol TUs for platform networking
+5. **Prove protocol independence mechanically**: grep protocol TUs for platform networking
    headers / event-engine symbols (see Goal 4). A passing grep is a real finding.
 6. **Scope fixes tightly.** One coherent change at a time; compile + run the most relevant
    tests after each. Escalate anything needing a public-API change to a finding, not a fix.
@@ -50,35 +50,36 @@ mirroring `docs/keel_audit.md`).
 
 ## Repo axis map (verify against current code)
 
-**Event axis** — `include/keel/event.h` (readiness interface) + `src/event_caps.h` (capability
+**Event axis**: `include/keel/event.h` (readiness interface) + `src/event_caps.h` (capability
 negotiation, `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) + `src/completion.h` +
-`src/completion_driver.c` (the platform-independent completion axis + generic connection driver)
-+ `src/io_engine.h` (the run-loop dispatch seam). Backends, Makefile-selected via `BACKEND=`:
+`src/completion_core.c` (the platform-independent completion axis + generic connection driver)
++ `src/completion_dispatch.c` / `src/completion_io.h` (the run-loop completion dispatch seam; the old io_engine has been retired). Backends, Makefile-selected via `BACKEND=`:
 - **Readiness:** `event_epoll.c` (Linux default), `event_kqueue.c` (macOS default),
   `event_wsapoll.c` (Windows default), `event_poll.c` (universal fallback).
-- **Completion:** `event_iouring.c` (Linux, `BACKEND=iouring` — completion-native SQE/CQE),
+- **Completion:** `event_iouring.c` (Linux, `BACKEND=iouring`; completion-native SQE/CQE),
   `event_iocp.c` (Windows, `BACKEND=iocp`), `event_pollcomp.c` (portable `poll()` facade,
-  `BACKEND=pollcomp` — the CI/ASan test double). Each backend implements `kl_event_caps` +
+  `BACKEND=pollcomp`; the CI/ASan test double). Each backend implements `kl_event_caps` +
   `kl_event_native_provider` (auto-wires its overlapped provider) + the `completion.h` post/drain
   contract.
 
-**Socket axis** — `src/socket.h` (the `KlSocketProvider` vtable: `KlSocketOps *ops; void *ctx;`
+**Socket axis**: `src/socket.h` (the `KlSocketProvider` vtable: `KlSocketOps *ops; void *ctx;`
 + capability flags incl. `KL_SOCK_CAP_OVERLAPPED`) with providers `socket_posix.c` and
 `socket_winsock.c`; the overlapped providers (`kl_socket_provider_iouring/iocp/pollcomp`) live in
 their event TUs. Native handle is `KlSocketHandle` (`include/keel/handle.h`, pointer-width
 `intptr_t`, `KL_INVALID_SOCKET` sentinel, `kl_handle_valid()`). Selected on `KlEventCtx.sockets`
-+ public `KlConfig.sockets`/`KlClientConfig.sockets`.
++ public `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`.
 
-**Protocol layer** — `connection.c` (+ `conn_internal.h` model-blind core:
-`kl_conn_dispatch_request`/`kl_conn_ingest_body`/`kl_conn_send_complete`), `h2.c`,
-`websocket.c`, `client.c`, `h2_client.c`, `websocket_client.c`, `sse.c`, the `KlTls` vtable
-(`tls.h`), body readers, `response.c`. These sit above both axes and go through `conn_read`/
-`conn_write` (internal.h) + the socket seam.
+**Protocol layer** (all under `src/protocols/http/` unless noted): `http_connection.c` (+
+`http_conn_internal.h` model-blind core: `kl_http_conn_dispatch_request`/`kl_http_conn_ingest_body`/
+`kl_http_conn_send_complete`), `http2_server.c`, `websocket.c`, the `http_client_*` TUs,
+`http2_client.c`, `websocket_client.c`, `http_sse.c`, the `KlTls` vtable (`tls.h`), body readers,
+`http_response.c`. These sit above both axes and go through `conn_read`/`conn_write`
+(`http_internal.h`) + the socket seam.
 
-The event↔socket negotiation is `kl_event_ctx_sockets_compatible()` (async.c): a completion loop
+The event/socket negotiation is `kl_event_ctx_sockets_compatible()` (`src/event_ctx.c`): a completion loop
 requires an overlapped provider; a readiness loop requires a native-fd provider. See
-`docs/pal_transformation_design.md` (master roadmap), `docs/phase8*_*.md`,
-`docs/phase8f5_iouring_default_migration_design.md`.
+`docs/archive/designs/pal_transformation_design.md` (master roadmap), the `docs/archive/phases/phase8*` design docs,
+`docs/archive/phases/phase8f5_iouring_default_migration_design.md`.
 
 ---
 
@@ -118,7 +119,7 @@ coupling that leaks upward.
    in `is_readable`/`is_writable`/epoll flags/kqueue filters/IOCP keys/`OVERLAPPED`/SQEs/CQEs/
    re-arming/native descriptor types. Also flag the opposite: an API claiming model-neutrality
    that can't express completion state, cancellation, partial completion, or op ownership.
-   Readiness/completion MAY be explicit event-axis concepts — protocols just need a stable
+   Readiness/completion MAY be explicit event-axis concepts; protocols just need a stable
    Keel-level contract, not platform mechanics.
 4. **Protocols remain above both axes.** Protocol modules must: use common socket/stream + event
    abstractions; NOT include platform networking headers; NOT call epoll/kqueue/WSAPoll/IOCP/
@@ -184,7 +185,7 @@ coupling that leaks upward.
 - **Completion receive:** runtime requests input → op + buffer created → submitted → completion
   returned → normalized → consumed → next recv submitted or paused.
 - **Accept:** one readiness backend + one completion backend.
-- **Send + backpressure:** a send larger than one writable op — how partial progress + backpressure
+- **Send + backpressure:** a send larger than one writable op; how partial progress + backpressure
   work under both models.
 - **Close with outstanding work:** receive pending, send queued, timeout armed, an event possibly
   already queued.
@@ -233,23 +234,23 @@ APIs before documenting the contract + migration impact; do broad formatting/unr
 
 ## Expected output (report sections)
 
-1. **Current architecture map** — files, modules, types, vtables, factories, build flags; how the
+1. **Current architecture map**: files, modules, types, vtables, factories, build flags; how the
    event axis, socket axis, and protocol layer connect.
-2. **Execution-path traces** — the readiness + completion paths above, with real names.
-3. **Findings** — per finding: severity (critical/high/medium/low/informational); affected
+2. **Execution-path traces**: the readiness + completion paths above, with real names.
+3. **Findings**: per finding: severity (critical/high/medium/low/informational); affected
    files+symbols; the architectural principle; why correct/incorrect; a concrete failure scenario;
    the smallest reasonable fix.
-4. **Compatibility matrix** — for `Linux sockets + epoll`, `Linux sockets + io_uring`,
+4. **Compatibility matrix**: for `Linux sockets + epoll`, `Linux sockets + io_uring`,
    `Darwin sockets + kqueue`, `Winsock + WSAPoll`, `Winsock + IOCP` (+ pollcomp double): mark
    implemented / buildable / tested / production-ready / incomplete / unsupported-by-design. Do
    NOT infer production-readiness merely because code exists.
-5. **Contract definition** — concise proposed internal contract for socket ownership, event-loop
+5. **Contract definition**: concise proposed internal contract for socket ownership, event-loop
    affinity, readiness notification, completion delivery, operation lifetime, cancellation,
    timeout races, error normalization, close semantics, backpressure. Base it on the existing
    design, not a new architecture.
-6. **Recommended incremental roadmap** — immediate correctness fixes / test coverage / small
+6. **Recommended incremental roadmap**: immediate correctness fixes / test coverage / small
    architectural cleanup / deferred improvements.
-7. **Changes made** — every modified file + why (if any). Keep minimal; compile after each
+7. **Changes made**: every modified file + why (if any). Keep minimal; compile after each
    coherent group; run the most relevant tests.
 
 ## Decision standard

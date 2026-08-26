@@ -7,7 +7,7 @@
  * KlHttpClientPool to the pooled request variants.
  *
  * Pool sizes are small (32-128), so entries use a flat array with
- * linear scan — cache-friendly and simpler than a hash map.
+ * linear scan: cache-friendly and simpler than a hash map.
  */
 
 #ifndef KEEL_HTTP_CLIENT_POOL_H
@@ -86,7 +86,7 @@ struct KlHttpClientPool {
  * @brief Initialize a connection pool.
  * @param pool   Pool to initialize (caller-owned storage).
  * @param cfg    Config (NULL for defaults).
- * @param alloc  Allocator (borrowed — must outlive pool).
+ * @param alloc  Allocator (borrowed, must outlive pool).
  * @param ev_ctx Event context for idle timers (NULL = manual eviction).
  * @return 0 on success, -1 on error.
  */

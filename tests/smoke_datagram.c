@@ -1,12 +1,12 @@
 /*
- * smoke_datagram.c — public KlDatagram link + loopback roundtrip smoke (7B-7).
+ * smoke_datagram.c: public KlDatagram link + loopback roundtrip smoke.
  *
- * NOT a utest suite — a standalone program built by the `smoke-datagram` Makefile target, the
+ * NOT a utest suite: a standalone program built by the `smoke-datagram` Makefile target, the
  * Windows-portable analogue of smoke_udp for the PUBLIC KlDatagram API. It preps two datagram fds
  * THROUGH the socket provider (the KlDatagram contract: caller socket()/configure()/bind before init),
  * runs one real datagram over 127.0.0.1, and tears down cleanly. Built over the default provider so it
  * is winsock-aware on Windows; on BACKEND=iocp it is the runtime proof of the facade's IOCP fd↔loop
- * registration (7B-7 kl_event_add/CreateIoCompletionPort) — the completion path pollcomp/io_uring
+ * registration (kl_event_add/CreateIoCompletionPort): the completion path pollcomp/io_uring
  * cannot exercise (their kl_event_add is inert). Runs on POSIX (kqueue/epoll readiness) too.
  */
 
@@ -75,7 +75,7 @@ int main(void) {
     KlDatagramConfig rc = { .ctx = &ctx, .alloc = &alloc, .sockets = sp, .fd = rxfd,
                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
     /* tx grants source-pin + TOS so the second send drives the completion backend's overlapped
-     * cmsg path (on IOCP: WSASendMsg with an op-resident WSAMSG/WSABUF/name/control — §1b), not the
+     * cmsg path (on IOCP: WSASendMsg with an op-resident WSAMSG/WSABUF/name/control, §1b), not the
      * plain WSASendTo. */
     KlDatagramConfig tc = rc; tc.fd = txfd;
     tc.want_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
@@ -87,13 +87,13 @@ int main(void) {
     KlSockAddr dst;
     unsigned char ipb[4]; inet_pton(AF_INET, "127.0.0.1", ipb); kl_sockaddr_from_ipv4(&dst, ipb, port);
 
-    /* (1) plain send — the WSASendTo overlapped path. */
+    /* (1) plain send: the WSASendTo overlapped path. */
     KlDatagramMessage m = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1, .peer = &dst, .tos = -1 };
     if (kl_datagram_send(&tx, &m) != KL_DATAGRAM_ACCEPTED) { fprintf(stderr, "smoke-datagram: send refused\n"); return 1; }
     for (int i = 0; i < 200 && g_got < 1; i++) kl_event_ctx_run(&ctx, 16, 10);
     int ok = (g_got == 1 && g_len == sizeof(SMOKE_MSG) - 1 && memcmp(g_buf, SMOKE_MSG, g_len) == 0);
 
-    /* (2) source-pinned + TOS send — the overlapped cmsg (WSASendMsg) path; its op-resident descriptor
+    /* (2) source-pinned + TOS send: the overlapped cmsg (WSASendMsg) path; its op-resident descriptor
      * set must survive the post until the terminal completion retires it exactly once (§1b lifetime). */
     KlSockAddr loc; kl_sockaddr_parse(&loc, "127.0.0.1", 0);
     KlDatagramMessage cm = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1,
@@ -105,7 +105,7 @@ int main(void) {
 
     /* (3) §1b cancellation / late-completion lifetime: post a source-pin control send, then close the
      * datagram WITHOUT draining the send completion. The op-resident descriptor set (on IOCP: WSAMSG,
-     * WSABUF, name, control — kernel-owned while the overlapped send is in flight) must stay valid until
+     * WSABUF, name, control: kernel-owned while the overlapped send is in flight) must stay valid until
      * the close coordinator cancels and drains the terminal completion, retiring the single op exactly
      * once → DETACHED, no UAF / no leak. Runs on every completion backend (IOCP is the target gate). */
     KlDatagram tx2; memset(&tx2, 0, sizeof(tx2));
@@ -117,7 +117,7 @@ int main(void) {
         KlDatagramMessage cm2 = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1,
                                   .peer = &dst, .local = &loc, .tos = 0x28 };
         KlDatagramSendStatus sr2 = kl_datagram_send(&tx2, &cm2);
-        kl_datagram_close_begin(&tx2);          /* close before pumping — send op still in flight */
+        kl_datagram_close_begin(&tx2);          /* close before pumping: send op still in flight */
         pump_close(&ctx, &tx2);
         cancel_ok = (sr2 == KL_DATAGRAM_ACCEPTED &&
                      kl_datagram_close_state(&tx2) == KL_DGRAM_CLOSE_CLOSED &&
@@ -127,7 +127,7 @@ int main(void) {
         kl_sock_close(sp, txfd2);
     }
 
-    /* clean close: graceful → retire → deregister → close fd once → DETACHED (the 7B-7 lifecycle) */
+    /* clean close: graceful → retire → deregister → close fd once → DETACHED (the registration lifecycle) */
     kl_datagram_close_begin(&rx); pump_close(&ctx, &rx);
     kl_datagram_close_begin(&tx); pump_close(&ctx, &tx);
     int detached = (kl_datagram_close_result(&rx) == KL_DGRAM_DETACHED &&

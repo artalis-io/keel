@@ -1,14 +1,14 @@
-# integrations/tls/mbedtls — standalone build of the mbedTLS KlTls adapter.
+# integrations/tls/mbedtls: standalone build of the mbedTLS KlTls adapter.
 #
 # Produces libkeel_mbedtls.a, a static archive containing just the adapter
 # object. Bring-your-own mbedTLS (3.x); nothing here is vendored or downloaded.
-# The core `make` / `make test` never build this — it is opt-in.
+# The core `make` / `make test` never build this; it is opt-in.
 #
 # Usage (from this directory or via the repo root's `make integration-mbedtls`):
 #   make MBEDTLS_DIR=$(brew --prefix mbedtls)        # build libkeel_mbedtls.a
 #   make test MBEDTLS_DIR=$(brew --prefix mbedtls)   # relocation/link smoke
 #
-# Link into a consumer (order matters — adapter before core, mbedTLS last):
+# Link into a consumer (order matters: adapter before core, mbedTLS last):
 #   cc app.c -L<keel> -lkeel -L. -lkeel_mbedtls \
 #            -L$(MBEDTLS_DIR)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 #

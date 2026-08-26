@@ -1,5 +1,5 @@
 /*
- * connection_pool.c — Connection pool internals demo
+ * connection_pool.c: Connection pool internals demo
  *
  * Concepts: kl_http_conn_pool_init, kl_http_conn_acquire, kl_http_conn_release,
  * pool exhaustion, active count tracking, kl_monotonic_ms.

@@ -7,7 +7,7 @@
  * Internal to KEEL, not part of the public API.
  *
  * State 0 = valid/accept, state 12 = reject/error.
- * Call kl_utf8_validate incrementally — pass state across calls.
+ * Call kl_utf8_validate incrementally: pass state across calls.
  */
 
 #include <stddef.h>

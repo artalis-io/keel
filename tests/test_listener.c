@@ -1,5 +1,5 @@
 /*
- * test_listener.c — Phase-B step 5: accept-side listener state machine (src/listener.h),
+ * test_listener.c: accept-side listener state machine (src/listener.h),
  * exercised in isolation with mock credit/arm/accept/dispose hooks (no live sockets).
  *
  * Covers the four distinct lifetimes: listener lifetime (start/close/detach), pool-owned
@@ -71,7 +71,7 @@ static int lt_arm(void *ctx) {
         kl_listener_on_accept_failed(m->l, m->arm_err);
         return 0;
     }
-    return 0;   /* async — awaiting an external completion */
+    return 0;   /* async; awaiting an external completion */
 }
 static void lt_disarm(void *ctx) { LT *m = ctx; m->disarm_calls++; }
 static void lt_cancel(void *ctx) { LT *m = ctx; m->cancel_calls++; }
@@ -149,7 +149,7 @@ UTEST(listener, backpressure_pauses_when_no_slot) {
 
 UTEST(listener, readiness_pause_disarms_then_resume_rearms) {
     /* Readiness backpressure must DROP the listen interest on pause (a level-triggered fd would
-     * otherwise keep firing), and re-arm on resume. Exposed by the live server wiring (step 6B-1). */
+     * otherwise keep firing), and re-arm on resume. Exposed by the live server wiring. */
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/0);
     m.slots = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);          /* reserves the one slot, arms */
@@ -169,12 +169,12 @@ UTEST(listener, notify_slot_free_noop_when_listening) {
     m.slots = 2;
     ASSERT_EQ(kl_listener_start(&l), 0);
     int arms = m.arm_calls;
-    kl_listener_notify_slot_free(&l);         /* not paused — no-op */
+    kl_listener_notify_slot_free(&l);         /* not paused; no-op */
     ASSERT_EQ(m.arm_calls, arms);
 }
 
 UTEST(listener, accepted_stream_lease_outlives_listener) {
-    /* Accept a connection, fully close+detach the listener, THEN release the lease — it must still
+    /* Accept a connection, fully close+detach the listener, THEN release the lease; it must still
      * reach the pool (the release capability is pool-owned, baked by value into the lease). */
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.slots = 2;
@@ -211,8 +211,8 @@ UTEST(listener, unbounded_no_credit_accounting) {
     ASSERT_EQ(m.reserve_calls, 0);            /* no reserve hook */
     kl_listener_on_accepted(&l, (KlSocketHandle)1000);
     ASSERT_EQ(m.accept_calls, 1);
-    ASSERT_EQ(m.arm_calls, 2);                /* keeps accepting — never paused */
-    kl_slot_lease_release(&m.last_lease);     /* NULL release — safe no-op */
+    ASSERT_EQ(m.arm_calls, 2);                /* keeps accepting; never paused */
+    kl_slot_lease_release(&m.last_lease);     /* NULL release; safe no-op */
     ASSERT_EQ(m.release_calls, 0);
 }
 
@@ -307,7 +307,7 @@ UTEST(listener, double_close_no_recancel) {
     KlListener l; LT m; lt_setup(&m, &l, 1);
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(kl_listener_close(&l), 0);
-    ASSERT_EQ(kl_listener_close(&l), 0);      /* idempotent — no second cancel */
+    ASSERT_EQ(kl_listener_close(&l), 0);      /* idempotent; no second cancel */
     ASSERT_EQ(m.cancel_calls, 1);
     kl_listener_on_accept_failed(&l, 0);
     ASSERT_EQ(m.close_calls, 1);
@@ -322,7 +322,7 @@ UTEST(listener, spurious_accept_disposed) {
     kl_listener_on_accepted(&l, (KlSocketHandle)3000);   /* real accept; then PAUSED (slot spent) */
     ASSERT_EQ(m.accept_calls, 1);
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
-    kl_listener_on_accepted(&l, (KlSocketHandle)3001);   /* spurious — no accept in flight */
+    kl_listener_on_accepted(&l, (KlSocketHandle)3001);   /* spurious; no accept in flight */
     ASSERT_EQ(m.accept_calls, 1);                        /* not handed off */
     ASSERT_EQ(m.dispose_calls, 1);                       /* fd disposed */
     ASSERT_EQ(m.disposed_fd, 3001);
@@ -366,7 +366,7 @@ UTEST(listener, reserve_error_closes) {
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.reserve_error = 1;                       /* reserve returns -1 (pool error) */
     ASSERT_EQ(kl_listener_start(&l), 0);
-    ASSERT_EQ(m.arm_calls, 0);                 /* never armed — reservation failed */
+    ASSERT_EQ(m.arm_calls, 0);                 /* never armed; reservation failed */
     ASSERT_EQ(m.close_calls, 1);              /* pool error closes the listener */
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
 }
@@ -383,7 +383,7 @@ UTEST(listener, no_reuse_until_reinit) {
     KlListener l; LT m; lt_setup(&m, &l, 0);
     ASSERT_EQ(kl_listener_start(&l), 0);
     kl_listener_close(&l);
-    ASSERT_EQ(kl_listener_start(&l), -1);     /* not IDLE — no restart without re-init */
+    ASSERT_EQ(kl_listener_start(&l), -1);     /* not IDLE; no restart without re-init */
     lt_setup(&m, &l, 0);                       /* re-init = reuse reset */
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_IDLE);
     ASSERT_EQ(kl_listener_start(&l), 0);
@@ -428,7 +428,7 @@ UTEST(listener, reentrant_close_from_arm_hook_no_completion) {
 
 UTEST(listener, reentrant_close_from_arm_hook_with_inline_completion) {
     /* The arm hook inline-accepts AND then reentrantly closes in the same invocation: exactly one
-     * handoff, detachment deferred until the arm frame unwinds, then fired once — no UAF. */
+     * handoff, detachment deferred until the arm frame unwinds, then fired once; no UAF. */
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.slots = 10; m.arm_accept_then_close = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);
@@ -460,7 +460,7 @@ UTEST(listener, reentrant_close_from_reserve_hook) {
     m.reserve_reentrant_close = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(m.detached_at_reserve, 0);      /* NOT detached inside the reserve hook */
-    ASSERT_EQ(m.arm_calls, 0);                /* never armed — reserve hook closed us */
+    ASSERT_EQ(m.arm_calls, 0);                /* never armed; reserve hook closed us */
     ASSERT_EQ(m.reserved_now, 0);             /* the acquired credit was returned, balanced */
     ASSERT_EQ(m.close_calls, 1);
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
@@ -474,7 +474,7 @@ UTEST(listener, double_lease_release_is_noop) {
     kl_listener_on_accepted(&l, (KlSocketHandle)1000);
     kl_slot_lease_release(&m.last_lease);
     ASSERT_EQ(m.release_calls, 1);
-    kl_slot_lease_release(&m.last_lease);     /* consumed — harmless no-op */
+    kl_slot_lease_release(&m.last_lease);     /* consumed; harmless no-op */
     ASSERT_EQ(m.release_calls, 1);
 }
 
@@ -488,7 +488,7 @@ UTEST(listener, reserved_slot_returned_on_readiness_close_while_armed) {
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
-/* ── Counted bounded-accept window (step 6B-3) — one reserved credit per posted accept ──────── */
+/* ── Counted bounded-accept window: one reserved credit per posted accept ──────────────────── */
 
 UTEST(listener, window_posts_up_to_window) {
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
@@ -554,18 +554,18 @@ UTEST(listener, window_exhaustion_pauses_then_resumes) {
     kl_slot_lease_release(&m.last_lease);       /* a connection closes → a credit frees */
     kl_listener_notify_slot_free(&l);
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
-    ASSERT_EQ(m.arm_calls, 3);                 /* resumed — posted one */
+    ASSERT_EQ(m.arm_calls, 3);                 /* resumed; posted one */
     kl_listener_close(&l);
     kl_listener_on_accept_failed(&l, 0);
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
 UTEST(listener, completion_exhaustion_queues_not_drops) {
-    /* 6B-3 2b-ii: when the pool is exhausted, a POST-DRIVEN completion listener must PAUSE — post
-     * NO accept — so a further connection waits in the kernel TCP backlog. It must NOT accept the
-     * fd and then drop it (the old comp_on_accept behavior). Proof: while exhausted no accept is
+    /* When the pool is exhausted, a POST-DRIVEN completion listener must PAUSE; post
+     * NO accept; so a further connection waits in the kernel TCP backlog. It must NOT accept the
+     * fd and then drop it (the accept-then-reset failure mode). Proof: while exhausted no accept is
      * posted (arm frozen) and nothing is disposed; when a slot frees, the listener posts and the
-     * queued connection is accepted — never reset. */
+     * queued connection is accepted; never reset. */
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
     m.slots = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);       /* reserve the one credit, post one accept */
@@ -575,7 +575,7 @@ UTEST(listener, completion_exhaustion_queues_not_drops) {
     ASSERT_EQ(m.accept_calls, 1);
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.arm_calls, 1);                  /* no further accept posted while exhausted */
-    ASSERT_EQ(m.dispose_calls, 0);             /* nothing accepted-and-dropped — it queues instead */
+    ASSERT_EQ(m.dispose_calls, 0);             /* nothing accepted-and-dropped; it queues instead */
 
     /* The first connection closes → its credit returns → the queued connection is now served. */
     kl_slot_lease_release(&m.last_lease);       /* slots: 0 → 1 */
@@ -611,7 +611,7 @@ UTEST(listener, set_accept_window_validation) {
 }
 
 UTEST(listener, readiness_rejects_window_over_one) {
-    /* A readiness arm is one persistent interest, not N posted ops — a window > 1 is rejected. */
+    /* A readiness arm is one persistent interest, not N posted ops; a window > 1 is rejected. */
     KlListener l; LT m; lt_setup(&m, &l, /*completion=*/0);
     ASSERT_EQ(kl_listener_set_accept_window(&l, 2), -1);
     ASSERT_EQ(kl_listener_set_accept_window(&l, 1), 0);    /* window 1 is fine */

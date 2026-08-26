@@ -1,15 +1,15 @@
 /*
- * raw_send_test.c — Stage B tests for the hardened lwIP-raw completion backend's SEND path.
+ * raw_send_test.c: tests for the hardened lwIP-raw completion backend's SEND path.
  *
- * Stage B redesigned the send + file-response path to stream through a BOUNDED, PREALLOCATED
- * per-connection transmit window (KL_LWR_TX_WIN) — no per-response malloc, no whole-payload
+ * The send + file-response path streams through a BOUNDED, PREALLOCATED
+ * per-connection transmit window (KL_LWR_TX_WIN): no per-response malloc, no whole-payload
  * copy, no whole-file read. These tests prove that, byte-exact + sanitizer-clean:
  *
  *   B1  small response                         -> byte-exact
  *   B2  zero-length response                   -> exact (empty body, 200)
  *   B3  64 KiB response                        -> byte-exact (length + checksum)
  *   B4  4 MiB response                         -> byte-exact (many pump/tcp_sent rounds)
- *   B5  24 MiB response (> old 16 MiB cap)     -> byte-exact (proves no size cap)
+ *   B5  24 MiB response                        -> byte-exact (proves no size cap)
  *   B6  multi-MiB FILE response                -> byte-exact + BOUNDED-MEMORY proof:
  *          peak live allocation stays ~ conn_cap*KL_LWR_TX_WIN + fixed overhead, INDEPENDENT
  *          of file size (a whole-file read or per-response send buffer would spike peak).
@@ -115,7 +115,7 @@ static void cnt_reset(void) {
 static size_t g_resp_size;            /* bytes the size handler should emit */
 
 /* Generate a deterministic pattern body of g_resp_size bytes. Uses kl_http_response_body_copy (a
- * COPY that survives the async send) — this DOES allocate on the response allocator (bounded by
+ * COPY that survives the async send): this DOES allocate on the response allocator (bounded by
  * the response size), which is separate from the SEND path. The bounded-memory / no-send-alloc
  * proofs use the FILE route (B6) where the response carries no in-memory body at all. */
 static void handle_size(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
@@ -196,7 +196,7 @@ typedef struct {
 
 /* Bounded-memory proof: transmit memory must NOT scale with file size. Rather than guess an
  * absolute bound (server-core per-conn buffering is a fixed baseline of a few MiB), the proof
- * sends TWO file sizes 4x apart and asserts the PEAK GROWTH during the send is ~identical — i.e.
+ * sends TWO file sizes 4x apart and asserts the PEAK GROWTH during the send is ~identical: i.e.
  * transmit memory is bounded by the fixed TX window, NOT the file. A whole-file read or per-
  * response send buffer would make the 4x-larger file's peak ~4x larger. */
 #define B6_FILE_SMALL  (4u * 1024u * 1024u)
@@ -246,7 +246,7 @@ static void s_advance(KlHttpServer *s) {
     s_build_req(&g_phases[g_phase_i]);
     g_started = 0; g_deadline = 2000;
     /* Await the previous connection's close before opening the next (single-slot accumulating
-     * client) — but NOT for the first phase (no prior connection to wait on, else deadlock). */
+     * client): but NOT for the first phase (no prior connection to wait on, else deadlock). */
     g_await_close = (g_phase_i > 0);
 }
 
@@ -278,7 +278,7 @@ static void s_poll(void *ud) {
             char buf[256];
             size_t n = kl_lwr_client_response(buf, sizeof(buf));
             int ok = (n > 0 && strstr(buf, " 200 ") != NULL && blen == 0);
-            if (ok) { printf("PASS B (%s) — empty body, 200, conn closed\n", ph->name);
+            if (ok) { printf("PASS B (%s): empty body, 200, conn closed\n", ph->name);
                       g_phase_i++; s_advance(s); }
             else { atomic_store(&g_s_fail, 1);
                    printf("B FAIL (%s): zero-length response not clean (blen %zu)\n", ph->name, blen);
@@ -298,7 +298,7 @@ static void s_poll(void *ud) {
         size_t peak = atomic_load(&g_cnt.peak);
         int peak_ok = (ph->peak_bound == 0) || (peak <= ph->peak_bound);
         if (ok && peak_ok) {
-            printf("PASS B (%s) — %zu bytes, checksum ok%s\n", ph->name, blen,
+            printf("PASS B (%s): %zu bytes, checksum ok%s\n", ph->name, blen,
                    ph->peak_bound ? ", peak-mem bounded" : "");
             if (ph->peak_bound)
                 printf("     peak live during send = %zu bytes (bound %zu, file %zu)\n",
@@ -333,7 +333,7 @@ static void *s_thread(void *arg) {
 static int run_send_phases(void) {
     cnt_reset();
     KlAllocator alloc = counting_alloc();
-    /* Small max_connections so the preallocated TX block (conn_cap*KL_LWR_TX_WIN) is small — the
+    /* Small max_connections so the preallocated TX block (conn_cap*KL_LWR_TX_WIN) is small: the
      * bounded-memory proof then has real teeth (peak must stay tiny vs a multi-MiB file). */
     KlHttpServerConfig cfg = { .port = SEND_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
@@ -397,7 +397,7 @@ static void lc_poll(void *ud) {
         }
     } else if (g_lc_stage == LC_HEALTHY) {
         if (kl_lwr_lc_saw_200()) {
-            printf("PASS B (server healthy after mid-send teardown) — full 200 served\n");
+            printf("PASS B (server healthy after mid-send teardown): full 200 served\n");
         } else {
             atomic_store(&g_lc_fail, 1);
             printf("B FAIL: server did not serve a full 200 after mid-send teardown\n");
@@ -501,7 +501,7 @@ static void fe_poll(void *ud) {
         size_t chk = 0, blen = kl_lwr_client_body(&chk, NULL, NULL);
         if (blen >= 1024) {
             if (blen == 1024 && chk == pat_checksum_of(1024))
-                printf("PASS B (server healthy after file read error) — 1024 bytes byte-exact\n");
+                printf("PASS B (server healthy after file read error): 1024 bytes byte-exact\n");
             else { atomic_store(&g_fe_fail, 1);
                    printf("B FAIL: post-error healthy body mismatch %zu\n", blen); }
             g_fe_stage = FE_DONE;
@@ -571,10 +571,10 @@ static int run_fail_alloc(void) {
         KlHttpServer s;
         int rc = kl_http_server_init(&s, &cfg);
         if (rc == 0) {
-            /* This fail point didn't hit a required alloc — clean up and try the next. */
+            /* This fail point didn't hit a required alloc: clean up and try the next. */
             kl_http_server_free(&s);
         } else {
-            any_fail_seen = 1;   /* init failed cleanly (no crash) — good */
+            any_fail_seen = 1;   /* init failed cleanly (no crash): good */
         }
     }
     /* Now a clean init (no failure) must succeed AND free cleanly, proving no stale active-ctx
@@ -600,12 +600,12 @@ static int run_fail_alloc(void) {
 /* A dedicated server + counting allocator sends TWO files 4x apart (B6_FILE_SMALL, B6_FILE_LARGE)
  * over the SAME server. Each roundtrip: snapshot a clean baseline (live, no send in flight), reset
  * the peak, run the roundtrip byte-exact, record peak GROWTH during the send. The proof: the 4x-
- * larger file's peak growth is within B6_PEAK_SLACK of the smaller file's — transmit memory is
+ * larger file's peak growth is within B6_PEAK_SLACK of the smaller file's: transmit memory is
  * bounded by the fixed TX window, NOT the file (a whole-file read would make it 4x larger). */
 #define FB_PORT 7814
 static KlHttpServer g_fbs;
 static atomic_int g_fb_finished, g_fb_fail;
-/* Stages: 0 = WARMUP (small file, growth discarded — forces all lazy per-conn server buffers to
+/* Stages: 0 = WARMUP (small file, growth discarded: forces all lazy per-conn server buffers to
  * be allocated so they don't count as "growth" in the measured stages); 1 = measure small; 2 =
  * measure large; 3 = compare + done. */
 static int      g_fb_stage;
@@ -665,7 +665,7 @@ static void fb_poll(void *ud) {
             size_t small = g_fb_growth[1], large = g_fb_growth[2];
             size_t delta = large > small ? large - small : small - large;
             if (delta <= B6_PEAK_SLACK) {
-                printf("PASS B (file bounded-mem) — %uMiB grew %zu, %uMiB grew %zu; "
+                printf("PASS B (file bounded-mem): %uMiB grew %zu, %uMiB grew %zu; "
                        "delta %zu <= slack %u => transmit memory bounded (NOT file-sized)\n",
                        B6_FILE_SMALL/(1024u*1024u), small, B6_FILE_LARGE/(1024u*1024u), large,
                        delta, B6_PEAK_SLACK);

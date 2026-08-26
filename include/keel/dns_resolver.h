@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 /**
- * dns_resolver.h — Built-in async DNS resolver over KlDatagram.
+ * dns_resolver.h: Built-in async DNS resolver over KlDatagram.
  *
  * Implements the KlResolver vtable using non-blocking UDP DNS queries, so it
  * drops into KlHttpClientConfig.resolver and replaces the blocking getaddrinfo
@@ -40,7 +40,7 @@ typedef struct {
 /**
  * @brief Create an async DNS resolver.
  *
- * @param ctx Event context (borrowed — must outlive the resolver).
+ * @param ctx Event context (borrowed; must outlive the resolver).
  * @param cfg Configuration (may be NULL for all defaults).
  * @return A KlResolver* to plug into KlHttpClientConfig.resolver, or NULL on error.
  *         Free via the vtable's destroy().
@@ -60,7 +60,7 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
  *
  * When @p expect_q is non-NULL, the response's question section must echo those
  * exact bytes (encoded QNAME + QTYPE + QCLASS, including 0x20 case) or the
- * response is rejected — binding the answer to the query, not just the ID.
+ * response is rejected: binding the answer to the query, not just the ID.
  * Pass NULL to skip question verification (answer extraction only).
  *
  * @param pkt          Response bytes.

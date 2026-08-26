@@ -1,5 +1,5 @@
 /*
- * client.c — HTTP/1.1 sync + async client
+ * client.c: HTTP/1.1 sync + async client
  *
  * Concepts: kl_http_client_request (sync), kl_http_client_start (async),
  * KlHttpClientConfig, KlHttpClientResponse, KlEventCtx standalone event loop.

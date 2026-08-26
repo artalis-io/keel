@@ -1,6 +1,6 @@
 /*
- * mbedtls_platform_uefi.h — install the UEFI backing for the freestanding mbedTLS
- * build used by U-4 (heap + entropy).
+ * mbedtls_platform_uefi.h: install the UEFI backing for the freestanding mbedTLS
+ * build (heap + entropy).
  *
  * mbedTLS, built with MBEDTLS_PLATFORM_MEMORY, calls a registered calloc/free pair
  * for ALL its heap. We register a pair backed by EFI AllocatePool(EfiBootServicesData)
@@ -17,8 +17,8 @@
 #include "efi_uefi.h"
 
 /* Bring up the mbedTLS platform: register EFI AllocatePool/FreePool as mbedTLS's calloc/free
- * (borrows @bs; it must outlive every TLS allocation) AND capture the U-8 cert-validity clock
- * snapshot (the fail-closed gate — see clock_snapshot.h). Call once, AFTER kl_uefi_platform_init()
+ * (borrows @bs; it must outlive every TLS allocation) AND capture the cert-validity clock
+ * snapshot (the fail-closed gate; see clock_snapshot.h). Call once, AFTER kl_uefi_platform_init()
  * (which installs Runtime Services GetTime). Idempotent after first success.
  *
  * Returns 0 on success, -1 if it CANNOT bring up TLS. Failure reasons include:
@@ -27,11 +27,11 @@
  *     is malformed, its year is below KL_UEFI_TIME_FLOOR_YEAR, or its timezone is unspecified with
  *     no configured offset (see wallclock_uefi.h / kl_uefi_set_unspecified_tz);
  *   - the mbedTLS calloc/free registration failed.
- * On -1 NO KlTlsCtx may be created — this is the structural gate that makes certificate
+ * On -1 NO KlTlsCtx may be created; this is the structural gate that makes certificate
  * validity-time enforceable, so a caller MUST treat -1 as "TLS unavailable" and not proceed. */
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs);
 
-/* F5: release the borrowed Boot Services pointer so no subsequent mbedTLS heap call
+/* Release the borrowed Boot Services pointer so no subsequent mbedTLS heap call
  * touches firmware. After this, calloc returns NULL and free is a no-op. Call on the
  * shutdown path AFTER destroying every KlTlsCtx/KlTls and BEFORE ExitBootServices.
  * Idempotent; safe to call even if init was never run. */

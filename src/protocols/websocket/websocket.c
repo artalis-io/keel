@@ -1,11 +1,10 @@
 /*
- * websocket.c — the SHARED WebSocket frame codec (RFC 6455 §5).
+ * websocket.c: the SHARED WebSocket frame codec (RFC 6455 §5).
  *
  * Just the incremental frame parser: used by BOTH the server (http_server_ws.c) and the
- * client (websocket_client.c). Split out of the old websocket.c in the Phase 10
- * UEFI server work (docs/phase10_uefi_server_design.md, S-1) so the WebSocket
- * SERVER logic (kl_ws_server_*) lives in http_server_ws.c — mirroring the client's
- * websocket_client.c and the new http_server_core.c / http2_server.c naming. A freestanding
+ * client (websocket_client.c). The WebSocket
+ * SERVER logic (kl_ws_server_*) lives in http_server_ws.c, mirroring the client's
+ * websocket_client.c and the http_server_core.c / http2_server.c naming. A freestanding
  * HTTP/1.1 server links neither this codec nor http_server_ws.c.
  */
 
@@ -75,7 +74,7 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
                               (size_t)fp->header_buf[3];
             mask_offset = 4;
         } else {
-            /* 64-bit length — check for overflow and absurd sizes */
+            /* 64-bit length: check for overflow and absurd sizes */
             uint64_t plen = 0;
             for (int i = 0; i < 8; i++)
                 plen = (plen << 8) | fp->header_buf[2 + i];
@@ -106,7 +105,7 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
     /* Return complete if no payload */
     if (fp->state == KL_WS_FRAME_COMPLETE) return 1;
 
-    /* Payload phase — just track how much has been consumed */
+    /* Payload phase: just track how much has been consumed */
     if (fp->state == KL_WS_FRAME_PAYLOAD) {
         size_t remaining = fp->payload_len - fp->payload_read;
         size_t avail = len - *consumed;

@@ -1,5 +1,5 @@
 /*
- * socket_posix.c — the POSIX socket provider (implements the socket.h seam).
+ * socket_posix.c: the POSIX socket provider (implements the socket.h seam).
  *
  * One provider per TU: sibling-to-be of socket_winsock.c / socket_lwip.c, the
  * analog of event_epoll.c/event_kqueue.c implementing the event.h interface.
@@ -8,13 +8,13 @@
  *
  * Defines the platform-default socket ops (kl_sockdef_*) the neutral socket.h
  * seam calls when there's no provider op, plus the POSIX provider (thin adapters
- * over those defaults). No raw syscall lives in socket.h — this TU owns them for
- * POSIX. See docs/pal_transformation_design.md and docs/phase6_winsock_design.md
- * §B.0.
+ * over those defaults). No raw syscall lives in socket.h; this TU owns them for
+ * POSIX. See docs/archive/designs/pal_transformation_design.md and
+ * docs/archive/phases/phase6_winsock_design.md §B.0.
  */
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE          /* accept4() — fold nonblock+cloexec into accept (Linux/BSD) */
+#define _GNU_SOURCE          /* accept4(): fold nonblock+cloexec into accept (Linux/BSD) */
 #endif
 #include "socket.h"
 #include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
@@ -35,7 +35,7 @@ const struct KlDatagramOps *kl_sockdef_dgram(void) { return &kl_socket_posix_dgr
 
 #define KL_SENDFILE_BUF 8192   /* pread+write fallback chunk (no-sendfile hosts) */
 
-/* ── Platform default socket ops (POSIX) — the kl_sockdef_* the seam calls ── */
+/* ── Platform default socket ops (POSIX): the kl_sockdef_* the seam calls ── */
 
 int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
     int flags = fcntl((int)fd, F_GETFL, 0);
@@ -74,7 +74,7 @@ int kl_sockdef_set_reuseport(KlSocketHandle fd, int on) {
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
 #else
     (void)fd; (void)on;
-    return -1;   /* not supported — best-effort, caller ignores */
+    return -1;   /* not supported; best-effort, caller ignores */
 #endif
 }
 int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
@@ -95,7 +95,7 @@ int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NOPUSH, &on, sizeof(on));
 #else
     (void)fd; (void)on;
-    return -1;   /* no cork primitive — best-effort, caller ignores */
+    return -1;   /* no cork primitive; best-effort, caller ignores */
 #endif
 }
 
@@ -119,7 +119,7 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
 }
 /* The default accept returns a non-blocking, close-on-exec socket. On Linux/BSD accept4
  * folds both flags into the accept syscall (two fewer per-connection syscalls on the
- * accept hot path — meaningful under connection churn); elsewhere (macOS) fall back to
+ * accept hot path, meaningful under connection churn); elsewhere (macOS) fall back to
  * accept + fcntl. Callers that use this default may skip the separate nonblock/cloexec
  * setup; a custom provider's accept op must honor the same contract or the caller applies
  * them itself. */
@@ -231,7 +231,7 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, 
 #endif
 }
 
-/* ── POSIX provider — thin adapters over the kl_sockdef_* defaults ──────── */
+/* ── POSIX provider: thin adapters over the kl_sockdef_* defaults ──────── */
 
 static int psx_set_nonblocking(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_set_nonblocking(fd);
@@ -350,7 +350,7 @@ KlError kl_sock_errno_to_error(int err) {
 #ifdef EHOSTDOWN
         case EHOSTDOWN:
 #endif
-            return KL_ERR_CONNECT;   /* refused / unreachable — connect-class */
+            return KL_ERR_CONNECT;   /* refused / unreachable: connect-class */
         case EADDRINUSE:
         case EADDRNOTAVAIL:
         case EACCES:
@@ -389,7 +389,7 @@ KlError kl_sock_errno_to_error(int err) {
 
 /* Hosted default I/O-result classifier: map the current `errno` (set by the last
  * failing send/recv/connect on this POSIX provider) to a portable KlIoStatus.
- * The ONLY errno read on the seam's I/O-result path — the inline kl_sock_io_status
+ * The ONLY errno read on the seam's I/O-result path; the inline kl_sock_io_status
  * dispatcher routes NULL-io_status providers here, so freestanding consumers never
  * touch errno themselves. errno==0 is treated as a clean peer close (a 0-length
  * read maps to KL_IO_CLOSED at the call site; -1 with errno==0 is degenerate). */
@@ -413,7 +413,7 @@ KlIoStatus kl_sockdef_io_status(void) {
 #if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
         case ENOTSUP:
 #endif
-            return KL_IO_UNSUPPORTED;   /* datagram M5.1: e.g. UDP GSO unavailable → caller falls back */
+            return KL_IO_UNSUPPORTED;   /* datagram: e.g. UDP GSO unavailable → caller falls back */
         default:
             return KL_IO_FATAL;
     }

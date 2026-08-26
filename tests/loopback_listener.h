@@ -2,13 +2,12 @@
 #define KEEL_TESTS_LOOPBACK_LISTENER_H
 
 /*
- * loopback_listener.h — a minimal accept-only loopback TCP listener for client tests.
+ * loopback_listener.h: a minimal accept-only loopback TCP listener for client tests.
  *
- * Shared test support (like mock_tls.h), extracted from the former
- * tests/test_tls_set_hostname_fail.c when it was split by client family (T-split). A
+ * Shared test support (like mock_tls.h) for client-family tests. A
  * background thread accepts and holds connections; with reply_http set it writes a canned
  * HTTP/1.1 200 to each accepted connection so a client that gets PAST the (identity) mock
- * TLS handshake would parse a success — the discriminator for fail-closed client behavior.
+ * TLS handshake would parse a success; the discriminator for fail-closed client behavior.
  */
 #include "net_compat.h"
 #include <string.h>
@@ -30,7 +29,7 @@ typedef struct {
 } Listener;
 
 /* A complete HTTP/1.1 200 response. With the passthrough mock TLS, a client that
- * gets PAST the (identity) handshake would parse this as a successful 200 — so a
+ * gets PAST the (identity) handshake would parse this as a successful 200; so a
  * client that instead aborts at set_hostname will NOT see it. This is what makes
  * the sync/async assertions discriminate the fail-closed behavior. */
 static const char kHttp200[] =
@@ -48,7 +47,7 @@ static void *listener_thread(void *arg)
         if (l->n_accepted < (int)(sizeof(l->accepted) / sizeof(l->accepted[0])))
             l->accepted[l->n_accepted++] = fd;
         if (l->reply_http) {
-            /* Drain a bit of the request (bounded — the client may have aborted
+            /* Drain a bit of the request (bounded, the client may have aborted
              * and sent nothing), then reply 200 (best-effort). */
             kl_test_set_rcvtimeo(fd, 300);
             char tmp[512];

@@ -1,11 +1,11 @@
 /*
- * http2_internal.h — INTERNAL HTTP/2 server state (PAL 8d-4).
+ * http2_internal.h: INTERNAL HTTP/2 server state.
  *
  * The per-connection (KlHttp2ServerConn) and per-stream (KlHttp2ServerStream) bodies live
  * here, not in the public <keel/http2_server.h>, so they are truly opaque to users: the
  * KlHttp2ServerSession vtable treats the connection as a void*, and only http_connection.c,
- * http_server.c and h2.c (plus the white-box h2 unit test) touch these fields. Keeping the
- * bodies internal means new internal state — e.g. the output-writer seam below — is not
+ * http_server.c and http2_server.c (plus the white-box h2 unit test) touch these fields. Keeping the
+ * bodies internal means new internal state (e.g. the output-writer seam below) is not
  * a public-API change.
  */
 #ifndef KEEL_SRC_HTTP2_INTERNAL_H
@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* ── HTTP/2 server drive + output-writer seam (moved from internal.h in R2a) ────
+/* ── HTTP/2 server drive + output-writer seam ────
  * The HTTP/2-specific cross-TU decls the HTTP core / completion driver call: the
  * plaintext-feed entry and the per-connection output writer. HTTP coordinates HTTP/2
  * through this seam (src/protocols/http/ → src/protocols/http2/, per the frozen §147 rule). */
@@ -29,7 +29,7 @@
  * flush produced output. Returns the next KlHttpConnState. Defined in http2_server.c. */
 KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len);
 
-/* HTTP/2 output boundary seam (8d-4): the h2 server writes produced frame bytes through a
+/* HTTP/2 output boundary seam: the h2 server writes produced frame bytes through a
  * per-connection writer; the default writes the socket (conn_write). A completion driver
  * installs its own buffering writer around a feed, then restores the default (fn == NULL).
  * Defined in http2_server.c. */
@@ -67,10 +67,10 @@ struct KlHttp2ServerConn {
     int num_streams;               /**< Number of active streams. */
     int max_streams;               /**< Maximum concurrent streams allowed. */
     int goaway_sent;               /**< Non-zero after GOAWAY sent. */
-    /* Output boundary seam (PAL 8d-4). Produced frame bytes flow through out_write; the
+    /* Output boundary seam. Produced frame bytes flow through out_write; the
      * default writes the socket (conn_write). A completion driver installs a buffering
      * writer (kl_http2_server_set_writer) to collect a feed's frames for one ordered
-     * overlapped send — symmetric with the WebSocket server's kl_drain boundary. The
+     * overlapped send, symmetric with the WebSocket server's kl_drain boundary. The
      * readiness path always uses the default writer, so it is unchanged. */
     KlHttp2WriteFn out_write;         /**< Output sink for produced frames. */
     void       *out_ctx;           /**< Context for out_write. */

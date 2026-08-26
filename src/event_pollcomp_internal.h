@@ -1,5 +1,5 @@
 /*
- * event_pollcomp_internal.h — the pollcomp completion backend's dual-role seam (RC-2).
+ * event_pollcomp_internal.h: the pollcomp completion backend's dual-role seam.
  *
  * event_pollcomp.c is a PURE runtime provider: static KlEventOps + KlCompletionOps +
  * a KlEventProvider factory (kl_event_provider_pollcomp), with NO kl_event_*_builtin /
@@ -10,11 +10,11 @@
  * To ALSO serve as the compiled-in BACKEND=pollcomp default it must still expose the
  * kl_event_*_builtin free functions + kl_comp_ops_builtin. Those live in a SEPARATE glue
  * TU (event_pollcomp_builtin.c), linked ONLY when BACKEND=pollcomp. The glue reaches the
- * provider's ops through the prefixed, non-static symbols declared here — so there is one
+ * provider's ops through the prefixed, non-static symbols declared here, so there is one
  * copy of the mechanics and the two roles never both define _builtin.
  *
- * Internal — not part of the public API. See event_lwip.c (the pure-provider template)
- * and completion.h / event_dispatch.c (the RC-1 dispatch mechanism this rides on).
+ * Internal: not part of the public API. See event_lwip.c (the pure-provider template)
+ * and completion.h / event_dispatch.c (the dispatch mechanism this rides on).
  */
 #ifndef KEEL_SRC_EVENT_POLLCOMP_INTERNAL_H
 #define KEEL_SRC_EVENT_POLLCOMP_INTERNAL_H
@@ -39,7 +39,7 @@ const struct KlSocketProvider *kl_pollcomp_ev_native_provider(const KlEventLoop 
  * kl_comp_ops_builtin (compiled-in path). */
 extern const KlCompletionOps kl_pollcomp_completion_ops;
 
-/* The runtime provider factory — hand to KlHttpServerConfig.event_provider / KlEventCtx to inject
+/* The runtime provider factory: hand to KlHttpServerConfig.event_provider / KlEventCtx to inject
  * pollcomp's completion axis into an otherwise-default libkeel. Internal/test-facing
  * (pollcomp is the completion test double), not the public keel/event.h surface. */
 const KlEventProvider *kl_event_provider_pollcomp(void);

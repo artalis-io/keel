@@ -1,7 +1,7 @@
 /*
- * stream_write.c — Phase-B KlStream write machinery (step 2A). See stream_write.h.
+ * stream_write.c: KlStream write machinery. See stream_write.h.
  *
- * Model-agnostic atomic write over a bounded, preallocated KlDrain queue (Step 1). Readiness
+ * Model-agnostic atomic write over a bounded, preallocated KlDrain queue. Readiness
  * drains via the queue's write_fn; completion posts one async send at a time via the submit
  * hook and pumps the next on the WRITE completion. TLS is above the raw stream (the adapter's
  * hooks encrypt); no TLS state here.
@@ -65,17 +65,17 @@ int kl_stream_set_submit(KlStream *s, KlStreamSubmitFn fn, void *ctx, int copyin
  * blocks a second submit until kl_stream_on_write_complete clears it. */
 static int stream_pump_completion(KlStream *s) {
     if (s->wq_err) return -1;
-    if (s->send_inflight) return 0;              /* one in flight — wait for its completion */
+    if (s->send_inflight) return 0;              /* one in flight; wait for its completion */
     size_t len = kl_drain_buffered(&s->wq);
     if (len == 0) return 0;
     const char *data = kl_drain_data(&s->wq);
     int r = s->submit_fn(s->submit_ctx, data, len);
     if (r != 0) { s->wq_err = 1; return -1; }    /* 0 = submitted; anything else = failed. */
     s->send_inflight    = 1;
-    s->send_cancel_requested = 0;                /* a genuinely new send op — not yet cancel-requested */
+    s->send_cancel_requested = 0;                /* a genuinely new send op; not yet cancel-requested */
     s->inflight_len     = len;
-    s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op (Finding 4) */
-    if (s->inflight_copying)                     /* backend copied — free the queue now, but */
+    s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op */
+    if (s->inflight_copying)                     /* backend copied: free the queue now, but */
         kl_drain_consume(&s->wq, len);           /* send_inflight still blocks the next submit */
     return 0;
 }
@@ -83,16 +83,16 @@ static int stream_pump_completion(KlStream *s) {
 KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
     if (!s || !s->wq_inited) return KL_STREAM_ERROR;
     if (s->wq_err) return KL_STREAM_ERROR;
-    if (s->wq_closing) return KL_STREAM_CLOSED;   /* close in progress — refuse new writes (step 3) */
+    if (s->wq_closing) return KL_STREAM_CLOSED;   /* close in progress; refuse new writes */
     /* Fail closed if the adapter never installed a transport hook (readiness write_fn or a
-     * completion submit) — otherwise the readiness path would call a NULL write_fn. Not sticky:
+     * completion submit); otherwise the readiness path would call a NULL write_fn. Not sticky:
      * a missing hook is a setup ordering issue, not a permanent stream error. Nothing is taken. */
     if (!s->submit_fn && !s->wq.write_fn) return KL_STREAM_ERROR;
     if (len == 0) return KL_STREAM_ACCEPTED;
     if (!data) return KL_STREAM_ERROR;
 
     if (s->submit_fn) {
-        /* Completion mode: buffer the whole write atomically (no synchronous direct send —
+        /* Completion mode: buffer the whole write atomically (no synchronous direct send;
          * output rides the async submit), then pump one send if none is in flight. */
         KlDrainWriteStatus ds = kl_drain_reserve_buffer(&s->wq, data, len);
         if (ds != KL_DRAIN_ACCEPTED) return map_drain(ds);
@@ -108,11 +108,11 @@ int kl_stream_flush(KlStream *s) {
     if (!s || !s->wq_inited || s->wq_err) return -1;
     /* Readiness-only: completion output leaves via the submit hook, not a synchronous flush.
      * Fail closed in completion mode, and when no readiness writer is installed (kl_drain_flush
-     * would call a NULL write_fn) — never crash on an accidental flush. */
+     * would call a NULL write_fn); never crash on an accidental flush. */
     if (s->submit_fn || !s->wq.write_fn) return -1;
     int r = kl_drain_flush(&s->wq);   /* 0 drained / 1 pending / -1 error */
     /* Readiness graceful close drains via successive writable flushes; a fully-drained queue means
-     * the write side is retired — notify so close can finalize (no-op unless closing). */
+     * the write side is retired; notify so close can finalize (no-op unless closing). */
     if (r == 0 && s->on_retire) s->on_retire(s);
     return r;
 }
@@ -123,14 +123,14 @@ int kl_stream_on_write_complete(KlStream *s, int ok) {
 
     if (!ok) {
         /* Delivery failed. The completion has arrived, so the provider operation has RETIRED
-         * and no longer references the queue. We still do NOT consume the queued bytes — but as
+         * and no longer references the queue. We still do NOT consume the queued bytes, but as
          * the stream's error/teardown policy (surface exactly what was unsent), not a
          * provider-lifetime requirement. (A copying backend already retired its copy at submit.)
          * Sticky error; do not pump. */
         s->send_inflight = 0;
         s->inflight_len  = 0;
         s->wq_err        = 1;
-        if (s->on_retire) s->on_retire(s);       /* send op physically retired — let close finalize */
+        if (s->on_retire) s->on_retire(s);       /* send op physically retired; let close finalize */
         return -1;
     }
     if (!s->inflight_copying)                     /* referencing backend: safe to free NOW */
@@ -149,7 +149,7 @@ size_t kl_stream_write_pending(const KlStream *s) {
     if (!s || !s->wq_inited) return 0;
     size_t q = kl_drain_buffered(&s->wq);
     /* A copying backend consumed the in-flight bytes from the queue at submit, but they are
-     * still pending (unacknowledged) on the wire — count them too, with an overflow guard. */
+     * still pending (unacknowledged) on the wire; count them too, with an overflow guard. */
     if (s->inflight_copying && s->send_inflight) {
         if (s->inflight_len > (size_t)-1 - q) return (size_t)-1;   /* saturate; not reachable */
         return q + s->inflight_len;
@@ -159,7 +159,7 @@ size_t kl_stream_write_pending(const KlStream *s) {
 
 int kl_stream_write_free(KlStream *s) {
     if (!s) return 0;
-    if (s->send_inflight) return -1;   /* op outstanding — freeing would UAF provider storage */
+    if (s->send_inflight) return -1;   /* op outstanding; freeing would UAF provider storage */
     kl_drain_free(&s->wq);
     s->wq_inited     = 0;
     s->inflight_len  = 0;

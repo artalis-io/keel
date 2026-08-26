@@ -1,5 +1,5 @@
 /*
- * e2e_socket.c — end-to-end HTTP/2 over a REAL loopback socket + KEEL event
+ * e2e_socket.c: end-to-end HTTP/2 over a REAL loopback socket + KEEL event
  * loop, both sides backed by the nghttp2 adapters.
  *
  * Unlike test_roundtrip.c (which wires the two sessions in memory), this drives:

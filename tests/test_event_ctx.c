@@ -113,7 +113,7 @@ UTEST(event_ctx, run_returns_0_on_timeout) {
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
 
-    /* No FDs registered — should timeout and return 0 */
+    /* No FDs registered: should timeout and return 0 */
     int n = kl_event_ctx_run(&ev, 8, 1);
     ASSERT_EQ(n, 0);
 

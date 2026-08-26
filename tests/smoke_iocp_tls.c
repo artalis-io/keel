@@ -1,11 +1,11 @@
 /*
- * smoke_iocp_tls.c — TLS-over-IOCP roundtrip on Windows (mock-TLS backend).
+ * smoke_iocp_tls.c: TLS-over-IOCP roundtrip on Windows (mock-TLS backend).
  *
  * Runtime-tests the IOCP-SPECIFIC TLS mechanics in event_iocp.c that pollcomp cannot
  * cover: the KL_IOCP_TLS_RECV op (WSARecv ciphertext into the op buffer), kl_comp_drain
  * feeding it to the engine (tls->feed_input) before surfacing a READ, and the overlapped
  * WSASend of the drained response ciphertext. It uses the portable identity mock TLS
- * (mock_tls.h) so no mbedTLS is needed — a KlHttpServer pinned to the IOCP completion loop
+ * (mock_tls.h) so no mbedTLS is needed; a KlHttpServer pinned to the IOCP completion loop
  * with the mock TLS, hit by the sync KlHttpClient using the same mock over loopback.
  *
  * Windows-only (references the internal IOCP provider); the Windows-IOCP CI job runs it.

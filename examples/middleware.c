@@ -1,14 +1,14 @@
 /*
- * middleware.c — Pre/post-body middleware, CORS, and access logging
+ * middleware.c: Pre/post-body middleware, CORS, and access logging
  *
  * Concepts: kl_http_server_use (pre-body), kl_http_server_use_post (post-body),
  * kl_http_cors_middleware, req->ctx for middleware-to-handler data passing.
  *
  * Middleware chain:
- *   1. request_log   (pre-body)  — logs method + path, stores start time
- *   2. CORS          (pre-body)  — allows http://localhost:3000
- *   3. auth_check    (pre-body)  — rejects /api/ without Authorization
- *   4. access_log    (post-body) — logs status + duration
+ *   1. request_log   (pre-body)  : logs method + path, stores start time
+ *   2. CORS          (pre-body)  : allows http://localhost:3000
+ *   3. auth_check    (pre-body)  : rejects /api/ without Authorization
+ *   4. access_log    (post-body) : logs status + duration
  *
  * Build:  make examples
  * Run:    ./examples/middleware
@@ -96,7 +96,7 @@ int main(void) {
     };
     if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
-    /* CORS — allow requests from localhost:3000 */
+    /* CORS: allow requests from localhost:3000 */
     static KlHttpCorsConfig cors;
     kl_http_cors_init(&cors);
     kl_http_cors_add_origin(&cors, "http://localhost:3000");

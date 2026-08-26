@@ -1,6 +1,6 @@
 /*
- * test_websocket_client_hostname_fail.c — Finding 1 regression (WebSocket client slice;
- * T-split of the former tests/test_tls_set_hostname_fail.c). The WebSocket client MUST fail
+ * test_websocket_client_hostname_fail.c: guards that the WebSocket client fails closed on a
+ * set_hostname failure (WebSocket client slice of the TLS set-hostname-fail tests). The WebSocket client MUST fail
  * closed when KlTls::set_hostname() returns -1 (see the HTTP slice for the full rationale).
  *
  * Strategy: a loopback listener (loopback_listener.h) accepts + holds; the ws client is

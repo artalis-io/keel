@@ -2,11 +2,11 @@
 #define KEEL_SRC_STREAM_IO_H
 
 /*
- * stream_io.h — raw (non-TLS) I/O over the embedded KlStream. Substrate.
+ * stream_io.h: raw (non-TLS) I/O over the embedded KlStream. Substrate.
  *
  * Thin inlines that read the socket provider off a KlStream and perform raw
  * recv/send/peek + io-status classification via the socket seam. Generic
- * transport primitives — no protocol knowledge. The TLS-aware connection I/O
+ * transport primitives: no protocol knowledge. The TLS-aware connection I/O
  * (conn_read/conn_write on a KlHttpConn) is an HTTP adapter ABOVE these and
  * lives in src/protocols/http/http_internal.h.
  */

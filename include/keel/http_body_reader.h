@@ -4,14 +4,14 @@
 #include <keel/allocator.h>
 #include <stddef.h>
 
-/** @brief Forward declaration — full definition in http_request.h. */
+/** @brief Forward declaration: full definition in http_request.h. */
 typedef struct KlHttpRequest KlHttpRequest;
 
 /**
  * @brief Pluggable body reader interface.
  *
  * The factory receives a fully-parsed KlHttpRequest with valid header pointers.
- * Inspect method, path, Content-Type, Content-Length, etc. in the factory —
+ * Inspect method, path, Content-Type, Content-Length, etc. in the factory;
  * header pointers into read_buf may be invalidated once the body spans
  * multiple socket reads.  Handlers should access body data exclusively
  * through the body reader, not through KlHttpRequest header fields.
@@ -36,7 +36,7 @@ typedef KlHttpBodyReader *(*KlHttpBodyReaderFactory)(KlAllocator *alloc,
                                               void *user_data);
 
 /**
- * @brief Built-in buffer reader — accumulates body into a growable buffer.
+ * @brief Built-in buffer reader: accumulates body into a growable buffer.
  *
  * Pass max_size as user_data via cast: (void *)(size_t)max_size.
  * Pass NULL (0) for unlimited.  Exceeding max_size returns -1 from

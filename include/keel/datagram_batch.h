@@ -2,18 +2,18 @@
 #define KEEL_DATAGRAM_BATCH_H
 
 /*
- * keel/datagram_batch.h — the OPTIONAL batch / GSO / GRO high-throughput extension for KlDatagram
- * (datagram M5). A strictly-additive layer ABOVE the single-datagram KlDatagram core; a consumer that
- * never includes this header is unaffected. See docs/datagram_m5_batch_extension_design.md.
+ * keel/datagram_batch.h: the OPTIONAL batch / GSO / GRO high-throughput extension for KlDatagram.
+ * A strictly-additive layer ABOVE the single-datagram KlDatagram core; a consumer that never includes
+ * this header is unaffected.
  *
- * M5.1 (this increment) ships ONLY the capability-gated, caller-preallocated batch OBJECT lifecycle
- * (create/free) — no send/recv wiring yet. The send (kl_datagram_send_batch / _send_gso) and receive
- * (kl_datagram_recv_attach_batch / _recv_segments) APIs land in M5.2 / M5.3.
+ * It ships the capability-gated, caller-preallocated batch OBJECT lifecycle (create/free), the
+ * transactional send (kl_datagram_send_batch / _send_gso), and the readiness receive
+ * (kl_datagram_recv_attach_batch / _recv_segments).
  *
  * Availability of the fast paths is provider support (kl_datagram_provider_caps): KL_DGRAM_CAP_RX_BATCH
- * / _TX_BATCH / _GSO / _GRO. Creation NEVER fails on capability absence — a missing provider block just
+ * / _TX_BATCH / _GSO / _GRO. Creation NEVER fails on capability absence; a missing provider block just
  * means the eventual send/recv takes a portable fallback; create fails only on invalid sizes, a
- * completion datagram requesting a receive direction, or OOM (§6.4).
+ * completion datagram requesting a receive direction, or OOM.
  */
 
 #include <keel/datagram.h>   /* KlDatagram, the KL_DGRAM_CAP_* bits */
@@ -43,7 +43,7 @@ typedef enum {
  * @return the batch, or NULL if: @p dg is invalid; @p dir is out of range; @p n_slots <= 0 or
  *  @p slot_bufsz == 0 or `n_slots * slot_bufsz` overflows; @p dg is a completion datagram and @p dir
  *  includes a receive direction (RECV or BOTH); or an allocation failed (every prior allocation is
- *  unwound — no leak). Capability absence alone NEVER fails creation.
+ *  unwound: no leak). Capability absence alone NEVER fails creation.
  */
 KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
                                           int n_slots, size_t slot_bufsz);
@@ -52,16 +52,16 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
  * @brief Free a caller-owned batch (a NULL @p b is a no-op).
  *
  * Returns 0 on success, or -1 while a GSO group from @p b is still in flight (it reads the group
- * buffer asynchronously — M5.2 §4.5). NEVER call on a batch consumed by a successful
- * kl_datagram_recv_attach_batch (the core owns it — M5.3 §5.4).
+ * buffer asynchronously). NEVER call on a batch consumed by a successful
+ * kl_datagram_recv_attach_batch (the core owns it).
  */
 int kl_datagram_batch_free(KlDatagramBatch *b);
 
 /**
- * @brief Send up to @p n datagrams through the core send queue as one transaction (M5.2a).
+ * @brief Send up to @p n datagrams through the core send queue as one transaction.
  *
  * Admits an accepted prefix of @p descs into the datagram's send queue (each datagram atomically
- * accepted or refused, subject to the configured slot-count / byte backpressure), then drains once —
+ * accepted or refused, subject to the configured slot-count / byte backpressure), then drains once:
  * on a readiness datagram via one sendmmsg over the head-run (or a portable single-send loop when
  * TX_BATCH is absent), on a completion datagram via the single-flight pump. @p b must be a SEND/BOTH
  * batch owned by @p dg (else -1 with @p stop = KL_DATAGRAM_ERROR).
@@ -70,19 +70,19 @@ int kl_datagram_batch_free(KlDatagramBatch *b);
  *  bad argument. On return @p stop (if non-NULL) classifies descs[accepted]: KL_DATAGRAM_ACCEPTED if
  *  all @p n were taken, else the refusal (WOULD_BLOCK = retry later / TOO_LARGE = permanent / ...).
  *  A per-datagram hard error while draining drops that datagram and is reported via
- *  kl_datagram_last_error — it does not fail the call.
+ *  kl_datagram_last_error; it does not fail the call.
  */
 int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
                            KlDatagramSendStatus *stop);
 
 /**
- * @brief Send one UDP GSO datagram (M5.2b): @p total_len bytes segmented into @p segment_size chunks,
+ * @brief Send one UDP GSO datagram: @p total_len bytes segmented into @p segment_size chunks,
  *  transmitted in one send_gso syscall where the provider supports it, else the same segments sent
  *  individually (a transparent per-segment fallback).
  *
  * @p b must be a SEND/BOTH batch owned by @p dg; its storage is the copy-once group buffer (capacity
  * `n_slots * slot_bufsz`). The payload is copied into it once and referenced until the group retires, so
- * @p b is busy (kl_datagram_batch_free returns -1) meanwhile — keep @p b AND @p dg alive until then.
+ * @p b is busy (kl_datagram_batch_free returns -1) meanwhile; keep @p b AND @p dg alive until then.
  *
  * The group is a FIFO citizen occupying `ceil(total_len/segment_size)` (>= 1) slots at the tail, sent
  * only when its first segment reaches the head. Atomic admission against BOTH the slot count and the
@@ -101,21 +101,21 @@ KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, co
 int kl_datagram_gso_active(const KlDatagram *dg);
 
 /**
- * @brief Attach a RECV batch to @p dg for high-throughput receive (M5.3): the readiness recv machine
+ * @brief Attach a RECV batch to @p dg for high-throughput receive: the readiness recv machine
  *  then draws logical datagrams from @p b's recvmmsg buffer (one recv_batch refill per readable edge,
  *  or a single recv when RX_BATCH is absent), delivering each to the on_recv callback one at a time.
  *  A GRO-coalesced buffer is split per-segment by default (O-A); register kl_datagram_recv_segments to
  *  receive the whole coalesced buffer instead.
  *
  * Attach BEFORE kl_datagram_recv_start, on a readiness datagram. @p b must be a RECV/BOTH batch owned
- * by @p dg. **On success (0) the core CONSUMES @p b** — the caller must never touch it again (no
+ * by @p dg. **On success (0) the core CONSUMES @p b**: the caller must never touch it again (no
  * kl_datagram_batch_free, no accessor; the core frees it at teardown). On failure (-1) @p b is
  * untouched and still caller-owned: a completion datagram, a wrong owner/direction, a re-attach, or
  * receiving already started.
  */
 int kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b);
 
-/** @brief Whole-coalesced-buffer GRO delivery callback (M5.3): a GRO buffer is delivered ONCE with its
+/** @brief Whole-coalesced-buffer GRO delivery callback: a GRO buffer is delivered ONCE with its
  *  @p segment_size, instead of the default per-segment split. `peer`/`local`/`flags` as on_recv. */
 typedef void (*KlDatagramRecvSegmentsFn)(void *ud, const void *data, size_t len, size_t segment_size,
                                          const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);

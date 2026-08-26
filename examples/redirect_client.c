@@ -1,5 +1,5 @@
 /*
- * redirect_client.c — HTTP redirect following (sync + async)
+ * redirect_client.c: HTTP redirect following (sync + async)
  *
  * Self-contained: starts a local server with redirect routes, then
  * demonstrates the redirect client API with automatic 3xx following.
@@ -106,7 +106,7 @@ static void sync_demo(void) {
     int rc = kl_http_redirect_request(&alloc, &cfg, &redir, "GET", url,
                                   NULL, 0, NULL, 0, &resp);
     if (rc < 0) {
-        printf("  error: %s (expected — chain needs 2 hops, limit is 1)\n",
+        printf("  error: %s (expected: chain needs 2 hops, limit is 1)\n",
                kl_strerror(resp.error));
     } else {
         kl_http_client_response_free(&resp);

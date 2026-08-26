@@ -96,7 +96,7 @@ UTEST(parser, parse_post_with_body) {
     ASSERT_TRUE(br != NULL);
     req.body_reader = br;
 
-    /* Resume parse with remaining data — body forwarded to reader */
+    /* Resume parse with remaining data; body forwarded to reader */
     size_t leftover = len - consumed;
     ASSERT_TRUE(leftover > 0);
     size_t consumed2 = 0;

@@ -1,5 +1,5 @@
 /*
- * async.c — Async suspend/resume with FD watchers
+ * async.c: Async suspend/resume with FD watchers
  *
  * Concepts: KlWatcher, KlAsyncOp, kl_async_suspend, kl_async_complete,
  * pipe-based completion signaling, kl_http_request_conn().
@@ -10,7 +10,7 @@
  * the connection.
  *
  * IMPORTANT: kl_async_complete() must be called from the event loop
- * thread. Never call it directly from a worker thread — use a pipe
+ * thread. Never call it directly from a worker thread; use a pipe
  * or the thread pool's done_fn to marshal back.
  *
  * Build:  make examples
@@ -74,7 +74,7 @@ static void delay_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
     /* Remove watcher before completing */
     kl_watcher_del(&ctx->server->ev, ctx->pipe_fds[0]);
 
-    /* Resume connection (must be on event loop thread — we are) */
+    /* Resume connection (must be on event loop thread, we are) */
     kl_async_complete(ctx->server, &ctx->op);
 }
 
@@ -149,7 +149,7 @@ static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
         pthread_attr_destroy(&attr);
-        /* Thread creation failed — resume connection with error */
+        /* Thread creation failed; resume connection with error */
         kl_http_response_json(&conn->res, 500,
                          "{\"error\":\"thread create failed\"}", 32);
         kl_async_complete(srv, &ctx->op);

@@ -1,5 +1,5 @@
 /*
- * udp_cmsg_win.c — the shared Winsock UDP control-message helpers (udp_cmsg_win.h).
+ * udp_cmsg_win.c: the shared Winsock UDP control-message helpers (udp_cmsg_win.h).
  *
  * kl_udp_win_get_recvmsg (WSARecvMsg extension fetch) + kl_udp_win_parse_local
  * (pktinfo local-address parse) are used by the Winsock datagram provider
@@ -14,7 +14,7 @@
 #include <mswsock.h>       /* WSAID_WSARECVMSG, LPFN_WSARECVMSG */
 #include <ws2tcpip.h>
 #include <string.h>
-#include <limits.h>        /* ULONG_MAX — bound the control-length size_t -> ULONG conversion */
+#include <limits.h>        /* ULONG_MAX: bound the control-length size_t -> ULONG conversion */
 
 /* Fetched lazily via WSAIoctl on any socket; process-wide, so cached once. */
 static LPFN_WSARECVMSG udp_fn_recvmsg = NULL;
@@ -34,7 +34,7 @@ LPFN_WSARECVMSG kl_udp_win_get_recvmsg(SOCKET s) {
 socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
     for (WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(msg); cm; cm = WSA_CMSG_NXTHDR(msg, cm)) {
         /* A runt/zeroed cmsg (cmsg_len < the header) can't advance the walk
-         * (WSA_CMSG_NXTHDR steps by ALIGN(cmsg_len), so 0 loops forever) — stop.
+         * (WSA_CMSG_NXTHDR steps by ALIGN(cmsg_len), so 0 loops forever); stop.
          * Happens on a control buffer never filled by a real recv (e.g. a cancelled
          * overlapped WSARecvMsg completing at teardown). */
         if (cm->cmsg_len < sizeof(WSACMSGHDR)) break;

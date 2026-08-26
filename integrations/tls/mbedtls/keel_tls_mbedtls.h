@@ -1,5 +1,5 @@
 /*
- * tls_mbedtls.h — mbedTLS backend for Keel's KlTls vtable
+ * tls_mbedtls.h: mbedTLS backend for Keel's KlTls vtable
  *
  * Provides TLS 1.2/1.3 server (and client) support using mbedTLS.
  * Supports mutual TLS (mTLS) with configurable client authentication.
@@ -54,7 +54,7 @@ typedef enum {
  * @param ca_path     Path to PEM-encoded CA cert for client verification (mTLS).
  *                    NULL to disable client authentication.
  * @param client_auth Client authentication mode (KlMtlsMode).
- * @param alloc       Allocator for context storage (borrowed — must outlive context).
+ * @param alloc       Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
@@ -67,7 +67,7 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
  * @brief Create a server TLS context from in-memory cert/key/(optional CA).
  *
  * Same as kl_tls_mbedtls_ctx_create() but reads cert, key, and (optional) mTLS
- * CA from buffers instead of files — for embedded certs where there is no
+ * CA from buffers instead of files, for embedded certs where there is no
  * filesystem path. Buffers are parsed and copied internally; the caller may free
  * them immediately after this returns.
  *
@@ -78,7 +78,7 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
  * @param ca_buf      mTLS CA bytes, or NULL to disable client authentication.
  * @param ca_len      CA length (0 when ca_buf is NULL).
  * @param client_auth Client authentication mode (KlMtlsMode).
- * @param alloc       Allocator for context storage (borrowed — must outlive it).
+ * @param alloc       Allocator for context storage (borrowed, must outlive it).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
@@ -90,10 +90,10 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create_from_buf(const unsigned char *cert_buf, size
  * @brief Create a client-side TLS context (for outbound connections).
  *
  * @param ca_path  Path to PEM-encoded CA cert bundle for server verification.
- *                 NULL skips certificate verification — requires explicit
+ *                 NULL skips certificate verification; requires explicit
  *                 opt-in via --skip-ca-bundle flag. Production deployments
  *                 should always provide a valid CA bundle path.
- * @param alloc    Allocator for context storage (borrowed — must outlive context).
+ * @param alloc    Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
@@ -111,9 +111,9 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
  * immediately after this call returns.
  *
  * @param ca_buf  PEM (or DER) CA bundle bytes. Must be non-NULL.
- * @param ca_len  Length in bytes. For PEM, must include the trailing NUL
- *                — mbedTLS requires PEM input to be NUL-terminated.
- * @param alloc   Allocator for context storage (borrowed — must outlive context).
+ * @param ca_len  Length in bytes. For PEM, must include the trailing NUL;
+ *                mbedTLS requires PEM input to be NUL-terminated.
+ * @param alloc   Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_client_ctx_create_from_buf(const unsigned char *ca_buf,
@@ -164,7 +164,7 @@ int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname);
  * kl_tls_mbedtls_ctx_create*() / _client_ctx_create*().
  *
  * The negotiated result is read back via the KlTls `alpn_protocol()` vtable
- * method after the handshake completes. See docs/alpn_policy.md.
+ * method after the handshake completes. See docs/contracts/alpn_policy.md.
  *
  * @param ctx    Server or client context.
  * @param protos NULL-terminated, preference-ordered protocol names.
@@ -176,19 +176,19 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * @brief Route the TLS transport's socket I/O through a KlSocketProvider.
  *
  * By default the socket-BIO does its ciphertext send/recv through the built-in
- * host socket ops (`kl_sockdef_*` — plain POSIX/Winsock). Set a provider here to
+ * host socket ops (`kl_sockdef_*`, plain POSIX/Winsock). Set a provider here to
  * send/recv through it instead (`kl_sock_send`/`kl_sock_recv`), so TLS runs over a
- * non-kernel stack whose descriptors are not host fds — e.g. lwIP
+ * non-kernel stack whose descriptors are not host fds, e.g. lwIP
  * (`kl_socket_provider_lwip()`), matching the socket/event providers the server or
  * client is already configured with. Passing NULL restores the default.
  *
  * Optional and usually unnecessary with a KlHttpServer/KlHttpClient: the framework
  * auto-wires each session's provider from `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`
  * via the `KlTls.set_socket_provider` vtable hook (which overrides this ctx default
- * at handshake time). Use this setter for **standalone** KlTls use — driving the
- * vtable directly without http_connection.c/client.c. Set once on the context, before
+ * at handshake time). Use this setter for **standalone** KlTls use: driving the
+ * vtable directly without the HTTP framework (http_connection.c and the client). Set once on the context, before
  * any handshake; every KlTls the factory creates inherits it. Applies only to the
- * synchronous socket-BIO path — the completion (memory-BIO) mode ignores it.
+ * synchronous socket-BIO path; the completion (memory-BIO) mode ignores it.
  *
  * @param ctx Server or client context.
  * @param sp  Socket provider to route through, or NULL for the host default.

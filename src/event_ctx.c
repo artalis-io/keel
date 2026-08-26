@@ -1,27 +1,26 @@
 /*
- * event_ctx.c — KlEventCtx lifecycle + the generic KlWatcher FD-callback API +
+ * event_ctx.c: KlEventCtx lifecycle + the generic KlWatcher FD-callback API +
  * kl_event_ctx_run (the portable wait/dispatch or completion tick).
  *
- * Split out of async.c in the freestanding phase (F0): this is the CLIENT-usable
- * half of the old async.c — it references only the event/timer/socket-provider
+ * The CLIENT-usable half of async.c: it references only the event/timer/socket-provider
  * seams (no KlHttpServer / KlHttpConn / connection state machine), so a completion HTTP
  * client can link it WITHOUT dragging in the server connection driver. The
  * server-side connection-suspension API (kl_async_suspend/complete/cancel) stays
  * in async.c, which references kl_http_conn_on_writable / kl_http_server_conn_release /
- * kl_http_comp_resume — the exact server symbols that must not leak
+ * kl_http_comp_resume: the exact server symbols that must not leak
  * into the freestanding client archive.
  */
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <stdint.h>
-#include <limits.h>            /* INT_MAX — dispatch-depth overflow guard (R3b-W) */
+#include <limits.h>            /* INT_MAX: dispatch-depth overflow guard */
 #ifndef KEEL_FREESTANDING
 #include <assert.h>            /* debug precondition in kl_event_ctx_free (hosted only) */
 #endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
 #include "event_caps.h"
-#include "completion_io.h"   /* kl_comp_run — the generic completion tick */
-#include "watcher_internal.h"   /* kl_watcher_add_detached — completion connect (LC-0) */
+#include "completion_io.h"   /* kl_comp_run: the generic completion tick */
+#include "watcher_internal.h"   /* kl_watcher_add_detached: completion connect */
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */
 
@@ -40,7 +39,7 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->alloc = alloc;
     ctx->watchers = NULL;
     ctx->dispatch_dirty = 0;
-    ctx->dispatch_depth = 0;          /* R3b-W: batch-dispatch reclamation */
+    ctx->dispatch_depth = 0;          /* batch-dispatch reclamation */
     ctx->retired = NULL;
     ctx->last_error = KL_ERR_NONE;
     ctx->timers = NULL;
@@ -68,9 +67,9 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
 
 void kl_event_ctx_free(KlEventCtx *ctx) {
     if (!ctx) return;
-    /* R3b-W: freeing a ctx DURING batch dispatch is a CALLER BUG — captured events on the live
+    /* Freeing a ctx DURING batch dispatch is a CALLER BUG; captured events on the live
      * dispatch stack may still reference retired nodes. Precondition: dispatch_depth == 0. Assert
-     * loudly in hosted debug builds; in non-assert (and freestanding) builds FAIL CLOSED — return
+     * loudly in hosted debug builds; in non-assert (and freestanding) builds FAIL CLOSED; return
      * before touching anything, so a precondition violation does not leave a partially destroyed
      * context (timers/watchers freed, loop closed, retired leaked). Checked FIRST, before any free. */
 #ifndef KEEL_FREESTANDING
@@ -101,17 +100,17 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
     kl_event_close(&ctx->loop);
 }
 
-/* PAL Phase 7/8: negotiate an event loop against a socket provider. Pure over the
+/* Negotiate an event loop against a socket provider. Pure over the
  * two axes (event model × handle domain), taking the loop caps explicitly so it is
- * unit-testable without a real backend. F3-safe: reads only capability bits, never
+ * unit-testable without a real backend. Reads only capability bits, never
  * crosses the socket↔event seam. A NULL provider is the built-in POSIX default. */
 int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets) {
     if (ev_caps & KL_EVENT_CAP_COMPLETION) {
-        /* Completion model (Phase 8, IOCP): the provider must route I/O through the
+        /* Completion model: the provider must route I/O through the
          * loop's overlapped submit path rather than synchronous send/recv. Also reject it
          * fail-loud when the completion axis was compiled out (KEEL_NO_COMPLETION): the
          * driver/dispatch are absent, so a completion loop cannot be driven. Keeps that
-         * build knob out of the shared negotiation — the axis TU reports its presence. */
+         * build knob out of the shared negotiation; the axis TU reports its presence. */
         if (!kl_completion_axis_available()) return 0;
         return kl_socket_provider_has_cap(sockets, KL_SOCK_CAP_OVERLAPPED);
     }
@@ -124,9 +123,9 @@ int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets)
     return provider_native && loop_watches_fds;
 }
 
-/* PAL Phase 7: negotiate the ctx's event loop against its socket provider. The
- * neutral meeting point — this ctx already holds both the loop and the provider, so
- * the socket seam and the event axis stay decoupled (F3). Rejects an incoherent
+/* Negotiate the ctx's event loop against its socket provider. The
+ * neutral meeting point: this ctx already holds both the loop and the provider, so
+ * the socket seam and the event axis stay decoupled. Rejects an incoherent
  * pairing here rather than failing obscurely at kl_event_add. */
 int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx) {
     if (!ctx) return 0;
@@ -175,8 +174,8 @@ int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
     return 0;
 }
 
-/* Detached watcher (LC-0): the ctx-owned node without a kl_event_add. See watcher_internal.h.
- * The mask is stored (KL_EVENT_WRITE — the connect result) but no readiness watch is armed;
+/* Detached watcher: the ctx-owned node without a kl_event_add. See watcher_internal.h.
+ * The mask is stored (KL_EVENT_WRITE: the connect result) but no readiness watch is armed;
  * the completion connect fires the tagged pointer directly. A later kl_watcher_mod arms the
  * real readiness relay for the send/recv phase. Idempotent per fd. */
 void *kl_watcher_add_detached(KlEventCtx *ctx, KlSocketHandle fd,
@@ -223,7 +222,7 @@ int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
 
     const KlWatcher *w = ctx->watchers;
     while (w && w->fd != fd) w = w->next;
-    if (!w) return 0;  /* removed during callback — safe no-op */
+    if (!w) return 0;  /* removed during callback: safe no-op */
 
     return kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
 }
@@ -239,7 +238,7 @@ void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
             *pp = w->next;
             kl_event_del(&ctx->loop, fd);
             if (ctx->dispatch_depth > 0) {
-                /* R3b-W: deleted DURING a batch — defer the free so this node's address cannot be
+                /* Deleted DURING a batch; defer the free so this node's address cannot be
                  * reused by a mid-batch kl_watcher_add before the batch's remaining events are
                  * dispatched (that reuse would let a stale event's pointer scan match the new
                  * watcher). Thread onto `retired` via the node's own next link; reclaimed when the
@@ -256,7 +255,7 @@ void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
     }
 }
 
-/* ── batch-dispatch reclamation (R3b-W watcher pointer-reuse ABA remedy) ─── */
+/* ── batch-dispatch reclamation (watcher pointer-reuse ABA remedy) ─── */
 
 /* Free every watcher node deferred during a batch (chained through KlWatcher.next). */
 static void kl_ctx_reclaim_retired(KlEventCtx *ctx) {
@@ -272,7 +271,7 @@ static void kl_ctx_reclaim_retired(KlEventCtx *ctx) {
  * kl_event_ctx_dispatch_end (the depth was not incremented). Guards against signed-overflow UB. */
 int kl_event_ctx_dispatch_begin(KlEventCtx *ctx) {
     if (!ctx) return -1;
-    if (ctx->dispatch_depth == INT_MAX) return -1;   /* refuse to overflow — do not dispatch */
+    if (ctx->dispatch_depth == INT_MAX) return -1;   /* refuse to overflow; do not dispatch */
     ctx->dispatch_depth++;
     return 0;
 }
@@ -293,8 +292,8 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     /* Clamp timeout to next timer deadline */
     timeout_ms = kl_timer_next_timeout(ctx, timeout_ms);
 
-    /* Completion loop (IOCP): drive the generic completion tick instead of the
-     * readiness wait/dispatch, so standalone consumers (UDP/DNS in 8b-4c) run on a
+    /* Completion loop: drive the generic completion tick instead of the
+     * readiness wait/dispatch, so standalone consumers (UDP/DNS) run on a
      * completion loop too. Dead on readiness backends (none advertise COMPLETION),
      * so the path below is unchanged there (byte-identical). */
     if (kl_event_caps(&ctx->loop) & KL_EVENT_CAP_COMPLETION)
@@ -309,7 +308,7 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
         if (!events) return -1;
     }
 
-    /* R3b-W: open the batch bracket BEFORE kl_event_wait so the whole acquire→dispatch→cleanup
+    /* Open the batch bracket BEFORE kl_event_wait so the whole acquire→dispatch→cleanup
      * window is covered and an overflow refusal consumes no events. begin → wait → dispatch →
      * cleanup → end on every exit. */
     if (kl_event_ctx_dispatch_begin(ctx) < 0) {
@@ -327,7 +326,7 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     if (events != stack_buf)
         kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
 
-    kl_event_ctx_dispatch_end(ctx);   /* end after cleanup — reclaims deferred watcher nodes */
+    kl_event_ctx_dispatch_end(ctx);   /* end after cleanup: reclaims deferred watcher nodes */
 
     /* Fire expired timers */
     kl_timer_fire(ctx);

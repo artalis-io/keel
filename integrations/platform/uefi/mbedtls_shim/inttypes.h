@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/inttypes.h — freestanding <inttypes.h> for the U-4 mbedTLS build.
+ * mbedtls_shim/inttypes.h: freestanding <inttypes.h> for the mbedTLS build.
  *
  * clang ships its own <inttypes.h> that #include_next's the libc one, which is
  * absent freestanding. mbedTLS (ssl.h) pulls <inttypes.h> for the fixed-width PRI*

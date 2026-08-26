@@ -1,28 +1,25 @@
 /*
- * event_pollcomp.c — a portable COMPLETION backend over poll() (PAL Phase 8d-0.5).
+ * event_pollcomp.c: a portable COMPLETION backend over poll().
  *
- * The completion event axis (completion.h) had one implementation: IOCP
- * (event_iocp.c, Windows-only). That left the platform-independent completion driver
- * (completion_driver.c) — and everything built on it (8b/8c/8d) — validatable only by
- * compile-gate + a bring-your-own Windows runtime. This TU is a SECOND completion
- * backend: it implements the same completion.h contract using poll() over ordinary
- * POSIX sockets, so the completion driver runs — and is tested — on Linux/macOS under
- * `make BACKEND=pollcomp test`.
+ * A completion backend that implements the completion.h contract using poll() over
+ * ordinary POSIX sockets, so the platform-independent completion driver
+ * (completion_core.c) runs, and is tested, on Linux/macOS under
+ * `make BACKEND=pollcomp test`, alongside the Windows-only IOCP implementation.
  *
  * It does double duty: it proves the completion axis is genuinely platform-independent
  * (the driver is reused verbatim, no #ifdef), and it makes that axis CI-testable. Like
- * event_iocp.c it is purely the platform layer — the KlEventLoop lifecycle + the
+ * event_iocp.c it is purely the platform layer: the KlEventLoop lifecycle + the
  * completion.h post/drain mechanics; no connection logic (that stays in
- * completion_driver.c), no Win32.
+ * completion_core.c), no Win32.
  *
  * Model: each post_* records a pending op (fd + kind + buffer/target). kl_comp_drain
  * builds a pollfd set from the pending ops, polls once, and for each ready op performs
  * the single syscall it represents (accept / recv / send / sendfile / recvfrom /
  * sendto), synthesising a platform-independent KlCompletionEvent. It is the completion
- * facade over readiness — the mirror image of a readiness backend adapting a completion
+ * facade over readiness: the mirror image of a readiness backend adapting a completion
  * source to the readiness interface.
  *
- * DUAL ROLE (RC-2): this TU is a PURE runtime provider — static KlEventOps +
+ * DUAL ROLE: this TU is a PURE runtime provider: static KlEventOps +
  * KlCompletionOps hung off a KlEventProvider (kl_event_provider_pollcomp), with NO
  * kl_event_*_builtin / kl_comp_ops_builtin (which would clash with a default backend's
  * own _builtin when pollcomp is injected into a default libkeel at runtime). Its event
@@ -33,9 +30,9 @@
  */
 #include <keel/event.h>
 #include "event_pollcomp_internal.h"
-#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend) — neutral accept/dgram ctx (R2f) */
+#include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend): neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
-#include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
+#include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
@@ -51,10 +48,10 @@
 
 typedef enum {
     PC_ACCEPT, PC_READ, PC_WRITE, PC_SENDFILE, PC_DGRAM_RECV, PC_DGRAM_SEND,
-    PC_CONNECT   /* outbound connect (LC-0): real connect()+POLLOUT+SO_ERROR */
+    PC_CONNECT   /* outbound connect: real connect()+POLLOUT+SO_ERROR */
 } PcOpType;
 
-/* One pending async op — polled, then completed by the single syscall it names. */
+/* One pending async op: polled, then completed by the single syscall it names. */
 typedef struct KlPcOp {
     struct KlPcOp *next;
     PcOpType       type;
@@ -67,7 +64,7 @@ typedef struct KlPcOp {
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
-    int            dg_tos;                /* UDP_RECV: capture received TOS byte (M6.0a) */
+    int            dg_tos;                /* UDP_RECV: capture received TOS byte */
     void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;                /* READ / UDP_RECV: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
@@ -83,14 +80,14 @@ typedef struct KlPcOp {
     union {
         void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
     };
-    int            aborted;               /* cancelled (idle timeout) — deliver as error */
+    int            aborted;               /* cancelled (idle timeout): deliver as error */
 } KlPcOp;
 
-/* A registered readiness watch (8e-2). kl_event_add stores these for TAGGED udata
- * (KlWatcher pointers, LSB=1 — the shared watcher convention); connection fds (untagged)
+/* A registered readiness watch. kl_event_add stores these for TAGGED udata
+ * (KlWatcher pointers, LSB=1: the shared watcher convention); connection fds (untagged)
  * are driven by posted ops and need no readiness watch. kl_comp_drain polls them
  * alongside the ops and surfaces ready ones as KL_COMP_WATCHER, which the driver routes
- * back through kl_event_dispatch — so thread-pool wakeups, timers, etc. work here. */
+ * back through kl_event_dispatch; so thread-pool wakeups, timers, etc. work here. */
 typedef struct KlPcWatch {
     struct KlPcWatch *next;
     KlSocketHandle    fd;
@@ -101,7 +98,7 @@ typedef struct KlPcWatch {
 typedef struct {
     KlAllocator   *alloc;
     KlPcOp        *ops;                    /* singly-linked pending-op list */
-    KlPcWatch     *watches;                /* registered readiness watches (8e-2) */
+    KlPcWatch     *watches;                /* registered readiness watches */
     KlSocketHandle  listen_fd;
     int             primed;
 } KlPcState;
@@ -119,13 +116,13 @@ int kl_pollcomp_ev_init(KlEventLoop *loop) {
     return 0;
 }
 
-/* Connection fds are driven by posted overlapped ops, not readiness — for those (untagged
+/* Connection fds are driven by posted overlapped ops, not readiness; for those (untagged
  * udata) add/mod/del are inert, as on IOCP. But a TAGGED udata is a KlWatcher (thread-pool
  * wakeup, timer, generic FD watcher); register it so kl_comp_drain relays its readiness as
- * a KL_COMP_WATCHER event (8e-2). This keys on the shared LSB watcher tag, not on any
- * pollcomp/IOCP specific — the same convention kl_event_dispatch uses. */
+ * a KL_COMP_WATCHER event. This keys on the shared LSB watcher tag, not on any
+ * pollcomp/IOCP specific; the same convention kl_event_dispatch uses. */
 int kl_pollcomp_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    if (!((uintptr_t)udata & 1)) return 0;   /* connection — posted ops, no readiness watch */
+    if (!((uintptr_t)udata & 1)) return 0;   /* connection: posted ops, no readiness watch */
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }   /* idempotent */
@@ -143,7 +140,7 @@ int kl_pollcomp_ev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, v
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }
-    return kl_pollcomp_ev_add(loop, fd, mask, udata);   /* not yet watched — add it */
+    return kl_pollcomp_ev_add(loop, fd, mask, udata);   /* not yet watched: add it */
 }
 int kl_pollcomp_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
     KlPcState *st = loop->_backend;
@@ -154,7 +151,7 @@ int kl_pollcomp_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
             kl_free(st->alloc, w, sizeof(*w));
             return 0;
         }
-    return 0;   /* not watched (a connection fd) — nothing to do */
+    return 0;   /* not watched (a connection fd): nothing to do */
 }
 
 int kl_pollcomp_ev_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
@@ -172,7 +169,7 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
     while (op) {
         KlPcOp *next = op->next;
         /* Release the datagram op's stable-token reference (loop teardown drops a never-reaped op
-         * WITHOUT emitting an event) — its final release frees the receive storage. Non-datagram ops
+         * WITHOUT emitting an event); its final release frees the receive storage. Non-datagram ops
          * have op->life == NULL. */
         if (op->life) kl_dgram_life_release(op->life);
         if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
@@ -190,14 +187,14 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
     loop->fd = -1;
 }
 
-/* A completion loop over native fds. COMPLETION makes the Phase 7 negotiation require
+/* A completion loop over native fds. COMPLETION makes the capability negotiation require
  * an OVERLAPPED provider (kl_socket_provider_pollcomp, below). */
 unsigned kl_pollcomp_ev_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
+/* The overlapped provider this completion loop needs: auto-wired by the server/client
  * when the caller configured none, so the pollcomp backend is a source-compatible drop-in. */
 const struct KlSocketProvider *kl_pollcomp_ev_native_provider(const KlEventLoop *loop) {
     (void)loop;
@@ -206,7 +203,7 @@ const struct KlSocketProvider *kl_pollcomp_ev_native_provider(const KlEventLoop 
 
 /* The overlapped socket provider: reuse the POSIX control-plane ops (close, send used
  * by comp_tls_flush, tcp_nodelay, …) and add the OVERLAPPED capability the negotiation
- * keys on — so completion_driver.c's kl_sock_* calls behave normally while the loop
+ * keys on; so completion_core.c's kl_sock_* calls behave normally while the loop
  * advertises completion. */
 const KlSocketProvider *kl_socket_provider_pollcomp(void) {
     static KlSocketProvider prov;
@@ -226,7 +223,7 @@ static void pc_op_push(KlPcState *st, KlPcOp *op) {
 }
 
 static void pc_op_free(KlPcOp *op) {
-    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event — e.g. a
+    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event: e.g. a
      * post-failure unwind or loop teardown) releases it here. Emit paths transfer the ref to the
      * event and NULL op->life first, so this does not double-release. */
     if (op->life)
@@ -241,7 +238,7 @@ static void pc_op_free(KlPcOp *op) {
 }
 
 /* Raw receive: recv up to `cap` bytes into the caller-supplied `buf` on `stream`. No TLS /
- * connection-state knowledge — the HTTP adapter chose the buffer. */
+ * connection-state knowledge; the HTTP adapter chose the buffer. */
 static int pc_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
     if (!buf || cap == 0) return -1;
     KlPcState *st = stream->ctx->loop._backend;
@@ -335,7 +332,7 @@ static int pc_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *
     op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
     op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
     op->dg_tos     = (rop->capture & KL_DGRAM_RX_TOS)     != 0;
-    op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
+    op->life = rop->life;               /* TRANSFERRED into the op (no retain: the caller retained) */
     pc_op_push(st, op);
     return 0;
 }
@@ -355,7 +352,7 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
     /* Marshal the neutral dest to a host sockaddr for the send at drain time. */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
         op->dest_len = kl_sockaddr_to_native(sop->dest, &op->dest);
-    /* Source-pin / per-packet TOS control message — COPIED into the op at post (§2.5.1); the drain uses
+    /* Source-pin / per-packet TOS control message: COPIED into the op at post (frozen §2.5.1); the drain uses
      * sendmsg with it (the sendto fast path stays for plain sends). */
     if ((sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0) {
         struct sockaddr_storage sss;
@@ -374,9 +371,9 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
     return 0;
 }
 
-/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): mark them aborted so the next
+/* Cancel the outstanding datagram op(s) of `kind` for `life`: mark them aborted so the next
  * drain delivers their terminal completion (which releases the token ref). Idempotent; NO ref release
- * here. Pollcomp has no in-kernel op — "cancel" just flips the abort flag on the tracked op. */
+ * here. Pollcomp has no in-kernel op; "cancel" just flips the abort flag on the tracked op. */
 static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
     KlPcState *st = ctx->loop._backend;
     PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;
@@ -387,7 +384,7 @@ static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgr
 
 /* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled
  * completion has not yet drained + released); none tracked means it physically retired. Pollcomp
- * never quarantines — a portable double where every posted op completes in a drain. */
+ * never quarantines; a portable double where every posted op completes in a drain. */
 static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
                                                 KlDgramOpKind kind, int *transport_err) {
     const KlPcState *st = ctx->loop._backend;
@@ -398,8 +395,8 @@ static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramL
     return KL_DGRAM_RETIRE_RETIRED;
 }
 
-/* Post an outbound connect (LC-0): issue the real nonblocking connect() now (the client
- * already made the fd nonblocking), then poll POLLOUT and read SO_ERROR on completion — a
+/* Post an outbound connect: issue the real nonblocking connect() now (the client
+ * already made the fd nonblocking), then poll POLLOUT and read SO_ERROR on completion: a
  * genuine, portable connect completion (not a fake readiness relay). On connect() returning
  * 0 (immediate loopback success) the op still completes on the next drain (POLLOUT is
  * immediately ready), keeping the completion single + deferred. The result surfaces as
@@ -419,7 +416,7 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     int rc = kl_sock_connect(ctx->sockets, fd, addr);
     if (rc < 0 && errno != EINPROGRESS) {
         pc_op_free(op);
-        return -1;                 /* hard local failure — caller closes fd + tries next */
+        return -1;                 /* hard local failure: caller closes fd + tries next */
     }
     /* rc == 0 (connected immediately) or EINPROGRESS: complete via POLLOUT on the drain. */
     pc_op_push(st, op);
@@ -429,21 +426,21 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static int pc_comp_prime_accepts(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
     if (!ctx) return -1;
     KlPcState *st = ctx->loop._backend;
-    if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
+    if (st->primed) return 1;              /* setup already done: report the window */
     st->listen_fd = listen_fd;
     st->primed = 1;
     /* Post-driven, window 1: latch the listen fd; the completion KlListener posts the single accept
-     * (reserve-before-post backpressure). No accept posted here — the listener arms it. */
+     * (reserve-before-post backpressure). No accept posted here; the listener arms it. */
     return 1;
 }
 
 /* Cancel pending ops on `fd`. Server conn ops (idle-timeout sweep): mark aborted so the next
- * drain delivers an error completion, driving the driver's normal release — we mark rather
+ * drain delivers an error completion, driving the driver's normal release; we mark rather
  * than remove so the invariant "a conn is released only from a completion" holds. A PC_CONNECT
  * op is different: the async client owns the connect fd + its (detached) watcher and tears both
  * down synchronously (he_close_attempts / he_fail_attempt), so its pending op is DROPPED here
- * (freed, no completion) — surfacing an aborted KL_COMP_CONNECT would dispatch against the
- * just-freed watcher. (LC-0) */
+ * (freed, no completion); surfacing an aborted KL_COMP_CONNECT would dispatch against the
+ * just-freed watcher. */
 static void pc_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlPcState *st = ctx->loop._backend;
     KlPcOp **link = &st->ops;
@@ -462,7 +459,7 @@ static void pc_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 /* ── drain: poll the pending ops, complete the ready ones ─────────────── */
 
 /* Fill an error completion for a cancelled op. Returns 1 if an event was written
- * (a connection/UDP target exists), 0 for an accept op (no target — just drop it). */
+ * (a connection/UDP target exists), 0 for an accept op (no target: just drop it). */
 static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     memset(ev, 0, sizeof(*ev));
     ev->ok = 0;
@@ -476,7 +473,7 @@ static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
                                       * pc_comp_cancel, not delivered as aborts. */
                                      return 0;
-    case PC_ACCEPT:                  /* a cancelled accept (listener close, 6B-3 2b-ii) — deliver
+    case PC_ACCEPT:                  /* a cancelled accept (listener close): deliver
                                       * ok=0 with no fd so the completion listener retires this
                                       * posted accept (returns its credit). The op never pre-accepts
                                       * a socket (accept() runs in pc_complete), so nothing leaks. */
@@ -500,10 +497,10 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
         int a = accept(op->fd, (struct sockaddr *)&ss, &slen);
-        if (a < 0) return 0;                 /* EAGAIN/spurious — keep the accept op */
+        if (a < 0) return 0;                 /* EAGAIN/spurious: keep the accept op */
         pc_set_blocking(a);
         ev->kind = KL_COMP_ACCEPT;
-        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
+        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
         ev->ok = 1;
         ev->accepted_fd = a;
         if (slen > 0)                            /* native → neutral once, at the seam */
@@ -597,7 +594,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 (void)kl_sockaddr_from_native(&ev->local,
                                               (struct sockaddr *)&local_ss, local_len);
         }
-        ev->tos = -1;                              /* M6.0a: default "none"; parse only if requested */
+        ev->tos = -1;                              /* default "none"; parse only if requested */
         if (n >= 0) {
             if (op->dg_gro)                       /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
@@ -720,7 +717,7 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
             /* POLLERR/POLLHUP without our event still lets the syscall report the
              * error/EOF; pc_complete surfaces ok=0 for TCP so the driver closes. */
             int r = pc_complete(op, &out[count]);
-            if (r == 0) continue;                 /* partial/spurious — keep the op */
+            if (r == 0) continue;                 /* partial/spurious: keep the op */
             count++;                              /* r == 1 (done) or -1 (failed) */
             /* Unlink and free the completed op. */
             KlPcOp **ulink = &st->ops;
@@ -728,8 +725,8 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
             if (*ulink) *ulink = op->next;
             pc_op_free(op);
         }
-        /* Ready watches (pfds[nops..nfds)) — level-triggered, persistent. Surface a
-         * KL_COMP_WATCHER for each; the driver routes it to kl_event_dispatch (8e-2). The
+        /* Ready watches (pfds[nops..nfds)): level-triggered, persistent. Surface a
+         * KL_COMP_WATCHER for each; the driver routes it to kl_event_dispatch. The
          * watch list is unmodified during processing, so a parallel re-walk is safe. */
         size_t j = nops;
         for (const KlPcWatch *w = st->watches; w && count < max; w = w->next, j++) {
@@ -752,7 +749,7 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
     return count;
 }
 
-/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap — the server drives the
+/* Teardown accept-side force-completion. Does NOT reap; the server drives the
  * drain (kl_comp_run) so every dequeued op gets its normal routing. This only marks each posted
  * accept aborted, so the next pc_comp_drain's abort pass (pc_emit_abort) emits a KL_COMP_ACCEPT
  * ok=0 that retires the listener. Synchronous → always succeeds. */
@@ -763,11 +760,11 @@ static int pc_shutdown_accepts(struct KlEventCtx *ctx) {
     return 0;
 }
 
-/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+/* ── Completion sub-vtable ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * can reach them through a runtime provider (loop->ops->completion, the injected path)
  * or, on the compiled-in BACKEND=pollcomp path, via the glue's kl_comp_ops_builtin()
- * (event_pollcomp_builtin.c) — which just returns this same table. Named (non-static)
+ * (event_pollcomp_builtin.c), which just returns this same table. Named (non-static)
  * so the glue can reference it; declared in event_pollcomp_internal.h. */
 const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
@@ -777,17 +774,17 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_shutdown_accepts,
 };
 
-/* ── Runtime event provider (RC-2) ────────────────────────────────────────
+/* ── Runtime event provider ────────────────────────────────────────
  * The pure-runtime form: KlEventOps carrying the completion sub-vtable via .completion,
  * wrapped in a named KlEventProvider. Handed to KlHttpServerConfig.event_provider to INJECT the
- * pollcomp completion axis into an otherwise-default (epoll/kqueue) libkeel — the RC-2
- * proof. No kl_event_*_builtin / kl_comp_ops_builtin appear in THIS TU, so it never
+ * pollcomp completion axis into an otherwise-default (epoll/kqueue) libkeel. No
+ * kl_event_*_builtin / kl_comp_ops_builtin appear in THIS TU, so it never
  * clashes with the default backend's compiled-in symbols. Mirrors event_lwip.c. */
 static const KlEventOps pollcomp_event_ops = {
     .init = kl_pollcomp_ev_init, .add = kl_pollcomp_ev_add, .mod = kl_pollcomp_ev_mod,
     .del = kl_pollcomp_ev_del, .wait = kl_pollcomp_ev_wait, .close = kl_pollcomp_ev_close,
     .caps = kl_pollcomp_ev_caps, .native_provider = kl_pollcomp_ev_native_provider,
-    .completion = &kl_pollcomp_completion_ops,   /* carry the completion axis (RC-2) */
+    .completion = &kl_pollcomp_completion_ops,   /* carry the completion axis */
 };
 
 static const KlEventProvider pollcomp_event_provider = { &pollcomp_event_ops, "pollcomp" };

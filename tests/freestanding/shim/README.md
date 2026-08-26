@@ -10,8 +10,8 @@ Used ONLY by the cross-target freestanding build/link gates
 (`make freestanding-lib` / `freestanding-lib-selfcontained` / `freestanding-link`
 over the `x86_64-unknown-windows` / `aarch64-unknown-windows` triples), injected
 via `-isystem`. A real UEFI/EDK2 build supplies the equivalents (BaseMemoryLib,
-the EFI socket protocols). These carry NO logic — only the declarations the
-freestanding client manifest references — so the archive's undefined-symbol
+the EFI socket protocols). These carry NO logic: only the declarations the
+freestanding client manifest references, so the archive's undefined-symbol
 closure (memcpy/memmove/memset/memcmp/strlen + the KEEL seams) is unchanged.
 
 They are deliberately NOT on the hosted build's include path.

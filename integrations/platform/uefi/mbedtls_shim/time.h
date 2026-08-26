@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/time.h — minimal <time.h> for the freestanding mbedTLS build.
+ * mbedtls_shim/time.h: minimal <time.h> for the freestanding mbedTLS build.
  *
  * With MBEDTLS_HAVE_TIME_DATE, mbedTLS's x509.c / platform_util.c reference `struct tm`
  * (broken-down time) even though mbedtls_time_t is pinned to a concrete 64-bit type via

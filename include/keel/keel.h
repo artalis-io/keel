@@ -1,6 +1,6 @@
 /**
  * @file keel.h
- * @brief KEEL — Minimal C11 HTTP client/server library built on epoll/kqueue/io_uring/poll.
+ * @brief KEEL: Minimal C11 HTTP client/server library built on epoll/kqueue/io_uring/poll.
  *
  * Umbrella header that includes all public KEEL modules.
  *
@@ -19,7 +19,7 @@
  * WebSocket, multipart, and URL parsers all operate on heap + stack
  * memory only; libFuzzer targets in `fuzz/` exercise these paths.
  *
- * Keel does not own a process boundary — W^X enforcement at the
+ * Keel does not own a process boundary; W^X enforcement at the
  * kernel-sandbox layer (seccomp / Seatbelt / Hardened Runtime) is the
  * host application's responsibility. See SECURITY.md for the host
  * policy Keel composes under.
@@ -103,10 +103,10 @@ int kl_version_number(void);
 #include <keel/http_sse.h>
 #include <keel/timer.h>
 
-/* Phase-B transport — STABLE contract headers. KlStream, KlListener, and KlConnectOp are an
+/* The stream transport: STABLE contract headers. KlStream, KlListener, and KlConnectOp are an
  * independently-usable transport surface with committed function signatures + ownership contracts.
  * The matching per-type detail layout headers (keel/stream_detail.h etc.) carry no ABI guarantee
- * and are OPT-IN for embedders only — deliberately NOT included by this umbrella. */
+ * and are OPT-IN for embedders only, deliberately NOT included by this umbrella. */
 #include <keel/stream.h>
 #include <keel/listener.h>
 #include <keel/connect_op.h>

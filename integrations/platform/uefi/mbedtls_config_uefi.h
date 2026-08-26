@@ -1,6 +1,6 @@
 /*
- * mbedtls_config_uefi.h — a FREESTANDING TLS 1.2 CLIENT mbedTLS config for the
- * U-4 UEFI spike.
+ * mbedtls_config_uefi.h: a FREESTANDING TLS 1.2 CLIENT mbedTLS config for the
+ * UEFI build.
  *
  * Goal: the smallest mbedTLS build that can complete a TLS 1.2 client handshake
  * against a stock openssl `s_server` / python TLS responder and read app data,
@@ -10,16 +10,16 @@
  * ── Deliberate freestanding shape ──────────────────────────────────────────
  *  - NO NET_C / FS_IO         : all BIO I/O goes through Keel's memory/socket BIO
  *                               (tls_mbedtls.c), which routes ciphertext through
- *                               the U-2 EFI_TCP4 socket provider. mbedTLS never
+ *                               the EFI_TCP4 socket provider. mbedTLS never
  *                               touches a host socket or file.
- *  - HAVE_TIME / HAVE_TIME_DATE : ENABLED (U-8). Cert validity (notBefore/notAfter)
+ *  - HAVE_TIME / HAVE_TIME_DATE : ENABLED. Cert validity (notBefore/notAfter)
  *                               IS enforced, over a registered time function backed by
  *                               Runtime Services GetTime (time_uefi.c), fail-closed on an
  *                               untrustworthy RTC. TIMING_C stays off (that is the delay/
  *                               benchmark helper, not needed).
  *  - NO NET_C / FS_IO         : (see above) all BIO I/O goes through Keel's socket BIO.
  *  - NO THREADING_C           : single-threaded pre-boot environment.
- *  - NO PSA / TLS 1.3         : stay on the classic TLS 1.2 stack — PSA drags in
+ *  - NO PSA / TLS 1.3         : stay on the classic TLS 1.2 stack; PSA drags in
  *                               a much larger surface and its own entropy/driver
  *                               init we don't want freestanding.
  *  - PLATFORM_C + PLATFORM_MEMORY : lets us install EFI AllocatePool/FreePool as
@@ -28,7 +28,7 @@
  *  - NO_PLATFORM_ENTROPY + ENTROPY_HARDWARE_ALT : we provide mbedtls_hardware_poll()
  *                               (mbedtls_platform_uefi.c) backed by EFI_RNG (or a
  *                               loudly-documented weak fallback when EFI_RNG is
- *                               absent — see mbedtls_platform_uefi.c).
+ *                               absent; see mbedtls_platform_uefi.c).
  *  - NO ERROR_C / DEBUG / SELF_TEST : keep the code + string tables small and avoid
  *                               pulling snprintf/printf-family libc dependencies.
  */
@@ -38,7 +38,7 @@
 /* ── System / platform abstraction ──────────────────────────────────────────
  * PLATFORM_C + PLATFORM_MEMORY: route mbedTLS heap through our EFI calloc/free
  * (installed at runtime via mbedtls_platform_set_calloc_free). We do NOT enable
- * PLATFORM_NO_STD_FUNCTIONS — mbedTLS defaults its (unused-here) printf/snprintf
+ * PLATFORM_NO_STD_FUNCTIONS: mbedTLS defaults its (unused-here) printf/snprintf
  * macros to the libc names, which the freestanding shim + platform TU satisfy,
  * and enabling NO_STD_FUNCTIONS would instead REQUIRE us to register every one. */
 #define MBEDTLS_PLATFORM_C
@@ -49,10 +49,10 @@
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
 
-/* ── Certificate validity-time (U-8) ────────────────────────────────────────
+/* ── Certificate validity-time ──────────────────────────────────────────────
  * Enforce notBefore/notAfter. There is no libc wall clock, so mbedtls_time is a compile-time
  * MACRO bound to kl_uefi_mbedtls_time (clock_snapshot.c). That returns ONE TLS-platform-lifetime
- * UTC snapshot — captured + validated once INSIDE kl_uefi_mbedtls_platform_init(), shared by all
+ * UTC snapshot: captured + validated once INSIDE kl_uefi_mbedtls_platform_init(), shared by all
  * sessions, advanced by the monotonic clock, never refreshed while TLS is active, cleared at
  * platform shutdown. It NEVER calls GetTime from the verification callback (so a later GetTime
  * failure cannot affect verification, and concurrent sessions share one basis). mbedtls_platform_
@@ -69,17 +69,17 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
 #define MBEDTLS_PLATFORM_TIME_MACRO        kl_uefi_mbedtls_time
 #define MBEDTLS_PLATFORM_GMTIME_R_ALT
 /* mbedtls_ms_time() (a MONOTONIC ms timer, distinct from the wall clock above) defaults to a
- * platform branch that, on the windows clang target, calls Win32 GetSystemTimeAsFileTime — absent
+ * platform branch that, on the windows clang target, calls Win32 GetSystemTimeAsFileTime, absent
  * freestanding. Override it (MS_TIME_ALT) with our monotonic tick (time_uefi.c → kl_monotonic_ms). */
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 /* ── Protocol: TLS 1.2, client + server ─────────────────────────────────────*/
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_CLI_C
-/* Phase 10 UEFI *server* (S-6): the server-side handshake state machine. Additive —
- * the client (U-4) is unaffected; enabling it lets the same freestanding mbedTLS drive
+/* UEFI *server*: the server-side handshake state machine. Additive;
+ * the client is unaffected; enabling it lets the same freestanding mbedTLS drive
  * an inbound HTTPS KlHttpServer (ServerHello/Certificate/ServerKeyExchange + the RSA key
- * operations, all pure crypto — no OS). Without it a server ctx parses but its handshake
+ * operations, all pure crypto, no OS). Without it a server ctx parses but its handshake
  * never progresses. */
 #define MBEDTLS_SSL_SRV_C
 #define MBEDTLS_SSL_PROTO_TLS1_2
@@ -102,7 +102,7 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
 /* PEM + base64: the handshake's server cert arrives as DER (no PEM needed), but a
- * caller-supplied CA bundle (production TLS verify — U-4 prod) is PEM, so decode it. */
+ * caller-supplied CA bundle (production TLS verify) is PEM, so decode it. */
 #define MBEDTLS_PEM_PARSE_C
 #define MBEDTLS_BASE64_C
 
@@ -151,6 +151,6 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
  * We do NOT define: MBEDTLS_NET_C, MBEDTLS_FS_IO, MBEDTLS_TIMING_C,
  * MBEDTLS_THREADING_C, MBEDTLS_SELF_TEST, MBEDTLS_ERROR_C, MBEDTLS_DEBUG_C,
  * MBEDTLS_PSA_CRYPTO_C, MBEDTLS_SSL_PROTO_TLS1_3. Leaving them undefined is how mbedTLS
- * disables them. (HAVE_TIME / HAVE_TIME_DATE are now ENABLED — see the cert-time block.) */
+ * disables them. (HAVE_TIME / HAVE_TIME_DATE are now ENABLED; see the cert-time block.) */
 
 #endif /* MBEDTLS_CONFIG_UEFI_H */

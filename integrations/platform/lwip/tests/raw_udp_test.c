@@ -1,7 +1,7 @@
 /*
- * raw_udp_test.c — LC-3a: public KlDatagram round-trip over the lwIP raw completion backend.
+ * raw_udp_test.c: public KlDatagram round-trip over the lwIP raw completion backend.
  *
- * The UDP analog of the LC-1 TCP client loopback test. It brings up ONE raw ctx
+ * The UDP analog of the TCP client loopback test. It brings up ONE raw ctx
  * (kl_event_ctx_init_ex + kl_event_provider_lwip_raw → NO_SYS=1 lwIP + loopback netif) and runs
  * KEEL's public KlDatagram machine (src/datagram.c) over the raw datagram data-plane:
  *
@@ -15,20 +15,20 @@
  *   T1  a single datagram round-trips byte-exact, with the correct source address (127.0.0.1).
  *   T2  a few datagrams back-to-back all arrive in order.
  *   T3  a datagram at the per-udp DGRAM_MAX bound round-trips (largest retained payload).
- *   T4  close-with-armed-recv: a receive is armed when the socket is closed — exercises the recv-side
+ *   T4  close-with-armed-recv: a receive is armed when the socket is closed; exercises the recv-side
  *         token release-on-close (arm ref, via the KlDatagram close coordinator's recv cancel/terminal)
  *         + the drain transfer path for the sends (T4 pumps, so its sends are transferred, not released).
  *   T5  close-with-undrained-sends: the SENDER is closed with pending sends still queued in the backend
  *         (no drain ran), so its pending sends take the close-side cancel/release path (T4 cannot cover
- *         this — the drain consumes all pending sends of a slot in one tick). Isolates the send-side
+ *         this: the drain consumes all pending sends of a slot in one tick). Isolates the send-side
  *         retained-ref release under the public close.
- *   T6  one-held-packet overflow (7A-5), driven at the GLUE level (kl_lwr_udp_*, own ctx): two datagrams
- *         reach the udp_recv callback in one netif_poll (synchronous glue sends, before any drain) — the
+ *   T6  one-held-packet overflow, driven at the GLUE level (kl_lwr_udp_*, own ctx): two datagrams
+ *         reach the udp_recv callback in one netif_poll (synchronous glue sends, before any drain): the
  *         backend holds exactly ONE and DROPS the second (no 16-entry ring), so precisely one is
  *         delivered. The public KlDatagram send posts a completion op flushed during a tick, so it cannot
- *         force both into one poll (the legacy UDP object's eager synchronous udp_sendto did) — the property lives in the
+ *         force both into one poll (an eager synchronous udp_sendto would): the property lives in the
  *         backend, so it is asserted at the glue seam like T7.
- *   T7  no stale capture while UNARMED (7A-5), driven at the GLUE level (kl_lwr_udp_*, its own ctx after
+ *   T7  no stale capture while UNARMED, driven at the GLUE level (kl_lwr_udp_*, its own ctx after
  *         the event ctx is freed): a datagram arriving with no recv armed is DROPPED at the callback, so
  *         a later post_recv surfaces NOTHING stale. Not observable through the public KlDatagram API
  *         (recv_stop is terminal in KlDgramRecv + the dispatch drops on recv_active==0), so this proves
@@ -36,16 +36,16 @@
  *
  * Diagnostic: the whole suite runs under ASan+UBSan+LSan, so every case doubles as a leak/
  * double-free check on the stable-token retain/transfer/release discipline (no independent "no-leak"
- * case — LSan validates the suite as a whole).
+ * case: LSan validates the suite as a whole).
  *
- * A real datagram crosses the loopback netif through KEEL's datagram.c machine — src/datagram.c and the
- * lwIP-raw provider + glue are UNCHANGED; only the public transport driver changes. Prints "LC-3a PASS".
+ * A real datagram crosses the loopback netif through KEEL's datagram.c machine: src/datagram.c and the
+ * lwIP-raw provider + glue are UNCHANGED; only the public transport driver changes. Prints its PASS marker on success.
  *
  * SPDX-License-Identifier: MIT
  */
 #include <keel/keel.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* complete KlDatagram type — stack instances below */
+#include <keel/datagram_detail.h>   /* complete KlDatagram type: stack instances below */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -59,7 +59,7 @@
 
 /* The stable-liveness token (src/datagram_life.h), forward-declared so this test manages op tokens for
  * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o.
- * (create takes a `dispatch` completion-routing handler — unused at the glue level here, so NULL.) */
+ * (create takes a `dispatch` completion-routing handler: unused at the glue level here, so NULL.) */
 typedef struct KlDgramLife KlDgramLife;
 struct KlCompletionEvent;
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
@@ -92,8 +92,8 @@ static void reset_capture(void) {
 }
 
 /* Public close lifecycle: abortive close_cancel -> pump the raw loop until CLOSED -> free.
- * Replaces the legacy synchronous teardown, exercising the canonical KlDatagram teardown over
- * the lwIP-raw provider (the close coordinator's recv-cancel terminal + pending-send release). */
+ * Exercises the canonical KlDatagram teardown over the lwIP-raw provider (the close
+ * coordinator's recv-cancel terminal + pending-send release). */
 static int dg_close_free(KlEventCtx *ctx, KlDatagram *dg) {
     if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
         (void)kl_datagram_close_cancel(dg);
@@ -114,7 +114,7 @@ static void dest_v4(KlSockAddr *a, uint16_t port) {
     kl_sockaddr_from_ipv4(a, lo, port);
 }
 
-/* T1 — one datagram, byte-exact + source addr. */
+/* T1: one datagram, byte-exact + source addr. */
 static int t1_single(KlEventCtx *ctx) {
     reset_capture();
     KlDatagram rx, tx;
@@ -144,7 +144,7 @@ static int t1_single(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T2 — a few datagrams back-to-back all arrive. */
+/* T2: a few datagrams back-to-back all arrive. */
 static int t2_burst(KlEventCtx *ctx) {
     reset_capture();
     KlDatagram rx, tx;
@@ -178,7 +178,7 @@ static int t2_burst(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T3 — a datagram at the per-udp DGRAM_MAX bound (2048) round-trips (largest retained payload). */
+/* T3: a datagram at the per-udp DGRAM_MAX bound (2048) round-trips (largest retained payload). */
 #define T3_LEN 2048u
 static unsigned char g_big[T3_LEN];
 static int t3_max(KlEventCtx *ctx) {
@@ -208,7 +208,7 @@ static int t3_max(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T4 — close-with-armed-recv: deliver one datagram (which re-arms the recv), then free the rx socket
+/* T4 - close-with-armed-recv: deliver one datagram (which re-arms the recv), then free the rx socket
  * with a recv armed. Exercises the recv-side arm-ref release on close. Must not leak / crash. */
 static int t4_close_with_armed_recv(KlEventCtx *ctx) {
     reset_capture();
@@ -222,23 +222,23 @@ static int t4_close_with_armed_recv(KlEventCtx *ctx) {
     KlSockAddr dst; dest_v4(&dst, port);
 
     if (kl_datagram_send(&tx, &(KlDatagramMessage){ .data = "one", .len = 3, .peer = &dst, .tos = -1 }) != KL_DATAGRAM_ACCEPTED) { dg_close_free(ctx, &tx); dg_close_free(ctx, &rx); return fail("T4 send"); }
-    pump_until(ctx, 1, 200);   /* deliver one; udp.c re-arms → a recv is armed at free time */
+    pump_until(ctx, 1, 200);   /* deliver one; the datagram machine re-arms → a recv is armed at free time */
 
-    /* Free with a recv armed (arm token ref outstanding) — kl_lwr_udp_close releases it; no leak. */
+    /* Free with a recv armed (arm token ref outstanding): kl_lwr_udp_close releases it; no leak. */
     dg_close_free(ctx, &tx);
     dg_close_free(ctx, &rx);
     printf("PASS T4 (close-with-armed-recv, no leak/crash)\n");
     return 0;
 }
 
-/* T5 — close-with-undrained-sends: post several sends and free the SENDER before ANY drain, so its
+/* T5 - close-with-undrained-sends: post several sends and free the SENDER before ANY drain, so its
  * pending KL_COMP_DGRAM_SEND records are released by kl_lwr_udp_close (each holds one stable-token
  * ref) rather than transferred out by the drain. T4 pumps between the sends and the free, and the
- * drain consumes ALL pending sends of a slot in one tick — so T4 exercises the send TRANSFER path,
+ * drain consumes ALL pending sends of a slot in one tick: so T4 exercises the send TRANSFER path,
  * NOT the send release-on-close path. This isolates the latter: no drain runs before dg_close_free(ctx, &tx),
  * so pend_send > 0 at close and the retained refs must be released there exactly once (ASan/LSan
  * gate). The trailing pump (AFTER the free) only lets lwIP process the queued loopback datagrams so
- * their pbufs are freed — it cannot touch the already-freed sender. */
+ * their pbufs are freed: it cannot touch the already-freed sender. */
 static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
     reset_capture();
     KlDatagram rx, tx;
@@ -250,7 +250,7 @@ static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
     uint16_t port = kl_datagram_local_port(&rx);
     KlSockAddr dst; dest_v4(&dst, port);
 
-    /* Three sends, NO pump/drain between them or before the free — the tx slot keeps pend_send == 3,
+    /* Three sends, NO pump/drain between them or before the free: the tx slot keeps pend_send == 3,
      * each holding one token ref that only close can release. */
     for (int i = 0; i < 3; i++)
         if (kl_datagram_send(&tx, &(KlDatagramMessage){ .data = "snd", .len = 3, .peer = &dst, .tos = -1 }) != KL_DATAGRAM_ACCEPTED) { dg_close_free(ctx, &tx); dg_close_free(ctx, &rx); return fail("T5 send"); }
@@ -262,17 +262,17 @@ static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T6 — one-held-packet overflow (7A-5), driven at the GLUE level (like T7).
+/* T6: one-held-packet overflow, driven at the GLUE level (like T7).
  *
  * Through the public KlDatagram API the two datagrams cannot be forced into a SINGLE netif_poll:
  * KlDatagram posts each send as a completion op flushed DURING a loop tick (interleaved with the
- * lwIP poll), so back-to-back sends spread across ticks and the recv re-arms between them — both
- * would be delivered. the legacy UDP object's send did a SYNCHRONOUS udp_sendto, so both landed before
- * the first poll; that eager-send timing is gone. The one-held-slot overflow is a BACKEND property,
+ * lwIP poll), so back-to-back sends spread across ticks and the recv re-arms between them: both
+ * would be delivered. A SYNCHRONOUS udp_sendto would land both before the first poll; the public
+ * send has no such eager timing. The one-held-slot overflow is a BACKEND property,
  * deterministic only where the send is synchronous: the glue (kl_lwr_udp_send → udp_sendto). With a
  * recv armed, TWO datagrams delivered in one netif_poll must surface EXACTLY ONE RECV on drain (the
  * backend holds one, drops the second; a former 16-entry ring would have surfaced both). Sibling of
- * T7 — same one-live-ctx glue harness, run sequentially after the event ctx is freed. */
+ * T7: same one-live-ctx glue harness, run sequentially after the event ctx is freed. */
 static int t6_glue_one_held(void) {
     KlAllocator alloc = kl_allocator_default();
     void *lwrctx = kl_lwr_ctx_create(&alloc, 4);
@@ -331,21 +331,21 @@ static int t6_glue_one_held(void) {
     if (delivered != 1) return fail("T6: expected exactly one delivery (the second must be dropped)");
     if (!held_ok)       return fail("T6: wrong held datagram (should be the first)");
     if (stale != 0)     return fail("T6: the dropped second datagram surfaced on re-arm (bad held slot)");
-    printf("PASS T6 (glue: one-held overflow — second datagram dropped, exactly one delivered)\n");
+    printf("PASS T6 (glue: one-held overflow, second datagram dropped, exactly one delivered)\n");
     return 0;
 }
 
-/* T7 — no stale capture while UNARMED (7A-5 review), driven at the GLUE level.
+/* T7: no stale capture while UNARMED, driven at the GLUE level.
  *
  * Through the public KlDatagram API this is not observable: KlDgramRecv's recv_stop is terminal (it never
- * re-posts after an unarmed gap) and the completion dispatch independently drops on recv_active == 0 — so a
+ * re-posts after an unarmed gap) and the completion dispatch independently drops on recv_active == 0: so a
  * transport-level test cannot exhibit a stale delivery. One layer down the CONSUMER controls re-posting, which is where
  * the stale-buffering bug would bite: a datagram captured while no recv is armed would be surfaced on the
  * NEXT post_recv. This drives kl_lwr_udp_* directly to prove the recv callback drops it.
  *
  * Runs after the shared event ctx is freed (kl_lwr_ctx_create rejects a second CONCURRENT ctx). Manages
  * the stable tokens itself: each posted op retains one ref, the drain TRANSFERS it to the record (we
- * release it), and close releases any op ref not drained — so the suite stays LSan-clean. */
+ * release it), and close releases any op ref not drained: so the suite stays LSan-clean. */
 static int t7_glue_unarmed_drop(void) {
     KlAllocator alloc = kl_allocator_default();
     void *lwrctx = kl_lwr_ctx_create(&alloc, 4);
@@ -383,8 +383,8 @@ static int t7_glue_unarmed_drop(void) {
             kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
         }
 
-        /* (2) UNARMED: "b" MUST actually send — its SEND completion proves the datagram traversed the
-         * loopback to the recv callback (else the phase-3 oracle would false-green). The callback must
+        /* (2) UNARMED: "b" MUST actually send: its SEND completion proves the datagram traversed the
+         * loopback to the recv callback (else the step-(3) oracle would false-green). The callback must
          * DROP it, so this drain yields exactly one SEND and ZERO RECV. */
         if (kl_lwr_udp_send(lwrctx, tx, ltx, "b", 1, lo, port) != 0) rc = fail("T7: send b");
         else {
@@ -417,11 +417,11 @@ static int t7_glue_unarmed_drop(void) {
     kl_lwr_ctx_destroy(lwrctx);
 
     if (rc != 0)        return rc;
-    if (got_recv1 != 1) return fail("T7: setup — the armed datagram was not delivered");
-    if (send2 != 1)     return fail("T7: the unarmed datagram 'b' never sent — oracle would false-green");
+    if (got_recv1 != 1) return fail("T7: setup, the armed datagram was not delivered");
+    if (send2 != 1)     return fail("T7: the unarmed datagram 'b' never sent, oracle would false-green");
     if (recv2 != 0)     return fail("T7: 'b' surfaced as a RECV while unarmed");
     if (stale != 0)     return fail("T7: a datagram captured while UNARMED surfaced on re-arm (stale buffering)");
-    printf("PASS T7 (glue: unarmed datagram dropped — 'b' sent but never delivered, no stale on re-arm)\n");
+    printf("PASS T7 (glue: unarmed datagram dropped, 'b' sent but never delivered, no stale on re-arm)\n");
     return 0;
 }
 
@@ -430,7 +430,7 @@ int main(void) {
     KlEventCtx ctx;
     if (kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw()) != 0)
         return fail("ctx init (bring up lwIP raw)");
-    /* Wire the ctx's sockets to the raw provider — the same auto-wire a KlHttpServer does via the
+    /* Wire the ctx's sockets to the raw provider: the same auto-wire a KlHttpServer does via the
      * loop's native_provider(). A standalone KlEventCtx leaves ctx.sockets NULL (POSIX default),
      * so a UDP consumer (like this test / the future DNS resolver) must set it explicitly. */
     ctx.sockets = kl_socket_provider_lwip_raw();
@@ -442,10 +442,10 @@ int main(void) {
     if (rc == 0) rc = t4_close_with_armed_recv(&ctx);
     if (rc == 0) rc = t5_close_with_undrained_sends(&ctx);
 
-    kl_event_ctx_free(&ctx);   /* free the event ctx FIRST — the raw backend allows only one live ctx */
+    kl_event_ctx_free(&ctx);   /* free the event ctx FIRST: the raw backend allows only one live ctx */
     if (rc != 0) return 1;
 
-    /* T6 + T7 stand up their OWN standalone glue ctxs (sequential — the event ctx is now gone).
+    /* T6 + T7 stand up their OWN standalone glue ctxs (sequential: the event ctx is now gone).
      * Both are BACKEND-property tests needing synchronous, controllable send timing at the glue seam. */
     if (t6_glue_one_held() != 0)   return 1;
     if (t7_glue_unarmed_drop() != 0) return 1;

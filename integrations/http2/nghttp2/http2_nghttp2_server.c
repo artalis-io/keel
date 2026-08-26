@@ -1,5 +1,5 @@
 /*
- * http2_nghttp2_server.c — server-side KlHttp2ServerSession backed by nghttp2.
+ * http2_nghttp2_server.c: server-side KlHttp2ServerSession backed by nghttp2.
  *
  * Maps the KEEL server session vtable (recv / submit_response / want_write /
  * flush / shutdown / destroy) onto an nghttp2 server session, and nghttp2's
@@ -137,7 +137,7 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
         if (namelen == 7 && memcmp(name, ":method", 7) == 0)   { slot = &st->method;    slen = &st->method_len; }
         else if (namelen == 5 && memcmp(name, ":path", 5) == 0){ slot = &st->path;      slen = &st->path_len; }
         else if (namelen == 10 && memcmp(name, ":authority", 10) == 0) { slot = &st->authority; slen = &st->authority_len; }
-        else return 0;                              /* :scheme etc. — ignored */
+        else return 0;                              /* :scheme etc.: ignored */
         if (*slot) return 0;                        /* keep first */
         *slot = ng_dup(st->alloc, (const char *)value, valuelen);
         if (*slot) *slen = valuelen;
@@ -227,12 +227,12 @@ static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 static kl_ssize_t ng_server_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     NgServerSession *s = (NgServerSession *)self;
-    /* Guard against re-entrant send: KEEL's h2.c submits a response + flushes
+    /* Guard against re-entrant send: KEEL's HTTP/2 server adapter submits a response + flushes
      * from within on_stream_end, which nghttp2 invokes inside mem_recv. Calling
      * nghttp2_session_send() re-entrantly there corrupts processing of later
      * frames in the same batch (an illegal trailing DATA/HEADERS would be missed).
      * Deferring the flush (see ng_server_flush) lets nghttp2 finish the whole
-     * batch — generating the correct STREAM_CLOSED/PROTOCOL_ERROR — before KEEL's
+     * batch, generating the correct STREAM_CLOSED/PROTOCOL_ERROR, before KEEL's
      * post-recv flush (kl_http2_server_feed) sends everything in order. */
     s->in_recv = 1;
     ssize_t r = nghttp2_session_mem_recv(s->ng, (const uint8_t *)data, len);
@@ -255,7 +255,7 @@ static int ng_server_submit_response(KlHttp2ServerSession *self, uint32_t stream
     NgServerStream *st = nghttp2_session_get_stream_user_data(s->ng, (int32_t)stream_id);
 
     if (st && body && body_len) {
-        st->resp_body = kl_malloc(s->alloc, body_len);   /* copy — pulled async */
+        st->resp_body = kl_malloc(s->alloc, body_len);   /* copy: pulled async */
         if (!st->resp_body) return -1;
         memcpy(st->resp_body, body, body_len);
         st->resp_body_len = body_len;
@@ -356,10 +356,10 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, ng_on_data_chunk_cb);
     nghttp2_session_callbacks_set_on_stream_close_callback(cbs, ng_on_stream_close_cb);
 
-    /* Expect the client connection preface ("PRI * HTTP/2.0...") on the stream —
+    /* Expect the client connection preface ("PRI * HTTP/2.0...") on the stream:
      * nghttp2's default. KEEL feeds the full preface through for all three h2
      * server entry paths (ALPN-negotiated h2 over TLS, h2c Upgrade, and h2c
-     * prior-knowledge — http_connection.c hands over the whole buffer, magic included),
+     * prior-knowledge: http_connection.c hands over the whole buffer, magic included),
      * so nghttp2 consumes it itself. */
     int rc = nghttp2_session_server_new(&s->ng, cbs, s);
     nghttp2_session_callbacks_del(cbs);

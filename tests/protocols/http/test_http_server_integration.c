@@ -83,7 +83,7 @@ static int connect_to(int port) {
     return fd;
 }
 
-/* Non-blocking connect — returns fd on success (may still be connecting), -1 on error */
+/* Non-blocking connect: returns fd on success (may still be connecting), -1 on error */
 static int connect_nb(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -177,18 +177,18 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     /* Wait for pool to register both connections */
     usleep(50000);
 
-    /* Stats must reflect the readiness listener's PAUSED state when the pool is full (step 6B-1). */
+    /* Stats must reflect the readiness listener's PAUSED state when the pool is full. */
     KlHttpServerStats st_full;
     kl_http_server_stats(&srv, &st_full);
     ASSERT_EQ(st_full.active_connections, 2);
     ASSERT_EQ(st_full.listen_paused, 1);
 
-    /* Third connect — pool full, server paused listening.
+    /* Third connect: pool full, server paused listening.
      * The OS may queue the connection in the backlog, but it won't
      * get a response because no slot is available. */
     int fd3 = connect_nb(port);
 
-    /* Try to get a response on fd3 — should timeout */
+    /* Try to get a response on fd3: should timeout */
     if (fd3 >= 0) {
         const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         kl_test_sockwrite(fd3, req, strlen(req));
@@ -221,7 +221,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     kl_http_server_free(&srv);
 }
 
-/* ── Listener teardown (step 6B-1): kl_http_server_free must complete the accept listener's
+/* ── Listener teardown: kl_http_server_free must complete the accept listener's
  *    close/detachment while armed AND while paused. ASan/UBSan verify no leak/UAF. ─────── */
 
 UTEST(server_integration, teardown_while_armed) {
@@ -262,7 +262,7 @@ UTEST(server_integration, teardown_while_paused) {
     ASSERT_EQ(st.listen_paused, 1);
 
     /* Free the server while the listener is PAUSED with a held reservation dropped and interest
-     * disarmed — the close/detachment contract must complete. */
+     * disarmed: the close/detachment contract must complete. */
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_http_server_free(&srv);
@@ -294,7 +294,7 @@ UTEST(server_integration, backpressure_recovery) {
     ASSERT_TRUE(fd2 >= 0);
     usleep(50000);
 
-    /* Release one connection — server should resume accepting */
+    /* Release one connection: server should resume accepting */
     kl_test_closesock(fd1);
     usleep(200000);
 
@@ -308,7 +308,7 @@ UTEST(server_integration, backpressure_recovery) {
     read_response(fd3, buf, sizeof(buf), 2000);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    /* Release again, fill again — second cycle */
+    /* Release again, fill again: second cycle */
     kl_test_closesock(fd2);
     kl_test_closesock(fd3);
     usleep(200000);
@@ -399,7 +399,7 @@ UTEST(server_integration, drain_completes_inflight) {
     const char *req = "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     kl_test_sockwrite(fd, req, strlen(req));
 
-    /* Immediately trigger drain — handler is still sleeping */
+    /* Immediately trigger drain: handler is still sleeping */
     usleep(50000);
     kl_http_server_stop(&srv);
 
@@ -433,7 +433,7 @@ UTEST(server_integration, drain_deadline_forces_exit) {
     ASSERT_TRUE(srv.bound_port > 0);
     int port = srv.bound_port;
 
-    /* Open connections but don't send complete requests — they stay in READING */
+    /* Open connections but don't send complete requests: they stay in READING */
     int fd1 = connect_to(port);
     int fd2 = connect_to(port);
     ASSERT_TRUE(fd1 >= 0);
@@ -444,7 +444,7 @@ UTEST(server_integration, drain_deadline_forces_exit) {
     kl_test_sockwrite(fd2, "GET /hello HTTP/1.1\r\n", 21);
     usleep(50000);
 
-    /* Trigger drain with 200ms deadline — idle connections should be force-closed */
+    /* Trigger drain with 200ms deadline: idle connections should be force-closed */
     uint64_t start = kl_monotonic_ms();
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
@@ -508,7 +508,7 @@ UTEST(server_integration, concurrent_requests) {
  *
  * POSIX-only: references kl_socket_provider_posix(), which lives in the
  * POSIX-only socket_posix.c TU and is not part of the Winsock build (the
- * Windows seam uses socket_winsock.c). No net_compat mapping applies —
+ * Windows seam uses socket_winsock.c). No net_compat mapping applies:
  * excluded from the Windows build, unchanged on POSIX. */
 #if !defined(_WIN32)
 UTEST(server_integration, explicit_posix_provider_roundtrip) {
@@ -590,7 +590,7 @@ UTEST(server_integration, serialized_writev_fallback) {
 /* A provider without KL_SOCK_CAP_SENDFILE makes http_response.c serve KL_HTTP_BODY_FILE
  * via pread + kl_sock_send instead of sendfile(); the file body must arrive
  * byte-correct. */
-#if !defined(_WIN32)   /* hardcoded /tmp path + CRT file I/O — POSIX-specific */
+#if !defined(_WIN32)   /* hardcoded /tmp path + CRT file I/O: POSIX-specific */
 UTEST(server_integration, sendfile_fallback) {
     /* Write a known temp file (~40 KB, spanning multiple read chunks). */
     snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_sf_%d.dat", (int)getpid());

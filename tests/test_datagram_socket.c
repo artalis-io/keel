@@ -1,5 +1,5 @@
 /*
- * test_datagram_socket.c — D1: the public KlDatagram socket convenience (kl_datagram_socket_init) +
+ * test_datagram_socket.c: the public KlDatagram socket convenience (kl_datagram_socket_init) +
  * provider-neutral connect (kl_datagram_connect) + the accepted-RX inspector.
  *
  * Live tests run over a REAL loopback socket via kl_event_ctx_init (backend-adaptive: readiness on a
@@ -18,19 +18,19 @@
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include <keel/datagram_batch.h>   /* KlDgramTxDesc / send_batch / send_gso — P1-2 peerless gate */
+#include <keel/datagram_batch.h>   /* KlDgramTxDesc / send_batch / send_gso: peerless gate */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
 #include <keel/socket.h>         /* kl_socket_provider_posix */
 
 #include "../src/socket.h"       /* KlSocketProvider / KlSocketOps / kl_sock_get_local_addr */
-#include "../src/event_caps.h"   /* kl_event_caps — completion detection (backend-adaptive tests) */
+#include "../src/event_caps.h"   /* kl_event_caps: completion detection (backend-adaptive tests) */
 
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>    /* inet_pton — source-pinned-reply test (Linux) */
+#include <arpa/inet.h>    /* inet_pton: source-pinned-reply test (Linux) */
 
 static KlAllocator g_alloc;
 
@@ -163,7 +163,7 @@ UTEST(datagram_socket, send_before_connect_unsupported) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Live: reconnect is unsupported in D1 — a second connect returns KL_ERR_INVALID_ARG. */
+/* Live: reconnect is unsupported; a second connect returns KL_ERR_INVALID_ARG. */
 UTEST(datagram_socket, second_connect_refused) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -235,8 +235,8 @@ UTEST(datagram_socket, queue_policy_selection_and_unknown) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Backend-adaptive: recv_gro requested on a COMPLETION loop leaves capture DISABLED (readiness-only,
- * M5.4) so ordinary receive works with no batch; on readiness the guard is exercised elsewhere. */
+/* Backend-adaptive: recv_gro requested on a COMPLETION loop leaves capture DISABLED (readiness-only)
+ * so ordinary receive works with no batch; on readiness the guard is exercised elsewhere. */
 UTEST(datagram_socket, gro_on_completion_capture_disabled) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -303,7 +303,7 @@ UTEST(datagram_socket, connect_capability_absent) {
     kl_event_ctx_free(&ctx);
 }
 
-/* P1: cfg->sockets == NULL means the EVENT CONTEXT's provider, not the built-in default. A custom
+/* cfg->sockets == NULL means the EVENT CONTEXT's provider, not the built-in default. A custom
  * provider on the ctx must be threaded through open/adopt/close. */
 UTEST(datagram_socket, context_provider_threaded_when_sockets_null) {
     g_alloc = kl_allocator_default(); mock_reset();
@@ -312,13 +312,13 @@ UTEST(datagram_socket, context_provider_threaded_when_sockets_null) {
     KlDatagram dg; memset(&dg, 0, sizeof(dg));
     KlDatagramSocketConfig cfg = { .ctx = &ctx, .sockets = NULL, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
-    ASSERT_TRUE(g_configure_calls > 0);   /* the CTX provider's configure ran — not the built-in default */
+    ASSERT_TRUE(g_configure_calls > 0);   /* the CTX provider's configure ran: not the built-in default */
     close_free(&ctx, &dg);
     ASSERT_TRUE(g_close_calls > 0);        /* and its close op ran at teardown */
     kl_event_ctx_free(&ctx);
 }
 
-/* P1: the actual-connected state gates ALL send admission paths (single/batch/GSO), not just the single
+/* The actual-connected state gates ALL send admission paths (single/batch/GSO), not just the single
  * send. A peerless batch or GSO send before connect is refused; after connect it is admitted. */
 UTEST(datagram_socket, peerless_batch_and_gso_require_connect) {
     g_alloc = kl_allocator_default();
@@ -360,7 +360,7 @@ UTEST(datagram_socket, peerless_batch_and_gso_require_connect) {
     kl_event_ctx_free(&ctx);
 }
 
-/* P1: connect must be refused once close has begun — without issuing a provider connect syscall. */
+/* Connect must be refused once close has begun: without issuing a provider connect syscall. */
 UTEST(datagram_socket, connect_after_close_begin_refused_no_syscall) {
     g_alloc = kl_allocator_default(); mock_reset();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -378,9 +378,9 @@ UTEST(datagram_socket, connect_after_close_begin_refused_no_syscall) {
     kl_event_ctx_free(&ctx);
 }
 
-/* ══ D2 migrations from test_udp.c / test_udp_server.c (unique live coverage) ═════════════════════ */
+/* ══ Datagram socket unicast + sockopt live coverage (not exercised above) ═══════════════════════ */
 
-/* recv_stop halts delivery (migrated from test_udp.c:recv_stop). */
+/* recv_stop halts delivery. */
 UTEST(datagram_socket, recv_stop_halts_delivery) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -402,7 +402,7 @@ UTEST(datagram_socket, recv_stop_halts_delivery) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Oversized datagram delivered truncated + counted (migrated from test_udp.c:truncation_counted). */
+/* Oversized datagram delivered truncated + counted. */
 static int g_trunc_flag;
 static void on_recv_trunc(void *ud, const void *data, size_t len, const KlSockAddr *peer,
                           const KlSockAddr *local, unsigned flags) {
@@ -432,7 +432,7 @@ UTEST(datagram_socket, truncation_counted) {
     kl_event_ctx_free(&ctx);
 }
 
-/* A small so_rcvbuf/so_sndbuf shrinks the kernel buffers (migrated from test_udp.c:so_bufsize_applied). */
+/* A small so_rcvbuf/so_sndbuf shrinks the kernel buffers. */
 UTEST(datagram_socket, so_bufsize_applied) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -453,7 +453,7 @@ UTEST(datagram_socket, so_bufsize_applied) {
 }
 
 /* A wildcard-bound datagram that REQUIRES source-pinned replies fails loud on a provider without
- * SOURCE_PIN (migrated from test_udp_server.c:m4_missing_srcpin_fails_init). */
+ * SOURCE_PIN. */
 UTEST(datagram_socket, wildcard_source_pin_cap_gate) {
     g_alloc = kl_allocator_default(); mock_reset();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -469,9 +469,8 @@ UTEST(datagram_socket, wildcard_source_pin_cap_gate) {
 }
 
 /* Source-pinned reply: a wildcard-bound datagram captures the datagram's local (hit) address on recv
- * and replies FROM it, so the reply egresses from the address the client contacted (migrated from
- * the datagram-server source-pinned reply convenience, expressed directly on
- * KlDatagram). Linux-only: uses the 127.0.0.0/8 loopback range. */
+ * and replies FROM it, so the reply egresses from the address the client contacted: the source-pin
+ * convenience expressed directly on KlDatagram. Linux-only: uses the 127.0.0.0/8 loopback range. */
 #if defined(__linux__)
 static KlSockAddr g_srv_local; static int g_srv_have_local; static KlSockAddr g_srv_peer;
 static KlDatagram *g_srv_dg;
@@ -523,7 +522,7 @@ UTEST(datagram_socket, source_pinned_reply_from_hit_address) {
 }
 #endif /* __linux__ */
 
-/* Live IPv6 unicast construction + roundtrip (migrated from test_udp.c:echo_v6). */
+/* Live IPv6 unicast construction + roundtrip. */
 UTEST(datagram_socket, ipv6_roundtrip) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
@@ -546,7 +545,7 @@ UTEST(datagram_socket, ipv6_roundtrip) {
     kl_event_ctx_free(&ctx);
 }
 
-/* SO_REUSEPORT shared bind (migrated from test_udp_server.c:reuse_port_shared_bind). */
+/* SO_REUSEPORT shared bind. */
 UTEST(datagram_socket, reuse_port_shared_bind) {
 #ifdef SO_REUSEPORT
     g_alloc = kl_allocator_default();
@@ -558,7 +557,7 @@ UTEST(datagram_socket, reuse_port_shared_bind) {
     KlDatagram b; memset(&b, 0, sizeof(b));
     KlDatagramSocketConfig cb = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1",
                                   .bind_port = port, .reuse_port = 1 };
-    ASSERT_EQ(0, kl_datagram_socket_init(&b, &cb));   /* shares the port — SO_REUSEPORT */
+    ASSERT_EQ(0, kl_datagram_socket_init(&b, &cb));   /* shares the port: SO_REUSEPORT */
     int ra = 0, rb = 0; socklen_t l = sizeof(int);
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&a), SOL_SOCKET, SO_REUSEPORT, (char *)&ra, &l));
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&b), SOL_SOCKET, SO_REUSEPORT, (char *)&rb, &l));
@@ -570,8 +569,8 @@ UTEST(datagram_socket, reuse_port_shared_bind) {
 #endif
 }
 
-/* SO_BROADCAST gated by the broadcast flag (migrated from test_udp_multicast.c:broadcast_flag_gates_send;
- * deterministic getsockopt check — the live send-to-broadcast probe was environment-sensitive). */
+/* SO_BROADCAST gated by the broadcast flag (deterministic getsockopt check: a live
+ * send-to-broadcast probe is environment-sensitive, so verify the sockopt was applied). */
 UTEST(datagram_socket, broadcast_flag_applied) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));

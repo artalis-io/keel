@@ -1,5 +1,5 @@
 /*
- * tls_openssl.c — OpenSSL / BoringSSL backend for Keel's KlTls vtable
+ * tls_openssl.c: OpenSSL / BoringSSL backend for Keel's KlTls vtable
  *
  * ONE adapter TU serving both OpenSSL 3.x and BoringSSL: the API is shared, the
  * few divergences are guarded with `#if defined(OPENSSL_IS_BORINGSSL)`. Builds
@@ -17,7 +17,7 @@
  *
  * The adapter lives ABOVE the socket seam: it includes only <keel/tls.h>,
  * <keel/allocator.h>, the internal src/socket.h seam, and the TLS library
- * headers — never an event-engine or platform-networking header.
+ * headers; never an event-engine or platform-networking header.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -48,7 +48,7 @@
 #include <string.h>
 #include <time.h>
 
-/* Secure zeroing — scrub key material before free. Volatile pointer prevents
+/* Secure zeroing: scrub key material before free. Volatile pointer prevents
  * the store being optimized away; portable, no platform-specific API. */
 static void kl_secure_zero(void *ptr, size_t len) {
     volatile unsigned char *p = (volatile unsigned char *)ptr;
@@ -78,7 +78,7 @@ typedef struct {
 /* ── Per-connection TLS session ──────────────────────────────────── */
 
 typedef struct {
-    KlTls              base;       /* vtable — must be first */
+    KlTls              base;       /* vtable: must be first */
     SSL               *ssl;
     KlOpensslCtx      *ctx;       /* shared context (not owned) */
     KlAllocator        *alloc;
@@ -103,7 +103,7 @@ typedef struct {
 } KlOpensslTls;
 
 /* Cap on either completion ciphertext ring (a TLS record is <= ~16 KiB; cert-
- * chain handshake flights are larger — 256 KiB is generous, overflow → error). */
+ * chain handshake flights are larger; 256 KiB is generous, overflow → error). */
 #define KL_TLS_COMP_MAX (256u * 1024u)
 
 /* Ensure *buf has capacity for `need` bytes (grow by doubling, capped). */
@@ -145,9 +145,9 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
     if (t->comp_mode) {   /* memory BIO: append to the outgoing-ciphertext ring */
         /* Overflow-safe cap check BEFORE the add: n > MAX - out_len ⇒ over cap. */
         if (n > KL_TLS_COMP_MAX - t->out_len)
-            return -1;   /* buffer full — fatal (no retry flag) */
+            return -1;   /* buffer full: fatal (no retry flag) */
         if (comp_ensure(&t->out_buf, &t->out_cap, t->out_len + n, t->alloc) < 0)
-            return -1;   /* buffer full — fatal (no retry flag) */
+            return -1;   /* buffer full: fatal (no retry flag) */
         memcpy(t->out_buf + t->out_len, buf, n);
         t->out_len += n;
         return len;
@@ -155,7 +155,7 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
 
     /* readiness: kl_sock_send routes through t->sp (or kl_sockdef_send when
      * NULL): SIGPIPE-suppressed + EINTR-retried on POSIX, Winsock errno-mapped
-     * on Windows — so the EAGAIN/EWOULDBLOCK check below works on both. */
+     * on Windows, so the EAGAIN/EWOULDBLOCK check below works on both. */
     ssize_t ret = kl_sock_send(t->sp, t->fd, buf, n);
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -197,7 +197,7 @@ static int kl_bio_read(BIO *bio, char *buf, int len)
         }
         return -1;   /* fatal, no retry flag */
     }
-    /* ret == 0: peer closed the transport — clean EOF. A 0 return from a source
+    /* ret == 0: peer closed the transport, clean EOF. A 0 return from a source
      * BIO signals EOF to OpenSSL (SSL_read → SSL_ERROR_ZERO_RETURN / -1). */
     return (int)ret;
 }
@@ -234,7 +234,7 @@ static int kl_bio_destroy(BIO *bio)
 
 /* Build a fresh custom BIO_METHOD. The method is CONTEXT-OWNED (created in
  * ctx-create, freed in ctx-destroy) rather than a lazily-initialized process
- * global — that removes the init race entirely with NO once primitive, NO
+ * global: that removes the init race entirely with NO once primitive, NO
  * libpthread, and NO OS/library #ifdef (the once APIs are not portable across the
  * OpenSSL/LibreSSL/BoringSSL family), and keeps the adapter free of mutable global
  * state. Every BIO_meth_set_*() return is checked; on any failure the partial
@@ -294,7 +294,7 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     if (len == 0)
         return 0;
 
-    /* at_eof() must describe THIS read, not a prior one — clear the sticky flag at
+    /* at_eof() must describe THIS read, not a prior one; clear the sticky flag at
      * the start of every substantive read (it is re-set below only on a real EOF). */
     t->eof_seen = 0;
 
@@ -310,7 +310,7 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
 
     int err = SSL_get_error(t->ssl, ret);
     if (err == SSL_ERROR_ZERO_RETURN) {
-        t->eof_seen = 1;   /* clean close_notify — at_eof() reports it */
+        t->eof_seen = 1;   /* clean close_notify: at_eof() reports it */
         return -1;
     }
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
@@ -384,7 +384,7 @@ static KlTlsResult tls_shutdown(KlTls *self, KlSocketHandle fd)
         return KL_TLS_WANT_READ;
     if (err == SSL_ERROR_WANT_WRITE)
         return KL_TLS_WANT_WRITE;
-    return KL_TLS_OK;   /* best-effort — don't fail on shutdown errors */
+    return KL_TLS_OK;   /* best-effort: don't fail on shutdown errors */
 }
 
 static size_t tls_pending(KlTls *self)
@@ -491,7 +491,7 @@ static const char *tls_alpn_protocol(KlTls *self)
  * Textual certificate identities (CN, DNS SAN) reach application authorization
  * code as C strings, so they must be canonicalized before exposure. A value like
  * "trusted-user\0attacker" would otherwise compare equal to "trusted-user" under
- * strcmp() and read that way in logs — a spoofing vector. We therefore FAIL CLOSED:
+ * strcmp() and read that way in logs: a spoofing vector. We therefore FAIL CLOSED:
  * a field carrying an embedded NUL or a control character is omitted (left empty /
  * dropped) rather than truncated or sanitized in place. The DER certificate and its
  * SHA-256 fingerprint remain the canonical identity for exact matching.
@@ -527,7 +527,7 @@ static int dns_san_bytes_safe(const unsigned char *p, size_t len)
 }
 
 /* Copy the CN of an X509_NAME into a NUL-terminated buffer. Fail closed (buffer
- * left empty) when the CN could yield an ambiguous or spoofable identity — see the
+ * left empty) when the CN could yield an ambiguous or spoofable identity; see the
  * canonicalization note above: an embedded NUL/control char, a value that would
  * not fit (truncation is itself ambiguous), or more than one CN attribute (which
  * one is authoritative is undefined). */
@@ -592,7 +592,7 @@ static void x509_extract_san(X509 *crt, char *out, size_t outlen)
             if (dlen < 0)
                 continue;
             size_t dl = (size_t)dlen;
-            /* Omit (don't truncate) a malformed or over-long DNS SAN — surfacing a
+            /* Omit (don't truncate) a malformed or over-long DNS SAN; surfacing a
              * partial/ambiguous name would defeat the canonicalization guarantee. */
             if (!dns_san_bytes_safe(dns, dl) || dl > sizeof(item) - 5)
                 continue;
@@ -610,7 +610,7 @@ static void x509_extract_san(X509 *crt, char *out, size_t outlen)
             else
                 continue;
         } else {
-            continue;   /* rfc822Name, URI, etc. — not surfaced */
+            continue;   /* rfc822Name, URI, etc.: not surfaced */
         }
 
         size_t ilen = strlen(item);
@@ -678,7 +678,7 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     memset(out, 0, sizeof(*out));
     /* verified == 1 must mean the chain was actually checked AND passed. With
      * SSL_VERIFY_NONE (e.g. an insecure client ctx) SSL_get_verify_result() still
-     * returns X509_V_OK — it reports the stored result, not that verification ran —
+     * returns X509_V_OK (it reports the stored result, not that verification ran),
      * so require SSL_VERIFY_PEER to be in effect too. Otherwise report unverified. */
     out->verified = ((SSL_get_verify_mode(t->ssl) & SSL_VERIFY_PEER) != 0 &&
                      SSL_get_verify_result(t->ssl) == X509_V_OK) ? 1 : 0;
@@ -688,7 +688,7 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
 
     /* DER + SHA-256 fingerprint. Stash the DER in THIS session's own buffer (not a
      * shared thread-local) so `der` stays valid until this session's next
-     * reset()/destroy() per the KlPeerCert contract — a second session on the same
+     * reset()/destroy() per the KlPeerCert contract; a second session on the same
      * thread never clobbers it. */
     int der_len = i2d_X509(crt, NULL);
     if (der_len > 0) {
@@ -729,7 +729,7 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     return 0;
 }
 
-/* KlTls.set_socket_provider — framework wires the connection's provider here
+/* KlTls.set_socket_provider: framework wires the connection's provider here
  * before the handshake so the socket-BIO matches the connection's stack. */
 static void tls_set_socket_provider(KlTls *self, const struct KlSocketProvider *sp)
 {
@@ -789,8 +789,8 @@ KlTls *kl_tls_openssl_create(KlTlsCtx *ctx, KlAllocator *alloc)
         SSL_set_connect_state(t->ssl);
 
     /* One custom BIO for both read and write; SSL takes ownership (freed by
-     * SSL_free). BIO_up_ref not needed for the single-BIO case per OpenSSL docs
-     * — but SSL_set_bio with the same rbio==wbio consumes exactly one ref. */
+     * SSL_free). BIO_up_ref not needed for the single-BIO case per OpenSSL docs;
+     * but SSL_set_bio with the same rbio==wbio consumes exactly one ref. */
     BIO *bio = BIO_new(meth);
     if (!bio) {
         SSL_free(t->ssl);
@@ -807,7 +807,7 @@ KlTls *kl_tls_openssl_create(KlTlsCtx *ctx, KlAllocator *alloc)
 /* ── Hostname for SNI + verification (client mode) ───────────────── */
 
 /* Is `s` a numeric IPv4 or IPv6 literal? inet_pton (via the socket seam) is the
- * authoritative test — no ambiguous digit/dot heuristics. */
+ * authoritative test; no ambiguous digit/dot heuristics. */
 static int hostname_is_ip_literal(const char *s)
 {
     unsigned char v4[4];
@@ -827,7 +827,7 @@ int kl_tls_openssl_set_hostname(KlTls *tls, const char *hostname)
 
     if (hostname_is_ip_literal(hostname)) {
         /* Numeric IP literal: RFC 6066 forbids an IP in the SNI server_name, so
-         * DON'T set SNI. Verify against iPAddress SANs via the IP param —
+         * DON'T set SNI. Verify against iPAddress SANs via the IP param:
          * SSL_set1_host does DNS-name matching only and won't match IP SANs on
          * all versions. */
         X509_VERIFY_PARAM *vp = SSL_get0_param(t->ssl);
@@ -879,7 +879,7 @@ static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *ou
         }
         i += 1 + slen;
     }
-    return SSL_TLSEXT_ERR_NOACK;   /* no overlap — proceed without ALPN */
+    return SSL_TLSEXT_ERR_NOACK;   /* no overlap: proceed without ALPN */
 }
 
 int kl_tls_openssl_ctx_set_alpn(KlTlsCtx *c, const char **protos)
@@ -959,7 +959,7 @@ static unsigned char *read_file(const char *path, size_t *out_len, KlAllocator *
 /* ── Cert/key/CA loading from PEM buffers ────────────────────────── */
 
 /* Safe wrapper around BIO_new_mem_buf: BIO_new_mem_buf takes an `int` length, so
- * reject anything that would narrow badly BEFORE the cast — empty/NULL buffers and
+ * reject anything that would narrow badly BEFORE the cast: empty/NULL buffers and
  * lengths that overflow int. Returns NULL on bad args (callers then fail cleanly). */
 static BIO *bio_new_mem_checked(const void *buf, size_t len)
 {
@@ -1210,7 +1210,7 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
         goto fail;
 
     if (insecure) {
-        /* WARNING: verify-none — encrypted but MITM-vulnerable. Explicit opt-in
+        /* WARNING: verify-none, encrypted but MITM-vulnerable. Explicit opt-in
          * via kl_tls_openssl_client_ctx_create_insecure(). */
         SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_NONE, NULL);
     } else if (ca_buf && ca_len > 0) {

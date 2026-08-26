@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_examples.sh — Smoke test all Keel example programs
+# tests/e2e_examples.sh: Smoke test all Keel example programs
 #
 # Usage:  sh tests/e2e_examples.sh
 # Expects examples to be pre-built (make examples).
@@ -90,7 +90,7 @@ check_contains_soft() {
     echo "  PASS: $label"
   elif [ -z "$response" ]; then
     skip=$((skip + 1))
-    echo "  SKIP: $label (no response — async mechanism may not work in this environment)"
+    echo "  SKIP: $label (no response; async mechanism may not work in this environment)"
   else
     fail=$((fail + 1))
     echo "  FAIL: $label (expected '$expected')"
@@ -128,7 +128,7 @@ test_standalone() {
 
 # ── Server examples (start, curl, kill) ────────────────────────────────
 
-# hello_server — accepts port arg
+# hello_server: accepts port arg
 test_hello_server() {
   echo "=== hello_server ==="
   bin="examples/hello_server"
@@ -147,7 +147,7 @@ test_hello_server() {
   stop_server "$pid"
 }
 
-# rest_api_server — hardcoded :8080
+# rest_api_server: hardcoded :8080
 test_rest_api_server() {
   echo "=== rest_api_server ==="
   bin="examples/rest_api_server"
@@ -172,7 +172,7 @@ test_rest_api_server() {
   stop_server "$pid"
 }
 
-# middleware — hardcoded :8080
+# middleware: hardcoded :8080
 test_middleware() {
   echo "=== middleware ==="
   bin="examples/middleware"
@@ -184,7 +184,7 @@ test_middleware() {
     stop_server "$pid"; return
   fi
 
-  # /api/public requires auth — should get 401 without it
+  # /api/public requires auth; should get 401 without it
   status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
     "http://127.0.0.1:8080/api/public" || true)
   check_status "GET /api/public (no auth) → 401" "$status" "401"
@@ -203,7 +203,7 @@ test_middleware() {
   stop_server "$pid"
 }
 
-# static_files — hardcoded :8080, uses wildcard route
+# static_files: hardcoded :8080, uses wildcard route
 test_static_files() {
   echo "=== static_files ==="
   bin="examples/static_files"
@@ -223,7 +223,7 @@ test_static_files() {
   stop_server "$pid"
 }
 
-# streaming — hardcoded :8080
+# streaming: hardcoded :8080
 test_streaming() {
   echo "=== streaming ==="
   bin="examples/streaming"
@@ -242,7 +242,7 @@ test_streaming() {
   stop_server "$pid"
 }
 
-# sse — hardcoded :8080
+# sse: hardcoded :8080
 test_sse() {
   echo "=== sse ==="
   bin="examples/sse"
@@ -265,7 +265,7 @@ test_sse() {
   stop_server "$pid"
 }
 
-# body_readers — hardcoded :8080
+# body_readers: hardcoded :8080
 test_body_readers() {
   echo "=== body_readers ==="
   bin="examples/body_readers"
@@ -289,7 +289,7 @@ test_body_readers() {
   stop_server "$pid"
 }
 
-# async — hardcoded :8080
+# async: hardcoded :8080
 test_async() {
   echo "=== async ==="
   bin="examples/async"
@@ -305,14 +305,14 @@ test_async() {
   resp=$($CURL "http://127.0.0.1:8080/" || true)
   check_contains "GET / (sync)" "$resp" '"hello'
 
-  # Async endpoint — depends on pipe watcher + kl_async_complete
+  # Async endpoint: depends on pipe watcher + kl_async_complete
   resp=$($CURL "http://127.0.0.1:8080/delay/10" || true)
   check_contains_soft "GET /delay/10" "$resp" '"delayed_ms"'
 
   stop_server "$pid"
 }
 
-# thread_pool — hardcoded :8080
+# thread_pool: hardcoded :8080
 test_thread_pool() {
   echo "=== thread_pool ==="
   bin="examples/thread_pool"
@@ -328,14 +328,14 @@ test_thread_pool() {
   resp=$($CURL "http://127.0.0.1:8080/" || true)
   check_contains "GET / (sync)" "$resp" '"hello'
 
-  # Thread pool endpoint — depends on pipe watcher + kl_async_complete
+  # Thread pool endpoint: depends on pipe watcher + kl_async_complete
   resp=$($CURL "http://127.0.0.1:8080/query" || true)
   check_contains_soft "GET /query" "$resp" '"answer"'
 
   stop_server "$pid"
 }
 
-# async_thread_pool — hardcoded :8080
+# async_thread_pool: hardcoded :8080
 test_async_thread_pool() {
   echo "=== async_thread_pool ==="
   bin="examples/async_thread_pool"
@@ -351,14 +351,14 @@ test_async_thread_pool() {
   resp=$($CURL "http://127.0.0.1:8080/" || true)
   check_contains "GET / (sync)" "$resp" '"hello'
 
-  # Thread pool endpoint — depends on pipe watcher + kl_async_complete
+  # Thread pool endpoint: depends on pipe watcher + kl_async_complete
   resp=$($CURL "http://127.0.0.1:8080/fast" || true)
   check_contains_soft "GET /fast" "$resp" '"work_ms"'
 
   stop_server "$pid"
 }
 
-# websocket_server — accepts port arg, test HTTP upgrade handshake
+# websocket_server: accepts port arg, test HTTP upgrade handshake
 test_websocket_server() {
   echo "=== websocket_server ==="
   bin="examples/websocket_server"
@@ -371,7 +371,7 @@ test_websocket_server() {
     stop_server "$pid"; return
   fi
 
-  # WebSocket upgrade request — server should respond with 101
+  # WebSocket upgrade request; server should respond with 101
   headers=$(curl -s -D - -o /dev/null --max-time 2 \
     -H "Upgrade: websocket" \
     -H "Connection: Upgrade" \
@@ -383,7 +383,7 @@ test_websocket_server() {
   stop_server "$pid"
 }
 
-# h2_server — accepts port arg, test with HTTP/1.1 (h2c upgrade needs special client)
+# h2_server: accepts port arg, test with HTTP/1.1 (h2c upgrade needs special client)
 test_h2_server() {
   echo "=== h2_server ==="
   bin="examples/h2_server"
@@ -460,7 +460,7 @@ test_async_client() {
 
 # ── Compression examples (conditional build) ──────────────────────────
 
-# decompress_client — standalone round-trip (no server needed)
+# decompress_client: standalone round-trip (no server needed)
 test_decompress_client() {
   echo "=== decompress_client ==="
   bin="examples/decompress_client"
@@ -475,7 +475,7 @@ test_decompress_client() {
   check_contains "streaming round-trip" "$output" "Streaming round-trip: OK"
 }
 
-# compress_server — server-side gzip compression
+# compress_server: server-side gzip compression
 test_compress_server() {
   echo "=== compress_server ==="
   bin="examples/compress_server"
@@ -495,7 +495,7 @@ test_compress_server() {
   resp=$($CURL "http://127.0.0.1:8080/json" || true)
   check_contains "GET /json (no gzip)" "$resp" '"Hello from Keel"'
 
-  # Compressed JSON — decompress with gunzip
+  # Compressed JSON: decompress with gunzip
   resp=$(curl -s --max-time 5 -H "Accept-Encoding: gzip" \
     "http://127.0.0.1:8080/json" | gunzip 2>/dev/null || true)
   check_contains "GET /json (gzip)" "$resp" '"Hello from Keel"'
@@ -544,7 +544,7 @@ test_h2_server
 test_client
 test_async_client
 
-# Compression examples (conditional — skip if not built)
+# Compression examples (conditional; skip if not built)
 test_decompress_client
 test_compress_server
 

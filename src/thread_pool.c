@@ -67,7 +67,7 @@ static void *worker_thread(void *arg)
         pool->work_count--;
         pthread_mutex_unlock(&pool->mutex);
 
-        /* Execute blocking work — no lock held */
+        /* Execute blocking work; no lock held */
         item.work_fn(item.user_data);
 
         /* Push to done queue */
@@ -93,7 +93,7 @@ static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user
     (void)ready;
     KlThreadPool *pool = user_data;
 
-    /* Drain wakeup channel — exact count doesn't matter */
+    /* Drain wakeup channel; exact count doesn't matter */
     kl_plat_wakeup_drain(fd);
 
     pthread_mutex_lock(&pool->mutex);

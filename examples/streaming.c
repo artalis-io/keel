@@ -1,5 +1,5 @@
 /*
- * streaming.c — Streaming chunked responses
+ * streaming.c: Streaming chunked responses
  *
  * Concepts: kl_http_response_begin_stream, KlHttpResponseWriteFn, chunked transfer-encoding.
  * Demonstrates how to stream JSON (or any data) without intermediate
@@ -13,7 +13,7 @@
 #include <keel/keel.h>
 #include <stdio.h>
 
-/* Simple streaming writer — writes directly through KEEL's chunked response */
+/* Simple streaming writer: writes directly through KEEL's chunked response */
 static int write_json_key(KlHttpResponseWriteFn write_fn, void *ctx,
                           const char *key, const char *value) {
     char buf[256];

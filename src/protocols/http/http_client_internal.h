@@ -1,16 +1,16 @@
 /*
- * http_client_internal.h — shared internals for the split HTTP/1.1 client TUs
+ * http_client_internal.h: shared internals for the split HTTP/1.1 client TUs
  *
- * The HTTP/1.1 client was split (freestanding step B2b) into three translation units
+ * The HTTP/1.1 client is split into three translation units
  * so a freestanding *async* client links without dragging in the blocking /
  * hosted sync path (poll()/read()/write()/blocking DNS):
  *
- *   - http_client_common.c — shared by sync + async: CRLF guard, plain/TLS I/O
+ *   - http_client_common.c - shared by sync + async: CRLF guard, plain/TLS I/O
  *     abstraction, heap request formatting, header helpers, response
  *     decompression, response free.
- *   - http_client_sync.c   — the blocking hosted API only (connect_with_timeout,
+ *   - http_client_sync.c:   the blocking hosted API only (connect_with_timeout,
  *     recv_response_sync, kl_http_client_request[_s], kl_http_client_request_pooled).
- *   - http_client_async.c  — the event-driven client (Happy Eyeballs, the state
+ *   - http_client_async.c:  the event-driven client (Happy Eyeballs, the state
  *     machine, completion connect, kl_http_client_start[_s], kl_http_client_start_pooled).
  *
  * This header is src/-internal (never installed). It carries only the surface
@@ -26,7 +26,7 @@
 #include <keel/decompress.h>
 #include <keel/http1_parser.h>
 #include <keel/resolver.h>
-#include <keel/connect_op.h>          /* KlConnectOp — outbound-connect state machine (6C) */
+#include <keel/connect_op.h>          /* KlConnectOp: outbound-connect state machine (6C) */
 #include <keel/connect_op_detail.h>   /* KlConnectOp layout (embedded by value) */
 #include <keel/tls.h>
 #include <keel/url.h>
@@ -59,7 +59,7 @@ typedef struct {
 } DecompStreamWrap;
 
 /* ══════════════════════════════════════════════════════════════════════
- * Async client state machine (http_client_async.c) — struct exposed here so the
+ * Async client state machine (http_client_async.c): struct exposed here so the
  * async-only helper build_connect_request (which mutates a KlHttpClient) and the
  * async TU share one definition.
  * ══════════════════════════════════════════════════════════════════════ */
@@ -104,12 +104,12 @@ struct KlHttpClient {
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
-    const char        *resolve_host;    /* host to resolve (borrowed; valid through the request) — 6C */
+    const char        *resolve_host;    /* host to resolve (borrowed; valid through the request); 6C */
     int                resolve_port;    /* port for the resolve (6C) */
-    int                connect_start_failed; /* 6C: resolver->resolve() could not start — the setup
+    int                connect_start_failed; /* 6C: resolver->resolve() could not start; the setup
                                               * returns NULL with no user callback (see cli_co_on_done) */
 
-    /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305), driven by the
+    /* Happy Eyeballs: racing connect over the resolved address list (RFC 8305), driven by the
      * KlConnectOp state machine (6C). Only active on the async resolver path (conn_racing=1); the
      * UNIX and sync-name-resolution paths stay single-fd. The client owns the idx->fd map
      * (conn_attempts) + the idx->addr map (conn_addrs); KlConnectOp owns the cursor / pending /
@@ -164,7 +164,7 @@ struct KlHttpClient {
 };
 
 /* ══════════════════════════════════════════════════════════════════════
- * Shared helpers (http_client_common.c) — used by both sync + async TUs.
+ * Shared helpers (http_client_common.c): used by both sync + async TUs.
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* CRLF injection guard: 1 if s[0..len) contains CR or LF. */

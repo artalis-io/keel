@@ -1,11 +1,11 @@
 /*
- * h2_client.c — Async HTTP/2 client
+ * h2_client.c: Async HTTP/2 client
  *
  * State machine: CONNECTING -> TLS_HANDSHAKE -> H2_INIT -> ACTIVE -> CLOSED
  *
  * Uses the pluggable KlHttp2ClientSession vtable so the actual HTTP/2
  * framing can be backed by nghttp2 or any other library. Tests use
- * a mock session — no nghttp2 dependency.
+ * a mock session; no nghttp2 dependency.
  */
 
 #include <keel/http2_client.h>
@@ -20,7 +20,7 @@
 #include <sys/types.h>
 
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
-#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
+#include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -256,9 +256,9 @@ static void h2c_on_stream_close(KlHttp2ClientSession *s, int32_t stream_id,
 
 /* After the TLS handshake, verify ALPN did not select a non-h2 protocol. This
  * client speaks HTTP/2; if the server negotiated something else (e.g. http/1.1)
- * we must fail rather than send an HTTP/2 preface it cannot parse — no silent
+ * we must fail rather than send an HTTP/2 preface it cannot parse: no silent
  * protocol switch. A NULL result (the server sent no ALPN) is accepted as
- * prior-knowledge h2, the documented client policy (see docs/alpn_policy.md). */
+ * prior-knowledge h2, the documented client policy (see docs/contracts/alpn_policy.md). */
 static int h2c_alpn_ok(KlHttp2ClientConn *c)
 {
     if (!c->tls || !c->tls->alpn_protocol) return 1;   /* no ALPN → prior knowledge */
@@ -346,7 +346,7 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
     if (r == KL_TLS_OK) {
         if (!h2c_alpn_ok(c)) { h2c_error(c, "ALPN did not negotiate h2"); return; }
         c->state = H2C_H2_INIT;
-        /* Create session — reuse the init path */
+        /* Create session: reuse the init path */
         if (!c->cfg.session) {
             h2c_error(c, "no session factory");
             return;
@@ -421,7 +421,7 @@ static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
         h2c_handle_tls_handshake(c);
         break;
     case H2C_H2_INIT:
-        /* Should not happen — init is synchronous after connect/TLS */
+        /* Should not happen: init is synchronous after connect/TLS */
         h2c_error(c, "unexpected state");
         break;
     case H2C_ACTIVE:

@@ -1,5 +1,5 @@
 /*
- * tls_server.c — HTTPS server using mbedTLS backend
+ * tls_server.c: HTTPS server using mbedTLS backend
  *
  * Concepts: KlTlsConfig, kl_tls_mbedtls_ctx_create, kl_tls_mbedtls_create,
  * cert/key loading, HTTPS on port 8443.

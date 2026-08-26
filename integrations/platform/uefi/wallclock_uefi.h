@@ -1,13 +1,13 @@
 /*
- * wallclock_uefi.h — EFI_TIME → UTC-seconds decode + the unspecified-timezone policy (U-8).
+ * wallclock_uefi.h: EFI_TIME → UTC-seconds decode + the unspecified-timezone policy.
  *
- * Split out of platform_uefi.c so the GetTime→decode→gate path is host-unit-testable with a
+ * Kept in its own TU so the GetTime→decode→gate path is host-unit-testable with a
  * fabricated EFI_TIME (the mock harness links this TU; platform_uefi.c only supplies the
  * actual GetTime call). Pure apart from the app-configurable timezone offset below.
  *
  * UNSPECIFIED-TIMEZONE POLICY (UEFI 2.10 §8.3): a GetTime whose TimeZone is
  * EFI_UNSPECIFIED_TIMEZONE returns LOCAL time, not UTC. We must NOT silently treat it as UTC.
- *   - Default: REJECT (fail-closed) — a local time with an unknown offset cannot validate cert
+ *   - Default: REJECT (fail-closed); a local time with an unknown offset cannot validate cert
  *     expiry to within the day.
  *   - kl_uefi_set_unspecified_tz(minutes): the app declares the machine's offset from UTC (UEFI
  *     sign: UTC = local + minutes), used only when the RTC reports unspecified.

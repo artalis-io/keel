@@ -1,19 +1,18 @@
 /*
- * completion_dispatch.c — the kl_comp_* completion-primitive call surface, dispatched
+ * completion_dispatch.c: the kl_comp_* completion-primitive call surface, dispatched
  * to either the compiled-in backend (default, no indirection) or a runtime-installed
- * provider. The completion-axis counterpart of event_dispatch.c (RC-1).
+ * provider. The completion-axis counterpart of event_dispatch.c.
  *
  * When loop->ops is NULL (the common case) each call goes straight to the backend's
- * completion vtable via kl_comp_ops_builtin() — the same table the backend also hangs
- * off its KlEventOps.completion. When a bring-your-own event backend is installed
+ * completion vtable via kl_comp_ops_builtin() (the same table the backend also hangs
+ * off its KlEventOps.completion). When a bring-your-own event backend is installed
  * (KlEventCtx.event_provider → loop->ops), the same calls route through
  * loop->ops->completion instead, so the completion axis is runtime-injectable without a
- * core recompile. RC-1 relocates the primitives behind this dispatch WITHOUT changing
- * behavior: the default (loop->ops == NULL) path reaches the identical backend impls.
+ * core recompile. The default (loop->ops == NULL) path reaches the identical backend impls.
  *
  * These definitions OWN the public kl_comp_* names; each completion backend renames its
  * own impls (static) and exposes them through kl_comp_ops_builtin(). The generic driver
- * (completion_driver.c) and the completion callers (async.c / http_server.c) call
+ * (completion_core.c) and the completion callers (async.c / http_server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
 #include <keel/event_ctx.h>   /* KlEventCtx (->loop) */
@@ -42,13 +41,13 @@ int kl_comp_prime_accepts_raw(struct KlEventCtx *ctx, KlSocketHandle listen_fd) 
 
 int kl_comp_shutdown_accepts_raw(struct KlEventCtx *ctx) {
     const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
-    /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
+    /* ops is NULL on a readiness builtin (never reached: the caller gates on KL_EVENT_CAP_
      * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
     if (ops && ops->shutdown_accepts) return ops->shutdown_accepts(ctx);
     return 0;
 }
 
-/* Raw transport routers (all neutral — KlEventCtx/KlStream). The HTTP-adapter wrappers
+/* Raw transport routers (all neutral: KlEventCtx/KlStream). The HTTP-adapter wrappers
  * (kl_comp_prime_accepts / post_accept / shutdown_accepts / post_recv / post_send / post_sendfile, in
  * KlHttpServer/KlHttpConn form) live in completion_http_server.c and forward the neutral arg here; the
  * backend behind the vtable does raw I/O only and never sees an HTTP type. */

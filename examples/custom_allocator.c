@@ -1,5 +1,5 @@
 /*
- * custom_allocator.c — Tracking allocator that counts allocations
+ * custom_allocator.c: Tracking allocator that counts allocations
  *
  * Concepts: KlAllocator vtable (malloc, realloc, free with sizes),
  * tracking allocator, passing custom allocator to APIs,

@@ -1,5 +1,5 @@
 /*
- * fuzz_decompress.c — libFuzzer target for gzip/deflate decompression.
+ * fuzz_decompress.c: libFuzzer target for gzip/deflate decompression.
  *
  * The client decompresses UNTRUSTED server response bodies. This feeds arbitrary
  * bytes through both the single-shot (kl_decompress_body) and streaming
@@ -7,7 +7,7 @@
  *   - malformed gzip header / trailer / CRC / ISIZE handling,
  *   - the growth loop and streaming emit path,
  *   - the anti-decompression-bomb output cap (a broken cap would let output grow
- *     unbounded — libFuzzer's malloc/rss limit flags that; ASan/UBSan catch OOB).
+ *     unbounded; libFuzzer's malloc/rss limit flags that; ASan/UBSan catch OOB).
  *
  * Seed the corpus with a real gzip stream so mutations reach the inflate paths.
  *

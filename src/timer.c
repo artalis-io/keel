@@ -136,7 +136,7 @@ int kl_timer_fire(KlEventCtx *ctx) {
         cb(ud);
         fired++;
 
-        /* Re-read now — callback may have taken time */
+        /* Re-read now; callback may have taken time */
         now = kl_monotonic_ms();
     }
 

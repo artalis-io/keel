@@ -1,8 +1,8 @@
 /*
- * test_datagram_multicast.c — D2: LIVE multicast join/leave/delivery over KlDatagram (migrated from
- * test_udp_multicast.c's unique live coverage; the validation/routing/gating cases are already covered
- * deterministically by test_datagram_public.m2_multicast_*). Delivery is environment-sensitive: these
- * probe the sandbox and UTEST_SKIP where loopback multicast is unavailable.
+ * test_datagram_multicast.c: LIVE multicast join/leave/delivery over KlDatagram. The
+ * validation/routing/gating cases are covered deterministically by
+ * test_datagram_public.m2_multicast_*; this file adds the live-delivery coverage. Delivery is
+ * environment-sensitive: these probe the sandbox and UTEST_SKIP where loopback multicast is unavailable.
  */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE

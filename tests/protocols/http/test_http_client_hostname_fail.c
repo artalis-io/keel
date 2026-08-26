@@ -1,6 +1,6 @@
 /*
- * test_http_client_hostname_fail.c — Finding 1 regression (HTTP client slice; T-split of
- * the former tests/test_tls_set_hostname_fail.c). Clients MUST fail closed when
+ * test_http_client_hostname_fail.c: guards that clients fail closed on a set_hostname
+ * failure (HTTP client slice of the TLS set-hostname-fail tests). Clients MUST fail closed when
  * KlTls::set_hostname() returns -1.
  *
  * The adapter's set_hostname sets up SNI *and* hostname verification; if it fails,
@@ -46,7 +46,7 @@ UTEST(tls_hostname_fail, sync_client_aborts)
     int rc = kl_http_client_request(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &resp);
     mock_tls_set_hostname_fail = 0;
 
-    /* Must fail — never a successful handshake / 200 (which the listener would
+    /* Must fail: never a successful handshake / 200 (which the listener would
      * otherwise deliver over the passthrough TLS). */
     ASSERT_EQ(rc, -1);
     ASSERT_NE(resp.status, 200);

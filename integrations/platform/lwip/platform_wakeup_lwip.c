@@ -1,13 +1,13 @@
 /*
- * platform_wakeup_lwip.c — the lwIP run-loop wakeup channel.
+ * platform_wakeup_lwip.c: the lwIP run-loop wakeup channel.
  *
  * The host self-pipe (platform_wakeup_posix.c) is invisible to lwip_poll, so
  * kl_http_server_stop would only be noticed on the next poll tick. This provides a
- * wakeup that IS an lwIP socket — a self-connected UDP socket on loopback: a
+ * wakeup that IS an lwIP socket, a self-connected UDP socket on loopback: a
  * send-to-self delivers a datagram that wakes lwip_poll(POLLIN) immediately.
  *
  * Link this object AHEAD of a stock libkeel.a so it overrides the platform_wakeup
- * seam's kl_plat_wakeup_* before the archive's host version is pulled — the same
+ * seam's kl_plat_wakeup_* before the archive's host version is pulled; the same
  * link-time override as socket_lwip.c / resolve_sync_lwip.c. Generic seam lives in
  * src/platform_wakeup_posix.c; only this lwIP-specific impl lives under integrations/.
  */
@@ -61,6 +61,6 @@ void kl_plat_wakeup_drain(KlSocketHandle rd)
 void kl_plat_wakeup_close(KlPlatWakeup *w)
 {
     if (kl_handle_valid(w->rd))
-        lwip_close((int)w->rd);   /* rd == wr — single socket */
+        lwip_close((int)w->rd);   /* rd == wr: single socket */
     w->rd = w->wr = KL_INVALID_SOCKET;
 }

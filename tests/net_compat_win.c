@@ -1,5 +1,5 @@
 /*
- * net_compat_win.c — Winsock implementation of the test network helpers.
+ * net_compat_win.c: Winsock implementation of the test network helpers.
  *
  * Sibling of net_compat_posix.c, selected by the Makefile (never both). Windows
  * has no socketpair() and no pollable pipes, so the pair is a self-connected
@@ -7,7 +7,7 @@
  * tests/net_compat.h.
  *
  * Precondition: Winsock must already be initialized (WSAStartup) before these
- * helpers are called — the library does this at load (socket_winsock.c's
+ * helpers are called; the library does this at load (socket_winsock.c's
  * constructor), which every test links, so tests need no explicit WSAStartup.
  */
 #include "net_compat.h"

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# run_dgram_dns.sh — 6.4c harness: the STOCK dns_resolver over KlDatagram-over-EFI_UDP4 on real
+# run_dgram_dns.sh: 6.4c harness: the STOCK dns_resolver over KlDatagram-over-EFI_UDP4 on real
 # firmware, to the FROZEN acceptance (docs/phase10_efi_udp4_provider_design.md §9). Runs
 # inside the Ubuntu 24.04 container. Two QEMU/OVMF boots of one EFI image:
 #
 #   HAPPY: python DNS answers A keel.test -> 10.0.2.2; python HTTP responder on TARGET_PORT.
 #          Assert: resolver ran A+AAAA over EFI_UDP4, GET returned 200, udp_live==0/quar==0.
 #   TC:    python DNS answers with TC=1 (truncated) + no records. The freestanding resolver
-#          has NO TCP fallback (6.4a-2), so it must settle a clean KL_ERR_DNS — no hang.
+#          has NO TCP fallback (6.4a-2), so it must settle a clean KL_ERR_DNS; no hang.
 #          Assert: NO-GO, no HTTP 200, udp_live==0, terminal DONE reached (bounded failure).
 #
 # The self-test only reports FACTS; THIS harness is the oracle. It exits non-zero unless BOTH
@@ -18,7 +18,7 @@
 #   KL_U9_HOSTNAME   hostname the guest resolves (default keel.test)
 #   KL_U9_NAMESERVER guest-visible DNS server address (default 10.0.2.2)
 #   OVMF_CODE/VARS   override OVMF fds
-#   BOOT_TIMEOUT     per-boot qemu safety timeout seconds (default 150 — DNS/GET + TCG is slow)
+#   BOOT_TIMEOUT     per-boot qemu safety timeout seconds (default 150; DNS/GET + TCG is slow)
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -70,7 +70,7 @@ echo "python http.server pid=$HTTPD_PID on 0.0.0.0:$TARGET_PORT"
 
 # ---- 5. DNS server (mode-switchable) on 0.0.0.0:53 ----
 # HAPPY: answer A keel.test -> 10.0.2.2, AAAA -> empty NOERROR (A wins, no hang).
-# TC:    every response has TC=1 (truncated) and no records — exercises the freestanding
+# TC:    every response has TC=1 (truncated) and no records; exercises the freestanding
 #        no-TCP-fallback branch, which must settle KL_ERR_DNS.
 DNS_ANSWER_IP="10.0.2.2"
 cat > /tmp/u9_dns.py <<PYEOF
@@ -112,7 +112,7 @@ while True:
     question = data[12:off+4]
     is_tc = (MODE == "tc")
     if is_tc:
-        # QR|RD|RA|TC, RCODE=0, no records — a truncated answer.
+        # QR|RD|RA|TC, RCODE=0, no records: a truncated answer.
         flags = struct.pack(">H", 0x8380)
         resp = tid + flags + struct.pack(">HHHH", 1, 0, 0, 0) + question
     else:
@@ -163,7 +163,7 @@ boot() {
           -serial stdio -display none -monitor none -no-reboot )
   echo "=== boot mode=$mode (timeout ${BOOT_TIMEOUT}s) ==="
   timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${args[@]}" 2>&1 | tee "$serial"
-  echo "(qemu exit: ${PIPESTATUS[0]} — 124=safety-timeout, expected only if firmware ignored reset -s)"
+  echo "(qemu exit: ${PIPESTATUS[0]}; 124=safety-timeout, expected only if firmware ignored reset -s)"
 }
 
 # ---- 8. oracles ----
@@ -200,7 +200,7 @@ assert_tc() {
   has "$dns" 'type=1 '                   && echo "  [ok] guest issued the query (TC path exercised)" || { echo "  [FAIL] no query reached DNS"; ok=0; }
   # Timing: response-driven TC settlement is prompt (leg fails immediately on TC, no retransmit),
   # so it lands well below the per-leg timeout. A DROPPED TC response would only settle after
-  # the ≥leg_timeout_ms timer — indistinguishable from this test's other markers WITHOUT this
+  # the ≥leg_timeout_ms timer, indistinguishable from this test's other markers WITHOUT this
   # check. Require completion under 2/3 of the leg timeout (derived from the serial, not magic).
   local legto ms thr
   legto=$(grep -oE 'leg_timeout_ms = [0-9]+' "$s" | grep -oE '[0-9]+' | head -1)
@@ -210,7 +210,7 @@ assert_tc() {
     if [ "$ms" -lt "$thr" ]; then
       echo "  [ok] TC settled in ${ms}ms < ${thr}ms (2/3 of ${legto}ms leg timeout) → response-driven, not timeout"
     else
-      echo "  [FAIL] TC settled in ${ms}ms (>= ${thr}ms) — cannot rule out a timeout-driven failure"; ok=0
+      echo "  [FAIL] TC settled in ${ms}ms (>= ${thr}ms); cannot rule out a timeout-driven failure"; ok=0
     fi
   else
     echo "  [FAIL] missing leg_timeout_ms/elapsed_ms markers (cannot prove prompt settlement)"; ok=0
@@ -229,9 +229,9 @@ assert_tc
 
 echo "======================================================"
 if [ "$FAILS" -eq 0 ]; then
-  echo "RESULT: PASS — stock dns_resolver over EFI_UDP4: GET 200 (happy) + clean KL_ERR_DNS (TC), no UDP leak"
+  echo "RESULT: PASS, stock dns_resolver over EFI_UDP4: GET 200 (happy) + clean KL_ERR_DNS (TC), no UDP leak"
   exit 0
 else
-  echo "RESULT: FAIL — $FAILS boot(s) did not meet the frozen 6.4c acceptance"
+  echo "RESULT: FAIL, $FAILS boot(s) did not meet the frozen 6.4c acceptance"
   exit 1
 fi

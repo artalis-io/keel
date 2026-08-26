@@ -1,4 +1,4 @@
-# integrations/ — umbrella build for the optional adapters.
+# integrations/: umbrella build for the optional adapters.
 #
 # Delegates to each adapter's own Makefile. An adapter is built only when its
 # BYO library variable is set; otherwise it is skipped with a notice, so
@@ -13,7 +13,7 @@ all: mbedtls openssl libressl nghttp2 lwip
 test: mbedtls-test openssl-test libressl-test nghttp2-test
 
 # lwIP: build-gate only (compile the providers against your lwIP). A running Keel
-# server on lwIP needs a PLATFORM=lwip build of libkeel — see platform/lwip/README.md.
+# server on lwIP needs a PLATFORM=lwip build of libkeel; see platform/lwip/README.md.
 lwip:
 ifndef LWIP_DIR
 	@echo "integrations: skipping lwip (set LWIP_DIR to build-gate)"

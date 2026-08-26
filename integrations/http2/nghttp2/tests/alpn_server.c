@@ -1,5 +1,5 @@
 /*
- * alpn_server.c — a real TLS server that advertises ALPN {h2, http/1.1} and
+ * alpn_server.c: a real TLS server that advertises ALPN {h2, http/1.1} and
  * serves BOTH from one shared REST layer, for external-tool ALPN interop:
  *
  *   openssl s_client -alpn h2       -connect 127.0.0.1:18443   -> ALPN: h2
@@ -9,7 +9,7 @@
  *
  * mbedTLS supplies TLS + ALPN advertisement (kl_tls_mbedtls_ctx_set_alpn); the
  * nghttp2 adapter supplies the HTTP/2 session. The GET / route + handler are
- * protocol-independent — the same handler answers over h2 and http/1.1. Runs
+ * protocol-independent: the same handler answers over h2 and http/1.1. Runs
  * until killed. Requires BOTH mbedTLS and nghttp2 (BYO, out of CI).
  */
 #include <keel/keel.h>
@@ -47,7 +47,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     int n = snprintf(body, sizeof(body),
                      "{\"ok\":true,\"http\":%d,\"host\":\"%s\"}",
                      req->version_major, host ? host : "");
-    /* body_copy (not kl_http_response_json, which borrows) — the buffer is on the
+    /* body_copy (not kl_http_response_json, which borrows): the buffer is on the
      * stack and the HTTP/1.1 path writes the body after this returns. */
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/json");

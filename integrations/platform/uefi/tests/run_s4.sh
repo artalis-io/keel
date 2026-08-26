@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# run_s4.sh — S-4 harness. Runs inside the Ubuntu 24.04 container.
+# run_s4.sh: S-4 harness. Runs inside the Ubuntu 24.04 container.
 #   1. build the freestanding self-contained SERVER archive
 #      (make freestanding-lib-server-selfcontained)
-#   2. build BOOTX64.EFI (build_s4.sh) — the EFI_TCP4 plaintext HTTP server
+#   2. build BOOTX64.EFI (build_s4.sh): the EFI_TCP4 plaintext HTTP server
 #   3. build a FAT ESP image with EFI/BOOT/BOOTX64.EFI + startup.nsh
 #   4. boot QEMU x86_64 + OVMF (TCG, no KVM), e1000 NIC, SLIRP user-net with a
 #      host->guest port-forward (hostfwd tcp::HOST_PORT-:80), serial to a log (bg)
@@ -11,14 +11,14 @@
 #   6. tear QEMU down
 #
 # Unlike the client harnesses (U-3/U-4), the workload runs IN the guest and the host
-# is the client — so this needs a SLIRP hostfwd (guest :80 -> host :HOST_PORT), not a
+# is the client, so this needs a SLIRP hostfwd (guest :80 -> host :HOST_PORT), not a
 # guest->host responder.
 #
 # Env:
 #   KEEL_ROOT     repo root (default: ../../../..)
 #   HOST_PORT     host side of the port-forward (default 18080)
 #   OVMF_CODE / OVMF_VARS   override OVMF fds
-#   BOOT_TIMEOUT  qemu timeout seconds (default 240 — DHCP + TCG boot is slow)
+#   BOOT_TIMEOUT  qemu timeout seconds (default 240; DHCP + TCG boot is slow)
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -113,7 +113,7 @@ done
 status=""
 if [ "$listening" = 1 ]; then
   echo "guest is listening; curling http://127.0.0.1:${HOST_PORT}/ ..."
-  # a few attempts — the EFI_TCP4 accept path may need a moment to prime
+  # a few attempts; the EFI_TCP4 accept path may need a moment to prime
   for _ in $(seq 1 20); do
     status="$(curl -s -o /tmp/s4_body.txt -w '%{http_code}' --max-time 5 \
                 "http://127.0.0.1:${HOST_PORT}/" 2>/dev/null || true)"
@@ -123,7 +123,7 @@ if [ "$listening" = 1 ]; then
   echo "curl HTTP status = ${status:-<none>}"
   echo "--- response body ---"; cat /tmp/s4_body.txt 2>/dev/null; echo "--- end ---"
 else
-  echo "guest never reported 'listening' — see serial log below"
+  echo "guest never reported 'listening'; see serial log below"
 fi
 
 # give the serial a moment to flush the GO marker, then report
@@ -132,7 +132,7 @@ echo "=== serial markers ==="
 grep -E 'S-4:' "$SERIAL" 2>/dev/null || echo "(no S-4 markers found)"
 
 if [ "$status" = "200" ] && grep -q "S-4: GO" "$SERIAL" 2>/dev/null; then
-  echo "S-4: PASS — EFI_TCP4 server served GET / -> 200"
+  echo "S-4: PASS, EFI_TCP4 server served GET / -> 200"
   exit 0
 fi
 echo "S-4: FAIL (status=${status:-<none>}, GO marker $(grep -q 'S-4: GO' "$SERIAL" 2>/dev/null && echo present || echo absent))"

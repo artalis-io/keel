@@ -31,17 +31,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         offset += consumed;
 
         if (rc < 0) {
-            /* Protocol error — reset and try from current position */
+            /* Protocol error; reset and try from current position */
             kl_ws_frame_init(&fp);
             if (consumed == 0) offset++;  /* skip bad byte */
             continue;
         }
 
         if (rc == 1) {
-            /* Frame complete — reset for next frame */
+            /* Frame complete; reset for next frame */
             kl_ws_frame_init(&fp);
         } else if (consumed == 0) {
-            /* No progress, need more data — advance to avoid stall */
+            /* No progress, need more data; advance to avoid stall */
             break;
         }
     }

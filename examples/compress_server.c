@@ -1,12 +1,12 @@
 /*
- * compress_server.c — Response compression with miniz gzip backend
+ * compress_server.c: Response compression with miniz gzip backend
  *
  * Concepts: KlCompress vtable, KlCompressConfig, kl_http_response_body_compress,
  * KlHttpCompressStream, kl_http_compress_stream_begin/write/end.
  *
  * Demonstrates:
- *   /json    — buffer body compression (gzip if Accept-Encoding: gzip)
- *   /stream  — streaming compression over chunked transfer
+ *   /json    : buffer body compression (gzip if Accept-Encoding: gzip)
+ *   /stream  : streaming compression over chunked transfer
  *
  * Build:  make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
  * Run:    ./examples/compress_server
@@ -25,7 +25,7 @@ typedef struct {
     KlCompressConfig *compress;
 } AppCtx;
 
-/* Buffer body compression — compresses the entire response at once */
+/* Buffer body compression; compresses the entire response at once */
 static void handle_json(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     AppCtx *app = user_data;
     const char *json =
@@ -48,7 +48,7 @@ static void handle_json(KlHttpRequest *req, KlHttpResponse *res, void *user_data
     }
 }
 
-/* Streaming compression — compresses chunks as they are written */
+/* Streaming compression; compresses chunks as they are written */
 static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     AppCtx *app = user_data;
 

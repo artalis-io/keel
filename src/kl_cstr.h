@@ -1,5 +1,5 @@
 /*
- * kl_cstr.h — locale-free, bounded C-string primitives (freestanding-safe).
+ * kl_cstr.h: locale-free, bounded C-string primitives (freestanding-safe).
  *
  * These replace the formatted-I/O + locale surface (snprintf / strtol /
  * strcasecmp / strstr / strchr) in the freestanding client TUs so that
@@ -77,7 +77,7 @@ int kl_streq(const char *a, const char *b);
 /**
  * Case-SENSITIVE prefix test: returns 1 iff NUL-terminated @p s begins with the
  * NUL-terminated @p prefix (stopping at either NUL, exactly like
- * strncmp(s, prefix, strlen(prefix)) == 0). Byte-exact, no case folding —
+ * strncmp(s, prefix, strlen(prefix)) == 0). Byte-exact, no case folding;
  * preserves the URL parser's existing scheme-match semantics. */
 int kl_str_startswith(const char *s, const char *prefix);
 

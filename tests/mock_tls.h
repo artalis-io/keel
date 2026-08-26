@@ -1,16 +1,16 @@
 /*
- * mock_tls.h — an identity (no-crypto) KlTls for tests.
+ * mock_tls.h: an identity (no-crypto) KlTls for tests.
  *
  * Implements the full KlTls vtable, INCLUDING the completion-mode feed_input/drain_output
  * ops, as a passthrough: "ciphertext" == plaintext. This lets the TLS-over-completion
- * driver run over the pollcomp backend in CI without mbedTLS — exercising comp_tls_drive,
+ * driver run over the pollcomp backend in CI without mbedTLS; exercising comp_tls_drive,
  * the memory-BIO feed/drain plumbing, and comp_tls_send_response/file/stream/TLS-h2 for
  * real. It is the direct analogue of the pollcomp backend (a test double that makes an
  * axis runnable), one layer up.
  *
  * Role-agnostic + symmetric: the handshake is 0-RTT (immediate OK, no bytes on the wire),
  * so the SAME factory serves both the server (completion transport: feed/drain rings) and
- * the sync client (synchronous socket I/O). NOT a security construct — tests only.
+ * the sync client (synchronous socket I/O). NOT a security construct; tests only.
  */
 #ifndef KEEL_TEST_MOCK_TLS_H
 #define KEEL_TEST_MOCK_TLS_H
@@ -41,7 +41,7 @@ static int mock_tls_grow(KlAllocator *a, unsigned char **buf, size_t *cap, size_
 
 static KlTlsResult mock_tls_handshake(KlTls *self, KlSocketHandle fd) {
     (void)self; (void)fd;
-    return KL_TLS_OK;   /* 0-RTT identity handshake — no bytes exchanged */
+    return KL_TLS_OK;   /* 0-RTT identity handshake; no bytes exchanged */
 }
 
 static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
@@ -52,7 +52,7 @@ static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_
         size_t n = avail < len ? avail : len;
         memcpy(buf, m->in + m->in_pos, n);
         m->in_pos += n;
-        if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;   /* drained — reset ring */
+        if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;   /* drained; reset ring */
         return (ssize_t)n;
     }
     return kl_sockdef_recv(fd, buf, len);
@@ -111,7 +111,7 @@ static void mock_tls_destroy(KlTls *self) {
     kl_free(m->alloc, m->out, m->out_cap);
     kl_free(m->alloc, m, sizeof(*m));
 }
-/* When set to 1, mock_tls_set_hostname returns -1 — simulating an SNI /
+/* When set to 1, mock_tls_set_hostname returns -1; simulating an SNI /
  * hostname-verification setup failure. Clients MUST fail closed (abort the
  * connection) rather than handshake without hostname verification. Static-per-TU,
  * default 0 (success), so it doesn't affect includers that don't opt in. */

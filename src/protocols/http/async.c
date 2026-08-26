@@ -1,8 +1,8 @@
 /*
- * async.c — KlAsyncOp connection suspension (server-side).
+ * async.c: KlAsyncOp connection suspension (server-side).
  *
- * The KlEventCtx + KlWatcher API + kl_event_ctx_run moved to event_ctx.c in the
- * freestanding phase (F0) — that half is client-usable and server-free. This TU
+ * The KlEventCtx + KlWatcher API + kl_event_ctx_run live in event_ctx.c; that
+ * half is client-usable and server-free. This TU
  * keeps only the connection-suspension machinery, which reaches into the server
  * connection driver (kl_http_conn_on_writable / kl_http_server_conn_release /
  * kl_http_comp_resume) and so is not part of the freestanding client.
@@ -15,7 +15,7 @@
 #include "http_internal.h"
 #include "event_caps.h"
 #include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
-#include "completion_http.h" /* kl_http_comp_resume — completion resume (8e-2) */
+#include "completion_http.h" /* kl_http_comp_resume: completion resume */
 
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
@@ -43,7 +43,7 @@ int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
 /* Idempotently retire an op: remove it from the active list, clear the
  * connection's back-pointer, and mark it terminal. Returns the connection it was
  * attached to on the first (pending→terminal) call, or NULL if the op was already
- * retired — the exactly-one-terminal guard shared by complete and cancel. */
+ * retired, the exactly-one-terminal guard shared by complete and cancel. */
 static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
     if (op->_terminal) return NULL;
     op->_terminal = 1;
@@ -63,7 +63,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
     /* Exactly-one-terminal: a second complete (or a complete racing a cancel)
-     * is a no-op — no double on_resume, no double release. */
+     * is a no-op: no double on_resume, no double release. */
     KlHttpConn *conn = async_retire(s, op);
     if (!conn) return;
 
@@ -74,21 +74,21 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (op->on_resume)
         op->on_resume(op, op->user_data);
 
-    /* If the handler suspended again, a new op is active — nothing to do */
+    /* If the handler suspended again, a new op is active, nothing to do */
     if (conn->state == KL_HTTP_CONN_SUSPENDED)
         return;
 
-    /* On a completion loop, drive the completion send path instead of re-arming the fd —
+    /* On a completion loop, drive the completion send path instead of re-arming the fd;
      * the readiness re-register + kl_http_conn_on_writable below is a no-op there (kl_event_add
      * is inert, kl_http_conn_on_writable does readiness socket writes). Branch on the abstract
      * event axis (not the backend); the completion send lives behind the completion seam so
-     * async.c stays free of completion internals (8e-2). */
+     * async.c stays free of completion internals. */
     if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
         kl_http_comp_resume(s, conn);
         return;
     }
 
-    /* Handler completed — re-register FD and drive state machine */
+    /* Handler completed: re-register FD and drive state machine */
     KlHttpConnState new_state = conn->state;
 
     /* Try immediate send if response is ready */
@@ -111,7 +111,7 @@ void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
     /* Exactly-one-terminal: a cancel racing a completion (or a double cancel) is
-     * a no-op — on_cancel fires at most once, and never after on_resume. */
+     * a no-op: on_cancel fires at most once, and never after on_resume. */
     if (async_retire(s, op) == NULL) return;
 
     if (op->on_cancel)

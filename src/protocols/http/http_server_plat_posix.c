@@ -4,9 +4,9 @@
 #endif
 
 /*
- * http_server_plat_posix.c — POSIX implementation of the server platform services
+ * http_server_plat_posix.c: POSIX implementation of the server platform services
  * (http_server_plat.h). The AF_UNIX node lifecycle, peer credentials, and signal
- * handling extracted from http_server.c so that TU stays platform-#ifdef-free.
+ * handling live here so http_server.c stays platform-#ifdef-free.
  *
  * This is a POSIX TU: it keeps intra-POSIX (__linux__ vs __APPLE__/BSD)
  * variance behind #ifdef, exactly like socket_posix.c does for sendfile.
@@ -272,7 +272,7 @@ void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
         /* Re-check that the path is still a socket before unlinking, so a
          * regular file (or a socket from a different process) that replaced
          * our path is not removed.  lstat (not stat) avoids following a
-         * symlink.  Best-effort teardown — no error reporting. */
+         * symlink.  Best-effort teardown; no error reporting. */
         struct stat st;
         if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
             unlink(s->config.unix_socket_path);
@@ -327,7 +327,7 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
 }
 
 unsigned kl_platform_caps(void) {
-    /* Mirrors kl_peer_cred_fd's per-dialect support (F5: POSIX dialects are the
+    /* Mirrors kl_peer_cred_fd's per-dialect support (POSIX dialects are the
      * PAL TU's own business). systemd socket activation is a Linux concept. */
     unsigned caps = 0;
 #if defined(__linux__) && defined(SO_PEERCRED)

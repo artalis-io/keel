@@ -1,5 +1,5 @@
 /*
- * timer.c — One-shot + repeating timers, cancellation
+ * timer.c: One-shot + repeating timers, cancellation
  *
  * Concepts: kl_timer_add, kl_timer_cancel, kl_timer_next_timeout,
  * kl_timer_fire, KlEventCtx standalone (no server).

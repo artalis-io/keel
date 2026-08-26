@@ -1,5 +1,5 @@
 /*
- * tls_mbedtls.c — mbedTLS backend for Keel's KlTls vtable
+ * tls_mbedtls.c: mbedTLS backend for Keel's KlTls vtable
  *
  * Implements server-side TLS (with optional mTLS) and client-side TLS
  * using mbedTLS 3.x. All I/O is non-blocking via custom BIO callbacks.
@@ -33,7 +33,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Secure zeroing — scrub key material before free.
+/* Secure zeroing: scrub key material before free.
  * Uses volatile pointer to prevent compiler from optimizing away the store.
  * Portable across all platforms without requiring platform-specific APIs
  * (explicit_bzero requires _DEFAULT_SOURCE on Linux, is unavailable in
@@ -61,7 +61,7 @@ typedef struct {
     const KlSocketProvider *sp;
     /* ALPN: ctx-owned copy of the advertised (server) / offered (client) protocol
      * list. mbedTLS stores the pointer (does not copy), so it must outlive the
-     * config — hence the backing buffer here. NULL-terminated `alpn` array. */
+     * config; hence the backing buffer here. NULL-terminated `alpn` array. */
     const char            *alpn[8];
     char                   alpn_buf[256];
 } KlMbedtlsCtx;
@@ -69,7 +69,7 @@ typedef struct {
 /* ── Per-connection TLS session ──────────────────────────────────── */
 
 typedef struct {
-    KlTls              base;       /* vtable — must be first */
+    KlTls              base;       /* vtable: must be first */
     mbedtls_ssl_context ssl;
     KlMbedtlsCtx      *ctx;       /* shared context (not owned) */
     KlAllocator        *alloc;
@@ -78,7 +78,7 @@ typedef struct {
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
     int                 reset_failed;  /* session_reset() failed → refuse next handshake */
-    /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
+    /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
     int                 comp_mode;
@@ -87,7 +87,7 @@ typedef struct {
 } KlMbedtlsTls;
 
 /* Cap on either completion ciphertext ring (a TLS record is <= ~16 KiB; cert-chain
- * handshake flights are larger — 256 KiB is generous, overflow → connection error). */
+ * handshake flights are larger; 256 KiB is generous, overflow → connection error). */
 #define KL_TLS_COMP_MAX (256u * 1024u)
 
 /* Ensure *buf has capacity for `need` bytes (grow by doubling, capped). */
@@ -124,9 +124,9 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
         t->out_len += len;
         return (int)len;
     }
-    /* kl_sock_send routes through the configured provider (t->sp) — or, when NULL,
+    /* kl_sock_send routes through the configured provider (t->sp), or, when NULL,
      * kl_sockdef_send: SIGPIPE-suppressed (MSG_NOSIGNAL) + EINTR-retried on POSIX,
-     * Winsock send with kl_wsa_set_errno on Windows — so the EAGAIN/EWOULDBLOCK
+     * Winsock send with kl_wsa_set_errno on Windows, so the EAGAIN/EWOULDBLOCK
      * check below works on both. A non-host provider (e.g. lwIP) supplies its own
      * would-block errno. */
     ssize_t ret = kl_sock_send(t->sp, t->fd, buf, len);
@@ -201,7 +201,7 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     if (len == 0)
         return 0;
 
-    /* at_eof() must describe THIS read, not a prior one — clear the sticky flag at
+    /* at_eof() must describe THIS read, not a prior one; clear the sticky flag at
      * the start of every substantive read (it is re-set below only on a real EOF). */
     t->eof_seen = 0;
 
@@ -210,7 +210,7 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     if (ret > 0)
         return ret;
     if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
-        t->eof_seen = 1;  /* clean shutdown / EOF — at_eof() reports it */
+        t->eof_seen = 1;  /* clean shutdown / EOF: at_eof() reports it */
         return -1;
     }
     if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
@@ -220,7 +220,7 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
 }
 
 /* at_eof: was the last read() -1 a clean TLS shutdown (close_notify/EOF)? See
- * KlTls.at_eof — lets a caller finalize a close-delimited response instead of
+ * KlTls.at_eof: lets a caller finalize a close-delimited response instead of
  * treating the -1 as an I/O error. */
 static int tls_at_eof(KlTls *self)
 {
@@ -257,7 +257,7 @@ static KlTlsResult tls_shutdown(KlTls *self, KlSocketHandle fd)
     if (ret == MBEDTLS_ERR_SSL_WANT_WRITE)
         return KL_TLS_WANT_WRITE;
 
-    return KL_TLS_OK;  /* best-effort — don't fail on shutdown errors */
+    return KL_TLS_OK;  /* best-effort: don't fail on shutdown errors */
 }
 
 static size_t tls_pending(KlTls *self)
@@ -266,7 +266,7 @@ static size_t tls_pending(KlTls *self)
     return mbedtls_ssl_get_bytes_avail(&t->ssl);
 }
 
-/* Completion mode (8b-5): feed received ciphertext to the engine's input ring. */
+/* Completion mode: feed received ciphertext to the engine's input ring. */
 static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
@@ -380,12 +380,12 @@ static void x509_extract_san(const mbedtls_x509_sequence *seq, char *out, size_t
             else
                 continue;
         } else {
-            continue;   /* rfc822Name, URI, etc. — not surfaced */
+            continue;   /* rfc822Name, URI, etc.: not surfaced */
         }
 
         size_t ilen = strlen(item);
         if (off + ilen + (off ? 1u : 0u) >= outlen)
-            break;      /* out of room — stop cleanly */
+            break;      /* out of room: stop cleanly */
         if (off)
             out[off++] = ',';
         memcpy(out + off, item, ilen);
@@ -442,7 +442,7 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     return 0;
 }
 
-/* KlTls.set_socket_provider — the framework (http_connection.c/client.c) calls this
+/* KlTls.set_socket_provider: the framework (http_connection.c and the HTTP client) calls this
  * before the handshake with the connection's provider, overriding any ctx default
  * so the socket-BIO uses the same stack as the connection. */
 static void tls_set_socket_provider(KlTls *self, const struct KlSocketProvider *sp)
@@ -480,7 +480,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.alpn_protocol = tls_alpn_protocol;
     t->base.set_hostname  = kl_tls_mbedtls_set_hostname;
     t->base.peer_cert     = tls_peer_cert;
-    t->base.feed_input    = tls_feed_input;      /* completion mode (8b-5) */
+    t->base.feed_input    = tls_feed_input;      /* completion mode */
     t->base.drain_output  = tls_drain_output;
     t->base.set_socket_provider = tls_set_socket_provider;  /* framework auto-wires the provider */
     t->base.at_eof        = tls_at_eof;          /* close-delimited response finalization */
@@ -501,7 +501,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
         return NULL;
     }
 
-    /* Set BIO callbacks — pass 't' as context */
+    /* Set BIO callbacks: pass 't' as context */
     mbedtls_ssl_set_bio(&t->ssl, t, bio_send, bio_recv, NULL);
 
     return &t->base;
@@ -601,7 +601,7 @@ static unsigned char *read_file(const char *path, size_t *out_len,
 
 /* Build a server context from in-memory cert/key/(optional CA) buffers. PEM
  * buffers must be NUL-terminated with the length counting the NUL (mbedTLS PEM
- * rule); DER is auto-detected. Does not take ownership of or scrub the buffers —
+ * rule); DER is auto-detected. Does not take ownership of or scrub the buffers;
  * the caller does. Shared by the file-path and _from_buf public entry points. */
 static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_len,
                                      const unsigned char *key_buf, size_t key_len,
@@ -803,7 +803,7 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
         mbedtls_ssl_conf_ca_chain(&ctx->conf, &ctx->ca_cert, NULL);
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else {
-        /* WARNING: No CA provided — TLS certificate verification DISABLED.
+        /* WARNING: No CA provided; TLS certificate verification DISABLED.
          * Connections are encrypted but vulnerable to MITM attacks.
          * Production deployments MUST provide a CA bundle. */
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);

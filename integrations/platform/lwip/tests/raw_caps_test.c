@@ -1,25 +1,25 @@
 /*
- * raw_caps_test.c — Stage C fail-early capability contract for the lwIP-raw completion backend.
+ * raw_caps_test.c: fail-early capability contract for the lwIP-raw completion backend.
  *
  * lwip-raw is an IPv4-only TCP+UDP completion backend that now does server AND client
- * (plaintext + HTTPS + DNS — see raw_client_test/raw_he_test/raw_dns_test/raw_tls_test for the
+ * (plaintext + HTTPS + DNS, see raw_client_test/raw_he_test/raw_dns_test/raw_tls_test for the
  * positive end-to-end proofs). This test asserts that the operations it does NOT support fail
  * EARLY and CLEARLY at the provider seam, so a caller never silently hangs on an unsupported op:
  *
  *   K1  the SYNCHRONOUS socket-provider connect op -> -1 / ENOTSUP BY DESIGN. Outbound client
  *         connects ride the COMPLETION connect primitive (kl_comp_post_connect → tcp_connect),
  *         NOT this blocking op, which is nonsensical on a NO_SYS=1 single-loop target. So this
- *         op staying ENOTSUP is correct even though the client is fully supported (LC-1/2/4).
+ *         op staying ENOTSUP is correct even though the client is fully supported.
  *   K2  bind() with a non-IPv4 (IPv6) address -> -1 (the loopif is IPv4; IPv6 unsupported).
- *   K3  bind() with an IPv4 address -> 0 (the supported family still works — a control case).
- *   K4  UDP is SUPPORTED (LC-3a): the raw socket provider now exposes datagram ops
- *         (.dgram != NULL), so kl_datagram_socket_init() on a ctx wired to this provider SUCCEEDS —
- *         KlDatagram runs over the raw completion loop. (This FLIPPED at LC-3a; previously unsupported.)
+ *   K3  bind() with an IPv4 address -> 0 (the supported family still works, a control case).
+ *   K4  UDP is SUPPORTED: the raw socket provider exposes datagram ops
+ *         (.dgram != NULL), so kl_datagram_socket_init() on a ctx wired to this provider SUCCEEDS;
+ *         KlDatagram runs over the raw completion loop.
  *
  * (The second-simultaneous-ctx rejection + sequential-ctx cases are covered in raw_recv_test.c;
  * they are not duplicated here.)
  *
- * These are pure provider-seam assertions — no server, no lwIP mainloop thread. K4 wires a
+ * These are pure provider-seam assertions; no server, no lwIP mainloop thread. K4 wires a
  * KlEventCtx's sockets to the raw provider (the same auto-wire a KlHttpServer does via the loop's
  * native_provider()) and confirms kl_datagram_socket_init accepts it.
  *
@@ -31,7 +31,7 @@
 #include <keel/socket.h>
 #include <keel/sockaddr.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* complete KlDatagram type — stack instance in K4b */
+#include <keel/datagram_detail.h>   /* complete KlDatagram type; stack instance in the UDP case */
 
 #include "keel_lwip_raw.h"
 
@@ -41,7 +41,7 @@
 
 static int fail(const char *msg) { printf("RAW-CAPS FAIL: %s\n", msg); return 1; }
 
-/* K1 — connect() is unsupported (server-only): must return -1 and set errno = ENOTSUP. */
+/* K1: connect() is unsupported (server-only): must return -1 and set errno = ENOTSUP. */
 static int test_connect_rejected(void) {
     const KlSocketProvider *p = kl_socket_provider_lwip_raw();
     if (!p || !p->ops || !p->ops->connect) return fail("no connect op on raw provider");
@@ -64,7 +64,7 @@ static int test_connect_rejected(void) {
     return 0;
 }
 
-/* K2/K3 — bind() rejects a non-IPv4 (IPv6) address but accepts IPv4. */
+/* K2/K3: bind() rejects a non-IPv4 (IPv6) address but accepts IPv4. */
 static int test_bind_family(void) {
     const KlSocketProvider *p = kl_socket_provider_lwip_raw();
     if (!p || !p->ops || !p->ops->socket || !p->ops->bind || !p->ops->close)
@@ -91,7 +91,7 @@ static int test_bind_family(void) {
     return 0;
 }
 
-/* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_datagram_socket_init
+/* K4 - UDP is SUPPORTED: the raw provider exposes datagram ops, so kl_datagram_socket_init
  * succeeds. `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly
  * as a KlHttpServer does via the loop's native_provider(). kl_datagram_socket_init now creates a udp_pcb
  * through the provider's datagram data-plane (udp_dg() non-NULL). */
@@ -101,10 +101,10 @@ static int test_udp_supported(KlEventCtx *ctx) {
 
     /* The support is structural: the provider now advertises a datagram data-plane. */
     if (p->dgram == NULL)
-        return fail("raw provider missing datagram ops (.dgram == NULL — LC-3a should expose them)");
+        return fail("raw provider missing datagram ops (.dgram == NULL: LC-3a should expose them)");
     if (!(p->capabilities & KL_SOCK_CAP_DATAGRAM))
         return fail("raw provider missing KL_SOCK_CAP_DATAGRAM");
-    printf("PASS K4a (raw provider .dgram != NULL + KL_SOCK_CAP_DATAGRAM — datagram data-plane)\n");
+    printf("PASS K4a (raw provider .dgram != NULL + KL_SOCK_CAP_DATAGRAM: datagram data-plane)\n");
 
     ctx->sockets = kl_socket_provider_lwip_raw();
     KlDatagram dg;
@@ -114,7 +114,7 @@ static int test_udp_supported(KlEventCtx *ctx) {
     int rc = kl_datagram_socket_init(&dg, &ucfg);
     if (rc != 0)
         return fail("kl_datagram_socket_init failed on the raw provider (UDP must be supported at LC-3a)");
-    /* No armed recv / pending send — abortive close reaches CLOSED promptly; pump to confirm + free. */
+    /* No armed recv / pending send; abortive close reaches CLOSED promptly; pump to confirm + free. */
     (void)kl_datagram_close_cancel(&dg);
     for (int i = 0; i < 200 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
         kl_event_ctx_run(ctx, 16, 5);
@@ -126,7 +126,7 @@ static int test_udp_supported(KlEventCtx *ctx) {
 }
 
 int main(void) {
-    /* K1/K2 (connect/bind family) are pure family checks — they never touch the lwIP core. But
+    /* K1/K2 (connect/bind family) are pure family checks; they never touch the lwIP core. But
      * K3's control case (an IPv4 bind on a real raw pcb) needs lwip_init() to have run, and the
      * K4 udp_init runs against a live ctx. So bring up ONE raw ctx (which lwip_init()s the core +
      * loopif) for the whole test, then tear it down. This also keeps the single-active-ctx

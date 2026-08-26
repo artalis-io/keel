@@ -1,10 +1,10 @@
 /*
- * test_event_provider.c — proves a runtime-injected event backend
+ * test_event_provider.c: proves a runtime-injected event backend
  * (KlEventProvider) actually drives a real KlHttpServer end to end.
  *
  * A self-contained poll()-based readiness backend is installed via
  * KlHttpServerConfig.event_provider (not the compiled-in epoll/kqueue). A raw-socket client
- * makes an HTTP/1.1 request; the handler must run and return 200 — driven only by
+ * makes an HTTP/1.1 request; the handler must run and return 200; driven only by
  * the custom backend. A call counter on the backend's wait() proves the loop ran
  * on the provider, not the builtin. This is the second consumer of the seam
  * (alongside the compiled default) and the exact mechanism lwIP uses.
@@ -81,7 +81,7 @@ static const struct KlSocketProvider *ep_native(const KlEventLoop *l) { (void)l;
 static const KlEventOps EP_OPS = {
     .init = ep_init, .add = ep_add, .mod = ep_mod, .del = ep_del, .wait = ep_wait,
     .close = ep_close, .caps = ep_caps, .native_provider = ep_native,
-    .completion = NULL,   /* readiness test backend — no completion axis (RC-1) */
+    .completion = NULL,   /* readiness test backend, no completion axis */
 };
 static const KlEventProvider EP_PROVIDER = { &EP_OPS, "test-poll" };
 

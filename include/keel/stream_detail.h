@@ -1,5 +1,5 @@
 /*
- * keel/stream_detail.h — Layout of KlStream (opt-in detail).
+ * keel/stream_detail.h: Layout of KlStream (opt-in detail).
  *
  * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlStream (e.g. KlHttpConn embeds
  * it); the fields are NOT part of the API and may change without notice. The behavior/ownership
@@ -63,7 +63,7 @@ struct KlStream {
     /* ── Graceful-close / confirmed-detachment (contract: kl_stream_close_* in <keel/stream.h>) */
     int                close_state;      /**< KL_STREAM_STATE_* */
     int                close_abort;      /**< 1 = abortive (cancel ops, drop queue) vs graceful */
-    int                in_close_cancel;  /**< DEPTH counter: >0 = inside cancel hooks — defer finalize */
+    int                in_close_cancel;  /**< DEPTH counter: >0 = inside cancel hooks; defer finalize */
     int                close_notified;   /**< on_close fired (exactly-once) */
     int                close_inited;
     int                wq_closing;       /**< write side closing: reject new writes */

@@ -8,7 +8,7 @@ int kl_decompress_body(KlDecompressConfig *cfg, const char *in, size_t in_len,
     if (in_len > 0 && !in)
         return -1;
 
-    /* Empty input — empty output */
+    /* Empty input: empty output */
     if (in_len == 0) {
         *out = NULL;
         *out_len = 0;

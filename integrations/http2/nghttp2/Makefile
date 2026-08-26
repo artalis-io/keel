@@ -1,4 +1,4 @@
-# integrations/http2/nghttp2 — standalone build of the nghttp2 HTTP/2 session adapters.
+# integrations/http2/nghttp2: standalone build of the nghttp2 HTTP/2 session adapters.
 #
 # Produces libkeel_http2_nghttp2.a (client + server KlHttp2*Session vtables over
 # nghttp2). Bring-your-own nghttp2 (>= 1.57 for the size_t "*2" API); nothing is
@@ -81,7 +81,7 @@ interop-curl: $(LIB)
 	  echo "integrations/http2/nghttp2: curl --http2-prior-knowledge interop OK"
 
 # HTTP/2 protocol conformance: run h2spec (https://github.com/summerwind/h2spec)
-# against the KEEL nghttp2 server (h2c). Reports pass/fail; informational — the
+# against the KEEL nghttp2 server (h2c). Reports pass/fail; informational; the
 # residual failures are shared with nghttp2's own reference server (nghttpd), see
 # README. Requires h2spec on PATH (brew install h2spec).
 INTEROP_PORT ?= 18478

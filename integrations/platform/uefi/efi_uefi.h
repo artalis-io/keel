@@ -1,16 +1,16 @@
 /*
- * efi_uefi.h — U-1 UEFI platform+allocator shim base types.
+ * efi_uefi.h: UEFI platform+allocator shim base types.
  *
- * Extends the U-0 spike's minimal vendored UEFI surface (efi_min.h)
- * with the handful of extra declarations the U-1 shims need that the spike did
- * not: the EfiBootServicesData pool type, the EVT_TIMER notify-callback
+ * Extends the minimal vendored UEFI surface (efi_min.h)
+ * with the handful of extra declarations the shims need that efi_min.h does
+ * not carry: the EfiBootServicesData pool type, the EVT_TIMER notify-callback
  * signature, and the EFI_RNG_PROTOCOL. All decls are vendored from the UEFI
  * Specification 2.10 and cite the relevant section.
  *
- * We include the spike's efi_min.h verbatim (it already declares the boot-
+ * We include efi_min.h verbatim (it already declares the boot-
  * services table with AllocatePool/FreePool/CreateEvent/SetTimer/Stall/
  * LocateProtocol and the system table + console) and add ONLY the missing bits
- * here, so the two stay in sync and we never re-vendor what the spike proved.
+ * here, so the two stay in sync and we never re-vendor what efi_min.h provides.
  *
  * EFIAPI == Microsoft x64 calling convention (UEFI ABI), honored by clang
  * --target=x86_64-unknown-windows via __attribute__((ms_abi)).
@@ -23,7 +23,7 @@
 /* ---- Memory pool types for AllocatePool (UEFI 2.10 §7.2, EFI_MEMORY_TYPE) ----
  * efi_min.h defines EfiLoaderData (2). The KEEL allocator uses
  * EfiBootServicesData (4): data owned by a boot-services application, freed
- * automatically at ExitBootServices — the correct class for a transient
+ * automatically at ExitBootServices, the correct class for a transient
  * networking heap that lives only in the pre-boot environment. */
 #ifndef EfiBootServicesData
 #define EfiBootServicesData 4

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# build_dgram_dns.sh — build the 6.4c stock-dns_resolver-over-EFI_UDP4 self-test into BOOTX64.EFI.
+# build_dgram_dns.sh: build the 6.4c stock-dns_resolver-over-EFI_UDP4 self-test into BOOTX64.EFI.
 #
-# This links the STOCK src/protocols/dns/dns_resolver.c — the real async Do53 engine — over KlDatagram-over-
+# This links the STOCK src/protocols/dns/dns_resolver.c, the real async Do53 engine, over KlDatagram-over-
 # EFI_UDP4. (The retired U-5 build linked a bespoke one-shot dns_uefi.c behind the synchronous
 # kl_resolve_sync; both build_u5.sh and dns_uefi.c have since been removed.) The transport is
 # the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4, socket_efi_udp4.c) +
@@ -9,7 +9,7 @@
 # from the self-contained freestanding DNS archive; only the EFI-native TUs are compiled here.
 #
 #   - freestanding archive: libkeel_freestanding_dns_selfcontained[_ARCH].a
-#                           (make freestanding-lib-dns-selfcontained) — dns_resolver + udp +
+#                           (make freestanding-lib-dns-selfcontained): dns_resolver + udp +
 #                           datagram_* + completion + event_ctx + kl_cstr_builtin (mem*/strlen)
 #   - U-1 shims:        allocator_uefi.c, errno_uefi.c, platform_uefi.c, civil_time.c, wallclock_uefi.c
 #   - unified socket:   socket_efi_tcp4.c (builder + provider) + socket_efi_udp4.c (EFI_UDP4 substrate)
@@ -23,7 +23,7 @@
 #   ARCHIVE           override the freestanding DNS archive path
 #   CLIENT_ARCHIVE    override the freestanding client archive path
 #   KL_U9_HOSTNAME    hostname the resolver looks up (default keel.test)
-#   KL_U9_NAMESERVER  DNS server the guest queries (default 10.0.2.2 — the SLIRP host)
+#   KL_U9_NAMESERVER  DNS server the guest queries (default 10.0.2.2, the SLIRP host)
 #   TARGET_PORT       host HTTP responder port compiled into the GET URL (default 18080)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -84,7 +84,7 @@ CFLAGS=(
 # u1_link_stubs.c supplies the fail-closed DEFAULT provider residuals (kl_sockdef_*,
 # kl_event_*_builtin, kl_comp_ops_builtin) the archive references but that the injected
 # EFI providers replace at runtime; its unused kl_resolve_sync is dead weight (the async
-# KlResolver path never calls it — contrast U-5).
+# KlResolver path never calls it; contrast U-5).
 SRCS=( ../allocator_uefi.c ../errno_uefi.c ../platform_uefi.c ../civil_time.c ../wallclock_uefi.c
        ../socket_efi_tcp4.c ../socket_efi_udp4.c ../event_efi.c
        u1_link_stubs.c dgram_link_stubs.c dgram_dns_selftest.c )

@@ -25,7 +25,7 @@ typedef enum {
  */
 typedef struct KlTls KlTls;
 
-/* A KlSocketProvider (keel/socket.h) — forward-declared so the optional
+/* A KlSocketProvider (keel/socket.h): forward-declared so the optional
  * set_socket_provider hook can route the transport's socket I/O without this
  * public header depending on the socket seam. */
 struct KlSocketProvider;
@@ -34,14 +34,14 @@ struct KlSocketProvider;
  * @brief Verified peer (client) certificate identity from an mTLS handshake.
  *
  * Filled by the optional KlTls::peer_cert method. `verified` reports whether
- * the certificate passed CA-chain validation — a certificate can be *present*
+ * the certificate passed CA-chain validation: a certificate can be *present*
  * (client sent one) yet *unverified* (chain/expiry/hostname failure) when the
  * server is configured for optional client auth. Always check `verified` before
  * trusting the identity fields.
  *
  * String fields are always NUL-terminated (empty string when the field is
  * absent from the certificate). `der` points into backend-owned memory that
- * remains valid only until the next reset()/destroy() on the session — copy it
+ * remains valid only until the next reset()/destroy() on the session; copy it
  * if you need it beyond the current request.
  */
 typedef struct {
@@ -104,13 +104,13 @@ struct KlTls {
 
     /**
      * @brief Negotiated ALPN protocol, or NULL.
-     * Optional — set to NULL if not supported.
+     * Optional: set to NULL if not supported.
      */
     const char *(*alpn_protocol)(KlTls *self);
 
     /**
      * @brief Set the expected server hostname for SNI (client mode).
-     * Optional — set to NULL if not supported by the backend.
+     * Optional: set to NULL if not supported by the backend.
      * Must be called before handshake().
      * @param self     TLS session.
      * @param hostname Server hostname for SNI and certificate verification.
@@ -122,7 +122,7 @@ struct KlTls {
      * @brief Extract the verified peer (client) certificate identity.
      *
      * Server-side mTLS: fills `*out` with the client certificate presented
-     * during the handshake. Optional — set to NULL if the backend does not
+     * during the handshake. Optional: set to NULL if the backend does not
      * support client-certificate extraction.
      * @param self TLS session (handshake must be complete).
      * @param out  Caller-provided struct to populate.
@@ -131,13 +131,13 @@ struct KlTls {
     int (*peer_cert)(KlTls *self, KlPeerCert *out);
 
     /**
-     * @brief Completion-mode transport (optional — NULL on backends that only do
+     * @brief Completion-mode transport (optional: NULL on backends that only do
      * the synchronous socket BIO). When both feed_input and drain_output are set,
      * the caller drives the transport: it feeds received ciphertext and drains the
      * engine's outgoing ciphertext, and handshake()/read()/write() then operate on
      * those buffers instead of the socket fd (their fd argument is ignored). Used by
      * the completion event loop (IOCP); a readiness loop never calls these, so a
-     * backend that leaves them NULL — and every readiness path — is unaffected.
+     * backend that leaves them NULL, and every readiness path, is unaffected.
      *
      * feed_input: hand `len` bytes of received ciphertext to the engine's input.
      *   Returns 0 on success, -1 on error (e.g. input buffer full).
@@ -147,7 +147,7 @@ struct KlTls {
     /**
      * @brief Drain up to `cap` bytes of the engine's pending outgoing ciphertext
      * into `buf` (what handshake()/write() produced). Returns bytes written (>= 0),
-     * or -1 on error. Optional — see feed_input.
+     * or -1 on error. Optional: see feed_input.
      */
     kl_ssize_t (*drain_output)(KlTls *self, void *buf, size_t cap);
 
@@ -159,10 +159,10 @@ struct KlTls {
      * host socket ops; when this hook is set, KEEL's server/client call it before
      * the handshake with the *connection's own* provider (`KlHttpServerConfig.sockets` /
      * `KlHttpClientConfig.sockets`), so TLS I/O automatically matches the connection's
-     * socket provider — e.g. a non-kernel stack (lwIP) whose descriptors are not
+     * socket provider: e.g. a non-kernel stack (lwIP) whose descriptors are not
      * host fds. Passing NULL selects the host default.
      *
-     * Optional — set to NULL if the backend only ever runs on host sockets. It has
+     * Optional: set to NULL if the backend only ever runs on host sockets. It has
      * no effect on the completion (memory-BIO feed_input/drain_output) path, which
      * never touches the socket fd. Idempotent; safe to call on every handshake.
      */
@@ -171,7 +171,7 @@ struct KlTls {
     /**
      * @brief Did the peer cleanly close the TLS session? (optional)
      *
-     * The read() contract has no distinct EOF code — a clean close and a fatal
+     * The read() contract has no distinct EOF code: a clean close and a fatal
      * error both surface as -1 (0 means WANT_READ). That is fine for a length-
      * delimited body, but a *close-delimited* response (HTTP/1.0, or `Connection:
      * close` with no `Content-Length`) is finalized precisely by the peer closing,
@@ -182,7 +182,7 @@ struct KlTls {
      * 0 otherwise. Lets the client treat a clean TLS EOF like a socket recv() of 0
      * (finalize an in-flight response) instead of reporting KL_ERR_IO.
      *
-     * Optional — NULL if the backend cannot report it; callers must treat a NULL
+     * Optional: NULL if the backend cannot report it; callers must treat a NULL
      * hook as "unknown", preserving the pre-existing error behavior.
      * @return 1 if the peer cleanly closed the session, else 0.
      */
@@ -194,7 +194,7 @@ struct KlTls {
  *
  * The 7 required ops (handshake/read/write/shutdown/pending/reset/destroy) must all be
  * set; alpn_protocol/peer_cert/feed_input/drain_output/at_eof are optional. A factory that
- * returns a session missing any required op — including `destroy` — is unusable, and a
+ * returns a session missing any required op, including `destroy`, is unusable, and a
  * later cleanup path that blindly called the missing op would crash. Callers (e.g.
  * kl_http_server_init) reject such a session with KL_ERR_TLS_VTABLE and free it via its own
  * `destroy` only when that pointer is non-NULL. Header-only so hosted + freestanding share
@@ -207,7 +207,7 @@ static inline int kl_tls_vtable_valid(const KlTls *t) {
 
 /**
  * @brief Opaque per-server TLS context (certificates, keys, ciphers).
- * User-owned — KEEL never inspects or modifies this.
+ * User-owned: KEEL never inspects or modifies this.
  */
 typedef struct KlTlsCtx KlTlsCtx;
 
@@ -224,7 +224,7 @@ typedef KlTls *(*KlTlsFactory)(KlTlsCtx *ctx, KlAllocator *alloc);
  * @brief TLS configuration for KlHttpServerConfig.
  */
 typedef struct {
-    KlTlsCtx    *ctx;          /**< Shared context (certs/keys) — user-owned */
+    KlTlsCtx    *ctx;          /**< Shared context (certs/keys); user-owned */
     KlTlsFactory factory;      /**< Creates per-connection KlTls */
     void (*ctx_destroy)(KlTlsCtx *ctx);  /**< Optional cleanup at server shutdown */
 } KlTlsConfig;

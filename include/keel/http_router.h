@@ -37,11 +37,11 @@ typedef struct {
     int streaming_async;               /**< 1 = invoke handler BEFORE feeding any
                                             leftover body bytes via on_data (v2.2.0+).
                                             Requires the handler to yield on
-                                            NEED_DATA — it'll be resumed by the body
+                                            NEED_DATA; it'll be resumed by the body
                                             reader's on_data callback for the leftover
                                             AND subsequent socket reads.
 
-                                            Implies streaming_handler=1 — set both via
+                                            Implies streaming_handler=1; set both via
                                             kl_http_server_route_streaming_async.
 
                                             Enables the full error-path mid-stream
@@ -125,7 +125,7 @@ int  kl_http_router_add_streaming(KlHttpRouter *r, const char *method, const cha
  *
  *        Identical to kl_http_router_add_streaming, plus: the handler is
  *        invoked BEFORE any leftover body bytes are fed via on_data.
- *        It MUST yield on NEED_DATA — the body reader's on_data
+ *        It MUST yield on NEED_DATA: the body reader's on_data
  *        callback will resume it when bytes arrive (both the leftover
  *        from the headers-read and subsequent socket reads).
  *
@@ -141,7 +141,7 @@ int  kl_http_router_add_streaming(KlHttpRouter *r, const char *method, const cha
  *        Synchronous C handlers that consume the body without yielding
  *        (i.e. they call into the body reader expecting events to be
  *        immediately available) must use the legacy kl_http_router_add_
- *        streaming — they'll see NEED_DATA on the first call here
+ *        streaming; they'll see NEED_DATA on the first call here
  *        and have no way to recover.
  *
  * @param r           Router instance.
@@ -178,7 +178,7 @@ int  kl_http_router_match(KlHttpRouter *r, const char *method, size_t method_len
  * @brief Register pre-body middleware that runs before body reading.
  * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern — exact match or prefix with trailing slash-star.
+ * @param pattern URL pattern: exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure.
@@ -194,7 +194,7 @@ int  kl_http_router_use(KlHttpRouter *r, const char *method, const char *pattern
  *
  * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern — exact match or prefix with trailing slash-star.
+ * @param pattern URL pattern: exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure.
@@ -233,9 +233,9 @@ int  kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlH
  * middleware is disabled, no handler is invoked and the caller should
  * read the return value to know what happened.
  *
- * This is the in-process counterpart to the network-driven dispatch in
- * `http_connection.c` / `h2.c`. Hull's test harness uses it; user code can
- * use it for synthetic requests (e.g. agent-API self-calls).
+ * This is the in-process counterpart to the network-driven dispatch in the HTTP/1.1 and HTTP/2
+ * connection handlers (`src/protocols/http/http_connection.c`, `src/protocols/http2/`). Hull's test
+ * harness uses it; user code can use it for synthetic requests (e.g. agent-API self-calls).
  *
  * @param r              Router instance.
  * @param req            Pre-built request (must outlive the call).

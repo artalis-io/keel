@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_dgram_public.sh — 7B-9 harness: the PUBLIC KlDatagram close over EFI_UDP4 on real
+# run_dgram_public.sh: 7B-9 harness: the PUBLIC KlDatagram close over EFI_UDP4 on real
 # firmware. One QEMU/OVMF boot of one EFI image. The guest does a public-API datagram
 # round-trip to a host UDP echo (over SLIRP 10.0.2.2) and then a graceful DETACHED close.
 #
@@ -98,7 +98,7 @@ args+=( -drive format=raw,file="$ESP" -netdev user,id=n0 -device e1000,netdev=n0
 echo "=== boot (timeout ${BOOT_TIMEOUT}s) ==="
 timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${args[@]}" 2>&1 | tee "$SERIAL"
 QEMU_RC=${PIPESTATUS[0]}   # capture BEFORE any other command resets PIPESTATUS
-echo "(qemu exit: $QEMU_RC — 0=clean guest power-off via ResetSystem; 124=safety-timeout; other=crash/qemu error)"
+echo "(qemu exit: $QEMU_RC; 0=clean guest power-off via ResetSystem; 124=safety-timeout; other=crash/qemu error)"
 
 echo "=== host UDP echo log ==="; cat /tmp/u9_echo.log || true
 
@@ -115,16 +115,16 @@ has "$SERIAL" '7b9: close_result = 1'            && echo "  [ok] close_result = 
 has "$SERIAL" '7b9: udp_live = 0 udp_quarantined = 0' && echo "  [ok] udp_live=0 quarantined=0 (clean teardown)" || { echo "  [FAIL] dirty UDP teardown"; ok=0; }
 has /tmp/u9_echo.log 'echo recv'                 && echo "  [ok] host echo saw the guest probe"    || { echo "  [FAIL] host echo never saw the probe"; ok=0; }
 # The markers above are all emitted BEFORE the app returns/ResetSystem, so a post-DONE crash,
-# failed reset, or hang would still print them. Require QEMU to have exited CLEANLY (0) — a
+# failed reset, or hang would still print them. Require QEMU to have exited CLEANLY (0): a
 # non-zero exit (124 timeout / crash) means the guest never powered off, which is exactly the
 # timer/return failure class this increment fixed.
 [ "$QEMU_RC" = 0 ]                                && echo "  [ok] qemu exited 0 (guest powered off cleanly; no post-DONE crash/hang)" || { echo "  [FAIL] qemu exit=$QEMU_RC (post-DONE crash / failed reset / timeout)"; ok=0; }
 
 echo "======================================================"
 if [ "$ok" = 1 ]; then
-  echo "RESULT: PASS — public KlDatagram round-trip + DETACHED close over EFI_UDP4 on OVMF, no UDP leak"
+  echo "RESULT: PASS, public KlDatagram round-trip + DETACHED close over EFI_UDP4 on OVMF, no UDP leak"
   exit 0
 else
-  echo "RESULT: FAIL — the 7B-9 public-KlDatagram e2e did not meet acceptance"
+  echo "RESULT: FAIL, the 7B-9 public-KlDatagram e2e did not meet acceptance"
   exit 1
 fi

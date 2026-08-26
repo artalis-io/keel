@@ -1,5 +1,5 @@
 /*
- * static_files.c — Static file server with sendfile
+ * static_files.c: Static file server with sendfile
  *
  * Concepts: kl_http_response_file (sendfile), MIME type detection, path
  * traversal guard, wildcard route.
@@ -32,7 +32,7 @@ static const char *mime_type(const char *path, size_t len) {
 static void handle_static(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
 
-    /* Reject path traversal — portable check (req->path is not null-terminated) */
+    /* Reject path traversal; portable check (req->path is not null-terminated) */
     int has_dotdot = 0;
     for (size_t i = 0; i + 1 < req->path_len; i++) {
         if (req->path[i] == '.' && req->path[i + 1] == '.') { has_dotdot = 1; break; }

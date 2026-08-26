@@ -1,6 +1,6 @@
 /*
- * test_io_status.c — the portable I/O-result classification seam (freestanding
- * step B1). Proves:
+ * test_io_status.c: the portable I/O-result classification seam (freestanding
+ * I/O-status contract). Proves:
  *   - kl_sock_io_status() dispatches to a provider's io_status op when set, and
  *     that a provider CAN classify every category WITHOUT ever touching errno
  *     (the freestanding contract: a stack with no hosted errno supplies io_status);
@@ -57,7 +57,7 @@ static KlSocketProvider efs_provider(ErrnoFreeSock *m) {
     return p;
 }
 
-/* The op, when present, is consulted — for every category — with errno untouched. */
+/* The op, when present, is consulted, for every category, with errno untouched. */
 UTEST(iostatus, op_classifies_without_errno) {
     ErrnoFreeSock m; memset(&m, 0, sizeof(m));
     KlSocketProvider p = efs_provider(&m);
@@ -76,11 +76,11 @@ UTEST(iostatus, op_classifies_without_errno) {
         ASSERT_EQ(cats[i], kl_sock_io_status(&p));
     }
     ASSERT_TRUE(m.status_calls >= 7);
-    /* errno was never consulted by the seam — our poison survives. */
+    /* errno was never consulted by the seam; our poison survives. */
     ASSERT_EQ(0xBADF00D, errno);
 }
 
-/* connect returning PENDING via the op — the exact test the async client makes:
+/* connect returning PENDING via the op: the exact test the async client makes:
  * `kl_sock_io_status(...) != KL_IO_PENDING`. */
 UTEST(iostatus, connect_pending_via_op) {
     ErrnoFreeSock m; memset(&m, 0, sizeof(m));
@@ -125,7 +125,7 @@ UTEST(iostatus, null_op_errno_fallback) {
 
 /* A native-fd decorator over the built-in POSIX provider whose io_status op both
  * counts and delegates to the hosted mapping. Because it advertises NATIVE_FD the
- * readiness async client accepts it, and its fds are real — so the watcher polls
+ * readiness async client accepts it, and its fds are real; so the watcher polls
  * them and the full connect/send/recv state machine runs over real loopback.
  * Every -1 the async client classifies now routes through THIS op (proving the
  * client no longer reads errno directly). */
@@ -212,7 +212,7 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     ASSERT_EQ(200, x.status);
     /* The async client classified at least one -1 I/O result through the
      * provider's io_status op (nonblocking connect EINPROGRESS and/or an EAGAIN
-     * on recv while draining) — it never read errno itself. */
+     * on recv while draining); it never read errno itself. */
     ASSERT_GT(g_cdeco.io_status_calls, 0);
 
     kl_http_client_free(c);

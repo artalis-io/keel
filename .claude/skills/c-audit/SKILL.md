@@ -8,7 +8,7 @@ user-invocable: true
 
 Perform comprehensive security, safety, and quality audits on KEEL C code.
 
-**Target:** $ARGUMENTS (default: all `src/` and `parsers/` files)
+**Target:** $ARGUMENTS (default: all `src/` files, recursively, including `src/protocols/`)
 
 ## Usage
 
@@ -56,7 +56,7 @@ atof(str)                  -> strtof(str, &end) with validation
 
 **Allocator Discipline:**
 ```c
-// KEEL never calls malloc/free directly — always use the allocator
+// KEEL never calls malloc/free directly: always use the allocator
 // BAD:
 void *p = malloc(size);
 free(p);
@@ -133,8 +133,8 @@ if (count > 0 && (size_t)count > SIZE_MAX / sizeof(KlConn)) {
 | Issue | Severity | What to Check |
 |-------|----------|---------------|
 | SIGPIPE handling | High | `signal(SIGPIPE, SIG_IGN)` before any `write()` |
-| Partial writes | High | `write()` may not send all bytes — handle short writes |
-| EPIPE/ECONNRESET | Medium | Connection closed by peer — don't crash |
+| Partial writes | High | `write()` may not send all bytes; handle short writes |
+| EPIPE/ECONNRESET | Medium | Connection closed by peer; don't crash |
 | Request smuggling | High | Parser correctly handles Content-Length vs Transfer-Encoding |
 | Header injection | High | Response headers don't contain \r\n from user input |
 | Slowloris | Medium | Read timeout enforced on idle connections |
@@ -198,9 +198,8 @@ When `/c-audit` is invoked:
 
 1. **Locate Files**
    ```
-   src/*.c include/keel/*.h    # Core source and headers
-   parsers/*.c                 # Parser backends
-   tests/test_*.c              # Test files
+   src/*.c src/protocols/**/*.c include/keel/*.h   # Substrate + protocol source and headers
+   tests/test_*.c tests/protocols/*/test_*.c       # Test files
    Makefile                    # Build configuration
    ```
 

@@ -1,6 +1,6 @@
 /*
- * smoke_iouring_async.c — async/thread-pool handler over the io_uring completion loop
- * (PAL Phase 8f, the watcher relay).
+ * smoke_iouring_async.c: async/thread-pool handler over the io_uring completion loop
+ * (the watcher relay).
  *
  * Runtime-tests the io_uring watcher relay end to end: a KlHttpServer on the io_uring
  * completion loop (BACKEND=iouring), a KlThreadPool whose wakeup pipe is a kl_watcher
@@ -13,7 +13,7 @@
  * runs it. Sibling of smoke_pollcomp_async.c.
  */
 #include <keel/keel.h>
-/* No internal socket.h: this smoke sets no provider — it proves the 8f-5a auto-wire. */
+/* No internal socket.h: this smoke sets no provider: it proves the auto-wire. */
 
 #include <pthread.h>
 #include <string.h>
@@ -33,7 +33,7 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-/* op MUST be first — on_cancel/cancel_fn free via this pointer. */
+/* op MUST be first: on_cancel/cancel_fn free via this pointer. */
 typedef struct { KlAsyncOp op; int result; } WorkCtx;
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */
@@ -76,10 +76,10 @@ static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 int main(void) {
-    /* No .sockets set on purpose (8f-5a): a completion loop rejects the default provider,
+    /* No .sockets set on purpose: a completion loop rejects the default provider,
      * so kl_http_server_init must adopt the backend's native overlapped provider automatically
      * (kl_event_native_provider). This proves the completion backend is a source-compatible
-     * drop-in — the whole async/thread-pool/watcher-relay surface then runs over the
+     * drop-in: the whole async/thread-pool/watcher-relay surface then runs over the
      * auto-wired provider, no explicit provider anywhere. */
     KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1" };
     if (kl_http_server_init(&g_srv, &cfg) < 0) {

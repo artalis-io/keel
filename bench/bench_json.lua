@@ -1,4 +1,4 @@
--- bench_json.lua — wrk JSON reporter for KEEL benchmarks
+-- bench_json.lua: wrk JSON reporter for KEEL benchmarks
 -- Usage: wrk --latency -s bench_json.lua http://...
 
 done = function(summary, latency, requests)

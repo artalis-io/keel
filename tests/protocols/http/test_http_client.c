@@ -18,7 +18,7 @@ UTEST(client, response_free_null) {
 UTEST(client, response_free_zeroed) {
     KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
-    /* alloc is zeroed — should be a no-op */
+    /* alloc is zeroed: should be a no-op */
     kl_http_client_response_free(&resp);
     ASSERT_EQ(resp.status, 0);
 }
@@ -215,7 +215,7 @@ UTEST(client, async_dns_with_resolver_error) {
 
 /* Regression (audit H1): a resolver that completes synchronously AND returns
  * NULL (both contract-permitted). The client must NOT treat the NULL as a start
- * failure and free itself out from under on_done — it must return a live handle
+ * failure and free itself out from under on_done: it must return a live handle
  * that the caller frees. */
 static KlResolveReq mock_req_syncnull;
 static int          syncnull_done_fired;
@@ -255,13 +255,13 @@ UTEST(client, async_resolver_sync_complete_null_return) {
     ASSERT_TRUE(syncnull_done_fired);      /* on_done fired synchronously */
     ASSERT_TRUE(c != NULL);                /* handle kept alive (not freed under us) */
     ASSERT_EQ(kl_http_client_error(c), -1);     /* completed with the resolver error */
-    kl_http_client_free(c);                     /* caller owns it — no double-free/UAF */
+    kl_http_client_free(c);                     /* caller owns it: no double-free/UAF */
 
     kl_event_ctx_free(&ev);
 }
 
 UTEST(client, sync_dns_fallback) {
-    /* NULL resolver should use sync getaddrinfo — just verify it doesn't crash */
+    /* NULL resolver should use sync getaddrinfo: just verify it doesn't crash */
     KlAllocator a = kl_allocator_default();
     KlHttpClientResponse resp;
 

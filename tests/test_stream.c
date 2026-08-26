@@ -1,5 +1,5 @@
 /*
- * test_stream.c — Phase-B step 2A: internal KlStream write machinery (src/stream_write.h).
+ * test_stream.c: internal KlStream write machinery (src/stream_write.h).
  * Exercised in isolation with mock readiness-writer + completion-submit hooks (no live sockets).
  */
 #include "utest.h"
@@ -50,7 +50,7 @@ UTEST(stream_write, readiness_partial_send_then_flush_in_order) {
     ASSERT_EQ((int)kl_stream_write(&s, src, 6), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ((int)w.len, 3);                       /* prefix "abc" sent inline */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 3); /* remainder buffered */
-    memset(src, 'Z', sizeof(src));                  /* caller buffer mutated — remainder copied */
+    memset(src, 'Z', sizeof(src));                  /* caller buffer mutated: remainder copied */
 
     w.mode = 0;                                     /* accept everything on flush */
     ASSERT_EQ(kl_stream_flush(&s), 0);
@@ -95,7 +95,7 @@ UTEST(stream_write, completion_one_send_in_flight_then_pump) {
 
     /* A second write while a send is in flight must NOT post another (ordering). */
     ASSERT_EQ((int)kl_stream_write(&s, "world", 5), (int)KL_STREAM_ACCEPTED);
-    ASSERT_EQ(c.submits, 1);                       /* still one — blocked by send_inflight */
+    ASSERT_EQ(c.submits, 1);                       /* still one: blocked by send_inflight */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 10);
 
     /* WRITE completion: consume the delivered bytes, then pump the next batch. */
@@ -123,7 +123,7 @@ UTEST(stream_write, completion_copying_consumes_at_submit_but_blocks_next) {
     ASSERT_EQ(c.submits, 1);
     ASSERT_EQ((int)kl_drain_buffered(&s.wq), 0);   /* copying: queue consumed at submit */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 5);/* but still pending (unacked in flight) */
-    memset(src, 'Z', sizeof(src));                 /* caller buffer mutated after submit — safe */
+    memset(src, 'Z', sizeof(src));                 /* caller buffer mutated after submit: safe */
 
     /* Next write buffers but does not submit (ordering blocked until completion). */
     ASSERT_EQ((int)kl_stream_write(&s, "world", 5), (int)KL_STREAM_ACCEPTED);
@@ -148,7 +148,7 @@ UTEST(stream_write, completion_submission_failure_keeps_bytes_and_errors) {
     ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ERROR);  /* submit failed */
     ASSERT_EQ(c.submits, 1);
     ASSERT_EQ((int)c.total, 0);                     /* nothing delivered */
-    ASSERT_EQ((int)kl_stream_write_pending(&s), 5); /* bytes still owned — never discarded */
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 5); /* bytes still owned: never discarded */
 
     /* Sticky: subsequent writes fail, no further submits. */
     ASSERT_EQ((int)kl_stream_write(&s, "x", 1), (int)KL_STREAM_ERROR);
@@ -159,7 +159,7 @@ UTEST(stream_write, completion_submission_failure_keeps_bytes_and_errors) {
 }
 
 UTEST(stream_write, completion_write_failure_referencing_retains_bytes) {
-    /* Finding 1: a WRITE that FAILS after a successful submit — referencing backend must NOT
+    /* A WRITE that FAILS after a successful submit: referencing backend must NOT
      * consume the queued bytes (provider may still reference them) and must not pump. */
     KlAllocator a = kl_allocator_default();
     CS c; cs_init(&c);
@@ -199,7 +199,7 @@ UTEST(stream_write, completion_write_failure_copying) {
 }
 
 UTEST(stream_write, free_refused_while_send_in_flight) {
-    /* Finding 2: freeing while a send is outstanding would UAF provider-referenced storage. */
+    /* Freeing while a send is outstanding would UAF provider-referenced storage. */
     KlAllocator a = kl_allocator_default();
     CS c; cs_init(&c);
     KlStream s; memset(&s, 0, sizeof(s));
@@ -207,7 +207,7 @@ UTEST(stream_write, free_refused_while_send_in_flight) {
     kl_stream_set_submit(&s, cs_submit, &c, /*copying=*/0);
 
     ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ACCEPTED);
-    ASSERT_EQ(kl_stream_write_free(&s), -1);          /* refused — op outstanding */
+    ASSERT_EQ(kl_stream_write_free(&s), -1);          /* refused: op outstanding */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 5);   /* intact */
 
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0); /* op retired */
@@ -227,14 +227,14 @@ UTEST(stream_write, free_refused_while_send_in_flight_copying) {
 }
 
 UTEST(stream_write, write_without_transport_hook_fails_closed) {
-    /* Finding 3: readiness mode with no writer installed must not deref a NULL write_fn. */
+    /* Readiness mode with no writer installed must not deref a NULL write_fn. */
     KlAllocator a = kl_allocator_default();
     KlStream s; memset(&s, 0, sizeof(s));
     ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);   /* no set_writer / set_submit */
 
     ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ERROR);
     ASSERT_EQ((int)kl_stream_write_pending(&s), 0);   /* nothing taken */
-    ASSERT_EQ(s.wq_err, 0);                           /* not sticky — a setup ordering issue */
+    ASSERT_EQ(s.wq_err, 0);                           /* not sticky: a setup ordering issue */
 
     /* Installing the writer afterward makes writes work (proves non-sticky). */
     RW w; rw_init(&w); w.mode = 0;
@@ -259,7 +259,7 @@ UTEST(stream_write, flush_fails_closed_in_completion_and_without_writer) {
     ASSERT_EQ(c.submits, 1);                       /* untouched */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 10);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* acks "hello", pumps "world" */
-    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* acks "world" — nothing left in flight */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* acks "world": nothing left in flight */
     kl_stream_write_free(&s);
 
     /* Readiness mode with no writer installed: flush must not deref a NULL write_fn. */
@@ -270,7 +270,7 @@ UTEST(stream_write, flush_fails_closed_in_completion_and_without_writer) {
 }
 
 UTEST(stream_write, config_locked_while_data_active) {
-    /* Finding 4: transport mode/ownership must not change while data is queued or in flight. */
+    /* Transport mode/ownership must not change while data is queued or in flight. */
     KlAllocator a = kl_allocator_default();
     RW w; rw_init(&w); w.mode = 2;   /* would-block → bytes stay queued */
     CS c; cs_init(&c);
@@ -279,8 +279,8 @@ UTEST(stream_write, config_locked_while_data_active) {
     ASSERT_EQ(kl_stream_set_writer(&s, rw_write, &w), 0);
     ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ACCEPTED);  /* queued */
 
-    ASSERT_EQ(kl_stream_set_submit(&s, cs_submit, &c, 1), -1);  /* rejected — bytes queued */
-    ASSERT_EQ(kl_stream_set_writer(&s, rw_write, &w), -1);      /* rejected — bytes queued */
+    ASSERT_EQ(kl_stream_set_submit(&s, cs_submit, &c, 1), -1);  /* rejected: bytes queued */
+    ASSERT_EQ(kl_stream_set_writer(&s, rw_write, &w), -1);      /* rejected: bytes queued */
 
     w.mode = 0;
     ASSERT_EQ(kl_stream_flush(&s), 0);                          /* drained */

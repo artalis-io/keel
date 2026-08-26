@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_u2.sh — U-2 harness. Runs inside the Ubuntu 24.04 container.
+# run_u2.sh: U-2 harness. Runs inside the Ubuntu 24.04 container.
 #   1. build the freestanding self-contained archive (make freestanding-lib-selfcontained)
 #   2. build BOOTX64.EFI (build_u2.sh)
 #   3. build a FAT ESP image with EFI/BOOT/BOOTX64.EFI + startup.nsh
@@ -26,7 +26,7 @@ echo "=== U-2 run harness ==="
 # ---- 1. build the freestanding self-contained archive (x86_64) ----
 # Reuse a pre-built + already-gated x86_64 archive if present (some clang builds
 # lower kl_cstr_builtin.c's byte loops back into mem* self-calls despite
-# -fno-builtin, tripping the self-contained gate — a toolchain quirk, not a U-2
+# -fno-builtin, tripping the self-contained gate: a toolchain quirk, not a U-2
 # issue). Set FORCE_ARCHIVE=1 to always rebuild.
 # The self-contained gate + archive index need a COFF-aware nm/ar (the freestanding
 # objects are PE/COFF). GNU binutils nm/ar on Linux cannot read clang's

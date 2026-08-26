@@ -1,34 +1,34 @@
 /*
- * raw_tick_test.c — Phase 9 lwIP-raw COMPLETION backend tests.
+ * raw_tick_test.c: lwIP-raw COMPLETION backend tests.
  *
- * P9-1 (retained): an lwIP-raw KlEventCtx ticks without a server — inits a ctx on the
+ * Tick-without-server: an lwIP-raw KlEventCtx ticks without a server: inits a ctx on the
  * lwIP-raw completion backend, asserts the loop's caps + socket provider are compatible,
  * drives it ~20 times via kl_event_ctx_run (each run = one lwIP mainloop tick), and frees
- * cleanly. Prints "P9-1 PASS".
+ * cleanly, then prints its PASS marker.
  *
- * P9-2 (retained): a RAW-BACKED KlHttpServer answers GET / over loopback. A real KlHttpServer is
+ * Raw-backed GET: a RAW-BACKED KlHttpServer answers GET / over loopback. A real KlHttpServer is
  * pinned to the lwIP-raw completion backend + its overlapped socket provider; the connection
  * state machine runs over the tcp_accept/tcp_recv/tcp_sent callbacks surfaced as
  * KL_COMP_ACCEPT/READ/WRITE. A raw-API test client (lwip_raw_testclient.c, driven from the
  * tick thread) connects to 127.0.0.1:PORT, writes "GET / HTTP/1.1...", and captures the response.
  *
- * P9-3 (this stage): full-payload send + backpressure + file send. Two cases FORCE multi-
+ * Full-payload send + backpressure + file send. Two cases FORCE multi-
  * round send (a response WELL larger than tcp_sndbuf ≈ 8*TCP_MSS ≈ 11-12 KB):
  *   (buffered) GET /big → a 64 KB body built with a known byte pattern. The client reads
  *              until it has the full Content-Length, then asserts body length + an additive
  *              checksum + first/last byte match. This spans many tcp_sent rounds and hits
- *              tcp_sndbuf-full (ERR_MEM) backpressure, resumed on tcp_sent. → "P9-3 PASS (buffered)"
+ *              tcp_sndbuf-full (ERR_MEM) backpressure, resumed on tcp_sent.
  *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_http_response_file
  *              (FILE mode → kl_comp_post_sendfile → the glue preads it into the send buffer +
- *              reuses the send-pump). Client verifies the whole file body. → "P9-3 PASS (file)"
+ *              reuses the send-pump). Client verifies the whole file body.
  *
  * SINGLE-THREADED lwIP discipline: NO_SYS=1 raw lwIP is not thread-safe and must run on ONE
- * thread. kl_http_server_run() blocks, so the server runs on a pthread that owns the lwIP tick —
+ * thread. kl_http_server_run() blocks, so the server runs on a pthread that owns the lwIP tick;
  * and EVERY lwIP-touching client call (start + response poll) is scheduled onto THAT thread
  * via KEEL timers (kl_timer_add fires on the loop thread). The main thread only waits. So all
  * tcp_* calls (server + client) execute on the single tick thread; no lwIP data race.
  *
- * Runs in-process over the loopback netif — no tap device, no root — like the spike.
+ * Runs in-process over the loopback netif, no tap device, no root, like the spike.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -51,7 +51,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-/* ── P9-1 ─────────────────────────────────────────────────────────────────── */
+/* ── tick-without-server ──────────────────────────────────────────────────── */
 #define TICK_ITERATIONS  20
 #define TICK_MAX_EVENTS  16
 #define TICK_TIMEOUT_MS  10
@@ -83,7 +83,7 @@ static int run_p9_1(void) {
     return 0;
 }
 
-/* ── shared large-body pattern (P9-3) ────────────────────────────────────────
+/* ── shared large-body pattern (full-payload send) ───────────────────────────
  * A deterministic, non-trivial byte pattern so a checksum + first/last byte proves the
  * bytes arrived intact and in order (not just the right count). */
 #define P9_3_BODY_LEN  (64u * 1024u)   /* WELL larger than tcp_sndbuf (~11-12 KB) */
@@ -97,7 +97,7 @@ static size_t pattern_checksum(size_t len) {
     return sum;
 }
 
-/* ── P9-2 ─────────────────────────────────────────────────────────────────── */
+/* ── raw-backed GET ───────────────────────────────────────────────────────── */
 #define P9_2_PORT       7780
 #define P9_2_REQUEST    "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 #define P9_2_BODY       "{\"ok\":true}"
@@ -128,7 +128,7 @@ static void poll_client_cb(void *ud) {
         kl_http_server_stop(s);
         return;
     }
-    if (atomic_load(&g_srv_stop)) return;   /* timed out — stop re-arming */
+    if (atomic_load(&g_srv_stop)) return;   /* timed out; stop re-arming */
     kl_timer_add(&s->ev, 10, poll_client_cb, s);   /* re-arm */
 }
 
@@ -144,7 +144,7 @@ static void *server_thread(void *arg) {
 }
 
 static int run_p9_2(void) {
-    /* RC-3: inject the lwip-raw completion backend at runtime on a STOCK libkeel. Setting
+    /* Inject the lwip-raw completion backend at runtime on a STOCK libkeel. Setting
      * only event_provider lets the server auto-wire the paired overlapped socket provider
      * from the loop's native_provider() (kl_socket_provider_lwip_raw). */
     KlHttpServerConfig cfg = { .port = P9_2_PORT, .bind_addr = "127.0.0.1",
@@ -186,10 +186,10 @@ static int run_p9_2(void) {
     return 0;
 }
 
-/* ── P9-3 ─────────────────────────────────────────────────────────────────────
+/* ── full-payload send + backpressure + file send ─────────────────────────────
  * One server, two routes (/big buffered, /file). Each case runs the same
- * server-thread + marshalled-client machinery as P9-2, parameterised by request +
- * verification. */
+ * server-thread + marshalled-client machinery as the raw-backed GET case,
+ * parameterised by request + verification. */
 #define P9_3_PORT           7781
 #define P9_3_REQ_BIG        "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 #define P9_3_REQ_FILE       "GET /file HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
@@ -225,7 +225,7 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/octet-stream");
     /* FILE mode → the completion driver posts kl_comp_post_sendfile. The response layer
-     * OWNS closing fd (kl_http_response_reset/free) — we do NOT close it here. */
+     * OWNS closing fd (kl_http_response_reset/free); we do NOT close it here. */
     kl_http_response_file(res, fd, sz);
 }
 
@@ -261,7 +261,7 @@ static void p3_poll_cb(void *ud) {
     KlHttpServer *s = ud;
 
     /* Between the two cases: the accumulating client is a single-slot peer, so /file must not
-     * open until the /big connection is FULLY closed (server FIN seen) — otherwise the two
+     * open until the /big connection is FULLY closed (server FIN seen); otherwise the two
      * roundtrips overlap on the shared accumulator AND a mid-send teardown of /big churns the
      * loopback pcb pool. Once closed, kick /file. */
     if (g_p3_awaiting_close) {
@@ -335,7 +335,7 @@ static int run_p9_3(void) {
     }
 
     KlHttpServerConfig cfg = { .port = P9_3_PORT, .bind_addr = "127.0.0.1",
-                     .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
+                     .event_provider = kl_event_provider_lwip_raw() };   /* runtime inject */
     if (kl_http_server_init(&g_srv3, &cfg) != 0) {
         printf("P9-3 FAIL: kl_http_server_init (err=%d)\n", g_srv3.last_error);
         unlink(g_file_path);
@@ -400,27 +400,27 @@ static int run_p9_3(void) {
     return 1;
 }
 
-/* ── P9-4 — close / cancel / idle-timeout LIFETIME + MEMORY SAFETY ──────────────
+/* ── close / cancel / idle-timeout LIFETIME + MEMORY SAFETY ─────────────────────
  * All four cases run inside ONE kl_http_server_run over ONE lwIP-raw loop (a raw NO_SYS=1 loop +
- * the glue's listen pcb + test client are process singletons — like P9-3). A state machine in
- * the poll callback drives them sequentially on the tick thread. Cases:
- *   C1 many-short-lived  — N (>> 8) sequential open/serve/close roundtrips to GET / : all get
+ * the glue's listen pcb + test client are process singletons; like the full-payload case). A
+ * state machine in the poll callback drives them sequentially on the tick thread. Cases:
+ *   C1 many-short-lived  - N (>> 8) sequential open/serve/close roundtrips to GET / : all get
  *                          200, slots recycle, no leak / overflow of the bounded slot table.
- *   C2 close-with-outstanding — GET /big (64 KB); client reads a little then FIN (mode 2). The
+ *   C2 close-with-outstanding - GET /big (64 KB); client reads a little then FIN (mode 2). The
  *                          server tears down the in-flight send cleanly (send buffer freed).
- *   C3 reset-mid-send    — GET /big; client reads a little then RST (mode 1) → server tcp_err →
+ *   C3 reset-mid-send    - GET /big; client reads a little then RST (mode 1) → server tcp_err →
  *                          free-by-owner (pcb already dead) + exactly-one close, no UAF.
- *   C4 idle-timeout      — a raw client connects, sends a partial request (no CRLFCRLF) and
+ *   C4 idle-timeout      - a raw client connects, sends a partial request (no CRLFCRLF) and
  *                          never completes it; the server's idle sweep (short read_timeout_ms)
  *                          calls kl_comp_cancel → tcp_abort → terminal completion → one release.
- * Each case prints "P9-4 PASS (...)". The whole run is under ASan/UBSan/LSan in CI. */
+ * Each case prints its PASS marker. The whole run is under ASan/UBSan/LSan in CI. */
 #define P9_4_PORT           7782
 #define P9_4_REQ_ROOT       "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 #define P9_4_REQ_BIG        "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 /* A deliberately INCOMPLETE request (no terminating CRLFCRLF) so the server never routes it and
  * the idle sweep fires. */
 #define P9_4_REQ_PARTIAL    "GET / HTTP/1.1\r\nHost: x\r\n"
-#define P9_4_MANY_CONNS     50            /* N >> KL_LWR_MAX_CONNS (8/32) — forces recycling */
+#define P9_4_MANY_CONNS     50            /* N >> KL_LWR_MAX_CONNS (8/32); forces recycling */
 #define P9_4_PARTIAL_READ   2048u         /* bytes the partial-read client takes before tearing down */
 #define P9_4_CLI_CAP        (P9_3_BODY_LEN + 4096u)
 
@@ -533,7 +533,7 @@ static int run_p9_4(void) {
     /* Short read timeout so the idle-timeout case (C4) fires quickly. */
     KlHttpServerConfig cfg = { .port = P9_4_PORT, .bind_addr = "127.0.0.1",
                      .read_timeout_ms = 200,
-                     .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
+                     .event_provider = kl_event_provider_lwip_raw() };   /* runtime inject */
     if (kl_http_server_init(&g_srv4, &cfg) != 0) {
         printf("P9-4 FAIL: kl_http_server_init (err=%d)\n", g_srv4.last_error);
         return 1;

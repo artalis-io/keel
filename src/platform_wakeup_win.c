@@ -1,7 +1,7 @@
 /*
- * platform_wakeup_win.c — the Windows run-loop wakeup channel.
+ * platform_wakeup_win.c: the Windows run-loop wakeup channel.
  *
- * Split out of platform_win.c into its own TU (mirrors platform_wakeup_posix.c)
+ * A separate TU (mirrors platform_wakeup_posix.c)
  * so the wakeup is an independently-overridable seam. Windows has no pipe(2) that
  * WSAPoll can watch, so the channel is a connected loopback TCP pair.
  */

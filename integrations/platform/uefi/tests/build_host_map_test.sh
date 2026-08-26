@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_host_map_test.sh — build + run the U-2 host mapping unit test (no QEMU).
+# build_host_map_test.sh: build + run the U-2 host mapping unit test (no QEMU).
 #
 # Compiles socket_efi_tcp4.c + allocator_uefi.c + host_map_test.c for the HOST and
 # links libkeel.a (for kl_sockaddr_*). Only the PURE mapping functions are exercised;

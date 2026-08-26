@@ -11,7 +11,7 @@
 #include <keel/tls.h>
 #include <keel/http2_server.h>
 #include <keel/http_connection.h>
-#include <keel/listener_detail.h>  /* struct KlListener layout — KlHttpServer embeds it (step 6B-1) */
+#include <keel/listener_detail.h>  /* struct KlListener layout: KlHttpServer embeds it */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
@@ -22,7 +22,7 @@ typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
 typedef KlHttp1Parser *(*KlHttp1ParserFactory)(KlAllocator *alloc);
 
-/** @brief Access log callback — called after each response is fully sent. NULL = disabled. */
+/** @brief Access log callback: called after each response is fully sent. NULL = disabled. */
 typedef void (*KlHttpAccessLogFn)(const KlHttpRequest *req, int status,
                                size_t body_bytes, double duration_ms,
                                void *user_data);
@@ -64,14 +64,14 @@ typedef struct KlHttpServerConfig {
     void *access_log_data;      /**< passed as user_data to access_log */
     KlHttpServerLogFn log_fn;             /**< default: NULL (fprintf stderr) */
     void   *log_user_data;
-    int install_signal_handlers; /**< install SIGTERM/SIGINT handlers (single instance only —
+    int install_signal_handlers; /**< install SIGTERM/SIGINT handlers (single instance only;
                                   * only the last server to call kl_http_server_run() receives signals) */
     int drain_timeout_ms;        /**< graceful shutdown drain timeout (0 = immediate) */
-    KlTlsConfig *tls;           /**< TLS config — NULL = plaintext (default) */
-    KlHttp2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
+    KlTlsConfig *tls;           /**< TLS config: NULL = plaintext (default) */
+    KlHttp2ServerConfig *h2;             /**< HTTP/2 config: NULL = disabled (default) */
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
-    KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
+    KlCompressConfig *compress; /**< compression config: NULL = disabled (default) */
     KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
                                  *   indistinguishable from unset, so a non-NULL path wins). */
@@ -91,7 +91,7 @@ typedef struct KlHttpServerConfig {
                                  *   UNIX socket. See kl_systemd_listen_fd(). */
     const KlSocketProvider *sockets; /**< custom socket provider (bring-your-own stack);
                                       *   NULL = built-in POSIX/Winsock default. Must advertise
-                                      *   KL_SOCK_CAP_NATIVE_FD — the readiness event loop needs a
+                                      *   KL_SOCK_CAP_NATIVE_FD: the readiness event loop needs a
                                       *   pollable OS descriptor (rejected at init otherwise). */
     const KlEventProvider *event_provider; /**< custom event backend (bring-your-own readiness
                                       *   loop, e.g. lwIP); NULL = compiled-in default. Pair it
@@ -128,7 +128,7 @@ typedef struct KlHttpServer {
      * this embedded KlListener with the split-credit pool accounting. INTERNAL/UNSTABLE. */
     KlListener accept_listener;   /**< accept driver (active when accept_via_listener); readiness or completion */
     int  accept_via_listener;     /**< 1 = the KlListener drives accepts (readiness, or a post-driven completion backend) */
-    int  accept_setup_done;       /**< completion path: prime_accepts run once (window latched) — 6B-3 2b-ii */
+    int  accept_setup_done;       /**< completion path: prime_accepts run once (window latched) */
     int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */
@@ -191,7 +191,7 @@ int  kl_http_server_route_streaming(KlHttpServer *s, const char *method, const c
  *
  *        Like kl_http_server_route_streaming, plus the handler is invoked
  *        BEFORE any leftover body bytes are fed via on_data. The
- *        handler MUST yield on NEED_DATA — the body reader's on_data
+ *        handler MUST yield on NEED_DATA: the body reader's on_data
  *        callback resumes it for the leftover and subsequent reads.
  *
  *        Enables the full error-path mid-stream early-exit: caps
@@ -216,7 +216,7 @@ int  kl_http_server_route_streaming_async(KlHttpServer *s, const char *method,
  * @brief Register pre-body middleware on the server.
  * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern — exact or prefix with trailing slash-star.
+ * @param pattern URL pattern: exact or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on failure.
@@ -232,7 +232,7 @@ int  kl_http_server_use(KlHttpServer *s, const char *method, const char *pattern
  *
  * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern — exact or prefix with trailing slash-star.
+ * @param pattern URL pattern: exact or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on failure.
@@ -264,7 +264,7 @@ void kl_http_server_stop(KlHttpServer *s);
 /** @brief Free all server resources (pool, router, event loop). */
 void kl_http_server_free(KlHttpServer *s);
 
-/** @brief Server load statistics — read-only snapshot for load-shedding decisions. */
+/** @brief Server load statistics: read-only snapshot for load-shedding decisions. */
 typedef struct {
     int active_connections;    /**< Currently active connection slots */
     int max_connections;       /**< Configured pool capacity */
@@ -274,8 +274,8 @@ typedef struct {
 
 /**
  * @brief Populate a stats snapshot from current server state.
- * @param s    Server instance (may be NULL — zeroes out).
- * @param out  Output struct (may be NULL — no-op).
+ * @param s    Server instance (may be NULL, zeroes out).
+ * @param out  Output struct (may be NULL, no-op).
  */
 void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out);
 
@@ -285,7 +285,7 @@ void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out);
  * A few server helpers below are only meaningful on certain platforms and
  * return -1 (or fail) elsewhere: the peer-credential and systemd socket-
  * activation calls. Rather than relying on a -1 return to discover support,
- * query kl_platform_caps() and gate the calls on the relevant bit — this makes
+ * query kl_platform_caps() and gate the calls on the relevant bit; this makes
  * the portability contract explicit and keeps platform assumptions out of
  * application logic.
  */
@@ -299,7 +299,7 @@ typedef enum {
  * @brief Bitmask of KlPlatformCap values supported by this build/platform.
  *
  * Resolved by the platform slice (server_plat_*), so it reflects the actual
- * target — e.g. PEER_CRED|PEER_CRED_PID|SYSTEMD_ACTIVATION on Linux, PEER_CRED|
+ * target: e.g. PEER_CRED|PEER_CRED_PID|SYSTEMD_ACTIVATION on Linux, PEER_CRED|
  * PEER_CRED_PID on macOS, 0 on Windows.
  */
 unsigned kl_platform_caps(void);
@@ -349,7 +349,7 @@ int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t bufle
  * @param ip     Buffer for the NUL-terminated address ("203.0.113.7" / "2001:db8::1").
  * @param iplen  Size of @p ip (>= INET6_ADDRSTRLEN recommended).
  * @param port   Receives the client port (host byte order); may be NULL.
- * @return 0 on success, -1 if unavailable (e.g. AF_UNIX — use peer credentials).
+ * @return 0 on success, -1 if unavailable (e.g. AF_UNIX, use peer credentials).
  */
 int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
                          uint16_t *port);
@@ -373,7 +373,7 @@ const KlSockAddr *kl_http_request_peer_sockaddr(const KlHttpRequest *req);
  *
  * `out->verified` reports whether the certificate passed CA-chain validation.
  * A certificate can be *present* but *unverified* when the server is configured
- * for optional client auth — always check `verified` before trusting the
+ * for optional client auth; always check `verified` before trusting the
  * identity. `out->der` points into connection-owned memory valid only until the
  * request completes; copy it if you need it longer.
  *

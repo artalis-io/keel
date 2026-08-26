@@ -1,5 +1,5 @@
 /*
- * mbedtls_shim/ws2tcpip.h — freestanding <ws2tcpip.h> for the U-4 mbedTLS TUs.
+ * mbedtls_shim/ws2tcpip.h: freestanding <ws2tcpip.h> for the mbedTLS TUs.
  *
  * tls_mbedtls.c includes src/socket.h -> sockcompat.h, whose _WIN32 branch (the
  * x86_64-unknown-windows target takes it) pulls <ws2tcpip.h>. The base freestanding
@@ -8,8 +8,8 @@
  * Those SAN calls are unreached under a verify-none client, but must still COMPILE
  * and LINK. This local shim (searched via -isystem AHEAD of the base one) adds them.
  *
- * inet_ntop is defined in mbedtls_platform_uefi.c as an inert stub (returns NULL) —
- * it is only reached from mTLS peer-cert SAN extraction, which the U-4 client does
+ * inet_ntop is defined in mbedtls_platform_uefi.c as an inert stub (returns NULL);
+ * it is only reached from mTLS peer-cert SAN extraction, which the client does
  * not perform.
  */
 #ifndef KEEL_UEFI_MBEDTLS_SHIM_WS2TCPIP_H

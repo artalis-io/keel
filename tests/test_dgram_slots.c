@@ -1,10 +1,10 @@
 /*
- * test_dgram_slots.c — Phase B: packet-slot storage foundation (7A-1 storage separation).
+ * test_dgram_slots.c: packet-slot storage foundation (storage separation).
  *
  * Covers the two INDEPENDENTLY-OWNED storage objects and their invariants (no send/recv/pause/close
  * semantics here): the OBJECT-owned outbound pool (KlDgramSlots) and the LIFE-ownable inbound slot
- * (KlDgramInbound) — zero/invalid capacities, size-arithmetic overflow, allocation failure + reuse,
- * acquire/release exhaustion, slot payload independence, and — crucially for the split — that the two
+ * (KlDgramInbound), zero/invalid capacities, size-arithmetic overflow, allocation failure + reuse,
+ * acquire/release exhaustion, slot payload independence, and, crucially for the split, that the two
  * are SEPARATE allocations with disjoint lifetimes.
  */
 #include "utest.h"
@@ -35,7 +35,7 @@ static KlAllocator failing_allocator(void) {
     ASSERT_EQ((int)(ip)->block_size, 0);             \
 } while (0)
 
-/* ══ Outbound pool (KlDgramSlots — object-owned) ════════════════════════════════════════════ */
+/* ══ Outbound pool (KlDgramSlots, object-owned) ════════════════════════════════════════════ */
 
 UTEST(dgram_slots, rejects_zero_and_invalid_capacities) {
     KlAllocator a = kl_allocator_default();
@@ -150,12 +150,12 @@ UTEST(dgram_slots, release_guards_are_noops) {
 
     kl_dgram_slots_release(&s, x);
     ASSERT_EQ((int)kl_dgram_slots_free_count(&s), 2);
-    kl_dgram_slots_release(&s, x);       /* double release — no-op (no free-list corruption) */
+    kl_dgram_slots_release(&s, x);       /* double release; no-op (no free-list corruption) */
     ASSERT_EQ((int)kl_dgram_slots_free_count(&s), 2);
 
-    kl_dgram_slots_release(&s, NULL);    /* NULL — no-op */
+    kl_dgram_slots_release(&s, NULL);    /* NULL; no-op */
     KlDgramSlot foreign; memset(&foreign, 0, sizeof(foreign));
-    kl_dgram_slots_release(&s, &foreign);/* not one of our slots — no-op */
+    kl_dgram_slots_release(&s, &foreign);/* not one of our slots; no-op */
     ASSERT_EQ((int)kl_dgram_slots_free_count(&s), 2);
 
     ASSERT_TRUE(kl_dgram_slots_acquire(&s) != NULL);
@@ -170,17 +170,17 @@ UTEST(dgram_slots, free_is_idempotent_and_null_safe) {
 
     KlDgramSlots s;
     memset(&s, 0, sizeof(s));
-    kl_dgram_slots_free(&s);             /* never-inited (zeroed) — no-op */
+    kl_dgram_slots_free(&s);             /* never-inited (zeroed); no-op */
 
     KlAllocator a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_slots_init(&s, &a, 2, 8), 0);
     kl_dgram_slots_free(&s);
     ASSERT_ZEROED(&s);
-    kl_dgram_slots_free(&s);             /* double free — no-op (block already NULL) */
+    kl_dgram_slots_free(&s);             /* double free; no-op (block already NULL) */
     ASSERT_ZEROED(&s);
 }
 
-/* ══ Inbound slot (KlDgramInbound — its own allocation, life-token-ownable) ══════════════════ */
+/* ══ Inbound slot (KlDgramInbound, its own allocation, life-token-ownable) ══════════════════ */
 
 UTEST(dgram_inbound, rejects_zero_and_null) {
     KlAllocator a = kl_allocator_default();
@@ -219,18 +219,18 @@ UTEST(dgram_inbound, free_is_idempotent_and_null_safe) {
 
     KlDgramInbound in;
     memset(&in, 0, sizeof(in));
-    kl_dgram_inbound_free(&in);          /* never-inited — no-op */
+    kl_dgram_inbound_free(&in);          /* never-inited; no-op */
 
     KlAllocator a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_inbound_init(&in, &a, 16), 0);
     kl_dgram_inbound_free(&in);
     ASSERT_IN_ZEROED(&in);
-    kl_dgram_inbound_free(&in);          /* double free — no-op */
+    kl_dgram_inbound_free(&in);          /* double free; no-op */
     ASSERT_IN_ZEROED(&in);
 }
 
 /* The split's whole point: the outbound pool and the inbound slot are SEPARATE allocations with
- * INDEPENDENT lifetimes — freeing one must not touch the other (so a life token can free the inbound
+ * INDEPENDENT lifetimes: freeing one must not touch the other (so a life token can free the inbound
  * long after the object freed its outbound pool). */
 UTEST(dgram_inbound, separate_lifetime_from_outbound) {
     KlAllocator a = kl_allocator_default();
@@ -239,7 +239,7 @@ UTEST(dgram_inbound, separate_lifetime_from_outbound) {
     ASSERT_EQ(kl_dgram_slots_init(&out, &a, 2, 16), 0);
     ASSERT_EQ(kl_dgram_inbound_init(&in, &a, 64), 0);
 
-    /* Disjoint allocations — pointer INEQUALITY only (relational `<`/`>=` across independent
+    /* Disjoint allocations, pointer INEQUALITY only (relational `<`/`>=` across independent
      * allocations is UB). Non-overlap is proven functionally below: freeing the outbound pool must
      * not disturb the inbound payload, and ASan would flag any aliasing. */
     ASSERT_TRUE(out.block != in.block);

@@ -1,6 +1,6 @@
 /*
- * test_watcher_aba.c — R3b-T2: deterministic regression for the watcher pointer-reuse ABA
- * (R3a finding 1a; remedy R3b-W deferred node reclamation).
+ * test_watcher_aba.c: deterministic regression for the watcher pointer-reuse ABA
+ * (remedy: deferred node reclamation).
  *
  * The bug: kl_event_dispatch matches a watcher by POINTER IDENTITY against ctx->watchers. If a
  * watcher B is deleted DURING a drained batch and its freed node address is reused by a new watcher
@@ -70,7 +70,7 @@ static KlAllocator fa_alloc(void) {
     return a;
 }
 static void fa_reset(void) {
-    for (int i = 0; i < g_fa.lifo_n; i++) free(g_fa.lifo[i]);   /* drain reuse pool — no leak */
+    for (int i = 0; i < g_fa.lifo_n; i++) free(g_fa.lifo[i]);   /* drain reuse pool; no leak */
     memset(&g_fa, 0, sizeof(g_fa));
 }
 static void *tag(void *node) { return (void *)((uintptr_t)node | 1u); }
@@ -100,7 +100,7 @@ static unsigned rdy_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_RE
 static struct { KlEvent evs[8]; int n; int served; int calls; } g_wait;
 static int rdy_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
     (void)l; (void)timeout;
-    g_wait.calls++;                       /* proves .wait was (not) reached — begin-before-acquire */
+    g_wait.calls++;                       /* proves .wait was (not) reached; begin-before-acquire */
     if (g_wait.served) return 0;
     g_wait.served = 1;
     int n = g_wait.n < max ? g_wait.n : max;
@@ -116,7 +116,7 @@ static unsigned cmp_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_CO
 static struct { KlCompletionEvent evs[8]; int n; int served; int calls; } g_drain;
 static int cmp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout) {
     (void)ctx; (void)timeout;
-    g_drain.calls++;                      /* proves .drain was (not) reached — begin-before-acquire */
+    g_drain.calls++;                      /* proves .drain was (not) reached; begin-before-acquire */
     if (g_drain.served) return 0;
     g_drain.served = 1;
     int n = g_drain.n < max ? g_drain.n : max;
@@ -196,16 +196,16 @@ UTEST(watcher_aba, nested_reclaim_at_outermost) {
     int before = g_fa.wsz_free_calls;
     kl_watcher_del(&ctx, (KlSocketHandle)200);          /* deferred (depth > 0) */
     ASSERT_EQ(g_fa.wsz_free_calls, before);             /* not yet freed */
-    kl_event_ctx_dispatch_end(&ctx);                    /* depth 1 — not outermost */
+    kl_event_ctx_dispatch_end(&ctx);                    /* depth 1; not outermost */
     ASSERT_EQ(g_fa.wsz_free_calls, before);             /* still deferred */
-    kl_event_ctx_dispatch_end(&ctx);                    /* depth 0 — reclaim now */
+    kl_event_ctx_dispatch_end(&ctx);                    /* depth 0; reclaim now */
     ASSERT_EQ(g_fa.wsz_free_calls, before + 1);
 
     kl_event_ctx_free(&ctx);
     fa_reset();
 }
 
-/* ── depth-0 (unbatched) del frees immediately — the fast path is unchanged ─────────────────────── */
+/* ── depth-0 (unbatched) del frees immediately; the fast path is unchanged ─────────────────────── */
 UTEST(watcher_aba, depth_zero_immediate_free) {
     fa_reset();
     KlAllocator a = fa_alloc();
@@ -269,8 +269,8 @@ UTEST(watcher_aba, overflow_refusal_completion_acquires_nothing) {
 
 /* ── server-loop ABA: the REAL kl_http_server_run loop receives a scripted [A, stale-B] readiness batch ─
  * A scripted readiness KlEventProvider is injected into KlHttpServer (cfg.event_provider). Its .wait
- * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own R3b-W bracket, so A
- * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C — the exact
+ * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own deferred-reclamation bracket, so A
+ * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C; the exact
  * ABA sequence, driven through the server loop (not a probe). */
 static KlHttpServer      g_srv;
 static volatile int  g_srv_batch_dispatched;

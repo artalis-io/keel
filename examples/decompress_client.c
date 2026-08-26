@@ -1,5 +1,5 @@
 /*
- * decompress_client.c — Client-side response decompression with miniz
+ * decompress_client.c: Client-side response decompression with miniz
  *
  * Concepts: KlDecompressConfig, kl_decompress_miniz_create, automatic
  * Content-Encoding: gzip decompression in KlHttpClientConfig.
@@ -12,7 +12,7 @@
  * Build:  make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
  * Run:    ./examples/decompress_client
  *
- * No server required — compresses data locally, then decompresses
+ * No server required; compresses data locally, then decompresses
  * to verify the round-trip.
  */
 

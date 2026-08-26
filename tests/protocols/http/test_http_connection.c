@@ -31,7 +31,7 @@ UTEST(connection, acquire_and_release) {
     ASSERT_TRUE(c2 != NULL);
     ASSERT_TRUE(c1 != c2);
 
-    /* Release — set fd to -1 to avoid closing real fds */
+    /* Release: set fd to -1 to avoid closing real fds */
     c1->stream.fd = -1;
     kl_http_conn_release(&pool, c1);
 
@@ -87,13 +87,13 @@ UTEST(connection, active_count_tracking) {
     KlHttpConn *c3 = kl_http_conn_acquire(&pool, 102);
     ASSERT_EQ(pool.active_count, 3);
 
-    /* Release one — count decrements, free_list non-NULL */
+    /* Release one, count decrements, free_list non-NULL */
     c2->stream.fd = -1;
     kl_http_conn_release(&pool, c2);
     ASSERT_EQ(pool.active_count, 2);
     ASSERT_TRUE(pool.free_list != NULL);
 
-    /* Acquire again — count back to 3 */
+    /* Acquire again, count back to 3 */
     KlHttpConn *c4 = kl_http_conn_acquire(&pool, 103);
     ASSERT_TRUE(c4 != NULL);
     ASSERT_EQ(pool.active_count, 3);
@@ -170,7 +170,7 @@ UTEST(connection, acquire_after_release) {
     kl_http_conn_release(&pool, c1);
     ASSERT_EQ(pool.active_count, 1);
 
-    /* Acquire again — should succeed */
+    /* Acquire again; should succeed */
     KlHttpConn *c3 = kl_http_conn_acquire(&pool, 103);
     ASSERT_TRUE(c3 != NULL);
     ASSERT_EQ(c3->stream.fd, 103);
@@ -193,7 +193,7 @@ UTEST(connection, monotonic_ms) {
 UTEST(connection, pool_capacity_zero) {
     KlAllocator a = kl_allocator_default();
     KlHttpConnPool pool;
-    /* Capacity 0 — should handle gracefully (return error or empty pool) */
+    /* Capacity 0, should handle gracefully (return error or empty pool) */
     int rc = kl_http_conn_pool_init(&pool, 0, &a);
     if (rc == 0) {
         /* If it succeeds with 0 capacity, acquire should return NULL */
@@ -239,7 +239,7 @@ UTEST(connection, read_buf_survives_acquire_release) {
     c->stream.fd = -1;
     kl_http_conn_release(&pool, c);
 
-    /* Re-acquire — buffer should still be valid */
+    /* Re-acquire; buffer should still be valid */
     KlHttpConn *c2 = kl_http_conn_acquire(&pool, 101);
     ASSERT_TRUE(c2 != NULL);
     ASSERT_TRUE(c2->stream.read_buf != NULL);

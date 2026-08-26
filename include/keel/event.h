@@ -14,7 +14,7 @@ typedef struct {
     KlEventMask ready;  /**< Bitmask of ready events */
 } KlEvent;
 
-/** @brief Forward declaration — the socket-provider seam (keel/socket.h). */
+/** @brief Forward declaration: the socket-provider seam (keel/socket.h). */
 struct KlSocketProvider;
 
 typedef struct KlEventOps KlEventOps;
@@ -24,7 +24,7 @@ typedef struct {
     void *_backend;     /**< reserved for backend-specific state */
     KlAllocator *alloc; /**< set before kl_event_init; used by io_uring backend */
     /** Optional runtime event backend (NULL = the compiled-in default). When set
-     *  before kl_event_init, all kl_event_* calls dispatch through it — this is how
+     *  before kl_event_init, all kl_event_* calls dispatch through it; this is how
      *  a bring-your-own event backend (e.g. lwIP) is injected without recompiling
      *  the core. Install it via KlEventCtx.event_provider. */
     const KlEventOps *ops;
@@ -36,7 +36,7 @@ typedef struct {
  * The core dispatches every kl_event_* call to these ops when a provider is
  * installed on the loop; otherwise it uses the compiled-in backend directly (no
  * indirection on the default path). A backend and its socket provider must agree
- * on what "pollable handle" means — a provider that watches non-OS handles (lwIP
+ * on what "pollable handle" means: a provider that watches non-OS handles (lwIP
  * socket indices) pairs with a socket provider whose native handles it can poll.
  */
 struct KlEventOps {
@@ -49,19 +49,19 @@ struct KlEventOps {
     unsigned (*caps)(const KlEventLoop *loop);
     const struct KlSocketProvider *(*native_provider)(const KlEventLoop *loop);
     /** Reserved: the backend's internal KlCompletionOps* (src/completion.h), or NULL.
-     *  Opaque here — no completion type appears in this public header (cf. the opaque
+     *  Opaque here: no completion type appears in this public header (cf. the opaque
      *  KlEventLoop._backend). A completion backend points this at its completion vtable
-     *  so a runtime-injected provider carries the completion axis too (RC-2); readiness
-     *  backends leave it NULL. MUST stay the last member (appended, no ABI shuffle). */
+     *  so a runtime-injected provider carries the completion axis too; readiness
+     *  backends leave it NULL. MUST stay the last member; no ABI shuffle. */
     const void *completion;
 };
 
-/* Event-backend capability bits returned by KlEventOps.caps() — the provider
+/* Event-backend capability bits returned by KlEventOps.caps(): the provider
  * describes how it reports work and what handles it can watch, so the wire-up can
  * check it against a socket provider. Two orthogonal axes:
- *   model  — KL_EVENT_CAP_READINESS (report readiness) / _COMPLETION (deliver
+ *   model:   KL_EVENT_CAP_READINESS (report readiness) / _COMPLETION (deliver
  *            completions; build-time backends only, not runtime-injectable today)
- *   handle — KL_EVENT_CAP_NATIVE_FD (watches OS descriptors) */
+ *   handle:  KL_EVENT_CAP_NATIVE_FD (watches OS descriptors) */
 #define KL_EVENT_CAP_READINESS  (1u << 0)
 #define KL_EVENT_CAP_NATIVE_FD  (1u << 1)
 #define KL_EVENT_CAP_COMPLETION (1u << 2)

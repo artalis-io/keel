@@ -1,6 +1,6 @@
 /*
- * resolve_uefi.c — numeric-only kl_resolve_sync for the freestanding UEFI client.
- * See resolve_uefi.h. No libc, no getaddrinfo — a dotted-quad IPv4 literal parser.
+ * resolve_uefi.c: numeric-only kl_resolve_sync for the freestanding UEFI client.
+ * See resolve_uefi.h. No libc, no getaddrinfo; a dotted-quad IPv4 literal parser.
  */
 
 #include "resolve_uefi.h"
@@ -26,7 +26,7 @@ static int parse_ipv4(const char *host, uint8_t out[4]) {
             val = -1;
             if (*p == '\0') break;
         } else {
-            return -1;   /* non-numeric host — this seam is numeric-only; hostnames resolve via the async cfg.resolver */
+            return -1;   /* non-numeric host: this seam is numeric-only; hostnames resolve via the async cfg.resolver */
         }
         p++;
     }
@@ -48,7 +48,7 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
     uint8_t ip[4];
 #ifdef KL_U4_STATIC_HOST
     /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a client
-     * with no async resolver wired can still dial a HOSTNAME — needed so TLS verifies the
+     * with no async resolver wired can still dial a HOSTNAME, needed so TLS verifies the
      * server cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
      * -DKL_U4_STATIC_HOST="name" -DKL_U4_STATIC_IP="a.b.c.d". */
     if (streq(host, KL_U4_STATIC_HOST)) {
@@ -65,8 +65,8 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
     }
 
     /* Non-numeric host: this seam resolves numeric literals only. DNS is an ASYNC protocol
-     * consumer, not a sync platform-seam capability — a freestanding client that needs a
+     * consumer, not a sync platform-seam capability; a freestanding client that needs a
      * hostname injects cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider;
-     * see 6.4c dgram_dns_selftest.c). Fail closed here. */
+     * see integrations/platform/uefi/tests/dgram_dns_selftest.c). Fail closed here. */
     return -1;
 }

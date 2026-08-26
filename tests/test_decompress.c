@@ -342,7 +342,7 @@ UTEST(decompress, stream_null_args) {
     ASSERT_EQ(kl_decompress_stream_feed(NULL, "data", 4, 0,
                                           test_emit, NULL), -1);
 
-    /* Free on NULL ds — should not crash */
+    /* Free on NULL ds: should not crash */
     kl_decompress_stream_free(NULL);
 }
 

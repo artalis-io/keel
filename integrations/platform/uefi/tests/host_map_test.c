@@ -1,5 +1,5 @@
 /*
- * host_map_test.c — HOST unit test for the PURE EFI_TCP4 mappings (no firmware).
+ * host_map_test.c: HOST unit test for the PURE EFI_TCP4 mappings (no firmware).
  *
  * Unit-tests the two pure, firmware-independent pieces of socket_efi_tcp4.c without
  * QEMU:
@@ -9,7 +9,7 @@
  *
  * It is a standalone host harness (NOT a tests/test_*.c auto-discovered suite) so it
  * needs no root-Makefile change: build_host_map_test.sh compiles socket_efi_tcp4.c
- * for the host (the ops table is present but never called here — only the pure fns)
+ * for the host (the ops table is present but never called here: only the pure fns)
  * and links libkeel.a for kl_sockaddr_*. The EFI types come from the vendored
  * efi_min.h/efi_tcp4.h, which compile cleanly on the host (pure typedefs).
  *
@@ -21,8 +21,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* F7a: socket_efi_tcp4.c now references kl_uefi_after_ebs() (the F3 fail-closed guard),
- * whose real definition lives in platform_uefi.c — a TU we do NOT link here (it would
+/* socket_efi_tcp4.c references kl_uefi_after_ebs() (the fail-closed guard),
+ * whose real definition lives in platform_uefi.c: a TU we do NOT link here (it would
  * collide with libkeel.a's kl_monotonic_ms/kl_plat_random). This host harness only
  * exercises the PURE mapping functions (firmware never runs), so a trivial stub that
  * reports "boot services still present" resolves the link. */

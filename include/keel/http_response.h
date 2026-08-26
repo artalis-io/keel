@@ -12,7 +12,7 @@ typedef struct KlTls KlTls;
  * ctx->sockets). Opaque forward decl keeps the provider seam out of this header. */
 struct KlEventCtx;
 
-/** @brief Pluggable write callback — same signature as sh_json's ShJsonWriteFn. */
+/** @brief Pluggable write callback: same signature as sh_json's ShJsonWriteFn. */
 typedef int (*KlHttpResponseWriteFn)(void *ctx, const char *data, size_t len);
 
 typedef enum {
@@ -46,7 +46,7 @@ typedef struct KlHttpResponse {
 
     int stream_error;       /**< Streaming error flag */
     int stream_ended;       /**< 1 = end_stream called, drain flush will close */
-    int stream_inflight;    /**< completion loop: an overlapped stream send is posted (8g-1) */
+    int stream_inflight;    /**< completion loop: an overlapped stream send is posted */
 
     KlDrain drain;          /**< Streaming backpressure buffer */
     int drain_enabled;      /**< 0 = off (default), 1 = on */
@@ -69,7 +69,7 @@ typedef struct KlHttpResponse {
  */
 int  kl_http_response_init(KlHttpResponse *res, KlAllocator *alloc);
 
-/** @brief Fast reinit for keep-alive — reuses header buffer, no alloc. */
+/** @brief Fast reinit for keep-alive: reuses header buffer, no alloc. */
 void kl_http_response_reset(KlHttpResponse *res);
 
 /** @brief Set the HTTP status code (default 200). */

@@ -1,25 +1,25 @@
 /*
- * smoke_iocp.c — end-to-end HTTP-over-IOCP roundtrip (PAL Phase 8a, 4b).
+ * smoke_iocp.c: end-to-end HTTP-over-IOCP roundtrip.
  *
  * The first real runtime validation of the IOCP completion connection driver:
  * a KlHttpServer running on the IOCP completion loop (BACKEND=iocp, the overlapped
  * provider) served by AcceptEx/WSARecv/WSASend, hit by the sync KlHttpClient over
  * loopback. Windows-only (references the internal IOCP provider); the Windows-IOCP
  * CI job is its oracle. Mirrors smoke_tcp.c, with the server pinned to the IOCP
- * completion axis. GET only — request bodies over IOCP are a later increment.
+ * completion axis. GET only: request bodies over IOCP are a later increment.
  */
-#include <winsock2.h>   /* raw UDP client (socket/sendto/recvfrom) — before windows.h */
+#include <winsock2.h>   /* raw UDP client (socket/sendto/recvfrom): before windows.h */
 #include <ws2tcpip.h>
 #include <keel/keel.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
+#include "datagram_test_util.h"   /* kl_dg_close_free: public lifecycle */
 #include "../src/socket.h"   /* internal kl_socket_provider_iocp() */
 
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>   /* malloc / free / strtol — bigstream dechunk */
+#include <stdlib.h>   /* malloc / free / strtol: bigstream dechunk */
 #include <windows.h>
 #include <io.h>       /* _open / _lseek / _write */
 #include <fcntl.h>    /* _O_* */
@@ -41,8 +41,8 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
-/* POST /echo — reads the request body via the buffer reader (READING_BODY over
- * IOCP) and echoes it back, exercising the completion body path (8b-1). */
+/* POST /echo: reads the request body via the buffer reader (READING_BODY over
+ * IOCP) and echoes it back, exercising the completion body path. */
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
@@ -51,7 +51,7 @@ static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-/* GET /file — serve a file body via kl_http_response_file (TransmitFile over IOCP, 8b-2).
+/* GET /file: serve a file body via kl_http_response_file (TransmitFile over IOCP).
  * Opens the pre-written temp file per request; the response owns and closes the fd. */
 static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -63,7 +63,7 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
-/* GET /bigfile — serve a file larger than the (test-lowered, KEEL_IOCP_TF_CHUNK) TransmitFile
+/* GET /bigfile: serve a file larger than the (test-lowered, KEEL_IOCP_TF_CHUNK) TransmitFile
  * per-call cap, so the body is transmitted as several offset-advancing TransmitFile chunks.
  * The payload is a byte pattern (i & 0xFF) so the client can verify every chunk landed at the
  * right file offset (a wrong offset would scramble/repeat bytes). */
@@ -79,8 +79,8 @@ static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
-/* GET /stream — a synchronous chunked stream produced during the handler
- * (KL_HTTP_BODY_STREAM over IOCP, 8b-3). */
+/* GET /stream: a synchronous chunked stream produced during the handler
+ * (KL_HTTP_BODY_STREAM over IOCP). */
 static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write = NULL;
@@ -91,8 +91,8 @@ static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_end_stream(res);
 }
 
-/* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
- * outbound buffer fills and the IOCP loop must flush it as overlapped WSASend chunks (8g-1)
+/* GET /bigstream: a chunked stream far larger than a slow client's receive window, so the
+ * outbound buffer fills and the IOCP loop must flush it as overlapped WSASend chunks
  * rather than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
@@ -109,11 +109,11 @@ static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_response_end_stream(res);
 }
 
-/* UDP echo over the IOCP completion loop (8b-4c): a KlDatagram on the server's ctx
+/* UDP echo over the IOCP completion loop: a KlDatagram on the server's ctx
  * receives via WSARecvFrom completions and echoes each datagram back to its source
- * (synchronous sendto — overlapped UDP send is 8b-4d). */
+ * (synchronous sendto). */
 static KlDatagram g_udp;
-/* Set when a received datagram carried its local (destination) address — proves the IOCP
+/* Set when a received datagram carried its local (destination) address: proves the IOCP
  * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
 static int g_udp_local_ok = 0;
 static void udp_echo(void *ud, const void *data, size_t len,
@@ -190,9 +190,9 @@ static int proxy_over_completion_ok(void) {
     return ok;
 }
 
-/* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
+/* Head-of-line: a slow client requests the big stream and stalls (tiny receive window,
  * no reads). The server's outbound buffer fills and it must post overlapped WSASend chunks and
- * move on — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a second,
+ * move on: NOT busy-spin a blocking flush. We prove the loop stayed free by driving a second,
  * normal request to completion while the first is stalled, then drain the first fully and
  * verify every byte of the 256 KiB stream arrived (dechunked). */
 static size_t dechunk_body_len(const char *buf, size_t n) {
@@ -225,7 +225,7 @@ static int bigstream_no_hol_ok(void) {
     to.sin_port = htons(SMOKE_PORT);
     inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
 
-    /* Conn A — slow reader: tiny receive window, request the big stream, then DON'T read. */
+    /* Conn A, slow reader: tiny receive window, request the big stream, then DON'T read. */
     SOCKET a = socket(AF_INET, SOCK_STREAM, 0);
     if (a == INVALID_SOCKET) return 0;
     int rcv = 2048;
@@ -238,7 +238,7 @@ static int bigstream_no_hol_ok(void) {
 
     nap_ms(150);   /* let the server dispatch, fill A's window, post the overlapped send */
 
-    /* Conn B — a normal request must complete promptly while A is stalled (the HOL check). */
+    /* Conn B: a normal request must complete promptly while A is stalled (the HOL check). */
     int b_ok = 0;
     SOCKET b = socket(AF_INET, SOCK_STREAM, 0);
     if (b != INVALID_SOCKET) {
@@ -278,7 +278,7 @@ static int bigstream_no_hol_ok(void) {
 }
 
 int main(void) {
-    /* Lower TransmitFile's per-call cap so a modest /bigfile splits into several chunks —
+    /* Lower TransmitFile's per-call cap so a modest /bigfile splits into several chunks:
      * exercises the offset-advancing multi-chunk TransmitFile path without a >2 GiB fixture.
      * Must be set before the first sendfile post (the cap is read + cached once). */
     _putenv_s("KEEL_IOCP_TF_CHUNK", "16384");
@@ -307,7 +307,7 @@ int main(void) {
     }
     _close(wfd);
 
-    /* Write the /bigfile payload — a byte pattern so the client can verify chunk offsets. */
+    /* Write the /bigfile payload: a byte pattern so the client can verify chunk offsets. */
     int bfd = _open(SMOKE_BIGFILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
     if (bfd < 0) { fprintf(stderr, "smoke-iocp: bigfile create failed\n"); kl_http_server_free(&g_srv); return 1; }
     {
@@ -362,7 +362,7 @@ int main(void) {
         }
     }
 
-    /* POST /echo — exercise the request-body path (READING_BODY over IOCP, 8b-1). */
+    /* POST /echo: exercise the request-body path (READING_BODY over IOCP). */
     int post_ok = 0;
     if (ok) {
         KlHttpClientResponse resp;
@@ -382,7 +382,7 @@ int main(void) {
         }
     }
 
-    /* GET /file — exercise the file-response path (TransmitFile over IOCP, 8b-2). */
+    /* GET /file: exercise the file-response path (TransmitFile over IOCP). */
     int file_ok = 0;
     if (ok && post_ok) {
         KlHttpClientResponse resp;
@@ -402,8 +402,8 @@ int main(void) {
         }
     }
 
-    /* GET /stream — exercise the chunked/streaming path (KL_HTTP_BODY_STREAM over IOCP,
-     * 8b-3). The client dechunks; the body is the concatenated chunks. */
+    /* GET /stream: exercise the chunked/streaming path (KL_HTTP_BODY_STREAM over IOCP).
+     * The client dechunks; the body is the concatenated chunks. */
     int stream_ok = 0;
     if (ok && post_ok && file_ok) {
         KlHttpClientResponse resp;
@@ -423,7 +423,7 @@ int main(void) {
         }
     }
 
-    /* GET /bigfile — chunked TransmitFile (>cap file split into offset-advancing chunks).
+    /* GET /bigfile: chunked TransmitFile (>cap file split into offset-advancing chunks).
      * Verify the whole 256 KiB arrived AND matches the i&0xFF pattern (a wrong chunk offset
      * would scramble/repeat bytes). KEEL_IOCP_TF_CHUNK=16384 → 16 chunks. */
     int bigfile_ok = 0;
@@ -447,15 +447,15 @@ int main(void) {
         }
     }
 
-    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+    /* Overlapped streaming flush: a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok) ? bigstream_no_hol_ok() : 0;
 
-    /* PROXY protocol over the IOCP loop — trusted-source header parsed, handler sees the real IP. */
+    /* PROXY protocol over the IOCP loop: trusted-source header parsed, handler sees the real IP. */
     int proxy_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok)
                        ? proxy_over_completion_ok() : 0;
 
-    /* UDP echo roundtrip — a raw datagram client hits the KlDatagram on the IOCP loop. */
+    /* UDP echo roundtrip: a raw datagram client hits the KlDatagram on the IOCP loop. */
     int udp_ok = 0;
     if (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok && udp_ready) {
         SOCKET cs = socket(AF_INET, SOCK_DGRAM, 0);
@@ -483,7 +483,7 @@ int main(void) {
 
     kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
+    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now: safe to pump the public close */
     kl_http_server_free(&g_srv);
     _unlink(SMOKE_FILE_PATH);
     _unlink(SMOKE_BIGFILE_PATH);

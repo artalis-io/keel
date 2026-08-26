@@ -88,7 +88,7 @@ int kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_
     size_t origin_len;
     const char *origin = kl_http_request_header_len(req, "Origin", &origin_len);
 
-    /* No Origin header — not a cross-origin request, continue */
+    /* No Origin header: not a cross-origin request, continue */
     if (!origin) return 0;
 
     /* Check if origin is allowed */
@@ -132,7 +132,7 @@ int kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_
 
         kl_http_response_status(res, 204);
         kl_http_response_body_borrow(res, "", 0);
-        return 1;  /* short-circuit — preflight handled */
+        return 1;  /* short-circuit: preflight handled */
     }
 
     return 0;  /* continue to handler */

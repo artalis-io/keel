@@ -1,5 +1,5 @@
 /*
- * http2_nghttp2_client.c — client-side KlHttp2ClientSession backed by nghttp2.
+ * http2_nghttp2_client.c: client-side KlHttp2ClientSession backed by nghttp2.
  *
  * Maps the KEEL client session vtable (recv / submit_request / flush / destroy)
  * onto an nghttp2 client session, and nghttp2's receive callbacks back onto the
@@ -23,7 +23,7 @@
 /* ── Session + per-stream state ─────────────────────────────────────── */
 
 typedef struct {
-    KlHttp2ClientSession base;      /* must be first — vtable the driver sees */
+    KlHttp2ClientSession base;      /* must be first: vtable the driver sees */
     KlAllocator      *alloc;
     nghttp2_session  *ng;
 } NgClientSession;
@@ -196,7 +196,7 @@ static int32_t ng_client_submit(KlHttp2ClientSession *self,
     memset(st, 0, sizeof(*st));
     st->alloc = s->alloc;
     if (body && body_len) {
-        st->body = kl_malloc(s->alloc, body_len);   /* copy — caller may free */
+        st->body = kl_malloc(s->alloc, body_len);   /* copy: caller may free */
         if (!st->body) { kl_free(s->alloc, st, sizeof(*st)); return -1; }
         memcpy(st->body, body, body_len);
         st->body_len = body_len;

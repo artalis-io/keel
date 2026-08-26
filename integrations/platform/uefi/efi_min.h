@@ -1,8 +1,8 @@
 /*
- * efi_min.h — self-contained minimal UEFI base types + the boot/console services the
- * U-0 spike uses. Vendored from the UEFI Specification 2.10 (§2 data types, §4 system
+ * efi_min.h: self-contained minimal UEFI base types + the boot/console services the
+ * EFI client uses. Vendored from the UEFI Specification 2.10 (§2 data types, §4 system
  * table, §7 boot services, §12.4 simple text output). Deliberately tiny: only what
- * tcp4_get.c needs, so the spike builds under the clang/lld freestanding toolchain
+ * tcp4_get.c needs, so it builds under the clang/lld freestanding toolchain
  * (x86_64-unknown-windows PE) with NO gnu-efi runtime dependency.
  *
  * EFIAPI == Microsoft x64 calling convention (UEFI ABI). clang honors it via __ms_abi__.
@@ -40,7 +40,7 @@ typedef VOID     *EFI_EVENT;
 
 /* EFIAPI: the UEFI calling convention. x86_64 UEFI uses the MS x64 convention
  * (ms_abi); aarch64 UEFI uses AAPCS (no attribute). ms_abi is an x86-only
- * attribute — applying it elsewhere (e.g. a native aarch64 host compiling the
+ * attribute; applying it elsewhere (e.g. a native aarch64 host compiling the
  * pure-mapping unit tests) is "ignored" and trips -Werror=attributes, so gate
  * it on the target arch. */
 #if defined(__x86_64__)
@@ -111,7 +111,7 @@ struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     VOID       *Mode;
 };
 
-/* ---- Boot Services (UEFI 2.10 §4.4, partial — only what we call) ---- */
+/* ---- Boot Services (UEFI 2.10 §4.4, partial: only what we call) ---- */
 typedef struct {
     /* EFI_TABLE_HEADER (24 bytes) */
     UINT64 Signature;
@@ -198,7 +198,7 @@ typedef struct {
 /* Memory pool types for AllocatePool */
 #define EfiLoaderData 2
 
-/* ---- EFI_TIME (UEFI 2.10 §8.3) — wall-clock, for cert validity-time (GetTime) ---- */
+/* ---- EFI_TIME (UEFI 2.10 §8.3): wall-clock, for cert validity-time (GetTime) ---- */
 typedef struct {
     UINT16 Year;        /* 1900 .. 9999 */
     UINT8  Month;       /* 1 .. 12 */
@@ -215,7 +215,7 @@ typedef struct {
 
 #define EFI_UNSPECIFIED_TIMEZONE 0x07FF   /* GetTime returned local/unknown TZ */
 
-typedef struct {                          /* §8.3 — opaque here (we pass NULL) */
+typedef struct {                          /* §8.3: opaque here (we pass NULL) */
     UINT32  Resolution;
     UINT32  Accuracy;
     BOOLEAN SetsToZero;
@@ -229,11 +229,11 @@ typedef enum {
     EfiResetPlatformSpecific
 } EFI_RESET_TYPE;
 
-/* ---- Runtime Services (UEFI 2.10 §8) — GetTime + ResetSystem are modelled at their spec
+/* ---- Runtime Services (UEFI 2.10 §8): GetTime + ResetSystem are modelled at their spec
  * offsets. GetTime is valid both before AND after ExitBootServices (the cert-validity clock
  * source). ResetSystem is the 11th runtime function (offset 104 on x64: the 24-byte
  * EFI_TABLE_HEADER + 10 preceding pointers); the intervening functions are opaque placeholders
- * ONLY to land ResetSystem at the correct offset for a real-firmware call — never dereferenced. */
+ * ONLY to land ResetSystem at the correct offset for a real-firmware call; never dereferenced. */
 typedef struct {
     UINT64 Signature;
     UINT32 Revision;

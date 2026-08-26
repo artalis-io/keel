@@ -4,7 +4,7 @@
 #include <keel/http_response.h>
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
-#include "../src/drain_reserve.h"   /* Phase-B internal reservation + low-water API */
+#include "../src/drain_reserve.h"   /* internal reservation + low-water API */
 #include <string.h>
 #include <stdlib.h>
 
@@ -151,7 +151,7 @@ UTEST(drain, flush_partial) {
     kl_drain_write(&d, "abcdef", 6);
     ASSERT_EQ(d.buf_len, (size_t)6);
 
-    /* Switch to partial mode — accept half, then block */
+    /* Switch to partial mode: accept half, then block */
     w.mode = 1;
     w.switch_after = -1;
     /* Partial will accept 3 of 6, then 1 of 3, then 1 of 2, then 1 of 1 */
@@ -179,7 +179,7 @@ UTEST(drain, flush_partial) {
     w.mode = 1;       /* partial: accept half */
     w.switch_after = 1; /* after 1 call, switch to normal */
     /* Hmm, normal would drain everything. Let me use a custom approach: */
-    /* Just use partial mode — it will drain progressively */
+    /* Just use partial mode: it will drain progressively */
 
     /* Simplify: use eagain after first successful write */
     mock_init(&w);
@@ -299,11 +299,11 @@ UTEST(drain, on_drain_not_on_direct) {
     DrainCbCtx cb = {0};
     kl_drain_on_drain(&d, drain_cb, &cb);
 
-    /* Direct passthrough — no buffering, no callback */
+    /* Direct passthrough: no buffering, no callback */
     kl_drain_write(&d, "fast", 4);
     ASSERT_EQ(cb.count, 0);
 
-    /* Flush on empty — no callback */
+    /* Flush on empty: no callback */
     kl_drain_flush(&d);
     ASSERT_EQ(cb.count, 0);
 
@@ -368,7 +368,7 @@ UTEST(drain, large_buffer_growth) {
     KlAllocator a = kl_allocator_default();
     MockWriter w;
     mock_init(&w);
-    w.mode = 2;  /* would-block — everything buffered */
+    w.mode = 2;  /* would-block: everything buffered */
 
     KlDrain d;
     kl_drain_init(&d, mock_write, &w, &a);
@@ -724,8 +724,8 @@ UTEST(drain, ws_drain_pending_check) {
     c.ws = NULL;
 }
 
-/* kl_drain_data / kl_drain_consume — the peek + front-drop accessors a transport uses to
- * flush the buffer itself (e.g. the completion loop posting an overlapped send, 8g-1). */
+/* kl_drain_data / kl_drain_consume: the peek + front-drop accessors a transport uses to
+ * flush the buffer itself (e.g. the completion loop posting an overlapped send). */
 UTEST(drain, data_and_consume) {
     KlAllocator a = kl_allocator_default();
     MockWriter w;
@@ -743,7 +743,7 @@ UTEST(drain, data_and_consume) {
     ASSERT_TRUE(p != NULL);
     ASSERT_EQ(memcmp(p, "hello world", 11), 0);
 
-    /* Drop the first 6 bytes ("hello ") — the rest shifts to the front. */
+    /* Drop the first 6 bytes ("hello "): the rest shifts to the front. */
     kl_drain_consume(&d, 6);
     ASSERT_EQ(kl_drain_buffered(&d), (size_t)5);
     ASSERT_EQ(memcmp(kl_drain_data(&d), "world", 5), 0);
@@ -768,7 +768,7 @@ UTEST(drain, consume_fires_on_drain) {
     w.mode = 2;
 
     kl_drain_write(&d, "abcd", 4);
-    kl_drain_consume(&d, 2);          /* partial — not empty yet, no callback */
+    kl_drain_consume(&d, 2);          /* partial: not empty yet, no callback */
     ASSERT_EQ(cb.count, 0);
     kl_drain_consume(&d, 2);          /* now empty → callback fires once */
     ASSERT_EQ(cb.count, 1);
@@ -776,7 +776,7 @@ UTEST(drain, consume_fires_on_drain) {
     kl_drain_free(&d);
 }
 
-/* ── Phase-B reservation + low-water (drain_reserve.h) ───────────────────── */
+/* ── reservation + low-water (drain_reserve.h) ───────────────────── */
 
 /* A failing allocator: fails malloc/realloc after `budget` successful calls (0 = fail all). */
 typedef struct { int budget; } FailAlloc;
@@ -811,7 +811,7 @@ UTEST(drain_reserve, prealloc_then_atomic_accept_and_wouldblock) {
 
     /* 4 more would exceed capacity-buffered (8-5=3): WOULD_BLOCK, nothing taken. */
     ASSERT_EQ((int)kl_drain_reserve_write(&d, "wxyz", 4), (int)KL_DRAIN_WOULD_BLOCK);
-    ASSERT_EQ((int)kl_drain_buffered(&d), 5);   /* unchanged — atomic */
+    ASSERT_EQ((int)kl_drain_buffered(&d), 5);   /* unchanged: atomic */
 
     /* Exactly 3 fits (fills to capacity). */
     ASSERT_EQ((int)kl_drain_reserve_write(&d, "xyz", 3), (int)KL_DRAIN_ACCEPTED);
@@ -901,12 +901,12 @@ UTEST(drain_reserve, low_water_writable_fires_once_per_crossing) {
 }
 
 UTEST(drain_reserve, requires_prealloc_not_just_max_size) {
-    /* Finding 1 regression: an ordinary (growable) drain with max_size but NO preallocated
-     * buffer must NOT be treated as reservation-capable — reserve_write fails closed without
+    /* Regression: an ordinary (growable) drain with max_size but NO preallocated
+     * buffer must NOT be treated as reservation-capable: reserve_write fails closed without
      * invoking the writer or modifying state (else a remainder is copied into buf == NULL). */
     KlAllocator a = kl_allocator_default();
     MockWriter w; mock_init(&w);
-    w.mode = 1;   /* partial writer — would tempt a remainder copy into a NULL buffer */
+    w.mode = 1;   /* partial writer: would tempt a remainder copy into a NULL buffer */
     KlDrain d;
     kl_drain_init(&d, mock_write, &w, &a);
     kl_drain_set_max_size(&d, 64);   /* max_size set, but no prealloc */
@@ -920,7 +920,7 @@ UTEST(drain_reserve, requires_prealloc_not_just_max_size) {
 }
 
 UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
-    /* Finding 4: reserve capacity for the whole remainder, writer takes a nonzero prefix, the
+    /* Reserve capacity for the whole remainder, writer takes a nonzero prefix, the
      * EXACT remainder is copied (caller buffer may then change), flush sends it in order. */
     KlAllocator a = kl_allocator_default();
     MockWriter w; mock_init(&w);
@@ -936,7 +936,7 @@ UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
     ASSERT_EQ((int)kl_drain_buffered(&d), 3); /* remainder "def" buffered */
     ASSERT_EQ(memcmp(d.buf, "def", 3), 0);
 
-    memset(src, 'Z', sizeof(src));            /* mutate caller buffer — remainder was copied */
+    memset(src, 'Z', sizeof(src));            /* mutate caller buffer: remainder was copied */
     ASSERT_EQ(memcmp(d.buf, "def", 3), 0);    /* buffered remainder unaffected */
 
     w.mode = 0;                               /* now accept everything */
@@ -948,7 +948,7 @@ UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
 }
 
 UTEST(drain_reserve, low_water_fires_on_second_crossing) {
-    /* Finding 5: a crossing fires again after the buffer goes back above low-water. */
+    /* A crossing fires again after the buffer goes back above low-water. */
     KlAllocator a = kl_allocator_default();
     MockWriter w; mock_init(&w);
     w.mode = 2;   /* buffer everything */

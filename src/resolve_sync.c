@@ -1,5 +1,5 @@
 /*
- * resolve_sync.c — POSIX/Winsock blocking name resolution (getaddrinfo) that
+ * resolve_sync.c: POSIX/Winsock blocking name resolution (getaddrinfo) that
  * returns Keel-neutral KlSockAddr. This is the platform boundary that keeps
  * getaddrinfo + struct sockaddr out of the protocol client TUs (see
  * resolve_sync.h). A foreign stack (lwIP) swaps in its own resolve_sync_lwip.c.

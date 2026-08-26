@@ -8,10 +8,10 @@
 #include <keel/http2_server.h>
 #include <keel/proxy_protocol.h>
 #include "http_conn_internal.h"
-#include "http_proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
+#include "http_proto_hooks.h"        /* ws/h2 upgrade seam: core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
-#include "kl_cstr.h"          /* kl_ascii_strncasecmp — freestanding-safe, locale-free */
+#include "kl_cstr.h"          /* kl_ascii_strncasecmp: freestanding-safe, locale-free */
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
@@ -19,8 +19,8 @@
 #include "http2_internal.h"
 #include "socket.h"
 
-/* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
- * default) for a standalone pool with no event ctx wired — see kl_http_conn_release. */
+/* Socket provider for this connection's fd, via the raw KlStream seam. NULL (POSIX
+ * default) for a standalone pool with no event ctx wired; see kl_http_conn_release. */
 static inline const KlSocketProvider *conn_sp(const KlHttpConn *c) {
     return kl_stream_provider(&c->stream);
 }
@@ -60,7 +60,7 @@ int kl_http_conn_pool_init(KlHttpConnPool *pool, int capacity, KlAllocator *allo
     pool->alloc = alloc;
     pool->capacity = capacity;
     pool->active_count = 0;
-    pool->free_credits = capacity;   /* admission rights: one per slot (step 6B credit layer) */
+    pool->free_credits = capacity;   /* admission rights: one per slot (credit layer) */
     if ((size_t)capacity > SIZE_MAX / sizeof(KlHttpConn)) return -1;
     pool->conns = kl_malloc(alloc, sizeof(KlHttpConn) * (size_t)capacity);
     if (!pool->conns) return -1;
@@ -78,7 +78,7 @@ int kl_http_conn_pool_init(KlHttpConnPool *pool, int capacity, KlAllocator *allo
             pool->conns = NULL;
             return -1;
         }
-        /* Base-init the embedded raw stream (step 6B-2): sets read_buf/read_cap, invalid handle,
+        /* Base-init the embedded raw stream: sets read_buf/read_cap, invalid handle,
          * and clears all facet state. The read_buf was allocated just above; kl_stream_init records
          * it as the stable receive buffer. Arguments are known-valid, but check the result and
          * unwind on failure to keep initialization discipline intact against future changes. */
@@ -108,7 +108,7 @@ int kl_http_conn_pool_reserve(KlHttpConnPool *pool) {
 void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
     if (!pool) return;                        /* defensive no-op */
     /* Over-return means broken lease accounting (the free_credits + reserved + active == capacity
-     * invariant was violated) — catch it in debug/tests instead of silently hiding it. */
+     * invariant was violated); catch it in debug/tests instead of silently hiding it. */
     assert(pool->free_credits < pool->capacity);
     if (pool->free_credits < pool->capacity) pool->free_credits++;   /* release-once safety net */
 }
@@ -152,13 +152,13 @@ static void conn_cleanup_body_reader(KlHttpConn *c) {
 
 void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
     /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
-     * module isn't linked — e.g. a freestanding HTTP/1.1 server). */
+     * module isn't linked, e.g. a freestanding HTTP/1.1 server). */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (wsh && wsh->cleanup) wsh->cleanup(c);
     if (h2h && h2h->cleanup) h2h->cleanup(c);
 
-    /* TLS shutdown before close(fd) — best-effort close_notify.
+    /* TLS shutdown before close(fd): best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
      * Give up on WANT_READ (can't block for peer's close_notify). */
     if (c->tls && kl_handle_valid(c->stream.fd)) {
@@ -223,7 +223,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
                 kl_free(pool->alloc, pool->conns[i].stream.read_buf,
                         pool->conns[i].stream.read_cap);
             }
-            if (pool->conns[i].comp_cipher) {   /* Phase-A interim completion TLS scratch */
+            if (pool->conns[i].comp_cipher) {   /* interim completion TLS scratch */
                 kl_free(pool->alloc, pool->conns[i].comp_cipher,
                         pool->conns[i].comp_cipher_cap);
             }
@@ -246,8 +246,7 @@ static void conn_log_access(KlHttpConn *c) {
 }
 
 /*
- * Initialize response for the current request.  Extracted from conn_process
- * so middleware can write headers/status before the handler runs.
+ * Initialize response for the current request, so middleware can write headers/status before the handler runs.
  */
 static int conn_init_response(KlHttpConn *c) {
     c->req._server_ctx = c;
@@ -286,7 +285,7 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
     if (c->state == KL_HTTP_CONN_SUSPENDED)
         return KL_HTTP_CONN_SUSPENDED;
 
-    /* If streaming, the handler already sent everything — unless drain is pending */
+    /* If streaming, the handler already sent everything, unless drain is pending */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
             c->state = KL_HTTP_CONN_SENDING;
@@ -308,7 +307,7 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
 static KlHttpConnState conn_run_post_middleware_and_handle(KlHttpConn *c,
                                                        KlHttpRouter *router) {
     if (kl_http_router_run_post_middleware(router, &c->req, &c->res) != 0) {
-        /* Body already consumed — keep_alive preserved */
+        /* Body already consumed: keep_alive preserved */
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
             c->state = KL_HTTP_CONN_CLOSED;
@@ -348,7 +347,7 @@ static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
     if (c->state == KL_HTTP_CONN_SUSPENDED) return KL_HTTP_CONN_SUSPENDED;
     if (c->state == KL_HTTP_CONN_READING_BODY) return KL_HTTP_CONN_READING_BODY;
 
-    /* Streaming response — handler already wrote chunks. */
+    /* Streaming response: handler already wrote chunks. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
             c->state = KL_HTTP_CONN_SENDING;
@@ -359,7 +358,7 @@ static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
         return c->state;
     }
 
-    /* Standard buffered response — send it. */
+    /* Standard buffered response: send it. */
     c->state = KL_HTTP_CONN_SENDING;
     return c->state;
 }
@@ -371,7 +370,7 @@ KlHttpConnState kl_http_conn_on_handshake(KlHttpConn *c) {
     }
     /* Route the TLS socket-BIO through the connection's own socket provider, so
      * TLS I/O matches the connection's stack (e.g. lwIP) without per-app config.
-     * Idempotent — a pointer store the backend consults on the readiness path. */
+     * Idempotent: a pointer store the backend consults on the readiness path. */
     if (c->tls->set_socket_provider)
         c->tls->set_socket_provider(c->tls, conn_sp(c));
     KlTlsResult r = c->tls->handshake(c->tls, c->stream.fd);
@@ -423,7 +422,7 @@ int kl_http_conn_read_proxy_header(KlHttpConn *c) {
     KlSockAddr peer;
     size_t consumed = 0;
     const KlProxyHooks *ph = kl_proxy_hooks();
-    if (!ph || !ph->parse) return 1;   /* PROXY module not linked — treat as no header */
+    if (!ph || !ph->parse) return 1;   /* PROXY module not linked: treat as no header */
     KlProxyResult r = ph->parse(buf, (size_t)n, &consumed, &peer);
 
     switch (r) {
@@ -458,7 +457,7 @@ int kl_http_conn_read_proxy_header(KlHttpConn *c) {
 }
 
 /* Model-blind PROXY-header ingest for the completion path: parse a PROXY header from bytes
- * already received into read_buf[0..len] (an overlapped recv, not a socket peek — the readiness
+ * already received into read_buf[0..len] (an overlapped recv, not a socket peek; the readiness
  * counterpart above peeks + consumes on the socket). On a real header sets c->stream.peer_addr as
  * KL_HTTP_PEER_PROXY. Returns the number of leading header bytes to consume (0 = not a PROXY header,
  * proceed with all bytes as HTTP/TLS), -1 on malformed/oversized, or -2 if more bytes are needed
@@ -467,7 +466,7 @@ int kl_http_conn_ingest_proxy(KlHttpConn *c, size_t len) {
     KlSockAddr peer;
     size_t consumed = 0;
     const KlProxyHooks *ph = kl_proxy_hooks();
-    if (!ph || !ph->parse) return 0;   /* PROXY module not linked — no header */
+    if (!ph || !ph->parse) return 0;   /* PROXY module not linked: no header */
     KlProxyResult r = ph->parse((const uint8_t *)c->stream.read_buf, len,
                                 &consumed, &peer);
     switch (r) {
@@ -478,7 +477,7 @@ int kl_http_conn_ingest_proxy(KlHttpConn *c, size_t len) {
         case KL_PROXY_INVALID:
             return -1;
         case KL_PROXY_NONE:
-            return 0;   /* not a PROXY header — proceed with all buffered bytes */
+            return 0;   /* not a PROXY header: proceed with all buffered bytes */
         case KL_PROXY_OK:
             if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
                 c->stream.peer_addr = peer;
@@ -515,7 +514,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                                           size_t leftover_len) {
     /* Null-terminate the parsed request fields in read_buf so handlers get valid
      * C strings. Done here in the shared core (not at the call sites) so the
-     * readiness and completion paths can't drift — the completion driver reaches
+     * readiness and completion paths can't drift; the completion driver reaches
      * this via kl_http_conn_dispatch_request. Idempotent + confined to the header
      * region (before any leftover body at read_buf + consumed). */
     conn_null_terminate_headers(c);
@@ -538,7 +537,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         return c->state;
     }
     if (kl_http_router_run_middleware(router, &c->req, &c->res) != 0) {
-        /* Middleware short-circuited — body may be unread */
+        /* Middleware short-circuited: body may be unread */
         c->req.keep_alive = 0;
         c->res.keep_alive = 0;
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
@@ -550,7 +549,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         return c->state;
     }
 
-    /* WebSocket upgrade — branch before body reading */
+    /* WebSocket upgrade: branch before body reading */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     if (c->route_result == 200 && c->route &&
         c->route->ws_config && wsh && wsh->upgrade) {
@@ -578,7 +577,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
     int has_body = (c->req.content_length > 0 || c->req.chunked);
 
     if (has_body && c->route && c->route->body_reader) {
-        /* Create body reader — factory can inspect headers */
+        /* Create body reader: factory can inspect headers */
         KlHttpBodyReader *br = c->route->body_reader(
             c->stream.alloc, &c->req, c->route->user_data);
         if (!br) {
@@ -604,10 +603,10 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
          * yield on NEED_DATA (empty buffer); the body reader's on_data
          * callback will then resume it for the leftover AND subsequent
          * socket reads, giving the handler a chance to catch parser
-         * errors that fire inside on_data — including caps that hit
+         * errors that fire inside on_data, including caps that hit
          * on the very first byte chunk. */
         if (c->route->streaming_handler && c->route->streaming_async) {
-            /* streaming_async implies streaming_handler — enforced by
+            /* streaming_async implies streaming_handler; enforced by
              * kl_http_router_add_streaming_async. Assert here to catch
              * downstream API misuse (direct KlHttpRoute mutation) in
              * debug builds without runtime cost in release. */
@@ -617,8 +616,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 /* Handler completed synchronously (sent a response,
                  * suspended for async I/O, or emitted a streaming
                  * response) without parking on the body reader. The
-                 * leftover bytes — and any subsequent body bytes still
-                 * in the kernel buffer — are now stranded: nothing in
+                 * leftover bytes, and any subsequent body bytes still
+                 * in the kernel buffer, are now stranded: nothing in
                  * the conn state machine will drain them. Force
                  * keep-alive off so the connection closes after the
                  * response sends, instead of bleeding stale body bytes
@@ -642,7 +641,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                             c->req.body_reader);
                 if (rc < 0) {
                     c->req.body_reader->on_error(c->req.body_reader);
-                    /* v2.1.2/v2.2.0 — honor streaming handler's
+                    /* v2.1.2/v2.2.0: honor streaming handler's
                      * response if the on_error chain resumed it
                      * (see READING_BODY paths below for the twin). */
                     if (c->route->streaming_handler &&
@@ -660,7 +659,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                     if (c->route->streaming_handler) {
                         /* For streaming_async: handler was invoked
                          * above and may have completed during the
-                         * on_data + on_complete chain — return its
+                         * on_data + on_complete chain; return its
                          * state. Otherwise: invoke now (legacy). */
                         if (c->route->streaming_async)
                             return c->state;
@@ -679,7 +678,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
 
             if (bpr == KL_HTTP1_PARSE_ERROR) {
                 c->req.body_reader->on_error(c->req.body_reader);
-                /* v2.1.2/v2.2.0 — same handler-state-honoring as the
+                /* v2.1.2/v2.2.0: same handler-state-honoring as the
                  * chunked path. */
                 if (c->route->streaming_handler &&
                     (c->state == KL_HTTP_CONN_SENDING ||
@@ -699,7 +698,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 }
                 return conn_run_post_middleware_and_handle(c, router);
             }
-            /* INCOMPLETE — need more body data */
+            /* INCOMPLETE: need more body data */
         }
 
         /* Legacy streaming-handler (not async): invoke the handler NOW
@@ -719,17 +718,17 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         return c->state;
 
     } else if (!has_body) {
-        /* No body — header pointers valid, process immediately.
+        /* No body: header pointers valid, process immediately.
          * Streaming routes still run the handler (with req->body_reader
          * == NULL); they're expected to detect and handle gracefully.
          * Skipping the streaming branch here would silently bypass the
-         * handler for CL:0 streaming requests — degenerate but real. */
+         * handler for CL:0 streaming requests, degenerate but real. */
         if (c->route && c->route->streaming_handler)
             return conn_invoke_streaming_handler(c);
         return conn_run_post_middleware_and_handle(c, router);
 
     } else {
-        /* Body present but no reader — discard body */
+        /* Body present but no reader: discard body */
 
         /* Content-Length early reject */
         if (!c->req.chunked &&
@@ -840,21 +839,21 @@ read_more_headers: ;
                 "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
             if (c->stream.read_len >= 24) {
                 if (memcmp(c->stream.read_buf, h2_preface, 24) == 0) {
-                    /* Hand the session the FULL preface (magic included) — the
+                    /* Hand the session the FULL preface (magic included); the
                      * session's HTTP/2 engine consumes the client connection
                      * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
                      * where the magic arrives on the stream normally. */
                     const KlHttp2ServerHooks *h2hp = kl_http2_server_hooks();
                     if (!h2hp || !h2hp->upgrade)
-                        return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
+                        return c->state;   /* HTTP/2 not linked: stay HTTP/1.1 */
                     c->state = (KlHttpConnState)h2hp->upgrade(
                         c, router, c->h2_config,
                         c->stream.read_buf, c->stream.read_len);
                     return c->state;
                 }
-                /* Not a preface — fall through to HTTP/1.1 parser */
+                /* Not a preface: fall through to HTTP/1.1 parser */
             } else if (memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
-                /* Partial preface match — wait for more data */
+                /* Partial preface match: wait for more data */
                 return KL_HTTP_CONN_READING;
             }
         }
@@ -866,7 +865,7 @@ read_more_headers: ;
                                              &consumed);
 
         if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
-            /* TLS may buffer multiple records — drain before re-arming */
+            /* TLS may buffer multiple records; drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++hdr_drains < KL_TLS_DRAIN_MAX)
                 goto read_more_headers;
@@ -1023,7 +1022,7 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, ssize_t result, int
     }
 
     if (zero_copy) {
-        /* Data already sent to socket via splice — advance offset, next chunk */
+        /* Data already sent to socket via splice: advance offset, next chunk */
         c->res.file_offset += (uint64_t)result;
         c->file_io_phase = FILE_IO_IDLE;
         return conn_file_submit_read(c);
@@ -1069,13 +1068,13 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
     return c->state;
 }
 
-/* ── Model-blind protocol core (PAL Phase 8) ─────────────────────────
+/* ── Model-blind protocol core ─────────────────────────
  * Thin non-static handles onto the static helpers above, so the IOCP completion
  * driver can reuse the exact parse→route→handle→lifecycle core after a completed
  * WSARecv, without the readiness transport wrapper and without http_connection.c
  * learning which event model produced the bytes. kl_http_conn_on_readable is unchanged
  * (still calls the statics directly), so the readiness path stays byte-identical.
- * See http_conn_internal.h / docs/phase8_iocp_design.md §4. */
+ * See http_conn_internal.h / docs/archive/phases/phase8_iocp_design.md §4. */
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len) {
     return conn_dispatch_request(c, router, leftover, leftover_len);
@@ -1085,11 +1084,11 @@ KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router) 
     return conn_run_post_middleware_and_handle(c, router);
 }
 
-/* PAL Phase 8b-1: the model-blind request-body core. Feed `nread` freshly-received
+/* The model-blind request-body core. Feed `nread` freshly-received
  * bytes (already in read_buf[0..nread]) to the chunked decoder / body reader, apply
  * limits, honor streaming-handler transitions. Returns the next state
  * (KL_HTTP_CONN_READING_BODY = need more bytes). kl_http_conn_on_readable calls this inline
- * after a recv (byte-identical); the completion driver calls it after a WSARecv —
+ * after a recv (byte-identical); the completion driver calls it after a WSARecv:
  * same core, no event model leaked in. */
 KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
     if (c->req.chunked) {
@@ -1140,7 +1139,7 @@ KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
         return KL_HTTP_CONN_READING_BODY;
     }
 
-    /* Content-Length body — parser path */
+    /* Content-Length body: parser path */
     size_t consumed = 0;
     KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req,
                                         c->stream.read_buf, nread, &consumed);

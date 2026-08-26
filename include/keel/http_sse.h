@@ -8,7 +8,7 @@
  * @brief SSE (Server-Sent Events) stream handle.
  *
  * Wraps a chunked streaming response with SSE line framing.
- * All writes go through write_fn — zero allocation.
+ * All writes go through write_fn; zero allocation.
  */
 typedef struct {
     KlHttpResponseWriteFn  write_fn;   /**< Chunked stream write callback */
@@ -33,7 +33,7 @@ int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse);
  *
  * Writes event:/id:/data: fields followed by a blank line.
  * NULL event or id omits that field. Multiline data is auto-split
- * on '\n' — each line gets its own "data: " prefix.
+ * on '\n'; each line gets its own "data: " prefix.
  *
  * @param sse      SSE handle from kl_http_sse_begin.
  * @param event    Event type (NULL to omit).

@@ -67,7 +67,7 @@ static int grow_arrays(KlPollState *st) {
     size_t new_ud_sz = (size_t)new_cap * sizeof(void *);
     void **nu = kl_realloc(st->alloc, st->udata, old_ud_sz, new_ud_sz);
     if (!nu) {
-        /* fds realloc succeeded but udata failed — shrink fds back to
+        /* fds realloc succeeded but udata failed; shrink fds back to
          * keep state consistent with st->capacity for kl_free sizing. */
         struct pollfd *rev = kl_realloc(st->alloc, nf, new_fds_sz, old_fds_sz);
         st->fds = rev ? rev : nf;
@@ -233,13 +233,13 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     loop->fd = -1;
 }
 
-/* PAL Phase 7: poll() is a readiness poller of native OS descriptors. */
+/* poll() is a readiness poller of native OS descriptors. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* Readiness loop — the default POSIX provider works; nothing to auto-wire (5a). */
+/* Readiness loop: the default POSIX provider works; nothing to auto-wire. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;

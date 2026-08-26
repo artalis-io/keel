@@ -1,6 +1,6 @@
 /*
- * stream_write.h — INTERNAL shim. The KlStream write contract now lives in the public candidate
- * header <keel/stream.h> (step 6A); the struct layout is in <keel/stream_detail.h>. This shim keeps
+ * stream_write.h: INTERNAL shim. The KlStream write contract now lives in the public candidate
+ * header <keel/stream.h>; the struct layout is in <keel/stream_detail.h>. This shim keeps
  * the historical include path ("stream_write.h") working for src/ and the unit tests.
  */
 #ifndef KEEL_SRC_STREAM_WRITE_H

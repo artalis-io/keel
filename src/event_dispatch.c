@@ -1,13 +1,13 @@
 /*
- * event_dispatch.c — the public kl_event_* API, dispatched to either the
+ * event_dispatch.c: the public kl_event_* API, dispatched to either the
  * compiled-in backend (default, no indirection) or a runtime-installed provider.
  *
  * When loop->ops is NULL (the common case) each call goes straight to the
- * backend's *_builtin function — a single, perfectly-predicted branch, no vtable
+ * backend's *_builtin function: a single, perfectly-predicted branch, no vtable
  * hop. When a bring-your-own backend is installed (KlEventCtx.event_provider →
  * loop->ops, e.g. lwIP), the same calls route through loop->ops instead, so the
  * core needs no recompile to run on a foreign event stack. See event.h /
- * event_builtin.h and docs/event_provider_design.md.
+ * event_builtin.h and docs/archive/designs/event_provider_design.md.
  */
 #include <keel/event.h>
 #include <stddef.h>

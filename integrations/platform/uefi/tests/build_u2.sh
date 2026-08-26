@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_u2.sh — build the U-2 EFI_TCP4 socket-provider self-test into BOOTX64.EFI.
+# build_u2.sh: build the U-2 EFI_TCP4 socket-provider self-test into BOOTX64.EFI.
 #
 # Links libkeel_freestanding_selfcontained.a (mem*/strlen + kl_sockaddr_* in-archive,
 # built by `make freestanding-lib-selfcontained` in the repo root) with the U-1 shim
@@ -8,7 +8,7 @@
 # CRT (-nostdlib, lld PE).
 #
 # The U-2 self-test references the socket PROVIDER directly (not kl_client), so it does
-# NOT pull the llhttp/client objects — the U-1 link stubs (__chkstk, abort, the
+# NOT pull the llhttp/client objects; the U-1 link stubs (__chkstk, abort, the
 # fail-closed sockdef/event/DNS seams) are NOT needed and are deliberately omitted.
 # Verified: the link closes with zero unresolved symbols against the archive alone.
 #

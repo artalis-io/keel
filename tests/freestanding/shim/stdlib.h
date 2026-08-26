@@ -1,4 +1,4 @@
-/* freestanding shim <stdlib.h> — declarations only (see ../README.md). */
+/* freestanding shim <stdlib.h>: declarations only (see ../README.md). */
 #ifndef KEEL_FS_SHIM_STDLIB_H
 #define KEEL_FS_SHIM_STDLIB_H
 #include <stddef.h>

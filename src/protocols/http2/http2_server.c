@@ -14,7 +14,7 @@
 #include "http_internal.h"
 #include "http2_internal.h"       /* KlHttp2ServerConn / KlHttp2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
-#include "http_proto_hooks.h"       /* H2 server upgrade seam — registered for the core */
+#include "http_proto_hooks.h"       /* H2 server upgrade seam: registered for the core */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -269,7 +269,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     req->method_len = method_len;
     p += method_len + 1;
 
-    /* Path — split query if present */
+    /* Path: split query if present */
     memcpy(p, path, path_len);
     p[path_len] = '\0';
     req->path = p;
@@ -331,7 +331,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         p[authority_len] = '\0';
         req->headers[hdr_count].value = p;
         req->headers[hdr_count].value_len = authority_len;
-        /* host is the last thing written into hdr_storage — no further p advance. */
+        /* host is the last thing written into hdr_storage; no further p advance. */
         hdr_count++;
     }
 
@@ -476,7 +476,7 @@ static ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
 }
 
 /* The session emits produced frame bytes here; route them through the output seam
- * (default: the socket; a completion driver can install a buffering writer — 8d-4). */
+ * (default: the socket; a completion driver can install a buffering writer). */
 static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     return h2c->out_write(h2c->out_ctx, data, len);
@@ -588,7 +588,7 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
 
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
  * frames + flush produced output). Shared by the readiness drive below and the
- * completion driver — see internal.h. */
+ * completion driver; see internal.h. */
 KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
@@ -604,7 +604,7 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
     }
 
     /* Session-done close: once the session (if it can report readiness) wants
-     * neither read nor write, it has terminated — e.g. it sent a GOAWAY for a
+     * neither read nor write, it has terminated: e.g. it sent a GOAWAY for a
      * protocol violation, or finished a graceful shutdown. Close now rather than
      * lingering until the peer times out. Flushed above, so the GOAWAY is on the
      * wire. want_read is optional (NULL → legacy: stay open until peer closes). */
@@ -697,7 +697,7 @@ void kl_http2_server_hooks_install(void) {
 }
 
 /* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
- * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * (without kl_http_server_init, e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_http2_server_* reference pulls it in). */
 __attribute__((constructor))
 static void kl_http2_server_hooks_autoinstall(void) {

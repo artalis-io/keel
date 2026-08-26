@@ -1,5 +1,5 @@
 /*
- * keel_tls_libressl.h — LibreSSL backend for Keel's KlTls vtable.
+ * keel_tls_libressl.h: LibreSSL backend for Keel's KlTls vtable.
  *
  * LibreSSL is API-compatible enough with OpenSSL that the SAME adapter TU
  * (integrations/tls/openssl/tls_openssl.c) serves it too. There is therefore NO
@@ -9,7 +9,7 @@
  *
  * The adapter guards the few LibreSSL/OpenSSL divergences with
  * `#if defined(LIBRESSL_VERSION_NUMBER)` (a macro LibreSSL's <openssl/opensslv.h>
- * defines) — currently just SSL_get_peer_certificate vs OpenSSL 3.x's
+ * defines): currently just SSL_get_peer_certificate vs OpenSSL 3.x's
  * SSL_get1_peer_certificate. Build integrations/tls/openssl/tls_openssl.c against a
  * LibreSSL prefix via this directory's Makefile (LIBRESSL_DIR=...).
  *

@@ -1,9 +1,9 @@
 /*
- * socket_dgram_win.c — the Winsock datagram data-plane (KlDatagramOps) for the
- * built-in Winsock socket provider. The primitive-only form of udp_io_win.c: every
- * op takes (ctx, fd, …) and speaks KlSockAddr, with no datagram machine state — the
- * send-queue walk, delivery, and interest tracking stay in the datagram core, which dispatches
- * through KlSocketProvider.dgram.
+ * socket_dgram_win.c: the Winsock datagram data-plane (KlDatagramOps) for the
+ * built-in Winsock socket provider. Primitive-only: every op takes (ctx, fd, …) and
+ * speaks KlSockAddr, with no datagram machine state: the send-queue walk, delivery,
+ * and interest tracking stay in the datagram core, which dispatches through
+ * KlSocketProvider.dgram.
  *
  * Winsock has no recvmmsg/sendmmsg batching, no UDP GSO, and no UDP GRO, so the
  * batch ops are NULL (the datagram core uses the per-datagram loop) and send_gso reports
@@ -33,7 +33,7 @@
 
 /* ── Extension fetch + errno + cmsg helpers (self-contained statics) ────── */
 
-/* Shared with the IOCP backend (udp_cmsg_win.c) — one cached WSASendMsg fetch, no drift. */
+/* Shared with the IOCP backend (udp_cmsg_win.c): one cached WSASendMsg fetch, no drift. */
 static LPFN_WSASENDMSG dgram_get_sendmsg(SOCKET s) { return kl_udp_win_get_sendmsg(s); }
 
 /* WSAEWOULDBLOCK -> EWOULDBLOCK (the datagram core queues); anything else -> EIO (error path). */
@@ -42,7 +42,7 @@ static void dgram_set_errno_from_wsa(void) {
     errno = (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) ? EWOULDBLOCK : EIO;
 }
 
-/* Delegates to the shared Winsock builder (udp_cmsg_win.c) — one implementation shared with the
+/* Delegates to the shared Winsock builder (udp_cmsg_win.c): one implementation shared with the
  * IOCP backend (no drift). Returns 0 with *out set, or -1 if a requested cmsg could not be built. */
 static int dgram_build_control(unsigned char *buf, size_t bufsz,
                                const struct sockaddr *src, int tos, int family, ULONG *out) {
@@ -94,7 +94,7 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
          * required); a plain unsigned char[] is only byte-aligned. */
         _Alignas(WSACMSGHDR) unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        /* Family for the TOS cmsg level: dest, else src, else getsockname — never defaulted to v4. */
+        /* Family for the TOS cmsg level: dest, else src, else getsockname; never defaulted to v4. */
         int family = kl_udp_win_send_family(s, dest_len ? (struct sockaddr *)&ds : NULL,
                                             src_len ? (struct sockaddr *)&ss : NULL);
         if (family < 0) { errno = EIO; return -1; }
@@ -148,7 +148,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
         DWORD got = 0;
         if (fn(s, &msg, &got, NULL, NULL) == SOCKET_ERROR) {
             int e = WSAGetLastError();
-            if (e == WSAEMSGSIZE) {   /* truncated; control indeterminate — skip parse */
+            if (e == WSAEMSGSIZE) {   /* truncated; control indeterminate: skip parse */
                 meta->truncated = 1;
                 if (msg.namelen > 0)
                     (void)kl_sockaddr_from_native(src, (struct sockaddr *)&from, (socklen_t)msg.namelen);
@@ -168,7 +168,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
         return (kl_ssize_t)got;
     }
 
-    /* No WSARecvMsg extension — plain recvfrom, source only. */
+    /* No WSARecvMsg extension: plain recvfrom, source only. */
     int fromlen = (int)sizeof(from);
     int r = recvfrom(s, (char *)buf, (int)buflen, 0, (struct sockaddr *)&from, &fromlen);
     if (r == SOCKET_ERROR) {
@@ -190,7 +190,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
 static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                                uint16_t seg, const KlSockAddr *dest) {
     (void)ctx; (void)fd; (void)data; (void)len; (void)seg; (void)dest;
-    errno = EIO;   /* no UDP GSO on Winsock — the datagram core falls back to per-segment sends */
+    errno = EIO;   /* no UDP GSO on Winsock; the datagram core falls back to per-segment sends */
     return -1;
 }
 
@@ -314,7 +314,7 @@ static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
     return -1;
 }
 
-/* M2: report ONLY the caps usable on THIS fd. Source-pin AND per-packet TOS both ride WSASendMsg
+/* Report ONLY the caps usable on THIS fd. Source-pin AND per-packet TOS both ride WSASendMsg
  * (wdg_send returns EIO if the extension is absent), so both are gated on a successful runtime probe
  * of WSASendMsg for this socket AND the family's cmsg macro. Multicast/broadcast are gated on their
  * family-specific macros; broadcast is IPv4-only; connected-mode send is always available. If the

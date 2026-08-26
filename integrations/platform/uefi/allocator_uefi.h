@@ -1,8 +1,8 @@
 /*
- * allocator_uefi.h — a KlAllocator backed by UEFI Boot Services.
+ * allocator_uefi.h: a KlAllocator backed by UEFI Boot Services.
  *
- * The first real UEFI client requires an EXPLICIT allocator (the Phase-10
- * design rule, finding 7): there is no global heap in the pre-boot environment,
+ * A UEFI client requires an EXPLICIT allocator: there is no global heap in the
+ * pre-boot environment,
  * so a KEEL freestanding client is handed a KlAllocator* built from the boot
  * services it was launched with. This is a FACTORY, not a global singleton.
  *

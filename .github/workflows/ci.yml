@@ -20,7 +20,7 @@ jobs:
             backend: ""
             deps: ""
           # io_uring is completion-native (8f-5d) and can't run the full `make test`
-          # (some readiness-shaped suites are excluded — see IOURING_TEST_SUITES); it is
+          # (some readiness-shaped suites are excluded; see IOURING_TEST_SUITES); it is
           # covered end-to-end by the dedicated "Completion (io_uring)" + unit-suite jobs
           # below, so it is not a full-suite matrix entry.
           - name: Linux (poll fallback)
@@ -69,8 +69,8 @@ jobs:
 
   completion:
     # The portable poll() completion backend (BACKEND=pollcomp, PAL 8d-0.5): runs the
-    # platform-independent completion driver (completion_driver.c) — the same one IOCP
-    # uses — on real POSIX runners, so the completion axis is genuinely CI-tested off
+    # platform-independent completion driver (completion_driver.c), the same one IOCP
+    # uses, on real POSIX runners, so the completion axis is genuinely CI-tested off
     # Windows (not just compile-gated). Proves the axis is platform-independent.
     strategy:
       fail-fast: false
@@ -94,24 +94,24 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-tls
 
-      # WebSocket over the completion loop (comp_ws_drive) — reuses the WS frame core.
+      # WebSocket over the completion loop (comp_ws_drive); reuses the WS frame core.
       - name: WebSocket-over-completion roundtrip smoke test
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-ws
 
-      # Async/thread-pool handler over completion — the watcher relay + async resume (8e-2).
+      # Async/thread-pool handler over completion: the watcher relay + async resume (8e-2).
       - name: Async/thread-pool-over-completion roundtrip smoke test
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-async
 
       # R3b-T1: single-shot completion contract for KlStream over the REAL pollcomp seam (the
-      # deterministic oracle — post one recv/send, exactly one completion, no re-fire after more
+      # deterministic oracle: post one recv/send, exactly one completion, no re-fire after more
       # peer activity). Also enrolled natively under io_uring (test-iouring) and IOCP (test-win-iocp).
       - name: Stream single-shot contract (pollcomp oracle)
         timeout-minutes: 5
         run: make BACKEND=pollcomp tests/test_stream_single_shot && ./tests/test_stream_single_shot
 
-      # Linux ASan has leak detection (macOS does not) — run BOTH completion smokes
+      # Linux ASan has leak detection (macOS does not); run BOTH completion smokes
       # (plaintext + TLS-via-mock), the pollcomp op-table, and the TLS/h2 buffers under
       # ASan+UBSan with leak checking.
       - name: Completion roundtrips under ASan+UBSan (leak detection)
@@ -119,7 +119,7 @@ jobs:
         timeout-minutes: 5
         run: make smoke-pollcomp-asan
 
-      # RC-2: runtime injection — a DEFAULT (readiness-compiled) libkeel serves a request
+      # RC-2: runtime injection; a DEFAULT (readiness-compiled) libkeel serves a request
       # over a pollcomp completion backend injected via KlEventCtx.event_provider (the
       # completion axis is now runtime-injectable, not only link-time BACKEND=).
       - name: Runtime-injected completion backend (default libkeel + pollcomp)
@@ -151,23 +151,23 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=iouring smoke-iouring
 
-      # Async/thread-pool over the completion loop — the watcher relay via single-shot
+      # Async/thread-pool over the completion loop: the watcher relay via single-shot
       # IORING_OP_POLL_ADD (the io_uring way to meet the same KL_COMP_WATCHER contract).
       - name: Async/thread-pool-over-io_uring roundtrip smoke test
         timeout-minutes: 5
         run: make BACKEND=iouring smoke-iouring-async
 
-      # LeakSanitizer over the io_uring op/registered-buffer/splice/watcher lifecycle — the
+      # LeakSanitizer over the io_uring op/registered-buffer/splice/watcher lifecycle: the
       # coverage the plain smokes lack (a watch leak once reached main without it).
       - name: io_uring smokes under ASan+UBSan (leak detection)
         timeout-minutes: 8
         run: make smoke-iouring-asan
 
   completion-iouring-suite:
-    # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
-    # regression gate alongside the smokes (backend-agnostic logic + protocol/loop suites
+    # Phase 8f-3: the unit-test suites that run over the io_uring completion backend, a
+    # regression gate alongside the smokes (backend-agnostic logic, protocol/loop suites
     # driven through kl_server_run / kl_event_ctx_run). Readiness-model-coupled suites are
-    # excluded (see the IOURING_TEST_SUITES comment in the Makefile — those need a
+    # excluded (see the IOURING_TEST_SUITES comment in the Makefile; those need a
     # per-test overlapped-provider opt-in, not a backend fix).
     name: Completion (io_uring) unit suite
     runs-on: ubuntu-latest
@@ -200,9 +200,9 @@ jobs:
           install: mingw-w64-x86_64-gcc make
 
       # WSAPoll event backend + Winsock provider. Builds and links the entire
-      # library on Windows — TCP HTTP server + sync/async client, the UDP
+      # library on Windows; TCP HTTP server + sync/async client, the UDP
       # datagram core (WSARecvMsg/WSASendMsg + cmsg), AND the built-in DNS
-      # resolver (iphlpapi config discovery) — then runs real loopback smoke
+      # resolver (iphlpapi config discovery), then runs real loopback smoke
       # tests for each.
       - name: Build full core (Winsock)
         run: make OS=windows CC=gcc
@@ -220,7 +220,7 @@ jobs:
         run: make OS=windows CC=gcc smoke-dns
 
       # Platform-neutral unit-test subset (utest suites that build AND run on
-      # Winsock today). Staged toward parity — see docs/phase6_winsock_design.md
+      # Winsock today). Staged toward parity; see docs/phase6_winsock_design.md
       # Part C; expand WIN_TEST_SUITES in the Makefile as more suites are ported.
       - name: Run Windows unit-test subset
         timeout-minutes: 5
@@ -262,20 +262,20 @@ jobs:
 
       # Runtime-test event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV,
       # feed-in-drain, overlapped ciphertext WSASend) via the portable identity mock TLS
-      # — no mbedTLS on the runner. This is the last compile-gated-only path on Windows.
+      # no mbedTLS on the runner. This is the last compile-gated-only path on Windows.
       - name: End-to-end TLS-over-IOCP roundtrip smoke test (mock TLS)
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-tls
 
       # The IOCP watcher relay (overlapped WSARecv on the thread-pool wakeup socket surfaces
-      # KL_COMP_WATCHER) — async/thread-pool handlers over the completion loop (8e-2c).
+      # KL_COMP_WATCHER); async/thread-pool handlers over the completion loop (8e-2c).
       - name: End-to-end async/thread-pool-over-IOCP roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
 
       # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
       # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
-      # the facade's completion fd<->loop registration (kl_event_add -> CreateIoCompletionPort) — the
+      # the facade's completion fd<->loop registration (kl_event_add -> CreateIoCompletionPort); the
       # path pollcomp/io_uring cannot exercise (their kl_event_add is inert).
       - name: End-to-end KlDatagram-over-IOCP roundtrip smoke test
         timeout-minutes: 3
@@ -346,7 +346,7 @@ jobs:
         # llvm provides llvm-ar / llvm-nm: the freestanding gates (freestanding-dgram / -dns /
         # uefi-dgram-gate / *-selfcontained) build Windows-COFF cross archives, and FREESTANDING_AR
         # auto-selects llvm-ar when present. GNU `ar`'s archive index is not scannable by lld-link for
-        # those PE targets — on-demand member extraction fails ("undefined symbol: kl_udp_init") — so
+        # those PE targets; on-demand member extraction fails ("undefined symbol: kl_udp_init"); so
         # without llvm-ar the compose-link probes break. (llvm-nm likewise for the symbol gate.)
         run: |
           sudo apt-get update
@@ -370,13 +370,13 @@ jobs:
       - name: Stale-name gate (deleted KlUdp object API does not reappear)
         run: make check-no-kludp
 
-      - name: Stale-name gate (renamed HTTP taxonomy — no legacy KlServer/KlClient/KlH2/... names)
+      - name: Stale-name gate (renamed HTTP taxonomy, no legacy KlServer/KlClient/KlH2/... names)
         run: make check-no-httplegacy
 
-      - name: Test-layout ownership gate (tests match tests/test-layout.manifest — no drift)
+      - name: Test-layout ownership gate (tests match tests/test-layout.manifest, no drift)
         run: make check-test-layout
 
-      - name: Boundary gate G1 (substrate purity — src/ never includes a protocol header)
+      - name: Boundary gate G1 (substrate purity, src/ never includes a protocol header)
         run: make check-substrate-purity
 
       - name: Boundary gate G2 (protocols never include an integration impl header)
@@ -391,6 +391,15 @@ jobs:
       - name: Boundary gate G5 (check-old-layout - no resurrected protocols / flat-home / spikes / parsers / unclassified integration file)
         run: make check-old-layout
 
+      - name: Comment-history gate (no milestone/phase archaeology in active C/H comments)
+        run: make check-no-milestones
+
+      - name: Em-dash gate (no U+2014 in any tracked non-binary file)
+        run: make check-no-em-dash
+
+      - name: Site gate (offline site validation + reproducible build)
+        run: make check-site
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
@@ -400,7 +409,7 @@ jobs:
       - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)
         run: make freestanding-dns
 
-      - name: "Freestanding DNS harness (runtime: truncation settles KL_ERR_DNS, no TCP, no timeout — ASan+UBSan+LSan)"
+      - name: "Freestanding DNS harness (runtime: truncation settles KL_ERR_DNS, no TCP, no timeout; ASan+UBSan+LSan)"
         run: make freestanding-dns-harness
 
       - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
@@ -418,7 +427,7 @@ jobs:
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 
-      - name: Build hardening — binary flag assertion
+      - name: Build hardening, binary flag assertion
         run: |
           # Build a test binary and assert the hardening flags actually
           # propagated to the linker output. RW (not RWE) on GNU_STACK
@@ -525,17 +534,17 @@ jobs:
             https://github.com/Mbed-TLS/mbedtls.git "$HOME/mbedtls"
           make -C "$HOME/mbedtls" -j"$(nproc)" lib
 
-      - name: Build core (dependency-light — no TLS/HTTP2 libs)
+      - name: Build core (dependency-light, no TLS/HTTP2 libs)
         run: make
 
-      - name: nghttp2 adapter — roundtrip + real-socket e2e
+      - name: nghttp2 adapter, roundtrip + real-socket e2e
         timeout-minutes: 5
         run: make -C integrations/http2/nghttp2 test
 
-      - name: nghttp2 conformance — h2spec
+      - name: nghttp2 conformance, h2spec
         timeout-minutes: 5
         # h2spec exits non-zero on ANY failure; Keel's expected result is ~136/146
-        # (the residual ~10 are nghttp2 library behavior — nghttpd fails the same
+        # (the residual ~10 are nghttp2 library behavior; nghttpd fails the same
         # cases; see integrations/http2/nghttp2/README.md). Gate on a pass-count floor so
         # the result stays visible and a real regression fails the job, without
         # tripping on the known nghttp2-parity failures.
@@ -546,21 +555,21 @@ jobs:
           echo "h2spec passed=${passed:-0} (floor 130)"
           test "${passed:-0}" -ge 130 || { echo "h2spec regression: ${passed:-0} < 130 passed"; exit 1; }
 
-      - name: nghttp2 load — h2load
+      - name: nghttp2 load, h2load
         timeout-minutes: 5
         run: make -C integrations/http2/nghttp2 h2load
 
-      - name: nghttp2 interop — curl + nghttpd
+      - name: nghttp2 interop, curl + nghttpd
         timeout-minutes: 5
         run: |
           make -C integrations/http2/nghttp2 interop-curl
           PATH="$PATH:/usr/sbin" make -C integrations/http2/nghttp2 interop-nghttpd
 
-      - name: ALPN e2e — mbedTLS + nghttp2 + openssl + curl + Keel client
+      - name: ALPN e2e, mbedTLS + nghttp2 + openssl + curl + Keel client
         timeout-minutes: 5
         run: make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
 
-      - name: mbedTLS adapter — real TLS handshake (folds mbedTLS into libkeel.a; runs last)
+      - name: mbedTLS adapter, real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
         run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" smoke-tls
 
@@ -576,7 +585,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential git python3-jinja2 python3-jsonschema
 
-      - name: Fetch lwIP + contrib (BYO — not vendored)
+      - name: Fetch lwIP + contrib (BYO, not vendored)
         timeout-minutes: 5
         run: |
           git clone --depth 1 -b STABLE-2_2_0_RELEASE \
@@ -593,21 +602,21 @@ jobs:
             https://github.com/Mbed-TLS/mbedtls.git "$HOME/mbedtls"
           make -C "$HOME/mbedtls" -j"$(nproc)" lib
 
-      - name: Build core (stock libkeel — no KEEL_PLATFORM_LWIP)
+      - name: Build core (stock libkeel, no KEEL_PLATFORM_LWIP)
         run: make
 
-      - name: lwIP loopback — stock libkeel + lwIP providers (server + client + UDP echo)
+      - name: lwIP loopback, stock libkeel + lwIP providers (server + client + UDP echo)
         timeout-minutes: 5
         run: make -C integrations/platform/lwip loopback LWIP_DIR="$HOME/lwip"
 
-      - name: lwIP HTTPS loopback — mbedTLS BIO routed through the lwIP socket provider
+      - name: lwIP HTTPS loopback, mbedTLS BIO routed through the lwIP socket provider
         timeout-minutes: 5
         run: make -C integrations/platform/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
 
-      - name: lwIP raw completion backend — P9 cases via runtime injection on STOCK libkeel (RC-3)
+      - name: lwIP raw completion backend, P9 cases via runtime injection on STOCK libkeel (RC-3)
         timeout-minutes: 5
         run: make -C integrations/platform/lwip loopback-raw LWIP_DIR="$HOME/lwip"
 
-      - name: lwIP raw completion backend — P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
+      - name: lwIP raw completion backend, P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
         timeout-minutes: 8
         run: make -C integrations/platform/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"

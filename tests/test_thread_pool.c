@@ -90,7 +90,7 @@ UTEST(thread_pool, submit_single) {
 
 static void slow_work_fn(void *ud) {
     (void)ud;
-    usleep(50000); /* 50ms — hold the slot */
+    usleep(50000); /* 50ms: hold the slot */
 }
 static void noop_done_fn(void *ud) { (void)ud; }
 
@@ -152,7 +152,7 @@ UTEST(thread_pool, work_executes_on_worker) {
     atomic_int done_count = 0;
     KlWorkItem item = {
         .work_fn = capture_tid_work,
-        .done_fn = single_done_fn,  /* reuse — increments single_done_called */
+        .done_fn = single_done_fn,  /* reuse: increments single_done_called */
         .user_data = NULL,
     };
 
@@ -297,7 +297,7 @@ static void cancel_fn(void *ud) {
 
 static void blocking_work_fn(void *ud) {
     (void)ud;
-    usleep(200000); /* 200ms — hold worker busy */
+    usleep(200000); /* 200ms: hold worker busy */
 }
 
 UTEST(thread_pool, shutdown_cancels_pending) {
@@ -307,7 +307,7 @@ UTEST(thread_pool, shutdown_cancels_pending) {
 
     atomic_store(&cancel_count, 0);
 
-    /* 1 worker, capacity 8 — first item blocks the worker */
+    /* 1 worker, capacity 8: first item blocks the worker */
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
     KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
@@ -335,7 +335,7 @@ UTEST(thread_pool, shutdown_cancels_pending) {
         ASSERT_EQ(kl_thread_pool_submit(pool, &item), 0);
     }
 
-    /* Free immediately — pending items should get cancel_fn called */
+    /* Free immediately: pending items should get cancel_fn called */
     kl_thread_pool_free(pool);
 
     /* At least some of the 4 pending items should have been cancelled */
@@ -375,7 +375,7 @@ UTEST(thread_pool, shutdown_waits_for_running) {
     /* Let worker pick it up */
     usleep(10000);
 
-    /* Free — should block until the running item completes */
+    /* Free: should block until the running item completes */
     kl_thread_pool_free(pool);
 
     ASSERT_EQ(atomic_load(&running_completed), 1);
@@ -404,7 +404,7 @@ UTEST(thread_pool, null_cancel_fn) {
     ASSERT_EQ(kl_thread_pool_submit(pool, &blocker), 0);
     usleep(10000);
 
-    /* Submit with NULL cancel_fn — should not crash on shutdown */
+    /* Submit with NULL cancel_fn: should not crash on shutdown */
     KlWorkItem item = {
         .work_fn = single_work_fn,
         .done_fn = noop_done_fn,
@@ -417,7 +417,7 @@ UTEST(thread_pool, null_cancel_fn) {
     cleanup_test_server(&s);
 }
 
-/* ── Test: stress — 1000 items ────────────────────────────────────── */
+/* ── Test: stress: 1000 items ────────────────────────────────────── */
 
 static atomic_int stress_done_count;
 
@@ -453,7 +453,7 @@ UTEST(thread_pool, stress_many_items) {
         if (kl_thread_pool_submit(pool, &item) == 0) {
             submitted++;
         } else {
-            /* Queue full — pump event loop to drain done items */
+            /* Queue full: pump event loop to drain done items */
             kl_event_ctx_run(&s.ev, 16, 10);
         }
     }

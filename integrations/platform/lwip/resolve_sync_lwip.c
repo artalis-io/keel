@@ -1,10 +1,10 @@
 /*
- * resolve_sync_lwip.c — blocking name resolution over lwIP's own resolver.
+ * resolve_sync_lwip.c: blocking name resolution over lwIP's own resolver.
  *
  * The lwIP counterpart of src/resolve_sync.c: it wraps lwip_getaddrinfo (not the
  * host getaddrinfo) and returns Keel-neutral KlSockAddr. Link this object AHEAD of
  * a stock libkeel.a so it satisfies kl_resolve_sync before the archive's host
- * version is pulled — that's how the Keel HTTP CLIENT resolves names/literals on a
+ * version is pulled; that's how the Keel HTTP CLIENT resolves names/literals on a
  * pure lwIP target (no host libc resolver). Numeric literals work without LWIP_DNS;
  * name resolution additionally needs LWIP_DNS=1 in lwipopts.h.
  *

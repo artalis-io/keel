@@ -1,4 +1,4 @@
-# KEEL — UEFI integration (U-1: platform + allocator shims)
+# KEEL: UEFI integration (U-1: platform + allocator shims)
 
 A **bring-your-own** integration (like `integrations/platform/lwip/`, `integrations/tls/mbedtls/`):
 nothing here is wired into the root `Makefile` or into `src/`/`include/`. It
@@ -9,7 +9,7 @@ This is **U-1**, the first stage of the real EFI provider (Phase 10, F-8). It
 began as the **U-0 spike** (a raw EFI_TCP4 GET under QEMU/OVMF); that spike has
 since been retired, and its minimal EFI ABI headers (`efi_min.h`, `efi_tcp4.h`,
 `efi_udp4.h`) were promoted into this backend directory as the provider's own
-protocol/ABI surface. U-1 is **platform + allocator only** — no socket/TCP yet
+protocol/ABI surface. U-1 is **platform + allocator only**; no socket/TCP yet
 (that's U-2/U-3).
 
 ## What the freestanding archive leaves for the platform
@@ -21,60 +21,60 @@ of symbols undefined (see `tests/freestanding_symbol_gate.sh`). U-1 supplies the
 
 | Undefined seam | U-1 supplies |
 |----------------|--------------|
-| `KlAllocator` (explicit, no global) | `kl_uefi_allocator(bs)` — `allocator_uefi.c` |
-| `uint64_t kl_monotonic_ms(void)` | periodic-timer tick counter — `platform_uefi.c` |
-| `void kl_plat_random(void*, size_t)` | `EFI_RNG_PROTOCOL`, fail-closed — `platform_uefi.c` |
+| `KlAllocator` (explicit, no global) | `kl_uefi_allocator(bs)`, `allocator_uefi.c` |
+| `uint64_t kl_monotonic_ms(void)` | periodic-timer tick counter, `platform_uefi.c` |
+| `void kl_plat_random(void*, size_t)` | `EFI_RNG_PROTOCOL`, fail-closed, `platform_uefi.c` |
 
 The remaining seams (socket provider, event/completion provider, DNS, the
 vendored-llhttp `abort`/`fprintf`/`stderr` residual, the PE `__chkstk`) are **not**
 U-1's job; the self-test defines fail-closed link stubs for them in
-`u1_link_stubs.c` purely so the image links (they never run — U-1 issues no
+`u1_link_stubs.c` purely so the image links (they never run; U-1 issues no
 request). U-2/U-3 replace the socket + event/completion seams with real EFI
 providers; DNS is now the async stock `src/protocols/dns/dns_resolver.c` running over the
 EFI_UDP4 socket provider (6.4c), not a sync seam.
 
 ## Files
 
-- `efi_min.h`, `efi_tcp4.h`, `efi_udp4.h` — the minimal vendored EFI ABI surface
+- `efi_min.h`, `efi_tcp4.h`, `efi_udp4.h`: the minimal vendored EFI ABI surface
   (promoted here from the retired U-0 spike): the system table, boot services,
   and the EFI_TCP4/EFI_UDP4 protocol decls the provider is built on.
-- `efi_uefi.h` — extends `efi_min.h` with the extra UEFI 2.10 decls U-1 needs:
+- `efi_uefi.h`: extends `efi_min.h` with the extra UEFI 2.10 decls U-1 needs:
   `EfiBootServicesData` (§7.2), the `EFI_EVENT_NOTIFY` timer-callback prototype
   (§7.1), and `EFI_RNG_PROTOCOL` (§37.5). Everything else (boot services incl.
   `AllocatePool`/`FreePool`/`CreateEvent`/`SetTimer`/`Stall`/`LocateProtocol`, the
   system table, console) is reused from `efi_min.h` verbatim.
-- `allocator_uefi.c` / `.h` — `KlAllocator` over `AllocatePool(EfiBootServicesData)`
+- `allocator_uefi.c` / `.h`: `KlAllocator` over `AllocatePool(EfiBootServicesData)`
   / `FreePool` / copy-`realloc` (uses the vtable's old_size to bound the copy).
-  A **factory** taking an explicit `EFI_BOOT_SERVICES*` (the design's rule — no
+  A **factory** taking an explicit `EFI_BOOT_SERVICES*` (the design's rule; no
   global heap in the pre-boot environment). `AllocatePool` failure → `NULL`.
-- `platform_uefi.c` / `.h` — `kl_monotonic_ms` + `kl_plat_random`, installed once
+- `platform_uefi.c` / `.h`: `kl_monotonic_ms` + `kl_plat_random`, installed once
   via `kl_uefi_platform_init(bs, st)`. See the clock/RNG notes below.
-- `u1_selftest.c` — the `efi_main` acceptance test.
-- `u1_link_stubs.c` — fail-closed stubs for the non-U-1 seams (link-only).
-- `build.sh` / `run.sh` / `startup.nsh` / `Makefile` — build + QEMU/OVMF harness.
+- `u1_selftest.c`: the `efi_main` acceptance test.
+- `u1_link_stubs.c`: fail-closed stubs for the non-U-1 seams (link-only).
+- `build.sh` / `run.sh` / `startup.nsh` / `Makefile`: build + QEMU/OVMF harness.
 
-## Monotonic clock — source & resolution
+## Monotonic clock: source & resolution
 
 `kl_monotonic_ms` is backed by a **periodic `EVT_TIMER` + `EVT_NOTIFY_SIGNAL`
 callback** (UEFI 2.10 §7.1): `kl_uefi_platform_init` does
 `CreateEvent(EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK, uefi_timer_tick, …)`
-then `SetTimer(TimerPeriodic, 100000)` — a **10 ms** period (`SetTimer`
+then `SetTimer(TimerPeriodic, 100000)`; a **10 ms** period (`SetTimer`
 `TriggerTime` is in 100 ns units; `100000 × 100 ns = 10 ms`). The notify function
 advances a `static volatile uint64_t` counter by the period-in-ms (10);
 `kl_monotonic_ms()` returns it.
 
-- **Monotonic by construction**: a free-running count that only increases —
+- **Monotonic by construction**: a free-running count that only increases,
   unlike `GetTime`/`EFI_TIME`, which is RTC **wall-clock** and can jump backward
   (Phase-10 finding 8). This is why we do **not** use `GetTime`.
 - **Resolution: 10 ms.** EDK2's timer architectural protocol coalesces very short
   periods up to its own tick granularity (~10 ms under OVMF): a 1 ms request only
   fires every ~10 ms, so counting each notify as 1 ms undercounts ~10x (observed
-  dt=5 for a 50 ms Stall in an early revision). Arming at 10 ms — at/above that
-  granularity — fires reliably once per period, and advancing by the period gives
+  dt=5 for a 50 ms Stall in an early revision). Arming at 10 ms; at/above that
+  granularity; fires reliably once per period, and advancing by the period gives
   an accurate elapsed-ms count (the 50 ms wait reads ~50 ms). 10 ms resolution is
   ample for KEEL's uses (timeout deadlines, Happy-Eyeballs delay).
 - **Why a callback, not `CheckEvent` polling**: a bare polled timer event carries
-  a single *signaled* bit, not a count — it cannot measure a gap across a blocking
+  a single *signaled* bit, not a count; it cannot measure a gap across a blocking
   `Stall`. The NOTIFY_SIGNAL callback is the only way to accumulate elapsed periods.
   The callback is trivial (one add) so it is safe on UEFI's bounded stack.
 
@@ -132,7 +132,7 @@ U-1: (parked; harness will terminate QEMU)
 
 `U-1: GO` is printed only if the allocator round-trip **and** the monotonic delta
 both pass. After GO the app **parks** (infinite `Stall` loop) so the markers stay
-the last serial output — the harness ends QEMU via its `BOOT_TIMEOUT`. (Returning
+the last serial output; the harness ends QEMU via its `BOOT_TIMEOUT`. (Returning
 to the boot manager instead let some OVMF builds execute an unsupported opcode on
 `reset`, muddying the capture.)
 

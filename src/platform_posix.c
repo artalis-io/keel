@@ -1,8 +1,8 @@
 /*
- * platform_posix.c — POSIX platform services (implements platform.h).
+ * platform_posix.c: POSIX platform services (implements platform.h).
  *
  * One-platform-per-TU (Makefile PLATFORM_SRC): the POSIX sibling of
- * platform_win.c. See docs/phase6_winsock_design.md §B.3.
+ * platform_win.c. See docs/archive/phases/phase6_winsock_design.md §B.3.
  */
 
 #include "platform.h"
@@ -44,7 +44,7 @@ void kl_plat_random(void *buf, size_t len) {
 #endif
 }
 
-/* kl_plat_wakeup_* moved to platform_wakeup_posix.c — an overridable seam so a
+/* kl_plat_wakeup_* live in platform_wakeup_posix.c: an overridable seam so a
  * foreign stack (lwIP) can swap the wakeup channel without touching this TU. */
 
 int kl_plat_cpu_count(void)

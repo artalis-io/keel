@@ -1,5 +1,5 @@
 /*
- * hello_server.c — Minimal KEEL HTTP server
+ * hello_server.c: Minimal KEEL HTTP server
  *
  * Concepts: KlHttpServer, KlHttpServerConfig, single route, JSON response.
  *

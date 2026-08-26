@@ -14,7 +14,7 @@ set -eu
 
 # Curated reference scan set (inherited from the retired check-no-interim-paths). Historical docs
 # and the gate's own sources are outside it.
-SCAN='src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture.md docs/architecture_invariants.md docs/capability_matrix.md'
+SCAN='src include tests examples bench fuzz integrations README.md CLAUDE.md AGENTS.md CONTRIBUTING.md docs/architecture/overview.md docs/architecture/invariants.md docs/operations/capability_matrix.md'
 
 fail=0
 

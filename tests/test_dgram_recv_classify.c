@@ -1,5 +1,5 @@
 /*
- * test_dgram_recv_classify.c — the platform-agnostic completed-recv classification the IOCP drain
+ * test_dgram_recv_classify.c: the platform-agnostic completed-recv classification the IOCP drain
  * relies on (src/dgram_recv_classify.h). Proves the Windows success classification WITHOUT a Windows
  * host: a zero-length datagram is a real receive (not a failure), truncation (flag OR EMSGSIZE) is a
  * captured-prefix success (not fatal), and cancellation/failure yields no datagram + no metadata.

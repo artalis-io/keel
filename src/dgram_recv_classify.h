@@ -2,7 +2,7 @@
 #define KEEL_SRC_DGRAM_RECV_CLASSIFY_H
 
 /*
- * dgram_recv_classify.h — INTERNAL, platform-agnostic classification of a COMPLETED overlapped
+ * dgram_recv_classify.h - INTERNAL, platform-agnostic classification of a COMPLETED overlapped
  * datagram receive into the neutral (ok / bytes / truncated / metadata) result the datagram machine
  * expects. Factored out of the IOCP completion path so the classification contract can be unit-tested
  * on ANY host (the live Winsock path only runs on Windows CI).
@@ -10,17 +10,17 @@
  * The caller supplies the platform's completion result: whether the op SUCCEEDED, its error code and
  * that platform's "message too long" sentinel (WSAEMSGSIZE / EMSGSIZE), the bytes transferred, the
  * message flags + that platform's truncation bit (MSG_TRUNC), and the receive buffer size. This
- * encodes the frozen datagram receive contract's provider side (docs/datagram_contract.md §4/§8):
+ * encodes the frozen datagram receive contract's provider side (docs/contracts/datagram.md §4/§8):
  *
  *  - Success, INCLUDING a zero-length datagram (xfer == 0): ok, bytes = xfer, source + control
  *    metadata parsed regardless of byte count, truncated iff the truncation flag is set (so an
  *    exact-capacity or zero-captured-prefix truncation is still surfaced).
- *  - "Message too long" (WSARecvFrom reports failure with WSAEMSGSIZE): a captured-prefix success —
+ *  - "Message too long" (WSARecvFrom reports failure with WSAEMSGSIZE): a captured-prefix success:
  *    ok, bytes = the full buffer, truncated; source parsed but the control message is indeterminate,
  *    so the local (pktinfo) address is NOT parsed.
  *  - Any other failure (cancellation / genuine error): NOT ok; no datagram, no metadata parsed.
  *
- * INTERNAL header — not installed, no ABI commitment. No platform headers here (only <stddef.h>).
+ * INTERNAL header: not installed, no ABI commitment. No platform headers here (only <stddef.h>).
  */
 
 #include <stddef.h>
@@ -41,7 +41,7 @@ static inline KlDgramRecvClass kl_dgram_recv_classify(int wsa_ok, int wsa_err, i
     KlDgramRecvClass c = { 0, 0, 0, 0, 0 };
     if (wsa_ok) {
         c.ok = 1;
-        c.bytes = xfer;                                  /* may be 0 — a real zero-length datagram */
+        c.bytes = xfer;                                  /* may be 0: a real zero-length datagram */
         c.truncated = (msg_flags & trunc_flag) ? 1 : 0;
         c.parse_source = 1;
         c.parse_local = 1;
@@ -52,7 +52,7 @@ static inline KlDgramRecvClass kl_dgram_recv_classify(int wsa_ok, int wsa_err, i
         c.parse_source = 1;
         c.parse_local = 0;                               /* control indeterminate on EMSGSIZE */
     }
-    /* else: cancelled/failed — leave everything zero (ok = 0, no metadata). */
+    /* else: cancelled/failed; leave everything zero (ok = 0, no metadata). */
     return c;
 }
 

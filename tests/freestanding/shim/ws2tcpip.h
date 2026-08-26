@@ -1,4 +1,4 @@
-/* freestanding shim <ws2tcpip.h> — see ../README.md. */
+/* freestanding shim <ws2tcpip.h>: see ../README.md. */
 #ifndef KEEL_FS_SHIM_WS2TCPIP_H
 #define KEEL_FS_SHIM_WS2TCPIP_H
 typedef int socklen_t;

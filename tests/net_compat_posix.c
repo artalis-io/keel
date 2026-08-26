@@ -1,5 +1,5 @@
 /*
- * net_compat_posix.c — POSIX implementation of the test network helpers.
+ * net_compat_posix.c: POSIX implementation of the test network helpers.
  *
  * Sibling of net_compat_win.c, selected by the Makefile (never both). Thin
  * wrappers over the POSIX socket calls, so ported tests behave identically to

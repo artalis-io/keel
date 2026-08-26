@@ -1,10 +1,10 @@
 /*
- * smoke_pollcomp_tls.c — TLS-over-completion roundtrip on POSIX (mock-TLS backend).
+ * smoke_pollcomp_tls.c: TLS-over-completion roundtrip on POSIX (mock-TLS backend).
  *
  * The first RUNTIME validation of the TLS-over-completion driver off Windows/mbedTLS:
  * a KlHttpServer on the pollcomp completion loop with an identity mock TLS (mock_tls.h),
  * hit by the sync KlHttpClient using the same mock TLS over loopback. Because the mock is a
- * passthrough, no crypto/mbedTLS is needed — yet the driver's TLS paths run for real:
+ * passthrough, no crypto/mbedTLS is needed; yet the driver's TLS paths run for real:
  * comp_tls_drive (handshake → feed → decrypt), comp_tls_send_response (buffered),
  * comp_tls_send_file_chunk (file), comp_tls_send_stream (chunked). Retires the
  * "compile-gated only" caveat on TLS-over-completion, and runs under the ASan CI.

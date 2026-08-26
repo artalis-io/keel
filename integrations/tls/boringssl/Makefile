@@ -1,4 +1,4 @@
-# integrations/tls/boringssl — build the SHARED OpenSSL/BoringSSL KlTls adapter
+# integrations/tls/boringssl: build the SHARED OpenSSL/BoringSSL KlTls adapter
 # against a BoringSSL prefix.
 #
 # There is no BoringSSL-specific source: this compiles ../openssl/tls_openssl.c
@@ -11,7 +11,7 @@
 # prefix that has:
 #   $(BORINGSSL_DIR)/include/openssl/*.h
 #   $(BORINGSSL_DIR)/lib/libssl.a   $(BORINGSSL_DIR)/lib/libcrypto.a
-# (or the in-tree build layout — override BORINGSSL_LIBDIR accordingly).
+# (or the in-tree build layout; override BORINGSSL_LIBDIR accordingly).
 #
 # Usage:
 #   make BORINGSSL_DIR=/path/to/boringssl/install          # build libkeel_boringssl.a
@@ -24,7 +24,7 @@ CC            ?= cc
 ADAPTER_SRC   := ../openssl/tls_openssl.c
 
 ifndef BORINGSSL_DIR
-$(error set BORINGSSL_DIR to a BoringSSL prefix (include/ + lib/) — see README.md)
+$(error set BORINGSSL_DIR to a BoringSSL prefix (include/ + lib/); see README.md)
 endif
 
 BORINGSSL_INC    := -I$(BORINGSSL_DIR)/include
@@ -60,7 +60,7 @@ test: $(LIB)
 	./tests/link_smoke
 	@echo "integrations/tls/boringssl: link smoke OK"
 
-# Full both-axes end-to-end handshake + hardening suite (reuses the OpenSSL e2e —
+# Full both-axes end-to-end handshake + hardening suite (reuses the OpenSSL e2e,
 # pure OpenSSL API). BoringSSL is C++, so add BORINGSSL_EXTRA_LIBS (-lstdc++).
 E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
               -fsanitize=address,undefined -fno-sanitize-recover=all \

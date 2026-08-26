@@ -1,5 +1,5 @@
 /*
- * rest_api_server.c — REST API with route parameters and body reading
+ * rest_api_server.c: REST API with route parameters and body reading
  *
  * Concepts: Route params (:id), query strings, POST body, KlHttpBufReader.
  *

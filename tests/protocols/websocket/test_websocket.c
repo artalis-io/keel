@@ -256,7 +256,7 @@ UTEST(frame, large_length_127) {
     size_t consumed = 0;
     int rc = kl_ws_frame_parse(&fp, buf, 10, &consumed);
 
-    /* Header parsed but payload not yet consumed — need more data */
+    /* Header parsed but payload not yet consumed; need more data */
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(fp.payload_len, (size_t)70000);
     ASSERT_EQ(fp.state, KL_WS_FRAME_PAYLOAD);
@@ -343,7 +343,7 @@ UTEST(frame, split_header) {
 }
 
 UTEST(frame, rsv_bits_rejection) {
-    /* Frame with RSV1 set — must be rejected */
+    /* Frame with RSV1 set; must be rejected */
     uint8_t buf[4];
     buf[0] = 0xC1;  /* FIN=1, RSV1=1, opcode=text */
     buf[1] = 0x00;  /* no mask, 0 payload */
@@ -357,7 +357,7 @@ UTEST(frame, rsv_bits_rejection) {
 }
 
 UTEST(frame, fragmented_control_rejection) {
-    /* Control frame (ping) with FIN=0 — must be rejected */
+    /* Control frame (ping) with FIN=0; must be rejected */
     uint8_t buf[4];
     buf[0] = 0x09;  /* FIN=0, opcode=ping */
     buf[1] = 0x00;
@@ -371,7 +371,7 @@ UTEST(frame, fragmented_control_rejection) {
 }
 
 UTEST(frame, oversized_control_rejection) {
-    /* Control frame with 126-byte payload — exceeds 125 max */
+    /* Control frame with 126-byte payload; exceeds 125 max */
     uint8_t buf[4];
     buf[0] = 0x89;  /* FIN=1, opcode=ping */
     buf[1] = 126;   /* 16-bit length encoding → > 125 */
@@ -707,7 +707,7 @@ UTEST(close, frame_with_code_and_reason) {
 }
 
 UTEST(close, empty_close_frame) {
-    /* Close frame with no payload — valid per RFC */
+    /* Close frame with no payload; valid per RFC */
     uint8_t buf[4];
     buf[0] = 0x88;  /* FIN=1, opcode=close */
     buf[1] = 0x00;

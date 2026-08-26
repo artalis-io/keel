@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — build the U-1 UEFI self-test into BOOTX64.EFI.
+# build.sh: build the U-1 UEFI self-test into BOOTX64.EFI.
 #
 # Links libkeel_freestanding_selfcontained.a (mem*/strlen in-archive, built by
 # `make freestanding-lib-selfcontained` in the repo root) with the two U-1 shim

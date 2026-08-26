@@ -1,11 +1,11 @@
 /*
- * custom_socket_provider.c — bring-your-own socket stack (PAL Phase 4).
+ * custom_socket_provider.c: bring-your-own socket stack.
  *
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
  * and selecting a provider via KlHttpServerConfig.sockets (server) + KlHttpClientConfig.sockets
  * (client). This provider is a *decorator*: it wraps the built-in provider
  * (kl_socket_provider_posix) and counts sockets + bytes, forwarding each op it
- * intercepts to the wrapped provider. Ops it does not implement are left NULL —
+ * intercepts to the wrapped provider. Ops it does not implement are left NULL;
  * Keel falls back to its built-in default for those. Uses only installed public
  * headers (no internal/POSIX types: KlIoVec, kl_ssize_t, KlSocketHandle).
  *
@@ -73,7 +73,7 @@ int main(void) {
     printf("custom_socket_provider example\n\n");
 
     /* Server through a counting decorator over the built-in provider. It must
-     * advertise KL_SOCK_CAP_NATIVE_FD — the readiness event loop polls real fds. */
+     * advertise KL_SOCK_CAP_NATIVE_FD; the readiness event loop polls real fds. */
     CountingCtx srv = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
     KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD, NULL };
 

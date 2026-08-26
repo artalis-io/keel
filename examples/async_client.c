@@ -1,5 +1,5 @@
 /*
- * async_client.c — Multiple concurrent async HTTP requests
+ * async_client.c: Multiple concurrent async HTTP requests
  *
  * Concepts: kl_http_client_start (async), KlEventCtx standalone event loop,
  * watcher-based completion, parallel request fan-out, error handling.

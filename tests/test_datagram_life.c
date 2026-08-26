@@ -1,5 +1,5 @@
 /*
- * test_datagram_life.c — the transport-neutral stable-liveness token (src/datagram_life.h).
+ * test_datagram_life.c: the transport-neutral stable-liveness token (src/datagram_life.h).
  *
  * The token underlies safe teardown of datagram completion ops: each posted op holds a ref; the
  * owner (the datagram core) holds one; on_final (freeing the receive storage) runs EXACTLY ONCE, on the final
@@ -47,7 +47,7 @@ UTEST(dgram_life, op_outlives_owner) {
     KlDgramLife *l = kl_dgram_life_create(&a, (void *)0x1, on_final, NULL, (KlDgramDispatchFn)0);
     kl_dgram_life_retain(l);                               /* a posted op takes a ref (refs=2) */
 
-    /* owner drop: mark dead + drop owner ref — storage NOT freed (op still holds a ref) */
+    /* owner drop: mark dead + drop owner ref; storage NOT freed (op still holds a ref) */
     kl_dgram_life_mark_dead(l);
     kl_dgram_life_release(l);
     ASSERT_EQ(g_final, 0);

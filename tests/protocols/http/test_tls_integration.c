@@ -2,7 +2,7 @@
 #include <keel/keel.h>
 #include <keel/tls.h>
 #include "net_compat.h"
-#include "mock_tls.h"   /* shared identity TLS mock — completion-capable (feed_input/drain_output) */
+#include "mock_tls.h"   /* shared identity TLS mock: completion-capable (feed_input/drain_output) */
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
@@ -102,7 +102,7 @@ UTEST(tls_integration, hello_request) {
     ASSERT_TRUE(srv.bound_port > 0);
     int port = srv.bound_port;
 
-    /* Connect and send plain HTTP — passthrough TLS is transparent */
+    /* Connect and send plain HTTP: passthrough TLS is transparent */
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 

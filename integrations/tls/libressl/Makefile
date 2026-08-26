@@ -1,4 +1,4 @@
-# integrations/tls/libressl — build the SHARED OpenSSL/BoringSSL/LibreSSL KlTls adapter
+# integrations/tls/libressl: build the SHARED OpenSSL/BoringSSL/LibreSSL KlTls adapter
 # against a LibreSSL prefix.
 #
 # There is no LibreSSL-specific source: this compiles ../openssl/tls_openssl.c
@@ -8,7 +8,7 @@
 #
 # Bring your own LibreSSL (Homebrew: `brew install libressl`, prefix
 # $(brew --prefix libressl)). It is keg-only, so it is NOT on the default search
-# path — pass LIBRESSL_DIR. Layout expected:
+# path; pass LIBRESSL_DIR. Layout expected:
 #   $(LIBRESSL_DIR)/include/openssl/*.h
 #   $(LIBRESSL_DIR)/lib/libssl.a   $(LIBRESSL_DIR)/lib/libcrypto.a
 #
@@ -24,7 +24,7 @@ CC          ?= cc
 ADAPTER_SRC := ../openssl/tls_openssl.c
 
 ifndef LIBRESSL_DIR
-$(error set LIBRESSL_DIR to a LibreSSL prefix (include/ + lib/) — e.g. $$(brew --prefix libressl))
+$(error set LIBRESSL_DIR to a LibreSSL prefix (include/ + lib/), e.g. $$(brew --prefix libressl))
 endif
 
 LIBRESSL_INC    := -I$(LIBRESSL_DIR)/include
@@ -56,7 +56,7 @@ test: $(LIB)
 	./tests/link_smoke
 	@echo "integrations/tls/libressl: link smoke OK"
 
-# Full both-axes end-to-end handshake (reuses the OpenSSL e2e — pure OpenSSL API).
+# Full both-axes end-to-end handshake (reuses the OpenSSL e2e, pure OpenSSL API).
 E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
               -fsanitize=address,undefined -fno-sanitize-recover=all \
               -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I../openssl $(LIBRESSL_INC)

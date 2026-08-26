@@ -1,33 +1,34 @@
 /*
- * raw_tls_test.c — LC-4: HTTPS (TLS) over the lwIP-raw completion backend, in-process over the
+ * raw_tls_test.c: HTTPS (TLS) over the lwIP-raw completion backend, in-process over the
  * loopback netif (NO_SYS=1, single-thread).
  *
- * The proof for LC-4 (docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4): the SAME single-loop
- * model as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw
- * async KlHttpClient on the loop thread), now with TLS on BOTH ends — a genuine mbedTLS handshake +
- * request round-trips over 127.0.0.1 on the loopif with zero lwIP-specific TLS code.
+ * The proof for the TLS-over-raw path (docs/archive/phases/phase10_lwip_raw_client_design.md §6 + §8):
+ * the SAME single-loop model as the plaintext raw-client test (ONE KlEventCtx == the one lwIP mainloop,
+ * driving BOTH a raw KlHttpServer and a raw async KlHttpClient on the loop thread), now with TLS on
+ * BOTH ends: a genuine mbedTLS handshake + request round-trips over 127.0.0.1 on the loopif with zero
+ * lwIP-specific TLS code.
  *
  * TLS over raw rides two EXISTING, generic legs (no new TLS code in the lwIP backend):
  *
  *   1. Client side = the mbedTLS socket-BIO through the CONFIGURED socket provider. tls_mbedtls.c's
- *      bio_send/bio_recv call kl_sock_send/kl_sock_recv(t->sp, t->fd, ...) — the provider wired via
+ *      bio_send/bio_recv call kl_sock_send/kl_sock_recv(t->sp, t->fd, ...): the provider wired via
  *      set_socket_provider, which src/http_client_async.c sets to ev_ctx->sockets. On raw that is
  *      kl_socket_provider_lwip_raw(), so bio_send/recv -> lwr_sock_send/recv -> tcp_write/read over
  *      the pcb. The WANT_READ/WANT_WRITE handshake churn rides the raw backend's emulated readiness
  *      watcher (writable = sndbuf headroom; readable = retained rx / peer close).
  *
- *   2. Server side = the generic memory-BIO completion-TLS leg. src/completion_driver.c's
+ *   2. Server side = the generic memory-BIO completion-TLS leg. src/protocols/http/completion_http_server.c's
  *      comp_tls_drive + comp_tls_drain_output drive the abstract KlTls feed_input/drain_output
  *      vtable with zero mbedTLS knowledge: the raw backend delivers ciphertext via KL_COMP_READ, the
  *      driver feed_input's it, tls->read returns plaintext, drain_output ciphertext is posted via
- *      the send path. The raw KlHttpServer already uses completion_driver.c, so server TLS "just moves
+ *      the send path. The raw KlHttpServer already uses the completion driver, so server TLS "just moves
  *      bytes".
  *
  * Case: a raw HTTPS KlHttpClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
  * 200 + body BYTE-EXACT. Embedded self-signed EC cert (CN=127.0.0.1); the client skips CA
  * verification. Same test-only cert material as integrations/tls/mbedtls/tests/smoke_tls.c / lwip_loopback_test.c.
  *
- * Buffered HTTP/1.1 over TLS only (the 8b-5 subset, §6 caveat): small buffered body, no
+ * Buffered HTTP/1.1 over TLS only (§6 caveat): small buffered body, no
  * file/stream body, no ALPN-h2.
  *
  * Must be ASan+UBSan+LSan-clean.
@@ -51,9 +52,9 @@
 #include <string.h>
 #include <time.h>
 
-/* ── numeric-only KlResolver (no DNS, no UDP — same as LC-1) ────────────────────
+/* ── numeric-only KlResolver (no DNS, no UDP: same as the plaintext raw-client test) ─
  * Parses a numeric IPv4/IPv6 literal via kl_sockaddr_parse and completes SYNCHRONOUSLY inside
- * resolve() — the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP: the
+ * resolve(): the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP: the
  * built-in kl_dns_resolver is unusable on raw (it eagerly kl_datagram_socket_init's, which lwip-raw rejects). */
 typedef struct { KlResolver base; KlResolveReq req; } NumResolver;
 
@@ -64,7 +65,7 @@ static KlResolveReq *num_resolve(KlResolver *self, KlEventCtx *ctx, const char *
     KlResolveResult res;
     memset(&res, 0, sizeof(res));
     if (kl_sockaddr_parse(&res.addrs[0], host, (uint16_t)port) != 0) {
-        done_fn(&nr->req, NULL, -1, ud);   /* not a numeric literal — synchronous failure */
+        done_fn(&nr->req, NULL, -1, ud);   /* not a numeric literal: synchronous failure */
         return &nr->req;
     }
     res.naddrs = 1;
@@ -78,7 +79,7 @@ static NumResolver g_numres = {
     { num_resolve, num_cancel, num_destroy }, { NULL }
 };
 
-/* ── test-only self-signed EC cert (CN=127.0.0.1) — same material as integrations/tls/mbedtls/tests/smoke_tls.c ── */
+/* ── test-only self-signed EC cert (CN=127.0.0.1): same material as integrations/tls/mbedtls/tests/smoke_tls.c ── */
 static const char CERT_PEM[] =
 "-----BEGIN CERTIFICATE-----\n"
 "MIIBmjCCAUGgAwIBAgIUOugIDeF4cZCY5f4MN+sk1xFwncIwCgYIKoZIzj0EAwIw\n"
@@ -112,7 +113,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 typedef struct {
     KlHttpServer   *srv;
     const char *url;
-    KlTlsCtx   *client_ctx;   /* client TLS ctx — created on the loop thread, freed after done */
+    KlTlsCtx   *client_ctx;   /* client TLS ctx: created on the loop thread, freed after done */
     KlHttpClient   *client;
     atomic_int  done;
     atomic_int  pass;
@@ -138,7 +139,7 @@ static void on_done(KlHttpClient *client, void *ud) {
 
 /* Fired on the loop thread: start the async HTTPS KlHttpClient on the server's shared ctx (== the one
  * lwIP mainloop). The mbedTLS socket-BIO is auto-wired to the loop's socket provider
- * (kl_socket_provider_lwip_raw) via the KlTls.set_socket_provider hook — no explicit call. */
+ * (kl_socket_provider_lwip_raw) via the KlTls.set_socket_provider hook: no explicit call. */
 static void start_client(void *ud) {
     ClientCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */

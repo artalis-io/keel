@@ -1,5 +1,5 @@
 /*
- * link_smoke.c — minimal link/relocation check for the OpenSSL integration.
+ * link_smoke.c: minimal link/relocation check for the OpenSSL integration.
  *
  * Does NOT perform a handshake (that is covered by tests/tls_e2e.c). This only
  * proves the adapter archive resolves against core libkeel.a + OpenSSL: it takes

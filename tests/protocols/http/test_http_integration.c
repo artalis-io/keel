@@ -48,7 +48,7 @@ static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
  * received by the time the handler fires (in the non-streaming route),
  * so kl_http_multipart_next never returns NEED_DATA here.
  *
- * All allocations go through the keel allocator — no fixed-size static
+ * All allocations go through the keel allocator, no fixed-size static
  * buffers, no magic-constant part caps. The response body is sent via
  * kl_http_response_body_copy so Keel owns the bytes after this function
  * returns; the handler's scratch allocations are freed before return. */
@@ -118,7 +118,7 @@ static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
             p->name = handle_upload_dup(&alloc, meta.name, meta.name_len);
             if (!p->name) {
                 /* L1 fix: don't promote a partially-initialised part
-                 * (with NULL name) into the active count — later
+                 * (with NULL name) into the active count; later
                  * snprintf would deref it. Bail cleanly. */
                 handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
                 kl_http_response_error(res, 500, "OOM");
@@ -224,7 +224,7 @@ static void handle_no_reader(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 /* ── Mid-stream early-exit on ERROR-return fixture ──────────────────
  *
  * Sibling of the streaming_mid_stream_early_exit test for the case
- * where the body reader REJECTS the body (returns -1 from on_data —
+ * where the body reader REJECTS the body (returns -1 from on_data;
  * e.g. cap-exceeded). The handler stashes conn+res at dispatch time;
  * on_data writes the response, sets state = SENDING, then returns
  * -1 to simulate the reader rejecting the body bytes. The new branch
@@ -248,14 +248,14 @@ static int  eer_err_on_data(KlHttpBodyReader *self, const char *data, size_t len
      * responded: succeed silently so the handler gets a chance to
      * run. Mirrors eer_on_data's null-conn handling. */
     if (r->responded || !r->conn || !r->res) return 0;
-    /* Handler is alive — now pretend we just hit a cap. Write a
+    /* Handler is alive. now pretend we just hit a cap. Write a
      * structured "handler" response BEFORE returning -1. The new
      * error-path branch in http_connection.c sees state == SENDING and
      * returns it without overwriting. */
     kl_http_response_status(r->res, 413);
     kl_http_response_header(r->res, "Content-Type", "text/plain");
-    /* 31 bytes — em-dash is 3 bytes UTF-8 */
-    kl_http_response_body_borrow(r->res, "cap exceeded — handler caught", 31);
+    /* 28 bytes */
+    kl_http_response_body_borrow(r->res, "cap exceeded: handler caught", 28);
     r->conn->state = KL_HTTP_CONN_SENDING;
     r->responded = 1;
     return -1;   /* simulate body-reader rejection */
@@ -325,7 +325,7 @@ static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
  * keep-alive off; otherwise stale body bytes bleed into the next
  * request on a re-used connection.
  *
- * Body reader is a no-op — on_data succeeds silently so the dispatch
+ * Body reader is a no-op: on_data succeeds silently so the dispatch
  * code path is the one under test, not the body reader. */
 typedef struct {
     KlHttpBodyReader  base;
@@ -356,7 +356,7 @@ static KlHttpBodyReader *noop_factory(KlAllocator *alloc, const KlHttpRequest *r
     return &r->base;
 }
 
-/* Handler responds with 401 and returns — never touches body. */
+/* Handler responds with 401 and returns; never touches body. */
 static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
                                         void *ctx) {
     (void)req; (void)ctx;
@@ -437,7 +437,7 @@ static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx
     r->conn = kl_http_request_conn(req);
     r->res  = res;
     r->conn->state = KL_HTTP_CONN_READING_BODY;
-    /* Signal the test thread that we've run — it polls this before
+    /* Signal the test thread that we've run; it polls this before
      * sending the second body chunk so the test isn't timing-fragile. */
     eer_handler_called = 1;
 }
@@ -502,7 +502,7 @@ static void start_server(void) {
      * handler after body-reader setup BEFORE on_complete. The handler
      * itself doesn't yield (kl_http_multipart_next never returns NEED_DATA
      * because the body arrives in one chunk in this test), so the
-     * observable behaviour is the same response shape — the dispatch
+     * observable behaviour is the same response shape, the dispatch
      * path is exercised. */
     kl_http_server_route_streaming(&test_server, "POST", "/upload-stream",
                                handle_upload, NULL, kl_http_body_reader_multipart);
@@ -512,13 +512,13 @@ static void start_server(void) {
     /* Mid-stream early-exit on body-reader-ERROR-return route (v2.1.2). */
     kl_http_server_route_streaming(&test_server, "POST", "/early-exit-err",
                                handle_early_exit_err, NULL, eer_err_factory);
-    /* Streaming-async early-invoke route (v2.2.0) — handler runs BEFORE
+    /* Streaming-async early-invoke route (v2.2.0); handler runs BEFORE
      * leftover is fed via on_data, closing the single-read leftover-
      * cap gap. */
     kl_http_server_route_streaming_async(&test_server, "POST", "/early-exit-async-err",
                                       handle_early_exit_async_err, NULL,
                                       eer_err_factory);
-    /* Streaming-async synchronous-completion route (v2.2.0) — handler
+    /* Streaming-async synchronous-completion route (v2.2.0); handler
      * responds with 401 without parking on the body reader. Tests the
      * keep-alive force-off contract on the synchronous return path. */
     kl_http_server_route_streaming_async(&test_server, "POST", "/async-sync-reject",
@@ -646,7 +646,7 @@ UTEST(integration, keepalive_post) {
                        "first";
     (void)kl_test_sockwrite(fd, req1, strlen(req1));
 
-    /* Read first response — need to parse Content-Length to know when done */
+    /* Read first response: need to parse Content-Length to know when done */
     char buf[8192];
     ssize_t total = 0;
     ssize_t n;
@@ -920,7 +920,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
      * Body is sent in TWO writes with a small sleep between so the
      * server processes them in two separate reads. The dispatcher
      * runs the handler after the leftover from write 1 has been
-     * fed via on_data (NULL conn — no-op). Write 2 arrives later,
+     * fed via on_data (NULL conn, no-op). Write 2 arrives later,
      * fires on_data with conn+res now set, triggers the response
      * mid-stream, and the early-exit branch returns SENDING. */
     start_server();
@@ -932,7 +932,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
 
     /* Sizes scoped to the test, expressed at the call site. The
      * announced Content-Length is larger than the two chunks sum so
-     * the body genuinely never completes — proves the early-exit
+     * the body genuinely never completes; proves the early-exit
      * branch doesn't rely on end-of-body. */
     size_t chunk1_len       = 64;
     size_t chunk2_len       = 64;
@@ -966,7 +966,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
     (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
     (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
 
-    /* Wait for the handler to have run before sending chunk2 — same
+    /* Wait for the handler to have run before sending chunk2; same
      * polling pattern as wait_for_bind() above. Avoids fixed-sleep
      * flakiness on loaded CI. ~2-second cap covers slow runners; the
      * normal-case wait is much shorter (a few ms). */
@@ -996,9 +996,9 @@ UTEST(integration, streaming_mid_stream_early_exit) {
 }
 
 UTEST(integration, streaming_mid_stream_early_exit_on_error) {
-    /* v2.1.2 — sibling of streaming_mid_stream_early_exit for the
+    /* v2.1.2: sibling of streaming_mid_stream_early_exit for the
      * body-reader-returns-(-1) path. The fixture's on_data writes a
-     * structured handler response (413 + "cap exceeded — handler
+     * structured handler response (413 + "cap exceeded: handler
      * caught"), sets state = SENDING, and returns -1 to simulate a
      * cap-exceeded rejection. The new early-exit branch in
      * kl_http_conn_on_readable's rc<0 / pr==KL_HTTP1_PARSE_ERROR clauses must
@@ -1036,7 +1036,7 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     memset(chunk1, 'A', chunk1_len);
     memset(chunk2, 'B', chunk2_len);
 
-    /* Same two-write sync pattern as the success-path test — handler
+    /* Same two-write sync pattern as the success-path test; handler
      * runs after chunk1's leftover, stashes conn+res, yields. */
     (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
     (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
@@ -1055,16 +1055,16 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     read_response(fd, buf, resp_cap);
     kl_test_closesock(fd);
 
-    /* The handler's structured response landed — NOT the hardcoded
+    /* The handler's structured response landed; NOT the hardcoded
      * kl_413_response. Both share the "413 Payload Too Large" status
      * line (it's the standard reason phrase), so the discriminator is
      * the body: the hardcoded response has Content-Length: 0; ours
-     * carries the "cap exceeded — handler caught" payload + custom
+     * carries the "cap exceeded: handler caught" payload + custom
      * Content-Type: text/plain. */
     ASSERT_TRUE(strstr(buf, "413") != NULL);
     ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
     ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);
-    ASSERT_TRUE(strstr(buf, "Content-Length: 31") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 28") != NULL);
 
     kl_free(&alloc, hdr,    hdr_cap);
     kl_free(&alloc, chunk1, chunk1_len);
@@ -1075,11 +1075,11 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
 }
 
 UTEST(integration, streaming_async_single_read_leftover_cap) {
-    /* v2.2.0 — closes the single-read leftover-rejection gap that
+    /* v2.2.0, closes the single-read leftover-rejection gap that
      * v2.1.2's fix left behind. With the legacy
      * kl_http_server_route_streaming, a body that arrives in the SAME
      * kernel read as the header gets processed as "leftover" inside
-     * conn_dispatch_request BEFORE the handler runs — so on_data fires
+     * conn_dispatch_request BEFORE the handler runs; so on_data fires
      * with the body reader's conn+res still unstashed, the safety
      * guard kicks in (returns 0), and the cap goes silently undetected.
      *
@@ -1114,13 +1114,13 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
     ASSERT_TRUE(hdr_len > 0);
     ASSERT_TRUE((size_t)hdr_len + body_len < total_cap);
 
-    /* Body bytes immediately after the header — this is the critical
+    /* Body bytes immediately after the header; this is the critical
      * single-write/single-read shape. Without v2.2.0's reorder, these
      * bytes get fed to on_data BEFORE the handler runs and the cap
      * goes undetected. */
     memset(packet + hdr_len, 'A', body_len);
 
-    /* Single write — packetised together by TCP, single read on the
+    /* Single write; packetised together by TCP, single read on the
      * server side (in the common case; the asserts below tolerate the
      * rare split). */
     (void)kl_test_sockwrite(fd, packet, (size_t)hdr_len + body_len);
@@ -1137,7 +1137,7 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
     ASSERT_TRUE(strstr(buf, "413") != NULL);
     ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
     ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);
-    ASSERT_TRUE(strstr(buf, "Content-Length: 31") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 28") != NULL);
 
     kl_free(&alloc, packet, total_cap);
     kl_free(&alloc, buf,    resp_cap);
@@ -1146,11 +1146,11 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
 }
 
 UTEST(integration, streaming_async_sync_completion_forces_close) {
-    /* v2.2.0 H1 contract — a streaming-async handler that responds
+    /* v2.2.0 H1 contract, a streaming-async handler that responds
      * WITHOUT parking on the body reader (e.g. auth rejection that
      * happens before reading body) must force keep-alive off. The
-     * leftover bytes — and any remaining body bytes still queued in
-     * the kernel buffer — are stranded by the early return, so
+     * leftover bytes (and any remaining body bytes still queued in
+     * the kernel buffer) are stranded by the early return, so
      * keeping the connection alive would let those stale bytes bleed
      * into a subsequent request's headers on this same connection.
      *
@@ -1158,7 +1158,7 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
      * larger than what's actually written, so leftover IS present
      * after the handler responds. The handler emits 401 with its own
      * "Connection: keep-alive" preference (we even send "Connection:
-     * keep-alive" in the request to bias toward keeping it open) —
+     * keep-alive" in the request to bias toward keeping it open);
      * the dispatch layer must override that with Connection: close. */
     start_server();
 
@@ -1167,7 +1167,7 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
 
     /* Short recv timeout: without the H1 fix the connection stays
      * open after the response (keep-alive on, dispatcher returned
-     * SENDING and skipped leftover) — read_response would otherwise
+     * SENDING and skipped leftover), read_response would otherwise
      * block until the whole-suite timeout. With the fix, the conn
      * closes and read returns 0 immediately. */
     kl_test_set_rcvtimeo(fd, 1000);   /* portable SO_RCVTIMEO (ms) */
@@ -1189,7 +1189,7 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
     ASSERT_TRUE(strstr(buf, "401") != NULL);
     ASSERT_TRUE(strstr(buf, "unauthorized") != NULL);
     /* Crucial: keep-alive was forced off because the body wasn't
-     * drained — stranded leftover bytes would otherwise bleed into
+     * drained; stranded leftover bytes would otherwise bleed into
      * a subsequent request on this conn. Keel only emits `Connection:
      * keep-alive` when keep_alive=1, so the absence of that header
      * is the signal that the H1 fix fired. Without the fix the line
@@ -1203,7 +1203,7 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
 }
 
 UTEST(integration, streaming_route_no_body_runs_handler) {
-    /* L3 regression: CL:0 + streaming route — handler must still be
+    /* L3 regression: CL:0 + streaming route, handler must still be
      * invoked. Its body_reader is NULL (no factory call since
      * has_body=0), so handle_upload responds 400 "No reader". The
      * test verifies the handler RAN (we got 400, not 500 or hang). */
@@ -1243,7 +1243,7 @@ UTEST(integration, multipart_upload_streaming_route) {
      * yielding requires a coroutine, which lives in Hull, not Keel).
      * To exercise the happy path here, send headers + body in one
      * write so the entire body sits in the leftover buffer by the
-     * time the dispatcher invokes the handler — kl_http_multipart_next
+     * time the dispatcher invokes the handler; kl_http_multipart_next
      * never has to return NEED_DATA. Hull's bindings will provide
      * the yield path. */
     start_server();
@@ -1276,7 +1276,7 @@ UTEST(integration, multipart_upload_streaming_route) {
 
     /* Combined single write: headers + body in one packet so the body
      * is in the leftover buffer when the streaming dispatcher fires.
-     * Allocate exactly what's needed — no magic-sized fixed buffer. */
+     * Allocate exactly what's needed, no magic-sized fixed buffer. */
     KlAllocator alloc = kl_allocator_default();
     size_t combined_len = (size_t)hdr_len + body_len;
     char *combined = kl_malloc(&alloc, combined_len);
@@ -1560,7 +1560,7 @@ UTEST(integration, signal_stop) {
     kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    /* Send SIGTERM to ourselves — handler should stop the server */
+    /* Send SIGTERM to ourselves; handler should stop the server */
     kill(getpid(), SIGTERM);
     pthread_join(tid, NULL);
     kl_http_server_free(&signal_server);
@@ -1802,7 +1802,7 @@ UTEST(integration, middleware_short_circuit_body) {
     int fd = connect_to(sc_body_server.bound_port);
     ASSERT_TRUE(fd >= 0);
 
-    /* POST with body — middleware should reject before body is read */
+    /* POST with body; middleware should reject before body is read */
     const char *req = "POST /echo HTTP/1.1\r\n"
                       "Host: localhost\r\n"
                       "Content-Length: 5\r\n"
@@ -1889,7 +1889,7 @@ UTEST(integration, post_middleware_body_access) {
     wait_for_bind(&post_mw_server);
     int pmw_port = post_mw_server.bound_port;
 
-    /* POST with valid body — should pass post-middleware */
+    /* POST with valid body; should pass post-middleware */
     int fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req1 = "POST /submit HTTP/1.1\r\n"
@@ -1905,7 +1905,7 @@ UTEST(integration, post_middleware_body_access) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "secret data") != NULL);
 
-    /* POST with invalid body — should be rejected by post-middleware */
+    /* POST with invalid body; should be rejected by post-middleware */
     fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req2 = "POST /submit HTTP/1.1\r\n"
@@ -1919,7 +1919,7 @@ UTEST(integration, post_middleware_body_access) {
     kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
-    /* GET skips POST-only post-middleware — should succeed */
+    /* GET skips POST-only post-middleware; should succeed */
     fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req3 = "GET /hello HTTP/1.1\r\n"
@@ -1988,7 +1988,7 @@ UTEST(integration, post_middleware_keepalive_preserved) {
     }
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
-    /* Second: GET on same connection — should work if keep-alive preserved */
+    /* Second: GET on same connection; should work if keep-alive preserved */
     const char *req2 = "GET /hello HTTP/1.1\r\n"
                        "Host: localhost\r\n"
                        "Connection: close\r\n"
@@ -2066,7 +2066,7 @@ UTEST(integration, per_route_limit_unaffected) {
     int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
-    /* POST to /echo with 32KB body — has 64KB body reader, should succeed
+    /* POST to /echo with 32KB body, has 64KB body reader, should succeed
      * even though global max_body_size is 4KB (only applies to discard path) */
     size_t body_len = 32768;
     char *body = malloc(body_len);

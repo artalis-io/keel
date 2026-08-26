@@ -1,5 +1,5 @@
 /*
- * thread_pool.c — Blocking work offloaded to worker threads
+ * thread_pool.c: Blocking work offloaded to worker threads
  *
  * Concepts: KlThreadPool, KlWorkItem, kl_thread_pool_create/submit/free,
  * KlAsyncOp + thread pool integration (work_fn / done_fn / cancel_fn).
@@ -10,9 +10,9 @@
  * connection via kl_async_complete().
  *
  * Three-callback model:
- *   work_fn   — runs on worker thread (do blocking I/O here)
- *   done_fn   — runs on event loop thread (safe to call kl_async_complete)
- *   cancel_fn — runs on shutdown for items that never started
+ *   work_fn   : runs on worker thread (do blocking I/O here)
+ *   done_fn   : runs on event loop thread (safe to call kl_async_complete)
+ *   cancel_fn : runs on shutdown for items that never started
  *
  * Build:  make examples
  * Run:    ./examples/thread_pool
@@ -106,7 +106,7 @@ static void handle_query(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
         .user_data = ctx,
     };
     if (kl_thread_pool_submit(app->pool, &item) < 0) {
-        /* Queue full — resume and send error */
+        /* Queue full; resume and send error */
         kl_http_response_error(res, 503, "Server busy");
         kl_async_complete(app->server, &ctx->op);
         free(ctx);

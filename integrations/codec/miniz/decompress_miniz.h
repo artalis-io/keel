@@ -8,7 +8,7 @@
  * @brief Create a miniz-based gzip decompression session.
  *
  * Safe to pass as factory in KlDecompressConfig.
- * Shares KlCompressCtx with kl_compress_miniz_create — use
+ * Shares KlCompressCtx with kl_compress_miniz_create: use
  * kl_compress_miniz_ctx_create/destroy for context lifecycle.
  *
  * @param ctx   Shared context from kl_compress_miniz_ctx_create.

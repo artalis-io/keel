@@ -1,5 +1,5 @@
 /*
- * websocket_server.c — WebSocket echo server
+ * websocket_server.c: WebSocket echo server
  *
  * Concepts: kl_http_server_ws_upgrade, KlWsServerConfig, on_open/on_message/on_close callbacks.
  *

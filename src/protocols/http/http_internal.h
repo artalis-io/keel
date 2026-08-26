@@ -2,7 +2,7 @@
 #define KEEL_PROTOCOLS_HTTP_INTERNAL_H
 
 /*
- * http_internal.h — HTTP-family internal seam: TLS-aware connection I/O over the
+ * http_internal.h - HTTP-family internal seam: TLS-aware connection I/O over the
  * embedded KlStream + HTTP-server cross-TU forward decls. Owned by src/protocols/http/;
  * the http2/websocket completion adapters include it for conn_read/conn_write
  * (permitted HTTP-family coordination seam). Substrate stream I/O lives in
@@ -27,10 +27,10 @@
 /* Completion-mode TLS ciphertext scratch size (one TLS record + slack). The HTTP completion
  * adapter hands a per-connection buffer of this size (KlHttpConn.comp_cipher, preallocated at
  * server init for TLS+completion slots) to the raw receive; the backend does raw I/O into it
- * with no TLS knowledge. Internal — not a public API (was briefly in http_connection.h). */
+ * with no TLS knowledge. Internal, not a public API (was briefly in http_connection.h). */
 #define KL_COMP_CIPHER_SIZE (17u * 1024u)
 
-/* ── Transport helpers — TLS-aware read/write over the embedded KlStream ──────── */
+/* ── Transport helpers: TLS-aware read/write over the embedded KlStream ──────── */
 
 /* Recover the owning KlHttpConn from its embedded stream at the HTTP adapter boundary. The stream is
  * the leading member (offset 0), but containerof keeps that an implementation detail. */
@@ -80,12 +80,12 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
 /* Release a connection and resume listening if paused (defined in http_server.c) */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
 
-/* Server bisection (S-1): the completion run-loop tick lives in the freestanding-safe
+/* The completion run-loop tick lives in the freestanding-safe
  * server core (http_server_core.c); the idle/drain sweeps stay in http_server.c (they own
  * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
 int  kl_http_server_run_completion_loop(KlHttpServer *s);
 /* Close the listen socket (+ unlink an owned AF_UNIX path, hosted). Non-static so the
- * freestanding kl_http_server_free (http_server_core.c) reaches it on the hosted path (S-7). */
+ * freestanding kl_http_server_free (http_server_core.c) reaches it on the hosted path. */
 void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);

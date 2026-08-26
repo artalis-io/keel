@@ -1,11 +1,10 @@
-/* test_http_async.c — HTTP KlAsyncOp/server-suspension slice of the former
- * tests/test_async.c.
+/* test_http_async.c: HTTP KlAsyncOp/server-suspension slice of the async tests.
  *
- * This is the HTTP half of the T-split of the async test family: the cases here
+ * This is the HTTP half of the async test family: the cases here
  * exercise connection suspension/resume, deadlines, cancellation, the
  * exactly-one-terminal guarantees, and an end-to-end async handler in a real
  * KlHttpServer. The generic KlWatcher cases (which touch no HTTP connection
- * state) stay in tests/test_async.c.
+ * state) live in tests/test_async.c.
  */
 
 #include "utest.h"
@@ -43,7 +42,7 @@ static void cleanup_test_server(KlHttpServer *s) {
 }
 
 /* Pump the event loop until *flag reaches `want` (or attempts run out). Uses
- * kl_event_ctx_run — the portable tick (wait + dispatch watchers) that works on
+ * kl_event_ctx_run: the portable tick (wait + dispatch watchers) that works on
  * BOTH the readiness and completion event models, so these watcher/async tests are
  * backend-agnostic instead of hard-coding a readiness kl_event_wait loop. */
 static void pump_until(KlEventCtx *ev, const int *flag, int want) {
@@ -91,7 +90,7 @@ UTEST(async, suspend_sets_state) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     int fds[2];
@@ -143,7 +142,7 @@ UTEST(async, complete_calls_on_resume) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     int fds[2];
@@ -200,7 +199,7 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     int fds[2];
@@ -262,7 +261,7 @@ UTEST(async, cancel_on_server_free) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     int fds[2];
@@ -291,7 +290,7 @@ UTEST(async, cancel_on_server_free) {
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
 
-    /* kl_http_server_free cancels ops — but we use cleanup helper
+    /* kl_http_server_free cancels ops: but we use cleanup helper
      * which mirrors the same behavior */
     while (s.async_ops) {
         KlAsyncOp *cop = s.async_ops;
@@ -315,7 +314,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     int fds[2];
@@ -338,7 +337,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
 
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
 
-    /* Set last_active_ms to far in the past — simulates long idle */
+    /* Set last_active_ms to far in the past: simulates long idle */
     c->last_active_ms = kl_monotonic_ms() - 60000;  /* 60s ago */
 
     /* Run the timeout sweep logic (mirrors http_server.c) */
@@ -384,7 +383,7 @@ static void watcher_complete_cb(KlSocketHandle fd, KlEventMask ready, void *user
     char buf[16];
     (void)kl_test_sockread(fd, buf, sizeof(buf));
 
-    /* Complete the async op — resumes the connection */
+    /* Complete the async op: resumes the connection */
     kl_async_complete(ctx->server, ctx->op);
 }
 
@@ -395,7 +394,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror http_server.c:419: a conn must know its event ctx */
     }
 
     /* Create a connection with socketpair */
@@ -432,7 +431,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
     ASSERT_EQ(c->state, KL_HTTP_CONN_SUSPENDED);
 
-    /* Register a watcher on the pipe read end — when the pipe is written to,
+    /* Register a watcher on the pipe read end: when the pipe is written to,
      * the watcher fires and completes the async op */
     WatcherCompleteCtx wctx = {
         .server = &s,
@@ -442,7 +441,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_EQ(kl_watcher_add(&s.ev, pipe_fds[0], KL_EVENT_READ,
                               watcher_complete_cb, &wctx), 0);
 
-    /* Write to the pipe — signals completion */
+    /* Write to the pipe: signals completion */
     (void)kl_test_sockwrite(pipe_fds[1], "done", 4);
 
     /* Run the loop until the watcher fires + completes the async op (portable). */
@@ -530,7 +529,7 @@ static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *us
     KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Allocate sleep context */
-    static SleepCtx sctx;  /* static for simplicity — single-request test */
+    static SleepCtx sctx;  /* static for simplicity: single-request test */
     memset(&sctx, 0, sizeof(sctx));
     sctx.server = srv;
 
@@ -551,7 +550,7 @@ static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *us
     /* Suspend the connection */
     kl_async_suspend(srv, conn, &sctx.op);
 
-    /* Schedule completion (write to pipe — watcher fires on next tick) */
+    /* Schedule completion (write to pipe: watcher fires on next tick) */
     (void)kl_test_sockwrite(sctx.pipe_fds[1], "!", 1);
 }
 
@@ -610,11 +609,11 @@ UTEST(async, e2e_handler_suspend_resume) {
     kl_http_server_free(&async_server);
 }
 
-/* ── Exactly-one-terminal guarantees (Phase 4) ─────────────────────────
+/* ── Exactly-one-terminal guarantees ─────────────────────────
  * These test the terminal *guard* in async.c, not the post-resume state drive:
  * the resume callback only counts and leaves conn->state as PROCESSING, so
  * kl_async_complete takes no SENDING/READING/CLOSED branch (no socket I/O, no
- * release) — keeping the op + conn valid for the idempotency assertions. */
+ * release): keeping the op + conn valid for the idempotency assertions. */
 static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     (void)op; ((AsyncCtx *)ud)->resume_called++;
 }
@@ -640,7 +639,7 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     c->stream.fd = -1; kl_test_closesock(fds[0]); kl_test_closesock(fds[1]);          \
     cleanup_test_server(&s)
 
-/* A — double complete fires on_resume exactly once. */
+/* A: double complete fires on_resume exactly once. */
 UTEST(async, complete_twice_is_idempotent) {
     RFC_TERMINAL_SETUP();
     kl_async_complete(&s, &op);
@@ -652,7 +651,7 @@ UTEST(async, complete_twice_is_idempotent) {
     RFC_TERMINAL_TEARDOWN();
 }
 
-/* Cancel is idempotent — on_cancel fires exactly once. */
+/* Cancel is idempotent: on_cancel fires exactly once. */
 UTEST(async, cancel_twice_is_idempotent) {
     RFC_TERMINAL_SETUP();
     kl_async_cancel(&s, &op);
@@ -664,7 +663,7 @@ UTEST(async, cancel_twice_is_idempotent) {
     RFC_TERMINAL_TEARDOWN();
 }
 
-/* C — cancel racing a completion: complete wins, later cancel is a no-op. */
+/* C, cancel racing a completion: complete wins, later cancel is a no-op. */
 UTEST(async, cancel_after_complete_is_noop) {
     RFC_TERMINAL_SETUP();
     kl_async_complete(&s, &op);
@@ -674,7 +673,7 @@ UTEST(async, cancel_after_complete_is_noop) {
     RFC_TERMINAL_TEARDOWN();
 }
 
-/* C (other order) — cancel wins, later completion is a no-op (no resume). */
+/* C (other order): cancel wins, later completion is a no-op (no resume). */
 UTEST(async, complete_after_cancel_is_noop) {
     RFC_TERMINAL_SETUP();
     kl_async_cancel(&s, &op);

@@ -63,13 +63,13 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     }
 }
 
-/* PAL Phase 7: epoll is a readiness poller of native OS descriptors. */
+/* epoll is a readiness poller of native OS descriptors. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
-/* Readiness loop — the default POSIX provider works; nothing to auto-wire (5a). */
+/* Readiness loop: the default POSIX provider works; nothing to auto-wire. */
 const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;

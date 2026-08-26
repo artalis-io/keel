@@ -7,7 +7,7 @@
 /* ═══════════════════════════════════════════════════════════════════
  * Event backend tests
  *
- * Uses pipe pairs as test FDs. Platform-independent — works on all
+ * Uses pipe pairs as test FDs. Platform-independent: works on all
  * backends (epoll, kqueue, io_uring, poll).
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -73,7 +73,7 @@ UTEST(event, del_fd) {
     int marker = 1;
     ASSERT_EQ(kl_event_add(&loop, fds[0], KL_EVENT_READ, &marker), 0);
 
-    /* Remove fd (return value is backend-dependent — kqueue may return -1
+    /* Remove fd (return value is backend-dependent: kqueue may return -1
      * when deleting a filter that was never registered, e.g. EVFILT_WRITE) */
     kl_event_del(&loop, fds[0]);
 
@@ -81,7 +81,7 @@ UTEST(event, del_fd) {
     char c = 'x';
     (void)kl_test_sockwrite(fds[1], &c, 1);
 
-    /* Wait — should timeout, no events for removed fd */
+    /* Wait: should timeout, no events for removed fd */
     KlEvent events[4];
     int n = kl_event_wait(&loop, events, 4, 50);
     /* n should be 0 (timeout) since we removed the fd */
@@ -160,7 +160,7 @@ UTEST(event, timeout_no_events) {
     loop.alloc = &alloc;
     ASSERT_EQ(kl_event_init(&loop), 0);
 
-    /* Wait with nothing registered — should return 0 (timeout) */
+    /* Wait with nothing registered: should return 0 (timeout) */
     KlEvent events[4];
     int n = kl_event_wait(&loop, events, 4, 10);
     ASSERT_EQ(n, 0);
@@ -182,7 +182,7 @@ UTEST(event, mod_mask) {
     /* Register for READ */
     ASSERT_EQ(kl_event_add(&loop, fds[0], KL_EVENT_READ, &marker), 0);
 
-    /* Modify to WRITE — verify kl_event_mod doesn't crash/error */
+    /* Modify to WRITE: verify kl_event_mod doesn't crash/error */
     ASSERT_EQ(kl_event_mod(&loop, fds[0], KL_EVENT_WRITE, &marker), 0);
 
     /* Note: mask enforcement after mod is backend-dependent.

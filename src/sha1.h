@@ -3,7 +3,7 @@
 
 /*
  * Minimal SHA-1 implementation for WebSocket handshake (RFC 6455 Section 4.2.2).
- * SHA-1 is mandated by the spec — this is a handshake proof, not used for security.
+ * SHA-1 is mandated by the spec; this is a handshake proof, not used for security.
  * Internal to KEEL, not part of the public API.
  */
 

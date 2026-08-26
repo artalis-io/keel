@@ -1,14 +1,14 @@
 /*
- * async_thread_pool.c — Thread pool + async ops with deadlines
+ * async_thread_pool.c: Thread pool + async ops with deadlines
  *
  * Concepts: KlThreadPool + KlAsyncOp together, multiple concurrent
  * async operations with different deadlines, cancel_fn for shutdown,
  * simulated blocking I/O on worker threads.
  *
- * GET /fast   — 10ms  simulated work
- * GET /slow   — 200ms simulated work
- * GET /cancel — demonstrates cancel_fn when connection drops
- * GET /       — immediate sync response
+ * GET /fast   : 10ms  simulated work
+ * GET /slow   : 200ms simulated work
+ * GET /cancel : demonstrates cancel_fn when connection drops
+ * GET /       : immediate sync response
  *
  * Build:  make examples
  * Run:    ./examples/async_thread_pool

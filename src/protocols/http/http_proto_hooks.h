@@ -2,25 +2,25 @@
 #define KEEL_HTTP_PROTO_HOOKS_H
 
 /*
- * http_proto_hooks.h — the per-protocol server upgrade seam.
+ * http_proto_hooks.h: the per-protocol server upgrade seam.
  *
  * The shared HTTP/1.1 server core (http_connection.c, http_server_core.c, and the sweep/drain
  * in http_server.c) dispatches into the WebSocket and HTTP-2 server modules on upgrade,
  * cleanup, and the drain/idle sweeps. Those modules (http_server_ws.c / http2_server.c) are
- * OPTIONAL — a freestanding HTTP/1.1 server (UEFI, docs/phase10_uefi_server_design.md
+ * OPTIONAL. A freestanding HTTP/1.1 server (UEFI, docs/archive/phases/phase10_uefi_server_design.md
  * §6) links neither. So the core never names kl_ws_server_* / kl_http2_server_* directly;
  * it goes through a SEPARATE hook table PER PROTOCOL, registered by that module.
  *
  * One table per protocol (not a merged blob) so each protocol is independently
- * linkable and named for what it is — a third protocol (HTTP/3 over QUIC) adds a
+ * linkable and named for what it is. A third protocol (HTTP/3 over QUIC) adds a
  * KlH3ServerHooks + kl_h3_server_hooks() the same way, touching no existing table.
  *
  * A hosted build calls the installers (kl_ws_server_hooks_install / _h2_) from
- * kl_http_server_init — an explicit reference that both registers the table AND pulls the
+ * kl_http_server_init, an explicit reference that both registers the table AND pulls the
  * protocol object out of the static archive (a self-registering constructor alone
  * would be dropped by the linker now that the core no longer names its symbols). A
  * freestanding build never calls them, so kl_ws_server_hooks()/kl_http2_server_hooks()
- * return NULL and the core stays pure HTTP/1.1 — with NO #ifdef in the shared code.
+ * return NULL and the core stays pure HTTP/1.1, with NO #ifdef in the shared code.
  */
 
 #include <keel/http_connection.h>   /* KlHttpConn */
@@ -74,8 +74,8 @@ void kl_http2_server_hooks_install(void);                /* defined in http2_ser
 /* ── Completion-mode drive seam ─────────────────────────────────────────────
  * Once a connection has upgraded, the completion server driver (completion_http_server.c)
  * pumps its frames through the ws/h2 COMPLETION handlers (completion_ws.c /
- * completion_http2.c). Registered from the COMPLETION axis — not http_server_ws.c/http2_server.c
- * — because those completion TUs share completion_http_server.c's build axis: a readiness
+ * completion_http2.c). Registered from the COMPLETION axis (not http_server_ws.c/http2_server.c)
+ * because those completion TUs share completion_http_server.c's build axis: a readiness
  * build compiles none of them (so nothing references the drives), and a freestanding
  * HTTP/1.1 server leaves the tables NULL (no upgrade ever occurs). completion_http_server.c
  * calls the installers, which also pull the completion TUs out of the static archive. */

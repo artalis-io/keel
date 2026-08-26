@@ -1,6 +1,5 @@
 /*
- * listener.c — Phase-B accept-side listener state machine (step 5; counted bounded-accept window
- * added in 6B-3). See listener.h.
+ * listener.c: the accept-side listener state machine. See listener.h.
  *
  * Reserve-before-accept backpressure, sync-completion-safe posting (iterative pump trampoline),
  * guarded reentrant callbacks, cancel-once, total accepted-fd disposal, and confirmed detachment.
@@ -23,13 +22,13 @@ void kl_slot_lease_release(KlSlotLease *lease) {
     lease->release     = NULL;
     lease->release_ctx = NULL;
     lease->alive       = NULL;
-    if (alive && !*alive) return;                 /* pool gone (liveness token is stable) — no-op */
+    if (alive && !*alive) return;                 /* pool gone (liveness token is stable): no-op */
     fn(ctx);
 }
 
 /* ── internal helpers ──────────────────────────────────────────────────────────────────────── */
 
-/* Reserve/release are POOL callbacks that MAY reentrantly close the listener — run them under the
+/* Reserve/release are POOL callbacks that MAY reentrantly close the listener; run them under the
  * in_dispatch depth guard so a nested kl_listener_close() defers detachment until the outer frame
  * unwinds. */
 static int l_reserve(KlListener *l) {
@@ -47,7 +46,7 @@ static void l_release_credit(KlListener *l) {      /* return one raw credit to t
     }
 }
 
-/* Detach if closing and everything is retired — deferred while a start/arm hook or a reentrant
+/* Detach if closing and everything is retired, deferred while a start/arm hook or a reentrant
  * callback is on the stack (in_start / in_dispatch). Exactly-once via `detached`. Every posted
  * accept holds a reservation, so `inflight == 0` also means no credit is held uncommitted. */
 static void l_finalize(KlListener *l) {
@@ -79,7 +78,7 @@ static void l_begin_close(KlListener *l) {
         if (l->inflight > 0) {
             if (!l->completion_mode) {
                 /* Readiness: drop the listen interest; the pending interest is cancelled, so nothing
-                 * completes — return every posted accept's credit now. */
+                 * completes; return every posted accept's credit now. */
                 if (l->disarm_accept) l->disarm_accept(l->ctx);
                 while (l->inflight > 0) { l->inflight--; l_release_credit(l); }
             } else if (l->cancel_accept && !l->accept_cancel_requested) {
@@ -99,7 +98,7 @@ static void l_begin_close(KlListener *l) {
 /* Post accepts up to the window, reserving ONE credit per posted accept (backpressure). ITERATIVE
  * pump trampoline: an arm hook that completes synchronously (on_accepted/on_accept_failed inline)
  * may request another pump; that is deferred via pump_pending and performed by this loop instead of
- * recursing — bounding the C stack across a run of synchronous accepts/failures. */
+ * recursing, bounding the C stack across a run of synchronous accepts/failures. */
 static void l_pump(KlListener *l) {
     if (l->pumping) { l->pump_pending = 1; return; }   /* defer a nested pump to the trampoline */
 
@@ -121,10 +120,10 @@ static void l_pump(KlListener *l) {
                     if (!l->completion_mode && l->disarm_accept)
                         l->disarm_accept(l->ctx);
                 }
-                break;   /* below window but out of credit — hold what is posted */
+                break;   /* below window but out of credit; hold what is posted */
             }
 
-            /* Credit held — post one accept. Mark it inflight BEFORE the hook so a synchronous
+            /* Credit held; post one accept. Mark it inflight BEFORE the hook so a synchronous
              * on_accepted/on_accept_failed (which decrements inflight) is seen. */
             int before = l->inflight;
             l->inflight = before + 1;
@@ -134,20 +133,20 @@ static void l_pump(KlListener *l) {
             l->in_start--;
             l->pumping  = 0;
 
-            if (l->inflight == before)        /* sync-completed this post — try to post more */
+            if (l->inflight == before)        /* sync-completed this post: try to post more */
                 continue;
-            if (rc < 0) {                     /* hard post failure — never became a real accept */
+            if (rc < 0) {                     /* hard post failure: never became a real accept */
                 l->inflight = before;
                 l_release_credit(l);          /* return this post's credit */
                 l->last_error = rc;
                 l_begin_close(l);             /* listen fd broken → close */
                 break;
             }
-            /* posted async (inflight == before + 1) — loop to fill the rest of the window */
+            /* posted async (inflight == before + 1): loop to fill the rest of the window */
         }
     } while (l->pump_pending);
 
-    l_finalize(l);   /* the pump frame has unwound — honor a reentrant close from an arm hook */
+    l_finalize(l);   /* the pump frame has unwound; honor a reentrant close from an arm hook */
 }
 
 /* ── public API ────────────────────────────────────────────────────────────────────────────── */
@@ -180,7 +179,7 @@ int kl_listener_set_accept_window(KlListener *l, int window) {
     if (!l || !l->inited || l->state != KL_LISTENER_STATE_IDLE) return -1;   /* init-time only */
     if (window < 1) return -1;
     /* A readiness arm is a single persistent interest registration, not N distinct posted
-     * operations — a window > 1 would reserve several credits against one registration. Only a
+     * operations; a window > 1 would reserve several credits against one registration. Only a
      * completion backend (which posts N discrete accept ops) may widen the window. */
     if (!l->completion_mode && window != 1) return -1;
     l->window = window;
@@ -197,18 +196,18 @@ int kl_listener_start(KlListener *l) {
 
 void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
     if (!l || !l->inited) return;
-    if (l->inflight <= 0) { l_dispose(l, fd); return; }   /* spurious accept — dispose its fd */
+    if (l->inflight <= 0) { l_dispose(l, fd); return; }   /* spurious accept: dispose its fd */
     l->inflight--;                                        /* this posted accept retired */
 
     if (l->state == KL_LISTENER_STATE_CLOSING || l->state == KL_LISTENER_STATE_CLOSED) {
-        /* teardown: cannot hand off — return this accept's credit and dispose the fd */
+        /* teardown: cannot hand off; return this accept's credit and dispose the fd */
         l_release_credit(l);
         l_dispose(l, fd);          /* guarded tail: finalizes after dispose returns */
         return;
     }
 
     /* Commit this accept's reserved credit to the connection, handed off as a lease built from the
-     * POOL-OWNED release capability (by value) + the nullable liveness token — no listener ref. */
+     * POOL-OWNED release capability (by value) + the nullable liveness token, no listener ref. */
     KlSlotLease lease = { l->release, l->credit_ctx, l->liveness };
     l->in_dispatch++;
     l->on_accept(l->ctx, fd, lease);    /* by value: ownership transfers to the accepted stream */
@@ -219,7 +218,7 @@ void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
 
 void kl_listener_on_accept_failed(KlListener *l, int error) {
     if (!l || !l->inited) return;
-    if (l->inflight <= 0) return;             /* duplicate/spurious — drop */
+    if (l->inflight <= 0) return;             /* duplicate/spurious: drop */
     l->inflight--;                            /* this posted accept retired */
     l->last_error = error;
     l_release_credit(l);                       /* return this accept's credit */
@@ -228,14 +227,14 @@ void kl_listener_on_accept_failed(KlListener *l, int error) {
         l_finalize(l);
         return;
     }
-    l_pump(l);         /* transient failure — top the window back up */
+    l_pump(l);         /* transient failure: top the window back up */
 }
 
 void kl_listener_notify_slot_free(KlListener *l) {
     if (!l || !l->inited) return;
     if (l->state == KL_LISTENER_STATE_PAUSED) l->state = KL_LISTENER_STATE_LISTENING;
     if (l->state != KL_LISTENER_STATE_LISTENING) return;
-    l_pump(l);         /* a credit is available now — top up (re-arms readiness interest if paused) */
+    l_pump(l);         /* a credit is available now: top up (re-arms readiness interest if paused) */
 }
 
 int kl_listener_close(KlListener *l) {

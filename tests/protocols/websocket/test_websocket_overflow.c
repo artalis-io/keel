@@ -1,5 +1,5 @@
 /*
- * WebSocket overflow boundary tests — the WebSocket-frame slice of the former
+ * WebSocket overflow boundary tests: the WebSocket-frame slice of the former
  * tests/test_overflow.c (T-split). Exercises SIZE_MAX overflow guards in the frame
  * parser with pathological 64-bit lengths. No real network connections needed.
  */
@@ -11,12 +11,12 @@
 /* ── WebSocket frame overflow ────────────────────────────────────── */
 
 UTEST(overflow, ws_frame_64bit_msb_set) {
-    /* websocket.c:115 — MSB must be 0 per RFC */
+    /* websocket.c:115 - MSB must be 0 per RFC */
     KlWsFrameParser fp;
     kl_ws_frame_init(&fp);
 
     /* FIN=1 opcode=2 masked=0 len=127 (64-bit)
-     * Payload length MSB=1 (0x80...) — should fail */
+     * Payload length MSB=1 (0x80...): should fail */
     uint8_t hdr[10] = {0x82, 0x7f,
                         0x80, 0x00, 0x00, 0x00,
                         0x00, 0x00, 0x00, 0x01};
@@ -26,7 +26,7 @@ UTEST(overflow, ws_frame_64bit_msb_set) {
 }
 
 UTEST(overflow, ws_frame_64bit_all_ff) {
-    /* websocket.c:115 — MSB=1 with all 0xFF */
+    /* websocket.c:115 - MSB=1 with all 0xFF */
     KlWsFrameParser fp;
     kl_ws_frame_init(&fp);
 
@@ -39,7 +39,7 @@ UTEST(overflow, ws_frame_64bit_all_ff) {
 }
 
 UTEST(overflow, ws_frame_64bit_size_max_half) {
-    /* websocket.c:116 — plen > SIZE_MAX/2 but MSB=0 */
+    /* websocket.c:116 - plen > SIZE_MAX/2 but MSB=0 */
     KlWsFrameParser fp;
     kl_ws_frame_init(&fp);
 
@@ -56,7 +56,7 @@ UTEST(overflow, ws_frame_64bit_size_max_half) {
 }
 
 UTEST(overflow, ws_frame_64bit_exactly_half) {
-    /* websocket.c:116 — plen == SIZE_MAX/2 should succeed (boundary) */
+    /* websocket.c:116 - plen == SIZE_MAX/2 should succeed (boundary) */
     KlWsFrameParser fp;
     kl_ws_frame_init(&fp);
 
@@ -74,7 +74,7 @@ UTEST(overflow, ws_frame_64bit_exactly_half) {
 }
 
 UTEST(overflow, ws_frame_control_oversized) {
-    /* websocket.c:128 — control frames max 125 bytes */
+    /* websocket.c:128 - control frames max 125 bytes */
     KlWsFrameParser fp;
     kl_ws_frame_init(&fp);
 

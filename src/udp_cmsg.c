@@ -1,12 +1,11 @@
 /*
- * udp_cmsg.c — the shared POSIX UDP control-message parsers (udp_cmsg.h).
+ * udp_cmsg.c: the shared POSIX UDP control-message parsers (udp_cmsg.h).
  *
  * kl_udp_parse_local / kl_udp_parse_gro are used by the POSIX completion backends
  * (event_iouring.c, event_pollcomp.c) to extract the pktinfo local address and the
- * UDP_GRO segment size from a received msghdr's control data. They used to live in
- * udp_io_posix.c; with the datagram data-plane folded onto the socket providers
- * (KlDatagramOps), the readiness recv path no longer needs a separate seam TU, so
- * these shared parsers live here (always linked on POSIX) instead.
+ * UDP_GRO segment size from a received msghdr's control data. The datagram data-plane
+ * is folded onto the socket providers (KlDatagramOps); these shared parsers live here
+ * (always linked on POSIX).
  */
 
 #ifndef _GNU_SOURCE
@@ -101,7 +100,7 @@ int kl_udp_parse_tos(struct msghdr *msg) {
 
 /* Overflow-safe capacity check: does a `space`-byte cmsg record fit after `used` bytes in `bufsz`?
  * `used` is a parameter (not a constant here) so the subtraction is guarded without a `0 > bufsz`
- * comparison — `bufsz - used` is evaluated only once `used <= bufsz` holds (short-circuit). */
+ * comparison; `bufsz - used` is evaluated only once `used <= bufsz` holds (short-circuit). */
 static int ctrl_fits(size_t used, size_t space, size_t bufsz) {
     return used <= bufsz && space <= bufsz - used;
 }
@@ -190,5 +189,5 @@ int kl_udp_send_family(int fd, const struct sockaddr *dest, const struct sockadd
     if (getsockname(fd, (struct sockaddr *)&ss, &sl) == 0 &&
         (ss.ss_family == AF_INET || ss.ss_family == AF_INET6))
         return (int)ss.ss_family;
-    return -1;   /* undeterminable — caller fails the send rather than guessing IPv4 */
+    return -1;   /* undeterminable; caller fails the send rather than guessing IPv4 */
 }

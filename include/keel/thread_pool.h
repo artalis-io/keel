@@ -5,22 +5,22 @@
 
 typedef struct KlEventCtx KlEventCtx;
 
-/** @brief Work function — runs on a worker thread. */
+/** @brief Work function: runs on a worker thread. */
 typedef void (*KlWorkFn)(void *user_data);
-/** @brief Done function — runs on the event loop thread after work completes. */
+/** @brief Done function: runs on the event loop thread after work completes. */
 typedef void (*KlWorkDoneFn)(void *user_data);
-/** @brief Cancel function — runs on shutdown if work item never started. */
+/** @brief Cancel function: runs on shutdown if work item never started. */
 typedef void (*KlWorkCancelFn)(void *user_data);
 
 /**
- * @brief Work item — passed by pointer to kl_thread_pool_submit.
+ * @brief Work item: passed by pointer to kl_thread_pool_submit.
  * Copied into the internal queue (caller can stack-allocate).
  */
 typedef struct KlWorkItem {
     KlWorkFn work_fn;           /**< Runs on worker thread */
     KlWorkDoneFn done_fn;       /**< Runs on event loop thread */
     KlWorkCancelFn cancel_fn;   /**< Runs on shutdown if item never started (may be NULL) */
-    void *user_data;            /**< Opaque — passed to all three callbacks */
+    void *user_data;            /**< Opaque: passed to all three callbacks */
 } KlWorkItem;
 
 /**
@@ -46,7 +46,7 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 /**
  * @brief Submit work. Copies *item into the internal queue.
  * @param pool Thread pool.
- * @param item Work item (copied — caller can stack-allocate).
+ * @param item Work item (copied; caller can stack-allocate).
  * @return 0 on success, -1 if queue full (backpressure).
  */
 int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);

@@ -4,7 +4,7 @@
 #include <keel/allocator.h>
 #include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <keel/event.h>
-#include <stdint.h>        /* uint64_t (submit offset) — file offsets are non-negative,
+#include <stdint.h>        /* uint64_t (submit offset): file offsets are non-negative,
                               same neutral type as the sendfile seam (src/socket.h) */
 
 typedef struct KlFileIO KlFileIO;

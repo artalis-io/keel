@@ -1,13 +1,13 @@
 /*
- * smoke_pollcomp_async.c — async/thread-pool handler over the completion loop (8e-2b).
+ * smoke_pollcomp_async.c: async/thread-pool handler over the completion loop.
  *
  * Proves the whole watcher-relay + resume mechanism end to end: a KlHttpServer on the pollcomp
  * completion loop, a KlThreadPool whose wakeup pipe is a kl_watcher on the server ctx, and
  * a handler that offloads blocking work to the pool and suspends the connection. The
  * worker finishes → writes the wakeup pipe → the completion loop's drain surfaces it as a
  * KL_COMP_WATCHER → the driver routes it to the pool's done_fn → kl_async_complete →
- * kl_http_comp_resume sends the response. None of that fired on a completion
- * loop before 8e-2. Runs in CI and under ASan.
+ * kl_http_comp_resume sends the response. Guards that the whole watcher-relay + resume
+ * path fires on a completion loop. Runs in CI and under ASan.
  */
 #include <keel/keel.h>
 #include "../src/socket.h"     /* internal kl_socket_provider_pollcomp() */
@@ -30,7 +30,7 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-/* op MUST be first — on_cancel/cancel_fn free via this pointer. */
+/* op MUST be first: on_cancel/cancel_fn free via this pointer. */
 typedef struct { KlAsyncOp op; int result; } WorkCtx;
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */

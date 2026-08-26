@@ -89,7 +89,7 @@ UTEST(cpool, release_then_acquire) {
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 1);
     ASSERT_EQ(kl_http_client_pool_host_count(&pool, "example.com", 80, 0, NULL, 0), 1);
 
-    /* Acquire — should hit */
+    /* Acquire: should hit */
     KlHttpClientPoolConn acq;
     ASSERT_EQ(kl_http_client_pool_acquire(&pool, "example.com", 80, 0, NULL, 0, &acq), 0);
     ASSERT_EQ(acq.reused, 1);
@@ -201,7 +201,7 @@ UTEST(cpool, pool_full_evicts_lru) {
     }
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 2);
 
-    /* Release one more — should evict oldest */
+    /* Release one more: should evict oldest */
     KlHttpClientPoolConn conn3 = { .fd = fds[2][0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_http_client_pool_release(&pool, &conn3, "host2.com", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 2);
@@ -224,7 +224,7 @@ UTEST(cpool, discard_closes_fd) {
     kl_http_client_pool_discard(&pool, &conn);
     ASSERT_EQ(conn.fd, -1);
 
-    /* Verify fd is closed — write should fail */
+    /* Verify fd is closed: write should fail */
     char c = 'x';
     ASSERT_TRUE(kl_test_sockwrite(fds[0], &c, 1) < 0);
 
@@ -406,7 +406,7 @@ UTEST(cpool, sync_pooled_reuse) {
     KlHttpClientPool pool;
     ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
 
-    /* First request — pool miss, establishes connection */
+    /* First request: pool miss, establishes connection */
     KlHttpClientResponse resp1;
     ASSERT_EQ(kl_http_client_request_pooled(&pool, &a, NULL, "GET", url,
                                          NULL, 0, NULL, 0, &resp1), 0);
@@ -416,7 +416,7 @@ UTEST(cpool, sync_pooled_reuse) {
     /* Connection should now be in pool */
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 1);
 
-    /* Second request — pool hit, reuses connection */
+    /* Second request: pool hit, reuses connection */
     KlHttpClientResponse resp2;
     ASSERT_EQ(kl_http_client_request_pooled(&pool, &a, NULL, "GET", url,
                                          NULL, 0, NULL, 0, &resp2), 0);
@@ -482,7 +482,7 @@ UTEST(cpool, async_pooled_reuse) {
     /* Connection should be in pool */
     ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 1);
 
-    /* Async request 2 — should reuse */
+    /* Async request 2: should reuse */
     AsyncPoolCtx ctx2 = { 0, 0 };
     KlHttpClient *c2 = kl_http_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
                                              NULL, 0, NULL, 0,

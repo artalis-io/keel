@@ -1,5 +1,5 @@
 /*
- * stream.c — Phase-B KlStream base initializer (step 6A). The facet machinery lives in
+ * stream.c: the KlStream base initializer. The facet machinery lives in
  * stream_write.c / stream_read.c / stream_close.c; this owns the whole-object base init that
  * establishes the invariants they build on. See <keel/stream.h>.
  */

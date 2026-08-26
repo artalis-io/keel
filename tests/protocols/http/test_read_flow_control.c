@@ -1,13 +1,13 @@
 /*
- * test_read_flow_control.c — Phase 1 read-side body flow control (kl_http_request_pause_body /
+ * test_read_flow_control.c: read-side body flow control (kl_http_request_pause_body /
  * kl_http_request_resume_body).
  *
  * A custom body reader pauses after the first chunk and schedules an async resume on a timer.
  * The client sends the body in two halves with a gap, so the server MUST stop reading after the
  * first half (pause), then continue after the timer resumes (READ re-armed / recv re-posted).
  * Verifies: no data lost, on_complete fires, and the pause actually took effect (reading stopped
- * until the timer resumed it). Model-independent — the same test runs over readiness here and
- * over the completion backends via the parity fixture (Phase 3).
+ * until the timer resumed it). Model-independent: the same test runs over readiness here and
+ * over the completion backends via the parity fixture.
  */
 #include "utest.h"
 #include <keel/keel.h>
@@ -130,7 +130,7 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
     rfc_nap(120);   /* > 30ms resume timer */
     ASSERT_TRUE(g_calls_at_pause >= 1);   /* paused after the first chunk(s) arrived */
     ASSERT_EQ(1, g_resumed);              /* timer resumed reading */
-    ASSERT_EQ(0, g_completed);            /* body not finished — second half not sent yet */
+    ASSERT_EQ(0, g_completed);            /* body not finished: second half not sent yet */
 
     memset(half, 'B', sizeof(half));
     ASSERT_EQ((long)RFC_HALF, kl_test_sockwrite(fd, half, RFC_HALF));  /* second half → completes */
@@ -177,7 +177,7 @@ static KlHttpBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlH
 }
 
 /* Shutdown-while-paused: a conn parked in read-paused (no outstanding op on completion / READ
- * interest off on readiness) must tear down cleanly on kl_http_server_stop — no hang, no leak, no
+ * interest off on readiness) must tear down cleanly on kl_http_server_stop: no hang, no leak, no
  * UAF (the ASan run is the oracle for the last two; join returning is the oracle for no-hang). */
 UTEST(read_flow_control, shutdown_while_paused) {
     g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;

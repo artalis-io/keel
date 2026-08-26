@@ -1,21 +1,21 @@
 /*
- * dgram_public_selftest.c — 7B-9 acceptance self-test (UEFI EFI application).
+ * dgram_public_selftest.c: public-facade close acceptance self-test (UEFI EFI application).
  *
- * The PUBLIC KlDatagram facade (keel/datagram.h) over EFI_UDP4 on bare OVMF firmware —
+ * The PUBLIC KlDatagram facade (keel/datagram.h) over EFI_UDP4 on bare OVMF firmware:
  * the end-to-end gate the host-mock cannot provide. Unlike dgram_dns_selftest.c (which
  * drives a KlDatagram via the stock dns_resolver), this exercises the public kl_datagram_*
  * surface directly: init → recv_start → send → (round-trip) → graceful close → DETACHED.
  *
- * It is the runtime proof for 7B-9 (the confirmed-detachment close): at close the armed
+ * It is the runtime proof for the confirmed-detachment close: at close the armed
  * recv is EMPTY (its terminal is surfaced from the post-backend_close STALE_RETIRED
- * observation) and the send has drained — so close must confirm DETACHED with ZERO live
+ * observation) and the send has drained; so close must confirm DETACHED with ZERO live
  * or quarantined EFI_UDP4 children.
  *
  * Scenario (one KlDatagram over a DHCP-default EFI_UDP4 socket):
  *   1. recv_start arms a receive; on_recv counts + matches the echo.
  *   2. send a probe datagram to KL_U9_ECHO_HOST:KL_U9_ECHO_PORT (a host UDP echo over
  *      SLIRP 10.0.2.2). The firmware Transmit completes; the echo is delivered back to the
- *      armed recv — proving the full public send + recv datagram path on real firmware.
+ *      armed recv; proving the full public send + recv datagram path on real firmware.
  *   3. kl_datagram_close_begin (graceful): the send has drained and the re-armed recv is
  *      EMPTY → the confirmed-detachment close cancels it and settles DETACHED.
  *   4. free + kl_event_ctx_free, then assert kl_uefi_udp_provider_live_count()==0 and
@@ -44,7 +44,7 @@
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/datagram.h>
-#include <keel/datagram_detail.h>   /* opt-in KlDatagram layout — stack-allocate the handle */
+#include <keel/datagram_detail.h>   /* opt-in KlDatagram layout; stack-allocate the handle */
 #include <keel/sockaddr.h>
 #include <keel/error.h>
 
@@ -134,7 +134,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("=== 7b9 public KlDatagram close over EFI_UDP4 (round-trip + DETACHED) ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("7b9: (warn) platform_init failed — clock/RNG stuck, continuing");
+        print_line("7b9: (warn) platform_init failed, clock/RNG stuck, continuing");
 
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("7b9: event provider build failed"); goto done; }
@@ -150,7 +150,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("7b9: event ctx up (efi completion) + unified socket provider");
 
     /* Prepare a DHCP-default EFI_UDP4 datagram socket (ephemeral source), then hand it to the
-     * public KlDatagram — fd ownership transfers to KlDatagram on a successful init. */
+     * public KlDatagram; fd ownership transfers to KlDatagram on a successful init. */
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) { print_line("7b9: kl_uefi_udp_socket failed"); kl_event_ctx_free(&ev); goto done; }
     {
@@ -171,7 +171,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     dcfg.send_slots = 2; dcfg.send_slot_cap = 1500; dcfg.recv_cap = 1500;
     if (kl_datagram_init(&dg, &dcfg) != 0) {
         print_line("7b9: kl_datagram_init failed");
-        (void)kl_uefi_udp_close(fd);   /* init did NOT adopt the fd — reclaim it */
+        (void)kl_uefi_udp_close(fd);   /* init did NOT adopt the fd; reclaim it */
         kl_event_ctx_free(&ev);
         goto done;
     }
@@ -199,7 +199,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("7b9: recv_matched = "); print_int(c.recv_matched); print_line("");
 
     /* Graceful close: the send has drained and the re-armed recv is EMPTY → confirmed-detachment
-     * close cancels it and settles DETACHED (the 7B-9 path on real firmware). */
+     * close cancels it and settles DETACHED (the empty-armed-recv close path on real firmware). */
     if (kl_datagram_close_begin(&dg) != 0) print_line("7b9: (warn) close_begin failed");
     for (int tick = 0; tick < 200000 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; tick++) {
         kl_event_ctx_run(&ev, 16, 5);
@@ -229,7 +229,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
 done:
     /* Release the platform's boot-services resources (the periodic monotonic timer + the EBS
-     * notify) BEFORE returning — a still-armed periodic EVT_TIMER notify left running as the app
+     * notify) BEFORE returning; a still-armed periodic EVT_TIMER notify left running as the app
      * returns to the shell / reset -s is a hazard. Idempotent + safe on every (incl. early) exit. */
     kl_uefi_platform_shutdown();
     /* Terminal marker: its ABSENCE in the serial log is the harness's crash/hang signal. */

@@ -1,19 +1,19 @@
 /*
- * u7_selftest.c — U-7 acceptance: ExitBootServices lifetime / clean EFI teardown.
+ * u7_selftest.c: client teardown acceptance: ExitBootServices lifetime / clean EFI teardown.
  *
- * Does the U-3 plaintext GET, then exercises the boot-services-lifetime path:
+ * Does the plaintext GET, then exercises the boot-services-lifetime path:
  *   kl_uefi_shutdown()  → releases the EFI_TCP4 socket provider, the completion event
  *                         provider, and the platform (periodic monotonic timer + the
  *                         EVT_SIGNAL_EXIT_BOOT_SERVICES event).
  * and OBSERVABLY proves the teardown happened: the monotonic clock, driven by the
- * periodic timer, FREEZES after shutdown (a Stall no longer advances it) — the timer
+ * periodic timer, FREEZES after shutdown (a Stall no longer advances it); the timer
  * event was really cancelled + closed. A clean run through teardown (no #PF / reset)
  * proves there is no double-free / use-after-free in the release path.
  *
  * The EVT_SIGNAL_EXIT_BOOT_SERVICES notify (platform_uefi.c) + the socket provider's
  * kl_uefi_after_ebs() guard are the automatic fail-closed net: a real
  * ExitBootServices() sets after_ebs, after which KEEL refuses boot-service I/O. We do
- * NOT call the real ExitBootServices() here — there is no serial console after it, so
+ * NOT call the real ExitBootServices() here; there is no serial console after it, so
  * the run would be unobservable; the teardown above is the observable acceptance.
  *
  * Freestanding: clang --target=x86_64-unknown-windows, -nostdlib, lld PE. No libc.
@@ -88,7 +88,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print("U-7: target = "); print_line(TARGET_URL);
 
     if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("U-7: (warn) platform_init failed — continuing");
+        print_line("U-7: (warn) platform_init failed, continuing");
 
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
     if (!ep) { print_line("U-7: event provider build failed"); goto park; }
@@ -121,26 +121,26 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 
-    /* ── the U-7 payload: clean boot-services teardown, observably proven ── */
-    /* F6: the lifecycle contract is that every opened socket is closed before shutdown.
-     * The async client closes its fd on completion, so this must read 0 here — prove it. */
+    /* ── the payload: clean boot-services teardown, observably proven ── */
+    /* The lifecycle contract is that every opened socket is closed before shutdown.
+     * The async client closes its fd on completion, so this must read 0 here; prove it. */
     int live = kl_uefi_socket_provider_live_count();
     print("U-7: live socket slots before shutdown = "); print_int(live);
-    print_line(live == 0 ? " (contract OK — all closed)"
-                         : " (WARN: contract violation — slots preserved, not reclaimed)");
+    print_line(live == 0 ? " (contract OK, all closed)"
+                         : " (WARN: contract violation, slots preserved, not reclaimed)");
     print_line("U-7: releasing EFI network stack (kl_uefi_shutdown)...");
     uint64_t t0 = kl_monotonic_ms();
     kl_uefi_shutdown();                 /* socket provider + event provider + platform */
-    print_line("U-7: clean teardown OK — socket/event providers + monotonic timer released");
+    print_line("U-7: clean teardown OK, socket/event providers + monotonic timer released");
 
     /* The monotonic clock is driven by the periodic timer we just cancelled+closed;
-     * after shutdown it must FREEZE. Stall ~50 ms and confirm it did not advance —
+     * after shutdown it must FREEZE. Stall ~50 ms and confirm it did not advance;
      * observable proof the timer event was truly released, not merely leaked. */
     bs->Stall(50000);
     uint64_t t1 = kl_monotonic_ms();
     int frozen = (t1 == t0);
     print("U-7: monotonic clock after shutdown: dt="); print_int((int)(t1 - t0));
-    print_line(frozen ? " (frozen — timer released)" : " (WARN: still advancing)");
+    print_line(frozen ? " (frozen, timer released)" : " (WARN: still advancing)");
 
     print("U-7: after_ebs guard = "); print_int(kl_uefi_after_ebs());
     print_line(" (0 pre-EBS; a real ExitBootServices sets it → providers fail-closed)");

@@ -34,7 +34,7 @@ typedef enum {
 /* ── Reader struct ───────────────────────────────────────────────────── */
 
 /*
- * KL_HTTP_MP_MAX_BOUNDARY (70) comes from RFC 2046 §5.1.1 — the multipart
+ * KL_HTTP_MP_MAX_BOUNDARY (70) comes from RFC 2046 §5.1.1: the multipart
  * spec's hard limit on boundary length, NOT a Keel-imposed magic cap.
  * No other fixed-size buffer state exists; both the input buffer and
  * the per-part header accumulator grow on demand, capped by config.
@@ -44,7 +44,7 @@ struct KlHttpMultipartReader {
     KlHttpBodyReader base;
     KlAllocator *alloc;
 
-    /* Delimiter: "\r\n--<boundary>" — what marks the END of a part
+    /* Delimiter: "\r\n--<boundary>", what marks the END of a part
      * body. For the initial preamble we search for just "--<boundary>".
      * Bounded by the RFC 2046 cap on boundary length, so a static
      * inline buffer is the right shape here. */
@@ -84,7 +84,7 @@ struct KlHttpMultipartReader {
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-/* O(n*m) naive search — boundary is at most KL_HTTP_MP_MAX_BOUNDARY + 4 bytes. */
+/* O(n*m) naive search; boundary is at most KL_HTTP_MP_MAX_BOUNDARY + 4 bytes. */
 static const void *mp_memmem(const void *hay, size_t hlen,
                               const void *needle, size_t nlen) {
     if (nlen == 0) return hay;
@@ -100,7 +100,7 @@ static const void *mp_memmem(const void *hay, size_t hlen,
 /*
  * Find a MIME parameter "<name>=" inside a header value, returning a
  * pointer to the byte AFTER the '='. The match must be at the start
- * of the value or be preceded by ';', SP, or HTAB — otherwise a
+ * of the value or be preceded by ';', SP, or HTAB; otherwise a
  * parameter with a colliding prefix (e.g. "somename=" vs "name=", or
  * "X-boundary=" vs "boundary=") could front-run the real one.
  *
@@ -224,10 +224,10 @@ static void mp_apply_consume(KlHttpMultipartReader *mr) {
  * Returns 0 on success, -1 on failure. On NOMEM, sets mr->last_error to
  * KL_HTTP_MP_ERR_NOMEM so the caller can preserve the cause via mp_fail_or_keep.
  * On any other failure (missing name=, empty name, unterminated quoted
- * attribute), leaves last_error alone — caller maps to MALFORMED.
+ * attribute), leaves last_error alone; caller maps to MALFORMED.
  *
  * Asymmetry: `name=` MUST be present AND non-empty (it's the form-field
- * key — an empty key is semantically meaningless and would confuse
+ * key: an empty key is semantically meaningless and would confuse
  * downstream form handlers). `filename=""` is accepted and produces a
  * zero-length string; clients legitimately send empty filename to mark
  * a part as binary-data-without-filename.
@@ -327,7 +327,7 @@ static int mp_parse_headers(KlHttpMultipartReader *mr) {
             } else if (name_len == 12 &&
                        strncasecmp(buf, "Content-Type", 12) == 0) {
                 /* Free any prior Content-Type allocation in this same
-                 * part — duplicate header lines would otherwise leak
+                 * part: duplicate header lines would otherwise leak
                  * the first allocation. Last header wins. */
                 mp_free_str(mr->alloc, &mr->cur_ctype, &mr->cur_ctype_len);
                 mr->cur_ctype = mp_strdup(mr->alloc, val, val_len);
@@ -470,7 +470,7 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
             if (found) {
                 size_t skip = (size_t)(found - mr->input) + nlen;
                 mr->input_consumed = skip;
-                mp_apply_consume(mr);  /* immediate — no slice handed out */
+                mp_apply_consume(mr);  /* immediate: no slice handed out */
                 mr->state = KL_HTTP_MP_S_AFTER_BOUNDARY;
                 continue;
             }
@@ -631,7 +631,7 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
                 return KL_HTTP_MP_EVT_PART_DATA;
             }
 
-            /* input could be a delimiter prefix — wait for more. */
+            /* input could be a delimiter prefix; wait for more. */
             return mp_need_or_eof(mr);
         }
 

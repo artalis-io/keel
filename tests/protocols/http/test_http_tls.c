@@ -1,9 +1,9 @@
-/* test_http_tls.c — HTTP-TLS-adapter slice of the former tests/test_tls.c.
+/* test_http_tls.c: HTTP-TLS-adapter slice of the TLS tests.
  *
- * This is the HTTP half of the T-split of the TLS test family: the cases here
+ * This is the HTTP half of the TLS test family: the cases here
  * drive the HTTP connection/response layer through the mock KlTls vtable
  * (handshake state machine, response send/stream/file through TLS, keep-alive
- * reset, and pool/connection shutdown). The generic KlTls-interface cases stay
+ * reset, and pool/connection shutdown). The generic KlTls-interface cases live
  * in tests/test_tls.c.
  */
 
@@ -215,7 +215,7 @@ UTEST(tls, response_send_through_mock) {
     kl_http_response_init(&res, &a);
 
     /* Use a pipe for conn_fd (writev_all needs a valid fd for the
-     * plaintext codepath, but TLS path ignores it — the mock captures
+     * plaintext codepath, but TLS path ignores it: the mock captures
      * all writes in write_buf) */
     int pipefd[2];
     ASSERT_EQ(kl_test_socketpair(pipefd), 0);
@@ -224,7 +224,7 @@ UTEST(tls, response_send_through_mock) {
     res.tls = &m.base;
     kl_http_response_json(&res, 200, "{\"tls\":true}", 12);
 
-    /* Buffer body sends may return 1 (partial) via try_writev — loop */
+    /* Buffer body sends may return 1 (partial) via try_writev: loop */
     int r;
     do { r = kl_http_response_send(&res); } while (r == 1);
     ASSERT_EQ(r, 0);
@@ -280,7 +280,7 @@ UTEST(tls, response_stream_through_mock) {
     kl_http_response_free(&res);
 }
 
-#if !defined(_WIN32)   /* mkstemp + hardcoded /tmp path — POSIX-specific */
+#if !defined(_WIN32)   /* mkstemp + hardcoded /tmp path: POSIX-specific */
 UTEST(tls, response_file_through_mock) {
     /* File send through TLS uses pread+tls->write fallback */
     MockTls m;
@@ -394,7 +394,7 @@ UTEST(tls, response_reset_preserves_tls) {
 
 /* ── Shutdown WANT_WRITE retry ───────────────────────────────────── */
 
-#if !defined(_WIN32)   /* open("/dev/null") — POSIX-specific device path */
+#if !defined(_WIN32)   /* open("/dev/null"): POSIX-specific device path */
 UTEST(tls, shutdown_retries_want_write) {
     /* kl_http_conn_release should retry shutdown on WANT_WRITE */
     MockTls m;
@@ -420,7 +420,7 @@ UTEST(tls, shutdown_retries_want_write) {
     ASSERT_EQ(m.shutdown_count, 3);
     ASSERT_TRUE(m.reset_called);
 
-    /* Clean up — prevent double-destroy since mock is stack-allocated */
+    /* Clean up: prevent double-destroy since mock is stack-allocated */
     pool.conns[0].tls = NULL;
     kl_http_conn_pool_free(&pool);
 }
@@ -465,7 +465,7 @@ UTEST(tls, pool_free_calls_shutdown_and_destroy) {
     pool.conns[0].tls = &m.base;
 
     /* Give the slot a valid-looking fd so shutdown path is taken.
-     * Use -1 to avoid closing a real fd — shutdown is still called
+     * Use -1 to avoid closing a real fd: shutdown is still called
      * because the check is fd >= 0.  So use a dup'd /dev/null. */
     int devnull = open("/dev/null", 0);
     ASSERT_TRUE(devnull >= 0);

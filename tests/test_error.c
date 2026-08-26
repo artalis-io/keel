@@ -39,7 +39,7 @@ UTEST(error, server_init_success) {
     KlHttpServer s;
     KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
-    cfg.port = 0;  /* unused — we won't run */
+    cfg.port = 0;  /* unused: we won't run */
     ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
     ASSERT_EQ(s.last_error, KL_ERR_NONE);
     kl_http_server_free(&s);

@@ -1,8 +1,8 @@
 /*
- * keel_tls_openssl.h — OpenSSL / BoringSSL backend for Keel's KlTls vtable
+ * keel_tls_openssl.h: OpenSSL / BoringSSL backend for Keel's KlTls vtable
  *
  * Provides TLS 1.2/1.3 server (and client) support using OpenSSL 3.x or
- * BoringSSL. The SAME adapter TU (tls_openssl.c) serves both libraries — the
+ * BoringSSL. The SAME adapter TU (tls_openssl.c) serves both libraries; the
  * few API divergences are guarded with `#if defined(OPENSSL_IS_BORINGSSL)`.
  * Supports mutual TLS (mTLS) with configurable client authentication and both
  * the readiness (socket-BIO) and completion (memory-BIO) transport modes.
@@ -38,7 +38,7 @@
 #include <keel/allocator.h>
 
 /*
- * LIFECYCLE: a KlTlsCtx is a LONG-LIVED, reusable object — create it ONCE (per
+ * LIFECYCLE: a KlTlsCtx is a LONG-LIVED, reusable object; create it ONCE (per
  * server, or per client configuration/connection-pool) and make many KlTls sessions
  * from it via the factory. Do NOT create and destroy a context per request. Besides
  * the cost of rebuilding the SSL_CTX, each context allocates its own custom
@@ -66,7 +66,7 @@ typedef enum {
  * @param client_auth Client authentication mode (KlMtlsMode). When OPTIONAL or
  *                    REQUIRED, ca_path must name a non-empty CA bundle (else the
  *                    call fails). An out-of-range mode value is rejected.
- * @param alloc       Allocator for context storage (borrowed — must outlive context).
+ * @param alloc       Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path,
@@ -92,7 +92,7 @@ KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path,
  * @param ca_len      CA length (0 when ca_buf is NULL).
  * @param client_auth Client authentication mode (KlMtlsMode). Out-of-range values
  *                    are rejected.
- * @param alloc       Allocator for context storage (borrowed — must outlive it).
+ * @param alloc       Allocator for context storage (borrowed, must outlive it).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
@@ -108,10 +108,10 @@ KlTlsCtx *kl_tls_openssl_ctx_create_from_buf(const unsigned char *cert_buf, size
  *
  * @param ca_path  Path to PEM-encoded CA cert bundle for server verification.
  *                 NULL uses the system default trust store
- *                 (SSL_CTX_set_default_verify_paths) — still verifying. To skip
+ *                 (SSL_CTX_set_default_verify_paths), still verifying. To skip
  *                 verification entirely (tests / cert-pinning done elsewhere),
  *                 use kl_tls_openssl_client_ctx_create_insecure().
- * @param alloc    Allocator for context storage (borrowed — must outlive context).
+ * @param alloc    Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_client_ctx_create(const char *ca_path,
@@ -128,7 +128,7 @@ KlTlsCtx *kl_tls_openssl_client_ctx_create(const char *ca_path,
  *                (still verifying); to disable verification use
  *                kl_tls_openssl_client_ctx_create_insecure().
  * @param ca_len  Length in bytes (0 when ca_buf is NULL).
- * @param alloc   Allocator for context storage (borrowed — must outlive context).
+ * @param alloc   Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_client_ctx_create_from_buf(const unsigned char *ca_buf,
@@ -138,13 +138,13 @@ KlTlsCtx *kl_tls_openssl_client_ctx_create_from_buf(const unsigned char *ca_buf,
 /**
  * @brief Create a client TLS context with certificate verification DISABLED.
  *
- * WARNING: verify-none. The connection is encrypted but MITM-vulnerable — the
+ * WARNING: verify-none. The connection is encrypted but MITM-vulnerable; the
  * server certificate is NOT checked against any CA and the hostname is NOT
  * matched. Use ONLY for tests or when peer authenticity is guaranteed by some
  * other means (e.g. certificate pinning performed by the caller). Production
  * code must use kl_tls_openssl_client_ctx_create() / _from_buf() instead.
  *
- * @param alloc  Allocator for context storage (borrowed — must outlive context).
+ * @param alloc  Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_client_ctx_create_insecure(KlAllocator *alloc);
@@ -219,7 +219,7 @@ int kl_tls_openssl_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * socket ops (kl_sockdef_*). Set a provider here to run TLS over a non-kernel
  * stack (e.g. lwIP). Passing NULL restores the host default. Applies only to the
  * synchronous socket-BIO path; the completion (memory-BIO) mode ignores it.
- * Optional — usually the framework auto-wires this via KlTls.set_socket_provider.
+ * Optional: usually the framework auto-wires this via KlTls.set_socket_provider.
  *
  * @param ctx Server or client context.
  * @param sp  Socket provider to route through, or NULL for the host default.

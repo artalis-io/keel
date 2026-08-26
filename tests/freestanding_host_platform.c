@@ -1,18 +1,18 @@
 /*
- * freestanding_host_platform.c — F-5 HOST reference implementations of the
- * freestanding platform-hook contract, for the F-7 host mock harness.
+ * freestanding_host_platform.c: HOST reference implementations of the
+ * freestanding platform-hook contract, for the host mock harness.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * THE FREESTANDING PLATFORM-HOOK CONTRACT
  * ─────────────────────────────────────────────────────────────────────────
  * libkeel_freestanding.a (the client-only, completion-only archive built by
- * `make freestanding-lib`) leaves a documented set of symbols UNDEFINED — the
+ * `make freestanding-lib`) leaves a documented set of symbols UNDEFINED: the
  * seams an embedder (UEFI, a unikernel, this test harness) must fill. The
  * enforced whitelist lives in tests/freestanding_symbol_gate.sh. They fall in
- * three classes; F-5 concerns the FIRST two:
+ * three classes; this TU provides the FIRST two:
  *
- *   1. PLATFORM SEAMS — the tiny per-platform services the design flags
- *      (docs/phase10_uefi_feasibility_design.md §6):
+ *   1. PLATFORM SEAMS: the tiny per-platform services the design flags
+ *      (docs/archive/phases/phase10_uefi_feasibility_design.md §6):
  *        - uint64_t kl_monotonic_ms(void)
  *              A monotonic millisecond clock. Drives kl_timer deadlines, the
  *              Happy-Eyeballs attempt delay, and the overall request deadline.
@@ -25,7 +25,7 @@
  *              CLIENT archive does not pull the DNS stack, so this is only a
  *              reserved seam (kept defined so an embedder that later adds DNS
  *              has one). A REAL freestanding build MUST fail-closed or use
- *              EFI_RNG_PROTOCOL — a deterministic PRNG like the one below is
+ *              EFI_RNG_PROTOCOL: a deterministic PRNG like the one below is
  *              TEST-ONLY and cryptographically worthless.
  *        - int kl_resolve_sync(host, port, socktype, out, max, *n)
  *              Blocking name resolution → KlSockAddr. See the long note at its
@@ -33,14 +33,14 @@
  *              cfg->resolver (or a numeric literal), so this is only a
  *              reference NUMERIC-ONLY resolver, never blocking DNS.
  *
- *   2. FALLBACK SOCKET DEFAULTS — kl_sockdef_*: the built-in per-op syscall the
+ *   2. FALLBACK SOCKET DEFAULTS: kl_sockdef_*: the built-in per-op syscall the
  *      inline dispatchers in src/socket.h call when a provider op is NULL. A
  *      freestanding build supplies its own provider (EFI_TCP4); the harness
  *      supplies a full mock provider. These symbols must still be DEFINED (the
  *      inline dispatchers reference them) even though a complete provider means
- *      they are never CALLED — so here they FAIL-CLOSED (no host syscall).
+ *      they are never CALLED: so here they FAIL-CLOSED (no host syscall).
  *
- *   3. EVENT/COMPLETION BUILTIN HOOKS — kl_event_*_builtin / kl_comp_ops_builtin:
+ *   3. EVENT/COMPLETION BUILTIN HOOKS: kl_event_*_builtin / kl_comp_ops_builtin:
  *      the compiled-in event/completion backend the dispatchers fall back to
  *      when loop->ops == NULL. The harness INJECTS a runtime provider
  *      (kl_event_ctx_init_ex → loop->ops != NULL), so these are never reached;
@@ -54,7 +54,7 @@
  *   - a KlEventProvider with a KlCompletionOps (drain + post_connect + cancel;
  *                               add/mod/del/wait/caps/native_provider)
  *   Nothing more for a plaintext client. TLS/ws would add a KlTls backend +
- *   its entropy (kl_plat_random / EFI_RNG); DNS (U-5) would add a KlResolver or
+ *   its entropy (kl_plat_random / EFI_RNG); DNS would add a KlResolver or
  *   a real kl_resolve_sync over EFI_UDP4/EFI_DNS4.
  *
  * This TU is TEST/HARNESS-ONLY. It is compiled with the SAME -DKEEL_FREESTANDING
@@ -75,7 +75,7 @@
 #include <string.h>
 
 /* ══════════════════════════════════════════════════════════════════════
- * 1a. MOCK MONOTONIC CLOCK — advanceable, deterministic (no sleeps).
+ * 1a. MOCK MONOTONIC CLOCK: advanceable, deterministic (no sleeps).
  * ══════════════════════════════════════════════════════════════════════
  * A file-scope counter the harness drives with fs_clock_set / fs_clock_advance,
  * so timer deadlines (HE delay, request deadline) fire on demand rather than by
@@ -92,7 +92,7 @@ void fs_clock_advance(uint64_t ms) { g_fs_now_ms += ms; }
 uint64_t fs_clock_now(void)        { return g_fs_now_ms; }
 
 /* ══════════════════════════════════════════════════════════════════════
- * 1b. DETERMINISTIC PRNG — TEST ONLY (a real build fails-closed / uses EFI_RNG).
+ * 1b. DETERMINISTIC PRNG: TEST ONLY (a real build fails-closed / uses EFI_RNG).
  * ══════════════════════════════════════════════════════════════════════
  * A splitmix64-style deterministic fill. NOT cryptographic. The freestanding
  * CLIENT archive does not currently reference kl_plat_random (no DNS/TLS in the
@@ -113,27 +113,27 @@ void kl_plat_random(void *buf, size_t len) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * 1c. kl_resolve_sync — NUMERIC-ONLY reference resolver (never blocking DNS).
+ * 1c. kl_resolve_sync: NUMERIC-ONLY reference resolver (never blocking DNS).
  * ══════════════════════════════════════════════════════════════════════
  * WHY MOCKED, NOT TRIMMED. The archive references kl_resolve_sync (undefined,
- * whitelisted): http_client_async.c's sync-DNS FALLBACK path — reached when
- * client_pick_resolver returns NULL — still calls it, and under KEEL_FREESTANDING
+ * whitelisted): http_client_async.c's sync-DNS FALLBACK path: reached when
+ * client_pick_resolver returns NULL: still calls it, and under KEEL_FREESTANDING
  * client_pick_resolver DOES return NULL (the built-in DNS-over-UDP resolver is
  * out of the minimal archive, §8). So the symbol is a genuine link dependency of
  * the compiled client, even though a consumer that passes cfg->resolver never
  * EXECUTES it.
  *
  * Trimming it would mean #ifdef-ing out both call sites AND their surrounding
- * fallback blocks in http_client_async.c — a real src change — and would leave a
+ * fallback blocks in http_client_async.c, a real src change, and would leave a
  * freestanding client unable to dial a NUMERIC address literal without a
  * resolver (numeric IPs also flow through this path in the fallback). The design
- * (§F-0) deliberately keeps kl_resolve_sync on the whitelist as "the tiny
+ * deliberately keeps kl_resolve_sync on the whitelist as "the tiny
  * platform seam"; the right move is to PROVIDE it as a numeric-only reference
- * impl (no getaddrinfo, no host DNS) — which is exactly what a minimal
- * freestanding embedder would ship pre-DNS (U-5). Reported in the deliverable.
+ * impl (no getaddrinfo, no host DNS): which is exactly what a minimal
+ * freestanding embedder would ship pre-DNS. Reported in the deliverable.
  *
  * Parses a dotted-quad IPv4 literal; any non-numeric host fails (a freestanding
- * client with no resolver cannot resolve names — the correct behavior). */
+ * client with no resolver cannot resolve names: the correct behavior). */
 static int parse_ipv4(const char *host, uint8_t out[4]) {
     int oct = 0, val = -1;
     const char *p = host;
@@ -148,7 +148,7 @@ static int parse_ipv4(const char *host, uint8_t out[4]) {
             val = -1;
             if (*p == '\0') break;
         } else {
-            return -1;   /* non-numeric host — no DNS in a freestanding client */
+            return -1;   /* non-numeric host: no DNS in a freestanding client */
         }
         p++;
     }
@@ -170,11 +170,11 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * 2. FALLBACK SOCKET DEFAULTS — fail-closed (the mock provider sets all ops).
+ * 2. FALLBACK SOCKET DEFAULTS: fail-closed (the mock provider sets all ops).
  * ══════════════════════════════════════════════════════════════════════
  * These are the kl_sockdef_* the src/socket.h inline dispatchers call when a
  * provider op is NULL. The harness's mock provider supplies every op it uses, so
- * these are never CALLED — but they must be DEFINED for the archive to link. Any
+ * these are never CALLED: but they must be DEFINED for the archive to link. Any
  * accidental reach here (a provider op left NULL) fails loudly rather than
  * silently doing a host syscall on a "freestanding" build. */
 KlSocketHandle kl_sockdef_socket(int d, int t, int p) { (void)d;(void)t;(void)p; return KL_INVALID_SOCKET; }
@@ -191,7 +191,7 @@ ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 
 /* ══════════════════════════════════════════════════════════════════════
- * 3. EVENT/COMPLETION BUILTIN HOOKS — fail-closed (harness injects a provider).
+ * 3. EVENT/COMPLETION BUILTIN HOOKS: fail-closed (harness injects a provider).
  * ══════════════════════════════════════════════════════════════════════
  * The compiled-in event/completion backend the dispatchers fall back to on the
  * loop->ops == NULL path. The harness ALWAYS installs a runtime provider via

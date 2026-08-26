@@ -2,19 +2,19 @@
 #define KEEL_SRC_PLATFORM_H
 
 /*
- * platform.h — internal platform-services interface.
+ * platform.h: internal platform-services interface.
  *
  * The narrow, logic-free declarations for the handful of services that are
  * genuinely OS-specific and not socket-shaped: monotonic clock, secure random,
  * thread-pool wakeup. Each is DEFINED per-OS in platform_posix.c / platform_win.c
- * (one selected by the Makefile PLATFORM_SRC branch) — the same one-platform-per-
+ * (one selected by the Makefile PLATFORM_SRC branch): the same one-platform-per-
  * TU pattern as event_epoll.c/event_wsapoll.c and socket_posix.c/socket_winsock.c.
- * See docs/phase6_winsock_design.md §B.0/§B.3.
+ * See docs/archive/phases/phase6_winsock_design.md §B.0/§B.3.
  *
  * Deliberately several narrow functions rather than one KlPlatformOps god-object
- * (per docs/pal_transformation_design.md §6).
+ * (per docs/archive/designs/pal_transformation_design.md §6).
  *
- * INTERNAL header — not installed.
+ * INTERNAL header: not installed.
  */
 
 #include <stdint.h>
@@ -26,9 +26,9 @@
  * Windows: QueryPerformanceCounter. Also declared in keel/http_connection.h (public,
  * unchanged); the identical redeclaration here lets the per-OS TU avoid dragging
  * in the not-yet-Windows-ready http_connection.h. */
-#include <keel/clock.h>   /* kl_monotonic_ms — generic substrate clock */
+#include <keel/clock.h>   /* kl_monotonic_ms: generic substrate clock */
 
-/* Fill @buf with @len secure-random bytes (best-effort — always fills the whole
+/* Fill @buf with @len secure-random bytes (best-effort: always fills the whole
  * buffer, degrading to a non-cryptographic last resort if the OS RNG is somehow
  * unavailable). POSIX: arc4random / /dev/urandom. Windows: BCryptGenRandom.
  * Callers use it for defense-in-depth (WS mask keys) and off-path spoof
@@ -37,11 +37,11 @@ void kl_plat_random(void *buf, size_t len);
 
 /* Cross-thread event-loop wakeup channel (a self-pipe). A worker thread writes a
  * byte to .wr to wake the event loop, which watches .rd. .rd is non-blocking and
- * is the handle to register with the event loop (kl_watcher_add); it coalesces —
+ * is the handle to register with the event loop (kl_watcher_add); it coalesces:
  * the byte count carries no meaning, only "something is ready".
  *
  * POSIX: pipe(2). Windows: a connected loopback TCP socket pair, because WSAPoll
- * can only watch sockets, not pipe HANDLEs (see docs/phase6_winsock_design.md
+ * can only watch sockets, not pipe HANDLEs (see docs/archive/phases/phase6_winsock_design.md
  * §B.3). This is the one platform seam the thread pool needs. */
 typedef struct {
     KlSocketHandle rd;
@@ -69,14 +69,14 @@ int kl_plat_cpu_count(void);
 
 /* Positioned read from a file descriptor at @offset, up to @count bytes into
  * @buf. Returns bytes read (0 = EOF), or -1 on error. POSIX: pread (offset
- * unchanged). Windows: _lseeki64 + _read (advances the fd offset — fine for the
+ * unchanged). Windows: _lseeki64 + _read (advances the fd offset, fine for the
  * sequential, per-response file sends this serves). @fd is a CRT file
  * descriptor; @count is bounded by the caller's buffer (fits in int). */
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
 
 /* Close a file-body descriptor opened for a KL_HTTP_BODY_FILE response. A platform
  * seam (not a raw close()) so http_response.c stays freestanding: POSIX/Windows close
- * the CRT fd; a freestanding build (no filesystem) supplies its own — typically a
+ * the CRT fd; a freestanding build (no filesystem) supplies its own: typically a
  * no-op. Ignores a negative fd. */
 void kl_plat_file_close(int fd);
 

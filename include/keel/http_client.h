@@ -77,7 +77,7 @@ typedef struct {
     int              timeout_ms;        /**< Connect/send/recv timeout (0 = default 30s) */
     size_t           max_response_size;  /**< Max response body (0 = default 4 MB) */
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
-    KlResolver      *resolver;          /**< Async DNS resolver — takes precedence over the default. */
+    KlResolver      *resolver;          /**< Async DNS resolver: takes precedence over the default. */
     int              system_dns;        /**< Async client: force blocking getaddrinfo (preserves /etc/hosts + search domains). Default 0 = built-in async DNS. Ignored when `resolver` is set. */
     KlDecompressConfig *decompress;     /**< Response decompression (NULL = no decompression) */
     KlHttpProxyConfig   *proxy;             /**< HTTP proxy (NULL = direct connection) */

@@ -1,5 +1,5 @@
 /*
- * test_version.c — runtime version accessors match the compile-time macros.
+ * test_version.c: runtime version accessors match the compile-time macros.
  */
 #include "utest.h"
 #include <keel/keel.h>

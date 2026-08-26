@@ -1,8 +1,8 @@
 /*
- * fuzz_proxy.c — libFuzzer target for the PROXY protocol header parser.
+ * fuzz_proxy.c: libFuzzer target for the PROXY protocol header parser.
  *
  * kl_proxy_parse consumes untrusted bytes from an L4 load-balancer connection:
- * v1 (text, CRLF-terminated) and v2 (binary — 12-byte signature + a 16-bit
+ * v1 (text, CRLF-terminated) and v2 (binary, 12-byte signature + a 16-bit
  * length field + a variable address block). Length-field binary parsers are a
  * classic source of over-read bugs; this feeds arbitrary bytes and lets
  * ASan/UBSan catch any out-of-bounds read or overflow. Also fuzzes the CIDR

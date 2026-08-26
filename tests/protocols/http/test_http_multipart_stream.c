@@ -58,7 +58,7 @@ typedef struct {
     KlHttpMultipartErrorCode last_error;
 } Collector;
 
-/* Abort on alloc failure — test code can't recover meaningfully and
+/* Abort on alloc failure: test code can't recover meaningfully and
  * silent NULL returns hide bugs. */
 static void mp_test_oom(void) {
     fprintf(stderr, "test fixture allocation failure\n");
@@ -411,7 +411,7 @@ UTEST(mp, body_byte_by_byte) {
 
 UTEST(mp, delimiter_split_across_chunks) {
     /* Carefully fragment so the boundary sequence is split between two
-     * on_data calls — the parser must keep the trailing potential-
+     * on_data calls: the parser must keep the trailing potential-
      * boundary prefix and not flush it as PART_DATA. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
@@ -660,7 +660,7 @@ UTEST(mp, premature_eof_mid_part_yields_error) {
         "multipart/form-data; boundary=PE");
     KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
-    /* No closing boundary — connection truncated. */
+    /* No closing boundary: connection truncated. */
     const char *body =
         "--PE\r\n"
         "Content-Disposition: form-data; name=\"x\"\r\n\r\n"
@@ -805,7 +805,7 @@ UTEST(mp, zero_body_part_immediate_boundary) {
 
     ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_BEGIN);
     ASSERT_TRUE(memcmp(m.name, "empty", m.name_len) == 0);
-    /* No PART_DATA — the next event is PART_END. */
+    /* No PART_DATA: the next event is PART_END. */
     ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_END);
 
     ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_BEGIN);
@@ -832,7 +832,7 @@ UTEST(mp, rejects_subtype_prefix_collision) {
 UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
     /* Regression for the case where a single chunk carries
      * [small headers + large body]. The HEADERS state must NOT count
-     * the body bytes toward max_headers_size — only the bytes up to
+     * the body bytes toward max_headers_size: only the bytes up to
      * \r\n\r\n. */
     KlAllocator a = kl_allocator_default();
     KlHttpMultipartConfig cfg = {0};
@@ -842,7 +842,7 @@ UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
     KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
     ASSERT_TRUE(br != NULL);
 
-    /* Body has ~80 bytes of headers and ~2 KiB of body bytes — all in
+    /* Body has ~80 bytes of headers and ~2 KiB of body bytes: all in
      * a single on_data call. */
     const char *prefix =
         "--CR\r\n"
@@ -985,7 +985,7 @@ UTEST(mp, duplicate_content_type_header_no_leak) {
 }
 
 UTEST(mp, name_does_not_collide_with_other_param_suffix) {
-    /* M5 regression: `somename=` must NOT be matched as `name=`.
+    /* Regression: `somename=` must NOT be matched as `name=`.
      * Real `name=` parameter must win. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
@@ -1012,7 +1012,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
 }
 
 UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
-    /* M5 regression for filename=. */
+    /* Regression for filename=. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=FC");
@@ -1038,7 +1038,7 @@ UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
 }
 
 UTEST(mp, boundary_does_not_collide_with_other_param_suffix) {
-    /* M5 regression at factory layer. `xboundary=` must NOT match;
+    /* Regression at factory layer. `xboundary=` must NOT match;
      * real `boundary=` must win. */
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
@@ -1106,7 +1106,7 @@ UTEST(mp, wrong_reader_kind_in_next_yields_error) {
     KlHttpRequest req = {0};
     KlHttpBodyReader *bufr = kl_http_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(bufr != NULL);
-    /* Pass a KlHttpBufReader to kl_http_multipart_next — must not crash. */
+    /* Pass a KlHttpBufReader to kl_http_multipart_next: must not crash. */
     KlHttpMultipartEvent e = kl_http_multipart_next(bufr, NULL, NULL, NULL);
     ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
     ASSERT_EQ(kl_http_multipart_last_error(bufr), KL_HTTP_MP_ERR_NONE);

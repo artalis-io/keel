@@ -1,9 +1,9 @@
 /*
- * datagram_core.c — INTERNAL fixed-slot datagram assembly (Phase B, step 7A-3). See datagram_core.h.
+ * datagram_core.c: INTERNAL fixed-slot datagram assembly. See datagram_core.h.
  *
  * Wires the built machines into one lifecycle: an OBJECT-owned outbound pool + send machine, a
  * LIFE-token-owned rx holder (inbound + recv, freed by on_final so it outlives a posted op AND the
- * caller-owned core), and the confirmed-detachment close coordinator with the §4.3 retirement seam.
+ * caller-owned core), and the confirmed-detachment close coordinator with the retirement seam.
  * Mirrors the proven rx-lifetime + interest wiring over neutral adapters (no provider or transport coupling).
  */
 #include "datagram_core.h"
@@ -12,7 +12,7 @@
 
 /* ── life-owned rx holder ─────────────────────────────────────────────────────────────────── */
 
-/* on_final: the owner ref AND every posted-op ref have been released — the inbound storage is no
+/* on_final: the owner ref AND every posted-op ref have been released; the inbound storage is no
  * longer pinned by any op, so free the rx holder (inbound + this). */
 static void core_rx_final(void *ctx) {
     KlDgramCoreRx *rx = ctx;
@@ -24,7 +24,7 @@ static void core_rx_final(void *ctx) {
 /* Backend-retirement hook driven ONCE by the close coordinator (after the outbound queue drains): the
  * single point that physically closes the adopted fd. Idempotent by fd_closed as belt-and-suspenders
  * (the coordinator already guarantees once). Runs BEFORE classification/on_close, matching the frozen
- * §4.1 order (fd close is what classifies + retires the still-outstanding recv on a completion backend). */
+ * order (fd close is what classifies + retires the still-outstanding recv on a completion backend). */
 static void core_backend_close(void *ctx) {
     KlDgramCore *core = ctx;
     if (core->fd_closed) return;
@@ -37,7 +37,7 @@ static void core_backend_close(void *ctx) {
 /* The core's own on_close: drop the owner life ref (its final release runs core_rx_final → frees the
  * inbound; on QUARANTINE a posted op still holds a ref → the final release DEFERS, storage pinned),
  * NULL the (now token-owned) rx/life, then forward the terminal classification to the caller. This is
- * a DESTRUCTIVE TAIL — the caller may free the core. */
+ * a DESTRUCTIVE TAIL: the caller may free the core. */
 static void core_on_close(void *ctx, KlDatagramCloseResult result) {
     KlDgramCore *core = ctx;
     KlDgramLife *life = core->life;
@@ -48,7 +48,7 @@ static void core_on_close(void *ctx, KlDatagramCloseResult result) {
         kl_dgram_life_release(life);      /* owner ref; runs core_rx_final iff no posted op holds one */
     }
     if (core->abandoning) {
-        /* Owner-destruction (§4a): SILENT — do NOT invoke user_on_close (it could free the owner). Run
+        /* Owner-destruction: SILENT; do NOT invoke user_on_close (it could free the owner). Run
          * the facade reclaim as the DESTRUCTIVE TAIL: it frees the object-owned machines + this heap
          * core + the handle + the owner. The hook + its ctx are read as call args (before it runs), and
          * nothing accesses `core` after this returns. */
@@ -67,7 +67,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     if (!cfg || !cfg->alloc || !kl_handle_valid(cfg->fd) ||
         cfg->send_slots == 0 || cfg->send_slot_cap == 0 || cfg->recv_cap == 0 ||
         !cfg->submit || !cfg->arm || !cfg->deliver || !cfg->close_transport)
-        return -1;   /* close_transport REQUIRED — the core adopts the fd, so it must close it */
+        return -1;   /* close_transport REQUIRED: the core adopts the fd, so it must close it */
 
     KlAllocator *a = cfg->alloc;
 
@@ -89,7 +89,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         return -1;
     }
     /* Owner ref (refs=1). `cfg->dispatch` is the completion-routing identity: a live completion facade
-     * (7B-3) installs kl_datagram_comp_dispatch so the driver routes this token via life->dispatch;
+     * installs kl_datagram_comp_dispatch so the driver routes this token via life->dispatch;
      * NULL (neutral-adapter tests) means completions are driven directly (kl_dgram_core_*_on_complete). */
     KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx,
                                              cfg->dispatch);
@@ -110,7 +110,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
         return -1;
     }
-    /* D1: initial connected state (0 for a fresh facade datagram — kl_datagram_connect sets it later;
+    /* Initial connected state (0 for a fresh facade datagram, kl_datagram_connect sets it later;
      * non-zero only when adopting an already-connected fd). Governs peerless-send admission uniformly. */
     kl_dgram_send_set_connected(&core->send, cfg->connected);
     if (kl_dgram_close_init(&core->close, &core->send, &rx->recv, core_on_close, core) != 0) {
@@ -123,7 +123,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     (void)kl_dgram_close_set_retire(&core->close, cfg->retire, cfg->retire_ctx);
     (void)kl_dgram_close_set_backend_close(&core->close, core_backend_close, core);
 
-    /* Final PRE-ADOPTION hook (7B-7) — the LAST fallible step, run only after EVERY allocation above
+    /* Final PRE-ADOPTION hook: the LAST fallible step, run only after EVERY allocation above
      * succeeded. On abort, unwind ALL prepared state and return -1 WITHOUT adopting the fd, so a
      * completion facade's fd↔loop registration (kl_event_add) that failed leaves the fd un-associated
      * and re-usable. No allocation follows a successful commit. */
@@ -142,9 +142,9 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     core->transport_ctx    = cfg->transport_ctx;
     core->completion   = cfg->completion ? 1 : 0;
     core->caps         = cfg->caps;
-    core->accepted_rx_caps = cfg->accepted_rx_caps;   /* M5.1: enabled-per-socket RX mask (facade-masked) */
-    core->ext          = NULL;                          /* M5.1: no batch attached */
-    core->gso_unsupported  = 0;                         /* M5.1: GSO latch clear */
+    core->accepted_rx_caps = cfg->accepted_rx_caps;   /* enabled-per-socket RX mask (facade-masked) */
+    core->ext          = NULL;                          /* no batch attached */
+    core->gso_unsupported  = 0;                         /* GSO latch clear */
     core->rx           = rx;
     core->life         = life;
     core->user_on_close    = cfg->on_close;
@@ -162,9 +162,9 @@ void kl_dgram_core_dispatch_end(KlDgramCore *core) {
 
 void kl_dgram_core_free_object_owned(KlDgramCore *core) {
     if (!core) return;
-    /* send_abandon skips the inflight_n guard (safe: dead token + §2.5.1 copy-at-submit); close_free
+    /* send_abandon skips the inflight_n guard (safe: dead token + copy-at-submit); close_free
      * requires CLOSED (the silent abandon set it); slots_free reclaims the whole outbound pool block
-     * (incl. any still-occupied in-flight slot — its payload copy lives in the backend op). None of these
+     * (incl. any still-occupied in-flight slot; its payload copy lives in the backend op). None of these
      * touch the life-owned rx holder or the heap core block. */
     kl_dgram_close_free(&core->close);
     kl_dgram_send_abandon(&core->send);
@@ -176,8 +176,8 @@ int kl_dgram_core_abandon(KlDgramCore *core,
                           void (*owner)(void *),   void *owner_ctx) {
     if (!core || !core->inited)
         return -1;
-    /* Idempotent while ALREADY abandoning (§4b): a second request during the DEFERRED window — reachable
-     * via a nested cancellation callback, not only direct repetition — must be a no-op success that
+    /* Idempotent while ALREADY abandoning: a second request during the DEFERRED window (reachable
+     * via a nested cancellation callback, not only direct repetition) must be a no-op success that
      * PRESERVES the first request's reclaim/owner callbacks. Overwriting them here would drop (or NULL
      * out → leak) the original owner reclaim before the terminal fires. */
     if (core->abandoning)
@@ -186,7 +186,7 @@ int kl_dgram_core_abandon(KlDgramCore *core,
      * busy handshake decides WHEN it runs: immediately (no active frame) or deferred to the outermost
      * leave (invoked from within a delivery frame). Either way, core_on_close (abandon branch) does
      * mark-dead + owner-ref-release, then runs `reclaim` as the destructive tail. mark_dead/release are
-     * NOT done here — they belong in the terminal so they run at the SAME safe point as the free. */
+     * NOT done here; they belong in the terminal so they run at the SAME safe point as the free. */
     core->abandoning          = 1;
     core->abandon_reclaim      = reclaim;
     core->abandon_reclaim_ctx  = reclaim_ctx;
@@ -277,7 +277,7 @@ void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso,
     if (core && core->inited)
         kl_dgram_send_set_gso_cbs(&core->send, submit_gso, submit_ctx, on_gso_done, done_ctx);
 }
-void kl_dgram_core_set_connected(KlDgramCore *core, int on) {   /* D1 */
+void kl_dgram_core_set_connected(KlDgramCore *core, int on) {
     if (core && core->inited) kl_dgram_send_set_connected(&core->send, on);
 }
 int kl_dgram_core_connected(const KlDgramCore *core) {

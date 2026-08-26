@@ -1,12 +1,12 @@
 /*
- * test_dgram_core.c — Phase B step 7A-3: the fixed-slot KlDgramCore assembly.
+ * test_dgram_core.c: the fixed-slot KlDgramCore assembly.
  *
  * Drives the integrated core over a SCRIPTED neutral adapter (no real socket/provider): init +
  * failure unwind; fixed-slot send FIFO / count-based backpressure / single-flight / writable+drain
  * edges; the backend-retirement + EXACTLY-ONCE fd close (incl. an idle posted-recv graceful close that
  * must NOT wedge); the copy-before-accept PROVIDER CONTRACT for payload AND address/TOS metadata; and
  * a QUARANTINED recv that pins its life-owned inbound storage (proved via counting-allocator
- * bookkeeping — on_final must NOT run while a posted-op life ref is outstanding).
+ * bookkeeping; on_final must NOT run while a posted-op life ref is outstanding).
  */
 #include "utest.h"
 
@@ -17,11 +17,11 @@
 
 /* ── scripted neutral adapter ─────────────────────────────────────────────────────────────── */
 
-static KlDgramCore *g_core;   /* the core under test — the adapters reach it to pin/retire ops */
+static KlDgramCore *g_core;   /* the core under test: the adapters reach it to pin/retire ops */
 static KlDgramLife *g_send_life;  /* the outstanding posted-send op's token (captured at submit) */
 
-/* submit: copy-before-accept of payload AND metadata into backend-owned storage, and — for an INFLIGHT
- * (async-posted) send — RETAIN a stable-token ref, uniform with the recv arm (B.6). */
+/* submit: copy-before-accept of payload AND metadata into backend-owned storage, and, for an INFLIGHT
+ * (async-posted) send, RETAIN a stable-token ref, uniform with the recv arm (the stable-token contract). */
 static KlDgramSubmitResult g_submit_result;
 static int        g_submit_calls;
 static unsigned char g_submitted[64];         /* backend's COPY of the last payload */
@@ -48,7 +48,7 @@ static KlDgramSubmitResult test_submit(void *ctx, const void *data, size_t len,
 }
 
 /* Deliver a posted send's terminal completion the way a backend does: retire the machine op AND
- * release that op's token ref. (Capture the token BEFORE completion — send_on_complete may pump the
+ * release that op's token ref. (Capture the token BEFORE completion: send_on_complete may pump the
  * next queued send, which retains a fresh ref on the same token.) */
 static void send_done(KlDgramCore *core, int ok) {
     KlDgramLife *l = g_send_life;
@@ -63,7 +63,7 @@ static KlDgramRetireResult test_retire(void *ctx, KlDgramOpKind kind, int *te) {
     return kind == KL_DGRAM_OP_SEND ? g_retire_send : g_retire_recv;
 }
 
-/* recv arm. Completion: posting a recv PINS the op by retaining a core life ref (the B.6 contract) —
+/* recv arm. Completion: posting a recv PINS the op by retaining a core life ref (the stable-token contract):
  * readiness interest is NOT a posted op, so it retains nothing. Readiness also tracks armed interest. */
 static int         g_completion;        /* the core's mode (set by base_cfg) */
 static int         g_arm_calls, g_disarm_calls, g_pull_calls, g_interest;
@@ -85,7 +85,7 @@ static int test_arm(void *ctx) {
     (void)ctx; g_arm_calls++;
     if (g_completion) {
         g_recv_life = kl_dgram_core_life(g_core);
-        kl_dgram_life_retain(g_recv_life);   /* posted op ref — released at terminal completion */
+        kl_dgram_life_retain(g_recv_life);   /* posted op ref: released at terminal completion */
     } else {
         g_interest = 1;                       /* readiness: READ interest armed */
     }
@@ -109,7 +109,7 @@ static void test_cancel_recv(void *ctx) {
     if (!g_recv_quarantine) kl_dgram_life_release(g_recv_life);
 }
 
-/* delivery recorder (+ optional pause/stop from within the callback — invariant-9 confinement). */
+/* delivery recorder (+ optional pause/stop from within the callback, invariant-9 confinement). */
 static int          g_deliv;
 static unsigned char g_last[128]; static size_t g_last_len;
 static int          g_has_peer, g_has_local; static unsigned g_last_flags;
@@ -128,7 +128,7 @@ static void test_deliver(void *ctx, const void *d, size_t n, const KlSockAddr *p
 }
 
 /* A datagram arrives on a posted COMPLETION recv: fill the inbound slot, then signal completion and
- * release THIS op's token ref (capture it first — a delivery re-arms, retaining a fresh ref). */
+ * release THIS op's token ref (capture it first: a delivery re-arms, retaining a fresh ref). */
 static void recv_arrive(KlDgramCore *core, const char *payload, size_t len) {
     KlDgramLife *completing = g_recv_life;
     inbound_fill(core, payload, len);
@@ -136,7 +136,7 @@ static void recv_arrive(KlDgramCore *core, const char *payload, size_t len) {
     kl_dgram_life_release(completing);              /* the completed op's ref */
 }
 
-/* close_transport: the physical fd close — must run EXACTLY ONCE with the adopted fd. */
+/* close_transport: the physical fd close: must run EXACTLY ONCE with the adopted fd. */
 static int            g_fd_close_calls;
 static KlSocketHandle g_fd_closed;
 static void test_close_transport(void *ctx, KlSocketHandle fd) { (void)ctx; g_fd_close_calls++; g_fd_closed = fd; }
@@ -162,7 +162,7 @@ static void reset_globals(void) {
     g_on_close_calls = 0; g_on_close_result = KL_DGRAM_CLOSE_NONE;
 }
 
-/* Counting allocator — tracks live allocations so a quarantine test can prove that on_final (which
+/* Counting allocator: tracks live allocations so a quarantine test can prove that on_final (which
  * frees the life-owned inbound + rx holder) did NOT run while a posted-op token ref is outstanding. */
 static int g_live;
 static void *count_malloc(void *c, size_t n) { (void)c; void *p = malloc(n); if (p) g_live++; return p; }
@@ -177,7 +177,7 @@ static KlDgramCoreConfig base_cfg(KlAllocator *a, int completion, size_t slots, 
     c.alloc = a; c.fd = TEST_FD; c.completion = completion;
     c.send_slots = slots; c.send_slot_cap = cap; c.recv_cap = 64;
     c.caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
-    c.connected = 1;   /* D1: these unit tests use peerless sends — start already-connected */
+    c.connected = 1;   /* These unit tests use peerless sends: start already-connected */
     c.submit = test_submit; c.arm = test_arm; c.disarm = test_disarm; c.pull = test_pull;
     c.deliver = test_deliver; c.cancel_recv = test_cancel_recv;
     c.retire = test_retire; c.close_transport = test_close_transport; c.on_close = test_on_close;
@@ -223,7 +223,7 @@ UTEST(dgram_core, init_rejects_bad_args) {
     ASSERT_EQ((int)core.inited, 0);      /* left zeroed/reusable on every rejection */
 }
 
-/* An allocator that fails after N successful allocations — drives the init unwind paths. */
+/* An allocator that fails after N successful allocations: drives the init unwind paths. */
 static int g_alloc_budget;
 static void *budget_malloc(void *c, size_t n) { (void)c; if (g_alloc_budget-- <= 0) return NULL; return malloc(n); }
 static void *budget_realloc(void *c, void *p, size_t o, size_t n) { (void)c;(void)o; return realloc(p, n); }
@@ -326,9 +326,9 @@ UTEST(dgram_core, copy_before_accept_facade) {
 
 /* Provider contract, storage ASYMMETRY. A QUARANTINED send exercises BOTH halves of the split:
  *  - copy-before-accept (payload AND address/TOS metadata) makes the OBJECT-owned outbound pool safe to
- *    release immediately at core_free — no late access through the pool pointer (ASan on the freed pool);
- *  - yet the send op still holds a B.6 token ref (uniform contract), so abandoning it on quarantine
- *    PINS the life-owned rx storage exactly as a quarantined recv would — on_final defers until the
+ *    release immediately at core_free: no late access through the pool pointer (ASan on the freed pool);
+ *  - yet the send op still holds a stable-token ref (uniform contract), so abandoning it on quarantine
+ *    PINS the life-owned rx storage exactly as a quarantined recv would: on_final defers until the
  *    abandoned ref is reclaimed. */
 UTEST(dgram_core, quarantined_send_releases_pool_but_pins_rx) {
     reset_globals();
@@ -362,7 +362,7 @@ UTEST(dgram_core, quarantined_send_releases_pool_but_pins_rx) {
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_QUARANTINED);
     ASSERT_EQ(g_fd_close_calls, 1);
 
-    /* free RELEASES the object-owned outbound pool (slot_ptr's backing) immediately — ASan on the freed
+    /* free RELEASES the object-owned outbound pool (slot_ptr's backing) immediately: ASan on the freed
      * pool is the check, and the backend's own payload+metadata copies stay intact... */
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
     ASSERT_EQ(memcmp(g_submitted, "HELLO", 5), 0);
@@ -426,7 +426,7 @@ UTEST(dgram_core, quarantined_recv_pins_inbound_storage) {
     /* Reclaim the intentionally-abandoned op ref (test-only): on_final now runs, freeing inbound + rx +
      * the token. No production ref is touched and detachment already fired exactly once. */
     kl_dgram_life_release(g_recv_life);
-    ASSERT_EQ(g_live, 0);                              /* fully reclaimed — LSan-clean */
+    ASSERT_EQ(g_live, 0);                              /* fully reclaimed: LSan-clean */
 }
 
 UTEST(dgram_core, close_detached_when_all_retired) {
@@ -445,10 +445,10 @@ UTEST(dgram_core, close_detached_when_all_retired) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* ── strict pause / receive control (7A-4a — CORE CONFORMANCE) ────────────────────────────────
+/* ── strict pause / receive control (CORE CONFORMANCE) ────────────────────────────────────────
  * These prove KlDgramCore correctly drives the strict-pause interest-drop latch over neutral scripted
  * adapters (completion + readiness). Wiring the ACTUAL backend seams (poll/kqueue/epoll, pollcomp,
- * io_uring, IOCP, EFI, lwIP-raw) onto KlDgramCore and flipping the §10 matrix is 7B — this increment
+ * io_uring, IOCP, EFI, lwIP-raw) onto KlDgramCore and flipping the §10 matrix is 7B; this increment
  * does not establish that any live provider drives the core. */
 
 /* A completion datagram delivers once (peer present) and the machine re-arms through the core. */
@@ -532,7 +532,7 @@ UTEST(dgram_core, recv_readiness_pause_drops_interest) {
 }
 
 /* Reentrant STRICT pause DURING a readiness drain: pausing from the first callback stops the active
- * serial drain before the second queued datagram is pulled — one delivery, one pull, interest dropped,
+ * serial drain before the second queued datagram is pulled: one delivery, one pull, interest dropped,
  * nothing more until resume. */
 UTEST(dgram_core, recv_readiness_pause_during_drain) {
     reset_globals();
@@ -567,7 +567,7 @@ UTEST(dgram_core, recv_readiness_pause_during_drain) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* Invariant 9 confinement: a delivery callback may pause — after which the machine does NOT re-arm. */
+/* Invariant 9 confinement: a delivery callback may pause: after which the machine does NOT re-arm. */
 UTEST(dgram_core, recv_pause_from_callback) {
     reset_globals();
     KlAllocator a = kl_allocator_default();
@@ -587,7 +587,7 @@ UTEST(dgram_core, recv_pause_from_callback) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* Invariant 9 confinement: a delivery callback may STOP — no re-arm, nothing delivered afterward. */
+/* Invariant 9 confinement: a delivery callback may STOP: no re-arm, nothing delivered afterward. */
 UTEST(dgram_core, recv_stop_from_callback) {
     reset_globals();
     KlAllocator a = kl_allocator_default();

@@ -1,21 +1,21 @@
 /*
- * freestanding_dns_harness.c — RUNTIME proof of the freestanding (UDP-only) DNS
- * resolver's truncation branch (6.4a-2 review, Medium).
+ * freestanding_dns_harness.c: RUNTIME proof of the freestanding (UDP-only) DNS
+ * resolver's truncation branch.
  *
  * The freestanding build of src/protocols/dns/dns_resolver.c compiles the RFC 7766 TCP fallback
  * out; a truncated (TC) response must instead settle the leg EMPTY so the whole
- * resolution fails PROMPTLY and CLEARLY (KL_ERR_DNS) — never open a TCP socket and
+ * resolution fails PROMPTLY and CLEARLY (KL_ERR_DNS): never open a TCP socket and
  * never wait for the per-leg timeout. That branch is otherwise only compile/link
  * gated; this harness EXECUTES it on the host, under -DKEEL_FREESTANDING, over a
  * mock datagram socket provider + a mock readiness event loop (no OS sockets, no
- * syscalls, an advanceable mock clock that is NEVER advanced — so a completion can
+ * syscalls, an advanceable mock clock that is NEVER advanced: so a completion can
  * only come from the injected recv, not a timeout).
  *
  * Built + run under ASan+UBSan+LSan by `make freestanding-dns-harness`. It links
  * the SAME freestanding TUs as the freestanding-dns archive (FREESTANDING_DNS_SRC)
- * + the F-5 host platform TU (kl_plat_random / kl_monotonic_ms / the fail-closed
- * sockdef+builtin stubs); the 4 datagram-path sockdef seams udp.c references (never
- * called — the mock provider wins) are defined below, fail-closed.
+ * + the host platform TU (kl_plat_random / kl_monotonic_ms / the fail-closed
+ * sockdef+builtin stubs); the 4 datagram-path sockdef seams the datagram machine references (never
+ * called: the mock provider wins) are defined below, fail-closed.
  */
 #include <keel/clock.h>
 #include <keel/dns_resolver.h>
@@ -43,7 +43,7 @@ static int g_pass = 0, g_fail = 0;
     else { g_fail++; printf("  FAIL: %s\n", (msg)); } \
 } while (0)
 
-/* Counting allocator over host malloc/free — asserts live==0 at teardown (leak
+/* Counting allocator over host malloc/free: asserts live==0 at teardown (leak
  * check that also runs where LSan can't, e.g. macOS). */
 typedef struct { KlAllocator base; long live; } CountAlloc;
 static void *ca_malloc(void *c, size_t n) {
@@ -142,7 +142,7 @@ static KlSocketProvider g_dsock_provider = {
 };
 
 /* ══════════════════════════════════════════════════════════════════════
- * Mock readiness event loop — one tagged watcher (the DNS socket's READ)
+ * Mock readiness event loop: one tagged watcher (the DNS socket's READ)
  * ══════════════════════════════════════════════════════════════════════ */
 static struct MockLoop {
     int            armed;
@@ -270,7 +270,7 @@ int main(void) {
     return g_fail ? 1 : 0;
 }
 
-/* ── Datagram-path sockdef seams referenced by udp.c (never called — the mock
+/* ── Datagram-path sockdef seams referenced by the datagram machine (never called: the mock
  *    provider supplies the live datagram ops; these are fail-closed link fodder,
  *    mirroring the KEEL_FS_LINK_DGRAM stubs in freestanding_link_main.c). The
  *    stream sockdef seams (socket/connect/close/...) come from the host platform TU. */

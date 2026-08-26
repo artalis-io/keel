@@ -1,10 +1,10 @@
 /*
- * freestanding_harness.c — F-7 host mock harness: proves libkeel_freestanding.a
+ * freestanding_harness.c - host mock harness: proves libkeel_freestanding.a
  * actually RUNS the async HTTP/1.1 client end-to-end, on the host, over fully
  * MOCKED (non-hosted) platform hooks + socket provider + completion event
- * provider — no real syscalls, no errno, no loopback socket. This is the
- * freestanding-phase acceptance milestone
- * (docs/phase10_uefi_feasibility_design.md: "performs an HTTP/1.1 GET over a mock
+ * provider: no real syscalls, no errno, no loopback socket. This is the
+ * freestanding-phase acceptance check
+ * (docs/archive/phases/phase10_uefi_feasibility_design.md: "performs an HTTP/1.1 GET over a mock
  * completion provider") BEFORE any UEFI/firmware toolchain work.
  *
  * ─────────────────────────────────────────────────────────────────────────
@@ -25,12 +25,12 @@
  *     ready mask, which re-drives the client's state handler → it retries the
  *     send/recv and consumes the next scripted step.
  *
- * So a pure mock needs exactly two cooperating objects (the U-2 / U-3 seams):
- *   1. MOCK SOCKET PROVIDER (KlSocketProvider, KL_SOCK_CAP_OVERLAPPED) — a
+ * So a pure mock needs exactly two cooperating objects (the socket + completion seams):
+ *   1. MOCK SOCKET PROVIDER (KlSocketProvider, KL_SOCK_CAP_OVERLAPPED): a
  *      per-fd script of connect / send / recv results; no syscall, no errno,
  *      io_status reports the category directly.
  *   2. MOCK COMPLETION EVENT PROVIDER (KlEventProvider + KlCompletionOps,
- *      KL_EVENT_CAP_COMPLETION) — an in-memory loop: post_connect queues a
+ *      KL_EVENT_CAP_COMPLETION), an in-memory loop: post_connect queues a
  *      connect completion, drain emits KL_COMP_CONNECT + KL_COMP_WATCHER for
  *      armed watches, cancel drops queued connect ops. native_provider returns
  *      the mock socket provider so kl_event_ctx_sockets_compatible passes.
@@ -67,7 +67,7 @@ static int g_pass = 0, g_fail = 0;
 
 /* ══════════════════════════════════════════════════════════════════════
  * A counting allocator (LSan double-checks; this makes leaks LOUD + lets us
- * inject a failing allocation at a chosen call index — scenario 9).
+ * inject a failing allocation at a chosen call index: scenario 9).
  * ══════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -108,7 +108,7 @@ static void ca_init(CountAlloc *a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * MOCK SOCKET PROVIDER — per-fd scripted results, no syscalls, no errno.
+ * MOCK SOCKET PROVIDER: per-fd scripted results, no syscalls, no errno.
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* One scripted recv step: hand back `data[0..len)` (len==0 => peer close), or a
@@ -176,7 +176,7 @@ static KlSocketHandle msock_socket(void *c, int d, int t, int p) {
 }
 static int msock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     (void)c; (void)a;
-    /* On a completion loop the client never calls connect() directly — the
+    /* On a completion loop the client never calls connect() directly: the
      * completion provider's post_connect drives it. But be safe: report PENDING. */
     (void)fd;
     g_sock.last_status = KL_IO_PENDING;
@@ -252,7 +252,7 @@ static KlSocketProvider g_sock_provider = {
 };
 
 /* ══════════════════════════════════════════════════════════════════════
- * MOCK COMPLETION EVENT PROVIDER — in-memory loop, no OS poll.
+ * MOCK COMPLETION EVENT PROVIDER: in-memory loop, no OS poll.
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* A queued outbound connect op (post_connect). Its completion is surfaced as a
@@ -263,7 +263,7 @@ typedef struct {
     void          *watcher_udata;   /* the tagged KlWatcher the client registered */
 } MockConnectOp;
 
-/* A registered tagged watch (add/mod) — the emulated-readiness relay. drain
+/* A registered tagged watch (add/mod): the emulated-readiness relay. drain
  * surfaces its armed mask as a KL_COMP_WATCHER so the client retries send/recv. */
 typedef struct {
     int            in_use;
@@ -280,14 +280,14 @@ typedef struct {
 
 static MockLoop g_loop;
 
-/* ── KlEventOps (the readiness face — connection fds are op-driven, only tagged
+/* ── KlEventOps (the readiness face: connection fds are op-driven, only tagged
  *    watchers register a relay, exactly like pollcomp) ──────────────────── */
 
 static int mloop_init(KlEventLoop *loop) { (void)loop; memset(&g_loop, 0, sizeof(g_loop)); return 0; }
 
 static int mloop_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop;
-    if (!((uintptr_t)udata & 1)) return 0;   /* untagged (connection) — op-driven */
+    if (!((uintptr_t)udata & 1)) return 0;   /* untagged (connection): op-driven */
     for (int i = 0; i < MAX_OPS; i++) {
         if (g_loop.watches[i].in_use && g_loop.watches[i].udata == udata) {
             g_loop.watches[i].mask = mask; g_loop.watches[i].fd = fd; return 0;
@@ -354,13 +354,13 @@ static void mloop_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 }
 
 /* drain: emit each queued connect completion (exactly-once), then relay each
- * armed tagged watch as a KL_COMP_WATCHER (level-triggered, persistent — the
+ * armed tagged watch as a KL_COMP_WATCHER (level-triggered, persistent: the
  * client re-arms it while it still needs to send/recv). */
 static int mloop_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     (void)ctx; (void)timeout_ms;
     int count = 0;
 
-    /* Connect completions — one terminal edge each, then retire the op. */
+    /* Connect completions: one terminal edge each, then retire the op. */
     for (int i = 0; i < MAX_OPS && count < max; i++) {
         if (!g_loop.conns[i].in_use) continue;
         MockConnectOp *op = &g_loop.conns[i];
@@ -391,7 +391,7 @@ static int mloop_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, 
     return count;
 }
 
-/* Ops the client never exercises on the client-only completion path get NULL —
+/* Ops the client never exercises on the client-only completion path get NULL:
  * server/UDP primitives are out of the freestanding archive. */
 static const KlCompletionOps MOCK_COMP_OPS = {
     .drain = mloop_drain,
@@ -411,7 +411,7 @@ static const KlEventOps MOCK_EVENT_OPS = {
 static const KlEventProvider MOCK_EVENT_PROVIDER = { &MOCK_EVENT_OPS, "mock-freestanding-comp" };
 
 /* ══════════════════════════════════════════════════════════════════════
- * MOCK RESOLVER — returns a fixed numeric address synchronously.
+ * MOCK RESOLVER: returns a fixed numeric address synchronously.
  * ══════════════════════════════════════════════════════════════════════ */
 
 static KlResolveReq g_resolve_req;
@@ -461,7 +461,7 @@ static void mocks_reset(void) {
     fs_clock_set(1000);
 }
 
-/* Pump the loop a bounded number of ticks (no real waiting — the mock drain
+/* Pump the loop a bounded number of ticks (no real waiting: the mock drain
  * returns immediately; timers fire off the advanceable clock). */
 static void pump(KlEventCtx *ev, const DoneCtx *d, int max_ticks) {
     for (int i = 0; i < max_ticks && !d->done; i++) {
@@ -507,7 +507,7 @@ static void scenario_1_happy(void) {
     KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     /* The socket fd is created during connect (first tick). Script recv after the
-     * first pump so the fd exists — but simpler: script via a post-connect hook.
+     * first pump so the fd exists; but simpler: script via a post-connect hook.
      * Here we pump one tick to let the socket be created + connect complete, then
      * script the recv on the live fd. */
     pump(&ev, &d, 3);

@@ -2,11 +2,11 @@
 #define KEEL_SOCKET_H
 
 /*
- * keel/socket.h — public socket-provider authoring API (PAL Phase 4).
+ * keel/socket.h: public socket-provider authoring API.
  *
  * A KlSocketProvider is an immutable ops table + context + capability flags that
- * a Keel server/client carries so a non-POSIX stack (Winsock, lwIP) — or a
- * fault-injection mock — can replace the socket syscalls. This is the authoring
+ * a Keel server/client carries so a non-POSIX stack (Winsock, lwIP), or a
+ * fault-injection mock, can replace the socket syscalls. This is the authoring
  * surface: to bring your own stack, implement KlSocketOps and hand Keel a
  * KlSocketProvider (via KlHttpServerConfig.sockets / KlHttpClientConfig.sockets / KlEventCtx.
  * sockets). The built-in providers (kl_socket_provider_posix/winsock) are the
@@ -16,14 +16,14 @@
  * kl_ssize_t (pointer-width signed); scatter-gather is the Keel-owned KlIoVec;
  * the sendfile offset is uint64_t; addresses are the Keel-owned KlSockAddr
  * (keel/sockaddr.h), so a provider never sees a platform struct sockaddr on the
- * connect/bind/get_local_addr ops — it marshals KlSockAddr to its native address
+ * connect/bind/get_local_addr ops: it marshals KlSockAddr to its native address
  * shape inside its own implementation (see src/sockaddr_native.h for the built-in
  * providers). A provider likewise translates KlIoVec to its native vector (POSIX
- * struct iovec, Winsock WSABUF, …). All address ops — connect/bind/accept/
- * get_local_addr — are KlSockAddr; no platform struct sockaddr crosses this API.
+ * struct iovec, Winsock WSABUF, …). All address ops, connect/bind/accept/
+ * get_local_addr, are KlSockAddr; no platform struct sockaddr crosses this API.
  *
  * The `kl_sock_*` consumer wrappers and `kl_sockdef_*` platform defaults are NOT
- * here — they are Keel's internal consumers of a provider (src/socket.h), not
+ * here: they are Keel's internal consumers of a provider (src/socket.h), not
  * part of the authoring API. A custom provider implements KlSocketOps; it never
  * calls them.
  */
@@ -34,13 +34,13 @@
 #include <keel/handle.h>       /* KlSocketHandle, KL_INVALID_SOCKET, kl_handle_valid, kl_ssize_t */
 #include <keel/sockaddr.h>     /* KlSockAddr (connect/bind/accept/get_local_addr currency) */
 #include <keel/error.h>        /* KlError */
-#include <keel/socket_dgram.h> /* KlDatagramOps — the optional provider->dgram data-plane vtable */
+#include <keel/socket_dgram.h> /* KlDatagramOps: the optional provider->dgram data-plane vtable */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Keel-owned scatter-gather vector — the seam's I/O-vector currency. A provider
+/* Keel-owned scatter-gather vector: the seam's I/O-vector currency. A provider
  * translates it to its native vector (POSIX struct iovec / Winsock WSABUF) inside
  * its own TU, so no platform vector type appears in this API. */
 typedef struct KlIoVec {
@@ -54,17 +54,17 @@ typedef struct KlIoVec {
  * freestanding stack (UEFI, lwIP) has no hosted errno, so classification lives on
  * the provider (KlSocketOps.io_status, additive/optional). The built-in POSIX /
  * Winsock providers leave that op NULL and Keel falls back to its hosted errno
- * mapping — behaviour-neutral for every current provider. */
+ * mapping: behaviour-neutral for every current provider. */
 typedef enum {
     KL_IO_OK = 0,        /* no error (the last op succeeded) */
-    KL_IO_WOULD_BLOCK,   /* EAGAIN / EWOULDBLOCK — retry when ready (re-arm) */
-    KL_IO_INTERRUPTED,   /* EINTR — retry immediately (loop continue) */
-    KL_IO_PENDING,       /* EINPROGRESS — async connect in progress */
+    KL_IO_WOULD_BLOCK,   /* EAGAIN / EWOULDBLOCK: retry when ready (re-arm) */
+    KL_IO_INTERRUPTED,   /* EINTR: retry immediately (loop continue) */
+    KL_IO_PENDING,       /* EINPROGRESS: async connect in progress */
     KL_IO_CLOSED,        /* peer closed / EPIPE */
-    KL_IO_RESET,         /* ECONNRESET — peer reset */
+    KL_IO_RESET,         /* ECONNRESET: peer reset */
     KL_IO_FATAL,         /* any other error */
-    KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP — op unavailable on this fd (e.g. UDP GSO); caller may
-                          * fall back. Appended (datagram M5.1) — values above are unchanged. */
+    KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP: op unavailable on this fd (e.g. UDP GSO); caller may
+                          * fall back. (KlIoStatus is append-only: existing values are stable.) */
 } KlIoStatus;
 
 /* Upper bound on scatter-gather segments a provider must handle in one writev.
@@ -82,7 +82,7 @@ typedef struct KlSocketOps {
     void    (*set_cloexec)(void *ctx, KlSocketHandle fd);
     void    (*set_nosigpipe)(void *ctx, KlSocketHandle fd);
     /* Socket options (each maps to a single setsockopt on POSIX/Winsock). `on` is
-     * a boolean toggle. Best-effort by contract — a provider/platform that lacks
+     * a boolean toggle. Best-effort by contract: a provider/platform that lacks
      * the option returns -1 and the caller ignores it (SO_REUSEPORT, IPV6_V6ONLY,
      * TCP_NODELAY are tuning knobs, not correctness gates). */
     int     (*set_reuseaddr)(void *ctx, KlSocketHandle fd, int on);
@@ -100,20 +100,20 @@ typedef struct KlSocketOps {
     int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
     KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, KlSockAddr *peer);
     int     (*close)(void *ctx, KlSocketHandle fd);
-    /* Read the local (bound) address — getsockname — into a KlSockAddr. */
+    /* Read the local (bound) address (getsockname) into a KlSockAddr. */
     int     (*get_local_addr)(void *ctx, KlSocketHandle fd, KlSockAddr *addr);
-    /* Read + clear the pending socket error — getsockopt(SO_ERROR). Writes it to
+    /* Read + clear the pending socket error (getsockopt(SO_ERROR)). Writes it to
      * *out_err (0 = none) and returns 0, or returns -1 if the query itself fails.
      * Used for async-connect completion. The value is a platform error code;
      * callers only test zero vs non-zero. */
     int     (*get_so_error)(void *ctx, KlSocketHandle fd, int *out_err);
-    /* I/O — return bytes moved (>=0) or -1 (errno-style error on the caller side). */
+    /* I/O: return bytes moved (>=0) or -1 (errno-style error on the caller side). */
     kl_ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
     kl_ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
     /* Peek up to @len bytes without consuming them (recv/MSG_PEEK). >0 = bytes,
      * 0 = peer closed, <0 = error/would-block. */
     kl_ssize_t (*recv_peek)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
-    /* Vectored write + zero-copy file send. May be NULL — a provider without them
+    /* Vectored write + zero-copy file send. May be NULL: a provider without them
      * advertises no WRITEV/SENDFILE capability and Keel serializes / pread-sends
      * instead. `in_fd` is a *file* descriptor; `out_fd` is a socket handle.
      * `sendfile` advances `*offset` (byte offset into the file). */
@@ -122,7 +122,7 @@ typedef struct KlSocketOps {
     /* Classify the most recent -1 I/O result on this provider into a portable
      * KlIoStatus (would-block / interrupted / connect-pending / closed / reset /
      * fatal). Valid immediately after a send/recv/connect on this provider
-     * returned -1 — the provider reports how that failure should be handled
+     * returned -1: the provider reports how that failure should be handled
      * WITHOUT the consumer reading a hosted `errno`, so the client's
      * would-block/re-arm/connect-pending control flow stays freestanding.
      *
@@ -130,8 +130,8 @@ typedef struct KlSocketOps {
      * mapping (kl_sockdef_io_status). A provider that already translates its
      * native errors into `errno` (the built-in POSIX/Winsock providers, and
      * lwIP which maps ERR_MEM→EAGAIN) needs no io_status op; a freestanding
-     * provider with no hosted errno MUST supply it. Appended to the ops table
-     * (additive ABI): older ops tables leave it zero-initialized (NULL). */
+     * provider with no hosted errno MUST supply it. (The KlSocketOps table is
+     * append-only: a zero-initialized/NULL slot means the op is not supplied.) */
     KlIoStatus (*io_status)(void *ctx);
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);
@@ -151,7 +151,7 @@ typedef struct KlSocketProvider {
 
 /* Capability flags. A provider advertises what it supports; Keel falls back for
  * anything it does not (e.g. serialize when WRITEV is absent). A native-fd
- * provider's handle is a real OS descriptor the readiness event loop can poll —
+ * provider's handle is a real OS descriptor the readiness event loop can poll:
  * required for the server (see KlHttpServerConfig.sockets). */
 #define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
 #define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* vectored writev usable on this fd */
