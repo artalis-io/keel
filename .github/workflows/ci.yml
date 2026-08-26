@@ -400,6 +400,9 @@ jobs:
       - name: Site gate (offline site validation + reproducible build)
         run: make check-site
 
+      - name: Axis-ownership gate (AF_UNIX node lifecycle stays out of the protocol tree)
+        run: make check-no-fsnode-in-protocols
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 

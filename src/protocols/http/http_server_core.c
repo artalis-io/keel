@@ -82,6 +82,9 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    /* The AF_UNIX node-cleanup state (opaque unix_node storage) is left zeroed by the memset above;
+     * the substrate module treats a zeroed state as "not open", so no explicit init is needed here
+     * and this stays platform-neutral (the module is POSIX-only). */
 
 #ifndef KEEL_FREESTANDING
     /* Register the WebSocket / HTTP-2 upgrade tables so http_connection.c's dispatch is
@@ -360,7 +363,7 @@ void kl_http_server_free(KlHttpServer *s) {
          * memory-safe, no-completion-lost order:
          *   (1) close the listen socket: freestanding-safe; forces every posted IOCP AcceptEx to
          *       complete (closesocket cancels its overlapped I/O). kl_http_server_close_listener below
-         *       then only does the owned-AF_UNIX unlink (fd already invalid).
+         *       then only does the owned-AF_UNIX node removal (fd already invalid).
          *   (2) kl_comp_shutdown_accepts: the backend GUARANTEES every posted accept will complete
          *       (io_uring unconditionally submits a cancel per accept; pollcomp marks them aborted;
          *       IOCP relies on the closed listen socket). Returns -1 only if it could not force.

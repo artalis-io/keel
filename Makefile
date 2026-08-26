@@ -58,12 +58,13 @@ else ifdef WINDOWS
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
+  UNIX_NODE_SRC = src/unix_socket_node_win.c   # identity-anchored AF_UNIX node lifecycle (NTFS)
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
   DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
-  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
+  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi -ladvapi32 -lshell32   # advapi32: ACL/SID/token APIs (unix_socket_node_win.c); shell32: SHGetFolderPath (test trusted-dir setup)
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
@@ -151,6 +152,8 @@ SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
 SERVER_PLAT_SRC ?= src/protocols/http/http_server_plat_posix.c
+# AF_UNIX filesystem-node lifecycle (substrate transport module; see src/unix_socket_node.h).
+UNIX_NODE_SRC ?= src/unix_socket_node_posix.c
 # The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
 # the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
@@ -184,7 +187,7 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
            src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
            src/protocols/http/http_body_reader_buffer.c \
            src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
@@ -332,7 +335,7 @@ examples: $(EXAMPLES)
 # Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
-TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
+TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -401,7 +404,7 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
                   async http_async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  tls http_tls tls_integration peer_cert
+                  tls http_tls tls_integration peer_cert unix_socket_node_win
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -933,7 +936,7 @@ check-sockaddr-neutral:
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
               $(wildcard src/platform_*.c) $(wildcard src/protocols/http/http_server_plat_*.c) $(wildcard src/protocols/http/completion_*.c) $(wildcard src/protocols/http2/completion_*.c) $(wildcard src/protocols/websocket/completion_*.c) $(wildcard src/protocols/dns/dns_sys_*.c) \
-              $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
+              $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) $(wildcard src/unix_socket_node*.c) \
               src/listener.c src/connect_op.c \
               src/event_ctx.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/http_server.c src/protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
@@ -1167,6 +1170,11 @@ check-no-milestones:
 # (U+2014 flags; box-drawing U+2500 / en-dash U+2013 / minus U+2212 do not) run before the tree scan.
 check-no-em-dash:
 	@perl tools/check_no_em_dash.pl
+
+# Axis-ownership guard: the AF_UNIX filesystem-node lifecycle stays in the substrate module
+# (src/unix_socket_node*.c) and must not return to src/protocols/ (comments/strings stripped).
+check-no-fsnode-in-protocols:
+	@perl tools/check_no_fsnode_in_protocols.pl
 
 # Site gate (C5-4). Offline, dependency-free validator for site/ (core Perl only):
 # required deployable assets, unique ids, internal-fragment + local-asset resolution,
@@ -1951,7 +1959,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

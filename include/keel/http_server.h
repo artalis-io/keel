@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
@@ -75,12 +76,32 @@ typedef struct KlHttpServerConfig {
     KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
                                  *   indistinguishable from unset, so a non-NULL path wins). */
-    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX */
-    int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
-    unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
-    const char *unix_socket_owner; /**< chown socket to this username; NULL = leave.
-                                    *   Changing owner needs privilege (CAP_CHOWN/root). */
-    const char *unix_socket_group; /**< chown socket to this group name; NULL = leave.
+    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX.
+                                 *   PRECONDITION for automatic cleanup/ownership below: the COMPLETE
+                                 *   ancestor chain of the path (every component, not just the immediate
+                                 *   parent) must be within the server's trust domain (owned by the
+                                 *   server uid or root, and not writable by untrusted actors unless
+                                 *   sticky; on Windows: no untrusted SID may delete/replace/
+                                 *   re-permission any component and no component may be a reparse
+                                 *   point). An untrusted component fails bind CLOSED rather than acting
+                                 *   on an ambiguous entry. Environment-default cwd/temp locations are
+                                 *   NOT guaranteed to satisfy this and may be rejected (a world-writable
+                                 *   /tmp-style tree, or a directory owned by a foreign uid, is correctly
+                                 *   refused); place the socket in an application-owned runtime directory
+                                 *   with a restrictive owner/mode or ACL (e.g. a service-owned /run
+                                 *   subdirectory, or a per-user runtime directory). See
+                                 *   docs/archive/designs/unix_socket_cleanup_security_design.md. */
+    int unix_socket_unlink;     /**< unlink a stale, owned socket node before bind and on free after a
+                                 *   successful bind. Only removes a validated socket the server owns,
+                                 *   under the parent-directory precondition above; else fails closed. */
+    unsigned int unix_socket_mode; /**< chmod socket node after bind; 0 = leave umask/default. Applied
+                                 *   under the trusted-parent precondition above. */
+    const char *unix_socket_owner; /**< chown socket node to this username; NULL = leave. Changing
+                                 *   owner needs privilege (CAP_CHOWN/root). Transferring ownership to a
+                                 *   DIFFERENT uid additionally requires a parent directory with no
+                                 *   group/other write (a sticky shared dir such as /tmp is not accepted
+                                 *   for that configuration). */
+    const char *unix_socket_group; /**< chown socket node to this group name; NULL = leave.
                                     *   Applied before listen(), so no exposure window. */
     const char *proxy_trusted_cidrs; /**< accept PROXY protocol (v1/v2) headers only from
                                       *   sources in this comma-separated CIDR allowlist
@@ -135,6 +156,15 @@ typedef struct KlHttpServer {
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
+    /* Opaque, fixed lifecycle storage for the substrate AF_UNIX node-cleanup state
+     * (src/unix_socket_node.h). Managed only by that module; the concrete state type stays in
+     * substrate. Zeroed and set to the not-open sentinel by kl_http_server_init. Unused on non-UNIX
+     * transports and on platforms without the POSIX node lifecycle. The 192 bytes match
+     * KL_UNIX_NODE_STORAGE; a static_assert in http_server_plat_posix.c verifies this storage is
+     * large enough, and one in unix_socket_node_posix.c bounds the state. max_align_t gives the
+     * storage suitable alignment for any member the module places in it.
+     * Adding this is a pre-3.0 source/ABI revision; see docs/archive/designs/unix_socket_cleanup_security_design.md. */
+    union { unsigned char opaque[192]; max_align_t _align; } unix_node;
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */

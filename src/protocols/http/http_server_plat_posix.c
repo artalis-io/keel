@@ -27,6 +27,14 @@
 #include <grp.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include "unix_socket_node.h"   /* substrate AF_UNIX filesystem-node lifecycle (transport axis) */
+
+/* The opaque KlHttpServer.unix_node storage must be large enough for the substrate node state
+ * (the concrete type is private to the module). Verified here, where both are in scope, so the
+ * public header's byte count can never silently fall short of KL_UNIX_NODE_STORAGE. */
+_Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
+               "KlHttpServer.unix_node is too small for the AF_UNIX node-cleanup state");
+
 #if !defined(KL_NO_SIGNAL)
 #include <signal.h>
 #include <stdatomic.h>
@@ -76,207 +84,85 @@ void kl_http_server_plat_signals_restore(KlHttpServer *s) {
 #endif
 }
 
-/* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
+/* ── AF_UNIX node lifecycle: thin adapter over the substrate node module ─────────────────────
+ *
+ * The filesystem-node lifecycle (trusted-directory walk, stale reclamation, ownership/mode
+ * mutation, teardown) is transport/socket-axis work and lives in the substrate module
+ * (unix_socket_node.h). This adapter only translates KlHttpServerConfig into a neutral policy, maps
+ * the module's status into KlError + server logging, and owns the KlHttpServer bookkeeping. It
+ * performs no filesystem or socket-path syscalls itself. */
 
-static int unlink_stale_unix_socket(KlHttpServer *s, const char *path) {
-    struct stat st;
-    if (lstat(path, &st) < 0) {
-        if (errno == ENOENT)
-            return 0;
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "lstat unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    if (!S_ISSOCK(st.st_mode)) {
-        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
-               "refusing to unlink non-socket unix path '%s'", path);
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    /* A pathname race cannot make unlink follow or modify the replacement target: it removes only the
-     * directory entry.  The subsequent bind still fails safely if another process wins this path. */
-    // lgtm[cpp/toctou-race-condition]
-    if (unlink(path) < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "unlink unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    return 0;
-}
-
-/* Resolve a username to a uid via getpwnam_r. Returns 0 on success, -1 if the
- * user is unknown or on allocation failure (sets last_error accordingly). */
-static int resolve_uid(KlHttpServer *s, const char *name, uid_t *out) {
-    long hint = sysconf(_SC_GETPW_R_SIZE_MAX);
-    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
-    for (;;) {
-        char *buf = kl_malloc(&s->alloc_storage, bufsz);
-        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
-        struct passwd pw, *res = NULL;
-        int rc = getpwnam_r(name, &pw, buf, bufsz, &res);
-        if (rc == 0) {
-            int ok = res ? 0 : -1;
-            if (ok == 0) *out = res->pw_uid;
-            kl_free(&s->alloc_storage, buf, bufsz);
-            return ok;
-        }
-        kl_free(&s->alloc_storage, buf, bufsz);
-        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
-        return -1;
+static KlError unix_node_status_to_error(KlUnixNodeStatus st) {
+    switch (st) {
+        case KL_UNIX_NODE_ERR_INVALID_PATH:
+        case KL_UNIX_NODE_ERR_UNKNOWN_OWNER:    return KL_ERR_INVALID_ARG;
+        case KL_UNIX_NODE_ERR_SOCKET:           return KL_ERR_SOCKET;
+        case KL_UNIX_NODE_ERR_NOMEM:            return KL_ERR_ALLOC;
+        case KL_UNIX_NODE_ERR_UNTRUSTED_PARENT:
+        case KL_UNIX_NODE_ERR_FOREIGN_NODE:
+        case KL_UNIX_NODE_ERR_BIND:
+        default:                                return KL_ERR_BIND;
     }
 }
 
-/* Resolve a group name to a gid via getgrnam_r. Same contract as above. */
-static int resolve_gid(KlHttpServer *s, const char *name, gid_t *out) {
-    long hint = sysconf(_SC_GETGR_R_SIZE_MAX);
-    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
-    for (;;) {
-        char *buf = kl_malloc(&s->alloc_storage, bufsz);
-        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
-        struct group gr, *res = NULL;
-        int rc = getgrnam_r(name, &gr, buf, bufsz, &res);
-        if (rc == 0) {
-            int ok = res ? 0 : -1;
-            if (ok == 0) *out = res->gr_gid;
-            kl_free(&s->alloc_storage, buf, bufsz);
-            return ok;
-        }
-        kl_free(&s->alloc_storage, buf, bufsz);
-        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
-        return -1;
+/* Translate a fail-closed status into a useful server log line, without leaking unrelated
+ * filesystem detail. Syscall failures carry the module-reported errno. */
+static void log_unix_node_failure(KlHttpServer *s, KlUnixNodeStatus st, int err,
+                                  const KlUnixNodePolicy *policy) {
+    switch (st) {
+        case KL_UNIX_NODE_ERR_INVALID_PATH:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "invalid unix socket path");
+            break;
+        case KL_UNIX_NODE_ERR_UNKNOWN_OWNER:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "unknown unix socket owner '%s' or group '%s'",
+                   policy->owner ? policy->owner : "", policy->group ? policy->group : "");
+            break;
+        case KL_UNIX_NODE_ERR_UNTRUSTED_PARENT:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: parent directory outside the trust boundary");
+            break;
+        case KL_UNIX_NODE_ERR_FOREIGN_NODE:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "refusing unix socket cleanup: existing node is not a socket the server owns");
+            break;
+        case KL_UNIX_NODE_ERR_NOMEM:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                   "out of memory resolving unix socket owner/group");
+            break;
+        case KL_UNIX_NODE_ERR_SOCKET:
+        case KL_UNIX_NODE_ERR_BIND:
+        default:
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unix socket bind failed: %s", strerror(err));
+            break;
     }
 }
 
 int kl_http_server_plat_bind_unix(KlHttpServer *s) {
-    const char *path = s->config.unix_socket_path;
-    if (!path || path[0] == '\0') {
-        s->last_error = KL_ERR_INVALID_ARG;
+    KlUnixNodePolicy policy = {
+        .path         = s->config.unix_socket_path,
+        .unlink_stale = s->config.unix_socket_unlink,
+        .owner        = s->config.unix_socket_owner,
+        .group        = s->config.unix_socket_group,
+        .mode         = s->config.unix_socket_mode,
+        .set_mode     = s->config.unix_socket_mode != 0,
+    };
+    int err = 0;
+    KlUnixNodeStatus st = kl_unix_socket_node_bind(&policy, s->ev.sockets, &s->alloc_storage,
+                                                   &s->unix_node, &s->listen_fd, &err);
+    if (st != KL_UNIX_NODE_OK) {
+        log_unix_node_failure(s, st, err, &policy);
+        s->last_error = unix_node_status_to_error(st);
         return -1;
     }
-
-    size_t path_len = strlen(path);
-    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-
-    s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
-    if (!kl_handle_valid(s->listen_fd)) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
-        s->last_error = KL_ERR_SOCKET;
-        return -1;
-    }
-    kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
-
-    if (s->config.unix_socket_unlink &&
-        unlink_stale_unix_socket(s, path) < 0) {
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path, path, path_len + 1);
-
-    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
-                                     path_len + 1);
-
-    /* Create the socket node with the requested mode atomically: bind()
-     * applies (0777 & ~umask), so a temporary umask closes the window in
-     * which the socket would otherwise be reachable with default (looser)
-     * permissions before the chmod below.  Restored immediately after bind. */
-    mode_t old_umask = 0;
-    int umask_set = 0;
-    if (s->config.unix_socket_mode != 0) {
-        old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
-        umask_set = 1;
-    }
-    KlSockAddr bind_sa;
-    kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
-    int bind_rc = kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa);
-    if (umask_set)
-        umask(old_umask);
-    if (bind_rc < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
-        s->last_error = KL_ERR_BIND;
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
-
     s->unix_socket_owned = 1;
-
-    /* Ownership: resolve owner/group names to ids and chown the socket node.
-     * Done before listen() (where connections first become possible), so the
-     * socket is never reachable with the wrong owner/group.  chown to a
-     * different user needs privilege (CAP_CHOWN/root); setting group to one
-     * the process belongs to is generally allowed for the file owner. */
-    if (s->config.unix_socket_owner || s->config.unix_socket_group) {
-        uid_t uid = (uid_t)-1;   /* -1 = leave unchanged (chown semantics) */
-        gid_t gid = (gid_t)-1;
-        if (s->config.unix_socket_owner &&
-            resolve_uid(s, s->config.unix_socket_owner, &uid) < 0) {
-            if (s->last_error != KL_ERR_ALLOC) {
-                kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket owner '%s'",
-                       s->config.unix_socket_owner);
-                s->last_error = KL_ERR_INVALID_ARG;
-            }
-            goto fail;
-        }
-        if (s->config.unix_socket_group &&
-            resolve_gid(s, s->config.unix_socket_group, &gid) < 0) {
-            if (s->last_error != KL_ERR_ALLOC) {
-                kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket group '%s'",
-                       s->config.unix_socket_group);
-                s->last_error = KL_ERR_INVALID_ARG;
-            }
-            goto fail;
-        }
-        if (chown(path, uid, gid) < 0) {
-            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chown unix socket");
-            s->last_error = KL_ERR_BIND;
-            goto fail;
-        }
-    }
-
-    /* Enforce the exact mode regardless of the platform's socket-creation
-     * base (some create nodes 0666, not 0777).  The umask above already
-     * closed the permissions window; this guarantees the precise bits, and
-     * re-asserts them after any chown (which clears set-gid on some OSes). */
-    if (s->config.unix_socket_mode != 0 &&
-        chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
-        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chmod unix socket");
-        s->last_error = KL_ERR_BIND;
-        goto fail;
-    }
-
     s->bound_port = 0;
     return 0;
-
-fail:
-    kl_sock_close(s->ev.sockets, s->listen_fd);
-    s->listen_fd = KL_INVALID_SOCKET;
-    unlink(path);
-    s->unix_socket_owned = 0;
-    return -1;
 }
 
 void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
-    if (s->unix_socket_owned && s->config.unix_socket_unlink &&
-        s->config.unix_socket_path) {
-        /* Re-check that the path is still a socket before unlinking, so a
-         * regular file (or a socket from a different process) that replaced
-         * our path is not removed.  lstat (not stat) avoids following a
-         * symlink.  Best-effort teardown; no error reporting. */
-        struct stat st;
-        if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
-            unlink(s->config.unix_socket_path);
-    }
+    if (s->unix_socket_owned)
+        (void)kl_unix_socket_node_teardown(&s->unix_node, s->config.unix_socket_unlink);
     s->unix_socket_owned = 0;
 }
 
