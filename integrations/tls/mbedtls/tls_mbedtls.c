@@ -335,22 +335,61 @@ static const char *tls_alpn_protocol(KlTls *self)
 
 /* ── mTLS peer-certificate extraction ────────────────────────────── */
 
-/* Copy the CommonName RDN of an X.509 name into a NUL-terminated buffer. */
+/* True if [p,p+len) is safe to surface as a textual identity: no NUL, no C0
+ * control char, no DEL. Multi-byte UTF-8 (bytes >= 0x80) is allowed. Mirrors the
+ * OpenSSL backend so both TLS adapters canonicalize peer identities identically. */
+static int identity_bytes_safe(const unsigned char *p, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (p[i] < 0x20 || p[i] == 0x7f)
+            return 0;
+    return 1;
+}
+
+/* True if [p,p+len) is a syntactically plausible DNS name: non-empty and made of
+ * LDH characters plus '.', '_', and a '*' wildcard. This rejects embedded NUL /
+ * control chars AND any byte (notably ',') that would make the comma-joined SAN
+ * list ambiguous, so no escaping of the joined representation is required. */
+static int dns_san_bytes_safe(const unsigned char *p, size_t len)
+{
+    if (len == 0)
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = p[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') ||
+                 c == '-' || c == '.' || c == '_' || c == '*';
+        if (!ok)
+            return 0;
+    }
+    return 1;
+}
+
+/* Copy the CommonName RDN of an X.509 name into a NUL-terminated buffer. Fail closed
+ * (buffer left empty) when the CN could yield an ambiguous or spoofable identity: an
+ * embedded NUL/control char (an "admin\0evil" CN must not match a strcmp("admin")
+ * authorization), a value that would be truncated (a cut value is ambiguous), or more
+ * than one CN attribute (which is authoritative is undefined). Mirrors the OpenSSL
+ * backend's x509_name_cn policy. */
 static void x509_extract_cn(const mbedtls_x509_name *name, char *out, size_t outlen)
 {
     if (outlen == 0)
         return;   /* defensive: no room even for the NUL */
     out[0] = '\0';
+    const mbedtls_x509_name *cn = NULL;
     for (const mbedtls_x509_name *n = name; n != NULL; n = n->next) {
         if (MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &n->oid) == 0) {
-            size_t len = n->val.len;
-            if (len >= outlen)
-                len = outlen - 1;
-            memcpy(out, n->val.p, len);
-            out[len] = '\0';
-            return;
+            if (cn != NULL)
+                return;   /* more than one CN: ambiguous, omit rather than pick one */
+            cn = n;
         }
     }
+    if (cn == NULL)
+        return;
+    if (!identity_bytes_safe(cn->val.p, cn->val.len) || cn->val.len >= outlen)
+        return;
+    memcpy(out, cn->val.p, cn->val.len);
+    out[cn->val.len] = '\0';
 }
 
 /* Render the subjectAltName sequence as a comma-separated "DNS:x,IP:y" list. */
@@ -361,13 +400,17 @@ static void x509_extract_san(const mbedtls_x509_sequence *seq, char *out, size_t
     out[0] = '\0';
     size_t off = 0;
     for (const mbedtls_x509_sequence *cur = seq; cur != NULL; cur = cur->next) {
-        char item[INET6_ADDRSTRLEN + 8];
+        /* Sized to hold "DNS:" + a maximum-length (253-byte) DNS name + NUL, so a valid long
+         * DNS SAN is surfaced whole rather than skipped as over-long (matches the OpenSSL backend). */
+        char item[sizeof("DNS:") + 253];
         int tag = cur->buf.tag & MBEDTLS_ASN1_TAG_VALUE_MASK;
 
         if (tag == MBEDTLS_X509_SAN_DNS_NAME) {
             size_t len = cur->buf.len;
-            if (len > sizeof(item) - 5)
-                len = sizeof(item) - 5;
+            /* Omit (do not truncate) a malformed or over-long DNS SAN; surfacing a
+             * partial/ambiguous name would defeat the canonicalization guarantee. */
+            if (!dns_san_bytes_safe(cur->buf.p, len) || len > sizeof(item) - 5)
+                continue;
             memcpy(item, "DNS:", 4);
             memcpy(item + 4, cur->buf.p, len);
             item[4 + len] = '\0';

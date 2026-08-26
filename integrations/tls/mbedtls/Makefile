@@ -40,6 +40,13 @@ tls_mbedtls.o: tls_mbedtls.c keel_tls_mbedtls.h
 
 # Link smoke: confirms the adapter archives + resolves against core libkeel.a and
 # mbedTLS. Requires the core lib to be built first (repo root `make`).
+#
+# KNOWN PRE-EXISTING FAILURE (tracked separately; NOT addressed here): on the current
+# tree this target fails to link with undefined internal seam symbols (e.g.
+# _kl_sockdef_get_so_error, _kl_sockaddr_to_native) that link_smoke.c pulls in but the
+# link line does not resolve. It reproduces on stock main (4a5ac7e) unchanged, so it is
+# not a regression from the peer-cert canonicalization work; its repair is out of scope
+# for that change. Use `make e2e` / `make cn-canon` for functional coverage meanwhile.
 MBEDTLS_LDPATH = $(if $(MBEDTLS_DIR),-L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib,)
 test: $(LIB)
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
@@ -61,8 +68,19 @@ e2e: $(OBJ)
 	  -L$(KEEL_ROOT) -lkeel $(MBEDTLS_LDPATH) -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	./tests/tls_e2e
 
+# Peer-cert identity canonicalization unit tests (x509_extract_cn / x509_extract_san).
+# Test-only seam: test_cn_canon.c includes the adapter TU to reach its static helpers
+# and drives crafted mbedtls_x509_name/sequence structs (an embedded-NUL CN or a
+# comma-bearing DNS SAN cannot be produced through a cert-writing API). ASan+UBSan;
+# needs the utest.h header (KEEL_ROOT/vendor).
+cn-canon:
+	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
+	$(CC) $(E2E_CFLAGS) -I$(KEEL_ROOT)/vendor -o tests/test_cn_canon tests/test_cn_canon.c \
+	  -L$(KEEL_ROOT) -lkeel $(MBEDTLS_LDPATH) -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
+	./tests/test_cn_canon
+
 clean:
-	rm -f $(LIB) $(OBJ) tls_mbedtls.d tests/link_smoke tests/tls_e2e
+	rm -f $(LIB) $(OBJ) tls_mbedtls.d tests/link_smoke tests/tls_e2e tests/test_cn_canon
 	rm -rf tests/*.dSYM
 
-.PHONY: all test e2e clean
+.PHONY: all test e2e cn-canon clean
