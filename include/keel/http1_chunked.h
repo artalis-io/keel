@@ -3,6 +3,10 @@
 
 #include <keel/http_body_reader.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_HTTP1_CHUNK_SIZE,       /**< reading hex chunk-size */
@@ -41,5 +45,9 @@ void kl_http1_chunked_init(KlHttp1ChunkedDecoder *dec);
  */
 int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
                       KlHttpBodyReader *reader);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

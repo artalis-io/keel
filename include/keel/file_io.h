@@ -7,6 +7,10 @@
 #include <stdint.h>        /* uint64_t (submit offset): file offsets are non-negative,
                               same neutral type as the sendfile seam (src/socket.h) */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct KlFileIO KlFileIO;
 
 typedef struct {
@@ -37,5 +41,9 @@ struct KlFileIO {
  *  Returns NULL if the backend doesn't support async file I/O.
  *  Caller owns the returned object; free with fio->destroy(fio). */
 KlFileIO *kl_file_io_create(KlEventLoop *loop, KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

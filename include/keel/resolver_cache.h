@@ -15,6 +15,10 @@
 #include <stdint.h>
 #include <keel/allocator.h>
 #include <keel/resolver.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #define KL_RESCACHE_DEFAULT_TTL_MS   60000
 #define KL_RESCACHE_DEFAULT_CAPACITY 64
@@ -49,5 +53,9 @@ void kl_resolver_cache_clear(KlResolver *resolver);
  * @brief Return the number of occupied cache entries.
  */
 int kl_resolver_cache_count(const KlResolver *resolver);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_RESOLVER_CACHE_H */

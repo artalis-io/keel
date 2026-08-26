@@ -4,6 +4,10 @@
 #include <keel/allocator.h>
 #include <keel/compress.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Pluggable decompression vtable.
@@ -150,5 +154,9 @@ int kl_decompress_stream_feed(KlDecompressStream *ds,
  * @param ds  Decompression stream handle.
  */
 void kl_decompress_stream_free(KlDecompressStream *ds);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_DECOMPRESS_H */

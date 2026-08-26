@@ -6,6 +6,10 @@
 #include <keel/sockaddr.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /*
  * socket_dgram.h: the datagram data-plane a KlSocketProvider optionally provides.
@@ -121,5 +125,9 @@ typedef struct KlDatagramOps {
     int   (*send_batch)(void *ctx, KlSocketHandle fd, void *tx_batch,
                         const KlDgramTxDesc *descs, int n);
 } KlDatagramOps;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_SOCKET_DGRAM_H */

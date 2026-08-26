@@ -16,6 +16,10 @@
 #include <keel/stream.h>         /* KlStream contract (STABLE transport API) */
 #include <keel/stream_detail.h>  /* struct KlStream layout: KlHttpConn embeds it (opt-in detail) */
 #include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Default read buffer size (bytes). */
 #define KL_HTTP_CONN_READ_BUF_SIZE 8192
@@ -212,5 +216,9 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
  * internal/unstable.
  */
 const KlSockAddr *kl_http_conn_peer_addr(const KlHttpConn *c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

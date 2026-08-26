@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_EVENT_READ  = 1, /**< FD is readable */
@@ -103,5 +107,9 @@ int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
 
 /** @brief Close and clean up the event loop. */
 void kl_event_close(KlEventLoop *loop);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

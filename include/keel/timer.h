@@ -3,6 +3,10 @@
 
 #include <keel/event_ctx.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Timer callback function.
@@ -73,5 +77,9 @@ int kl_timer_next_timeout(KlEventCtx *ctx, int max_ms);
  * @return Number of timers fired.
  */
 int kl_timer_fire(KlEventCtx *ctx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

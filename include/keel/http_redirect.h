@@ -16,6 +16,10 @@
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/url.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
@@ -135,5 +139,9 @@ void kl_http_redirect_cancel(KlHttpRedirectClient *rc);
  * @brief Free all redirect client resources.
  */
 void kl_http_redirect_free(KlHttpRedirectClient *rc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_REDIRECT_H */

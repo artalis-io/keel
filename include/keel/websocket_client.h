@@ -14,6 +14,10 @@
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
 #include <keel/websocket.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
@@ -86,5 +90,9 @@ void  kl_ws_client_close(KlWsClientConn *ws, uint16_t code,
 
 /** @brief Free all WebSocket client resources. */
 void  kl_ws_client_free(KlWsClientConn *ws);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

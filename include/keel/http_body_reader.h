@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Forward declaration: full definition in http_request.h. */
 typedef struct KlHttpRequest KlHttpRequest;
@@ -64,5 +68,9 @@ typedef struct {
  */
 KlHttpBodyReader *kl_http_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req,
                                      void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

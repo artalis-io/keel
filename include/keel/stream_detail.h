@@ -16,6 +16,10 @@
 #include <keel/handle.h>      /* KlSocketHandle */
 #include <keel/sockaddr.h>    /* KlSockAddr */
 #include <keel/drain.h>       /* KlDrain */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* Back-pointer to the owning event context (the internal socket provider reads ctx->sockets).
  * Opaque forward decl keeps the provider seam out of this header. */
@@ -75,5 +79,9 @@ struct KlStream {
     int              (*cancel_send)(void *ctx);
     void             (*on_retire)(struct KlStream *s); /**< read/write → close finalize */
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_STREAM_DETAIL_H */

@@ -18,6 +18,10 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
@@ -451,5 +455,9 @@ int kl_systemd_listen_fds(int *count);
  * @return The matching fd (>= 3), or -1 if not socket-activated / no match.
  */
 int kl_systemd_listen_fd_by_name(const char *name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

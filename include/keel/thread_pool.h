@@ -2,6 +2,10 @@
 #define KEEL_THREAD_POOL_H
 
 #include <keel/allocator.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlEventCtx KlEventCtx;
 
@@ -55,5 +59,9 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
  * @brief Drain queue, join threads, remove watcher, free.
  */
 void kl_thread_pool_free(KlThreadPool *pool);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

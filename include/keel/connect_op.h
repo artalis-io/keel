@@ -30,6 +30,10 @@
 #define KEEL_CONNECT_OP_H
 
 #include <keel/handle.h>   /* KlSocketHandle, KL_INVALID_SOCKET */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Opaque connect operation. Full layout in <keel/connect_op_detail.h> (opt-in). */
 typedef struct KlConnectOp KlConnectOp;
@@ -130,5 +134,9 @@ int  kl_connect_op_cancel(KlConnectOp *op);
 KlConnectOpState kl_connect_op_state(const KlConnectOp *op);
 /** 1 once on_detach has fired (fully retired; reusable), else 0. */
 int  kl_connect_op_is_detached(const KlConnectOp *op);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_CONNECT_OP_H */

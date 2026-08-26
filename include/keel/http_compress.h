@@ -5,6 +5,10 @@
 #include <keel/http_response.h>
 #include <keel/allocator.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @file http_compress.h
@@ -87,5 +91,9 @@ int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
  * @return 0 on success, -1 on error.
  */
 int kl_http_compress_stream_end(KlHttpCompressStream *cs);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_COMPRESS_H */

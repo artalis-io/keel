@@ -6,6 +6,10 @@
 #include <keel/event.h>
 #include <keel/handle.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── KlWatcher: generic FD callback ──────────────────────────────── */
 
@@ -223,5 +227,9 @@ void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
  * @return Number of events returned by kl_event_wait, or -1 on error.
  */
 int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

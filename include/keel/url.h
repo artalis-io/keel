@@ -2,6 +2,10 @@
 #define KEEL_URL_H
 
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Parsed URL components (points into original URL string).
@@ -62,5 +66,9 @@ int kl_url_parse(const char *url, KlUrl *out);
  */
 int kl_url_resolve(const char *base_url, const char *location,
                    char *out, size_t out_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

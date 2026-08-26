@@ -4,6 +4,10 @@
 #include <keel/http_body_reader.h>
 #include <keel/http_request.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Streaming multipart/form-data parser.
@@ -131,5 +135,9 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
  * @return KL_HTTP_MP_ERR_NONE if no error, else the specific cause.
  */
 KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

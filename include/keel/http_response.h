@@ -6,6 +6,10 @@
 #include <keel/drain.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlTls KlTls;
 /* Back-pointer to the owning event ctx (for the internal socket provider,
@@ -162,5 +166,9 @@ int kl_http_response_end_stream(KlHttpResponse *res);
  * @return 0 when done, positive if more to send, -1 on error.
  */
 int kl_http_response_send(KlHttpResponse *res);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

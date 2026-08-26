@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Pluggable compression vtable.
@@ -82,5 +86,9 @@ typedef struct KlCompressConfig {
     KlCompressFactory  factory;     /**< Creates per-operation KlCompress */
     void (*ctx_destroy)(KlCompressCtx *ctx);  /**< Optional cleanup */
 } KlCompressConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_COMPRESS_H */

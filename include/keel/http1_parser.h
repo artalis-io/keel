@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <keel/http_request.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_HTTP1_PARSE_OK,            /**< Full request/response parsed */
@@ -58,5 +62,9 @@ typedef KlHttp1ResponseParser *(*KlHttp1ResponseParserFactory)(size_t max_respon
  */
 KlHttp1ResponseParser *kl_http1_response_parser_llhttp(size_t max_response_size,
                                              KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -20,6 +20,10 @@
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
@@ -177,5 +181,9 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    const KlHttpClientHeader *headers, int num_headers,
                                    const char *body, size_t body_len,
                                    KlHttpClientDoneFn on_done, void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_CLIENT_POOL_H */

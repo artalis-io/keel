@@ -12,6 +12,10 @@
 #include <keel/websocket.h>
 #include <keel/drain.h>
 #include <keel/http_server.h>   /* KlPeerCred + kl_peer_cred_fd */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -108,5 +112,9 @@ void kl_ws_server_drain_close(KlHttpConn *c);
 int  kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now);
 int  kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now);
 int  kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

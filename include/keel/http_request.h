@@ -2,6 +2,10 @@
 #define KEEL_HTTP_REQUEST_H
 
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Maximum number of request headers. */
 #define KL_MAX_HEADERS 64
@@ -163,5 +167,9 @@ static inline const char *kl_http_request_param(const KlHttpRequest *req,
     }
     return NULL;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

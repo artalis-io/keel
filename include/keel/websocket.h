@@ -12,6 +12,10 @@
 #include <keel/allocator.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Status codes (RFC 6455 Section 7.4.1) ──────────────────────── */
 
@@ -69,5 +73,9 @@ int  kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
 
 /** @brief RFC 6455 magic GUID for WebSocket handshake. */
 #define KL_WS_MAGIC_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

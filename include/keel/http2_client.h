@@ -17,6 +17,10 @@
 #include <keel/event_ctx.h>
 #include <keel/http2.h>
 #include <keel/tls.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
@@ -144,5 +148,9 @@ void kl_http2_client_close(KlHttp2ClientConn *c);
 void kl_http2_client_free(KlHttp2ClientConn *c);
 /** @brief Free a response's headers and body (allocator-owned). */
 void kl_http2_client_response_free(KlHttp2ClientResponse *resp, KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

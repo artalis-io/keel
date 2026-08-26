@@ -52,6 +52,10 @@
 #define KL_VERSION_NUMBER \
     ((KL_VERSION_MAJOR) * 10000 + (KL_VERSION_MINOR) * 100 + (KL_VERSION_PATCH))
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** @brief Version string of the *linked* library ("major.minor.patch").
  *  Compile-time macros describe the headers; this reports the compiled library,
  *  so a consumer that static-relinks a newer Keel can verify it at runtime. */
@@ -59,6 +63,10 @@ const char *kl_version(void);
 
 /** @brief Packed version (@ref KL_VERSION_NUMBER) of the *linked* library. */
 int kl_version_number(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 /** @} */
 

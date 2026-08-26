@@ -4,6 +4,10 @@
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @file http_cors.h
  *  @brief Built-in CORS middleware.
@@ -69,5 +73,9 @@ int  kl_http_cors_is_allowed(const KlHttpCorsConfig *config, const char *origin,
  * @return 0 to continue, 1 to short-circuit (OPTIONS preflight).
  */
 int  kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

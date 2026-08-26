@@ -2,6 +2,10 @@
 #define KEEL_ALLOCATOR_H
 
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Bring-your-own allocator vtable.
@@ -47,5 +51,9 @@ void *kl_realloc(KlAllocator *a, void *ptr, size_t old_size, size_t new_size);
  * @param size Size of the allocation being freed.
  */
 void  kl_free(KlAllocator *a, void *ptr, size_t size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

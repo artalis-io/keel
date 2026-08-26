@@ -17,6 +17,10 @@
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>
 #include <keel/http_router.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -122,5 +126,9 @@ int  kl_http2_server_on_writable(KlHttpConn *c);
 void kl_http2_server_drain_shutdown(KlHttpConn *c);
 /** @brief Clean up all HTTP/2 state for a connection. */
 void kl_http2_server_cleanup(KlHttpConn *c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

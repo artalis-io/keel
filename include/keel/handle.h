@@ -2,6 +2,10 @@
 #define KEEL_HANDLE_H
 
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * handle.h: portable socket handle.
@@ -42,5 +46,9 @@ typedef intptr_t kl_ssize_t;
 static inline int kl_handle_valid(KlSocketHandle h) {
     return h != KL_INVALID_SOCKET;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HANDLE_H */

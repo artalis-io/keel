@@ -21,6 +21,10 @@
 #include <keel/socket.h>
 #include <keel/tls.h>
 #include <keel/url.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
@@ -313,5 +317,9 @@ KlHttp1ResponseParser *kl_http1_response_parser_llhttp_s(size_t max_response_siz
                                                 KlHttpClientHeadersFn on_headers,
                                                 void (*on_complete)(void *),
                                                 void *stream_user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_CLIENT_H */

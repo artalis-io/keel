@@ -2,6 +2,10 @@
 #define KEEL_CLOCK_H
 
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @file clock.h
@@ -16,5 +20,9 @@
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_CLOCK_H */

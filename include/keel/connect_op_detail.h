@@ -9,6 +9,10 @@
 #define KEEL_CONNECT_OP_DETAIL_H
 
 #include <keel/connect_op.h>   /* KlConnectOp typedef, hook typedefs, KlConnectResult */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 struct KlConnectOp {
     int  state;               /* KL_CONNECT_OP_STATE_* */
@@ -52,5 +56,9 @@ struct KlConnectOp {
     KlConnectDetachFn         on_detach;
     void *ctx;
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_CONNECT_OP_DETAIL_H */

@@ -5,6 +5,10 @@
 #include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Result codes for non-blocking TLS operations.
@@ -228,5 +232,9 @@ typedef struct {
     KlTlsFactory factory;      /**< Creates per-connection KlTls */
     void (*ctx_destroy)(KlTlsCtx *ctx);  /**< Optional cleanup at server shutdown */
 } KlTlsConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

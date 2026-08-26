@@ -6,6 +6,10 @@
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Route handler function. */
 typedef void (*KlHttpHandler)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
@@ -251,5 +255,9 @@ int  kl_http_router_dispatch_synthetic(KlHttpRouter *r, KlHttpRequest *req,
 
 /** @brief Free router resources. */
 void kl_http_router_free(KlHttpRouter *r);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

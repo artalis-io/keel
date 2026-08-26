@@ -12,6 +12,10 @@
 
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* Forward declarations */
 typedef struct KlEventCtx KlEventCtx;
@@ -69,5 +73,9 @@ struct KlResolver {
     /** Destroy the resolver (free any shared state). */
     void (*destroy)(KlResolver *self);
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_RESOLVER_H */

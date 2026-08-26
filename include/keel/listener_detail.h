@@ -9,6 +9,10 @@
 #define KEEL_LISTENER_DETAIL_H
 
 #include <keel/listener.h>   /* KlListener typedef, hook typedefs, KlSlotLease */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 struct KlListener {
     int  state;               /* KL_LISTENER_* */
@@ -43,5 +47,9 @@ struct KlListener {
     KlListenerCloseFn    on_close;
     void *ctx;
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_LISTENER_DETAIL_H */
