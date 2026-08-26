@@ -5,6 +5,81 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Fourteenth pass: AF_UNIX node-cleanup security increment (#250/#251) + whole-tree re-audit (2026-08-26)
+
+**Scope:** whole `src/` (93 `.c`) + `src/protocols/` + `integrations/` (67 `.c`) + headers +
+`Makefile`. Trigger: the AF_UNIX node-lifecycle hardening merged at `4a5ac7e` (PR #251, issue #250 /
+CodeQL #43): `src/unix_socket_node_posix.c` + the identity-anchored `src/unix_socket_node_win.c`. A
+fresh six-subsystem sweep re-audited the rest of the tree (substrate core, datagram, event/completion
+backends, HTTP server core + body/parse, client/http2/websocket/dns, integrations).
+
+**Verdict: CLEAN.** 0 Critical / 0 High / 0 Medium / 4 Low + 2 Informational. The build is
+`-Werror`-clean (0 warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2`), `cppcheck` exits 0,
+`scan-build` reports no bugs (verified on `unix_socket_node_posix.c` this pass), and the full suite is
+ASan/UBSan-clean (`make debug-test`, 90 suites, 0 sanitizer hits). None of the Low/Info items is a
+reachable memory-safety defect; the security-critical node-cleanup modules are clean.
+
+### Mechanical scans (whole tree)
+
+| Category | Result |
+|---|---|
+| Unsafe str/format (`strcpy`/`strcat`/`sprintf`/`gets`/`vsprintf`) | none in `src/`; grep hits are the word "gets" in comments. One freestanding `strcpy` *definition* in `integrations/platform/uefi/mbedtls_platform_uefi.c` (a libc shim, bounded, expected) |
+| Unsafe int parse (`atoi`/`atol`/`atof`) | none |
+| Direct `malloc`/`free`/`calloc`/`realloc` in `src/` | none outside the default-allocator seam (`allocator_default_stdlib.c`); all app allocation via `kl_malloc`/`kl_free` (with size) |
+| Overflow guards (`SIZE_MAX`/`INT_MAX` before size arithmetic) | present across substrate, datagram slots/batch, HTTP header/body growth, websocket/DNS/proxy length fields |
+| Dead code (`#if 0` / `if (0)`) | none |
+| VLAs / large stack arrays | none |
+
+### Findings
+
+| # | Severity | file:line | Issue | Suggested fix |
+|---|----------|-----------|-------|---------------|
+| L1 | Low (security: mTLS authz) | `integrations/tls/mbedtls/tls_mbedtls.c:338-373` (`x509_extract_cn`/`x509_extract_san`) | The mbedTLS adapter copies raw ASN.1 CommonName / DNS-SAN bytes verbatim with no canonicalization. An embedded NUL in a client-cert CN (`"admin\0evil"`) yields `subject_cn = "admin\0evil"`, so an app doing `strcmp(subject_cn, "admin")` for authorization matches. The OpenSSL sibling explicitly guards this (`identity_bytes_safe` rejects `<0x20`/`0x7f`; `dns_san_bytes_safe` allows only LDH+`.`/`_`/`*`, rejecting NUL/control and the `,` that would make the joined SAN list ambiguous). Bounds are correct: this is an identity-spoofing asymmetry between the two TLS backends, not memory unsafety. | Mirror the OpenSSL policy in the mbedTLS extractor: reject/skip a CN or DNS-SAN whose bytes contain NUL, a C0 control, DEL, or (SAN) a comma. |
+| L2 | Low (liveness) | `src/event_iouring.c:476` (also 502, 513; callers 545/578/617) | On submission-queue exhaustion at the *initial* post, `iou_prep_send_tail` sets `op->aborted=1` and returns, but no SQE was queued and the post function still returns 0 (success). The drain (`io_uring_for_each_cqe`) only processes CQEs and `->aborted` is consumed only inside `iou_fill_event` when a CQE is dequeued, so no completion is ever delivered; the idle-timeout sweep skips already-aborted ops, so the WRITE/SENDFILE is stranded until the connection idle-closes. Not a UAF (kernel never owned the buffer). Requires SQ-depth (1024) exhaustion, so hard to trigger. The "surface as error next drain" comment is aspirational; there is no aborted-op sweep. | Treat an initial `!sqe` as a hard post failure: unlink + `iou_op_free` the op and return -1 (as the other `!sqe` post paths do), so the driver closes the connection instead of waiting on a completion that never arrives. |
+| L3 | Low (integrity) | `integrations/codec/miniz/decompress_miniz.c:338-367` | The streaming gzip CRC32 + ISIZE verification runs only in the `flush && trail_len>=8` branch. A stream whose final block plus full 8-byte trailer arrives without a subsequent `flush`, or that ends with `<8` trailer bytes, is accepted with no integrity check; corrupted payload passes as valid. Contained by the 256 MB anti-bomb cap; ISIZE compares 32-bit `total_out` (wraps >4 GB). Not memory-unsafe. | Verify the trailer whenever `done` and 8 bytes are accumulated (independent of `flush`); treat a DONE stream with `<8` trailer bytes at flush as an error. |
+| L4 | Low (not attacker-reachable) | `src/protocols/http2/http2_client.c:175-207` (`h2c_on_response`) | If invoked twice for one stream while `n <= headers_cap`, the realloc block is skipped and the previous `name`/`value` heap strings are overwritten in place without `kl_free` (leak). Only reachable if a peer delivers two `HCAT_RESPONSE` HEADERS frames on one stream, which nghttp2 rejects as a protocol error and RSTs before a second delivery. | Hardening: free existing `st->resp.headers[*]` and reset `num_headers` at the top of the copy block before re-filling. |
+| I1 | Info | `integrations/platform/uefi/mbedtls_platform_uefi.c:234-266` | The freestanding `snprintf` skips `l`/`z`/`h` length modifiers but always `va_arg`s a 32-bit `int`/`unsigned` for `%x`/`%u`/`%d`. A `%zx`/`%lx` with a 64-bit arg would read the wrong vararg slot and desync the rest. Latent only: current mbedTLS call sites (ERROR_C/DEBUG_C off) use 32-bit conversions. | Honor the length modifier if a 64-bit/`z` conversion is ever introduced; otherwise acceptable under the documented "not a general printf" contract. |
+| I2 | Info | `integrations/http2/nghttp2/http2_nghttp2_server.c:147` (`ng_on_header_cb`) | On `ng_sstream_grow` realloc failure mid-headers the callback returns 0, so the request is later delivered missing that header (graceful degradation). An app that authorizes/routes on the full header set could be bypassed by a truncated set. Not memory-unsafe. | Return `NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE` to RST the stream on allocation failure. |
+
+**Update (same session, 2026-08-26): L1 FIXED.** `integrations/tls/mbedtls/tls_mbedtls.c` now mirrors
+the OpenSSL backend's identity canonicalization: added `identity_bytes_safe` (rejects `<0x20`/`0x7f`)
+and `dns_san_bytes_safe` (LDH+`.`/`_`/`*` only, rejecting NUL/control/comma); `x509_extract_cn` fails
+closed on an invalid-byte CN, a would-truncate CN, or more than one CN attribute; the DNS-SAN branch
+skips an invalid-byte or over-long entry instead of truncating. The adapter compiles clean under
+`-Werror` and the mbedTLS `e2e` peer-cert suite passes (valid-cert extraction unregressed). The other
+Low/Info items (L2/L3/L4, I1/I2) remain as recorded.
+
+### Coverage note
+
+Six independent subsystem sweeps read the real code (not pattern matching) across substrate core
+(allocator/kl_cstr/error/drain/timer/thread_pool/url/sockaddr/file_io/resolve_sync/stream/listener/
+connect_op/completion_core/completion_dispatch/event_ctx/event_dispatch), the datagram data plane
+(`datagram*.c`, `udp_cmsg.c`, `socket_dgram_posix.c`), all event/completion + socket backends
+(epoll/kqueue/poll/WSAPoll/io_uring/IOCP/pollcomp + posix/winsock providers), the HTTP server core +
+untrusted-input body/parse path (connection/server/response/router/body readers/chunked/multipart/
+cors/sse/compress/async), the client + secondary protocols (http_client_*/http2/websocket/dns/
+proxy_protocol/decompress/resolver_cache), and the `integrations/` adapter glue (lwIP raw + EFI
+TCP4/UDP4 token/quarantine lifetime, TLS mbedtls/openssl, nghttp2, miniz, UEFI freestanding shims).
+Verified clean at scrutiny: the substrate size/index overflow guards and the synchronous-inline-
+completion re-entrancy discipline (set-flag-before-hook + depth counter + deferred finalize) in
+stream/listener/connect_op; the datagram life-token refcount (created at 1, retain-per-post,
+release-exactly-once per completion, QUARANTINE borrowed-ref intentional leak) and fixed-slot/ring/
+batch overflow guards; the completion-backend op/buffer ownership (io_uring queue_exit-before-free,
+IOCP deliberate leak-on-port-error to avoid UAF, token transfer-and-NULL discipline); CL/TE
+resolution (llhttp zeroes Content-Length when chunked), the chunked 16-hex-digit overflow guard and
+multipart underflow-safe loop guards, response-header CRLF-injection rejection, and the Happy-Eyeballs
+terminal-once teardown; the DNS/WebSocket/PROXY length-field bounds and decompression output cap; and
+the two highest-risk integration lifetime domains (lwIP pcb/pbuf/token, EFI generation+quarantine).
+
+The two security-critical modules from the merged increment were covered by the concurrent #250/#251
+review this session rather than re-audited redundantly: `unix_socket_node_posix.c` (component-walked
+`O_NOFOLLOW`/`O_DIRECTORY` trust validation on every path component, dev/ino identity captured at bind
+and re-verified at teardown, `out_fd`-required NULL guard) is `scan-build`-clean; `unix_socket_node_win.c`
+(per-component no-follow walk rejecting reparse points, ACL default-deny that skips inherit-only ACEs,
+held/pinned parent, `FILE_ID_INFO`-verified delete-by-handle via `FileDispositionInfoEx` only) is
+`cppcheck`-clean and contains no `DeleteFileA`/pathname-deletion path. Both fail closed on an untrusted
+component or an identity mismatch.
+
 ## Thirteenth pass: datagram Phase B (public `KlDatagram` + `KlUdp`/dns) whole-tree re-audit (2026-08-17)
 
 **Scope:** whole `src/` (69 `.c`) + `parsers/` + headers + `Makefile`, focused on the code added

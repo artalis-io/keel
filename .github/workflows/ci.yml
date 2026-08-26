@@ -572,6 +572,12 @@ jobs:
         timeout-minutes: 5
         run: make -C integrations/http2/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
 
+      - name: mbedTLS adapter, peer-cert identity canonicalization unit tests (ASan)
+        timeout-minutes: 5
+        # Runs before the fold-into-libkeel.a step below: this test includes tls_mbedtls.c
+        # via a test-only seam, so libkeel.a must still be plain core (no duplicate symbols).
+        run: make -C integrations/tls/mbedtls cn-canon MBEDTLS_DIR="$HOME/mbedtls"
+
       - name: mbedTLS adapter, real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
         run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" smoke-tls
