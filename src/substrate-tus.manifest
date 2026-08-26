@@ -55,5 +55,6 @@ src/thread_pool.c
 src/timer.c
 src/udp_cmsg.c
 src/udp_cmsg_win.c
+src/unix_socket_node_posix.c
 src/url.c
 src/version.c

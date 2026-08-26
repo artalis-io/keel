@@ -270,23 +270,38 @@ Tests avoid timing sleeps; they prepare state deterministically between the publ
 
 ## 10. Deliverables and sequencing
 
-Implementation is deferred until this design is accepted. It then lands as **separate reviewed
-increments**:
+The work lands as **separate reviewed increments**:
 
-- **Increment 1 (POSIX):**
-  1. Component-walked, lifetime-held parent `dirfd` (sentinel-initialized, stored in server state,
-     reused at teardown, closed on all exits) with the section 4.1 tier check.
+- **Increment 1 (POSIX security hardening):**
+  1. Component-walked, lifetime-held parent `dirfd` (stored in fixed state, reused at teardown, closed
+     on all exits) with the section 4.1 tier check.
   2. `base` copied into lifecycle-owned fixed storage.
   3. A shared validated helper (`dirfd` + `base` + `fstatat(NOFOLLOW)` identity + accepted-owner set)
-     used by P1, P4, P5.
+     used by the reclaim, failure-cleanup, and teardown removals.
   4. `fstatat`-based dev/ino capture at bind and match at teardown.
-  5. Directory-relative `unlinkat`/`fchownat`/`fchmodat` (P1-P5), chown-then-chmod, with pre-op
-     revalidation; no socket-fd owner/mode.
+  5. Directory-relative `unlinkat`/`fchownat`/`fchmodat`, chown-then-chmod, with pre-op revalidation;
+     no socket-fd owner/mode.
   6. Header doc-comment precondition updates (section 5.3) and removal of the suppression + over-strong
      comment (section 6).
   7. The deterministic tests (section 7) with **no** boundary-injection seam, plus the compile-coverage
      check (section 9).
-- **Increment 2 (Windows spike):** the section 5.2 API/behavior spike and its recorded decision; no
-  Windows code until it resolves.
 
-When the increment(s) are finalized, this design is archived under `docs/archive/designs/`.
+  Landed first in the HTTP server-platform TU; a reviewable, self-contained security commit.
+
+- **Increment 2 (behavior-neutral axis extraction):** the AF_UNIX filesystem-node lifecycle is
+  transport/socket-axis work, so it moves out of the protocol tree into a substrate module,
+  **`src/unix_socket_node.h` + `src/unix_socket_node_posix.c`**. The module names no protocol type,
+  takes a neutral policy (`KlUnixNodePolicy`: path, unlink, owner/group NAMES, mode) + the socket
+  provider + an allocator seam, owns the opaque per-bind state (held dirfd, copied base, dev/ino,
+  accepted-owner), resolves owner/group names internally, and returns a neutral `KlUnixNodeStatus`.
+  The HTTP server keeps only a thin adapter: it builds the policy, delegates bind/teardown, and maps
+  the status into `KlError` + server logging. `src/protocols/http/` retains no AF_UNIX node
+  syscalls, enforced by the ownership gate **`check-no-fsnode-in-protocols`**. No behavior change.
+
+- **Increment 3 (Windows spike):** the section 5.2 API/behavior spike and its recorded decision; a
+  Windows implementation of the **same** `unix_socket_node.h` contract
+  (`src/unix_socket_node_win.c`) is its future home. Until then Windows keeps its existing inline
+  teardown and `UNIX_NODE_SRC` is empty on that platform. No Windows code until the spike resolves.
+
+The substrate home is the final one: `src/unix_socket_node*.c`. When the increments are finalized,
+this design is archived under `docs/archive/designs/`.

@@ -1091,4 +1091,64 @@ UTEST(unix_socket, hardened_failure_path_removes_only_owned_node) {
     rmdir(dir);
 }
 
+/* Every path component is trust-validated, not only the final parent: an untrusted INTERMEDIATE
+ * directory fails closed even when the immediate parent is private. (POSIX has no bindat(), so the
+ * whole chain the textual bind() re-resolves must be anchored.) */
+UTEST(unix_socket, hardened_untrusted_intermediate_component_fails_closed) {
+    char mid[96], sub[160], path[220];
+    snprintf(mid, sizeof(mid), "./keel-%ld-imid", (long)getpid());
+    snprintf(sub, sizeof(sub), "%s/sub", mid);
+    rmdir(sub); rmdir(mid);
+    ASSERT_EQ(0, mkdir(mid, 0700));
+    ASSERT_EQ(0, chmod(mid, 0777));                 /* untrusted intermediate (world-writable, no sticky) */
+    ASSERT_EQ(0, mkdir(sub, 0700));                 /* private immediate parent */
+    snprintf(path, sizeof(path), "%s/x.sock", sub);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_http_server_run(&srv));        /* walk rejects the intermediate: fail closed */
+    ASSERT_EQ(srv.last_error, KL_ERR_BIND);
+    kl_http_server_free(&srv);
+
+    ASSERT_NE(0, access(path, F_OK));
+    rmdir(sub); rmdir(mid);
+}
+
+/* Relative-path behavior: the path is anchored to the current working directory (opened during the
+ * walk); bind resolves the relative sun_path against the process cwd. Safe under the documented
+ * precondition that the process does not chdir() concurrently (KEEL's single-threaded server model).
+ * Here a relative path with a mode mutation binds and the node is created under cwd. */
+UTEST(unix_socket, hardened_relative_path_binds_under_cwd) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "rel");      /* "./keel-...sock": relative, under cwd */
+    unlink(path);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_mode = 0660,                   /* forces the hardened, cwd-anchored path */
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);                            /* the node was created at the cwd-relative path */
+    close(fd);
+    struct stat stt;
+    ASSERT_EQ(0, stat(path, &stt));
+    ASSERT_TRUE(S_ISSOCK(stt.st_mode));
+
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+    ASSERT_NE(0, access(path, F_OK));               /* owned-node teardown removed it */
+}
+
 UTEST_MAIN();

@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
@@ -126,11 +127,6 @@ typedef struct {
 
 typedef struct KlAsyncOp KlAsyncOp;
 
-/* Upper bound on an AF_UNIX path's final component that the server copies into
- * lifecycle-owned storage. sockaddr_un.sun_path is 108 on Linux and 104 on the
- * BSDs/macOS; 108 bounds every hosted POSIX target (asserted in the POSIX TU). */
-#define KL_HTTP_UNIX_PATH_MAX 108
-
 typedef struct KlHttpServer {
     KlHttpServerConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
@@ -152,19 +148,15 @@ typedef struct KlHttpServer {
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
-    /* Hardened AF_UNIX node-cleanup state (POSIX). All-zero / dirfd = -1 on TCP
-     * transports and on Windows (which keeps its own by-name teardown). Adding these
-     * fields is a pre-3.0 source/ABI revision; see
-     * docs/unix_socket_cleanup_security_design.md. */
-    struct {
-        int dirfd;                          /**< lifetime-held, trust-validated parent dir; -1 = none */
-        int node_captured;                  /**< 1 = node_dev/node_ino below are valid */
-        int owner_set;                      /**< 1 = owner_uid is a resolved unix_socket_owner */
-        unsigned int owner_uid;             /**< resolved unix_socket_owner uid (accepted-owner set) */
-        unsigned long long node_dev;        /**< bound-node st_dev (teardown identity check) */
-        unsigned long long node_ino;        /**< bound-node st_ino */
-        char base[KL_HTTP_UNIX_PATH_MAX];   /**< owned copy of the socket path's final component */
-    } unix_node;
+    /* Opaque, fixed lifecycle storage for the substrate AF_UNIX node-cleanup state
+     * (src/unix_socket_node.h). Managed only by that module; the concrete state type stays in
+     * substrate. Zeroed and set to the not-open sentinel by kl_http_server_init. Unused on non-UNIX
+     * transports and on platforms without the POSIX node lifecycle. The 192 bytes match
+     * KL_UNIX_NODE_STORAGE; a static_assert in http_server_plat_posix.c verifies this storage is
+     * large enough, and one in unix_socket_node_posix.c bounds the state. max_align_t gives the
+     * storage suitable alignment for any member the module places in it.
+     * Adding this is a pre-3.0 source/ABI revision; see docs/unix_socket_cleanup_security_design.md. */
+    union { unsigned char opaque[192]; max_align_t _align; } unix_node;
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
