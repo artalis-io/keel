@@ -77,11 +77,19 @@ typedef struct KlHttpServerConfig {
                                  *   forces UNIX regardless of this field (TCP == 0 is
                                  *   indistinguishable from unset, so a non-NULL path wins). */
     const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX.
-                                 *   PRECONDITION for automatic cleanup/ownership below: the socket's
-                                 *   PARENT DIRECTORY must be within the server's trust domain (owned
-                                 *   by the server uid or root; not writable by untrusted actors, or
-                                 *   sticky). An untrusted parent fails bind closed rather than acting
-                                 *   on an ambiguous entry. See
+                                 *   PRECONDITION for automatic cleanup/ownership below: the COMPLETE
+                                 *   ancestor chain of the path (every component, not just the immediate
+                                 *   parent) must be within the server's trust domain (owned by the
+                                 *   server uid or root, and not writable by untrusted actors unless
+                                 *   sticky; on Windows: no untrusted SID may delete/replace/
+                                 *   re-permission any component and no component may be a reparse
+                                 *   point). An untrusted component fails bind CLOSED rather than acting
+                                 *   on an ambiguous entry. Environment-default cwd/temp locations are
+                                 *   NOT guaranteed to satisfy this and may be rejected (a world-writable
+                                 *   /tmp-style tree, or a directory owned by a foreign uid, is correctly
+                                 *   refused); place the socket in an application-owned runtime directory
+                                 *   with a restrictive owner/mode or ACL (e.g. a service-owned /run
+                                 *   subdirectory, or a per-user runtime directory). See
                                  *   docs/unix_socket_cleanup_security_design.md. */
     int unix_socket_unlink;     /**< unlink a stale, owned socket node before bind and on free after a
                                  *   successful bind. Only removes a validated socket the server owns,

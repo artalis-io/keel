@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include "mock_tls.h"   /* shared completion-capable identity TLS mock */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -1151,4 +1152,66 @@ UTEST(unix_socket, hardened_relative_path_binds_under_cwd) {
     ASSERT_NE(0, access(path, F_OK));               /* owned-node teardown removed it */
 }
 
-UTEST_MAIN();
+/* Recursively remove a test-owned directory tree (best-effort; operates only on our mkdtemp dir). */
+static void rm_rf(const char *path) {
+    DIR *d = opendir(path);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            char child[4096];
+            snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+            struct stat st;
+            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
+                rm_rf(child);
+            else
+                unlink(child);
+        }
+        closedir(d);
+    }
+    rmdir(path);
+}
+
+/*
+ * The hardened AF_UNIX bind validates the trust of EVERY component of the socket path (see
+ * docs/unix_socket_cleanup_security_design.md section 5.3). The relative-path tests below
+ * bind "./keel-*.sock" under the process cwd, so they require a cwd whose whole ancestor chain is
+ * trusted (owned by us, not group/other writable). An environment-default cwd is NOT guaranteed to
+ * be trusted -- e.g. a CI container owns the workspace as a foreign uid, which the hardened walk
+ * correctly refuses. So the suite runs from a private, verified 0700 directory we own, and restores
+ * the original cwd on the single exit path.
+ */
+UTEST_STATE();
+
+int main(int argc, char *argv[]) {
+    char orig_cwd[4096];
+    if (!getcwd(orig_cwd, sizeof(orig_cwd))) { perror("getcwd"); return 99; }
+
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char tmpl[4096];
+    snprintf(tmpl, sizeof(tmpl), "%s/keel-unixtest-XXXXXX", tmp);
+    char *dir = mkdtemp(tmpl);
+    if (!dir) { perror("mkdtemp"); return 99; }
+
+    /* Assert the private dir is ours and restrictive BEFORE binding anything under it. */
+    struct stat st;
+    if (stat(dir, &st) != 0) { perror("stat"); rmdir(dir); return 99; }
+    if (st.st_uid != geteuid()) {
+        fprintf(stderr, "test dir %s owner uid=%u != euid=%u\n",
+                dir, (unsigned)st.st_uid, (unsigned)geteuid());
+        rmdir(dir); return 99;
+    }
+    if ((st.st_mode & 0777) != 0700) {
+        fprintf(stderr, "test dir %s mode 0%o is not 0700\n", dir, (unsigned)(st.st_mode & 0777));
+        rmdir(dir); return 99;
+    }
+    if (chdir(dir) != 0) { perror("chdir"); rmdir(dir); return 99; }
+
+    int rc = utest_main(argc, (const char *const *)argv);
+
+    if (chdir(orig_cwd) != 0) perror("chdir restore");   /* restore cwd, then remove the tree */
+    rm_rf(dir);
+    return rc;
+}

@@ -203,6 +203,29 @@ sticky shared directory such as `/tmp` is not accepted for that configuration). 
 untrusted for the applicable tier, bind fails closed; place the socket in a server-owned directory or
 manage the path yourself.
 
+**Trusted directory is a caller responsibility (prominent).** Automatic AF_UNIX node management
+requires a **trusted, complete ancestor chain**: every component of the path, from the anchoring root
+to the immediate parent, must be within the trust domain (the walk validates each, not only the final
+parent, because there is no atomic bind-to-inode). A consequence callers must plan for: **environment
+default working-directory and temp locations are not guaranteed to be trusted and may be rejected.**
+Concretely, and observed in practice:
+
+- a **world-writable `/tmp`-style tree** (POSIX without the applicable sticky/tier condition, or a
+  Windows tree that grants an untrusted SID delete/modify) is correctly refused;
+- a **current working directory owned by a foreign uid** (for example a CI container that owns the
+  workspace as a non-root uid while the process runs as root) is correctly refused for a relative
+  path;
+- a per-user temp directory provided by a **non-native environment** (for example an MSYS2 `/tmp`
+  that grants Authenticated Users Modify across its tree) is correctly refused on Windows.
+
+None of these are defects; they are the fail-closed guarantee working. Callers that want automatic
+node management should place the socket in an **application-owned runtime directory** whose whole
+ancestor chain they control, for example a service-owned subdirectory of `/run` (POSIX) or a per-user
+runtime directory under `LOCALAPPDATA`/`XDG_RUNTIME_DIR` created with a restrictive owner/mode or ACL.
+Callers that cannot guarantee a trusted chain should manage the socket path lifecycle themselves
+rather than relying on automatic unlink/ownership. There is deliberately no opt-out that relaxes the
+trust check.
+
 ## 6. CodeQL handling
 
 The fix removes the over-strong comment and the `// lgtm[cpp/toctou-race-condition]` suppression at

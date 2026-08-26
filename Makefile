@@ -64,7 +64,7 @@ else ifdef WINDOWS
   DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
-  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi -ladvapi32   # advapi32: ACL/SID/token APIs (unix_socket_node_win.c)
+  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi -ladvapi32 -lshell32   # advapi32: ACL/SID/token APIs (unix_socket_node_win.c); shell32: SHGetFolderPath (test trusted-dir setup)
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
