@@ -45,11 +45,8 @@ static const char kl_415_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-static const char kl_431_response[] =
-    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n"
-    "\r\n";
+/* 431 response now lives as KL_HTTP_431_RESPONSE in http_internal.h (shared with the
+ * completion path). */
 
 static const char kl_100_continue[] =
     "HTTP/1.1 100 Continue\r\n"
@@ -794,8 +791,8 @@ read_more_headers: ;
         size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) {
             if (c->stream.read_cap >= c->max_header_size) {
-                best_effort_conn_write(c, kl_431_response,
-                                       sizeof(kl_431_response) - 1);
+                best_effort_conn_write(c, KL_HTTP_431_RESPONSE,
+                                       sizeof(KL_HTTP_431_RESPONSE) - 1);
                 c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
@@ -803,16 +800,16 @@ read_more_headers: ;
             if (new_cap > c->max_header_size)
                 new_cap = c->max_header_size;
             if (new_cap < c->stream.read_cap || new_cap > SIZE_MAX / 2) {
-                best_effort_conn_write(c, kl_431_response,
-                                       sizeof(kl_431_response) - 1);
+                best_effort_conn_write(c, KL_HTTP_431_RESPONSE,
+                                       sizeof(KL_HTTP_431_RESPONSE) - 1);
                 c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
             char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf,
                                    c->stream.read_cap, new_cap);
             if (!nb) {
-                best_effort_conn_write(c, kl_431_response,
-                                       sizeof(kl_431_response) - 1);
+                best_effort_conn_write(c, KL_HTTP_431_RESPONSE,
+                                       sizeof(KL_HTTP_431_RESPONSE) - 1);
                 c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
