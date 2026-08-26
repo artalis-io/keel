@@ -112,16 +112,25 @@ contracts, 4 opt-in detail/extension headers. The judgment of whether any publis
 implementation seam that should not be installed is deferred to 1b and decision F2-B; it is not
 asserted here.
 
-## 1b. Symbol-level struct classification (census pending; conclusion withdrawn)
+## 1b. Symbol-level type classification (census done; decision withdrawn to F2-B)
 
-`grep -oE '^\} Kl[A-Za-z_]+;'` over the installed headers finds 87 published concrete layouts (this
-count includes public enums and intentionally caller-constructed structs; a tagged-typedef-only grep
-undercounts because several layouts, for example `KlEventLoop` and `KlHttpConnPool`, are anonymous
-`typedef struct { ... } Name;`). The first draft's "zero accidentally internal" claim is withdrawn:
-it was asserted per file, but the correct unit is the individual declaration, and no per-declaration
-audit had been done.
+The complete public type surface is enumerated by `tools/f2_public_inventory.sh` into
+`docs/f2/public_types.tsv` (F2-1a): 193 public types across five kinds (89 struct, 25 enum, 16 opaque,
+60 callback, 3 alias; no unions). The alias count includes the one intentionally-public lowercase Keel
+typedef, `kl_ssize_t` (handle.h); type extraction accepts the `Kl*` convention plus that `kl_*` typedef
+form, and requires a `typedef` keyword so struct fields and lowercase implementation identifiers are
+never collected. This supersedes a naive `grep '^} Kl...;'` closer count, which finds
+only 87 and is itself incomplete in two ways the review flagged: it misses tag-form bodies
+(`struct KlName { ... };`, for example `KlHttpRequest` and the public vtables `KlTls`/`KlResolver`/
+`KlEventOps`, whose layout is on the caller surface), and it misses every opaque forward-declared
+handle (`KlDatagram`, `KlStream`, `KlListener`, `KlHttpClient`, ...), so the `opaque` category could
+never be assigned from it and F2-B would have reviewed only concrete closers rather than the whole type
+surface. Callback typedefs (60) are tagged distinctly so F2-B never mistakes an API signature for an
+object layout. The first draft's "zero accidentally internal" claim is withdrawn: it was asserted per
+file, but the correct unit is the individual declaration; the per-declaration decision itself is F2-B.
 
-The v3 audit must classify every published concrete layout into exactly one of:
+Every public type is classified (in `docs/f2/type_classification.tsv`, all rows `UNRESOLVED` until
+F2-B) into exactly one of:
 
 - caller-constructed: the caller allocates and fills it (configs, `KlIoVec`, callback/hook structs,
   vtables such as `KlSocketOps`, `KlDatagramOps`, `KlTls`);
@@ -291,13 +300,17 @@ therefore correct in the install rule as written.
 
 ## 5. Public declaration coverage (candidates, not verified coverage)
 
-Inventory: 318 unique public `kl_*` functions across `include/keel/*.h` (comment-stripped,
-statement-split, typedef and function-pointer vtable fields excluded).
+Inventory: 316 unique public `kl_*` function names, 318 declarations (`kl_version` and
+`kl_version_number` are each declared in both umbrellas), across `include/keel/*.h`. Produced by
+`tools/f2_public_inventory.sh` (comment-stripped, preprocessor-stripped, statement-split, typedefs and
+function-pointer vtable fields excluded) and checked in under `docs/f2/` in F2-1a. The counts below are
+the prior manual assessment; F2-4 recomputes them exactly against the checked-in
+`docs/f2/function_coverage.tsv`.
 
 Coverage evidence, stated honestly (the first draft over-claimed direct coverage):
 
-- 290 of 318 have at least one by-name caller in `tests/`/`examples/`/`integrations/`. A by-name
-  caller is a COVERAGE CANDIDATE, not verified coverage.
+- About 290 of the 316 have at least one by-name caller in `tests/`/`examples/`/`integrations/`. A
+  by-name caller is a COVERAGE CANDIDATE, not verified coverage.
 - 40 of those were manually verified as behavioral tests with assertions on observable effects (for
   example `kl_datagram_send` in `test_datagram_socket.c`, `kl_url_parse` in `test_url.c`,
   `kl_http_server_stats` in `test_http_server_stats.c`, `kl_proxy_parse` in `test_proxy_protocol.c`,
@@ -409,9 +422,14 @@ KlEventCtx; and the standalone-compile gate (F2-1b) is implemented only after th
 the C/C++ policy exist. Each increment is one reviewed step, validated locally, then paused.
 
 - F2-0: this docs-only inventory and freeze. Commit and pause. (current)
-- F2-1a: checked-in public-header, public-function, and public-layout inventories plus classification
-  scaffolding only. No API changes, no header edits, no gate wiring. The 1b per-declaration census is
-  produced here as reviewable data. Commit and pause; do NOT begin F2-A in this increment.
+- F2-1a: checked-in public-header, public-function, and complete public-type inventories plus
+  classification scaffolding only. No API changes, no header edits, no gate wiring. The 1b
+  per-declaration census (193 types: struct/union/enum/opaque/callback/alias) is produced here as
+  reviewable data by `tools/f2_public_inventory.sh`, whose `--check` verifies the raw inventories
+  reproduce and that both scaffolds are exact key-set joins (missing/extra/duplicate/malformed/drifted
+  keys fail) and whose `--selftest` canaries the extractor (concrete struct/union/enum, opaque handle,
+  callback-not-a-layout, cross-umbrella duplicate function, comment-embedded fake, multiline decl,
+  preprocessor guard). Commit and pause; do NOT begin F2-A in this increment.
 - F2-A: C and C++ support and linkage policy (section 3). Recommended ruling: support C++ linkage via
   `extern "C"` guards on every installed header, C-first. Ratifying it schedules the guard addition
   and the staged compile-and-link C++ consumer (with the negative canary).
