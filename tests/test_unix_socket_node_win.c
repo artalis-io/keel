@@ -341,9 +341,8 @@ UTEST(unix_node_win, zzz_runner_diagnostic) {
             printf("NODE fsctl_reparse ok=%d gle=%lu tag=0x%08lx (afunix=0x%08lx)\n",
                    rok, (unsigned long)(rok ? 0 : GetLastError()),
                    (unsigned long)(rok ? *(DWORD *)buf : 0), (unsigned long)IO_REPARSE_TAG_AF_UNIX);
-            FILE_ID_INFO fi;
-            BOOL iok = GetFileInformationByHandleEx(ln, FileIdInfo, &fi, sizeof(fi));
-            printf("NODE fileidinfo ok=%d gle=%lu\n", iok, (unsigned long)(iok ? 0 : GetLastError()));
+            /* (FileIdInfo probe omitted: FILE_ID_INFO needs _WIN32_WINNT >= 0x0602, which the test
+             * prelude does not set; the module sets it internally, so get_file_id compiles there.) */
             CloseHandle(ln);
         }
         closesocket(s2); DeleteFileA(path);
