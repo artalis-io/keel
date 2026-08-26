@@ -5,6 +5,113 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Thirteenth pass: post-AF_UNIX-node-cleanup (#251) whole-repo re-audit; three-axis separation holds (2026-08-26)
+
+**Verdict: architecturally sound.** The event / socket / protocol axes remain genuinely orthogonal
+and separately replaceable. Trigger: the AF_UNIX node-lifecycle hardening merged at `4a5ac7e` (PR
+#251); a fresh whole-repo `/axis-audit`. One Low functional-divergence finding between the two event
+models (oversized-header handling); no architectural coupling introduced. All six axis-boundary gates
+pass (`check-substrate-purity`, `check-readiness-identity`, `check-sockaddr-neutral`,
+`check-protocol-home`, `check-protocol-no-integration`, `check-integration-seam`).
+
+### 1. Architecture map (verified current)
+
+- **Event axis:** `include/keel/event.h` (readiness) + `src/event_caps.h` (negotiation) +
+  `src/completion.h` + `src/completion_core.c` (platform-independent completion + generic driver) +
+  `src/completion_dispatch.c` / `src/completion_io.h` (run-loop seam). The old `io_engine` is retired:
+  no `src/io_engine.c`/`.h` is git-tracked (a stale `io_engine.o` build artifact remains until
+  `make clean`; F2). Backends present and `BACKEND=`-selected: readiness `event_epoll/kqueue/poll/
+  wsapoll.c`; completion `event_iouring.c` (SQE/CQE), `event_iocp.c`, `event_pollcomp.c` (poll double).
+- **Socket axis:** `src/socket.h` (`KlSocketProvider` vtable + `KL_SOCK_CAP_*`), providers
+  `socket_posix.c` / `socket_winsock.c`; overlapped providers live in their event TUs. `KlSocketHandle`
+  (pointer-width, `KL_INVALID_SOCKET`, `kl_handle_valid`). Datagram data plane rides the provider's
+  `dgram` op (`socket_dgram_{posix,win}.c`, `udp_cmsg{,_win}.c`), model-blind.
+- **Protocol layer** (`src/protocols/`): `http_connection.c` (+ model-blind core
+  `kl_http_conn_on_readable`/`_dispatch_request`/`_ingest_body`/`_send_complete` in
+  `http_conn_internal.h`), `http2_server.c`, `websocket.c`, the `http_client_*`/`http2_client.c`/
+  `websocket_client.c` TUs, `http_sse.c`, `http_response.c`, body readers, the `KlTls` vtable. These go
+  through `conn_read`/`conn_write` + the socket seam and never call an event engine.
+- **Negotiation:** `kl_event_ctx_sockets_compatible()` (`src/event_ctx.c`): a completion loop requires
+  an overlapped provider; a readiness loop requires a native-fd provider.
+
+### 2. Execution-path traces (real names)
+
+- **Readiness receive** (epoll/kqueue): `kl_event_wait` reports READ against `&conn->stream` (the
+  `check-readiness-identity` gate enforces registrations use `&conn->stream`) -> dispatch ->
+  `kl_http_conn_on_readable` -> `conn_read` (socket seam `kl_sock_recv` or `KlTls->read`) into
+  `stream.read_buf` -> llhttp -> `kl_http_conn_dispatch_request` / `_ingest_body` -> handler ->
+  `kl_http_response_*` -> `conn_write`; EAGAIN re-arms interest via `kl_event_mod`.
+- **Completion receive** (io_uring/pollcomp/IOCP): `kl_comp_post_recv(c)` computes
+  `space = read_cap - read_len` and calls `kl_comp_post_recv_raw(&c->stream, buf, space)` (the backend
+  sees only a `KlStream`, never an HTTP type) -> backend submits (`io_uring_prep_recv` / `WSARecv` /
+  pollcomp poll, keyed on the stream token) -> drain (`kl_comp_run` -> `completion_dispatch.c`) maps
+  the CQE/packet to a `KlCompletionEvent` -> `completion_http_server.c` recv handler ->
+  `kl_http_conn_ingest`/parse -> `comp_send_response` -> `kl_comp_post_send_raw`; the next recv is
+  posted, or parked when `stream.read_paused` (read-side flow control).
+- **Accept:** readiness -> listener readable -> `kl_sock_accept` loop -> conn acquire -> register
+  `&conn->stream`. completion -> `kl_comp_prime_accepts_raw`/`kl_comp_post_accept_raw`
+  (io_uring ACCEPT / AcceptEx) -> completion delivers the new fd -> conn acquire -> `kl_comp_post_recv`.
+- **Send + backpressure:** readiness -> `conn_write` partial -> EAGAIN -> `KlDrain` buffers the
+  remainder + re-arms WRITE -> flush on writable. completion -> `kl_comp_post_send_raw` submits the
+  whole iov; a partial send re-preps the tail (`send_done`/`send_total`); backpressure is the bounded
+  send queue + not posting the next recv until drained.
+- **Close with outstanding work:** readiness -> `kl_event_del` + `kl_sock_close`; stale post-close
+  events guarded by slot generation. completion -> `kl_comp_close` -> conn release; outstanding ops
+  handled by io_uring `queue_exit`-before-free (kernel drops in-flight), IOCP port-quiesce +
+  deliberate leak of still-kernel-owned ops (avoids UAF), and the datagram close coordinator's
+  retire/cancel with the backend-owned life token. Exactly-one-terminal per op.
+
+### 3. Findings
+
+| # | Severity | Files+symbols | Principle | Why / failure scenario | Smallest fix |
+|---|----------|---------------|-----------|------------------------|--------------|
+| F1 | Low | readiness `http_connection.c:796-806` (grow to `max_header_size`, emit `kl_431_response`) vs completion `completion_http_server.c:84` (`space==0 -> -1 -> kl_comp_close`) and `:503` (`off>=read_cap -> kl_comp_close`) | Goal 7/8: readiness and completion must not produce observably different protocol semantics for the same input. | Oversized request headers are handled differently by event model: the readiness path grows the header buffer up to the configured `max_header_size` and returns a proper `431 Request Header Fields Too Large`; the completion path uses the fixed `KL_HTTP_CONN_READ_BUF_SIZE` (8 KB) read buffer (no growth) and closes the connection with no 431. Two observable differences: (a) 431 vs bare TCP close; (b) a `max_header_size` configured above 8 KB is honored on readiness but silently capped at 8 KB on any completion backend. Both models still reject oversized input safely (no memory-safety impact); the divergence is functional/config. | Align the completion path: on header-buffer overflow, best-effort post the same `kl_431_response` before close (mirrors readiness), and either grow the completion read buffer to `max_header_size` or document that `max_header_size` > `KL_HTTP_CONN_READ_BUF_SIZE` is a readiness-only knob. Needs a small design decision (grow vs document) before coding. |
+| F2 | Informational | stale `src/io_engine.o` (no git-tracked source) | Build hygiene, not architecture. | The `io_engine` translation unit is retired (no `.c`/`.h` tracked), but a stale object file lingers in a dirty tree and can confuse a grep/`ls`. | `make clean` (removes it); no source change. |
+
+### 4. Compatibility matrix
+
+| Combination | Implemented | Buildable | Tested | Production-ready | Notes |
+|---|---|---|---|---|---|
+| Linux sockets + epoll (readiness) | yes | yes | yes (`make`, full suite) | yes | default on Linux |
+| Darwin sockets + kqueue (readiness) | yes | yes | yes (`make`, full suite) | yes | default on macOS |
+| POSIX + poll (readiness fallback) | yes | yes | yes (`BACKEND=poll`, CI) | yes | universal fallback |
+| Linux sockets + io_uring (completion) | yes | yes | yes (container `test-iouring`, ASan/LSan) | yes | completion-native SQE/CQE + splice |
+| Winsock + WSAPoll (readiness) | yes | yes | yes (CI Windows) | yes | |
+| Winsock + IOCP (completion) | yes | yes | yes (CI Windows IOCP + smoke) | yes | overlapped provider |
+| pollcomp double (completion) | yes | yes | yes (`BACKEND=pollcomp`, ASan) | n/a (test/CI double) | portable completion driver under ASan |
+| lwIP raw (completion provider) | yes | yes | yes (loopback-raw ASan/UBSan/LSan) | integration | runtime-injected provider |
+| EFI_TCP4/UDP4 (UEFI completion) | yes | yes | yes (host-mock + QEMU/OVMF) | integration | freestanding provider |
+
+### 5. Contract (unchanged from prior passes; re-affirmed)
+
+Socket ownership: the provider owns the native handle; the protocol layer holds only a `KlStream` +
+`KlSocketHandle`. Event-loop affinity: one loop, one thread; the thread pool bridges blocking work via
+pipe + watcher. Readiness = register interest / wait / op / EAGAIN / re-arm; completion = submit /
+track / drain / interpret / retire, with exactly-one-terminal and post-close stale events discarded by
+generation (readiness) or queue-exit/quiesce (completion). Error normalization: platform errors ->
+`kl_sock_io_status` categories through the seam. Backpressure: readiness reduces interest + `KlDrain`;
+completion bounds the send queue + pauses recv posting. Cancellation/close: `kl_comp_cancel` marks
+aborted + posts a cancel (completion) or `kl_event_del` (readiness); the datagram coordinator defers
+the destructive terminal to the outermost frame.
+
+### 6. Recommended roadmap
+
+1. Immediate: resolve F1 (decide grow-vs-document for `max_header_size` on completion; mirror the 431
+   on overflow). Small, contained, improves cross-model consistency.
+2. Test coverage: add a deterministic oversized-header test asserting identical observable behavior
+   (status + close) under readiness and the pollcomp double, to lock the F1 contract once chosen.
+3. Hygiene: `make clean` to drop the stale `io_engine.o` (F2).
+4. No architectural change warranted; the three-axis design is intact and the recent socket-axis
+   additions (AF_UNIX node cleanup, datagram data plane) exemplify rather than erode it.
+
+### 7. Changes made
+
+None (report-only pass). F1 carries a design decision (grow vs document) that should be made before
+coding; F2 is a `make clean`. The AF_UNIX node cleanup merged in #251 is pure socket-axis transport
+code invoked through the neutral `unix_socket_node.h` contract by the `_plat_` adapters, so it adds no
+protocol-layer coupling: `http_connection.c` and the other protocol TUs remain free of platform
+networking headers and event-engine calls (verified by grep and the six axis gates).
+
 ## Twelfth pass: the public `KlDatagram` STABLE facade (datagram Phase B) preserves the three-axis separation (2026-08-17)
 
 **Verdict: architecturally sound, the datagram transport consolidation (Phase B, Step 7B) added
