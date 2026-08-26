@@ -77,6 +77,16 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
     (void)r;
 }
 
+/* 431 Request Header Fields Too Large: sent best-effort before closing a header read that
+ * grew to max_header_size, on both the readiness path (kl_http_conn_on_readable) and the
+ * completion path (completion_http_server.c). A macro, not a header static const, so each
+ * use site can sizeof() it without a per-TU unused-const-variable warning under -Werror. */
+#define KL_HTTP_431_RESPONSE \
+    "HTTP/1.1 431 Request Header Fields Too Large\r\n" \
+    "Content-Length: 0\r\n" \
+    "Connection: close\r\n" \
+    "\r\n"
+
 /* Release a connection and resume listening if paused (defined in http_server.c) */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
 

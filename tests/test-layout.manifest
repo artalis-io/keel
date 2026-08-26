@@ -83,6 +83,7 @@ tests/test_event_provider.c
 tests/test_file_io.c
 tests/test_io_status.c
 tests/test_iocp_engine.c
+tests/test_iouring_sqe_fail.c
 tests/test_kl_cstr.c
 tests/test_kl_cstr_builtin.c
 tests/test_listener.c

@@ -159,10 +159,18 @@ typedef struct {
     int             reg_free_count;
     int             reg_ok;                /* buffers registered; else always malloc+SEND */
     int             has_splice;            /* IORING_OP_SPLICE supported; else pread+SEND */
+#ifdef KEEL_IOURING_TEST_HOOKS
+    int             test_fail_next_sqe;    /* test-only: N forced iou_sqe()==NULL (SQ-exhaustion sim) */
+#endif
 } KlIouState;
 
 /* ── SQE helper: flush the SQ if it is full, then retry once. ─────────── */
 static struct io_uring_sqe *iou_sqe(KlIouState *st) {
+#ifdef KEEL_IOURING_TEST_HOOKS
+    /* Deterministically simulate submission-queue exhaustion for the L2 regression test:
+     * return NULL as if no SQE were available, without touching the real ring. */
+    if (st->test_fail_next_sqe > 0) { st->test_fail_next_sqe--; return NULL; }
+#endif
     struct io_uring_sqe *sqe = io_uring_get_sqe(&st->ring);
     if (!sqe) {
         io_uring_submit(&st->ring);        /* drain queued SQEs to free ring slots */
@@ -170,6 +178,16 @@ static struct io_uring_sqe *iou_sqe(KlIouState *st) {
     }
     return sqe;
 }
+
+#ifdef KEEL_IOURING_TEST_HOOKS
+/* Test-only seam (compile-time-guarded, so production carries neither the field above nor this
+ * symbol): make the next `count` io_uring SQE acquisitions fail, simulating SQ exhaustion at a
+ * post. Used by tests/test_iouring_sqe_fail.c to drive the initial-post !sqe failure path. */
+void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_fail_next_sqe = count;
+}
+#endif
 
 static unsigned iou_poll_mask(KlEventMask mask) {
     unsigned e = 0;
@@ -516,6 +534,17 @@ static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
     op->sf_stage = 2;
 }
 
+/* Undo a just-posted send/sendfile op whose INITIAL submission could not obtain an SQE
+ * (submission queue exhausted): unlink it, return its borrowed registered buffer / free its
+ * sendbuf, and free the op. No SQE was queued, so no completion will ever arrive; the post
+ * must fail (like the recv path on !sqe) so the driver closes the connection rather than
+ * waiting forever on a completion that never comes. */
+static void iou_post_undo(KlIouState *st, KlIouOp *op) {
+    iou_op_unlink(st, op);
+    iou_send_release(st, op);   /* reg buffer -> pool, or free the malloc'd sendbuf; NULLs it */
+    iou_op_free(op);
+}
+
 static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
     KlIouState *st = iou_state(stream);
     KlIouOp *op = iou_op_alloc(stream->alloc);
@@ -543,6 +572,7 @@ static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
     }
     iou_op_push(st, op);
     iou_prep_send_tail(st, op);
+    if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
 
@@ -576,6 +606,7 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
     op->send_total = head_total + got;
     iou_op_push(st, op);
     iou_prep_send_tail(st, op);
+    if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
 
@@ -615,6 +646,7 @@ static int iou_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int
     }
     iou_op_push(st, op);
     iou_prep_send_tail(st, op);                      /* stage 0: send the head */
+    if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
 

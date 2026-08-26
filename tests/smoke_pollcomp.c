@@ -232,6 +232,35 @@ static int keepalive_churn(int n) {
     return 1;
 }
 
+/* F1 (readiness<->completion parity): a request whose headers exceed max_header_size must get a
+ * proper 431 Request Header Fields Too Large on the completion loop, not a bare TCP close (which
+ * is what the completion path did before honoring max_header_size). The header block here is well
+ * past the default max_header_size (KL_HTTP_CONN_READ_BUF_SIZE, 8 KB). */
+static int oversized_header_gets_431(void) {
+    int cs = connect_client();
+    if (cs < 0) return 0;
+    char req[10240];
+    int n = snprintf(req, sizeof(req), "GET / HTTP/1.1\r\nHost: x\r\nX-Big: ");
+    memset(req + n, 'a', sizeof(req) - (size_t)n - 4);
+    memcpy(req + sizeof(req) - 4, "\r\n\r\n", 4);
+    /* Best-effort full write; the server may 431 + close before we finish, which is fine. */
+    size_t off = 0;
+    while (off < sizeof(req)) {
+        ssize_t w = write(cs, req + off, sizeof(req) - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    char buf[512]; size_t got = 0; int found = 0;
+    while (got < sizeof(buf) - 1) {
+        ssize_t r = read(cs, buf + got, sizeof(buf) - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r; buf[got] = 0;
+        if (strstr(buf, "431")) { found = 1; break; }
+    }
+    close(cs);
+    return found;
+}
+
 /* Resilience: an abrupt mid-request drop and a malformed request must be cleaned up
  * without crashing/leaking; then a normal request must still succeed (server survived).
  * The leak/UAF signal comes from the ASan CI run over these cleanup paths. */
@@ -717,8 +746,9 @@ int main(void) {
     /* Adversarial edge-case batch (hardening), all under the ASan CI run. */
     int churn_ok = idle_ok ? keepalive_churn(50) : 0;       /* keep-alive reset churn */
     int resil_ok = churn_ok ? resilience_ok(&alloc, &ccfg) : 0;  /* drop + malformed cleanup */
+    int hdr431_ok = resil_ok ? oversized_header_gets_431() : 0;  /* over-limit headers -> 431 (F1) */
     int big_ok = 0;                                          /* partial-send WRITE loop */
-    if (resil_ok) {
+    if (hdr431_ok) {
         KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
         int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/big",
@@ -750,6 +780,7 @@ int main(void) {
     if (!idle_ok) { fprintf(stderr, "smoke-pollcomp: idle-timeout (slowloris) close FAILED\n"); return 1; }
     if (!churn_ok) { fprintf(stderr, "smoke-pollcomp: keep-alive churn FAILED\n"); return 1; }
     if (!resil_ok) { fprintf(stderr, "smoke-pollcomp: resilience (drop/malformed) FAILED\n"); return 1; }
+    if (!hdr431_ok) { fprintf(stderr, "smoke-pollcomp: oversized-header 431 parity FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
     if (!bigstream_ok) { fprintf(stderr, "smoke-pollcomp: bigstream overlapped flush / HOL FAILED\n"); return 1; }
     if (!proxy_ok) { fprintf(stderr, "smoke-pollcomp: PROXY-over-completion roundtrip FAILED\n"); return 1; }

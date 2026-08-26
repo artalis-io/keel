@@ -426,10 +426,46 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
     return 0;
 }
 
-/* Plaintext headers path: parse what's in read_buf; on need-more, post a read. */
-static void comp_drive_reading(struct KlHttpServer *s, KlHttpConn *c) {
-    if (comp_try_reading(s, c) == 1 && kl_comp_post_recv(c) < 0)
+/* Honor max_header_size on the completion path, mirroring the readiness path
+ * (kl_http_conn_on_readable): when the read buffer is full but the request headers are
+ * still incomplete, grow it (doubling, capped at max_header_size); once it has reached
+ * max_header_size, best-effort a 431 Request Header Fields Too Large and close. This keeps
+ * the two event models observably equivalent for over-limit headers (a configured
+ * max_header_size above the base read buffer is honored, and an over-limit header set gets a
+ * 431 rather than a bare close). Returns 0 (room remains, no growth needed), 1 (grew), or
+ * -1 (431 sent + connection closed; caller must return). */
+static int comp_grow_headers_or_431(struct KlHttpServer *s, KlHttpConn *c) {
+    if (c->stream.read_len < c->stream.read_cap)
+        return 0;                                   /* room remains: read into it as-is */
+    if (c->stream.read_cap >= c->max_header_size) {
+        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
         kl_comp_close(s, c);
+        return -1;
+    }
+    size_t new_cap = c->stream.read_cap * 2;
+    if (new_cap > c->max_header_size) new_cap = c->max_header_size;
+    if (new_cap <= c->stream.read_cap || new_cap > SIZE_MAX / 2) {
+        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+        kl_comp_close(s, c);
+        return -1;
+    }
+    char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf, c->stream.read_cap, new_cap);
+    if (!nb) {
+        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+        kl_comp_close(s, c);
+        return -1;
+    }
+    c->stream.read_buf = nb;
+    c->stream.read_cap = new_cap;
+    return 1;
+}
+
+/* Plaintext headers path: parse what's in read_buf; on need-more, grow (or 431) then read. */
+static void comp_drive_reading(struct KlHttpServer *s, KlHttpConn *c) {
+    if (comp_try_reading(s, c) == 1) {
+        if (comp_grow_headers_or_431(s, c) < 0) return;   /* over-limit: 431 sent + closed */
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+    }
 }
 
 /* Feed a completed body read through the model-blind body core, then act. */
@@ -500,7 +536,10 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
     /* Reading request headers: accumulate decrypted plaintext, parse, dispatch. */
     for (;;) {
         size_t off = c->stream.read_len;
-        if (off >= c->stream.read_cap) { kl_comp_close(s, c); return; }   /* headers overflowed */
+        if (off >= c->stream.read_cap) {   /* buffer full: grow to max_header_size, else 431 + close */
+            if (comp_grow_headers_or_431(s, c) < 0) return;
+            /* grew: read_cap increased, off (== read_len) unchanged, so space is now available */
+        }
         ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
         if (p < 0) { kl_comp_close(s, c); return; }
         if (p == 0) {                                  /* WANT_READ: need the network */

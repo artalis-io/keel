@@ -335,7 +335,7 @@ examples: $(EXAMPLES)
 # Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
-TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
+TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c tests/test_iouring_sqe_fail.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -373,6 +373,15 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
 	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+
+# io_uring L2 SQ-exhaustion regression (excluded from the default wildcard; enrolled in
+# IOURING_TEST_SUITES, so only built under BACKEND=iouring). Links a -DKEEL_IOURING_TEST_HOOKS copy of
+# the io_uring backend AHEAD of libkeel.a: as a direct object it defines every event_iouring symbol,
+# so the archive's non-hooked member is never pulled (no duplicate), and the hooked iou_sqe()
+# (deterministic SQ-exhaustion) is the one exercised.
+tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -DKEEL_IOURING_TEST_HOOKS -c -o tests/event_iouring_hooked.o src/event_iouring.c
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -696,7 +705,7 @@ IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chu
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
                           stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
-                          udp_cmsg unix_socket url version websocket websocket_client
+                          udp_cmsg unix_socket url version websocket websocket_client iouring_sqe_fail
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
@@ -1290,6 +1299,29 @@ fuzz/fuzz_url: fuzz/fuzz_url.c $(FUZZ_LIB)
 fuzz/fuzz_decompress: fuzz/fuzz_decompress.c $(FUZZ_LIB)
 	$(CC) $(FUZZ_CFLAGS) $(MINIZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 fuzz-decompress: fuzz/fuzz_decompress
+
+# Opt-in regression test for the streaming gzip trailer (CRC32 + ISIZE) verification in
+# decompress_miniz.c. Bring-your-own miniz (any source layout under MINIZ_DIR):
+#   make decompress-miniz-test MINIZ_DIR=/path/to/miniz
+# (The miniz codec backend is otherwise not exercised in CI.) Built with ASan+UBSan;
+# miniz sources are compiled with relaxed warnings, the adapters + test under -Werror.
+decompress-miniz-test: $(LIB)
+	@test -n "$(MINIZ_DIR)" || { echo "decompress-miniz-test: set MINIZ_DIR=/path/to/miniz"; exit 1; }
+	@set -e; mzobj=""; \
+	for f in $(MINIZ_DIR)/*.c; do \
+	  o="integrations/codec/miniz/tests/mz_$$(basename $$f .c).o"; \
+	  $(CC) -w -g -O1 -fsanitize=address,undefined -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO -c -o "$$o" "$$f"; \
+	  mzobj="$$mzobj $$o"; \
+	done; \
+	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -Wno-unused-function \
+	  -fsanitize=address,undefined -fno-sanitize-recover=all \
+	  -Iinclude -Iintegrations/codec/miniz -I$(MINIZ_DIR) -Ivendor -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
+	  -o integrations/codec/miniz/tests/test_decompress_trailer \
+	  integrations/codec/miniz/tests/test_decompress_trailer.c \
+	  integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c \
+	  $$mzobj -L. -lkeel; \
+	./integrations/codec/miniz/tests/test_decompress_trailer
+	@rm -f integrations/codec/miniz/tests/mz_*.o integrations/codec/miniz/tests/test_decompress_trailer
 
 fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \
       fuzz/fuzz_proxy fuzz/fuzz_url
