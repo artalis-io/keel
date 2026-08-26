@@ -171,3 +171,33 @@ implementation supports exactly that verified capability set and fails closed el
 `UNTRUSTED_PARENT` for an intermediate reparse point or an untrusted-writable component). It never
 falls back to `DeleteFileA`. Behavior on ReFS, SMB, FAT, and Windows versions below the probed build
 remains unverified and is therefore treated as unsupported until separately validated.
+
+## 10. CI-confirmed results (the permanent `windows-latest` MinGW node-test job)
+
+A later instrumented run on the `windows-latest` MinGW job (the instrumentation has since been
+removed; the permanent node tests remain) reconfirmed the capability set on the runner and pinned
+down the operational trust requirement now enforced by those tests. Recorded here so the runner
+environment, filesystem capabilities, AF_UNIX reparse tag, API results, and security conclusions
+survive removal of the temporary diagnostic:
+
+- Runner filesystem: local volume **NTFS**; `GetVolumeInformationByHandleW` flags include
+  `FILE_SUPPORTS_OPEN_BY_FILE_ID` and `FILE_SUPPORTS_REPARSE_POINTS`.
+- **AF_UNIX reparse tag:** a bound AF_UNIX socket node, opened no-follow, returns
+  `FSCTL_GET_REPARSE_POINT` tag `0x80000023` (`IO_REPARSE_TAG_AF_UNIX`).
+- API results: no-follow open (`FILE_FLAG_OPEN_REPARSE_POINT`), delete-by-handle
+  (`FileDispositionInfoEx` POSIX), and identity capture succeed on a node under a trusted directory;
+  the raw `bind()` on the AF_UNIX path also succeeds there.
+- Operational conclusion (drove the test design): the trust walk correctly **refuses** a directory
+  whose ancestor chain lets an untrusted principal delete/modify a component. The MinGW runner's
+  `%TEMP%` is MSYS2's `C:\msys64\tmp`, whose tree grants Authenticated Users Modify (including
+  `DELETE`) via an effective (non-inherit-only) inherited ACE, so a naive `%TEMP%` bind is correctly
+  rejected with `KL_UNIX_NODE_ERR_UNTRUSTED_PARENT` (rejected at `C:\msys64`). The permanent node
+  tests therefore create their directory under the native per-user base (`FOLDERID_LocalAppData`)
+  with inheritance removed and a DACL granting only the current user, SYSTEM, and Administrators, and
+  a verification test fails loudly with a per-component owner+ACE dump if that native chain is ever
+  unexpectedly unsafe. This is the fail-closed guarantee operating as designed, not a defect.
+
+The `C:\` DACL detail worth recording: it carries an **inherit-only** Modify grant for Authenticated
+Users (`(OI)(CI)(IO)` flags, mask includes `DELETE`), which confers no access on `C:\` itself; the
+ACL evaluation therefore skips inherit-only ACEs when asking who can substitute a given component
+(an effective inherited grant is still evaluated in full).
