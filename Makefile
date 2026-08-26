@@ -335,7 +335,7 @@ examples: $(EXAMPLES)
 # Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
-TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
+TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c tests/test_iouring_sqe_fail.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -373,6 +373,15 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 
 tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
 	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+
+# io_uring L2 SQ-exhaustion regression (excluded from the default wildcard; enrolled in
+# IOURING_TEST_SUITES, so only built under BACKEND=iouring). Links a -DKEEL_IOURING_TEST_HOOKS copy of
+# the io_uring backend AHEAD of libkeel.a: as a direct object it defines every event_iouring symbol,
+# so the archive's non-hooked member is never pulled (no duplicate), and the hooked iou_sqe()
+# (deterministic SQ-exhaustion) is the one exercised.
+tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -DKEEL_IOURING_TEST_HOOKS -c -o tests/event_iouring_hooked.o src/event_iouring.c
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -696,7 +705,7 @@ IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chu
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
                           stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
-                          udp_cmsg unix_socket url version websocket websocket_client
+                          udp_cmsg unix_socket url version websocket websocket_client iouring_sqe_fail
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

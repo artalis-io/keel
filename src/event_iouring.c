@@ -159,10 +159,18 @@ typedef struct {
     int             reg_free_count;
     int             reg_ok;                /* buffers registered; else always malloc+SEND */
     int             has_splice;            /* IORING_OP_SPLICE supported; else pread+SEND */
+#ifdef KEEL_IOURING_TEST_HOOKS
+    int             test_fail_next_sqe;    /* test-only: N forced iou_sqe()==NULL (SQ-exhaustion sim) */
+#endif
 } KlIouState;
 
 /* ── SQE helper: flush the SQ if it is full, then retry once. ─────────── */
 static struct io_uring_sqe *iou_sqe(KlIouState *st) {
+#ifdef KEEL_IOURING_TEST_HOOKS
+    /* Deterministically simulate submission-queue exhaustion for the L2 regression test:
+     * return NULL as if no SQE were available, without touching the real ring. */
+    if (st->test_fail_next_sqe > 0) { st->test_fail_next_sqe--; return NULL; }
+#endif
     struct io_uring_sqe *sqe = io_uring_get_sqe(&st->ring);
     if (!sqe) {
         io_uring_submit(&st->ring);        /* drain queued SQEs to free ring slots */
@@ -170,6 +178,16 @@ static struct io_uring_sqe *iou_sqe(KlIouState *st) {
     }
     return sqe;
 }
+
+#ifdef KEEL_IOURING_TEST_HOOKS
+/* Test-only seam (compile-time-guarded, so production carries neither the field above nor this
+ * symbol): make the next `count` io_uring SQE acquisitions fail, simulating SQ exhaustion at a
+ * post. Used by tests/test_iouring_sqe_fail.c to drive the initial-post !sqe failure path. */
+void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_fail_next_sqe = count;
+}
+#endif
 
 static unsigned iou_poll_mask(KlEventMask mask) {
     unsigned e = 0;
