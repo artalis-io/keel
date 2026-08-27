@@ -14,6 +14,11 @@ extern "C" {
  * Users implement this interface to provide compression (gzip, deflate, zstd).
  * One KlCompress instance is created per compress operation via the factory,
  * not pre-allocated per connection (deflate state is ~300KB).
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. Required (core calls them):
+ * compress, feed, encoding, destroy. Optional (NULL = not supplied): reset. New
+ * ops are appended after destroy.
  */
 typedef struct KlCompress KlCompress;
 
@@ -71,6 +76,11 @@ typedef struct KlCompressCtx KlCompressCtx;
 
 /**
  * @brief Factory creates a KlCompress session from the shared context.
+ *
+ * The factory signature is frozen (see docs/contracts/compatibility.md): pass new
+ * construction inputs through KlCompressCtx or KlCompressConfig, never by changing
+ * this signature.
+ *
  * @param ctx   Shared compression context (algorithm, level).
  * @param alloc Allocator for session resources.
  * @return New compression session, or NULL on failure.
@@ -80,6 +90,11 @@ typedef KlCompress *(*KlCompressFactory)(KlCompressCtx *ctx,
 
 /**
  * @brief Compression configuration (shared context + per-operation factory).
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default (a NULL factory leaves
+ * compression disabled). New members are appended after ctx_destroy.
  */
 typedef struct KlCompressConfig {
     KlCompressCtx     *ctx;         /**< Shared context: user-owned */

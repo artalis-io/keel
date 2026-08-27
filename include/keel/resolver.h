@@ -49,7 +49,14 @@ struct KlResolveReq {
     KlResolver *resolver;  /**< Back-pointer to owning resolver */
 };
 
-/** @brief Async DNS resolver vtable. */
+/**
+ * @brief Async DNS resolver vtable.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All three ops (resolve,
+ * cancel, destroy) are required; core calls each. New ops are appended after
+ * destroy.
+ */
 struct KlResolver {
     /**
      * Start async name resolution. Must not block.

@@ -23,6 +23,12 @@ extern "C" {
 #define KL_RESCACHE_DEFAULT_TTL_MS   60000
 #define KL_RESCACHE_DEFAULT_CAPACITY 64
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after capacity.
+ */
 typedef struct {
     uint64_t ttl_ms;      /**< Cache TTL in ms (0 = default 60s) */
     int      capacity;    /**< Max cache entries (0 = default 64) */

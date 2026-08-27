@@ -80,7 +80,13 @@ typedef struct {
 } KlHttpMultipartPartMeta;
 
 /** Parser caps. All fields default to 0 = unlimited; the caller is
- * responsible for setting sensible limits for adversarial input. */
+ * responsible for setting sensible limits for adversarial input.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after max_input_buffer.
+ */
 typedef struct {
     size_t max_part_size;     /**< per-part body bytes; 0 = unlimited */
     size_t max_total_size;    /**< total bytes received; 0 = unlimited */

@@ -59,6 +59,12 @@ typedef enum {
     KL_HTTP_SERVER_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
 } KlHttpServerTransport;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after event_provider.
+ */
 typedef struct KlHttpServerConfig {
     int port;
     const char *bind_addr;      /**< default: "0.0.0.0" */

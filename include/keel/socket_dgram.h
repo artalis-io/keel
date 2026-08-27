@@ -72,6 +72,14 @@ typedef struct {
     int         tos;
 } KlDgramTxDesc;
 
+/*
+ * Append-only provider vtable (see docs/contracts/compatibility.md): providers
+ * zero-initialize and recompile per major version. Required (the datagram core
+ * calls them): send, recv, configure. Optional (NULL = feature unavailable, core
+ * falls back or grants no cap): send_gso, set_tos, mcast_membership, caps, and the
+ * mmsg batch ops (rx_batch_new/tx_batch_new/rx_batch_free/tx_batch_free/
+ * recv_batch/send_batch). New ops are appended after send_batch.
+ */
 typedef struct KlDatagramOps {
     /* One datagram out. Returns bytes sent, or -1 (errno set): the datagram core decides
      * queue-on-EAGAIN vs drop. */

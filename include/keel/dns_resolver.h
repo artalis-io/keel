@@ -26,6 +26,11 @@ extern "C" {
 
 /**
  * @brief DNS resolver configuration.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after alloc.
  */
 typedef struct {
     const char  *nameserver;  /**< Single numeric NS address (overrides resolv.conf). NULL = use resolv.conf. */

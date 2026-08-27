@@ -60,6 +60,14 @@ typedef struct {
     size_t   der_len;                /**< Length of `der`, 0 if none */
 } KlPeerCert;
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. Required subset (enforced at
+ * the factory boundary by kl_tls_vtable_valid): handshake, read, write, shutdown,
+ * pending, reset, destroy. Optional (NULL = not supplied; core NULL-checks each):
+ * alpn_protocol, set_hostname, peer_cert, feed_input, drain_output,
+ * set_socket_provider, at_eof. New ops are appended after at_eof.
+ */
 struct KlTls {
     /**
      * @brief Non-blocking handshake step. Call repeatedly until OK or ERROR.
@@ -218,6 +226,10 @@ typedef struct KlTlsCtx KlTlsCtx;
 /**
  * @brief Factory creates a per-connection KlTls session from the shared context.
  * Called once per connection slot at server init.
+ *
+ * The factory signature is frozen (see docs/contracts/compatibility.md): pass new
+ * construction inputs through KlTlsCtx or KlTlsConfig, never by changing it.
+ *
  * @param ctx   Shared TLS context (certs/keys).
  * @param alloc Allocator for session resources.
  * @return New TLS session, or NULL on failure.
@@ -226,6 +238,11 @@ typedef KlTls *(*KlTlsFactory)(KlTlsCtx *ctx, KlAllocator *alloc);
 
 /**
  * @brief TLS configuration for KlHttpServerConfig.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default (a NULL factory leaves TLS
+ * disabled). New members are appended after ctx_destroy.
  */
 typedef struct {
     KlTlsCtx    *ctx;          /**< Shared context (certs/keys); user-owned */

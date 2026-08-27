@@ -12,6 +12,11 @@ extern "C" {
  *
  * All KEEL allocations go through this interface. Provide custom
  * implementations for arena/pool allocation, tracking, or sandboxing.
+ *
+ * Append-only vtable, copied by value (see docs/contracts/compatibility.md):
+ * callers zero-initialize and recompile per major version. Required: malloc,
+ * realloc, free (called by kl_malloc/kl_realloc/kl_free). Optional: ctx (NULL if
+ * the implementation is stateless). New members are appended after ctx.
  */
 typedef struct {
     void *(*malloc)(void *ctx, size_t size);                        /**< Allocate size bytes */

@@ -38,6 +38,12 @@ extern "C" {
 
 typedef struct KlHttpClientPool KlHttpClientPool;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after idle_ms.
+ */
 typedef struct {
     int         capacity;       /**< Total pool slots (0 = default 32) */
     int         max_per_host;   /**< Max idle per (host,port,tls) (0 = default 4) */

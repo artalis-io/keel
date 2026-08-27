@@ -19,6 +19,11 @@ typedef struct KlHttpRequest KlHttpRequest;
  * header pointers into read_buf may be invalidated once the body spans
  * multiple socket reads.  Handlers should access body data exclusively
  * through the body reader, not through KlHttpRequest header fields.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All four ops (on_data,
+ * on_complete, on_error, destroy) are required; core calls each. New ops are
+ * appended after destroy.
  */
 typedef struct KlHttpBodyReader KlHttpBodyReader;
 
@@ -34,6 +39,10 @@ struct KlHttpBodyReader {
  *
  * user_data is the value passed to kl_http_server_route / kl_http_router_add.
  * Return NULL to reject the request (KEEL sends 415 and closes).
+ *
+ * The factory signature is frozen (see docs/contracts/compatibility.md): pass new
+ * construction inputs through user_data or the request, never by changing this
+ * signature.
  */
 typedef KlHttpBodyReader *(*KlHttpBodyReaderFactory)(KlAllocator *alloc,
                                               const KlHttpRequest *req,

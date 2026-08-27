@@ -36,6 +36,12 @@ extern "C" {
 
 typedef struct KlWsClientConn KlWsClientConn;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after ping_interval_ms.
+ */
 typedef struct {
     int          timeout_ms;       /**< 0 = KL_WS_CLIENT_DEFAULT_TIMEOUT_MS */
     size_t       max_frame_size;   /**< 0 = KL_WS_CLIENT_DEFAULT_MAX_FRAME */

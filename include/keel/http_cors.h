@@ -26,6 +26,12 @@ extern "C" {
 /** @brief Maximum origin string length. */
 #define KL_HTTP_CORS_ORIGIN_SIZE 256
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after max_age_seconds.
+ */
 typedef struct {
     char allowed_origins[KL_HTTP_CORS_MAX_ORIGINS][KL_HTTP_CORS_ORIGIN_SIZE];
     int origin_count;             /**< 0 = allow all (*) */

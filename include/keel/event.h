@@ -46,6 +46,12 @@ typedef struct {
  * indirection on the default path). A backend and its socket provider must agree
  * on what "pollable handle" means: a provider that watches non-OS handles (lwIP
  * socket indices) pairs with a socket provider whose native handles it can poll.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): providers
+ * zero-initialize and recompile per major version. Required (core dispatches or
+ * queries them): init, add, mod, del, wait, close, caps, native_provider.
+ * Optional: completion (NULL for a readiness backend). New ops are appended
+ * immediately BEFORE the reserved `completion` slot, which MUST stay last.
  */
 struct KlEventOps {
     int  (*init)(KlEventLoop *loop);

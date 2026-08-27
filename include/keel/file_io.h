@@ -19,6 +19,12 @@ typedef struct {
     int zero_copy;     /**< 1 = data already sent to socket (splice path) */
 } KlFileIOResult;
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All four ops (submit, cancel,
+ * tick, destroy) are required; core calls each. New ops are appended after
+ * destroy.
+ */
 struct KlFileIO {
     /** Submit an async file read into buf.
      *  sock_fd is an opaque key for routing/cancellation.

@@ -42,6 +42,7 @@ consumer that relinks a newer Keel can verify it at runtime.
 - Existing `KlError` and other enum values.
 - The function-pointer order of published vtables (`KlTls`, `KlHttpBodyReader`,
   `KlHttp2ClientSession`, `KlHttp2ServerSession`, `KlResolver`, `KlCompress`, …).
+  New ops are only appended at the end (see the append-only policy below).
 
 ## May evolve without a major bump (minor)
 
@@ -57,24 +58,43 @@ Because callers embed structs like `KlHttpServerConfig`, `KlAsyncOp`, and `KlHtt
 by value, appending a field changes `sizeof`; hence the recompile. Never insert
 or reorder existing fields within a major version.
 
-## Extensible vtables: the `struct_size` / `api_version` convention
+## Extending vtables and configs: append-only, zero-default
 
-For a struct or vtable that Keel expects to extend heavily over time, the
-robust pattern is to lead with a size/version field so the callee can detect
-which fields the caller knows about:
+Keel's sole forward extensibility policy for public configuration structs and
+provider/vtable types is **append-only, zero-default** evolution (rationale and
+the rejected alternatives are recorded in `docs/f2_c_extensibility_decision.md`):
 
-```c
-typedef struct {
-    size_t struct_size;   /* sizeof(the caller's view); Keel checks before reading newer fields */
-    /* ... fields ... */
-} KlSomethingConfig;
-```
+1. **Append only.** A public caller-constructed config or vtable grows only by
+   APPENDING trailing members. Never reorder, insert-in-the-middle, remove,
+   rename-in-place, retype, or resize an existing member.
+2. **Zero is the default.** Every appended member's zero/NULL value MUST be a
+   valid, behavior-preserving default ("not supplied" / "use the built-in
+   default"). A feature whose off-state is not zero needs a new function or an
+   opt-in flag, not a silent field.
+3. **Callers zero-initialize and recompile.** Consumers zero-initialize (`= {0}`,
+   a designated initializer, or `memset`) and recompile against the header they
+   build against. That recompile, already required by source + static-relink, is
+   the only migration cost of an appended member: C zero-fills omitted trailing
+   members, so existing designated and `memset`-zero initializers stay correct.
+4. **Optional ops are NULL-checked; a required subset is validated once.** Core
+   NULL-checks optional appended vtable ops; a required subset is enforced at an
+   installation/factory/init boundary by a `*_vtable_valid` validator (as `KlTls`
+   does via `kl_tls_vtable_valid`), not repeatedly in hot paths. A provider built
+   against a newer header that leaves a new optional slot zero is treated as
+   "not supplied".
+5. **Callback and factory signatures are frozen.** Extend behavior by APPENDING a
+   new vtable slot, never by changing an existing callback's or factory's
+   signature; pass new construction inputs through the owning config or context.
+6. **Keep any slot marked "MUST stay last"** (for example `KlEventOps.completion`)
+   last.
 
-This is a **convention for new extensible surfaces going forward**, not a
-retrofit: adding a leading `struct_size`/`api_version` to an *existing* struct
-would shift every field offset (a MAJOR break), so existing structs keep the
-plain trailing-field rule above. New integration vtables that anticipate multiple
-independent backends should adopt it from the start.
+Keel does **not** use a `struct_size`/`api_version` field. Such a field only
+detects an old-binary-vs-new-binary mismatch, which the source + static-relink
+promise and the W^X/no-dlopen posture (no runtime binary plugin ever meets the
+library) make impossible; append-only zero-default already delivers compatible
+growth with less apparatus. Each config and vtable header states its own
+required-versus-optional members and its append point, so this contract is not
+restated per type.
 
 ## Integrations
 
