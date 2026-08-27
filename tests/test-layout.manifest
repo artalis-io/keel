@@ -69,6 +69,7 @@ tests/test_datagram_life.c
 tests/test_datagram_live.c
 tests/test_datagram_multicast.c
 tests/test_datagram_open.c
+tests/test_datagram_ops_vtable.c
 tests/test_datagram_public.c
 tests/test_datagram_socket.c
 tests/test_decompress.c
