@@ -48,10 +48,11 @@ typedef struct {
  * socket indices) pairs with a socket provider whose native handles it can poll.
  *
  * Append-only vtable (see docs/contracts/compatibility.md): providers
- * zero-initialize and recompile per major version. Required (core dispatches or
- * queries them): init, add, mod, del, wait, close, caps, native_provider.
- * Optional: completion (NULL for a readiness backend). New ops are appended
- * immediately BEFORE the reserved `completion` slot, which MUST stay last.
+ * zero-initialize and recompile per major version. Required (core dispatches them
+ * unconditionally): init, add, mod, del, wait, close, caps. Optional:
+ * native_provider (NULL = the provider offers no native socket provider) and
+ * completion (NULL for a readiness backend). New ops are appended immediately
+ * BEFORE the reserved `completion` slot, which MUST stay last.
  */
 struct KlEventOps {
     int  (*init)(KlEventLoop *loop);

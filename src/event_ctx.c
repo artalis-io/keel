@@ -53,6 +53,15 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->loop.ops = NULL;             /* set by kl_event_init[_provider] below */
     /* A runtime provider (e.g. lwIP) supplies its own event backend; NULL uses
      * the compiled-in default. Both leave the rest of the ctx identical. */
+    /* A malformed event provider (a required op is NULL) is bad input, distinct from
+     * a complete provider whose init() fails: report it as KL_ERR_INVALID_ARG before
+     * any slot is touched. A NULL ops table means "use the compiled-in default"
+     * (handled inside kl_event_init_provider), not malformed. */
+    if (event_provider && event_provider->ops &&
+        !kl_event_ops_required_valid(event_provider->ops)) {
+        ctx->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     int r = event_provider ? kl_event_init_provider(&ctx->loop, event_provider)
                            : kl_event_init(&ctx->loop);
     if (r < 0) {
