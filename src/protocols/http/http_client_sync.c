@@ -570,6 +570,12 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
+    /* Reject a malformed provider (non-NULL, NULL ops) before connecting: the
+     * kl_sock_* dispatchers would fault on the first I/O. */
+    if (!kl_socket_provider_ops_valid(sockets)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
                                                     : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
@@ -806,6 +812,12 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
+    /* Reject a malformed provider (non-NULL, NULL ops) before connecting: the
+     * kl_sock_* dispatchers would fault on the first I/O. */
+    if (!kl_socket_provider_ops_valid(sockets)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
                                                     : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;

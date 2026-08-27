@@ -1106,6 +1106,10 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
     if (num_headers > 0 && !headers)
         return NULL;
+    /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
+     * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
+    if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
 
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0)
@@ -1208,7 +1212,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np) c->ev_ctx->sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
     }
     /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
@@ -1537,6 +1541,10 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         return NULL;
     if (num_headers > 0 && !headers)
         return NULL;
+    /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
+     * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
+    if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
 
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0)
@@ -1592,7 +1600,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np) c->ev_ctx->sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
     }
     /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */

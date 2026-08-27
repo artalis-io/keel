@@ -33,6 +33,16 @@
  * loop negotiates against this bit (see kl_caps_compatible). No public API change. */
 #define KL_SOCK_CAP_OVERLAPPED (1ull << 3)
 
+/* True iff a socket provider is usable: either NULL (the built-in POSIX default,
+ * per KlSocketProvider's contract) or a non-NULL provider carrying a non-NULL ops
+ * table. The kl_sock_* dispatchers below deref p->ops unguarded (a NULL individual
+ * op falls back to the native default, but a NULL ops table itself would fault on
+ * the first I/O), so a consumer validates a caller-supplied provider once, at the
+ * boundary where it becomes active, before any I/O. Individual ops stay optional. */
+static inline int kl_socket_provider_ops_valid(const KlSocketProvider *p) {
+    return !p || p->ops;
+}
+
 /* The overlapped socket provider that pairs with the IOCP completion backend
  * (defined in event_iocp.c, Windows/BACKEND=iocp only). Internal; kept out of the
  * public header alongside its capability. Declared unconditionally; only ever

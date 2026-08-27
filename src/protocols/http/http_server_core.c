@@ -90,6 +90,15 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+
+    /* A caller-supplied socket provider becomes active as ev.sockets below and drives
+     * every connection's I/O through the kl_sock_* dispatchers. Reject a malformed one
+     * (non-NULL provider with a NULL ops table) before acquiring any resources; NULL
+     * means the built-in default. Individual ops stay optional (native fallback). */
+    if (!kl_socket_provider_ops_valid(config->sockets)) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     /* The AF_UNIX node-cleanup state (opaque unix_node storage) is left zeroed by the memset above;
      * the substrate module treats a zeroed state as "not open", so no explicit init is needed here
      * and this stays platform-neutral (the module is POSIX-only). */
@@ -298,7 +307,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * incompatible pairing is rejected below. */
     if (!kl_event_ctx_sockets_compatible(&s->ev)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
-        if (np) s->ev.sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) s->ev.sockets = np;
     }
 
     /* Negotiate the event loop against the socket provider now that both are wired
