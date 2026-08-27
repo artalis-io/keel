@@ -6,9 +6,11 @@ tests/protocols/http/test_compress.c
 tests/protocols/http/test_cross_module.c
 tests/protocols/http/test_http1_chunked.c
 tests/protocols/http/test_http1_parser.c
+tests/protocols/http/test_http1_parser_vtable.c
 tests/protocols/http/test_http1_response_parser.c
 tests/protocols/http/test_http_async.c
 tests/protocols/http/test_http_body_reader.c
+tests/protocols/http/test_http_body_reader_vtable.c
 tests/protocols/http/test_http_client.c
 tests/protocols/http/test_http_client_happy_eyeballs.c
 tests/protocols/http/test_http_client_hostname_fail.c
@@ -32,12 +34,14 @@ tests/protocols/http/test_http_tls.c
 tests/protocols/http/test_peer_addr.c
 tests/protocols/http/test_peer_cert.c
 tests/protocols/http/test_read_flow_control.c
+tests/protocols/http/test_socket_provider_vtable.c
 tests/protocols/http/test_timeout.c
 tests/protocols/http/test_tls_integration.c
 tests/protocols/http/test_tls_vtable.c
 tests/protocols/http2/test_http2.c
 tests/protocols/http2/test_http2_client.c
 tests/protocols/http2/test_http2_client_hostname_fail.c
+tests/protocols/http2/test_http2_client_vtable.c
 tests/protocols/http2/test_http2_overflow.c
 tests/protocols/proxy_protocol/test_proxy_protocol.c
 tests/protocols/websocket/smoke_pollcomp_ws.c
@@ -80,6 +84,7 @@ tests/test_event.c
 tests/test_event_caps.c
 tests/test_event_ctx.c
 tests/test_event_provider.c
+tests/test_event_provider_vtable.c
 tests/test_file_io.c
 tests/test_io_status.c
 tests/test_iocp_engine.c
