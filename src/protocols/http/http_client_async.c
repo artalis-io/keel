@@ -1092,6 +1092,15 @@ static void async_complete_error(KlHttpClient *c)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
+/* True iff a caller-supplied resolver is usable. Only `resolve` is called
+ * unconditionally on the async path; `cancel` is NULL-checked before use (optional)
+ * and a caller-supplied (borrowed) resolver's `destroy` is never called by Keel, so
+ * neither is required. A malformed table is rejected at acceptance as bad input,
+ * rather than being presented later as a DNS lookup failure. */
+static int client_resolver_valid(const KlResolver *r) {
+    return r && r->resolve;
+}
+
 KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlHttpClientConfig *cfg,
                               const char *method, const char *url_str,
@@ -1109,6 +1118,10 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
      * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
     if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
+    /* A malformed caller-supplied resolver (no resolve op) is bad input, not a DNS
+     * failure: reject it here rather than letting it surface later as KL_ERR_DNS. */
+    if (cfg && cfg->resolver && !client_resolver_valid(cfg->resolver))
         return NULL;
 
     KlUrl parsed;
@@ -1544,6 +1557,10 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
      * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
     if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
+    /* A malformed caller-supplied resolver (no resolve op) is bad input, not a DNS
+     * failure: reject it here rather than letting it surface later as KL_ERR_DNS. */
+    if (cfg && cfg->resolver && !client_resolver_valid(cfg->resolver))
         return NULL;
 
     KlUrl parsed;

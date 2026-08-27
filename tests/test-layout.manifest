@@ -34,6 +34,7 @@ tests/protocols/http/test_http_tls.c
 tests/protocols/http/test_peer_addr.c
 tests/protocols/http/test_peer_cert.c
 tests/protocols/http/test_read_flow_control.c
+tests/protocols/http/test_resolver_vtable.c
 tests/protocols/http/test_socket_provider_vtable.c
 tests/protocols/http/test_timeout.c
 tests/protocols/http/test_tls_integration.c
