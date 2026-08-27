@@ -16,7 +16,14 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
 CC=${CC:-cc}
 
-command -v pkg-config >/dev/null 2>&1 || { echo "installed-consumer: SKIP (no pkg-config)"; exit 0; }
+# pkg-config may be absent on a general local host (SKIP), but a release/CI gate must not silently
+# skip: set KEEL_REQUIRE_PKGCONFIG=1 to turn a missing pkg-config into a hard failure (F2-6 enrolls it).
+if ! command -v pkg-config >/dev/null 2>&1; then
+    if [ "${KEEL_REQUIRE_PKGCONFIG:-0}" = 1 ]; then
+        echo "installed-consumer: FAIL - pkg-config required (KEEL_REQUIRE_PKGCONFIG=1) but not found"; exit 1
+    fi
+    echo "installed-consumer: SKIP (no pkg-config; set KEEL_REQUIRE_PKGCONFIG=1 to require it)"; exit 0
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
