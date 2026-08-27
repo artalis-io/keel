@@ -46,26 +46,10 @@ struct KlWsServerConfig {
 };
 typedef struct KlWsServerConfig KlWsServerConfig;
 
-/* ── Per-connection WebSocket state ──────────────────────────────── */
-
-struct KlWsServerConn {
-    KlWsServerConfig *config;    /**< Points to route's config (not owned) */
-    KlWsFrameParser frame;       /**< Incremental frame parser */
-    char *msg_buf;               /**< Reassembly buffer (allocated) */
-    size_t msg_len;              /**< Current message length */
-    size_t msg_cap;              /**< Message buffer capacity */
-    int msg_opcode;              /**< Opcode of first fragment */
-    uint32_t utf8_state;         /**< Incremental UTF-8 validator state */
-    int close_sent;              /**< Close frame sent flag */
-    int close_received;          /**< Close frame received flag */
-    uint16_t close_code;         /**< Close status code */
-    uint64_t close_deadline_ms;  /**< Close handshake timeout deadline */
-    uint64_t next_ping_ms;       /**< 0 = auto-ping disabled */
-    KlHttpConn *conn;                /**< Back-pointer for send functions */
-    KlAllocator *alloc;          /**< Allocator for message buffer */
-    KlDrain drain;               /**< Backpressure write buffer (opt-in) */
-    int drain_enabled;           /**< 0 = off (default), 1 = on */
-};
+/* KlWsServerConn is an opaque, connection-owned WebSocket handle: the callbacks and the public API
+ * below take a KlWsServerConn *; application code never constructs, sizes, or dereferences one. Its
+ * layout and the server-internal driver functions are private, in
+ * src/protocols/websocket/websocket_server_internal.h. */
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
@@ -101,17 +85,9 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
  */
 int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out);
 
-/* ── Internal (used by http_connection.c / http_server.c) ──────────────────── */
-
-int  kl_ws_server_upgrade(KlHttpConn *c, const char *leftover, size_t leftover_len);
-int  kl_ws_server_on_readable(KlHttpConn *c);
-int  kl_ws_server_on_writable(KlHttpConn *c);
-int  kl_ws_server_drain_pending(const KlHttpConn *c);
-void kl_ws_server_cleanup(KlHttpConn *c);
-void kl_ws_server_drain_close(KlHttpConn *c);
-int  kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now);
-int  kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now);
-int  kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len);
+/* The server-internal WebSocket driver seam (kl_ws_server_upgrade/on_readable/on_writable/
+ * drain_pending/cleanup/drain_close/check_close_timeout/auto_ping/on_readable_data), which takes a
+ * KlHttpConn *, is INTERNAL and lives in src/protocols/websocket/websocket_server_internal.h. */
 
 #ifdef __cplusplus
 }

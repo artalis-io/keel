@@ -5,6 +5,7 @@
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
+#include "../websocket/websocket_server_internal.h"
 #include <keel/http2_server.h>
 #include <keel/proxy_protocol.h>
 #include "http_conn_internal.h"

@@ -9,6 +9,7 @@
 #include <keel/clock.h>
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
+#include "websocket_server_internal.h"
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
 #include <keel/http_server.h>   /* KlHttpServer: kl_http_server_ws_upgrade registration API lives here */

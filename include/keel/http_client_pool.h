@@ -58,23 +58,16 @@ typedef struct {
 } KlHttpClientPoolConn;
 
 /**
- * @brief Pool entry (internal, stored in flat array).
+ * @brief Pool entry: an opaque, internal slot.
+ *
+ * The layout is private to the client-pool implementation
+ * (src/protocols/http/http_client_pool_internal.h); KlHttpClientPool holds it by pointer, so only
+ * this forward declaration is public.
  */
-typedef struct KlHttpClientPoolEntry {
-    char     host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< NUL-terminated key */
-    int      port;
-    int      is_tls;
-    char     proxy_host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
-    int      proxy_port;                          /**< 0 = direct connection */
-    KlSocketHandle fd;            /**< -1 = free slot */
-    KlTls   *tls;
-    uint64_t idle_since_ms; /**< kl_monotonic_ms() when returned */
-    int64_t  timer_id;      /**< idle timer (-1 = none) */
-    struct KlHttpClientPool *pool; /**< back-pointer for timer callback */
-} KlHttpClientPoolEntry;
+typedef struct KlHttpClientPoolEntry KlHttpClientPoolEntry;
 
 struct KlHttpClientPool {
-    KlHttpClientPoolEntry *entries;
+    KlHttpClientPoolEntry *entries;  /**< slot array (visible-for-allocation only) */
     int       capacity;
     int       active;       /**< idle connections in pool */
     int       max_per_host;

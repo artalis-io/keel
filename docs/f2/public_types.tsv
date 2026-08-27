@@ -96,7 +96,7 @@ KlHttpClientHeadersFn	callback	http_client.h
 KlHttpClientPool	struct	http_client_pool.h
 KlHttpClientPoolConfig	struct	http_client_pool.h
 KlHttpClientPoolConn	struct	http_client_pool.h
-KlHttpClientPoolEntry	struct	http_client_pool.h
+KlHttpClientPoolEntry	opaque	http_client_pool.h
 KlHttpClientReadFn	callback	http_client.h
 KlHttpClientResponse	struct	http_client.h
 KlHttpClientStreamCfg	struct	http_client.h
@@ -106,7 +106,7 @@ KlHttpConnPool	struct	http_connection.h
 KlHttpCorsConfig	struct	http_cors.h
 KlHttpHandler	callback	http_router.h
 KlHttpMiddleware	callback	http_router.h
-KlHttpMiddlewareEntry	struct	http_router.h
+KlHttpMiddlewareEntry	opaque	http_router.h
 KlHttpMultipartConfig	struct	http_body_reader_multipart.h
 KlHttpMultipartErrorCode	enum	http_body_reader_multipart.h
 KlHttpMultipartEvent	enum	http_body_reader_multipart.h
@@ -188,5 +188,5 @@ KlWsFrameParseState	enum	websocket.h
 KlWsFrameParser	struct	websocket.h
 KlWsServerCallbacks	struct	websocket_server.h
 KlWsServerConfig	struct	websocket_server.h
-KlWsServerConn	struct	websocket_server.h
+KlWsServerConn	opaque	websocket_server.h
 kl_ssize_t	alias	handle.h

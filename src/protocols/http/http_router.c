@@ -1,4 +1,5 @@
 #include <keel/http_router.h>
+#include "http_router_internal.h"
 #include <string.h>
 #include <limits.h>
 

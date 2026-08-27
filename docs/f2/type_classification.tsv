@@ -103,7 +103,7 @@ http_client.h	KlHttpProxyConfig	struct	caller-constructed	caller-built; F2-C app
 http_client_pool.h	KlHttpClientPool	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
 http_client_pool.h	KlHttpClientPoolConfig	struct	caller-constructed	caller-built; F2-C append-only
 http_client_pool.h	KlHttpClientPoolConn	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
-http_client_pool.h	KlHttpClientPoolEntry	struct	opaque	F2-B1 opaque in v3; KlHttpClientPool holds a pointer; def -> private
+http_client_pool.h	KlHttpClientPoolEntry	opaque	opaque	F2-B1 opaque in v3; KlHttpClientPool holds a pointer; def -> private
 http_compress.h	KlHttpCompressStream	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
 http_connection.h	KlHttpConnPool	struct	caller-owned-value	F2-B1 caller-owned value; embedded in caller-owned KlHttpServer; visible to permit enclosing layout
 http_cors.h	KlHttpCorsConfig	struct	caller-constructed	caller-built; F2-C append-only
@@ -117,7 +117,7 @@ http_response.h	KlHttpResponse	struct	caller-owned-value	F2-B1 caller-owned valu
 http_response.h	KlHttpResponseWriteFn	callback	api-signature	-
 http_router.h	KlHttpHandler	callback	api-signature	-
 http_router.h	KlHttpMiddleware	callback	api-signature	-
-http_router.h	KlHttpMiddlewareEntry	struct	opaque	F2-B1 opaque in v3; router stores pointers, no public API returns it; def -> private
+http_router.h	KlHttpMiddlewareEntry	opaque	opaque	F2-B1 opaque in v3; router stores pointers, no public API returns it; def -> private
 http_router.h	KlHttpRoute	struct	caller-inspectable	F2-B1 caller-inspectable; kl_http_router_match() returns KlHttpRoute** (public result)
 http_router.h	KlHttpRouter	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
 http_server.h	KlHttp1ParserFactory	callback	api-signature	-
@@ -190,4 +190,4 @@ websocket_client.h	KlWsClientConfig	struct	caller-constructed	caller-built; F2-C
 websocket_client.h	KlWsClientConn	opaque	opaque	private handle
 websocket_server.h	KlWsServerCallbacks	struct	caller-constructed	caller-built; F2-C append-only
 websocket_server.h	KlWsServerConfig	struct	caller-constructed	caller-built; F2-C append-only
-websocket_server.h	KlWsServerConn	struct	opaque	F2-B1 opaque in v3; borrowed handle via kl_ws_server_* API; def -> private
+websocket_server.h	KlWsServerConn	opaque	opaque	F2-B1 opaque in v3; borrowed handle via kl_ws_server_* API; def -> private
