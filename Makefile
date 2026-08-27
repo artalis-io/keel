@@ -979,6 +979,19 @@ check-allocator-boundaries:
 	@sh tools/f2_allocator_boundaries.sh --selftest
 	@sh tools/f2_allocator_boundaries.sh
 
+# F2-1b: mechanical enforcement of the public-header contract against the accepted inventories and
+# classifications. Composes: extraction canaries + exact inventory/classification joins
+# (f2_public_inventory.sh), standalone staged C11/C++11 header compilation with a negative canary
+# (f2_standalone_headers.sh), and the linkage guards with their negative controls (f2_opaque_probe.sh,
+# f2_cxx_link_test.sh). No behavior; purely a gate.
+check-public-headers:
+	@sh tools/f2_public_inventory.sh --selftest
+	@sh tools/f2_public_inventory.sh --check
+	@sh tools/f2_standalone_headers.sh
+	@sh tools/f2_opaque_probe.sh >/dev/null && echo "opaque-probe: OK (opaque public types reject layout access; pointer use links; C + C++)"
+	@sh tools/f2_cxx_link_test.sh >/dev/null && echo "cxx-link: OK (C++ links the C archive with guards; unguarded linkage fails)"
+	@echo "check-public-headers: OK"
+
 check-doc-refs:
 	@bad=0; \
 	for doc in $(DOC_REF_FILES); do \
@@ -2001,7 +2014,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-public-headers check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
