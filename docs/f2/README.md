@@ -34,33 +34,42 @@ Current kind counts: 89 struct, 25 enum, 16 opaque, 60 callback, 3 alias, 0 unio
 Seeded once, then human-owned (a re-run appends new keys with default rows but never rewrites existing
 ones):
 
-- `type_classification.tsv` - `<header>\t<type>\t<kind>\t<category>\t<note>`. Every row starts at
-  category `UNRESOLVED`. Decided in F2-B. Key: (header, type, kind).
+- `type_classification.tsv` - `<header>\t<type>\t<kind>\t<category>\t<note>`. Filled in F2-B1: all 193
+  rows carry a final category (zero `UNRESOLVED`) and a note. Key: (header, type, kind).
 - `function_coverage.tsv` - `<function>\t<header>\t<classification>\t<citation>`. Every row starts at
   classification `unreviewed`. Decided in F2-4. Key: function name.
 
 An empty `note` or `citation` field is written as `-` (a literal empty final column would be trailing
 whitespace).
 
-## Type categories (decided in F2-B)
+## Type categories (the accepted F2-B nine-category taxonomy)
 
-Each public type is classified into exactly one:
+Each public type is classified into exactly one (see `docs/f2_b_public_layout_decision.md`):
 
-- `caller-constructed` - the caller allocates and fills it (configs, `KlIoVec`, callback/hook structs,
-  vtables such as `KlSocketOps`, `KlDatagramOps`, `KlTls`).
+- `caller-constructed` - the caller/provider allocates AND fills it (configs, `KlIoVec`, callback/hook
+  containers, vtables such as `KlSocketOps`, `KlDatagramOps`, `KlTls`). Append-only per F2-C.
 - `caller-inspectable` - the library fills it and the caller reads defined fields (`KlUrl`,
-  `KlHttpServerStats`, `KlProxyResult`, `KlResolveResult`, `KlPeerCert`, `KlHttpClientResponse`).
-- `opaque` - handle-only on the public surface; layout in a `*_detail.h` or private.
-- `opt-in-unstable-layout` - layout deliberately behind a `*_detail.h` the umbrella excludes.
-- `impl-layout-installed` - runtime-state struct exported through `include/` only because a
-  protocol/substrate TU consumes it, with no caller contract.
-- `unresolved-v3-decision` - the classification itself is the decision (KlEventLoop, KlEventCtx,
-  KlHttpServer, KlHttpConn/Pool).
+  `KlHttpServerStats`, `KlResolveResult`, `KlPeerCert`, `KlHttpClientResponse`).
+- `caller-owned-value` - the caller allocates the storage via an init-in-place function; the library
+  owns most fields; some fields are documented public facets, the rest are visible solely to permit
+  allocation and evolve append-only (`KlHttpServer`, `KlEventCtx`, `KlEventLoop`, `KlHttpRouter`, ...).
+- `opaque` - handle-only; layout private to `src/` or an internal header. A concrete definition
+  classified `opaque` (a v3 relocation, e.g. `KlHttpConn`) MUST carry a migration note.
+- `opt-in-unstable-layout` - opaque handle whose layout is in a `*_detail.h` the umbrella excludes
+  (`KlStream`, `KlListener`, `KlConnectOp`, `KlDatagram`).
 - `api-signature` - a callback typedef (a signature, not a layout).
-- `type-alias` - a primitive alias.
+- `type-alias` - a typedef alias.
+- `enum-constants` - a public enumeration; append-only value set.
 
-All 193 rows are `UNRESOLVED` until F2-B classifies them against the accepted F2-C (extensibility) and
-F2-D (KlEventLoop.fd) policies. No decision is pre-made here.
+The prior scaffold placeholders `unresolved-v3-decision`, `borrowed-handle-published-layout`, and
+`impl-layout-installed` are gone: F2-B/F2-B1 gave every type a concrete v3 destination, so the accepted
+vocabulary is these eight categories (`impl-layout-installed` described a migration finding, not a
+surface Keel freezes, and reached zero).
+
+`--check` enforces kind-to-category validity: a `callback` must be `api-signature`, an `alias` must be
+`type-alias`, an `enum` must be `enum-constants`, an `opaque`-kind must be `opaque` or
+`opt-in-unstable-layout`, a concrete-def `opaque` requires a migration note, and any `UNRESOLVED` (or
+otherwise unknown) category fails (zero-UNRESOLVED, default-deny for a new unclassified type).
 
 ## Coverage classifications (decided in F2-4)
 
@@ -92,7 +101,7 @@ tools/f2_public_inventory.sh --selftest  # run the extraction canaries on a synt
                                          # a preprocessor-guarded declaration
 ```
 
-During the undecided stage `UNRESOLVED` and `unreviewed` are valid classification values; later gates
-(F2-B, F2-4) tighten by forbidding those defaults. Function extraction is a documented heuristic; an
+Type categories are final (zero `UNRESOLVED`, validated per the kind-to-category rules above). Function
+coverage is still `unreviewed` until F2-4 tightens it. Function extraction is a documented heuristic; an
 AST-grade extractor is the F2-4 concern. `--check` is not yet wired into any `make` gate; that wiring
 is F2-1b (headers), F2-3 (install), and F2-4 (coverage).

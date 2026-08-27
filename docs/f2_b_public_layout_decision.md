@@ -26,9 +26,13 @@ accessors, definition relocation, the scaffold fill, contract comments) is a sep
 
 ## 1. Classification taxonomy
 
-Each public type is classified into exactly one category: the freeze's six, extended by `api-signature`
-and `type-alias` (F2-1a) and by `caller-owned-value` and `enum-constants` (this decision).
-`impl-layout-installed` is retained for published-but-impl layouts.
+Each public type is classified into exactly one category. The accepted final vocabulary is eight
+categories: the freeze's `caller-constructed`/`caller-inspectable`/`opaque`/`opt-in-unstable-layout`,
+extended by `api-signature` and `type-alias` (F2-1a) and by `caller-owned-value` and `enum-constants`
+(this decision). `impl-layout-installed` was a working bucket during classification; F2-B1 gave each of
+its members a concrete destination (opaque with a migration note, caller-owned-value, caller-constructed,
+or caller-inspectable), so it reached zero and is NOT part of the accepted vocabulary. It described a
+migration finding, not a surface Keel freezes.
 
 - caller-constructed: the caller/provider allocates the storage AND fills the fields (configs, vtables,
   hook/callback containers, caller-filled currency). Append-only per F2-C.
@@ -41,8 +45,6 @@ and `type-alias` (F2-1a) and by `caller-owned-value` and `enum-constants` (this 
   use accessors only. (A borrowed handle whose owning container references it by pointer belongs here,
   because nothing forces its layout to be public.)
 - opt-in-unstable-layout: opaque handle on the main surface whose layout is in a `*_detail.h`.
-- impl-layout-installed: a concrete layout published in a header for which there is no caller contract
-  and no caller-held instance; visible only incidentally or to permit a by-value embed.
 - api-signature: a function-pointer typedef (callback); signature frozen.
 - type-alias: a typedef alias.
 - enum-constants: a public enumeration; append-only value set.
@@ -122,15 +124,26 @@ definition. No application code, and no integration, dereferences any other `KlH
   apparent hit, `conn->last_status` in a UEFI comment, is a different struct); the two public examples
   migrate `&conn->res` to `kl_http_conn_response()`. If a future integration needs a connection field,
   it goes through a narrow sanctioned accessor, not the raw layout.
-- KlHttpConnPool: impl-layout-installed, retained as the concrete embedded pool shell. `KlHttpServer`
-  embeds it by value and it holds `KlHttpConn *conns`; no caller constructs or reads it. Its concreteness
-  does not re-expose `KlHttpConn`.
-- KlWatcher: impl-layout-installed, RESOLVED to make-opaque-in-v3. `kl_watcher_add` returns `int`;
-  watchers are ctx-owned heap nodes; `KlEventCtx` holds only `KlWatcher *`. Layout moves private with
+- KlHttpConnPool: caller-owned-value (F2-B1). It is embedded by value inside the caller-owned
+  `KlHttpServer` and holds `KlHttpConn *conns`; its fields are visible solely to permit the enclosing
+  value layout. Its concreteness does not re-expose `KlHttpConn`.
+- KlWatcher: opaque with a migration note (F2-B1). `kl_watcher_add` returns `int`; watchers are
+  ctx-owned heap nodes; `KlEventCtx` holds only `KlWatcher *`, so the definition moves private with
   near-zero migration (one white-box test).
-- KlTimerEntry: impl-layout-installed, RESOLVED to make-opaque-in-v3. `kl_timer_add` returns an
-  `int64_t` id; callers never hold a `KlTimerEntry *`; `KlEventCtx` holds only a pointer. Layout moves
-  private with zero caller migration.
+- KlTimerEntry: opaque with a migration note (F2-B1). `kl_timer_add` returns an `int64_t` id; callers
+  never hold a `KlTimerEntry *`; `KlEventCtx` holds only a pointer; definition moves private.
+- KlHttpClientPoolEntry: opaque with a migration note (F2-B1). `KlHttpClientPool` holds
+  `KlHttpClientPoolEntry *entries` (a pointer), so the entry definition moves private.
+- KlWsServerConn: opaque with a migration note (F2-B1). Applications receive a borrowed handle and
+  operate through `kl_ws_server_*`; definition moves private.
+- KlHttpMiddlewareEntry: opaque with a migration note (F2-B1). The router stores pointers and no public
+  API returns the entry; definition moves private.
+- KlHttpResponse: caller-owned-value (F2-B1). `kl_http_response_init(KlHttpResponse *res, ...)` accepts
+  caller-owned storage.
+- KlResolveReq: caller-constructed (F2-B1). Custom resolver providers embed and return it, so its base
+  contract is a provider seam, not an implementation leak.
+- KlHttpRoute: caller-inspectable (F2-B1). `kl_http_router_match()` returns a `KlHttpRoute **`, so
+  retaining that public API makes the result layout part of the public contract.
 
 ## 5. Classification rules for the deferred fill
 
@@ -146,10 +159,9 @@ When `type_classification.tsv` is filled (after this taxonomy is accepted), rows
     `KlHttpRouter`, `KlHttpResponse`, `KlHttpSse`, `KlDrain`, `KlHttp1ChunkedDecoder`, `KlHttpBufReader`,
     `KlWsFrameParser`, `KlHttpCompressStream`, `KlDecompressStream`, `KlHttpClientPool`, ...) ->
     caller-owned-value;
-  - `KlHttpConn` (currently a public struct) -> opaque, recording the v3 decision to relocate its
-    definition (section 4);
-  - published-but-impl, no caller instance (`KlHttpConnPool`, `KlWatcher`, `KlTimerEntry`) ->
-    impl-layout-installed.
+  - concrete structs with a v3 decision to relocate their definition private -> opaque WITH a migration
+    note (`KlHttpConn`, `KlWatcher`, `KlTimerEntry`, `KlHttpClientPoolEntry`, `KlWsServerConn`,
+    `KlHttpMiddlewareEntry`); the checker rejects a concrete-def `opaque` that lacks a note.
 
 `TYPE_CATEGORIES` in `tools/f2_public_inventory.sh` gains `caller-owned-value` and `enum-constants` in
 the fill increment (not `borrowed-handle-published-layout`, which is removed). Borderline per-struct

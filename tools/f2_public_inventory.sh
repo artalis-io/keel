@@ -46,7 +46,7 @@ OUT=docs/f2
 # Allowed classification vocabularies. During the undecided stage every row is UNRESOLVED / unreviewed;
 # later gates (F2-B, F2-4) tighten by forbidding those defaults. The full vocabulary is accepted now so
 # a partially-decided scaffold still passes --check.
-TYPE_CATEGORIES='UNRESOLVED caller-constructed caller-inspectable opaque opt-in-unstable-layout impl-layout-installed unresolved-v3-decision api-signature type-alias'
+TYPE_CATEGORIES='caller-constructed caller-inspectable caller-owned-value opaque opt-in-unstable-layout api-signature type-alias enum-constants'
 FN_CLASSES='unreviewed direct-assertion indirect-execution compile-only example'
 
 # --- extractors (operate on the header paths in "$@") -------------------------
@@ -257,10 +257,26 @@ if [ "$MODE" = check ]; then
         extra=$(comm -13 "$tmp/inv_typekeys" "$tmp/sc_typekeys")
         [ -n "$miss" ]  && { echo "f2 --check: type_classification MISSING rows (drift/new type):"; printf '%s\n' "$miss"  | sed 's/^/  /'; bad=1; }
         [ -n "$extra" ] && { echo "f2 --check: type_classification STALE/EXTRA rows (removed type or header drift):"; printf '%s\n' "$extra" | sed 's/^/  /'; bad=1; }
-        # shellcheck disable=SC2034  # note is read to consume the column, not used
         while IFS='	' read -r hdr typ knd cat note; do
             [ "$hdr" = header ] && continue
-            value_ok "$cat" "$TYPE_CATEGORIES" || { echo "f2 --check: type_classification bad category '$cat' for $typ"; bad=1; }
+            # every row must carry a final (accepted) category; UNRESOLVED is no longer valid, so a
+            # freshly-seeded or unclassified row fails here (zero-UNRESOLVED, default-deny).
+            if ! value_ok "$cat" "$TYPE_CATEGORIES"; then
+                echo "f2 --check: type_classification bad/unresolved category '$cat' for $typ"; bad=1; continue
+            fi
+            # kind<->category validity: reject inherently invalid combinations.
+            case "$knd" in
+              callback) [ "$cat" = api-signature ]  || { echo "f2 --check: $typ (callback) must be api-signature, got '$cat'"; bad=1; } ;;
+              alias)    [ "$cat" = type-alias ]      || { echo "f2 --check: $typ (alias) must be type-alias, got '$cat'"; bad=1; } ;;
+              enum)     [ "$cat" = enum-constants ]  || { echo "f2 --check: $typ (enum) must be enum-constants, got '$cat'"; bad=1; } ;;
+              opaque)   case "$cat" in opaque|opt-in-unstable-layout) ;; *) echo "f2 --check: $typ (opaque) must be opaque or opt-in-unstable-layout, got '$cat'"; bad=1;; esac ;;
+              struct|union)
+                        case "$cat" in
+                          caller-constructed|caller-inspectable|caller-owned-value) ;;
+                          opaque) [ -n "$note" ] && [ "$note" != "-" ] || { echo "f2 --check: $typ (concrete def) classified opaque without a migration note"; bad=1; } ;;
+                          *) echo "f2 --check: $typ (concrete def) invalid category '$cat'"; bad=1 ;;
+                        esac ;;
+            esac
         done < "$tc"
     fi
 
