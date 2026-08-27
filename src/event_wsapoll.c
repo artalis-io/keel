@@ -99,7 +99,6 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     st->capacity = INITIAL_CAP;
     st->count = 0;
 
-    loop->fd = -1;             /* no backend fd, like event_poll */
     loop->_backend = st;
     return 0;
 }
@@ -210,7 +209,6 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     kl_free(alloc, st->fds, (size_t)st->capacity * sizeof(WSAPOLLFD));
     kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* WSAPoll is a readiness poller of native OS descriptors (SOCKETs). */

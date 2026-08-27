@@ -136,7 +136,6 @@ static int lwr_ev_init(KlEventLoop *loop) {
     if (!st->lwrctx) { kl_free(loop->alloc, st, sizeof(*st)); return -1; }
     st->loopif = kl_lwr_ctx_loopif(st->lwrctx);
     loop->_backend = st;
-    loop->fd = -1;   /* NO_SYS=1 raw loop has no pollable fd (backend-private; no shared code reads it) */
     return 0;
 }
 
@@ -196,7 +195,6 @@ static void lwr_ev_close(KlEventLoop *loop) {
     kl_lwr_ctx_destroy(st->lwrctx);
     kl_free(st->alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* Completion loop over lwIP-raw. COMPLETION makes the capability negotiation

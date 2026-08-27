@@ -3,6 +3,10 @@
 #include <keel/allocator.h>
 #include "net_compat.h"
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>            /* dup/close/dup2 for the descriptor-zero test (POSIX) */
+#endif
+#include "../src/event_caps.h" /* kl_event_caps: gate the descriptor-zero round-trip to native-fd readiness */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Event backend tests
@@ -206,5 +210,72 @@ UTEST(event, double_close) {
     /* Second close should be safe (no crash) */
     kl_event_close(&loop);
 }
+
+/* F2-D: the backend descriptor moved off the public KlEventLoop into loop->alloc-owned private
+ * state (_backend). A failing allocator at kl_event_init must unwind exactly once and leave
+ * _backend == NULL, leaking neither memory nor a kernel descriptor (ASan/LSan enforce the leak
+ * check). Backend-agnostic: every compiled-in backend now allocates its state through loop->alloc. */
+static void *f2d_fail_malloc(void *ctx, size_t size) { (void)ctx; (void)size; return NULL; }
+static void *f2d_fail_realloc(void *ctx, void *p, size_t os, size_t ns) { (void)ctx; (void)p; (void)os; (void)ns; return NULL; }
+static void  f2d_fail_free(void *ctx, void *p, size_t size) { (void)ctx; (void)p; (void)size; }
+
+UTEST(event, backend_state_alloc_failure) {
+    KlAllocator failing = { f2d_fail_malloc, f2d_fail_realloc, f2d_fail_free, NULL };
+    KlEventLoop loop;
+    memset(&loop, 0, sizeof(loop));
+    loop.alloc = &failing;
+
+    ASSERT_EQ(kl_event_init(&loop), -1);   /* allocator failure -> init fails */
+    ASSERT_TRUE(loop._backend == NULL);    /* unwound exactly once; nothing published */
+
+    kl_event_close(&loop);                 /* close on a never-initialized loop is a no-op */
+    ASSERT_TRUE(loop._backend == NULL);
+}
+
+#ifndef _WIN32
+/* F2-D: a valid backend descriptor equal to 0 must not alias the closed (_backend == NULL) state.
+ * Close stdin so the epoll/kqueue descriptor created by init lands on fd 0, drive a full readiness
+ * round-trip (on a native-fd readiness backend), and confirm a clean close resets _backend. On a
+ * backend without a single kernel fd this still exercises init/close with fd 0 free. */
+UTEST(event, backend_descriptor_zero) {
+    int saved = dup(0);
+    ASSERT_GE(saved, 0);
+    ASSERT_EQ(close(0), 0);                /* fd 0 is now the lowest free descriptor */
+
+    KlEventLoop loop;
+    memset(&loop, 0, sizeof(loop));
+    KlAllocator alloc = kl_allocator_default();
+    loop.alloc = &alloc;
+    ASSERT_EQ(kl_event_init(&loop), 0);    /* an epoll/kqueue descriptor lands on fd 0 */
+    ASSERT_TRUE(loop._backend != NULL);
+
+    unsigned caps = kl_event_caps(&loop);
+    if ((caps & KL_EVENT_CAP_READINESS) && (caps & KL_EVENT_CAP_NATIVE_FD) &&
+        !(caps & KL_EVENT_CAP_COMPLETION)) {
+        int fds[2];
+        ASSERT_EQ(kl_test_socketpair(fds), 0);
+        int marker = 7;
+        ASSERT_EQ(kl_event_add(&loop, fds[0], KL_EVENT_READ, &marker), 0);
+        char c = 'x';
+        ASSERT_EQ((int)kl_test_sockwrite(fds[1], &c, 1), 1);
+        KlEvent evs[4];
+        int n = kl_event_wait(&loop, evs, 4, 1000);
+        ASSERT_GE(n, 1);
+        int found = 0;
+        for (int i = 0; i < n; i++)
+            if (evs[i].udata == &marker) found = 1;
+        ASSERT_TRUE(found);                /* the loop functions with its descriptor at fd 0 */
+        kl_event_del(&loop, fds[0]);
+        kl_test_closesock(fds[0]);
+        kl_test_closesock(fds[1]);
+    }
+
+    kl_event_close(&loop);
+    ASSERT_TRUE(loop._backend == NULL);    /* fd 0 closed and state freed, not aliased with closed */
+
+    ASSERT_EQ(dup2(saved, 0), 0);          /* restore stdin */
+    ASSERT_EQ(close(saved), 0);
+}
+#endif
 
 UTEST_MAIN();

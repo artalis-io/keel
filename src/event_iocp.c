@@ -144,7 +144,6 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     st->port = port;
     st->alloc = loop->alloc;
     loop->_backend = st;
-    loop->fd = -1;
     return 0;
 }
 
@@ -258,7 +257,6 @@ void kl_event_close_builtin(KlEventLoop *loop) {
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
     }
-    loop->fd = -1;
 }
 
 /* A completion loop over native OS handles (SOCKETs on the port). COMPLETION makes

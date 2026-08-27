@@ -24,9 +24,13 @@ struct KlSocketProvider;
 typedef struct KlEventOps KlEventOps;
 
 typedef struct {
-    int fd;             /**< epoll_fd or kqueue_fd, -1 for io_uring */
-    void *_backend;     /**< reserved for backend-specific state */
-    KlAllocator *alloc; /**< set before kl_event_init; used by io_uring backend */
+    /** Backend-owned private state, allocated through `alloc` at kl_event_init and released at
+     *  kl_event_close; NULL before init and after close. Every compiled-in backend keeps its own
+     *  state here (the kqueue/epoll descriptor box, the pollfd table, the io_uring ring, the IOCP
+     *  completion port). Opaque to everything outside the backend TU; no public field holds a raw
+     *  backend descriptor. */
+    void *_backend;
+    KlAllocator *alloc; /**< set before kl_event_init; used to allocate backend state */
     /** Optional runtime event backend (NULL = the compiled-in default). When set
      *  before kl_event_init, all kl_event_* calls dispatch through it; this is how
      *  a bring-your-own event backend (e.g. lwIP) is injected without recompiling
