@@ -14,15 +14,8 @@ extern "C" {
  */
 typedef void (*KlTimerFn)(void *user_data);
 
-/**
- * @brief Timer heap entry (stored in KlEventCtx.timers array).
- */
-struct KlTimerEntry {
-    uint64_t  deadline_ms;   /**< Absolute monotonic deadline. */
-    KlTimerFn cb;            /**< Callback invoked on expiry. */
-    void     *user_data;     /**< Opaque pointer passed to cb. */
-    int64_t   id;            /**< Monotonic timer ID. */
-};
+/* KlTimerEntry is an opaque handle (forward-declared in <keel/event_ctx.h>); its layout is private to
+ * the substrate (src/event_ctx_internal.h). Callers schedule via the int64 id from kl_timer_add(). */
 
 /**
  * @brief Schedule a one-shot timer.

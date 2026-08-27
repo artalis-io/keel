@@ -22,19 +22,18 @@ extern "C" {
 typedef void (*KlWatcherFn)(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
 /**
- * @brief A registered FD watcher (heap-allocated, ctx-owned list).
+ * @brief A registered FD watcher: an opaque, heap-allocated, ctx-owned handle.
+ *
+ * The layout is private to the substrate (src/event_ctx_internal.h); callers never construct or read
+ * one. kl_watcher_add() returns int and the watcher travels as a tagged pointer resolved inside the
+ * substrate (see kl_event_dispatch), so no consumer needs the fields.
  */
-typedef struct KlWatcher {
-    KlSocketHandle fd;       /**< Watched file descriptor */
-    KlEventMask mask;        /**< Event interest mask */
-    KlWatcherFn on_ready;    /**< Callback when FD is ready */
-    void *user_data;         /**< Opaque user pointer */
-    struct KlWatcher *next;  /**< Next watcher in ctx-owned list */
-} KlWatcher;
+typedef struct KlWatcher KlWatcher;
 
 /* ── KlEventCtx: composable event loop + watcher context ────────── */
 
-/** @brief Timer heap entry (defined in src/timer.c). */
+/** @brief Timer heap entry: opaque handle; layout private to the substrate
+ *  (src/event_ctx_internal.h). Callers use the int64 id from kl_timer_add(). */
 typedef struct KlTimerEntry KlTimerEntry;
 
 /* Internal socket provider (src/socket.h). Carried as an opaque pointer so the
@@ -165,32 +164,23 @@ int  kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd);
  *
  * @return 1 if a watcher was dispatched, 0 otherwise.
  */
+/*
+ * INTERNAL link-support symbol, NOT application API. Required only by the kl_event_dispatch() inline
+ * below: it handles the watcher case, which needs the opaque KlWatcher layout, so the inline stays
+ * layout-free. The keel__ prefix marks it internal and keeps it out of the public API inventory; it
+ * stays inside the extern "C" block so C++ consumers of the inline link to it correctly. @p watcher is
+ * the unmasked tagged pointer; it performs the ABA validity walk, invokes on_ready, and re-arms (a
+ * stale/already-retired node is a no-op). Do not call it directly.
+ */
+void keel__event_dispatch_watcher(KlEventCtx *ctx, void *watcher, KlEventMask ready);
+
 static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
     uintptr_t tag = (uintptr_t)event->udata;
     if (!(tag & 1))
-        return 0;  /* not a watcher; caller handles */
-    KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-    /* A prior event in the SAME drain batch may already have freed this watcher.
-     * kl_comp_run (and kl_event_ctx_run) drain a batch of events, then dispatch
-     * them one by one; dispatching event i can retire watcher j>i. The canonical
-     * case is Happy-Eyeballs: the winning connect's KL_COMP_CONNECT runs
-     * he_close_attempts → kl_watcher_del, freeing the losing attempts' nodes,
-     * whose own KL_COMP_CONNECT may still sit later in this batch. Confirm the
-     * node is still linked before touching it: we compare pointer identity
-     * against the live list and NEVER dereference a possibly-freed node. */
-    int w_live = 0;
-    for (const KlWatcher *it = ctx->watchers; it; it = it->next)
-        if (it == w) { w_live = 1; break; }
-    if (!w_live)
-        return 1;  /* watcher retired earlier in this batch; stale event, consumed */
-    KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int; a completion backend
-                                   * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
-                                   * truncated + sign-extended by an int, breaking watcher rearm. */
-    ctx->dispatch_dirty = 0;
-    w->on_ready(wfd, event->ready, w->user_data);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (!ctx->dispatch_dirty)
-        kl_watcher_rearm(ctx, wfd);
+        return 0;  /* not a watcher; caller handles (hot path stays inline, no call) */
+    /* The watcher case needs the (opaque) KlWatcher layout, so it is handled by a real substrate
+     * function; the unmasking is layout-free pointer arithmetic. */
+    keel__event_dispatch_watcher(ctx, (void *)(tag & ~(uintptr_t)1), event->ready);
     return 1;
 }
 

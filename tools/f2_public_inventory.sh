@@ -182,6 +182,7 @@ kl_canary_multiline(
 int kl_canary_guarded(void);
 #endif
 int kl_canary_dup(void);
+void keel__probe_internal(int x);   /* internal link-support symbol: must NOT enter the public inventory */
 /* int kl_canary_fake(void); struct KlCanaryFakeInComment { int x; } KlCanaryFakeInComment; */
 #endif
 H
@@ -223,6 +224,7 @@ H
     expect_fn kl_canary_guarded                 # inside a preprocessor guard
     expect_fn kl_canary_dup
     expect_no_fn kl_canary_fake
+    expect_no_fn keel__probe_internal          # internal keel__ link-support excluded from the public inventory
     # duplicate across two headers: one unique name, two declarations
     dups=$(printf '%s\n' "$funcs" | awk -F'\t' '$1=="kl_canary_dup"' | wc -l | tr -d ' ')
     [ "$dups" = 2 ] || { echo "selftest: kl_canary_dup expected 2 declarations, got $dups"; bad=1; }

@@ -55,6 +55,17 @@ else
     echo "  positive: FAILED to compile/link"; sed -n '1,8p' "$build/pos.err"; bad=1
 fi
 
+# POSITIVE (C): a plain C consumer that exercises the kl_event_dispatch inline (which references the
+# internal keel__event_dispatch_watcher link-support symbol), linked against the C archive and run.
+echo "cxx-link: POSITIVE C consumer compile+link+run"
+CC=${CC:-cc}
+# shellcheck disable=SC2086
+if (cd "$build" && $CC -std=c11 $CFLAGS "$SRC/dispatch_c.c" $LIBS -o dispatch_c) 2>"$build/c.err"; then
+    if "$build/dispatch_c" >/dev/null; then echo "  C consumer: linked and ran"; else echo "  C consumer: FAILED at runtime"; bad=1; fi
+else
+    echo "  C consumer: FAILED to compile/link"; sed -n '1,8p' "$build/c.err"; bad=1
+fi
+
 # NEGATIVE canary: unguarded C++ declaration must NOT link against the C archive.
 echo "cxx-link: NEGATIVE canary (must fail to link)"
 # shellcheck disable=SC2086

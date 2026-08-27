@@ -1,5 +1,6 @@
 #include <keel/timer.h>
 #include <keel/clock.h>            /* kl_monotonic_ms */
+#include "event_ctx_internal.h"   /* KlTimerEntry layout (opaque on the public surface) */
 
 /* ── Min-heap helpers ──────────────────────────────────────────────── */
 

@@ -15,6 +15,14 @@
 // umbrella's guards).
 const char *fs_probe(void);
 
+// Instantiate the kl_event_dispatch() inline out-of-line from C++. Its body calls the internal
+// keel__event_dispatch_watcher() link-support symbol; if that were not inside extern "C" the C++
+// instantiation would reference a mangled name and fail to link. This proves the internal symbol
+// links from a C++ consumer. (Runtime: a clear tag returns 0 without invoking it.)
+extern "C" int f2_dispatch_probe(KlEventCtx *ctx, const KlEvent *ev) {
+    return kl_event_dispatch(ctx, ev);
+}
+
 // Force the linker to resolve representative complex symbols across the axes without any runtime
 // setup: taking a function's address requires its symbol to be found at link time.
 static void *const g_refs[] = {
@@ -24,6 +32,7 @@ static void *const g_refs[] = {
     (void *)&kl_dns_resolver_create,  // DNS
     (void *)&kl_thread_pool_create,   // thread pool
     (void *)&kl_event_ctx_init,       // event substrate
+    (void *)&f2_dispatch_probe,       // forces kl_event_dispatch -> keel__event_dispatch_watcher link
 };
 
 int main(void) {

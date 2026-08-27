@@ -168,7 +168,7 @@ KlStreamWriteFn	callback	stream.h
 KlStreamWriteStatus	enum	stream.h
 KlThreadPool	opaque	thread_pool.h
 KlThreadPoolConfig	struct	thread_pool.h
-KlTimerEntry	struct	timer.h
+KlTimerEntry	opaque	event_ctx.h
 KlTimerFn	callback	timer.h
 KlTls	struct	tls.h
 KlTlsConfig	struct	tls.h
@@ -176,7 +176,7 @@ KlTlsCtx	opaque	tls.h
 KlTlsFactory	callback	tls.h
 KlTlsResult	enum	tls.h
 KlUrl	struct	url.h
-KlWatcher	struct	event_ctx.h
+KlWatcher	opaque	event_ctx.h
 KlWatcherFn	callback	event_ctx.h
 KlWorkCancelFn	callback	thread_pool.h
 KlWorkDoneFn	callback	thread_pool.h

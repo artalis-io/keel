@@ -51,7 +51,8 @@ event.h	KlEventMask	enum	enum-constants	-
 event.h	KlEventOps	struct	caller-constructed	caller-built; F2-C append-only
 event.h	KlEventProvider	struct	caller-constructed	caller-built; F2-C append-only
 event_ctx.h	KlEventCtx	struct	caller-owned-value	F2-B caller-owned value; .loop via kl_event_ctx_loop accessor
-event_ctx.h	KlWatcher	struct	opaque	F2-B opaque in v3; ctx-owned heap; kl_watcher_add returns int; def -> private
+event_ctx.h	KlTimerEntry	opaque	opaque	opaque handle; layout private (src/event_ctx_internal.h)
+event_ctx.h	KlWatcher	opaque	opaque	opaque handle; layout private (src/event_ctx_internal.h)
 event_ctx.h	KlWatcherFn	callback	api-signature	-
 file_io.h	KlFileIO	struct	caller-constructed	caller-built; F2-C append-only
 file_io.h	KlFileIOResult	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
@@ -175,7 +176,6 @@ thread_pool.h	KlWorkCancelFn	callback	api-signature	-
 thread_pool.h	KlWorkDoneFn	callback	api-signature	-
 thread_pool.h	KlWorkFn	callback	api-signature	-
 thread_pool.h	KlWorkItem	struct	caller-constructed	caller-built; F2-C append-only
-timer.h	KlTimerEntry	struct	opaque	F2-B opaque in v3; ctx-owned; kl_timer_add returns id; def -> private
 timer.h	KlTimerFn	callback	api-signature	-
 tls.h	KlPeerCert	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
 tls.h	KlTls	struct	caller-constructed	caller-built; F2-C append-only

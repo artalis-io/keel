@@ -18,6 +18,7 @@
 #include <assert.h>            /* debug precondition in kl_event_ctx_free (hosted only) */
 #endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
+#include "event_ctx_internal.h"  /* KlWatcher/KlTimerEntry layouts (opaque on the public surface) */
 #include "event_caps.h"
 #include "completion_io.h"   /* kl_comp_run: the generic completion tick */
 #include "watcher_internal.h"   /* kl_watcher_add_detached: completion connect */
@@ -340,4 +341,24 @@ KlEventLoop *kl_event_ctx_loop(KlEventCtx *ctx) {
 
 const KlEventLoop *kl_event_ctx_loop_const(const KlEventCtx *ctx) {
     return ctx ? &ctx->loop : NULL;
+}
+
+void keel__event_dispatch_watcher(KlEventCtx *ctx, void *watcher, KlEventMask ready) {
+    KlWatcher *w = watcher;
+    /* A prior event in the SAME drain batch may already have freed this watcher (see the
+     * kl_event_dispatch batch contract). Confirm the node is still linked by pointer identity
+     * before touching it; NEVER dereference a possibly-freed node. */
+    int w_live = 0;
+    for (const KlWatcher *it = ctx->watchers; it; it = it->next)
+        if (it == w) { w_live = 1; break; }
+    if (!w_live)
+        return;  /* watcher retired earlier in this batch; stale event, consumed */
+    KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int; a completion backend
+                                   * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
+                                   * truncated + sign-extended by an int, breaking watcher rearm. */
+    ctx->dispatch_dirty = 0;
+    w->on_ready(wfd, ready, w->user_data);  /* may kl_watcher_del/add -> sets dispatch_dirty */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ctx->dispatch_dirty)
+        kl_watcher_rearm(ctx, wfd);
 }
