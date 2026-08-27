@@ -287,6 +287,57 @@ UTEST(h2, session_vtable_validation) {
     test_teardown();
 }
 
+/* Parity: each REQUIRED op missing (recv/submit_response/want_write/flush/shutdown/destroy)
+ * causes the upgrade to fail (KL_HTTP_CONN_CLOSED), without crashing during cleanup. */
+UTEST(h2, session_vtable_each_missing_required_rejected) {
+    test_setup();
+    for (int omit = 0; omit < 6; omit++) {
+        MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+        int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+        KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+        conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+        mock.skip_vtable_init = 1;
+        mock.base.recv = mock_recv;
+        mock.base.submit_response = mock_submit_response;
+        mock.base.want_write = mock_want_write;
+        mock.base.flush = mock_flush;
+        mock.base.shutdown = mock_shutdown;
+        mock.base.destroy = mock_destroy;
+        switch (omit) {
+            case 0: mock.base.recv = NULL; break;
+            case 1: mock.base.submit_response = NULL; break;
+            case 2: mock.base.want_write = NULL; break;
+            case 3: mock.base.flush = NULL; break;
+            case 4: mock.base.shutdown = NULL; break;
+            case 5: mock.base.destroy = NULL; break;
+        }
+        int r = kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+        ASSERT_EQ(r, (int)KL_HTTP_CONN_CLOSED);
+        kl_test_closesock(pfd[0]);
+        kl_test_closesock(pfd[1]);
+    }
+    test_teardown();
+}
+
+/* Parity: the OPTIONAL want_read slot may be NULL; the upgrade still succeeds. */
+UTEST(h2, session_vtable_optional_want_read_null_accepted) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    /* Full required set via the normal factory; want_read left NULL (mock never sets it). */
+    mock.skip_vtable_init = 0;
+    int r = kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_TRUE(conn.h2 != NULL);
+    ASSERT_TRUE(conn.h2->session->want_read == NULL);   /* optional slot stayed NULL, still accepted */
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
 UTEST(h2, conn_init_and_free) {
     test_setup();
     MockH2Session mock;
