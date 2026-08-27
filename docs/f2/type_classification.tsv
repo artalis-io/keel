@@ -2,6 +2,7 @@ header	type	kind	category	note
 allocator.h	KlAllocator	struct	caller-constructed	caller-built; F2-C append-only
 async.h	KlAsyncFn	callback	api-signature	-
 async.h	KlAsyncOp	struct	caller-owned-value	caller-owned value; caller sets callbacks, library owns the rest
+async.h	KlHttpConn	opaque	opaque	opaque handle; layout + server/driver fns private (http_conn_internal.h); pool holds KlHttpConn*
 compress.h	KlCompress	struct	caller-constructed	caller-built; F2-C append-only
 compress.h	KlCompressConfig	struct	caller-constructed	caller-built; F2-C append-only
 compress.h	KlCompressCtx	opaque	opaque	private handle
@@ -104,9 +105,7 @@ http_client_pool.h	KlHttpClientPoolConfig	struct	caller-constructed	caller-built
 http_client_pool.h	KlHttpClientPoolConn	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
 http_client_pool.h	KlHttpClientPoolEntry	struct	opaque	F2-B1 opaque in v3; KlHttpClientPool holds a pointer; def -> private
 http_compress.h	KlHttpCompressStream	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
-http_connection.h	KlHttpConn	struct	opaque	F2-B opaque in v3; def -> http_conn_internal.h; pool holds KlHttpConn*
 http_connection.h	KlHttpConnPool	struct	caller-owned-value	F2-B1 caller-owned value; embedded in caller-owned KlHttpServer; visible to permit enclosing layout
-http_connection.h	KlHttpConnState	enum	enum-constants	-
 http_cors.h	KlHttpCorsConfig	struct	caller-constructed	caller-built; F2-C append-only
 http_redirect.h	KlHttpRedirectClient	opaque	opaque	private handle
 http_redirect.h	KlHttpRedirectConfig	struct	caller-constructed	caller-built; F2-C append-only

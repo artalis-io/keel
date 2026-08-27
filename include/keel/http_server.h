@@ -11,6 +11,8 @@
 #include <keel/tls.h>
 #include <keel/http2_server.h>
 #include <keel/http_connection.h>
+#include <keel/file_io.h>          /* KlFileIO (was transitive via http_connection.h before it slimmed) */
+#include <keel/async.h>            /* KlAsyncOp (was transitive via http_connection.h before it slimmed) */
 #include <keel/listener_detail.h>  /* struct KlListener layout: KlHttpServer embeds it */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>

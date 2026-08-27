@@ -10,6 +10,7 @@
  */
 
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/http_compress.h>
 #include <keel/keel.h>
 #include <keel/resolver_cache.h>

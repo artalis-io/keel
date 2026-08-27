@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 
 #include <string.h>

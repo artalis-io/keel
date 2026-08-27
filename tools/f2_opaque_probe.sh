@@ -27,6 +27,12 @@ printf '#include <keel/event_ctx.h>\nint f(KlWatcher *w){ return (int)w->fd; }\n
 printf '#include <keel/timer.h>\nlong f(KlTimerEntry *t){ return (long)t->deadline_ms; }\n'  > "$tmp/t_deref.c"
 printf '#include <keel/event_ctx.h>\nKlWatcher *f(KlWatcher *w){ return w; }\n'              > "$tmp/w_ptr.c"
 printf '#include <keel/timer.h>\nKlTimerEntry *f(KlTimerEntry *t){ return t; }\n'            > "$tmp/t_ptr.c"
+# KlHttpConn: a borrowed handle. Consumers may hold/pass KlHttpConn* but must not deref, sizeof, or
+# instantiate it.
+printf '#include <keel/http_connection.h>\nint  f(KlHttpConn *c){ return (int)c->state; }\n'     > "$tmp/hc_deref.c"
+printf '#include <keel/http_connection.h>\n#include <stddef.h>\nsize_t f(void){ return sizeof(KlHttpConn); }\n' > "$tmp/hc_sizeof.c"
+printf '#include <keel/http_connection.h>\nvoid f(void){ KlHttpConn c; (void)c; }\n'             > "$tmp/hc_inst.c"
+printf '#include <keel/http_connection.h>\nKlHttpConn *f(KlHttpConn *c){ return c; }\n'          > "$tmp/hc_ptr.c"
 
 must_fail() {  # label file
     if (cd "$tmp" && $CC -std=c11 -I"$INC" -fsyntax-only "$2") 2>/dev/null; then
@@ -47,17 +53,25 @@ must_fail "KlWatcher.fd deref"          "$tmp/w_deref.c"
 must_fail "KlTimerEntry.deadline_ms"    "$tmp/t_deref.c"
 must_pass "KlWatcher pointer use"       "$tmp/w_ptr.c"
 must_pass "KlTimerEntry pointer use"    "$tmp/t_ptr.c"
+must_fail "KlHttpConn field deref"      "$tmp/hc_deref.c"
+must_fail "KlHttpConn sizeof"           "$tmp/hc_sizeof.c"
+must_fail "KlHttpConn instantiate"      "$tmp/hc_inst.c"
+must_pass "KlHttpConn pointer use"      "$tmp/hc_ptr.c"
 
 # C++ mirror of the negative controls, where a C++ compiler exists.
 if command -v "$CXX" >/dev/null 2>&1; then
-    cp "$tmp/w_deref.c" "$tmp/w_deref.cpp"; cp "$tmp/t_deref.c" "$tmp/t_deref.cpp"
-    if (cd "$tmp" && $CXX -std=c++11 -I"$INC" -fsyntax-only w_deref.cpp) 2>/dev/null; then
-        echo "opaque-probe: C++ KlWatcher.fd deref COMPILED but must fail"; bad=1
-    else echo "opaque-probe: C++ KlWatcher.fd deref correctly rejected"; fi
-    if (cd "$tmp" && $CXX -std=c++11 -I"$INC" -fsyntax-only t_deref.cpp) 2>/dev/null; then
-        echo "opaque-probe: C++ KlTimerEntry deref COMPILED but must fail"; bad=1
-    else echo "opaque-probe: C++ KlTimerEntry deref correctly rejected"; fi
+    for n in w_deref t_deref hc_deref hc_sizeof hc_inst; do cp "$tmp/$n.c" "$tmp/$n.cpp"; done
+    for n in w_deref t_deref hc_deref hc_sizeof hc_inst; do
+        if (cd "$tmp" && $CXX -std=c++11 -I"$INC" -fsyntax-only "$n.cpp") 2>/dev/null; then
+            echo "opaque-probe: C++ $n COMPILED but must fail"; bad=1
+        else echo "opaque-probe: C++ $n correctly rejected"; fi
+    done
+    # C++ positive: holding/passing the opaque handle pointer must compile.
+    cp "$tmp/hc_ptr.c" "$tmp/hc_ptr.cpp"
+    if (cd "$tmp" && $CXX -std=c++11 -I"$INC" -fsyntax-only hc_ptr.cpp) 2>/dev/null; then
+        echo "opaque-probe: C++ KlHttpConn pointer use compiles"
+    else echo "opaque-probe: C++ KlHttpConn pointer use FAILED (positive control broke)"; bad=1; fi
 fi
 
-[ "$bad" = 0 ] && echo "opaque-probe: OK (KlWatcher and KlTimerEntry are opaque on the installed surface)"
+[ "$bad" = 0 ] && echo "opaque-probe: OK (KlWatcher, KlTimerEntry, KlHttpConn are opaque on the installed surface)"
 exit "$bad"

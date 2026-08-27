@@ -119,13 +119,11 @@ websocat ws://localhost:8080/ws
 | Example | Description | Key APIs |
 |---------|-------------|----------|
 | `custom_allocator` | Tracking allocator + URL parsing | `KlAllocator` vtable, `kl_url_parse` |
-| `connection_pool` | Connection pool internals | `kl_http_conn_pool_init`, `kl_http_conn_acquire/release` |
 | `url_parser` | URL parsing (schemes, IPv6, CRLF guard) | `kl_url_parse`, `KlUrl` |
 | `timer` | One-shot + repeating timers, cancellation | `kl_timer_add`, `kl_timer_cancel`, `KlEventCtx` |
 
 ```bash
 ./examples/custom_allocator
-./examples/connection_pool
 ./examples/url_parser
 ./examples/timer
 ```

@@ -14,6 +14,7 @@
  * :authority pseudo-header converges onto the same "host" header HTTP/1.1 uses.
  */
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include "mock_tls.h"
 #include "net_compat.h"

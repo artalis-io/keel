@@ -101,9 +101,8 @@ KlHttpClientReadFn	callback	http_client.h
 KlHttpClientResponse	struct	http_client.h
 KlHttpClientStreamCfg	struct	http_client.h
 KlHttpCompressStream	struct	http_compress.h
-KlHttpConn	struct	http_connection.h
+KlHttpConn	opaque	async.h
 KlHttpConnPool	struct	http_connection.h
-KlHttpConnState	enum	http_connection.h
 KlHttpCorsConfig	struct	http_cors.h
 KlHttpHandler	callback	http_router.h
 KlHttpMiddleware	callback	http_router.h

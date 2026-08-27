@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include <keel/http2.h>
 #include <keel/http2_server.h>

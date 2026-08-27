@@ -7,6 +7,7 @@
  * auto-installed by a load-time constructor, so it starts pristine (NULL) in this unit.
  */
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include "http_proto_hooks.h"   /* internal seam; its includes are all public <keel/...> */
 
 static void drive_a(struct KlHttpServer *s, KlHttpConn *c) { (void)s; (void)c; }

@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
