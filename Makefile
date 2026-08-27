@@ -793,21 +793,43 @@ integration-test:
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
+# DESTDIR stages into a build root; PREFIX is the logical install prefix baked into keel.pc and the
+# runtime paths. Both are preserved: every path below is $(DESTDIR)$(PREFIX)/...
 install: $(LIB) keel.pc
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/include/keel
 	install -d $(DESTDIR)$(PREFIX)/lib/pkgconfig
 	install -m 644 $(LIB) $(DESTDIR)$(PREFIX)/lib/
-	install -m 644 include/keel/*.h $(DESTDIR)$(PREFIX)/include/keel/
+	@# Install ONLY the reviewed public headers (docs/f2/public_headers.txt), never a wildcard, so an
+	@# internal header placed in include/keel/ cannot leak into the installed surface.
+	@set -e; while IFS= read -r h; do \
+	  case "$$h" in ''|\#*) continue ;; esac; \
+	  install -m 644 include/keel/$$h $(DESTDIR)$(PREFIX)/include/keel/$$h; \
+	done < docs/f2/public_headers.txt
 	install -m 644 keel.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB)
-	rm -rf $(DESTDIR)$(PREFIX)/include/keel
 	rm -f $(DESTDIR)$(PREFIX)/lib/pkgconfig/keel.pc
+	@# Remove ONLY the headers Keel installed (the reviewed manifest); leave any unrelated file intact.
+	@while IFS= read -r h; do \
+	  case "$$h" in ''|\#*) continue ;; esac; \
+	  rm -f $(DESTDIR)$(PREFIX)/include/keel/$$h; \
+	done < docs/f2/public_headers.txt
+	@# Remove the directories Keel created only when now empty: rmdir fails harmlessly (preserving the
+	@# directory) if anything unrelated remains. Never rm -rf a shared dir.
+	-rmdir $(DESTDIR)$(PREFIX)/include/keel 2>/dev/null || true
+	-rmdir $(DESTDIR)$(PREFIX)/lib/pkgconfig 2>/dev/null || true
 
-keel.pc: keel.pc.in
-	sed 's|@PREFIX@|$(PREFIX)|g' $< > $@
+# keel.pc reflects the current PREFIX. Regenerate it whenever the configuration changes (not only when
+# keel.pc.in does): rebuild the content each time and replace the file only when it differs, so its
+# mtime advances exactly on a real change and a stale prefix can never be installed.
+keel.pc: keel.pc.in FORCE
+	@sed 's|@PREFIX@|$(PREFIX)|g' $< > $@.tmp; \
+	 if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
+	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX))"; fi
+
+FORCE:
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
@@ -984,6 +1006,9 @@ check-allocator-boundaries:
 # (f2_public_inventory.sh), standalone staged C11/C++11 header compilation with a negative canary
 # (f2_standalone_headers.sh), and the linkage guards with their negative controls (f2_opaque_probe.sh,
 # f2_cxx_link_test.sh). No behavior; purely a gate.
+check-install:
+	@sh tools/f2_install_test.sh
+
 check-public-headers:
 	@sh tools/f2_public_inventory.sh --selftest
 	@sh tools/f2_public_inventory.sh --check
@@ -2014,7 +2039,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-public-headers check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE check-install check-public-headers check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
