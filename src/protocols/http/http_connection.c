@@ -46,6 +46,12 @@ static const char kl_415_response[] =
     "Connection: close\r\n"
     "\r\n";
 
+static const char kl_500_response[] =
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n"
+    "\r\n";
+
 /* 431 response now lives as KL_HTTP_431_RESPONSE in http_internal.h (shared with the
  * completion path). */
 
@@ -154,6 +160,15 @@ static void conn_cleanup_body_reader(KlHttpConn *c) {
         c->req.body_reader->destroy(c->req.body_reader);
         c->req.body_reader = NULL;
     }
+}
+
+/* True iff every REQUIRED KlHttpBodyReader op is present. Core drives on_data,
+ * on_complete, on_error, and destroy unconditionally over a request body, so a
+ * factory that returns a reader missing any of them would fault a later data or
+ * cleanup callback. Validated once, right after the factory returns the reader
+ * (not in a hot path). */
+static int body_reader_vtable_valid(const KlHttpBodyReader *br) {
+    return br && br->on_data && br->on_complete && br->on_error && br->destroy;
 }
 
 void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
@@ -587,8 +602,19 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         KlHttpBodyReader *br = c->route->body_reader(
             c->stream.alloc, &c->req, c->route->user_data);
         if (!br) {
+            /* Factory declined the request: documented 415 + close. */
             best_effort_conn_write(c, kl_415_response,
                         sizeof(kl_415_response) - 1);
+            c->state = KL_HTTP_CONN_CLOSED;
+            return c->state;
+        }
+        if (!body_reader_vtable_valid(br)) {
+            /* A non-NULL reader missing a required op is an implementation/config
+             * fault, not unsupported media: 500 + close. Guard destroy (it may be
+             * the missing op) before discarding the reader. */
+            if (br->destroy) br->destroy(br);
+            best_effort_conn_write(c, kl_500_response,
+                        sizeof(kl_500_response) - 1);
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
