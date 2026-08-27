@@ -43,11 +43,12 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
 OUT=docs/f2
 
-# Allowed classification vocabularies. During the undecided stage every row is UNRESOLVED / unreviewed;
-# later gates (F2-B, F2-4) tighten by forbidding those defaults. The full vocabulary is accepted now so
-# a partially-decided scaffold still passes --check.
+# Allowed classification vocabularies. A newly seeded row is UNRESOLVED (types) / unreviewed
+# (functions); F2-B and F2-4 tightened the gate by REMOVING those defaults from the accepted vocabulary,
+# so a freshly-seeded or unclassified row fails --check (zero-default, default-deny) and must be
+# classified with concrete evidence before it can pass.
 TYPE_CATEGORIES='caller-constructed caller-inspectable caller-owned-value opaque opt-in-unstable-layout api-signature type-alias enum-constants'
-FN_CLASSES='unreviewed direct-assertion indirect-execution compile-only example'
+FN_CLASSES='direct-assertion indirect-execution compile-only example intentional-untested'
 
 # --- extractors (operate on the header paths in "$@") -------------------------
 
@@ -294,10 +295,12 @@ if [ "$MODE" = check ]; then
         extra=$(comm -13 "$tmp/inv_fn" "$tmp/sc_fn")
         [ -n "$miss" ]  && { echo "f2 --check: function_coverage MISSING rows:"; printf '%s\n' "$miss"  | sed 's/^/  /'; bad=1; }
         [ -n "$extra" ] && { echo "f2 --check: function_coverage STALE/EXTRA rows:"; printf '%s\n' "$extra" | sed 's/^/  /'; bad=1; }
-        # shellcheck disable=SC2034  # cit is read to consume the column, not used
         while IFS='	' read -r fn hdr cls cit; do
             [ "$fn" = function ] && continue
-            value_ok "$cls" "$FN_CLASSES" || { echo "f2 --check: function_coverage bad classification '$cls' for $fn"; bad=1; }
+            value_ok "$cls" "$FN_CLASSES" || { echo "f2 --check: function_coverage unclassified/bad classification '$cls' for $fn (classify with evidence)"; bad=1; }
+            # Every row must record concrete evidence: a test/example location for the coverage
+            # categories, or an explicit rationale for intentional-untested. A bare '-' is rejected.
+            case "$cit" in ''|'-') echo "f2 --check: function_coverage missing evidence/rationale for $fn"; bad=1;; esac
             if ! awk -F'\t' -v f="$fn" -v hh="$hdr" '$1==f && $2==hh{ok=1} END{exit !ok}' "$tmp/public_functions.tsv"; then
                 echo "f2 --check: function_coverage header drift for $fn (header '$hdr' not a declarer)"; bad=1; fi
         done < "$fc"
