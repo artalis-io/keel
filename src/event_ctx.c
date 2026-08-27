@@ -20,6 +20,7 @@
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
 #include "event_ctx_internal.h"  /* KlWatcher/KlTimerEntry layouts (opaque on the public surface) */
 #include "event_caps.h"
+#include "allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "completion_io.h"   /* kl_comp_run: the generic completion tick */
 #include "watcher_internal.h"   /* kl_watcher_add_detached: completion connect */
 
@@ -33,7 +34,9 @@ static void *watcher_tag(const KlWatcher *w) {
 
 int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
                          const KlEventProvider *event_provider) {
-    if (!ctx || !alloc) {
+    /* A NULL allocator is invalid here (no documented default); so is a non-NULL one
+     * missing a required op. Reject before storing ctx->alloc or allocating anything. */
+    if (!ctx || !kl_allocator_ops_valid(alloc)) {
         if (ctx) ctx->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }

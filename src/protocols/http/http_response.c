@@ -4,6 +4,7 @@
 #include "socket.h"
 #include "http_response_internal.h"
 #include "platform.h"
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include <string.h>
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
@@ -128,6 +129,9 @@ static int hdr_append(KlHttpResponse *res, const char *data, size_t len) {
 
 int kl_http_response_init(KlHttpResponse *res, KlAllocator *alloc) {
     memset(res, 0, sizeof(*res));
+    /* A NULL/malformed allocator is invalid here (no documented default). Reject after
+     * zeroing res (its deterministic failure state) and before the first allocation. */
+    if (!kl_allocator_ops_valid(alloc)) return -1;
     res->alloc = alloc;
     res->status = 200;
     res->file_fd = -1;
@@ -618,7 +622,7 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
 
 int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
                               size_t max_size) {
-    if (!res || !alloc) return -1;
+    if (!res || !kl_allocator_ops_valid(alloc)) return -1;
     kl_drain_init(&res->drain, response_drain_writer, res, alloc);
     if (max_size > 0)
         kl_drain_set_max_size(&res->drain, max_size);

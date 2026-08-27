@@ -1,6 +1,7 @@
 #include <keel/thread_pool.h>
 #include <keel/event_ctx.h>
 #include "platform.h"
+#include "allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include <pthread.h>
 #include <string.h>
 #include <limits.h>
@@ -118,6 +119,9 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     if (!ctx) return NULL;
 
     KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : ctx->alloc;
+    /* Validate the RESOLVED allocator (cfg->alloc, or the event context's when NULL);
+     * a malformed non-NULL allocator is rejected, not replaced by the default. */
+    if (!kl_allocator_ops_valid(alloc)) return NULL;
     int num_workers = (cfg && cfg->num_workers > 0) ? cfg->num_workers : 0;
     int queue_cap = (cfg && cfg->queue_capacity > 0) ? cfg->queue_capacity
                                                      : KL_TP_DEFAULT_CAPACITY;

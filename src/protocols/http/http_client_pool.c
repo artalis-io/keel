@@ -9,6 +9,7 @@
 #include <keel/clock.h>
 #include <keel/http_client_pool.h>
 #include "http_client_pool_internal.h"
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
 #include "socket.h"
@@ -73,10 +74,17 @@ static void idle_timer_cb(void *user_data)
 int kl_http_client_pool_init(KlHttpClientPool *pool, const KlHttpClientPoolConfig *cfg,
                    KlAllocator *alloc, KlEventCtx *ev_ctx)
 {
-    if (!pool || !alloc)
+    if (!pool)
         return -1;
 
     memset(pool, 0, sizeof(*pool));
+
+    /* A NULL/malformed allocator is invalid (no default); reject after zeroing pool so
+     * its error surface is set deterministically, before any allocation. */
+    if (!kl_allocator_ops_valid(alloc)) {
+        pool->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     int cap = (cfg && cfg->capacity > 0) ? cfg->capacity
                                           : KL_HTTP_CLIENT_POOL_DEFAULT_CAPACITY;

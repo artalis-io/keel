@@ -10,6 +10,7 @@
 
 #include <keel/http2_client.h>
 #include <keel/url.h>
+#include "../../allocator_validate.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -486,7 +487,7 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                       KlHttp2ClientErrorFn on_error,
                                       void *user_data)
 {
-    if (!ev || !alloc || !cfg || !url || !cfg->session)
+    if (!ev || !kl_allocator_ops_valid(alloc) || !cfg || !url || !cfg->session)
         return NULL;
 
     KlUrl parsed;
@@ -671,6 +672,7 @@ void kl_http2_client_free(KlHttp2ClientConn *c)
     kl_free(alloc, c, sizeof(KlHttp2ClientConn));
 }
 
+/* Precondition: alloc must be a valid allocator (the one that allocated resp); this void API cannot report a malformed allocator, so it does not validate the ops. */
 void kl_http2_client_response_free(KlHttp2ClientResponse *resp, KlAllocator *alloc)
 {
     if (!resp || !alloc) return;

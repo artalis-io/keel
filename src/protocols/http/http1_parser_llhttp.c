@@ -1,5 +1,6 @@
 #include <keel/http1_parser.h>
 #include <keel/http_body_reader.h>
+#include "../../allocator_validate.h"
 #include <string.h>
 #include "llhttp.h"
 
@@ -217,6 +218,7 @@ static void llhttp_destroy_parser(KlHttp1RequestParser *self) {
 }
 
 KlHttp1RequestParser *kl_http1_request_parser_llhttp(KlAllocator *alloc) {
+    if (!kl_allocator_ops_valid(alloc)) return NULL;
     LlhttpParser *lp = kl_malloc(alloc, sizeof(LlhttpParser));
     if (!lp) return NULL;
 

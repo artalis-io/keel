@@ -25,6 +25,7 @@
 #include <sys/types.h>
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "event_caps.h" /* event↔socket capability negotiation */
 #include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel: completion connect */
@@ -1109,8 +1110,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlHttpClientStreamCfg *stream,
                               KlHttpClientDoneFn on_done, void *user_data)
 {
-    if (!ev_ctx || !alloc || !method || !url_str)
-        return NULL;
+    if (!ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url_str)
+        return NULL;   /* NULL/malformed allocator is invalid on the async path (no default) */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)
@@ -1548,8 +1549,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    const char *body, size_t body_len,
                                    KlHttpClientDoneFn on_done, void *user_data)
 {
-    if (!pool || !ev_ctx || !alloc || !method || !url_str)
-        return NULL;
+    if (!pool || !ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url_str)
+        return NULL;   /* NULL/malformed allocator is invalid on the async path (no default) */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)

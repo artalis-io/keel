@@ -64,6 +64,7 @@ tests/smoke_pollcomp_async.c
 tests/smoke_pollcomp_client.c
 tests/smoke_pollcomp_tls.c
 tests/test_allocator.c
+tests/test_allocator_validate.c
 tests/test_async.c
 tests/test_connect_op.c
 tests/test_datagram_batch.c

@@ -975,6 +975,10 @@ check-tier1-boundary:
 # (so `../include/keel/stream.h`, `datagram_contract.md`, `audits/README.md` all check). External
 # (http/mailto) and pure `#anchor` links are skipped. Backstop for docs/architecture/invariants.md.
 DOC_REF_FILES = docs/architecture/overview.md docs/architecture/invariants.md
+check-allocator-boundaries:
+	@sh tools/f2_allocator_boundaries.sh --selftest
+	@sh tools/f2_allocator_boundaries.sh
+
 check-doc-refs:
 	@bad=0; \
 	for doc in $(DOC_REF_FILES); do \
@@ -1997,7 +2001,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

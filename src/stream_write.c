@@ -8,6 +8,7 @@
  */
 #include "stream_write.h"
 #include "drain_reserve.h"     /* kl_drain_prealloc / reserve_write / low-water */
+#include "allocator_validate.h"
 #include <keel/drain.h>
 
 /* Map an internal drain reservation result to the public-ish stream write status. */
@@ -21,7 +22,7 @@ static KlStreamWriteStatus map_drain(KlDrainWriteStatus s) {
 }
 
 int kl_stream_write_init(KlStream *s, KlAllocator *alloc, size_t capacity) {
-    if (!s || s->wq_inited) return -1;
+    if (!s || s->wq_inited || !kl_allocator_ops_valid(alloc)) return -1;
     kl_drain_init(&s->wq, NULL, NULL, alloc);   /* writer installed later by the adapter */
     if (kl_drain_prealloc(&s->wq, capacity) < 0) return -1;
     s->wq_inited        = 1;

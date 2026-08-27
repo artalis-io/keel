@@ -44,6 +44,7 @@
 #include <string.h>
 
 #include "socket.h"      /* kl_sock_* seam + AF_INET/AF_INET6/SOCK_* (via sockcompat / the fs shim) */
+#include "../../allocator_validate.h" /* kl_allocator_ops_valid: valid-allocator gate */
 #include "datagram_open.h" /* kl_datagram_open: provider-neutral datagram socket prep */
 #include "platform.h"
 #include "kl_cstr.h"     /* locale-free bounded string primitives (freestanding-safe) */
@@ -1580,8 +1581,10 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg, int send_slots) {
     if (!ctx)
         return NULL;
+    /* Validate the RESOLVED allocator (cfg->alloc, or the event context's when NULL);
+     * a malformed non-NULL allocator is rejected, not replaced by the default. */
     KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : ctx->alloc;
-    if (!alloc)
+    if (!kl_allocator_ops_valid(alloc))
         return NULL;
 
     KlDnsResolver *r = kl_malloc(alloc, sizeof(*r));

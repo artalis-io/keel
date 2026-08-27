@@ -33,6 +33,7 @@
 #include "completion.h"         /* KlCompletionEvent + kl_comp_* + KL_COMP_DGRAM_* */
 #include "completion_io.h"          /* KlDgramSendOp / KlDgramRecvOp descriptors */
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
+#include "allocator_validate.h" /* kl_allocator_ops_valid: valid-allocator gate */
 #include "event_caps.h"         /* kl_event_caps */
 #include "datagram_life.h"      /* kl_dgram_life_retain/_release */
 #include "datagram_open.h"      /* KlDatagramReclaimFn + kl_datagram_teardown */
@@ -368,7 +369,7 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
 }
 
 int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget) {
-    if (!dg || !cfg || !cfg->ctx || !cfg->alloc || !kl_handle_valid(cfg->fd)) {
+    if (!dg || !cfg || !cfg->ctx || !kl_allocator_ops_valid(cfg->alloc) || !kl_handle_valid(cfg->fd)) {
         if (dg) { memset(dg, 0, sizeof(*dg)); dg->last_error = KL_ERR_INVALID_ARG; }
         return -1;
     }
@@ -458,6 +459,9 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     }
     int completion = (kl_event_caps(&cfg->ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
     KlAllocator *alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
+    /* Validate the RESOLVED allocator (cfg->alloc, or the event context's when NULL)
+     * before creating any fd; a malformed non-NULL allocator is rejected, not replaced. */
+    if (!kl_allocator_ops_valid(alloc)) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
     /* Resolve ONE effective provider. "NULL = ctx default" means the EVENT CONTEXT's provider
      * (cfg->ctx->sockets), not the built-in POSIX default; else a custom lwIP/EFI event context would be
      * mixed with POSIX datagram ops. Use it consistently for open, adoption, and every pre-adoption close. */

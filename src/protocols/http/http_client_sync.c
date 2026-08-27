@@ -28,6 +28,7 @@
 #include <sys/types.h>
 
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "platform.h"     /* kl_plat_poll1: sync readiness wait (poll/WSAPoll) */
 #include "http_client_internal.h"
@@ -558,14 +559,21 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
                          const KlHttpClientStreamCfg *stream,
                          KlHttpClientResponse *resp)
 {
-    if (!alloc || !method || !url_str || !resp)
-        return -1;
+    if (!method || !url_str || !resp)
+        return -1;   /* resp NULL: no error surface; the allocator is validated after memset below */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return -1;
     if (num_headers > 0 && !headers)
         return -1;
 
     memset(resp, 0, sizeof(*resp));
+
+    /* A NULL/malformed allocator is invalid on the sync path (no documented default):
+     * reject after zeroing resp so its error surface is set deterministically. */
+    if (!kl_allocator_ops_valid(alloc)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */
@@ -800,14 +808,21 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
                               const char *body, size_t body_len,
                               KlHttpClientResponse *resp)
 {
-    if (!pool || !alloc || !method || !url_str || !resp)
-        return -1;
+    if (!pool || !method || !url_str || !resp)
+        return -1;   /* the allocator is validated after memset below (sets resp->error) */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return -1;
     if (num_headers > 0 && !headers)
         return -1;
 
     memset(resp, 0, sizeof(*resp));
+
+    /* A NULL/malformed allocator is invalid on the sync path (no documented default):
+     * reject after zeroing resp so its error surface is set deterministically. */
+    if (!kl_allocator_ops_valid(alloc)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     /* Selected socket provider (NULL = built-in default), threaded through the
      * whole sync path (connect + I/O), never hardcoded. */

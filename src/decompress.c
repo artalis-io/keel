@@ -1,10 +1,11 @@
 #include <keel/decompress.h>
 #include "decompress_internal.h"   /* kl_decompress_vtable_valid: required-subset gate */
+#include "allocator_validate.h"    /* kl_allocator_ops_valid: valid-allocator gate */
 #include <string.h>
 
 int kl_decompress_body(KlDecompressConfig *cfg, const char *in, size_t in_len,
                         char **out, size_t *out_len, KlAllocator *alloc) {
-    if (!cfg || !cfg->factory || !out || !out_len || !alloc)
+    if (!cfg || !cfg->factory || !out || !out_len || !kl_allocator_ops_valid(alloc))
         return -1;
     if (in_len > 0 && !in)
         return -1;
@@ -33,7 +34,7 @@ int kl_decompress_body(KlDecompressConfig *cfg, const char *in, size_t in_len,
 
 int kl_decompress_stream_init(KlDecompressStream *ds, KlDecompressConfig *cfg,
                                KlAllocator *alloc) {
-    if (!ds || !cfg || !cfg->factory || !alloc)
+    if (!ds || !cfg || !cfg->factory || !kl_allocator_ops_valid(alloc))
         return -1;
 
     memset(ds, 0, sizeof(*ds));

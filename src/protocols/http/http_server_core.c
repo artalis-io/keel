@@ -20,6 +20,7 @@
 #include <keel/timer.h>
 #include <keel/http_request.h>
 #include "http_internal.h"
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "completion_io.h"    /* kl_comp_cancel (neutral completion seam) */
 #include "completion_http.h" /* kl_http_comp_run / _quiesce_accepts / _post_read (HTTP orchestration) */
 #include "event_caps.h"   /* kl_event_caps: completion vs readiness pause/resume */
@@ -152,6 +153,13 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * pool allocator on UEFI); falling back to kl_allocator_default() would drag
      * malloc/free/stdio into the freestanding closure. */
     if (s->config.alloc) {
+        /* A caller-supplied allocator is copied by value below; a malformed one (a
+         * required op is NULL) would fault the first allocation. Validate before
+         * copying, and do not silently fall back to the default. */
+        if (!kl_allocator_ops_valid(s->config.alloc)) {
+            s->last_error = KL_ERR_INVALID_ARG;
+            return -1;
+        }
         s->alloc_storage = *s->config.alloc;
     } else {
 #ifndef KEEL_FREESTANDING

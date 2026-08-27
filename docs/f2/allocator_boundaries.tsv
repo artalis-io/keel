@@ -1,0 +1,71 @@
+# F2-C2 allocator-boundary manifest. Every public API that accepts a KlAllocator (directly or via a
+# config it consumes) and how it satisfies the valid-allocator policy: a non-NULL allocator is valid
+# only when malloc, realloc, and free are all non-NULL (ctx optional); NULL keeps each API's own
+# documented meaning; a malformed non-NULL allocator is never silently replaced by a default.
+#
+# Checked by tools/f2_allocator_boundaries.sh: the `fn` rows must exactly equal the set of public
+# functions taking a direct KlAllocator* parameter; the `field-count` rows must match the per-header
+# count of KlAllocator* struct fields; each `config` row's function must be a public function. A new
+# allocator-accepting API therefore cannot be added without classifying it here.
+#
+# Columns: kind<TAB>key<TAB>disposition<TAB>note
+# disposition: validates | delegates:<fn> | config-validates | precondition | stub
+#
+# ── Direct KlAllocator* parameter (fn) ──────────────────────────────────────────────────────────
+fn	kl_event_ctx_init_ex	validates	NULL invalid; KL_ERR_INVALID_ARG on ctx->last_error, -1
+fn	kl_event_ctx_init	delegates:kl_event_ctx_init_ex	thin wrapper
+fn	kl_http_response_init	validates	NULL invalid; -1 after res is memset-zeroed (deterministic)
+fn	kl_http_response_enable_drain	validates	NULL invalid; -1
+fn	kl_http_router_init	validates	NULL invalid; -1, r left untouched
+fn	kl_http_body_reader_buffer	validates	NULL invalid; NULL (factory)
+fn	kl_http_body_reader_multipart	validates	NULL invalid; NULL (factory)
+fn	kl_http1_request_parser_llhttp	validates	NULL invalid; NULL (factory)
+fn	kl_http1_response_parser_llhttp	delegates:create_parser	create_parser validates
+fn	kl_http1_response_parser_llhttp_s	delegates:create_parser	create_parser validates
+fn	kl_http_client_request_s	validates	NULL invalid; -1, resp->error = KL_ERR_INVALID_ARG after memset
+fn	kl_http_client_request	delegates:kl_http_client_request_s	thin wrapper
+fn	kl_http_client_request_pooled	validates	NULL invalid; -1, resp->error after memset
+fn	kl_http_client_start_s	validates	NULL invalid; NULL (factory), ahead of sockets/resolver checks
+fn	kl_http_client_start	delegates:kl_http_client_start_s	thin wrapper
+fn	kl_http_client_start_pooled	validates	NULL invalid; NULL (factory)
+fn	kl_http_client_pool_init	validates	NULL invalid; -1, pool->last_error = KL_ERR_INVALID_ARG after memset
+fn	kl_http_redirect_request	delegates:do_sync_request	do_sync_request validates
+fn	kl_http_redirect_request_pooled	delegates:do_sync_request	do_sync_request validates
+fn	kl_http_redirect_start	validates	NULL invalid; NULL (factory)
+fn	kl_http_redirect_start_pooled	validates	NULL invalid; NULL (factory)
+fn	kl_http2_client_connect	validates	NULL invalid; NULL (factory)
+fn	kl_ws_client_connect	validates	NULL invalid; NULL (factory)
+fn	kl_stream_write_init	validates	NULL invalid; -1
+fn	kl_decompress_body	validates	NULL invalid; -1, *out left NULL
+fn	kl_decompress_stream_init	validates	NULL invalid; -1
+fn	kl_resolver_cache_create	validates	NULL invalid; NULL (factory)
+fn	kl_malloc	precondition	hot-path primitive: valid-allocator precondition, no runtime check
+fn	kl_realloc	precondition	hot-path primitive: valid-allocator precondition, no runtime check
+fn	kl_free	precondition	hot-path primitive: valid-allocator precondition, no runtime check
+fn	kl_drain_init	precondition	void API: valid-allocator precondition; callers validate at their boundary
+fn	kl_http2_client_response_free	precondition	void free: valid-allocator precondition, cannot fail safely
+fn	kl_file_io_create	stub	always returns NULL, never allocates
+# ── Config-carried allocator (config->alloc / config->allocator; not a direct parameter) ────────
+config	kl_http_server_init	config-validates	config->alloc validated before by-value copy; NULL = stdlib default (hosted) / invalid (freestanding)
+config	kl_thread_pool_create	config-validates	resolved allocator (cfg->alloc, else ctx->alloc) validated; NULL = ctx default
+config	kl_dns_resolver_create	config-validates	resolved allocator (cfg->alloc, else ctx->alloc) validated in the create-slots impl; NULL = ctx default
+config	kl_datagram_init_ex	config-validates	cfg->alloc validated; NULL invalid (adopt path, no default)
+config	kl_datagram_init	delegates:kl_datagram_init_ex	thin wrapper
+config	kl_datagram_socket_init	config-validates	resolved allocator (cfg->alloc, else ctx->alloc) validated; NULL = ctx default
+# ── Per-header KlAllocator* struct-field counts (catches a new allocator-carrying config/object) ─
+field-count	datagram.h	2
+field-count	datagram_detail.h	1
+field-count	decompress.h	1
+field-count	dns_resolver.h	1
+field-count	drain.h	1
+field-count	event.h	1
+field-count	event_ctx.h	1
+field-count	http_body_reader.h	1
+field-count	http_client_pool.h	1
+field-count	http_compress.h	1
+field-count	http_connection.h	1
+field-count	http_response.h	1
+field-count	http_router.h	1
+field-count	http_server.h	1
+field-count	stream_detail.h	1
+field-count	thread_pool.h	1
