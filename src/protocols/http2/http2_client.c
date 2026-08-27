@@ -267,6 +267,16 @@ static int h2c_alpn_ok(KlHttp2ClientConn *c)
     return (p[0] == 'h' && p[1] == '2' && p[2] == '\0');
 }
 
+/* True iff every REQUIRED KlHttp2ClientSession op is present. Core calls recv,
+ * submit_request, flush, and destroy unconditionally; the KEEL-managed keel_cbs/
+ * keel_ctx members are written by core, not called. Mirrors the server-side
+ * required-subset gate in http2_server.c. Validated once per session, right after
+ * the factory returns it (not in any hot path). */
+static int h2c_session_vtable_valid(const KlHttp2ClientSession *s)
+{
+    return s && s->recv && s->submit_request && s->flush && s->destroy;
+}
+
 static void h2c_handle_connecting(KlHttp2ClientConn *c)
 {
     int err = 0;
@@ -328,6 +338,12 @@ static void h2c_handle_connecting(KlHttp2ClientConn *c)
         h2c_error(c, "session factory failed");
         return;
     }
+    if (!h2c_session_vtable_valid(c->session)) {
+        if (c->session->destroy) c->session->destroy(c->session);
+        c->session = NULL;
+        h2c_error(c, "session vtable missing a required op");
+        return;
+    }
 
     /* Wire up callbacks */
     c->session->keel_cbs.on_send = h2c_on_send;
@@ -354,6 +370,12 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
         c->session = c->cfg.session(c->alloc);
         if (!c->session) {
             h2c_error(c, "session factory failed");
+            return;
+        }
+        if (!h2c_session_vtable_valid(c->session)) {
+            if (c->session->destroy) c->session->destroy(c->session);
+            c->session = NULL;
+            h2c_error(c, "session vtable missing a required op");
             return;
         }
         c->session->keel_cbs.on_send = h2c_on_send;
@@ -562,6 +584,12 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     if (c->state == H2C_H2_INIT) {
         c->session = cfg->session(alloc);
         if (!c->session) {
+            kl_sock_close(ev->sockets, fd);
+            kl_free(alloc, c, sizeof(KlHttp2ClientConn));
+            return NULL;
+        }
+        if (!h2c_session_vtable_valid(c->session)) {
+            if (c->session->destroy) c->session->destroy(c->session);
             kl_sock_close(ev->sockets, fd);
             kl_free(alloc, c, sizeof(KlHttp2ClientConn));
             return NULL;
