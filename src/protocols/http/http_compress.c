@@ -1,6 +1,16 @@
 #include <keel/http_compress.h>
 #include <string.h>
 
+/* True iff every REQUIRED KlCompress op is present. Core calls compress (single-shot),
+ * feed (streaming), encoding, and destroy unconditionally; reset is optional (the
+ * header documents it "may be NULL", and it is never called here). Validated once,
+ * right after the factory returns the session (not in a hot path). A session missing
+ * a required op is rejected; its destroy is guarded because a malformed table may
+ * omit destroy, in which case the object cannot be freed generically. */
+static int compress_vtable_valid(const KlCompress *c) {
+    return c && c->compress && c->feed && c->encoding && c->destroy;
+}
+
 int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
                                const char *data, size_t len) {
     if (!res || !cfg || !cfg->factory) return -1;
@@ -19,6 +29,10 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
     /* Create compression session */
     KlCompress *comp = cfg->factory(cfg->ctx, alloc);
     if (!comp) return -1;
+    if (!compress_vtable_valid(comp)) {
+        if (comp->destroy) comp->destroy(comp);   /* guard: a malformed table may omit destroy */
+        return -1;
+    }
 
     /* Compress */
     char *out = NULL;
@@ -82,6 +96,10 @@ int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
     /* Create compression session */
     KlCompress *comp = cfg->factory(cfg->ctx, alloc);
     if (!comp) return -1;
+    if (!compress_vtable_valid(comp)) {
+        if (comp->destroy) comp->destroy(comp);   /* guard: a malformed table may omit destroy */
+        return -1;
+    }
 
     /* Set Content-Encoding and Vary headers */
     const char *enc = comp->encoding(comp);

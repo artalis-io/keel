@@ -3,6 +3,7 @@ tests/protocols/dns/test_dns_resolver.c
 tests/protocols/http/smoke_tcp.c
 tests/protocols/http/test_alpn.c
 tests/protocols/http/test_compress.c
+tests/protocols/http/test_compress_vtable.c
 tests/protocols/http/test_cross_module.c
 tests/protocols/http/test_http1_chunked.c
 tests/protocols/http/test_http1_parser.c

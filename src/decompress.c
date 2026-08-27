@@ -1,4 +1,5 @@
 #include <keel/decompress.h>
+#include "decompress_internal.h"   /* kl_decompress_vtable_valid: required-subset gate */
 #include <string.h>
 
 int kl_decompress_body(KlDecompressConfig *cfg, const char *in, size_t in_len,
@@ -19,6 +20,10 @@ int kl_decompress_body(KlDecompressConfig *cfg, const char *in, size_t in_len,
     KlDecompress *decomp = cfg->factory(cfg->ctx, alloc);
     if (!decomp)
         return -1;
+    if (!kl_decompress_vtable_valid(decomp)) {
+        if (decomp->destroy) decomp->destroy(decomp);   /* guard: a malformed table may omit destroy */
+        return -1;
+    }
 
     /* Decompress */
     int rc = decomp->decompress(decomp, in, in_len, out, out_len, alloc);
@@ -36,6 +41,10 @@ int kl_decompress_stream_init(KlDecompressStream *ds, KlDecompressConfig *cfg,
     KlDecompress *decomp = cfg->factory(cfg->ctx, alloc);
     if (!decomp)
         return -1;
+    if (!kl_decompress_vtable_valid(decomp)) {
+        if (decomp->destroy) decomp->destroy(decomp);   /* guard: a malformed table may omit destroy */
+        return -1;
+    }
 
     ds->decomp = decomp;
     ds->alloc = alloc;
