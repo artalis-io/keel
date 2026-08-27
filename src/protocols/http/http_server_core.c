@@ -74,6 +74,14 @@ static void kl_http_server_wakeup_init(KlHttpServer *s) {
  * async file-I/O backend, and the stop self-pipe) are compiled out under
  * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
  * file I/O, no self-pipe). Everything else is platform-neutral. */
+/* True iff every REQUIRED KlHttp1RequestParser op is present. Core calls parse,
+ * reset, and destroy unconditionally over a connection's lifetime, so a parser
+ * factory that returns a table missing any of them would fault later. Validated
+ * once per pool slot at server init (not in a hot path). */
+static int http1_request_parser_vtable_valid(const KlHttp1RequestParser *p) {
+    return p && p->parse && p->reset && p->destroy;
+}
+
 int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
@@ -209,6 +217,18 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].parser = s->config.parser(alloc);
         if (!s->pool.conns[i].parser) {
             s->last_error = KL_ERR_ALLOC;
+            kl_http_conn_pool_free(&s->pool);
+            kl_http_router_free(&s->router);
+            return -1;
+        }
+        if (!http1_request_parser_vtable_valid(s->pool.conns[i].parser)) {
+            /* Malformed parser vtable (a required op is NULL): reject before the
+             * server accepts traffic. Guard destroy (it may be the missing op),
+             * clear the slot so pool_free skips it, and fail with an arg error. */
+            KlHttp1RequestParser *p = s->pool.conns[i].parser;
+            if (p->destroy) p->destroy(p);
+            s->pool.conns[i].parser = NULL;
+            s->last_error = KL_ERR_INVALID_ARG;
             kl_http_conn_pool_free(&s->pool);
             kl_http_router_free(&s->router);
             return -1;
