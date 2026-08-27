@@ -228,6 +228,22 @@ void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
  */
 int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms);
 
+/**
+ * @brief Borrowed accessor for the context's embedded event loop.
+ *
+ * Returns a pointer to the `KlEventLoop` owned by @p ctx, for the lower-level event API that
+ * operates on a `KlEventLoop *` (for example `kl_event_caps()` and `kl_event_native_provider()`),
+ * which `kl_event_ctx_run()` does not replace. Prefer this accessor over reaching into `ctx->loop`,
+ * whose name and placement are not a stable contract.
+ *
+ * Ownership: borrowed; the loop is owned by @p ctx, so the caller must not free it or use it after
+ * `kl_event_ctx_free(ctx)`. Lifetime: valid while @p ctx is initialized. Mutability: the returned
+ * loop is live and driven by the context; the caller may pass it to the event API but must not
+ * re-init or close it. NULL: returns NULL when @p ctx is NULL (deterministic).
+ */
+KlEventLoop       *kl_event_ctx_loop(KlEventCtx *ctx);
+const KlEventLoop *kl_event_ctx_loop_const(const KlEventCtx *ctx);
+
 #ifdef __cplusplus
 }
 #endif

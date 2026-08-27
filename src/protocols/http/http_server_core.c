@@ -654,3 +654,15 @@ void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out) {
         suspended++;
     out->async_suspended = suspended;
 }
+
+KlEventCtx *kl_http_server_event_ctx(KlHttpServer *s) {
+    return s ? &s->ev : NULL;
+}
+
+const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s) {
+    return s ? &s->ev : NULL;
+}
+
+int kl_http_server_bound_port(const KlHttpServer *s) {
+    return s ? s->bound_port : -1;
+}

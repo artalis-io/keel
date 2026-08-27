@@ -77,6 +77,8 @@ kl_event_ctx_dispatch_end	event_ctx.h
 kl_event_ctx_free	event_ctx.h
 kl_event_ctx_init	event_ctx.h
 kl_event_ctx_init_ex	event_ctx.h
+kl_event_ctx_loop	event_ctx.h
+kl_event_ctx_loop_const	event_ctx.h
 kl_event_ctx_run	event_ctx.h
 kl_event_del	event.h
 kl_event_dispatch	event_ctx.h
@@ -140,6 +142,8 @@ kl_http_conn_pool_reserve	http_connection.h
 kl_http_conn_pool_return_credit	http_connection.h
 kl_http_conn_read_proxy_header	http_connection.h
 kl_http_conn_release	http_connection.h
+kl_http_conn_response	http_connection.h
+kl_http_conn_response_const	http_connection.h
 kl_http_cors_add_origin	http_cors.h
 kl_http_cors_init	http_cors.h
 kl_http_cors_is_allowed	http_cors.h
@@ -193,6 +197,9 @@ kl_http_router_run_middleware	http_router.h
 kl_http_router_run_post_middleware	http_router.h
 kl_http_router_use	http_router.h
 kl_http_router_use_post	http_router.h
+kl_http_server_bound_port	http_server.h
+kl_http_server_event_ctx	http_server.h
+kl_http_server_event_ctx_const	http_server.h
 kl_http_server_free	http_server.h
 kl_http_server_init	http_server.h
 kl_http_server_route	http_server.h

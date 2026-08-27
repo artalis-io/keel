@@ -51,7 +51,7 @@ static void query_done_fn(void *user_data) {
     if (n < 0) n = 0;
 
     KlHttpConn *conn = ctx->op.conn;
-    kl_http_response_json(&conn->res, 200, body, (size_t)n);
+    kl_http_response_json(kl_http_conn_response(conn), 200, body, (size_t)n);
 
     kl_async_complete(ctx->server, &ctx->op);
     free(ctx);
@@ -130,7 +130,7 @@ int main(void) {
 
     /* Create thread pool (4 workers, default queue) */
     KlThreadPoolConfig pool_cfg = {.num_workers = 4};
-    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &pool_cfg);
+    KlThreadPool *pool = kl_thread_pool_create(kl_http_server_event_ctx(&s), &pool_cfg);
     if (!pool) {
         fprintf(stderr, "thread pool creation failed\n");
         kl_http_server_free(&s);

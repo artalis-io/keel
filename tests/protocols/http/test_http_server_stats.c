@@ -94,4 +94,24 @@ UTEST(server_stats, stats_null_safety) {
     kl_http_server_free(&s);
 }
 
+/* F2-B accessors: event-context and bound-port accessors, normal and NULL inputs. */
+UTEST(server_stats, accessors) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.port = 0;
+    cfg.max_connections = 4;
+    ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
+
+    ASSERT_EQ((void *)kl_http_server_event_ctx(&s), (void *)&s.ev);
+    ASSERT_EQ((const void *)kl_http_server_event_ctx_const(&s), (const void *)&s.ev);
+    ASSERT_EQ(kl_http_server_bound_port(&s), s.bound_port);
+
+    ASSERT_TRUE(kl_http_server_event_ctx(NULL) == NULL);
+    ASSERT_TRUE(kl_http_server_event_ctx_const(NULL) == NULL);
+    ASSERT_EQ(kl_http_server_bound_port(NULL), -1);
+
+    kl_http_server_free(&s);
+}
+
 UTEST_MAIN();

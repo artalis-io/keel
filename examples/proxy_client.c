@@ -392,9 +392,9 @@ int main(void) {
 
     pthread_t srv_tid;
     pthread_create(&srv_tid, NULL, target_thread, &target_srv);
-    for (int i = 0; i < 200 && target_srv.bound_port == 0; i++)
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&target_srv) == 0; i++)
         usleep(10000);
-    target_port = target_srv.bound_port;
+    target_port = kl_http_server_bound_port(&target_srv);
 
     /* Start mini proxy */
     proxy_listen_fd = proxy_make_listener();

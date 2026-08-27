@@ -333,3 +333,11 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
 
     return n < 0 ? -1 : n;
 }
+
+KlEventLoop *kl_event_ctx_loop(KlEventCtx *ctx) {
+    return ctx ? &ctx->loop : NULL;
+}
+
+const KlEventLoop *kl_event_ctx_loop_const(const KlEventCtx *ctx) {
+    return ctx ? &ctx->loop : NULL;
+}

@@ -134,4 +134,18 @@ UTEST(event_ctx, run_zero_max_events_returns_minus_1) {
     kl_event_ctx_free(&ev);
 }
 
+/* F2-B accessor: kl_event_ctx_loop[_const] return the embedded loop, NULL on NULL input. */
+UTEST(event_ctx, loop_accessor) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+
+    ASSERT_EQ((void *)kl_event_ctx_loop(&ev), (void *)&ev.loop);
+    ASSERT_EQ((const void *)kl_event_ctx_loop_const(&ev), (const void *)&ev.loop);
+    ASSERT_TRUE(kl_event_ctx_loop(NULL) == NULL);
+    ASSERT_TRUE(kl_event_ctx_loop_const(NULL) == NULL);
+
+    kl_event_ctx_free(&ev);
+}
+
 UTEST_MAIN();

@@ -46,7 +46,7 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
     if (n < 0) n = 0;
 
     KlHttpConn *conn = op->conn;
-    kl_http_response_json(&conn->res, 200, body, (size_t)n);
+    kl_http_response_json(kl_http_conn_response(conn),200, body, (size_t)n);
 
     close(ctx->pipe_fds[0]);
     close(ctx->pipe_fds[1]);
@@ -72,7 +72,7 @@ static void delay_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
     if (read(ctx->pipe_fds[0], buf, 1) < 0) { /* ignore */ }
 
     /* Remove watcher before completing */
-    kl_watcher_del(&ctx->server->ev, ctx->pipe_fds[0]);
+    kl_watcher_del(kl_http_server_event_ctx(ctx->server), ctx->pipe_fds[0]);
 
     /* Resume connection (must be on event loop thread, we are) */
     kl_async_complete(ctx->server, &ctx->op);
@@ -130,7 +130,7 @@ static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     }
 
     /* Register read end with event loop */
-    if (kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ,
+    if (kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ,
                         delay_watcher, ctx) < 0) {
         close(ctx->pipe_fds[0]);
         close(ctx->pipe_fds[1]);
@@ -150,7 +150,7 @@ static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
         pthread_attr_destroy(&attr);
         /* Thread creation failed; resume connection with error */
-        kl_http_response_json(&conn->res, 500,
+        kl_http_response_json(kl_http_conn_response(conn),500,
                          "{\"error\":\"thread create failed\"}", 32);
         kl_async_complete(srv, &ctx->op);
         return;

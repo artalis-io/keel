@@ -217,6 +217,21 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
  */
 const KlSockAddr *kl_http_conn_peer_addr(const KlHttpConn *c);
 
+/**
+ * @brief Response builder for a connection: stable accessor.
+ *
+ * Returns the connection's `KlHttpResponse`, for async workflows that resume a suspended connection
+ * and set its response outside the handler. Prefer this over reaching into `conn->res`, which is
+ * internal/unstable (the KlHttpConn layout is becoming opaque).
+ *
+ * Ownership: borrowed; the response is owned by the connection (pool storage), so the caller must
+ * not free it. Lifetime: valid while the connection is live (the borrowed `KlHttpConn *` returned by
+ * `kl_http_request_conn()`). Mutability: drive it through the `kl_http_response_*` API. NULL: returns
+ * NULL when @p c is NULL (deterministic).
+ */
+KlHttpResponse       *kl_http_conn_response(KlHttpConn *c);
+const KlHttpResponse *kl_http_conn_response_const(const KlHttpConn *c);
+
 #ifdef __cplusplus
 }
 #endif

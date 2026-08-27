@@ -140,6 +140,14 @@ const KlSockAddr *kl_http_conn_peer_addr(const KlHttpConn *c) {
     return &c->stream.peer_addr;
 }
 
+KlHttpResponse *kl_http_conn_response(KlHttpConn *c) {
+    return c ? &c->res : NULL;
+}
+
+const KlHttpResponse *kl_http_conn_response_const(const KlHttpConn *c) {
+    return c ? &c->res : NULL;
+}
+
 static void conn_cleanup_body_reader(KlHttpConn *c) {
     if (c->req.body_reader) {
         c->req.body_reader->destroy(c->req.body_reader);

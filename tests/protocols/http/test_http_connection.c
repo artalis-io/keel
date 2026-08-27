@@ -270,4 +270,23 @@ UTEST(connection, max_header_size_default) {
     kl_http_conn_pool_free(&pool);
 }
 
+/* F2-B accessor: kl_http_conn_response[_const] return the connection's response, NULL on NULL. */
+UTEST(connection, response_accessor) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 2, &a), 0);
+    for (int i = 0; i < 2; i++)
+        pool.conns[i].parser = kl_http1_parser_llhttp(&a);
+
+    KlHttpConn *c = kl_http_conn_acquire(&pool, 100);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ((void *)kl_http_conn_response(c), (void *)&c->res);
+    ASSERT_EQ((const void *)kl_http_conn_response_const(c), (const void *)&c->res);
+    ASSERT_TRUE(kl_http_conn_response(NULL) == NULL);
+    ASSERT_TRUE(kl_http_conn_response_const(NULL) == NULL);
+
+    c->stream.fd = -1;
+    kl_http_conn_pool_free(&pool);
+}
+
 UTEST_MAIN();

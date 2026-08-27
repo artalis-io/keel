@@ -315,3 +315,10 @@ kl_ws_server_send_binary	websocket_server.h	unreviewed	-
 kl_ws_server_send_ping	websocket_server.h	unreviewed	-
 kl_ws_server_send_text	websocket_server.h	unreviewed	-
 kl_ws_server_upgrade	websocket_server.h	unreviewed	-
+kl_event_ctx_loop	event_ctx.h	unreviewed	-
+kl_event_ctx_loop_const	event_ctx.h	unreviewed	-
+kl_http_conn_response	http_connection.h	unreviewed	-
+kl_http_conn_response_const	http_connection.h	unreviewed	-
+kl_http_server_bound_port	http_server.h	unreviewed	-
+kl_http_server_event_ctx	http_server.h	unreviewed	-
+kl_http_server_event_ctx_const	http_server.h	unreviewed	-

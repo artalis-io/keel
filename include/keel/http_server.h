@@ -314,6 +314,33 @@ typedef struct {
 void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out);
 
 /**
+ * @brief Borrowed accessor for the server's embedded event context.
+ *
+ * Returns the `KlEventCtx` the server drives, for registering watchers, timers, and a thread pool
+ * (for example `kl_watcher_add()`, `kl_thread_pool_create()`). The field `s->ev` remains a supported
+ * facet, but new code should PREFER this accessor so it does not depend on the field's name or
+ * placement.
+ *
+ * Ownership: borrowed; the context is owned by @p s, so the caller must not free it or use it after
+ * `kl_http_server_free(s)`. Lifetime: valid while @p s is initialized. Mutability: the context is
+ * live; drive it through the watcher/timer/thread-pool APIs, not by re-initializing it. NULL:
+ * returns NULL when @p s is NULL (deterministic).
+ */
+KlEventCtx       *kl_http_server_event_ctx(KlHttpServer *s);
+const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
+
+/**
+ * @brief Bound TCP port the server is listening on.
+ *
+ * Resolved even when the config requested an ephemeral port (port 0): after the listen socket is
+ * bound this returns the actual port. Prefer this over reading `s->bound_port` directly.
+ *
+ * Ownership: none (returns a value). Lifetime: meaningful once the listener is bound (0 before
+ * binding). NULL: returns -1 when @p s is NULL (deterministic).
+ */
+int kl_http_server_bound_port(const KlHttpServer *s);
+
+/**
  * @brief Optional platform capabilities.
  *
  * A few server helpers below are only meaningful on certain platforms and

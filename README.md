@@ -517,7 +517,7 @@ void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
 
     /* Create a pipe: watcher fires when the pipe is written to */
     socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection (removes it from event loop, exempt from timeouts) */
     kl_async_suspend(srv, conn, &ctx->op);
@@ -534,7 +534,7 @@ The watcher callback runs on the event loop thread, making it safe to call `kl_a
 
 ```c
 /* Create pool (auto-detects CPU count, 64-item queue) */
-KlThreadPool *pool = kl_thread_pool_create(&server.ev, NULL);
+KlThreadPool *pool = kl_thread_pool_create(kl_http_server_event_ctx(&server), NULL);
 
 /* Work callbacks */
 static void do_query(void *ud) {
@@ -594,7 +594,7 @@ KlAllocator alloc = kl_allocator_default();
 KlEventCtx ev;
 kl_event_ctx_init(&ev, &alloc);
 kl_http_client_start(&ev, &alloc, NULL, "GET", "http://example.com/", NULL, 0, NULL, 0, on_done, NULL);
-/* pump ev.loop ... */
+while (!done) kl_event_ctx_run(&ev, 16, 1000);   /* drive the loop (kl_event_ctx_loop() exposes the KlEventLoop*) */
 kl_event_ctx_free(&ev);
 ```
 
