@@ -1023,6 +1023,14 @@ check-public-headers:
 	@sh tools/f2_cxx_link_test.sh >/dev/null && echo "cxx-link: OK (C++ links the C archive with guards; unguarded linkage fails)"
 	@echo "check-public-headers: OK"
 
+# F2-4: the public-function coverage manifest is an exact, default-deny join - every public function is
+# classified with concrete evidence (no unreviewed rows, no empty citations). Delegates to the exact
+# coverage-manifest check (and its extraction canaries) in f2_public_inventory.sh.
+check-public-coverage:
+	@sh tools/f2_public_inventory.sh --selftest
+	@sh tools/f2_public_inventory.sh --check
+	@echo "check-public-coverage: OK"
+
 check-doc-refs:
 	@bad=0; \
 	for doc in $(DOC_REF_FILES); do \
@@ -2045,7 +2053,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE check-install check-installed-consumer check-public-headers check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

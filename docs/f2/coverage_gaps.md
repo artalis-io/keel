@@ -68,9 +68,3 @@ result would harden them: `kl_datagram_recv_stop`, `kl_stream_read_close`, `kl_s
 `kl_drain_free`, `kl_connect_op_cancel`, and the header-inline primitives `kl_req_memeq` /
 `kl_req_strlen` / `kl_monotonic_ms` (exercised through the request/deadline paths). Low priority; listed
 for completeness, not a required fix.
-
-## Secondary: executed but own result not directly asserted (indirect-execution hardening)
-
-These are covered (their downstream effect is asserted) but a direct assertion on the function's own
-result would harden them: `kl_datagram_recv_stop`, `kl_stream_read_close`, `kl_stream_pause`,
-`kl_drain_free`, `kl_connect_op_cancel`. Low priority; listed for completeness, not a required fix.

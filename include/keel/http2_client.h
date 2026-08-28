@@ -73,7 +73,7 @@ typedef struct {
  * zero-initializes and recompiles per major version. Required (the adapter fills
  * them; core calls them): recv, submit_request, flush, destroy. KEEL-managed
  * (core writes them; the adapter leaves them zero): keel_cbs, keel_ctx. New ops
- * are appended after keel_ctx. See docs/f2_c_extensibility_decision.md for the
+ * are appended after keel_ctx. See docs/archive/f2/f2_c_extensibility_decision.md for the
  * mixed-ownership note.
  */
 struct KlHttp2ClientSession {

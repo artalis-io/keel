@@ -62,7 +62,7 @@ or reorder existing fields within a major version.
 
 Keel's sole forward extensibility policy for public configuration structs and
 provider/vtable types is **append-only, zero-default** evolution (rationale and
-the rejected alternatives are recorded in `docs/f2_c_extensibility_decision.md`):
+the rejected alternatives are recorded in `docs/archive/f2/f2_c_extensibility_decision.md`):
 
 1. **Append only.** A public caller-constructed config or vtable grows only by
    APPENDING trailing members. Never reorder, insert-in-the-middle, remove,

@@ -1,9 +1,13 @@
-# F2-1a public-surface inventories and classification scaffolding
+# F2 public-surface inventories and classification manifests
 
 This directory holds the reproducible, tree-derived inventories of Keel's installed public surface and
-the classification scaffolds that later F2 increments decide against. It is DATA scaffolding: F2-1a
-adds no API change, edits no public header, and wires no gate. See
-`docs/f2_public_surface_install_freeze.md` for the full freeze and the increment sequence.
+the reviewed classification manifests the F2 gates enforce. It began (F2-1a) as pure DATA scaffolding;
+the classifications have since been decided and are now the machine-consumed manifests behind the
+standing CI gates (`make check-public-headers`, `check-public-coverage`, `check-allocator-boundaries`,
+`check-no-eventloop-fd`, `check-install`, `check-installed-consumer`). This directory stays LIVE (the
+manifests are regenerated and checked in place); the frozen F2 narrative and the decision records are
+archived under `docs/archive/f2/` (see `docs/archive/f2/f2_public_surface_install_freeze.md` for the
+full freeze and the increment sequence).
 
 ## Files
 
@@ -36,15 +40,17 @@ ones):
 
 - `type_classification.tsv` - `<header>\t<type>\t<kind>\t<category>\t<note>`. Filled in F2-B1: all 193
   rows carry a final category (zero `UNRESOLVED`) and a note. Key: (header, type, kind).
-- `function_coverage.tsv` - `<function>\t<header>\t<classification>\t<citation>`. Every row starts at
-  classification `unreviewed`. Decided in F2-4. Key: function name.
+- `function_coverage.tsv` - `<function>\t<header>\t<classification>\t<citation>`. A newly seeded row
+  starts at classification `unreviewed` (which is NOT an accepted value, so an unclassified function
+  fails `--check`: default-deny). Decided in F2-4: all rows now carry an accepted classification and a
+  concrete non-`-` citation. Key: function name.
 
 An empty `note` or `citation` field is written as `-` (a literal empty final column would be trailing
 whitespace).
 
 ## Type categories (the accepted F2-B nine-category taxonomy)
 
-Each public type is classified into exactly one (see `docs/f2_b_public_layout_decision.md`):
+Each public type is classified into exactly one (see `docs/archive/f2/f2_b_public_layout_decision.md`):
 
 - `caller-constructed` - the caller/provider allocates AND fills it (configs, `KlIoVec`, callback/hook
   containers, vtables such as `KlSocketOps`, `KlDatagramOps`, `KlTls`). Append-only per F2-C.
@@ -79,11 +85,17 @@ Each function is classified into exactly one:
 - `indirect-execution` - exercised via a higher-level path, not asserted by name.
 - `compile-only` - referenced only to compile, not behaviorally checked.
 - `example` - demonstrated in `examples/` without a test assertion.
-- `intentional-public-but-untested:<reason>` - a reviewed decision to ship it untested.
+- `intentional-untested` (or `intentional-public-but-untested:<reason>`) - a reviewed decision to ship
+  it untested, with the rationale recorded in the citation column.
 
-A by-name caller does not auto-map to `direct-assertion`. Internal dispatch hooks reached only
-indirectly trigger a public-surface decision under F2-B (should the symbol be public at all), not an
-automatic exemption.
+The default seed value `unreviewed` is deliberately NOT in this set, so a newly added public function
+fails the gate until it is classified (default-deny). A by-name caller does not auto-map to
+`direct-assertion`. Internal dispatch hooks reached only indirectly trigger a public-surface decision
+under F2-B (should the symbol be public at all), not an automatic exemption.
+
+Current counts (F2-4/F2-5, all 302 functions classified): 252 direct-assertion, 45 indirect-execution,
+3 intentional-untested, 2 compile-only. The prioritized gap list closed in F2-5 is in
+`coverage_gaps.md`.
 
 ## Regenerating and checking
 
@@ -102,6 +114,8 @@ tools/f2_public_inventory.sh --selftest  # run the extraction canaries on a synt
 ```
 
 Type categories are final (zero `UNRESOLVED`, validated per the kind-to-category rules above). Function
-coverage is still `unreviewed` until F2-4 tightens it. Function extraction is a documented heuristic; an
-AST-grade extractor is the F2-4 concern. `--check` is not yet wired into any `make` gate; that wiring
-is F2-1b (headers), F2-3 (install), and F2-4 (coverage).
+coverage is fully decided (zero `unreviewed`; F2-4/F2-5). Function extraction is a documented heuristic.
+`--check` and `--selftest` are wired into the standing `make` gates: `check-public-headers` (headers +
+inventories/joins), `check-public-coverage` (the coverage manifest + extraction canaries),
+`check-install` / `check-installed-consumer` (install + out-of-tree consumer), `check-allocator-boundaries`,
+and `check-no-eventloop-fd`. All six run in the CI gates job.
