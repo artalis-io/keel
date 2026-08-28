@@ -23,9 +23,10 @@ exercised; it is not listed here just to pad. Only real holes appear below.
   silently break cleartext h2 upgrade.
 - `kl_ws_server_close` (websocket_server.h) - server-initiated WebSocket close is entirely untested:
   close-frame emission, status codes, and server-side teardown are unverified.
-- `kl_http_router_dispatch_synthetic` (http_router.h) - the public synthetic-dispatch entry point has
-  no test driving a synthetic request through the router (assert the handler runs and a response is
-  produced).
+- CLOSED (F2-5) `kl_http_router_dispatch_synthetic` (http_router.h) - direct tests added
+  (tests/protocols/http/test_http_router.c router_synthetic: matched=200 + handler effect, unmatched=404,
+  method-mismatch=405, pre-body middleware short-circuit, pre+post pass-through -> handler, invalid=-1);
+  manifest promoted to direct-assertion.
 - CLOSED (F2-5) `kl_sockaddr_is_multicast` (sockaddr.h) - direct test added
   (tests/test_sockaddr.c is_multicast: IPv4 224.0.0.0/4 + IPv6 ff00::/8 positive/boundary/negative +
   NULL); manifest promoted to direct-assertion.

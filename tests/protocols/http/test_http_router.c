@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/http_router.h>
+#include <string.h>
 
 static void dummy_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
@@ -668,3 +669,109 @@ UTEST(router, streaming_and_regular_routes_independent) {
 }
 
 UTEST_MAIN();
+
+/* ── synthetic dispatch: kl_http_router_dispatch_synthetic ─────────────────── */
+static int g_syn_handler_ran;
+static void syn_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx; g_syn_handler_ran++; kl_http_response_status(res, 201);
+}
+static int g_syn_pre_ran, g_syn_post_ran;
+static int syn_mw_short(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud; g_syn_pre_ran++; kl_http_response_status(res, 403); return 1; /* short-circuit */
+}
+static int syn_mw_pass(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)res; (void)ud; g_syn_pre_ran++; return 0;
+}
+static int syn_post_mw(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)res; (void)ud; g_syn_post_ran++; return 0;
+}
+static KlHttpRequest syn_req(const char *method, const char *path) {
+    KlHttpRequest q; memset(&q, 0, sizeof(q));
+    q.method = method; q.method_len = strlen(method);
+    q.path = path; q.path_len = strlen(path);
+    return q;
+}
+
+/* Matched route dispatches the handler (200) and the handler's effect lands on res. */
+UTEST(router_synthetic, matched_runs_handler) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r; kl_http_router_init(&r, &a);
+    kl_http_router_add(&r, "GET", "/hello", syn_handler, NULL, NULL);
+    KlHttpResponse res; kl_http_response_init(&res, &a);
+    KlHttpRequest q = syn_req("GET", "/hello");
+    g_syn_handler_ran = 0;
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(&r, &q, &res, 0), 200);
+    ASSERT_EQ(g_syn_handler_ran, 1);
+    ASSERT_EQ((int)res.status, 201);
+    kl_http_response_free(&res);
+    kl_http_router_free(&r);
+}
+
+/* Unmatched path returns 404 and does not run the handler. */
+UTEST(router_synthetic, unmatched_is_404) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r; kl_http_router_init(&r, &a);
+    kl_http_router_add(&r, "GET", "/hello", syn_handler, NULL, NULL);
+    KlHttpResponse res; kl_http_response_init(&res, &a);
+    KlHttpRequest q = syn_req("GET", "/nope");
+    g_syn_handler_ran = 0;
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(&r, &q, &res, 0), 404);
+    ASSERT_EQ(g_syn_handler_ran, 0);
+    kl_http_response_free(&res);
+    kl_http_router_free(&r);
+}
+
+/* Matching path but wrong method returns 405, no handler. */
+UTEST(router_synthetic, method_mismatch_is_405) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r; kl_http_router_init(&r, &a);
+    kl_http_router_add(&r, "GET", "/hello", syn_handler, NULL, NULL);
+    KlHttpResponse res; kl_http_response_init(&res, &a);
+    KlHttpRequest q = syn_req("POST", "/hello");
+    g_syn_handler_ran = 0;
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(&r, &q, &res, 0), 405);
+    ASSERT_EQ(g_syn_handler_ran, 0);
+    kl_http_response_free(&res);
+    kl_http_router_free(&r);
+}
+
+/* A pre-body middleware short-circuit returns the middleware's code; the handler never runs. */
+UTEST(router_synthetic, middleware_short_circuits) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r; kl_http_router_init(&r, &a);
+    kl_http_router_add(&r, "GET", "/hello", syn_handler, NULL, NULL);
+    kl_http_router_use(&r, "*", "/*", syn_mw_short, NULL);
+    KlHttpResponse res; kl_http_response_init(&res, &a);
+    KlHttpRequest q = syn_req("GET", "/hello");
+    g_syn_handler_ran = 0; g_syn_pre_ran = 0;
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(&r, &q, &res, 1), 1);   /* the mw return value */
+    ASSERT_EQ(g_syn_pre_ran, 1);
+    ASSERT_EQ(g_syn_handler_ran, 0);
+    ASSERT_EQ((int)res.status, 403);
+    kl_http_response_free(&res);
+    kl_http_router_free(&r);
+}
+
+/* Pre + post middleware pass through -> both run and the handler dispatches (200). */
+UTEST(router_synthetic, middleware_pass_runs_handler_and_post) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r; kl_http_router_init(&r, &a);
+    kl_http_router_add(&r, "GET", "/hello", syn_handler, NULL, NULL);
+    kl_http_router_use(&r, "*", "/*", syn_mw_pass, NULL);
+    kl_http_router_use_post(&r, "*", "/*", syn_post_mw, NULL);
+    KlHttpResponse res; kl_http_response_init(&res, &a);
+    KlHttpRequest q = syn_req("GET", "/hello");
+    g_syn_handler_ran = 0; g_syn_pre_ran = 0; g_syn_post_ran = 0;
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(&r, &q, &res, 1), 200);
+    ASSERT_EQ(g_syn_pre_ran, 1);
+    ASSERT_EQ(g_syn_post_ran, 1);
+    ASSERT_EQ(g_syn_handler_ran, 1);
+    ASSERT_EQ((int)res.status, 201);
+    kl_http_response_free(&res);
+    kl_http_router_free(&r);
+}
+
+/* Invalid args -> -1. */
+UTEST(router_synthetic, invalid_args) {
+    ASSERT_EQ(kl_http_router_dispatch_synthetic(NULL, NULL, NULL, 0), -1);
+}

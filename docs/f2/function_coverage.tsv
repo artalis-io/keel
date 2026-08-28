@@ -174,7 +174,7 @@ kl_http_response_status	http_response.h	direct-assertion	tests/protocols/http/te
 kl_http_router_add	http_router.h	indirect-execution	tests/protocols/http/test_http_router.c:19 (registers; match result asserted)
 kl_http_router_add_streaming	http_router.h	direct-assertion	tests/protocols/http/test_http_router.c:634 (ASSERT_EQ on return)
 kl_http_router_add_streaming_async	http_router.h	indirect-execution	tests/protocols/http/test_http_integration.c (via server wrapper; no direct call)
-kl_http_router_dispatch_synthetic	http_router.h	intentional-untested	No test or example invokes the synthetic-dispatch entry point (GAP)
+kl_http_router_dispatch_synthetic	http_router.h	direct-assertion	tests/protocols/http/test_http_router.c (router_synthetic: matched=200+handler effect, unmatched=404, method=405, pre-mw short-circuit, pre+post pass -> handler, invalid=-1)
 kl_http_router_free	http_router.h	indirect-execution	tests/protocols/http/test_http_router.c (teardown; own effect not asserted)
 kl_http_router_init	http_router.h	indirect-execution	tests/protocols/http/test_http_router.c (setup; downstream match/add asserted)
 kl_http_router_match	http_router.h	direct-assertion	tests/protocols/http/test_http_router.c:24 (match result + extracted params asserted)
