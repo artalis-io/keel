@@ -51,6 +51,7 @@ tests/protocols/websocket/test_websocket.c
 tests/protocols/websocket/test_websocket_client.c
 tests/protocols/websocket/test_websocket_client_hostname_fail.c
 tests/protocols/websocket/test_websocket_overflow.c
+tests/protocols/websocket/test_ws_server_close.c
 tests/smoke_completion_inject.c
 tests/smoke_datagram.c
 tests/smoke_iocp.c

@@ -287,7 +287,7 @@ kl_ws_client_send_ping	websocket_client.h	direct-assertion	tests/protocols/webso
 kl_ws_client_send_text	websocket_client.h	indirect-execution	tests/test_unix_socket.c:142 (client sends "ping" -> server echoes -> asserted :740)
 kl_ws_frame_init	websocket.h	indirect-execution	tests/protocols/websocket/test_websocket.c (setup before every asserted kl_ws_frame_parse)
 kl_ws_frame_parse	websocket.h	direct-assertion	tests/protocols/websocket/test_websocket.c (rc + opcode/payload/consumed asserted) + overflow
-kl_ws_server_close	websocket_server.h	intentional-untested	No tests/ or examples/ reference server-initiated close; close-frame/teardown from server side unverified (GAP)
+kl_ws_server_close	websocket_server.h	direct-assertion	tests/protocols/websocket/test_ws_server_close.c (emits_close_frame, idempotent, code_zero_empty_payload, invalid_state)
 kl_ws_server_config_init	websocket_server.h	indirect-execution	tests/protocols/websocket/test_websocket.c (setup before asserted upgrade tests)
 kl_ws_server_enable_drain	websocket_server.h	direct-assertion	tests/test_drain.c:656 (ws_drain_enable: rc==0 + drain_enabled/max_size/write_fn asserted)
 kl_ws_server_peer_cred	websocket_server.h	direct-assertion	tests/test_unix_socket.c:742 (rc==0 + creds.uid==getuid() on live WS conn)

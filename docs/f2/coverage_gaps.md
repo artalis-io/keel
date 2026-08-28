@@ -23,8 +23,11 @@ exercised; it is not listed here just to pad. Only real holes appear below.
 - `kl_http2_server_upgrade_from_h1` (http2_server.h) - the HTTP/1 -> HTTP/2 (h2c prior-knowledge /
   Upgrade) server path is untested; only the ALPN/direct upgrade is covered. A regression would
   silently break cleartext h2 upgrade.
-- `kl_ws_server_close` (websocket_server.h) - server-initiated WebSocket close is entirely untested:
-  close-frame emission, status codes, and server-side teardown are unverified.
+- CLOSED (F2-5) `kl_ws_server_close` (websocket_server.h) - direct tests added
+  (tests/protocols/websocket/test_ws_server_close.c): the emitted CLOSE frame (opcode/length/status
+  code/reason) is captured and asserted, plus idempotence (second close emits nothing), the code-0 empty
+  payload, and invalid-state handling (NULL conn rejected; sends refused after close). Manifest promoted
+  to direct-assertion.
 - CLOSED (F2-5) `kl_http_router_dispatch_synthetic` (http_router.h) - direct tests added
   (tests/protocols/http/test_http_router.c router_synthetic: matched=200 + handler effect, unmatched=404,
   method-mismatch=405, pre-body middleware short-circuit, pre+post pass-through -> handler, invalid=-1);
