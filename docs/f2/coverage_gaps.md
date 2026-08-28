@@ -20,9 +20,10 @@ exercised; it is not listed here just to pad. Only real holes appear below.
 
 ## Priority 2 (medium): public path with no asserted coverage
 
-- `kl_http2_server_upgrade_from_h1` (http2_server.h) - the HTTP/1 -> HTTP/2 (h2c prior-knowledge /
-  Upgrade) server path is untested; only the ALPN/direct upgrade is covered. A regression would
-  silently break cleartext h2 upgrade.
+- CLOSED (F2-5) `kl_http2_server_upgrade_from_h1` (http2_server.h) - direct tests added
+  (tests/protocols/http2/test_http2.c): success emits the 101 Switching Protocols response and wires the
+  session (HTTP2), and a malformed session vtable is rejected (CLOSED) with the session destroyed and
+  conn.h2 left NULL (ownership cleanup, no dangling state). Manifest promoted to direct-assertion.
 - CLOSED (F2-5) `kl_ws_server_close` (websocket_server.h) - direct tests added
   (tests/protocols/websocket/test_ws_server_close.c): the emitted CLOSE frame (opcode/length/status
   code/reason) is captured and asserted, plus idempotence (second close emits nothing), the code-0 empty

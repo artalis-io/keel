@@ -102,7 +102,7 @@ kl_http2_server_drain_shutdown	http2_server.h	direct-assertion	tests/protocols/h
 kl_http2_server_on_readable	http2_server.h	indirect-execution	tests/protocols/http2/test_http2.c (frame ingest; downstream router/response asserted)
 kl_http2_server_on_writable	http2_server.h	indirect-execution	tests/protocols/http2/test_http2.c (flush path; downstream output asserted)
 kl_http2_server_upgrade	http2_server.h	direct-assertion	tests/protocols/http2/test_http2.c:280 (int r = upgrade; r asserted) + test_alpn.c:185
-kl_http2_server_upgrade_from_h1	http2_server.h	intentional-untested	No test or example covers the HTTP/1->HTTP/2 (h2c) upgrade-from-HTTP/1 path (GAP)
+kl_http2_server_upgrade_from_h1	http2_server.h	direct-assertion	tests/protocols/http2/test_http2.c (upgrade_from_h1_success: 101 emitted + session wired; upgrade_from_h1_malformed_rejected: CLOSED + session destroyed + conn.h2 NULL)
 kl_http_body_reader_buffer	http_body_reader.h	direct-assertion	tests/protocols/http/test_http_body_reader.c:14 (asserts on_data/buffer behavior)
 kl_http_body_reader_multipart	http_body_reader_multipart.h	direct-assertion	tests/protocols/http/test_http_multipart_stream.c:178 (asserts parse events)
 kl_http_client_cancel	http_client.h	direct-assertion	tests/protocols/http/test_http_client_happy_eyeballs.c (cancel then completion state) + test_http_client.c:148 NULL-guard
