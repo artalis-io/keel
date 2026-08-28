@@ -260,6 +260,87 @@ UTEST(datagram_public, send_fixed_slot_geometry_and_fifo) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
+/* ── kl_datagram_on_writable: the send full->non-full edge callback ─────────── */
+static int g_wr_calls;
+static void on_writable_rec(void *ud) { (void)ud; g_wr_calls++; }
+static void drain_sends(KlDatagram *dg) {   /* complete every outstanding send so free() is permitted */
+    while (kl_datagram_send_queued(dg) > 0) drive_send(1);
+}
+
+/* The callback fires exactly once when the send queue crosses full -> non-full, and the state
+ * transition is observable: a send that was WOULD_BLOCK becomes ACCEPTED after the edge. */
+UTEST(datagram_public, on_writable_edge_and_state_transition) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_for(fd, 2, 1500);   /* two send slots */
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_wr_calls = 0;
+    kl_datagram_on_writable(&dg, on_writable_rec, NULL);
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m = { .data = "X", .len = 1, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED,    (int)kl_datagram_send(&dg, &m));   /* slot 1 */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED,    (int)kl_datagram_send(&dg, &m));   /* slot 2 -> full */
+    ASSERT_EQ((int)KL_DATAGRAM_WOULD_BLOCK, (int)kl_datagram_send(&dg, &m));   /* full: not writable */
+    ASSERT_EQ(0, g_wr_calls);                                                  /* no edge while filling */
+
+    drive_send(1);                    /* one completion frees a slot: full -> non-full edge */
+    ASSERT_EQ(1, g_wr_calls);         /* fired exactly once, on the edge */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));      /* now writable again */
+
+    drain_sends(&dg);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* A queue that never fills produces no spurious writable notification. */
+UTEST(datagram_public, on_writable_no_spurious_when_never_full) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_for(fd, 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_wr_calls = 0;
+    kl_datagram_on_writable(&dg, on_writable_rec, NULL);
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m = { .data = "X", .len = 1, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));      /* 1 of 2: never full */
+    drive_send(1);                    /* drains to empty; queue was never full -> no edge */
+    ASSERT_EQ(0, g_wr_calls);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* A non-edge drain (already non-full) does not re-fire; a fresh full->non-full transition fires again. */
+UTEST(datagram_public, on_writable_repeats_only_on_a_new_edge) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_for(fd, 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_wr_calls = 0;
+    kl_datagram_on_writable(&dg, on_writable_rec, NULL);
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m = { .data = "X", .len = 1, .peer = &d, .tos = -1 };
+    kl_datagram_send(&dg, &m); kl_datagram_send(&dg, &m);   /* full */
+    drive_send(1);                    /* edge #1 */
+    ASSERT_EQ(1, g_wr_calls);
+    drive_send(1);                    /* drains the pumped one; already non-full -> NO new edge */
+    ASSERT_EQ(1, g_wr_calls);
+
+    kl_datagram_send(&dg, &m); kl_datagram_send(&dg, &m);   /* full again */
+    drive_send(1);                    /* a distinct full->non-full transition -> edge #2 */
+    ASSERT_EQ(2, g_wr_calls);
+
+    drain_sends(&dg);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
 UTEST(datagram_public, copy_before_accept_facade) {
     mk_ctx(); mc_reset();
     KlDatagram dg; memset(&dg, 0, sizeof(dg));

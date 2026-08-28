@@ -12,9 +12,11 @@ exercised; it is not listed here just to pad. Only real holes appear below.
 
 ## Priority 1 (high): zero coverage, real behavioral hole
 
-- `kl_datagram_on_writable` (datagram.h) - the send-writable signal registration hook has ZERO test or
-  example references anywhere. Missing: register an on_writable callback, drive the send queue to
-  WOULD_BLOCK, then assert the callback fires when the socket becomes writable.
+- CLOSED (F2-5) `kl_datagram_on_writable` (datagram.h) - direct tests added
+  (tests/test_datagram_public.c): the callback fires exactly once on the send-queue full->non-full edge
+  with the WOULD_BLOCK->ACCEPTED state transition observable; no spurious notification when the queue
+  never fills; a non-edge drain does not re-fire while a distinct edge fires again. Manifest promoted to
+  direct-assertion.
 
 ## Priority 2 (medium): public path with no asserted coverage
 

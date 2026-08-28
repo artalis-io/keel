@@ -38,7 +38,7 @@ kl_datagram_multicast_join	datagram.h	direct-assertion	tests/test_datagram_publi
 kl_datagram_multicast_leave	datagram.h	direct-assertion	tests/test_datagram_public.c:836 ASSERT_EQ(0,...); tests/test_datagram_multicast.c:91
 kl_datagram_on_close	datagram.h	direct-assertion	tests/test_datagram_public.c:210 registers; close test asserts g_close_calls
 kl_datagram_on_drain	datagram.h	direct-assertion	tests/test_datagram_public.c:548 registers; :553 asserts reclaim ran
-kl_datagram_on_writable	datagram.h	intentional-untested	No test or example references it; the writable-signal hook has no behavioral coverage (GAP)
+kl_datagram_on_writable	datagram.h	direct-assertion	tests/test_datagram_public.c (on_writable_edge_and_state_transition, no_spurious_when_never_full, repeats_only_on_a_new_edge)
 kl_datagram_pause	datagram.h	direct-assertion	tests/test_datagram_public.c:313 pause; :316 asserts g_recv_calls==0 while paused
 kl_datagram_provider_caps	datagram.h	direct-assertion	tests/test_datagram_public.c:725 (full provider set asserted)
 kl_datagram_recv_attach_batch	datagram_batch.h	direct-assertion	tests/test_datagram_batch.c:1081 ASSERT_EQ(0,...); batched recv asserted
