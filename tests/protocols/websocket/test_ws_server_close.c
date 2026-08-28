@@ -95,4 +95,39 @@ UTEST(ws_server_close, invalid_state) {
     kl_drain_free(&ws.drain);
 }
 
+/* ── server-emitted send frames (kl_ws_server_send_ping / _send_binary) ─────── */
+
+/* A ping emits a PING control frame carrying the payload. */
+UTEST(ws_server_send, emits_ping_frame) {
+    KlAllocator a = kl_allocator_default();
+    KlWsServerConn ws; KlWsServerConfig cfg; ws_setup(&ws, &cfg, &a);
+
+    ASSERT_EQ(kl_ws_server_send_ping(&ws, "pong", 4), 0);
+    ASSERT_EQ(g_cap_len, (size_t)6);   /* 2 header + 4 payload */
+    ASSERT_EQ(g_cap[0], (unsigned char)(KL_WS_FIN_BIT | KL_WS_OP_PING));
+    ASSERT_EQ(g_cap[1], (unsigned char)4);
+    ASSERT_EQ(memcmp(g_cap + 2, "pong", 4), 0);
+
+    /* an over-125 control payload is rejected. */
+    char big[126]; memset(big, 'x', sizeof(big));
+    ASSERT_EQ(kl_ws_server_send_ping(&ws, big, sizeof(big)), -1);
+
+    kl_drain_free(&ws.drain);
+}
+
+/* A binary send emits a BINARY frame carrying the payload. */
+UTEST(ws_server_send, emits_binary_frame) {
+    KlAllocator a = kl_allocator_default();
+    KlWsServerConn ws; KlWsServerConfig cfg; ws_setup(&ws, &cfg, &a);
+
+    ASSERT_EQ(kl_ws_server_send_binary(&ws, "\x00\x01\x02", 3), 0);
+    ASSERT_EQ(g_cap_len, (size_t)5);   /* 2 header + 3 payload */
+    ASSERT_EQ(g_cap[0], (unsigned char)(KL_WS_FIN_BIT | KL_WS_OP_BINARY));
+    ASSERT_EQ(g_cap[1], (unsigned char)3);
+    ASSERT_EQ(g_cap[2], (unsigned char)0x00);
+    ASSERT_EQ(g_cap[4], (unsigned char)0x02);
+
+    kl_drain_free(&ws.drain);
+}
+
 UTEST_MAIN();

@@ -135,4 +135,35 @@ UTEST(sse, begin_sets_headers) {
     kl_http_response_free(&res);
 }
 
+/* kl_http_sse_end ends the underlying chunked stream: it emits the zero-length terminating chunk. */
+UTEST(sse, end_terminates_stream) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    res.conn_fd = pfd[1];
+
+    KlHttpSse sse;
+    ASSERT_EQ(kl_http_sse_begin(&res, &sse), 0);
+    /* drain the status line + headers that begin_stream sent */
+    char buf[512];
+    if (kl_test_poll1(pfd[0], 0, 500) > 0) kl_test_sockread(pfd[0], buf, sizeof(buf) - 1);
+
+    ASSERT_EQ(kl_http_sse_end(&sse), 0);
+    ASSERT_GT(kl_test_poll1(pfd[0], 0, 500), 0);
+    long n = kl_test_sockread(pfd[0], buf, sizeof(buf) - 1);
+    ASSERT_GT(n, (long)0);
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "0\r\n\r\n") != NULL);   /* chunked terminator */
+
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    kl_http_response_free(&res);
+}
+
+UTEST(sse, end_null_is_invalid) {
+    ASSERT_EQ(kl_http_sse_end(NULL), -1);
+}
+
 UTEST_MAIN();

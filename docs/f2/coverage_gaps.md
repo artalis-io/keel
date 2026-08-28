@@ -37,30 +37,37 @@ exercised; it is not listed here just to pad. Only real holes appear below.
   (tests/test_sockaddr.c is_multicast: IPv4 224.0.0.0/4 + IPv6 ff00::/8 positive/boundary/negative +
   NULL); manifest promoted to direct-assertion.
 
-## Priority 3 (low): accessor/advisory with only transitive or example coverage
+## Priority 3 (low): closed cheaply, or rationale preserved
 
-- `kl_http_request_peer_sockaddr` (http_server.h) - the raw KlSockAddr* peer accessor is untested (the
-  string form `kl_http_request_peer_addr` is covered). Add a family + address-bytes assertion.
-- `kl_http_conn_peer_addr` (http_connection.h) - connection-level peer-address accessor has no direct
-  test (only the request-level wrapper). A one-line accessor assertion closes it.
-- `kl_platform_caps` (http_server.h) - advisory capability bitmask is untested; assert
-  KL_PLATCAP_PEER_CRED is set on POSIX (where peer-cred is proven) for self-consistency.
-- `kl_ws_server_send_ping` (websocket_server.h) - server-originated ping (server-driven keepalive) has
-  no caller; pair with a client that asserts the pong.
-- `kl_ws_server_send_binary` (websocket_server.h) - only exercised by `examples/websocket_server.c`
-  (never run under test) and only as an echo; no test asserts a server binary frame is received intact.
-- `kl_http_sse_end` (http_sse.h) - only covered by `examples/sse.c`; the SSE unit test uses
-  `kl_http_response_end_stream` instead, so the SSE-specific end path has no asserted coverage.
-- `kl_watcher_rearm` (event_ctx.h) - the WOULD_BLOCK re-arm helper is referenced only in harness
-  comments; add a watcher test that rearms after a would-block and confirms the next readiness fires.
-- `kl_socket_provider_winsock` (socket.h) - reached only from a Windows-gated compile helper; add a
-  smoke assertion (provider non-NULL, OVERLAPPED/native caps) in the Windows IOCP/WSAPoll gate.
-- `kl_req_memeq` / `kl_req_strlen` (http_request.h) - header-inline primitives covered only through
-  header/param lookups; cheap direct byte-compare/length cases (n=0, embedded NUL, mismatch) would lock
-  the ASCII-exact contract independently.
-- `kl_monotonic_ms` (clock.h) - used only as an opaque deadline source; a minimal
-  "two reads are non-decreasing and advance across a short sleep" assertion would pin the clock
-  contract.
+Closed in F2-5 (cheap, deterministic, direct assertions added):
+- CLOSED `kl_http_conn_peer_addr` (http_connection.h) - tests/protocols/http/test_http_connection.c
+  (connection.response_accessor): returns &stream.peer_addr and reads back family + port.
+- CLOSED `kl_ws_server_send_ping` (websocket_server.h) - tests/protocols/websocket/test_ws_server_close.c
+  (ws_server_send.emits_ping_frame): PING opcode + payload asserted; over-125 control payload rejected.
+- CLOSED `kl_ws_server_send_binary` (websocket_server.h) - same file
+  (ws_server_send.emits_binary_frame): BINARY opcode + payload asserted.
+- CLOSED `kl_http_sse_end` (http_sse.h) - tests/protocols/http/test_http_sse.c
+  (sse.end_terminates_stream): emits the zero-length chunked terminator; NULL rejected.
+
+Rationale preserved (genuinely advisory, platform-only, or not cheap to test deterministically; left
+intentional-untested / compile-only, not padded):
+- `kl_http_request_peer_sockaddr` (http_server.h) - the raw KlSockAddr* peer accessor needs a live
+  accepted connection carrying a peer address; not a cheap unit assertion. The string form
+  `kl_http_request_peer_addr` is directly covered.
+- `kl_platform_caps` (http_server.h) - advisory capability bitmask; its exact bits are platform-defined,
+  so a direct assertion would only restate the platform, not verify behavior.
+- `kl_watcher_rearm` (event_ctx.h) - the WOULD_BLOCK re-arm helper requires driving a real would-block
+  edge through the event loop; not a cheap deterministic case, deferred.
+- `kl_socket_provider_winsock` (socket.h) - Windows-only; reached from a Windows-gated compile helper
+  and cannot run on the primary (POSIX) CI. Belongs to the Windows IOCP/WSAPoll gate.
+
+## Secondary: executed but own result not directly asserted (indirect-execution hardening)
+
+These are covered (their downstream effect is asserted) but a direct assertion on the function's own
+result would harden them: `kl_datagram_recv_stop`, `kl_stream_read_close`, `kl_stream_pause`,
+`kl_drain_free`, `kl_connect_op_cancel`, and the header-inline primitives `kl_req_memeq` /
+`kl_req_strlen` / `kl_monotonic_ms` (exercised through the request/deadline paths). Low priority; listed
+for completeness, not a required fix.
 
 ## Secondary: executed but own result not directly asserted (indirect-execution hardening)
 
