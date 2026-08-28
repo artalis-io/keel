@@ -229,7 +229,7 @@ kl_sockaddr_from_ipv4	sockaddr.h	direct-assertion	tests/test_sockaddr.c:10 (0 / 
 kl_sockaddr_from_ipv6	sockaddr.h	direct-assertion	tests/test_sockaddr.c:20 (ASSERT_EQ 0)
 kl_sockaddr_from_unix	sockaddr.h	direct-assertion	tests/test_sockaddr.c:30 (0 / -1 empty+oversize)
 kl_sockaddr_is_loopback	sockaddr.h	direct-assertion	tests/test_sockaddr.c:94 (ASSERT_TRUE/FALSE)
-kl_sockaddr_is_multicast	sockaddr.h	intentional-untested	No test calls it; only reached transitively via kl_datagram_multicast_join (GAP)
+kl_sockaddr_is_multicast	sockaddr.h	direct-assertion	tests/test_sockaddr.c (is_multicast: IPv4 224.0.0.0/4 + IPv6 ff00::/8 positive/boundary/negative + NULL asserted)
 kl_sockaddr_parse	sockaddr.h	direct-assertion	tests/test_sockaddr.c:179 (0 valid, -1 malformed)
 kl_sockaddr_port	sockaddr.h	direct-assertion	tests/test_sockaddr.c:12 (ASSERT_EQ on port)
 kl_sockaddr_set_port	sockaddr.h	direct-assertion	tests/test_sockaddr.c:58 (set then ASSERT_EQ port)

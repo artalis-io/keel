@@ -26,9 +26,9 @@ exercised; it is not listed here just to pad. Only real holes appear below.
 - `kl_http_router_dispatch_synthetic` (http_router.h) - the public synthetic-dispatch entry point has
   no test driving a synthetic request through the router (assert the handler runs and a response is
   produced).
-- `kl_sockaddr_is_multicast` (sockaddr.h) - public predicate covered only transitively (via
-  `kl_datagram_multicast_join`). Add a unit test asserting TRUE for 224.0.0.0/4 + ff00::/8 and FALSE
-  for unicast/loopback, mirroring the existing `is_loopback` cases.
+- CLOSED (F2-5) `kl_sockaddr_is_multicast` (sockaddr.h) - direct test added
+  (tests/test_sockaddr.c is_multicast: IPv4 224.0.0.0/4 + IPv6 ff00::/8 positive/boundary/negative +
+  NULL); manifest promoted to direct-assertion.
 
 ## Priority 3 (low): accessor/advisory with only transitive or example coverage
 

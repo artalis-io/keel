@@ -106,6 +106,53 @@ UTEST(sockaddr, is_loopback) {
     ASSERT_FALSE(kl_sockaddr_is_loopback(&a));
 }
 
+UTEST(sockaddr, is_multicast) {
+    KlSockAddr a;
+
+    /* IPv4 224.0.0.0/4: positive incl. both boundaries. */
+    uint8_t v4_lo[4]  = { 224, 0, 0, 0 };          /* low edge in range */
+    kl_sockaddr_from_ipv4(&a, v4_lo, 0);   ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_hi[4]  = { 239, 255, 255, 255 };    /* high edge in range */
+    kl_sockaddr_from_ipv4(&a, v4_hi, 0);   ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_mid[4] = { 233, 1, 2, 3 };
+    kl_sockaddr_from_ipv4(&a, v4_mid, 0);  ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+
+    /* IPv4 negative: just below/above the block, unicast, loopback, any, broadcast. */
+    uint8_t v4_below[4] = { 223, 255, 255, 255 };
+    kl_sockaddr_from_ipv4(&a, v4_below, 0); ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_above[4] = { 240, 0, 0, 1 };
+    kl_sockaddr_from_ipv4(&a, v4_above, 0); ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_uni[4] = { 192, 168, 1, 1 };
+    kl_sockaddr_from_ipv4(&a, v4_uni, 0);   ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_lb[4]  = { 127, 0, 0, 1 };
+    kl_sockaddr_from_ipv4(&a, v4_lb, 0);    ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_any[4] = { 0, 0, 0, 0 };
+    kl_sockaddr_from_ipv4(&a, v4_any, 0);   ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v4_bc[4]  = { 255, 255, 255, 255 };
+    kl_sockaddr_from_ipv4(&a, v4_bc, 0);    ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+
+    /* IPv6 ff00::/8: positive incl. boundaries. */
+    uint8_t v6_mc[16]  = { 0xff, 0x00 };            /* ff00:: low edge */
+    kl_sockaddr_from_ipv6(&a, v6_mc, 0, 0);  ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+    uint8_t v6_all[16] = { 0xff, 0x02, [15] = 1 };  /* ff02::1 all-nodes */
+    kl_sockaddr_from_ipv6(&a, v6_all, 0, 0); ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+    uint8_t v6_hi[16];  memset(v6_hi, 0xff, sizeof(v6_hi));  /* ffff:...:ffff */
+    kl_sockaddr_from_ipv6(&a, v6_hi, 0, 0);  ASSERT_TRUE(kl_sockaddr_is_multicast(&a));
+
+    /* IPv6 negative: just below the block (fe..), link-local, loopback, unicast. */
+    uint8_t v6_below[16] = { 0xfe, 0x00 };
+    kl_sockaddr_from_ipv6(&a, v6_below, 0, 0); ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v6_ll[16] = { 0xfe, 0x80 };
+    kl_sockaddr_from_ipv6(&a, v6_ll, 0, 0);    ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v6_lb[16] = { [15] = 1 };
+    kl_sockaddr_from_ipv6(&a, v6_lb, 0, 0);    ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+    uint8_t v6_uni[16] = { 0x20, 0x01, 0x0d, 0xb8 };
+    kl_sockaddr_from_ipv6(&a, v6_uni, 0, 0);   ASSERT_FALSE(kl_sockaddr_is_multicast(&a));
+
+    /* NULL is not multicast. */
+    ASSERT_FALSE(kl_sockaddr_is_multicast(NULL));
+}
+
 /* ── presentation ─────────────────────────────────────────────────────────── */
 
 UTEST(sockaddr, format_ipv4) {
