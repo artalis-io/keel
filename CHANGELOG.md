@@ -3,12 +3,16 @@
 All notable, user-visible changes to Keel are recorded here. The format follows Keep a Changelog, and
 Keel follows Semantic Versioning (the compatibility contract is in `docs/contracts/compatibility.md`).
 
-## [Unreleased] 3.0.0-rc.1
+## [Unreleased]
 
-Release candidate; no release date. 3.0.0 is a major version: it renames most of the public HTTP
-surface and moves backend-specific headers out of the installed set. The step-by-step source migration
-is in `docs/migrations/2.x-to-3.0.md`. Names below were verified against the v2.9.0 tree (old) and the
-current tree (new).
+No changes yet.
+
+## [3.0.0-rc.1]
+
+Release candidate; no release date (the tag and prerelease are a separately authorized step). 3.0.0 is
+a major version: it renames most of the public HTTP surface and moves backend-specific headers out of
+the installed set. The step-by-step source migration is in `docs/migrations/2.x-to-3.0.md`. Names below
+were verified against the v2.9.0 tree (old) and the current tree (new).
 
 ### Breaking
 
