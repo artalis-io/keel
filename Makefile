@@ -848,6 +848,23 @@ check-version-drift:
 	@sh tools/version_sync.sh --selftest
 	@sh tools/version_sync.sh --check
 
+# R3-4: build the deterministic source release archive + SHA-256 manifest into dist/ (gitignored).
+# Builds artifacts only; does not sign, tag, or publish.
+release:
+	@sh tools/release_build.sh dist
+
+# Verify the deterministic release artifacts: build twice + compare, extract, match the tracked
+# manifest, prove VERSION/version.h/kl_version()/pkg-config/SBOM/archive-name/checksum agreement, build +
+# test + staged install + out-of-tree C and C++ consumers from the extracted tree, and check for path
+# leakage. Self-canaried. --verify is untagged; check-release-artifacts-strict requires the v$(VERSION) tag.
+check-release-artifacts:
+	@sh tools/release_verify.sh --selftest
+	@sh tools/release_verify.sh --verify
+
+check-release-artifacts-strict:
+	@sh tools/release_verify.sh --selftest
+	@sh tools/release_verify.sh --strict
+
 FORCE:
 
 clean:
@@ -2072,7 +2089,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE version-sync check-version-drift check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
