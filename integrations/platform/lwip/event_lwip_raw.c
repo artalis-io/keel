@@ -63,7 +63,7 @@
  */
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx: kl_comp_drain reaches loop._backend */
-#include <keel/http_connection.h>   /* KlStream: fd / ctx / alloc (raw transport target) */
+#include <keel/stream_detail.h>     /* KlStream layout: fd / ctx (opt-in, unstable provider detail) */
 #include <keel/http_server.h>       /* KlHttpServer: listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
@@ -634,18 +634,22 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             continue;
         }
 
-        /* KL_LWR_WRITE: a completed send (ok=1) OR a terminal close (ok=0). */
-        KlHttpConn *c = r->owner;
-        if (!c) continue;
+        /* KL_LWR_WRITE: a completed send (ok=1) OR a terminal close (ok=0). The slot owner is the
+         * neutral KlStream transport target (set in lwr_comp_post_recv), matching the KL_COMP_READ
+         * path below and the src/ backends (pollcomp sets ev->target = op->stream for READ+WRITE).
+         * This TU never depends on the (opaque) KlHttpConn layout. */
+        KlStream *stream = r->owner;
+        if (!stream) continue;
         ev->kind = KL_COMP_WRITE;
-        ev->target = c;
+        ev->target = stream;
         ev->ok = r->ok;
         ev->bytes = r->nbytes;
         /* Exactly-one-close: a terminal (ok=0) completion, surfaced by the glue on
          * tcp_err / kl_comp_cancel / close-with-outstanding, drives the driver to release this
-         * conn. Disarm it NOW so the armed-READ scan below (and future drains) never touch the
-         * about-to-be-released KlHttpConn (no dangling armed slot aliasing a freed/reused conn). */
-        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)c->stream.fd);
+         * stream (its owning conn). Disarm it NOW so the armed-READ scan below (and future drains)
+         * never touch the about-to-be-released stream (no dangling armed slot aliasing a freed
+         * or reused conn). */
+        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)stream->fd);
         count++;
     }
 
