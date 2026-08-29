@@ -129,7 +129,9 @@ claim (benchmark numbers are environment-specific and are not a support guarante
 
 Keel ships a static library `libkeel.a` plus a pkg-config module named `keel`
 (`pkg-config --cflags --libs keel`). There is no shared object and no soname: consumers link statically
-and there is no cross-version binary ABI promise. The installed header set is exactly a reviewed manifest
+and there is no cross-version binary ABI promise. Release bundles are source-first (a deterministic
+source archive plus a SHA-256 manifest and the SBOM); how they are built and verified is in
+[releasing.md](releasing.md). The installed header set is exactly a reviewed manifest
 (`make check-public-headers` / `make check-install`), and the pkg-config `Version` is single-sourced from
 the root `VERSION` file and always matches the compiled `kl_version()` and `keel/version.h`
 (`make check-version-drift`).
