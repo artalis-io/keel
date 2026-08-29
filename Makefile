@@ -865,6 +865,42 @@ check-release-artifacts-strict:
 	@sh tools/release_verify.sh --selftest
 	@sh tools/release_verify.sh --strict
 
+# Local workflow lint: parse every workflow as YAML and run actionlint for workflow/action validity
+# (shellcheck of embedded run: scripts is disabled; this gate is about malformed workflow edits, not
+# script style). Catches a broken .github/workflows edit before it is pushed.
+check-workflows:
+	@for f in .github/workflows/*.yml; do \
+	  python3 -c "import sys,yaml; yaml.safe_load(open('$$f'))" || { echo "check-workflows: FAIL - $$f is not valid YAML"; exit 1; }; \
+	done
+	@if command -v actionlint >/dev/null 2>&1; then \
+	  actionlint -shellcheck= .github/workflows/*.yml || { echo "check-workflows: FAIL - actionlint"; exit 1; }; \
+	  echo "check-workflows: OK (YAML parse + actionlint)"; \
+	else \
+	  echo "check-workflows: OK (YAML parse; actionlint not installed, install it for full workflow linting)"; \
+	fi
+
+# R3-5: the release-candidate aggregate. Runs the readiness gates in a fail-fast order: version-drift,
+# workflow + documentation/text checks, the public/coverage/allocator/eventloop gates, install +
+# out-of-tree consumer, the deterministic release-artifact verification, a release build, the full test
+# suite, and the sanitizer suite. Heavy (multiple full builds + test runs); intended for RC validation.
+rc-validate:
+	@echo "== rc-validate: version single-source =="
+	@$(MAKE) --no-print-directory check-version-drift
+	@echo "== rc-validate: workflow + documentation/text gates =="
+	@$(MAKE) --no-print-directory check-workflows check-doc-refs check-no-em-dash check-no-milestones
+	@echo "== rc-validate: public-surface + install gates =="
+	@$(MAKE) --no-print-directory check-public-headers check-public-coverage check-allocator-boundaries check-no-eventloop-fd
+	@$(MAKE) --no-print-directory check-install check-installed-consumer
+	@echo "== rc-validate: deterministic release artifacts =="
+	@$(MAKE) --no-print-directory check-release-artifacts
+	@echo "== rc-validate: release build =="
+	@$(MAKE) --no-print-directory release
+	@echo "== rc-validate: full test suite =="
+	@$(MAKE) --no-print-directory test
+	@echo "== rc-validate: sanitizers (ASan + UBSan) =="
+	@$(MAKE) --no-print-directory debug-test
+	@echo "== rc-validate: OK =="
+
 FORCE:
 
 clean:
@@ -2089,7 +2125,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

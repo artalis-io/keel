@@ -104,6 +104,11 @@ EOF2
     # 7. Staged install + out-of-tree C and C++ compile-link-run consumers from the extracted tree.
     stage=$(mk)
     ( cd "$T" && make -s install PREFIX="$stage" >/dev/null 2>&1 ) || fail "staged install from extracted tree failed"
+    # In CI, a missing pkg-config is a hard failure (the installed-consumer path must not silently fall
+    # back to direct flags); local hosts without pkg-config use the documented fallback.
+    if [ "${RELEASE_REQUIRE_PKGCONFIG:-0}" = 1 ] && ! command -v pkg-config >/dev/null 2>&1; then
+        fail "pkg-config required (RELEASE_REQUIRE_PKGCONFIG=1) but not found"
+    fi
     if command -v pkg-config >/dev/null 2>&1; then
         pcver=$(PKG_CONFIG_PATH="$stage/lib/pkgconfig" pkg-config --modversion keel 2>/dev/null || true)
         [ "$pcver" = "$V" ] || fail "pkg-config modversion '$pcver' != VERSION"

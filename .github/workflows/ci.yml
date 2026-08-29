@@ -661,3 +661,110 @@ jobs:
       - name: lwIP raw completion backend, P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
         timeout-minutes: 8
         run: make -C integrations/platform/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"
+
+  # R3-5: build the deterministic source release ARCHIVE once, verify it end to end (with pkg-config
+  # required, not skippable), and upload the tarball + checksum as short-lived WORKFLOW artifacts. This
+  # is validation output, not a published release: no tag, no signing, no release/upload API.
+  release-archive:
+    name: Release archive (verify + upload)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install deps (pkg-config required)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
+
+      - name: Record VERSION and audited commit
+        id: rel
+        run: |
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify deterministic release artifacts (pkg-config required)
+        timeout-minutes: 15
+        run: make check-release-artifacts RELEASE_REQUIRE_PKGCONFIG=1
+
+      - name: Build the release archive into dist/
+        run: make release
+
+      - name: Upload source archive + checksum (validation artifact, NOT a release asset)
+        # NOTE: SHA-pin this to match the repo's action-pinning policy.
+        uses: actions/upload-artifact@v4
+        with:
+          name: keel-${{ steps.rel.outputs.version }}-${{ steps.rel.outputs.sha }}-source-validation
+          path: |
+            dist/keel-*.tar.gz
+            dist/keel-*.sha256
+          retention-days: 5
+          if-no-files-found: error
+
+  # Download the verified source archive, check its checksum, extract it, and build/test from the
+  # EXTRACTED tree (not the checkout) on each hosted OS default backend: Ubuntu epoll, macOS kqueue.
+  # Windows (WSAPoll) is a separate job below because it needs msys2.
+  archive-validate:
+    name: Archive build (${{ matrix.name }})
+    needs: release-archive
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu (epoll)
+            os: ubuntu-latest
+          - name: macOS (kqueue)
+            os: macos-latest
+    steps:
+      - name: Download the verified source archive
+        # NOTE: SHA-pin this to match the repo's action-pinning policy.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: keel-*-source-validation
+          merge-multiple: true
+          path: dist
+
+      - name: Verify checksum, extract, and build/test from the extracted tree
+        timeout-minutes: 10
+        run: |
+          set -e
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum -c keel-*.sha256; else shasum -a 256 -c keel-*.sha256; fi
+          tar -xzf keel-*.tar.gz
+          cd keel-*/
+          make
+          make test
+
+  # Windows (WSAPoll) archive validation: same download/verify/extract/build, via msys2 + MinGW.
+  archive-validate-windows:
+    name: Archive build (Windows WSAPoll)
+    needs: release-archive
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      # NOTE: SHA-pin this to match the repo's action-pinning policy.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          install: mingw-w64-x86_64-gcc make tar gzip coreutils
+      - name: Download the verified source archive
+        # NOTE: SHA-pin this to match the repo's action-pinning policy.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: keel-*-source-validation
+          merge-multiple: true
+          path: dist
+      - name: Verify checksum, extract, and build from the extracted tree (Winsock/WSAPoll)
+        timeout-minutes: 15
+        run: |
+          set -e
+          cd dist
+          sha256sum -c keel-*.sha256
+          tar -xzf keel-*.tar.gz
+          cd keel-*/
+          make OS=windows CC=gcc
+          make OS=windows CC=gcc smoke-tcp
+          make OS=windows CC=gcc test-win
