@@ -62,9 +62,39 @@ files are archived, `.git`, untracked files, build output, editor state, local c
 - Strict (`--strict` / `make check-release-artifacts-strict`) additionally requires the Git tag
   `v<VERSION>` to exist and point at HEAD; used at the actual release commit.
 
+## Release-candidate validation in CI
+
+The `rc-validate` make target runs the readiness gates locally in a fail-fast order: version-drift, the
+workflow + documentation/text checks, the public-surface + install gates, the deterministic
+release-artifact verification, a release build, the full test suite, and the sanitizer suite.
+
+In standing CI, a dedicated read-only `Release archive (verify + upload)` job (Ubuntu, pkg-config
+required) runs `make check-release-artifacts RELEASE_REQUIRE_PKGCONFIG=1`, builds the archive, and
+uploads the tarball + checksum as short-lived workflow artifacts (validation output, not a release
+asset; named with the version and the audited commit). Downstream `Archive build` jobs on Ubuntu
+(epoll), macOS (kqueue), and Windows (WSAPoll) download that archive, verify its checksum, extract it,
+and build/test from the extracted tree. The workflow keeps read-only permissions, uses no release/upload
+API, needs no secrets, and keeps a short artifact retention. The `check-workflows` gate lints the
+workflow YAML (and actionlint when installed) locally so a malformed workflow edit is caught before push.
+
+## Release-candidate acceptance criteria
+
+A release candidate is accepted for promotion to a final release only when ALL of the following hold:
+
+- The full CI matrix and CodeQL are green on the RC commit.
+- The verified-archive matrix is green: `Release archive (verify + upload)` and the Ubuntu, macOS, and
+  Windows `Archive build` jobs all pass, so the deterministic source archive builds and tests from its
+  extracted tree on every hosted OS.
+- There are no open release-blocking security or correctness findings.
+- At least seven clean calendar days have elapsed after the final RC tag with no new release-blocking
+  issue.
+
+Promotion to the final `3.0.0` then changes only version/prerelease metadata and release documentation;
+any functional change requires a new RC (see `docs/v3_release_version_policy_freeze.md`).
+
 ## Where this sits in the release sequence
 
-This is R3-4: it builds and verifies artifacts but publishes nothing. Enrolling the gate in the
-release-candidate matrix is R3-5. Signing (checksum and tag), tagging, uploading, and creating the
-GitHub release are the separately authorized R3-6 publication step; the signing method is decided
-there. The version and maintenance policy is in `docs/v3_release_version_policy_freeze.md`.
+R3-4 built and verified artifacts; R3-5 enrolls the verification in standing CI and defines the RC
+acceptance criteria above. Both publish nothing. Signing (checksum and tag), tagging, uploading, and
+creating the GitHub release are the separately authorized R3-6 publication step; the signing method is
+decided there. The version and maintenance policy is in `docs/v3_release_version_policy_freeze.md`.
