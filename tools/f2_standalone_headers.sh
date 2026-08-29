@@ -25,6 +25,11 @@ INC="$stage/include"
 have_cxx=0
 command -v "$CXX" >/dev/null 2>&1 && have_cxx=1
 
+# Strict flags so an accepted compiler extension cannot hide a portability failure: -pedantic-errors
+# turns every extension use into a hard error (this is how a C-only construct like _Atomic in a header
+# is caught under a C++ compiler that would otherwise accept it as an extension).
+STRICT="-Wall -Wextra -Werror -pedantic-errors"
+
 bad=0
 n=0
 for h in "$INC"/keel/*.h; do
@@ -32,23 +37,33 @@ for h in "$INC"/keel/*.h; do
     n=$((n + 1))
     printf '#include <%s>\nint main(void){return 0;}\n' "$rel" > "$tmp/one.c"
     cp "$tmp/one.c" "$tmp/one.cpp"
-    if ! (cd "$tmp" && $CC -std=c11 -I"$INC" -fsyntax-only one.c) 2>/dev/null; then
+    if ! (cd "$tmp" && $CC -std=c11 $STRICT -I"$INC" -fsyntax-only one.c) 2>/dev/null; then
         echo "standalone-headers: C11 FAILED for <$rel> (not self-contained)"; bad=1
     fi
     if [ "$have_cxx" = 1 ]; then
-        if ! (cd "$tmp" && $CXX -std=c++11 -I"$INC" -fsyntax-only one.cpp) 2>/dev/null; then
+        if ! (cd "$tmp" && $CXX -std=c++11 $STRICT -I"$INC" -fsyntax-only one.cpp) 2>/dev/null; then
             echo "standalone-headers: C++11 FAILED for <$rel> (not self-contained)"; bad=1
         fi
     fi
 done
 
-# Negative canary: including a real header but referencing an undeclared symbol MUST fail, proving the
-# compile above is a genuine type-check (a no-op toolchain would let this pass).
-printf '#include <keel/error.h>\nint main(void){ return kl_no_such_symbol_canary(); }\n' > "$tmp/neg.c"
-if (cd "$tmp" && $CC -std=c11 -I"$INC" -fsyntax-only neg.c) 2>/dev/null; then
-    echo "standalone-headers: NEGATIVE CANARY compiled but must fail (compile is not type-checking)"; bad=1
+# Negative canary: declare an object of an UNDECLARED TYPE. That is a hard error in BOTH C and C++
+# (unlike calling an undeclared function, which some C compilers accept with only a warning), so the
+# canary reliably proves the compiles above are genuine type-checks. Checked under the C compiler and,
+# where present, the C++ compiler.
+printf '#include <keel/error.h>\nkl_no_such_type_canary_t kl_canary_obj;\nint main(void){return 0;}\n' > "$tmp/neg.c"
+cp "$tmp/neg.c" "$tmp/neg.cpp"
+if (cd "$tmp" && $CC -std=c11 $STRICT -I"$INC" -fsyntax-only neg.c) 2>/dev/null; then
+    echo "standalone-headers: NEGATIVE CANARY (C) compiled but must fail (compile is not type-checking)"; bad=1
 else
-    echo "standalone-headers: negative canary correctly rejected (undeclared symbol fails to compile)"
+    echo "standalone-headers: negative canary correctly rejected by C (undeclared type)"
+fi
+if [ "$have_cxx" = 1 ]; then
+    if (cd "$tmp" && $CXX -std=c++11 $STRICT -I"$INC" -fsyntax-only neg.cpp) 2>/dev/null; then
+        echo "standalone-headers: NEGATIVE CANARY (C++) compiled but must fail (compile is not type-checking)"; bad=1
+    else
+        echo "standalone-headers: negative canary correctly rejected by C++ (undeclared type)"
+    fi
 fi
 
 if [ "$bad" = 0 ]; then
