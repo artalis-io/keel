@@ -38,19 +38,9 @@
 #error "Keel's W^X policy forbids dlopen (KEEL_ENABLE_DLOPEN)."
 #endif
 
-/** @brief Major version number. */
-#define KL_VERSION_MAJOR  2
-/** @brief Minor version number. */
-#define KL_VERSION_MINOR  9
-/** @brief Patch version number. */
-#define KL_VERSION_PATCH  0
-/** @brief Version string ("major.minor.patch"). */
-#define KL_VERSION_STRING "2.9.0"
-
-/** @brief Packed version: major*10000 + minor*100 + patch (e.g. 20900). Suitable
- *  for `#if KL_VERSION_NUMBER >= 20900` compile-time gating. */
-#define KL_VERSION_NUMBER \
-    ((KL_VERSION_MAJOR) * 10000 + (KL_VERSION_MINOR) * 100 + (KL_VERSION_PATCH))
+/* Version macros (KL_VERSION_MAJOR/MINOR/PATCH/STRING/PRERELEASE/NUMBER) come from the single source
+ * of truth: the root VERSION file, generated into <keel/version.h> by tools/version_sync.sh. */
+#include <keel/version.h>
 
 #ifdef __cplusplus
 extern "C" {

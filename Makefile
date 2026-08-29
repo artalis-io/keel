@@ -825,13 +825,81 @@ uninstall:
 	-rmdir $(DESTDIR)$(PREFIX)/include/keel 2>/dev/null || true
 	-rmdir $(DESTDIR)$(PREFIX)/lib/pkgconfig 2>/dev/null || true
 
-# keel.pc reflects the current PREFIX. Regenerate it whenever the configuration changes (not only when
-# keel.pc.in does): rebuild the content each time and replace the file only when it differs, so its
-# mtime advances exactly on a real change and a stale prefix can never be installed.
-keel.pc: keel.pc.in FORCE
-	@sed 's|@PREFIX@|$(PREFIX)|g' $< > $@.tmp; \
+# The authoritative version. Single source of truth (R3-1): the root VERSION file feeds keel.pc,
+# include/keel/version.h, and the SBOM through tools/version_sync.sh. Read once at parse time.
+KEEL_VERSION := $(shell cat VERSION 2>/dev/null)
+
+# keel.pc reflects the current PREFIX and the single-source version. Regenerate it whenever the
+# configuration changes (not only when keel.pc.in does): rebuild the content each time and replace the
+# file only when it differs, so its mtime advances exactly on a real change and a stale prefix or
+# version can never be installed. @VERSION@ is substituted from VERSION so keel.pc.in holds no literal.
+keel.pc: keel.pc.in VERSION FORCE
+	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(KEEL_VERSION)|g' $< > $@.tmp; \
 	 if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
-	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX))"; fi
+	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX), version=$(KEEL_VERSION))"; fi
+
+# Regenerate every derived version value from VERSION (version.h + SBOM); keel.pc regenerates on build.
+version-sync:
+	@sh tools/version_sync.sh --generate
+
+# Default-deny version-drift gate: fail if any machine-readable version value disagrees with VERSION,
+# or if a stray KL_VERSION_* literal or a keel.pc.in version literal reappears. Self-canaried.
+check-version-drift:
+	@sh tools/version_sync.sh --selftest
+	@sh tools/version_sync.sh --check
+
+# R3-4: build the deterministic source release archive + SHA-256 manifest into dist/ (gitignored).
+# Builds artifacts only; does not sign, tag, or publish.
+release:
+	@sh tools/release_build.sh dist
+
+# Verify the deterministic release artifacts: build twice + compare, extract, match the tracked
+# manifest, prove VERSION/version.h/kl_version()/pkg-config/SBOM/archive-name/checksum agreement, build +
+# test + staged install + out-of-tree C and C++ consumers from the extracted tree, and check for path
+# leakage. Self-canaried. --verify is untagged; check-release-artifacts-strict requires the v$(VERSION) tag.
+check-release-artifacts:
+	@sh tools/release_verify.sh --selftest
+	@sh tools/release_verify.sh --verify
+
+check-release-artifacts-strict:
+	@sh tools/release_verify.sh --selftest
+	@sh tools/release_verify.sh --strict
+
+# Local workflow lint: parse every workflow as YAML and run actionlint for workflow/action validity
+# (shellcheck of embedded run: scripts is disabled; this gate is about malformed workflow edits, not
+# script style). Catches a broken .github/workflows edit before it is pushed.
+check-workflows:
+	@for f in .github/workflows/*.yml; do \
+	  python3 -c "import sys,yaml; yaml.safe_load(open('$$f'))" || { echo "check-workflows: FAIL - $$f is not valid YAML"; exit 1; }; \
+	done
+	@if command -v actionlint >/dev/null 2>&1; then \
+	  actionlint -shellcheck= .github/workflows/*.yml || { echo "check-workflows: FAIL - actionlint"; exit 1; }; \
+	  echo "check-workflows: OK (YAML parse + actionlint)"; \
+	else \
+	  echo "check-workflows: OK (YAML parse; actionlint not installed, install it for full workflow linting)"; \
+	fi
+
+# R3-5: the release-candidate aggregate. Runs the readiness gates in a fail-fast order: version-drift,
+# workflow + documentation/text checks, the public/coverage/allocator/eventloop gates, install +
+# out-of-tree consumer, the deterministic release-artifact verification, a release build, the full test
+# suite, and the sanitizer suite. Heavy (multiple full builds + test runs); intended for RC validation.
+rc-validate:
+	@echo "== rc-validate: version single-source =="
+	@$(MAKE) --no-print-directory check-version-drift
+	@echo "== rc-validate: workflow + documentation/text gates =="
+	@$(MAKE) --no-print-directory check-workflows check-doc-refs check-no-em-dash check-no-milestones
+	@echo "== rc-validate: public-surface + install gates =="
+	@$(MAKE) --no-print-directory check-public-headers check-public-coverage check-allocator-boundaries check-no-eventloop-fd
+	@$(MAKE) --no-print-directory check-install check-installed-consumer
+	@echo "== rc-validate: deterministic release artifacts =="
+	@$(MAKE) --no-print-directory check-release-artifacts
+	@echo "== rc-validate: release build =="
+	@$(MAKE) --no-print-directory release
+	@echo "== rc-validate: full test suite =="
+	@$(MAKE) --no-print-directory test
+	@echo "== rc-validate: sanitizers (ASan + UBSan) =="
+	@$(MAKE) --no-print-directory debug-test
+	@echo "== rc-validate: OK =="
 
 FORCE:
 
@@ -2057,7 +2125,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

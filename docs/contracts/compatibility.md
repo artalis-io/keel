@@ -111,3 +111,10 @@ Keel will not add (and a compatibility bump will never introduce) dynamic
 loading (`dlopen`), runtime plugin discovery, executable memory, or global
 mutable backend registration. Backends are selected at build time (`BACKEND=`,
 `KEEL_TLS=`) or wired explicitly via a provider/vtable the caller passes in.
+
+## Supported platforms and backends
+
+Which toolchains, event backends, socket/platform providers, and integrations are supported (and at
+what level: standing CI, strict compile gate, local-only, or bring-your-own) is documented separately
+and authoritatively in [platform support](../operations/platform_support.md). This contract governs how
+the API evolves; that document governs where it is built and tested.

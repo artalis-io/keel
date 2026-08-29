@@ -45,7 +45,7 @@ make check-no-milestones   # no milestone/phase archaeology in C/H comments
 make check-no-em-dash      # no em-dash (U+2014) in any tracked text
 ```
 
-The layout and seam gates (`make check-old-layout`, `check-test-layout`, `check-integration-seam`, ...) also run in CI; the full list is under "Local Gates" in `CLAUDE.md`.
+The layout and seam gates (`make check-old-layout`, `check-test-layout`, `check-integration-seam`, ...) also run in CI; the full list is under "Local Gates" in `CLAUDE.md`. Which toolchains, backends, providers, and integrations are covered by standing CI (versus a strict compile gate, local-only, or bring-your-own) is documented in [docs/operations/platform_support.md](docs/operations/platform_support.md).
 
 ## Pull Request Workflow
 

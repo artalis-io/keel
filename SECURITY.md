@@ -2,10 +2,14 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 2.x     | Yes       |
-| < 2.0   | No        |
+Security fixes target the current stable line (2.9.x). The full version-support and maintenance policy,
+including the 3.x transition and the 2.x maintenance window after 3.0.0, is the single source at
+[docs/operations/platform_support.md](docs/operations/platform_support.md).
+
+| Version | Security fixes |
+|---------|----------------|
+| 2.9.x (current stable) | Yes |
+| < 2.0   | No |
 
 ## Reporting a Vulnerability
 

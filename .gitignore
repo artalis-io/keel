@@ -102,3 +102,4 @@ keel.pc
 *.swo
 *~
 .DS_Store
+dist/
