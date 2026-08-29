@@ -1,9 +1,34 @@
 # Keel v3 release-readiness: version-policy audit and design freeze (R3-0)
 
-Status: PROPOSED (docs-only; nothing implemented). This is the frozen policy for how Keel 3.0.0 is
-versioned, what "3.x compatibility" promises, and the verified breaking-change surface. It changes no
-version macro, no build file, no workflow, and no tag. Later increments (R3-1..R3-6) implement it, each
-separately reviewed and authorized.
+Status: ACCEPTED. This is the frozen policy for how Keel 3.0.0 is versioned, what "3.x compatibility"
+promises, and the verified breaking-change surface. The decisions in section 5 were reviewed and
+ruled on; the accepted rulings are recorded in "Accepted rulings" immediately below and supersede the
+section 5 recommendations where they differ. Later increments (R3-1..R3-6) implement them, each
+separately reviewed and authorized. R3-1 (single-source version mechanism) has shipped; the effective
+version remains 2.9.0 (R3-1 is not the v3 bump).
+
+## Accepted rulings (post-R3-0 review)
+
+- Release form (D1): an RC sequence. The first candidate is 3.0.0-rc.1; it is NOT set during R3-1.
+- Tag format (D2): v3.0.0-rc.1, then v3.0.0 (leading v; SemVer prerelease suffix).
+- Single source (D3): a root VERSION file (not macros in an umbrella header). version.h, keel.pc, SBOM,
+  and other machine-readable values are generated or verified from it; both umbrellas include version.h.
+  Shipped in R3-1.
+- Numeric identity (D4): KL_VERSION_NUMBER stays numeric (major*10000 + minor*100 + patch); prerelease
+  identity is in KL_VERSION_STRING and an explicit prerelease macro/suffix. Shipped in R3-1.
+- Prerelease immutability and promotion (D5): every tagged candidate is immutable. Any post-tag code,
+  API, package, or artifact change requires rc.N+1. The final 3.0.0 must differ from the accepted final
+  RC only in version/prerelease metadata and release documentation; any functional change requires
+  another RC. At least seven calendar days of clean RC exposure are required before final promotion,
+  with the full CI matrix and the artifact checks green.
+- 2.x maintenance (D6): while RCs are active, 2.9.x remains the supported stable line. After 3.0.0
+  final, 2.x receives critical security and correctness fixes for 90 days, then is marked EOL. No
+  general feature backports are promised.
+- Packaging (D7): keep the package name and the keel.pc identity (keel). No soname decision is needed
+  for the current static-only distribution.
+- Release-validation agreement (D8): release validation must prove that VERSION, the installed headers,
+  the compiled kl_version(), the pkg-config metadata, the SBOM component version, the archive name, and
+  the Git tag all agree.
 
 Audited base commit: 88d5b3be65e4fbb43d3babda205c6ba7745569fc (origin/main, merge of PR #254).
 Audit date: 2026-08-29.
