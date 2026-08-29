@@ -17,7 +17,7 @@ should be re-verified against current state before acting (code is authoritative
 | Engineering clarity | **A- to B+** | Code is clear and defensive; doc corpus is large and has already begun to drift from code |
 
 **One-line takeaway:** an excellent, genuinely enforceable three-axis decomposition with a heavy,
-partially-stale documentation corpus — and a real, confirmed instance of documentation drift.
+partially-stale documentation corpus, and a real, confirmed instance of documentation drift.
 
 ---
 
@@ -27,11 +27,11 @@ partially-stale documentation corpus — and a real, confirmed instance of docum
 
 Three orthogonal, independently replaceable axes:
 
-- **Event axis** — readiness (`event.h`: epoll/kqueue/WSAPoll/poll) vs. completion
+- **Event axis**: readiness (`event.h`: epoll/kqueue/WSAPoll/poll) vs. completion
   (`completion.h`: io_uring/IOCP/pollcomp).
-- **Socket/provider axis** — `KlSocketProvider` vtable + pointer-width `KlSocketHandle` +
+- **Socket/provider axis**: `KlSocketProvider` vtable + pointer-width `KlSocketHandle` +
   `KL_SOCK_CAP_*` (POSIX/Winsock built in; lwIP/EFI as `integrations/`).
-- **Protocol axis** — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS, TLS-above-stream; written once against
+- **Protocol axis**: HTTP/1.1, HTTP/2, WebSocket, SSE, DNS, TLS-above-stream; written once against
   the Tier-1 transports `KlStream` / `KlDatagram` / `KlListener`.
 
 Enforcement is **default-deny and self-canaried** via make gates. Verified passing on this date:
@@ -49,7 +49,7 @@ The default-deny rule (every `src/` + `src/protocols/` TU is governed unless all
 
 ### 2. Completion/readiness duality is handled honestly
 
-- Production backends keep their **native** model — no epoll-as-completion or IOCP-as-readiness
+- Production backends keep their **native** model: no epoll-as-completion or IOCP-as-readiness
   emulation.
 - `pollcomp` is **explicitly scoped as a test double** (completion contract over `poll()`), confined
   to CI so the completion driver runs under ASan on any POSIX host; never production.
@@ -57,7 +57,7 @@ The default-deny rule (every `src/` + `src/protocols/` TU is governed unless all
   HTTP type (`src/completion.h` is protocol-neutral); the HTTP adapter (`completion_http.h`) is a
   thin layer that holds all TLS/PROXY/state knowledge on the HTTP side.
 - `http_proto_hooks` per-protocol hook tables let the HTTP/1.1 core dispatch into WebSocket/HTTP-2
-  without naming them directly and without `#ifdef` — each protocol stays independently linkable.
+  without naming them directly and without `#ifdef`; each protocol stays independently linkable.
 
 ### 3. The invariants document is a model of what architecture should mean
 
@@ -76,13 +76,13 @@ hard problems:
 ### 4. Frontier-provider work validates the thesis empirically
 
 The *same* `KlHttpClient` runs unchanged over io_uring, IOCP, pollcomp, lwIP raw (no OS sockets),
-and EFI tokens (before any OS). This is the strongest possible evidence the axis separation holds —
+and EFI tokens (before any OS). This is the strongest possible evidence the axis separation holds;
 it cannot be faked with documentation.
 
 ### 5. Engineering discipline
 
 - Overflow guards (`SIZE_MAX/2`), bounds checks at system boundaries.
-- Allocator discipline — all allocation through `KlAllocator`.
+- Allocator discipline: all allocation through `KlAllocator`.
 - Pre-allocated connection pool; no per-request `malloc`.
 - ASan/UBSan debug builds; Clang static analyzer; cppcheck; libFuzzer on the parser/multipart.
 - Append-only 13-pass axis audit trail (`docs/archive/audits/keel_axis_audit.md`).
@@ -97,10 +97,10 @@ it cannot be faked with documentation.
 
 Concrete contradiction between two load-bearing docs:
 
-- `README.md` line ~805 — states the io_uring backend is **completion-native**, and the earlier
+- `README.md` line ~805: states the io_uring backend is **completion-native**, and the earlier
   `IORING_OP_POLL_ADD` **readiness** adapter was **retired** after benchmarks showed it ~2–2.3×
   slower.
-- `docs/architecture/overview.md` line ~148 — still lists io_uring as
+- `docs/architecture/overview.md` line ~148: still lists io_uring as
   `IORING_OP_POLL_ADD` (readiness, not async I/O).
 
 `make check-doc-refs` verifies **file links only, not claims**, so this passes CI. Given the size of
@@ -140,8 +140,8 @@ public-vs-internal `socket.h` split is well-reasoned but adds cognitive load.
 
 ## On changing the grades if the drift is addressed
 
-**Architecture (A-):** essentially unchanged by doc fixes. The A- rests on the *code* — the
-executable gates, honest event models, model-blind core, Tier-1 contracts, EFI/lwIP proof — none of
+**Architecture (A-):** essentially unchanged by doc fixes. The A- rests on the *code*: the
+executable gates, honest event models, model-blind core, Tier-1 contracts, EFI/lwIP proof, none of
 which change if `overview.md` is corrected. The drift was a blemish within an A-level architecture,
 not the reason it wasn't an A.
 
@@ -175,11 +175,11 @@ doc-independent:
 
 ## Reference
 
-- `docs/architecture/overview.md` — three-axis model + HTTP-server internals
-- `docs/architecture/invariants.md` — enforceable invariants I1–I11
-- `docs/archive/audits/keel_axis_audit.md` — append-only axis audit trail (13 passes)
-- `src/completion.h` / `src/completion_io.h` — protocol-neutral completion axis
-- `include/keel/event.h` / `include/keel/socket.h` — readiness + provider seams
-- `src/protocols/http/completion_http.h` — HTTP adapter over the neutral completion axis
-- `src/protocols/http/http_proto_hooks.h` — ws/h2 decoupling seam
-- `include/keel/stream.h` — Tier-1 raw-transport contract
+- `docs/architecture/overview.md` - three-axis model + HTTP-server internals
+- `docs/architecture/invariants.md` - enforceable invariants I1–I11
+- `docs/archive/audits/keel_axis_audit.md` - append-only axis audit trail (13 passes)
+- `src/completion.h` / `src/completion_io.h` - protocol-neutral completion axis
+- `include/keel/event.h` / `include/keel/socket.h` - readiness + provider seams
+- `src/protocols/http/completion_http.h` - HTTP adapter over the neutral completion axis
+- `src/protocols/http/http_proto_hooks.h` - ws/h2 decoupling seam
+- `include/keel/stream.h` - Tier-1 raw-transport contract
