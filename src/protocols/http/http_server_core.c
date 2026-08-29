@@ -34,7 +34,7 @@
 #endif
 #include <string.h>
 #include <stdint.h>
-#include <stdatomic.h>
+#include "kl_atomic.h"    /* lock-free int atomics for the running/draining flags */
 
 /* Same tick bound http_server.c's readiness loop uses; a local copy keeps this TU
  * independent of http_server.c (both are plain compile-time constants). */
@@ -598,7 +598,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
 }
 
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
-    if (!atomic_load(&s->draining)) return;
+    if (!kl_atomic_load_int(&s->draining)) return;
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     for (int j = 0; j < s->pool.capacity; j++) {
@@ -611,7 +611,7 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
     for (int j = 0; j < s->pool.capacity; j++)
         if (s->pool.conns[j].state != KL_HTTP_CONN_CLOSED) active++;
     if (active == 0 || now >= s->drain_deadline_ms)
-        atomic_store(&s->running, 0);
+        kl_atomic_store_int(&s->running, 0);
 }
 
 /* ── Route + middleware registration (thin router wrappers, seam-only) ───────── */

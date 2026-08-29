@@ -17,7 +17,6 @@
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
 #ifdef __cplusplus
@@ -180,8 +179,8 @@ typedef struct KlHttpServer {
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
-    _Atomic int running;        /**< Server is running */
-    _Atomic int draining;       /**< Graceful shutdown in progress */
+    int running;                /**< Server is running (accessed atomically via src/kl_atomic.h) */
+    int draining;               /**< Graceful shutdown in progress (accessed atomically via src/kl_atomic.h) */
     uint64_t drain_deadline_ms; /**< Drain timeout deadline */
     /* Self-pipe/loopback wakeup so kl_http_server_stop() wakes the run loop immediately
      * instead of waiting up to KL_POLL_TIMEOUT_MS for the current wait/drain to
