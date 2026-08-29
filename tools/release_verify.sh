@@ -160,11 +160,16 @@ run_selftest() {
     printf 'x' >> "$c/$NAME.tar.gz"
     if ( cd "$c" && sha256_check "$NAME.sha256" >/dev/null 2>&1 ); then echo "selftest: checksum corruption NOT caught"; st=1; fi
 
-    # canary: nondeterministic gzip (default gzip embeds a timestamp) must differ from the -n build,
-    # and byte-compare must distinguish them (this is why the builder uses gzip -n).
+    # canary: two `gzip -n` builds are byte-identical (the reproducibility the verify relies on), and the
+    # byte-compare that step 2 uses genuinely distinguishes different content (so real nondeterminism
+    # would be caught). Content difference is used rather than gzip metadata: GNU gzip zeroes the mtime
+    # for stdin regardless of -n, so a "-n vs default gzip" comparison is a no-op on Linux.
     nd=$(mk)
-    git archive --format=tar --prefix="$NAME/" HEAD | gzip -9 > "$nd/nondet.tar.gz"   # NO -n
-    if cmp -s "$A" "$nd/nondet.tar.gz"; then echo "selftest: nondeterministic gzip NOT distinguished"; st=1; fi
+    git archive --format=tar --prefix="$NAME/" HEAD | gzip -n -9 > "$nd/a.tar.gz"
+    git archive --format=tar --prefix="$NAME/" HEAD | gzip -n -9 > "$nd/b.tar.gz"
+    cmp -s "$nd/a.tar.gz" "$nd/b.tar.gz" || { echo "selftest: two gzip -n builds are not byte-identical"; st=1; }
+    cp "$nd/a.tar.gz" "$nd/c.tar.gz"; printf 'x' >> "$nd/c.tar.gz"
+    if cmp -s "$nd/a.tar.gz" "$nd/c.tar.gz"; then echo "selftest: nondeterministic content NOT distinguished"; st=1; fi
 
     # canary: version disagreement in version.h must fail the agreement grep.
     vd=$(mk); tar -xzf "$A" -C "$vd"
