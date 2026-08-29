@@ -24,6 +24,9 @@ make fuzz               # build libFuzzer fuzz targets (requires clang)
 make clean              # remove artifacts
 ```
 
+Supported toolchains, event backends, socket/platform providers, integrations, and the version and
+compatibility policy are in one place: [docs/operations/platform_support.md](docs/operations/platform_support.md).
+
 ## Hello World
 
 ```c
