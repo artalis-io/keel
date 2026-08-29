@@ -13,6 +13,7 @@
  * runs it. Sibling of smoke_pollcomp_async.c.
  */
 #include <keel/keel.h>
+#include "../src/protocols/http/http_conn_internal.h"  /* white-box: KlHttpConn layout + state enum */
 /* No internal socket.h: this smoke sets no provider: it proves the auto-wire. */
 
 #include <pthread.h>

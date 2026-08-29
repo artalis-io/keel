@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_PROXY_NONE = 0,   /**< Leading bytes are not a PROXY header; direct conn */
@@ -61,5 +65,9 @@ int kl_cidr_parse_list(const char *s, KlCidr *out, int cap);
  * @return 1 if matched, 0 otherwise.
  */
 int kl_cidr_match(const KlCidr *list, int count, const KlSockAddr *sa);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_PROXY_PROTOCOL_H */

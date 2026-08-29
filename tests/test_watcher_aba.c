@@ -22,6 +22,9 @@
  * address is NOT reused mid-batch, so the stale event finds no live node and is dropped.
  */
 #include "utest.h"
+/* White-box: this ABA regression drives a fixture allocator keyed on sizeof(KlWatcher) to force
+ * deterministic same-address node reuse, so it needs the substrate-private KlWatcher layout. */
+#include "../src/event_ctx_internal.h"
 #include <keel/keel.h>
 #include <keel/event_ctx.h>
 #include <keel/event.h>

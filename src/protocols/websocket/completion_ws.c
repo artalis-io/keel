@@ -8,6 +8,7 @@
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <keel/websocket_server.h> /* kl_ws_server_on_readable_data: WS over completion */
+#include "websocket_server_internal.h"
 #include "completion_http.h"     /* kl_comp_post_recv (HTTP wrapper): pulls the neutral completion.h */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */

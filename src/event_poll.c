@@ -116,7 +116,6 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     st->fd_to_idx_cap = INITIAL_CAP;
     st->count = 0;
 
-    loop->fd = -1;
     loop->_backend = st;
     return 0;
 }
@@ -230,7 +229,6 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     kl_free(alloc, st->fds, (size_t)st->capacity * sizeof(struct pollfd));
     kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* poll() is a readiness poller of native OS descriptors. */

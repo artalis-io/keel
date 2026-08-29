@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_EVENT_READ  = 1, /**< FD is readable */
@@ -20,9 +24,13 @@ struct KlSocketProvider;
 typedef struct KlEventOps KlEventOps;
 
 typedef struct {
-    int fd;             /**< epoll_fd or kqueue_fd, -1 for io_uring */
-    void *_backend;     /**< reserved for backend-specific state */
-    KlAllocator *alloc; /**< set before kl_event_init; used by io_uring backend */
+    /** Backend-owned private state, allocated through `alloc` at kl_event_init and released at
+     *  kl_event_close; NULL before init and after close. Every compiled-in backend keeps its own
+     *  state here (the kqueue/epoll descriptor box, the pollfd table, the io_uring ring, the IOCP
+     *  completion port). Opaque to everything outside the backend TU; no public field holds a raw
+     *  backend descriptor. */
+    void *_backend;
+    KlAllocator *alloc; /**< set before kl_event_init; used to allocate backend state */
     /** Optional runtime event backend (NULL = the compiled-in default). When set
      *  before kl_event_init, all kl_event_* calls dispatch through it; this is how
      *  a bring-your-own event backend (e.g. lwIP) is injected without recompiling
@@ -38,6 +46,13 @@ typedef struct {
  * indirection on the default path). A backend and its socket provider must agree
  * on what "pollable handle" means: a provider that watches non-OS handles (lwIP
  * socket indices) pairs with a socket provider whose native handles it can poll.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): providers
+ * zero-initialize and recompile per major version. Required (core dispatches them
+ * unconditionally): init, add, mod, del, wait, close, caps. Optional:
+ * native_provider (NULL = the provider offers no native socket provider) and
+ * completion (NULL for a readiness backend). New ops are appended immediately
+ * BEFORE the reserved `completion` slot, which MUST stay last.
  */
 struct KlEventOps {
     int  (*init)(KlEventLoop *loop);
@@ -103,5 +118,9 @@ int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
 
 /** @brief Close and clean up the event loop. */
 void kl_event_close(KlEventLoop *loop);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -112,7 +112,6 @@ int kl_pollcomp_ev_init(KlEventLoop *loop) {
     st->alloc = loop->alloc;
     st->listen_fd = KL_INVALID_SOCKET;
     loop->_backend = st;
-    loop->fd = -1;
     return 0;
 }
 
@@ -184,7 +183,6 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
     }
     kl_free(st->alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* A completion loop over native fds. COMPLETION makes the capability negotiation require

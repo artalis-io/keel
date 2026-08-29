@@ -3,6 +3,10 @@
 
 #include <keel/allocator.h>
 #include <keel/http_request.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef enum {
     KL_HTTP1_PARSE_OK,            /**< Full request/response parsed */
@@ -15,6 +19,11 @@ typedef enum {
 
 typedef struct KlHttp1RequestParser KlHttp1RequestParser;
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All three ops (parse, reset,
+ * destroy) are required; core calls each. New ops are appended after destroy.
+ */
 struct KlHttp1RequestParser {
     KlHttp1ParseResult (*parse)(KlHttp1RequestParser *self, KlHttpRequest *req,
                            const char *buf, size_t len, size_t *consumed); /**< Parse request bytes */
@@ -39,6 +48,11 @@ typedef KlHttp1RequestParser KlHttp1Parser;
 typedef struct KlHttpClientResponse KlHttpClientResponse;
 typedef struct KlHttp1ResponseParser KlHttp1ResponseParser;
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All three ops (parse, reset,
+ * destroy) are required; core calls each. New ops are appended after destroy.
+ */
 struct KlHttp1ResponseParser {
     KlHttp1ParseResult (*parse)(KlHttp1ResponseParser *self, KlHttpClientResponse *resp,
                            const char *buf, size_t len, size_t *consumed); /**< Parse response bytes */
@@ -46,7 +60,9 @@ struct KlHttp1ResponseParser {
     void (*destroy)(KlHttp1ResponseParser *self); /**< Free parser resources */
 };
 
-/** @brief Factory function for creating response parsers. */
+/** @brief Factory function for creating response parsers.
+ *  The signature is frozen (see docs/contracts/compatibility.md): pass new
+ *  construction inputs through the allocator context, never by changing it. */
 typedef KlHttp1ResponseParser *(*KlHttp1ResponseParserFactory)(size_t max_response_size,
                                                        KlAllocator *alloc);
 
@@ -58,5 +74,9 @@ typedef KlHttp1ResponseParser *(*KlHttp1ResponseParserFactory)(size_t max_respon
  */
 KlHttp1ResponseParser *kl_http1_response_parser_llhttp(size_t max_response_size,
                                              KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

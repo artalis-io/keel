@@ -2,6 +2,10 @@
 #define KEEL_THREAD_POOL_H
 
 #include <keel/allocator.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlEventCtx KlEventCtx;
 
@@ -26,6 +30,11 @@ typedef struct KlWorkItem {
 /**
  * @brief Thread pool configuration.
  * All fields have sensible defaults when set to 0/NULL.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after alloc.
  */
 typedef struct KlThreadPoolConfig {
     int num_workers;          /**< 0 = auto-detect via sysconf(_SC_NPROCESSORS_ONLN) */
@@ -55,5 +64,9 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
  * @brief Drain queue, join threads, remove watcher, free.
  */
 void kl_thread_pool_free(KlThreadPool *pool);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

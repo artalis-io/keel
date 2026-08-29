@@ -37,7 +37,7 @@ static int ep_init(KlEventLoop *l) {
     EpState *s = kl_malloc(l->alloc, sizeof(*s));
     if (!s) return -1;
     memset(s, 0, sizeof(*s));
-    s->a = l->alloc; l->_backend = s; l->fd = -1;
+    s->a = l->alloc; l->_backend = s;
     return 0;
 }
 static int ep_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask mask, void *ud) {

@@ -3,6 +3,10 @@
 
 #include <keel/event_ctx.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Timer callback function.
@@ -10,15 +14,8 @@
  */
 typedef void (*KlTimerFn)(void *user_data);
 
-/**
- * @brief Timer heap entry (stored in KlEventCtx.timers array).
- */
-struct KlTimerEntry {
-    uint64_t  deadline_ms;   /**< Absolute monotonic deadline. */
-    KlTimerFn cb;            /**< Callback invoked on expiry. */
-    void     *user_data;     /**< Opaque pointer passed to cb. */
-    int64_t   id;            /**< Monotonic timer ID. */
-};
+/* KlTimerEntry is an opaque handle (forward-declared in <keel/event_ctx.h>); its layout is private to
+ * the substrate (src/event_ctx_internal.h). Callers schedule via the int64 id from kl_timer_add(). */
 
 /**
  * @brief Schedule a one-shot timer.
@@ -73,5 +70,9 @@ int kl_timer_next_timeout(KlEventCtx *ctx, int max_ms);
  * @return Number of timers fired.
  */
 int kl_timer_fire(KlEventCtx *ctx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

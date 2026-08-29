@@ -12,7 +12,7 @@
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
-#include <keel/http_connection.h>           /* KlHttpConn: server post_recv/post_send targets */
+#include <keel/stream_detail.h>              /* KlStream layout: fd (opt-in, unstable provider detail) */
 #include "../../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 

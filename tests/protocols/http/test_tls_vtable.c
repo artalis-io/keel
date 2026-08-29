@@ -7,6 +7,7 @@
  * not call a NULL destroy/shutdown), and a fully-valid vtable must still init + free.
  */
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include <string.h>
 

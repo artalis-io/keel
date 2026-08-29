@@ -1,4 +1,5 @@
 #include <keel/http_body_reader.h>
+#include "../../allocator_validate.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -52,6 +53,7 @@ static void buf_destroy(KlHttpBodyReader *self) {
  * carries max_size by value, not a pointer to read. */
 /* cppcheck-suppress constParameterPointer */
 KlHttpBodyReader *kl_http_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
+    if (!kl_allocator_ops_valid(alloc)) return NULL;
     (void)req;
 
     KlHttpBufReader *br = kl_malloc(alloc, sizeof(KlHttpBufReader));

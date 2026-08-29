@@ -180,8 +180,8 @@ int main(void) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, &srv);
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
-    srv_port = srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) usleep(10000);
+    srv_port = kl_http_server_bound_port(&srv);
 
     sync_demo();
     async_demo();

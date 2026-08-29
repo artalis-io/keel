@@ -4,6 +4,7 @@
  * decoder, multipart parser, router, and body reader. No real network connections needed.
  */
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/allocator.h>
 #include <keel/http_response.h>
 #include <keel/http_connection.h>

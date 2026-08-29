@@ -10,6 +10,7 @@
  */
 
 #include <keel/http_connection.h>
+#include "http_conn_internal.h"
 #include <keel/http_server.h>
 #include <keel/tls.h>
 #include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */

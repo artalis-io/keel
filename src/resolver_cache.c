@@ -8,6 +8,7 @@
 #include <keel/resolver_cache.h>
 #include <keel/allocator.h>    /* kl_malloc / kl_free wrappers */
 #include <keel/clock.h>            /* kl_monotonic_ms */
+#include "allocator_validate.h"
 
 /* Private DNS hostname bound for cached entries (resolver-owned; not public config). */
 #define KL_RESOLVER_CACHE_HOSTNAME_MAX 256
@@ -336,7 +337,7 @@ KlResolver *kl_resolver_cache_create(KlResolver *inner,
                                       const KlResolverCacheConfig *cfg,
                                       KlAllocator *alloc)
 {
-    if (!inner || !alloc)
+    if (!inner || !kl_allocator_ops_valid(alloc))
         return NULL;
 
     int capacity = KL_RESCACHE_DEFAULT_CAPACITY;

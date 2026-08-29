@@ -42,8 +42,14 @@
 #define KL_VERSION_STRING "2.9.0"
 #define KL_VERSION_NUMBER \
     ((KL_VERSION_MAJOR) * 10000 + (KL_VERSION_MINOR) * 100 + (KL_VERSION_PATCH))
+#ifdef __cplusplus
+extern "C" {
+#endif
 const char *kl_version(void);
 int         kl_version_number(void);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 /* ── The freestanding-clean client + protocol header subset ───────────────────

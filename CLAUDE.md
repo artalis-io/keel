@@ -271,7 +271,7 @@ int  kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask);
 void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd);
 ```
 
-Watchers are heap-allocated and ctx-owned. `KlHttpServer` embeds `KlEventCtx ev`; use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
+Watchers are heap-allocated and ctx-owned. `KlHttpServer` embeds `KlEventCtx ev`; prefer `kl_http_server_event_ctx(server)` (the `&server->ev` field remains a supported facet) when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
 
 ### Dispatch Helpers
 
@@ -288,7 +288,7 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms);
 **`kl_event_dispatch`**: unmasks the tagged pointer, calls `on_ready`, re-arms. Server uses this inline for mixed connection+watcher dispatch:
 ```c
 for (int i = 0; i < n; i++) {
-    if (kl_event_dispatch(&s->ev, &events[i])) continue;
+    if (kl_event_dispatch(kl_http_server_event_ctx(s), &events[i])) continue;
     /* handle connection events ... */
 }
 ```
@@ -330,7 +330,7 @@ void handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
 
     /* Create a pipe/socket for completion signal */
     socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection */
     kl_async_suspend(srv, conn, &ctx->op);

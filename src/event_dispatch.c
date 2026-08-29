@@ -26,6 +26,11 @@ int kl_event_init(KlEventLoop *loop) {
 
 int kl_event_init_provider(KlEventLoop *loop, const KlEventProvider *provider) {
     if (!provider || !provider->ops) return kl_event_init(loop);
+    /* Reject a malformed provider before touching loop->ops or calling any slot: a
+     * table missing a required op would fault at the first dispatch. Direct callers
+     * see a <0 return; the ctx wire-up pre-validates to attach KL_ERR_INVALID_ARG. */
+    if (!kl_event_ops_required_valid(provider->ops))
+        return -1;
     loop->ops = provider->ops;
     int r = loop->ops->init(loop);
     if (r < 0) return r;
@@ -71,6 +76,9 @@ unsigned kl_event_caps(const KlEventLoop *loop) {
 }
 
 const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
-    return loop->ops ? loop->ops->native_provider(loop)
-                     : kl_event_native_provider_builtin(loop);
+    /* native_provider is an optional slot: a provider that leaves it NULL offers no
+     * native socket provider, so report none (the caller keeps its configured
+     * sockets). The builtin path is used only when no provider is installed. */
+    if (!loop->ops) return kl_event_native_provider_builtin(loop);
+    return loop->ops->native_provider ? loop->ops->native_provider(loop) : NULL;
 }

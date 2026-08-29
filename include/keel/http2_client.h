@@ -17,6 +17,10 @@
 #include <keel/event_ctx.h>
 #include <keel/http2.h>
 #include <keel/tls.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
@@ -64,6 +68,14 @@ typedef struct {
 
 /* ── Session vtable (user provides, wraps nghttp2 etc.) ──────────── */
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): the adapter
+ * zero-initializes and recompiles per major version. Required (the adapter fills
+ * them; core calls them): recv, submit_request, flush, destroy. KEEL-managed
+ * (core writes them; the adapter leaves them zero): keel_cbs, keel_ctx. New ops
+ * are appended after keel_ctx. See docs/archive/f2/f2_c_extensibility_decision.md for the
+ * mixed-ownership note.
+ */
 struct KlHttp2ClientSession {
     /** Feed received network data into the session. */
     int (*recv)(KlHttp2ClientSession *self, const char *data, size_t len);
@@ -83,11 +95,19 @@ struct KlHttp2ClientSession {
     void *keel_ctx;
 };
 
-/** @brief Factory for creating client-side HTTP/2 sessions. */
+/** @brief Factory for creating client-side HTTP/2 sessions.
+ *  The signature is frozen (see docs/contracts/compatibility.md): pass new
+ *  construction inputs through the allocator context, never by changing it. */
 typedef KlHttp2ClientSession *(*KlHttp2ClientSessionFactory)(KlAllocator *alloc);
 
 /* ── Config ──────────────────────────────────────────────────────── */
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; session is required; every
+ * other member is optional and its zero/NULL value selects the built-in default.
+ * New members are appended after session.
+ */
 typedef struct {
     int                       timeout_ms;              /**< 0 = default */
     int                       max_concurrent_streams;  /**< 0 = KL_HTTP2_DEFAULT_MAX_STREAMS */
@@ -144,5 +164,9 @@ void kl_http2_client_close(KlHttp2ClientConn *c);
 void kl_http2_client_free(KlHttp2ClientConn *c);
 /** @brief Free a response's headers and body (allocator-owned). */
 void kl_http2_client_response_free(KlHttp2ClientResponse *resp, KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

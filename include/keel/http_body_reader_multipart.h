@@ -4,6 +4,10 @@
 #include <keel/http_body_reader.h>
 #include <keel/http_request.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Streaming multipart/form-data parser.
@@ -76,7 +80,13 @@ typedef struct {
 } KlHttpMultipartPartMeta;
 
 /** Parser caps. All fields default to 0 = unlimited; the caller is
- * responsible for setting sensible limits for adversarial input. */
+ * responsible for setting sensible limits for adversarial input.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after max_input_buffer.
+ */
 typedef struct {
     size_t max_part_size;     /**< per-part body bytes; 0 = unlimited */
     size_t max_total_size;    /**< total bytes received; 0 = unlimited */
@@ -131,5 +141,9 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
  * @return KL_HTTP_MP_ERR_NONE if no error, else the specific cause.
  */
 KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

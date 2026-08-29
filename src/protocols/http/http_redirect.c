@@ -7,6 +7,7 @@
  */
 
 #include <keel/http_redirect.h>
+#include "../../allocator_validate.h"
 
 #include <string.h>
 #include <strings.h>
@@ -121,7 +122,7 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
                            const char *body, size_t body_len,
                            KlHttpClientResponse *resp)
 {
-    if (!alloc || !method || !url || !resp)
+    if (!kl_allocator_ops_valid(alloc) || !method || !url || !resp)
         return -1;
 
     int max_redir = (redir && redir->max_redirects > 0)
@@ -511,7 +512,7 @@ KlHttpRedirectClient *kl_http_redirect_start(KlEventCtx *ev_ctx, KlAllocator *al
                                     const char *body, size_t body_len,
                                     KlHttpRedirectDoneFn on_done, void *user_data)
 {
-    if (!ev_ctx || !alloc || !method || !url)
+    if (!ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url)
         return NULL;
 
     KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, NULL, redir,
@@ -537,7 +538,7 @@ KlHttpRedirectClient *kl_http_redirect_start_pooled(KlHttpClientPool *pool,
                                            const char *body, size_t body_len,
                                            KlHttpRedirectDoneFn on_done, void *user_data)
 {
-    if (!pool || !ev_ctx || !alloc || !method || !url)
+    if (!pool || !ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url)
         return NULL;
 
     KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, pool, redir,

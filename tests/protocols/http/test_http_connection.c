@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/clock.h>
 #include <keel/http_connection.h>
 
@@ -267,6 +268,33 @@ UTEST(connection, max_header_size_default) {
     ASSERT_EQ(pool.conns[0].max_header_size, (size_t)KL_HTTP_CONN_READ_BUF_SIZE);
     ASSERT_EQ(pool.conns[1].max_header_size, (size_t)KL_HTTP_CONN_READ_BUF_SIZE);
 
+    kl_http_conn_pool_free(&pool);
+}
+
+/* F2-B accessor: kl_http_conn_response[_const] return the connection's response, NULL on NULL. */
+UTEST(connection, response_accessor) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 2, &a), 0);
+    for (int i = 0; i < 2; i++)
+        pool.conns[i].parser = kl_http1_parser_llhttp(&a);
+
+    KlHttpConn *c = kl_http_conn_acquire(&pool, 100);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ((void *)kl_http_conn_response(c), (void *)&c->res);
+    ASSERT_EQ((const void *)kl_http_conn_response_const(c), (const void *)&c->res);
+    ASSERT_TRUE(kl_http_conn_response(NULL) == NULL);
+    ASSERT_TRUE(kl_http_conn_response_const(NULL) == NULL);
+
+    /* peer-address accessor: returns the connection's stored peer address and reads it back. */
+    uint8_t ip[4] = { 203, 0, 113, 7 };
+    kl_sockaddr_from_ipv4(&c->stream.peer_addr, ip, 4321);
+    const KlSockAddr *pa = kl_http_conn_peer_addr(c);
+    ASSERT_EQ((const void *)pa, (const void *)&c->stream.peer_addr);
+    ASSERT_EQ((int)kl_sockaddr_family(pa), (int)KL_AF_INET);
+    ASSERT_EQ(4321, (int)kl_sockaddr_port(pa));
+
+    c->stream.fd = -1;
     kl_http_conn_pool_free(&pool);
 }
 

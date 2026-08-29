@@ -20,6 +20,10 @@
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
@@ -34,6 +38,12 @@
 
 typedef struct KlHttpClientPool KlHttpClientPool;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after idle_ms.
+ */
 typedef struct {
     int         capacity;       /**< Total pool slots (0 = default 32) */
     int         max_per_host;   /**< Max idle per (host,port,tls) (0 = default 4) */
@@ -54,23 +64,16 @@ typedef struct {
 } KlHttpClientPoolConn;
 
 /**
- * @brief Pool entry (internal, stored in flat array).
+ * @brief Pool entry: an opaque, internal slot.
+ *
+ * The layout is private to the client-pool implementation
+ * (src/protocols/http/http_client_pool_internal.h); KlHttpClientPool holds it by pointer, so only
+ * this forward declaration is public.
  */
-typedef struct KlHttpClientPoolEntry {
-    char     host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< NUL-terminated key */
-    int      port;
-    int      is_tls;
-    char     proxy_host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
-    int      proxy_port;                          /**< 0 = direct connection */
-    KlSocketHandle fd;            /**< -1 = free slot */
-    KlTls   *tls;
-    uint64_t idle_since_ms; /**< kl_monotonic_ms() when returned */
-    int64_t  timer_id;      /**< idle timer (-1 = none) */
-    struct KlHttpClientPool *pool; /**< back-pointer for timer callback */
-} KlHttpClientPoolEntry;
+typedef struct KlHttpClientPoolEntry KlHttpClientPoolEntry;
 
 struct KlHttpClientPool {
-    KlHttpClientPoolEntry *entries;
+    KlHttpClientPoolEntry *entries;  /**< slot array (visible-for-allocation only) */
     int       capacity;
     int       active;       /**< idle connections in pool */
     int       max_per_host;
@@ -177,5 +180,9 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    const KlHttpClientHeader *headers, int num_headers,
                                    const char *body, size_t body_len,
                                    KlHttpClientDoneFn on_done, void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_CLIENT_POOL_H */

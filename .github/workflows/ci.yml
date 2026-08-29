@@ -350,7 +350,7 @@ jobs:
         # without llvm-ar the compose-link probes break. (llvm-nm likewise for the symbol gate.)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tools cppcheck llvm
+          sudo apt-get install -y clang-tools cppcheck llvm pkg-config
 
       - name: scan-build
         run: make analyze
@@ -429,6 +429,25 @@ jobs:
 
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
+
+      - name: "Public-header contract gate (F2-1b: exact inventory/classification joins, standalone C11/C++11 compile, opacity + linkage guards, negative canaries)"
+        run: make check-public-headers
+
+      - name: "Public-function coverage gate (F2-4: every public function classified with evidence; exact default-deny join)"
+        run: make check-public-coverage
+
+      - name: "Allocator-boundary gate (F2-C2: every public allocator-accepting API is classified; no default-allow)"
+        run: make check-allocator-boundaries
+
+      - name: "Event-loop-fd gate (F2-D: no KlEventLoop.fd resurrection)"
+        run: make check-no-eventloop-fd
+
+      - name: "Install/uninstall gate (F2-2: manifest-only install, keel.pc regen on config change, ownership-safe uninstall; isolated temp DESTDIR)"
+        run: make check-install
+
+      - name: "Installed-consumer gate (F2-3: out-of-tree C consumer via pkg-config; PREFIX + DESTDIR; no repo/vendor leakage; correct library + platform-private flags)"
+        # In CI, missing pkg-config is a hard failure (not a skip): the release gate must not silently pass.
+        run: make check-installed-consumer KEEL_REQUIRE_PKGCONFIG=1
 
       - name: Build hardening, binary flag assertion
         run: |

@@ -10,6 +10,7 @@
  * over the completion backends via the parity fixture.
  */
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include "net_compat.h"
 #include <pthread.h>

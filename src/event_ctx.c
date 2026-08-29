@@ -18,7 +18,9 @@
 #include <assert.h>            /* debug precondition in kl_event_ctx_free (hosted only) */
 #endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
+#include "event_ctx_internal.h"  /* KlWatcher/KlTimerEntry layouts (opaque on the public surface) */
 #include "event_caps.h"
+#include "allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "completion_io.h"   /* kl_comp_run: the generic completion tick */
 #include "watcher_internal.h"   /* kl_watcher_add_detached: completion connect */
 
@@ -32,7 +34,9 @@ static void *watcher_tag(const KlWatcher *w) {
 
 int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
                          const KlEventProvider *event_provider) {
-    if (!ctx || !alloc) {
+    /* A NULL allocator is invalid here (no documented default); so is a non-NULL one
+     * missing a required op. Reject before storing ctx->alloc or allocating anything. */
+    if (!ctx || !kl_allocator_ops_valid(alloc)) {
         if (ctx) ctx->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -52,6 +56,15 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->loop.ops = NULL;             /* set by kl_event_init[_provider] below */
     /* A runtime provider (e.g. lwIP) supplies its own event backend; NULL uses
      * the compiled-in default. Both leave the rest of the ctx identical. */
+    /* A malformed event provider (a required op is NULL) is bad input, distinct from
+     * a complete provider whose init() fails: report it as KL_ERR_INVALID_ARG before
+     * any slot is touched. A NULL ops table means "use the compiled-in default"
+     * (handled inside kl_event_init_provider), not malformed. */
+    if (event_provider && event_provider->ops &&
+        !kl_event_ops_required_valid(event_provider->ops)) {
+        ctx->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     int r = event_provider ? kl_event_init_provider(&ctx->loop, event_provider)
                            : kl_event_init(&ctx->loop);
     if (r < 0) {
@@ -332,4 +345,32 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     kl_timer_fire(ctx);
 
     return n < 0 ? -1 : n;
+}
+
+KlEventLoop *kl_event_ctx_loop(KlEventCtx *ctx) {
+    return ctx ? &ctx->loop : NULL;
+}
+
+const KlEventLoop *kl_event_ctx_loop_const(const KlEventCtx *ctx) {
+    return ctx ? &ctx->loop : NULL;
+}
+
+void keel__event_dispatch_watcher(KlEventCtx *ctx, void *watcher, KlEventMask ready) {
+    KlWatcher *w = watcher;
+    /* A prior event in the SAME drain batch may already have freed this watcher (see the
+     * kl_event_dispatch batch contract). Confirm the node is still linked by pointer identity
+     * before touching it; NEVER dereference a possibly-freed node. */
+    int w_live = 0;
+    for (const KlWatcher *it = ctx->watchers; it; it = it->next)
+        if (it == w) { w_live = 1; break; }
+    if (!w_live)
+        return;  /* watcher retired earlier in this batch; stale event, consumed */
+    KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int; a completion backend
+                                   * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
+                                   * truncated + sign-extended by an int, breaking watcher rearm. */
+    ctx->dispatch_dirty = 0;
+    w->on_ready(wfd, ready, w->user_data);  /* may kl_watcher_del/add -> sets dispatch_dirty */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ctx->dispatch_dirty)
+        kl_watcher_rearm(ctx, wfd);
 }

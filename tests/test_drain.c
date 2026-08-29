@@ -1,8 +1,10 @@
 #include "utest.h"
+#include "../src/protocols/http/http_conn_internal.h"
 #include <keel/drain.h>
 #include <keel/allocator.h>
 #include <keel/http_response.h>
 #include <keel/websocket_server.h>
+#include "../src/protocols/websocket/websocket_server_internal.h"
 #include <keel/http_connection.h>
 #include "../src/drain_reserve.h"   /* internal reservation + low-water API */
 #include <string.h>

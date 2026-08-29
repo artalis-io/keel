@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../src/protocols/http/http_conn_internal.h"
 #include <keel/file_io.h>
 #include <keel/http_connection.h>
 #include <keel/allocator.h>

@@ -5,6 +5,10 @@
 
 #define DRAIN_INIT_CAP 4096
 
+/* Precondition: `alloc` is a valid allocator (non-NULL with non-NULL malloc/realloc/free). This is a
+ * void API that cannot report a malformed allocator; the allocator is stored here and used by later
+ * kl_drain_* calls. Public callers that expose a drain (e.g. kl_http_response_enable_drain,
+ * kl_stream_write_init) validate the allocator at their own boundary before calling this. */
 void kl_drain_init(KlDrain *d, KlDrainWriteFn write_fn, void *write_ctx,
                    KlAllocator *alloc) {
     if (!d) return;

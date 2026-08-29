@@ -220,16 +220,23 @@ Site acceptance requirements:
 
 (F1, freestanding composition repair, is complete and recorded in the completed-work summary above.)
 
-### F2: audit public headers and installation
+### F2: audit public headers and installation (complete)
 
-Keep `include/keel/` flat for consumers, while verifying:
+Status: COMPLETE. The public surface and staged install are now intentional, manifest-driven, and
+gate-enforced in standing CI. The frozen plan and decision records are archived under
+`docs/archive/f2/`; the live, machine-consumed inventories and classification manifests stay under
+`docs/f2/` (regenerated and checked by `tools/f2_public_inventory.sh`). Six standing gates enforce the
+outcome: `check-public-headers`, `check-public-coverage`, `check-allocator-boundaries`,
+`check-no-eventloop-fd`, `check-install`, `check-installed-consumer`.
 
-- Only public substrate and built-in protocol headers are installed.
+`include/keel/` stays flat for consumers; the phase verified and now continuously enforces:
+
+- Only public substrate and built-in protocol headers are installed (manifest-only install).
 - Integration adapter headers remain with their integrations.
-- Detail headers are intentionally public or removed from installation.
+- Detail headers are intentionally public (opt-in `*_detail.h`) or removed from installation.
 - `keel.h` exposes exactly the intended umbrella surface.
-- Every public function has test coverage.
-- Examples compile with installed-style includes.
+- Every public function is classified with concrete evidence (default-deny coverage manifest).
+- Examples and an out-of-tree consumer compile and link with installed-style includes via pkg-config.
 - Public comments use current taxonomy and contain no implementation history.
 
 ### F3: audit dead code and clutter
@@ -413,7 +420,8 @@ No new feature may push protocol-specific state into the neutral substrate.
 ```text
 S4    structural gates and reconciliation                          [done]
 C1-C5 documentation, comments, punctuation, guidance, and site     [done]
-F2-F3 public-surface and dead-code audits                          (next)
+F2    public-surface audit and gate enforcement                    [done]
+F3    dead-code and clutter audit                                  (next)
 P1    platform-layout inventory
 P2-P3 optional platform moves and platform-owned tests
 E1    unified conformance harness

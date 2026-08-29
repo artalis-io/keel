@@ -11,6 +11,7 @@
 #include <keel/timer.h>
 #include <keel/url.h>
 #include <keel/drain.h>
+#include "../../allocator_validate.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -895,7 +896,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                       const KlWsClientCallbacks *cbs,
                                       void *user_data)
 {
-    if (!ev || !alloc || !url)
+    if (!ev || !kl_allocator_ops_valid(alloc) || !url)
         return NULL;
 
     KlUrl parsed;

@@ -100,7 +100,6 @@ static int lwev_init(KlEventLoop *loop) {
     for (int i = 0; i < INITIAL_CAP; i++) st->fd_to_idx[i] = -1;
     st->capacity = INITIAL_CAP;
     st->fd_to_idx_cap = INITIAL_CAP;
-    loop->fd = -1;
     loop->_backend = st;
     return 0;
 }
@@ -179,7 +178,6 @@ static void lwev_close(KlEventLoop *loop) {
     kl_free(alloc, st->fds, (size_t)st->capacity * sizeof(struct pollfd));
     kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* Readiness poller of lwIP-native descriptors. */

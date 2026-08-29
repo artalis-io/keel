@@ -25,6 +25,7 @@
 #include <sys/types.h>
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "event_caps.h" /* event↔socket capability negotiation */
 #include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel: completion connect */
@@ -1092,6 +1093,15 @@ static void async_complete_error(KlHttpClient *c)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
+/* True iff a caller-supplied resolver is usable. Only `resolve` is called
+ * unconditionally on the async path; `cancel` is NULL-checked before use (optional)
+ * and a caller-supplied (borrowed) resolver's `destroy` is never called by Keel, so
+ * neither is required. A malformed table is rejected at acceptance as bad input,
+ * rather than being presented later as a DNS lookup failure. */
+static int client_resolver_valid(const KlResolver *r) {
+    return r && r->resolve;
+}
+
 KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlHttpClientConfig *cfg,
                               const char *method, const char *url_str,
@@ -1100,11 +1110,19 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlHttpClientStreamCfg *stream,
                               KlHttpClientDoneFn on_done, void *user_data)
 {
-    if (!ev_ctx || !alloc || !method || !url_str)
-        return NULL;
+    if (!ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url_str)
+        return NULL;   /* NULL/malformed allocator is invalid on the async path (no default) */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)
+        return NULL;
+    /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
+     * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
+    if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
+    /* A malformed caller-supplied resolver (no resolve op) is bad input, not a DNS
+     * failure: reject it here rather than letting it surface later as KL_ERR_DNS. */
+    if (cfg && cfg->resolver && !client_resolver_valid(cfg->resolver))
         return NULL;
 
     KlUrl parsed;
@@ -1208,7 +1226,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np) c->ev_ctx->sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
     }
     /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
@@ -1531,11 +1549,19 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    const char *body, size_t body_len,
                                    KlHttpClientDoneFn on_done, void *user_data)
 {
-    if (!pool || !ev_ctx || !alloc || !method || !url_str)
-        return NULL;
+    if (!pool || !ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url_str)
+        return NULL;   /* NULL/malformed allocator is invalid on the async path (no default) */
     if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)
+        return NULL;
+    /* A malformed socket provider (non-NULL, NULL ops) would fault the client's
+     * kl_sock_* I/O; reject before allocating anything. NULL = built-in default. */
+    if (cfg && !kl_socket_provider_ops_valid(cfg->sockets))
+        return NULL;
+    /* A malformed caller-supplied resolver (no resolve op) is bad input, not a DNS
+     * failure: reject it here rather than letting it surface later as KL_ERR_DNS. */
+    if (cfg && cfg->resolver && !client_resolver_valid(cfg->resolver))
         return NULL;
 
     KlUrl parsed;
@@ -1592,7 +1618,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
      * client too (the event axis stays masked). */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np) c->ev_ctx->sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
     }
     /* The async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */

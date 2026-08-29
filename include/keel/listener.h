@@ -28,6 +28,10 @@
 #define KEEL_LISTENER_H
 
 #include <keel/handle.h>   /* KlSocketHandle */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Opaque listener. Full layout in <keel/listener_detail.h> (opt-in). */
 typedef struct KlListener KlListener;
@@ -154,5 +158,9 @@ int  kl_listener_close(KlListener *l);
 KlListenerState kl_listener_state(const KlListener *l);
 /** 1 once on_close has fired (fully retired; reusable), else 0. */
 int  kl_listener_is_detached(const KlListener *l);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_LISTENER_H */

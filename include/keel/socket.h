@@ -74,7 +74,13 @@ typedef enum {
 
 /* Provider operation table. `ctx` is the provider's own context (NULL for the
  * built-in POSIX provider). Any op may be NULL, in which case Keel falls back to
- * its built-in default (native syscall) for that operation. */
+ * its built-in default (native syscall) for that operation.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): providers
+ * zero-initialize and recompile per major version. No op is strictly required:
+ * every slot is optional and a zero/NULL slot means "not supplied", so Keel uses
+ * its built-in native default for it (io_status has a documented hosted-errno
+ * fallback). New ops are appended after `name`. */
 typedef struct KlSocketOps {
     /* setup */
     int     (*set_nonblocking)(void *ctx, KlSocketHandle fd);

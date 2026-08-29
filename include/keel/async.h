@@ -3,6 +3,10 @@
 
 #include <keel/event_ctx.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlHttpServer KlHttpServer;
 typedef struct KlHttpConn KlHttpConn;
@@ -93,5 +97,9 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
  * @param op Async op to cancel.
  */
 void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

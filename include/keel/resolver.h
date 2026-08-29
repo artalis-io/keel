@@ -12,6 +12,10 @@
 
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* Forward declarations */
 typedef struct KlEventCtx KlEventCtx;
@@ -45,7 +49,14 @@ struct KlResolveReq {
     KlResolver *resolver;  /**< Back-pointer to owning resolver */
 };
 
-/** @brief Async DNS resolver vtable. */
+/**
+ * @brief Async DNS resolver vtable.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All three ops (resolve,
+ * cancel, destroy) are required; core calls each. New ops are appended after
+ * destroy.
+ */
 struct KlResolver {
     /**
      * Start async name resolution. Must not block.
@@ -69,5 +80,9 @@ struct KlResolver {
     /** Destroy the resolver (free any shared state). */
     void (*destroy)(KlResolver *self);
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_RESOLVER_H */

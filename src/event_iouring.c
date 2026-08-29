@@ -249,7 +249,6 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     }
     iou_init_optim(st);
     loop->_backend = st;
-    loop->fd = -1;
     return 0;
 }
 
@@ -419,7 +418,6 @@ void kl_event_close_builtin(KlEventLoop *loop) {
                                (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ);
     kl_free(st->alloc, st, sizeof(*st));
     loop->_backend = NULL;
-    loop->fd = -1;
 }
 
 /* A completion loop over native fds: COMPLETION makes the capability negotiation require an

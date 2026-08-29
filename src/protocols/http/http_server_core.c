@@ -20,6 +20,7 @@
 #include <keel/timer.h>
 #include <keel/http_request.h>
 #include "http_internal.h"
+#include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "completion_io.h"    /* kl_comp_cancel (neutral completion seam) */
 #include "completion_http.h" /* kl_http_comp_run / _quiesce_accepts / _post_read (HTTP orchestration) */
 #include "event_caps.h"   /* kl_event_caps: completion vs readiness pause/resume */
@@ -33,7 +34,7 @@
 #endif
 #include <string.h>
 #include <stdint.h>
-#include <stdatomic.h>
+#include "kl_atomic.h"    /* lock-free int atomics for the running/draining flags */
 
 /* Same tick bound http_server.c's readiness loop uses; a local copy keeps this TU
  * independent of http_server.c (both are plain compile-time constants). */
@@ -74,6 +75,14 @@ static void kl_http_server_wakeup_init(KlHttpServer *s) {
  * async file-I/O backend, and the stop self-pipe) are compiled out under
  * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
  * file I/O, no self-pipe). Everything else is platform-neutral. */
+/* True iff every REQUIRED KlHttp1RequestParser op is present. Core calls parse,
+ * reset, and destroy unconditionally over a connection's lifetime, so a parser
+ * factory that returns a table missing any of them would fault later. Validated
+ * once per pool slot at server init (not in a hot path). */
+static int http1_request_parser_vtable_valid(const KlHttp1RequestParser *p) {
+    return p && p->parse && p->reset && p->destroy;
+}
+
 int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
@@ -82,6 +91,15 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+
+    /* A caller-supplied socket provider becomes active as ev.sockets below and drives
+     * every connection's I/O through the kl_sock_* dispatchers. Reject a malformed one
+     * (non-NULL provider with a NULL ops table) before acquiring any resources; NULL
+     * means the built-in default. Individual ops stay optional (native fallback). */
+    if (!kl_socket_provider_ops_valid(config->sockets)) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     /* The AF_UNIX node-cleanup state (opaque unix_node storage) is left zeroed by the memset above;
      * the substrate module treats a zeroed state as "not open", so no explicit init is needed here
      * and this stays platform-neutral (the module is POSIX-only). */
@@ -135,6 +153,13 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * pool allocator on UEFI); falling back to kl_allocator_default() would drag
      * malloc/free/stdio into the freestanding closure. */
     if (s->config.alloc) {
+        /* A caller-supplied allocator is copied by value below; a malformed one (a
+         * required op is NULL) would fault the first allocation. Validate before
+         * copying, and do not silently fall back to the default. */
+        if (!kl_allocator_ops_valid(s->config.alloc)) {
+            s->last_error = KL_ERR_INVALID_ARG;
+            return -1;
+        }
         s->alloc_storage = *s->config.alloc;
     } else {
 #ifndef KEEL_FREESTANDING
@@ -213,6 +238,18 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
             kl_http_router_free(&s->router);
             return -1;
         }
+        if (!http1_request_parser_vtable_valid(s->pool.conns[i].parser)) {
+            /* Malformed parser vtable (a required op is NULL): reject before the
+             * server accepts traffic. Guard destroy (it may be the missing op),
+             * clear the slot so pool_free skips it, and fail with an arg error. */
+            KlHttp1RequestParser *p = s->pool.conns[i].parser;
+            if (p->destroy) p->destroy(p);
+            s->pool.conns[i].parser = NULL;
+            s->last_error = KL_ERR_INVALID_ARG;
+            kl_http_conn_pool_free(&s->pool);
+            kl_http_router_free(&s->router);
+            return -1;
+        }
         s->pool.conns[i].access_log = s->config.access_log;
         s->pool.conns[i].access_log_data = s->config.access_log_data;
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
@@ -278,7 +315,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * incompatible pairing is rejected below. */
     if (!kl_event_ctx_sockets_compatible(&s->ev)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
-        if (np) s->ev.sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) s->ev.sockets = np;
     }
 
     /* Negotiate the event loop against the socket provider now that both are wired
@@ -561,7 +598,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
 }
 
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
-    if (!atomic_load(&s->draining)) return;
+    if (!kl_atomic_load_int(&s->draining)) return;
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     for (int j = 0; j < s->pool.capacity; j++) {
@@ -574,7 +611,7 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
     for (int j = 0; j < s->pool.capacity; j++)
         if (s->pool.conns[j].state != KL_HTTP_CONN_CLOSED) active++;
     if (active == 0 || now >= s->drain_deadline_ms)
-        atomic_store(&s->running, 0);
+        kl_atomic_store_int(&s->running, 0);
 }
 
 /* ── Route + middleware registration (thin router wrappers, seam-only) ───────── */
@@ -653,4 +690,16 @@ void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out) {
     for (const KlAsyncOp *op = s->async_ops; op; op = op->next)
         suspended++;
     out->async_suspended = suspended;
+}
+
+KlEventCtx *kl_http_server_event_ctx(KlHttpServer *s) {
+    return s ? &s->ev : NULL;
+}
+
+const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s) {
+    return s ? &s->ev : NULL;
+}
+
+int kl_http_server_bound_port(const KlHttpServer *s) {
+    return s ? s->bound_port : -1;
 }

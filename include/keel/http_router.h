@@ -6,6 +6,10 @@
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Route handler function. */
 typedef void (*KlHttpHandler)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
@@ -53,14 +57,10 @@ typedef struct {
                                             caps that fire after dispatch. */
 } KlHttpRoute;
 
-typedef struct {
-    const char *method;    /**< HTTP method filter */
-    const char *pattern;   /**< URL pattern filter */
-    size_t method_len;     /**< Length of method string */
-    size_t pattern_len;    /**< Length of pattern string */
-    KlHttpMiddleware fn;       /**< Middleware function */
-    void *user_data;       /**< Opaque data passed to fn */
-} KlHttpMiddlewareEntry;
+/* Registered middleware entry: an opaque, router-internal record. The layout is private to the
+ * router implementation (src/protocols/http/http_router_internal.h); KlHttpRouter holds it by
+ * pointer, so only this forward declaration is public. */
+typedef struct KlHttpMiddlewareEntry KlHttpMiddlewareEntry;
 
 typedef struct KlHttpRouter {
     KlHttpRoute *routes;                   /**< Route table array */
@@ -251,5 +251,9 @@ int  kl_http_router_dispatch_synthetic(KlHttpRouter *r, KlHttpRequest *req,
 
 /** @brief Free router resources. */
 void kl_http_router_free(KlHttpRouter *r);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

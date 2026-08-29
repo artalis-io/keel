@@ -6,12 +6,29 @@
 
 #define KL_EVENT_BATCH 256  /* internal stack buffer for kernel events */
 
+/* Backend-private state: the kqueue instance descriptor. Allocated through loop->alloc at init and
+ * released at close; kept in loop->_backend, never on the public KlEventLoop layout. */
+typedef struct {
+    int fd;
+} KlKqueueState;
+
 int kl_event_init_builtin(KlEventLoop *loop) {
-    loop->fd = kqueue();
-    return loop->fd < 0 ? -1 : 0;
+    loop->_backend = NULL;  /* deterministic: no state until it is fully built */
+    KlKqueueState *st = kl_malloc(loop->alloc, sizeof(*st));
+    if (!st) return -1;     /* allocator failure: nothing created, _backend stays NULL */
+    /* -1 is the descriptor sentinel (kqueue returns it on failure, and close() skips a negative
+     * fd). The state is published only with a valid descriptor. */
+    st->fd = kqueue();
+    if (st->fd < 0) {
+        kl_free(loop->alloc, st, sizeof(*st));  /* kernel-object failure: unwind exactly once */
+        return -1;
+    }
+    loop->_backend = st;
+    return 0;
 }
 
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+    KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
     int n = 0;
 
@@ -24,7 +41,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         n++;
     }
 
-    return kevent(loop->fd, changes, n, NULL, 0, NULL) < 0 ? -1 : 0;
+    return kevent(st->fd, changes, n, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
 int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
@@ -37,6 +54,7 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
      * so subsequent mods just enable/disable. The mask may request READ,
      * WRITE, or both (e.g., HTTP/2 connections need simultaneous read+write).
      */
+    KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
 
     unsigned short read_flags = (mask & KL_EVENT_READ)
@@ -49,17 +67,19 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     EV_SET(&changes[0], fd, EVFILT_READ, read_flags, 0, 0, udata);
     EV_SET(&changes[1], fd, EVFILT_WRITE, write_flags, 0, 0, udata);
 
-    return kevent(loop->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
+    return kevent(st->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
 int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
+    KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    return kevent(loop->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
+    return kevent(st->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
 int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+    KlKqueueState *st = loop->_backend;
     struct kevent events[KL_EVENT_BATCH];
     int batch = max < KL_EVENT_BATCH ? max : KL_EVENT_BATCH;
     struct timespec ts;
@@ -71,7 +91,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
         tsp = &ts;
     }
 
-    int n = kevent(loop->fd, NULL, 0, events, batch, tsp);
+    int n = kevent(st->fd, NULL, 0, events, batch, tsp);
     if (n < 0) return -1;
 
     for (int i = 0; i < n; i++) {
@@ -87,10 +107,11 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 }
 
 void kl_event_close_builtin(KlEventLoop *loop) {
-    if (loop->fd >= 0) {
-        close(loop->fd);
-        loop->fd = -1;
-    }
+    KlKqueueState *st = loop->_backend;
+    if (!st) return;                            /* idempotent */
+    if (st->fd >= 0) close(st->fd);             /* close any descriptor, including 0 */
+    kl_free(loop->alloc, st, sizeof(*st));
+    loop->_backend = NULL;                      /* reset: resource released exactly once */
 }
 
 /* kqueue is a readiness poller of native OS descriptors. */

@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * sockaddr.h: Keel's platform-neutral socket address (PAL: address axis).
@@ -110,5 +114,9 @@ int kl_sockaddr_format(const KlSockAddr *a, char *buf, size_t n);
  * NUL. Returns the length written (excl. NUL), or -1 on truncation / bad family.
  */
 int kl_sockaddr_format_ip(const KlSockAddr *a, char *buf, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_SOCKADDR_H */

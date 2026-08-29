@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "http_internal.h"
+#include "kl_atomic.h"    /* lock-free int atomics for the running/draining flags */
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* event↔socket capability negotiation */
 #include "completion_io.h"    /* completion-loop tick dispatch (IOCP) */
@@ -332,8 +333,8 @@ int kl_http_server_run(KlHttpServer *s) {
      * so a failed bind never leaves handlers installed without a restore. */
     kl_http_server_plat_signals_install(s);
 
-    atomic_store(&s->running, 1);
-    atomic_store(&s->draining, 0);
+    kl_atomic_store_int(&s->running, 1);
+    kl_atomic_store_int(&s->draining, 0);
     KlEvent events[KL_EVENTS_PER_TICK];
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
@@ -354,7 +355,7 @@ int kl_http_server_run(KlHttpServer *s) {
         s->accept_via_listener = 1;
     }
 
-    while (atomic_load(&s->running)) {
+    while (kl_atomic_load_int(&s->running)) {
         if (completion_loop) {
             /* One completion-loop tick: factored into the freestanding-safe server
              * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */
@@ -441,7 +442,7 @@ int kl_http_server_run(KlHttpServer *s) {
                  * fd is committed + wired by server_accept_on_accept; when the pool credit is
                  * exhausted it transitions to PAUSED (disarming the listen fd, so the kernel TCP
                  * backlog queues the rest) and resumes when a slot frees. */
-                if (atomic_load(&s->draining)) goto rearm_listen;
+                if (kl_atomic_load_int(&s->draining)) goto rearm_listen;
                 while (kl_listener_state(&s->accept_listener) == KL_LISTENER_STATE_LISTENING) {
                     KlSockAddr peer;
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
@@ -652,13 +653,13 @@ transition:
 }
 
 void kl_http_server_stop(KlHttpServer *s) {
-    if (s->config.drain_timeout_ms > 0 && !atomic_load(&s->draining)) {
+    if (s->config.drain_timeout_ms > 0 && !kl_atomic_load_int(&s->draining)) {
         /* Enter drain mode: stop accepting, let in-flight finish */
-        atomic_store(&s->draining, 1);
+        kl_atomic_store_int(&s->draining, 1);
         s->drain_deadline_ms = kl_monotonic_ms() +
                                (uint64_t)s->config.drain_timeout_ms;
     } else {
-        atomic_store(&s->running, 0);
+        kl_atomic_store_int(&s->running, 0);
     }
     /* Wake the run loop so it re-checks running/drain now instead of after the current
      * wait/drain tick. write() is async-signal-safe + thread-safe, so this is valid both

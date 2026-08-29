@@ -21,6 +21,10 @@
 #include <keel/socket.h>
 #include <keel/tls.h>
 #include <keel/url.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
@@ -49,6 +53,11 @@
 
 /**
  * @brief HTTP proxy configuration (borrowed pointers, caller-owned).
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; host is required; every
+ * other member is optional and its zero/NULL value selects the built-in
+ * default. New members are appended after auth.
  */
 typedef struct {
     const char *host;       /**< Proxy hostname */
@@ -73,6 +82,12 @@ typedef struct KlHttpClientResponse {
     KlError          error;     /**< Diagnostic error code (KL_ERR_NONE on success) */
 } KlHttpClientResponse;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after sockets.
+ */
 typedef struct {
     int              timeout_ms;        /**< Connect/send/recv timeout (0 = default 30s) */
     size_t           max_response_size;  /**< Max response body (0 = default 4 MB) */
@@ -313,5 +328,9 @@ KlHttp1ResponseParser *kl_http1_response_parser_llhttp_s(size_t max_response_siz
                                                 KlHttpClientHeadersFn on_headers,
                                                 void (*on_complete)(void *),
                                                 void *stream_user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_CLIENT_H */

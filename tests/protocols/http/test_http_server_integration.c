@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/clock.h>
 #include <keel/keel.h>
 #include "socket.h"   /* internal: exercise the socket-provider seam */

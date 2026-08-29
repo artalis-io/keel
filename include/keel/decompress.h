@@ -4,12 +4,21 @@
 #include <keel/allocator.h>
 #include <keel/compress.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Pluggable decompression vtable.
  *
  * Users implement this interface to provide decompression (gzip, deflate, zstd).
  * One KlDecompress instance is created per decompress operation via the factory.
+ *
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. Required (core calls them):
+ * decompress, dfeed, encoding, destroy. Optional (NULL = not supplied): reset. New
+ * ops are appended after destroy.
  */
 typedef struct KlDecompress KlDecompress;
 
@@ -64,6 +73,10 @@ struct KlDecompress {
  *
  * Shares KlCompressCtx with compression: same algorithm configuration.
  *
+ * The factory signature is frozen (see docs/contracts/compatibility.md): pass new
+ * construction inputs through KlCompressCtx or KlDecompressConfig, never by
+ * changing this signature.
+ *
  * @param ctx   Shared compression context (algorithm, level).
  * @param alloc Allocator for session resources.
  * @return New decompression session, or NULL on failure.
@@ -75,6 +88,11 @@ typedef KlDecompress *(*KlDecompressFactory)(KlCompressCtx *ctx,
  * @brief Decompression configuration.
  *
  * Shares KlCompressCtx with KlCompressConfig for algorithm configuration.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default (a NULL factory leaves
+ * decompression disabled). New members are appended after ctx_destroy.
  */
 typedef struct KlDecompressConfig {
     KlCompressCtx       *ctx;         /**< Shared context: user-owned */
@@ -150,5 +168,9 @@ int kl_decompress_stream_feed(KlDecompressStream *ds,
  * @param ds  Decompression stream handle.
  */
 void kl_decompress_stream_free(KlDecompressStream *ds);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_DECOMPRESS_H */

@@ -1,5 +1,9 @@
 #ifndef KEEL_ERROR_H
 #define KEEL_ERROR_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Diagnostic error codes for Keel public functions.
@@ -70,5 +74,9 @@ typedef enum {
  * @return Static string, never NULL. Returns "unknown error" for out-of-range.
  */
 const char *kl_strerror(KlError err);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_ERROR_H */

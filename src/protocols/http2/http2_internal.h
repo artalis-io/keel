@@ -13,6 +13,7 @@
 
 #include <keel/http2_server.h>    /* public vtable / callbacks / config typedefs */
 #include <keel/http_connection.h>   /* KlHttpConn */
+#include "../http/http_conn_internal.h"
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>

@@ -16,6 +16,10 @@
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/url.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
@@ -24,6 +28,12 @@
 
 /* ── Config ───────────────────────────────────────────────────────── */
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after max_redirects.
+ */
 typedef struct {
     /**
      * Maximum number of redirect HOPS to follow.  `max_redirects = N`
@@ -135,5 +145,9 @@ void kl_http_redirect_cancel(KlHttpRedirectClient *rc);
  * @brief Free all redirect client resources.
  */
 void kl_http_redirect_free(KlHttpRedirectClient *rc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_HTTP_REDIRECT_H */

@@ -177,6 +177,10 @@ DNS_SYS_SRC ?= src/protocols/dns/dns_sys_posix.c
 # completion_absent.c + the HTTP surface in completion_http_absent.c (R2f); the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c src/protocols/http/completion_http_absent.c
+  # Expose the build config to code so a TU can compile out completion-only cases (here the axis is
+  # stubbed to abort()). No library source branches on this; only tests that exercise a completion
+  # loop directly (e.g. the completion case in test_datagram_ops_vtable.c) use it.
+  CFLAGS += -DKEEL_NO_COMPLETION
 else
   COMPLETION_CORE = src/completion_core.c src/protocols/http/completion_http_server.c \
                     src/protocols/http2/completion_http2.c src/protocols/websocket/completion_ws.c src/completion_dispatch.c
@@ -309,7 +313,7 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
            examples/h2_server examples/h2_client \
            examples/client examples/async_client examples/async_thread_pool \
            examples/custom_allocator examples/custom_socket_provider \
-           examples/connection_pool examples/url_parser \
+ examples/url_parser \
            examples/sse examples/streaming_client examples/timer \
            examples/redirect_client examples/proxy_client \
            examples/unix_socket_server
@@ -793,21 +797,43 @@ integration-test:
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
+# DESTDIR stages into a build root; PREFIX is the logical install prefix baked into keel.pc and the
+# runtime paths. Both are preserved: every path below is $(DESTDIR)$(PREFIX)/...
 install: $(LIB) keel.pc
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/include/keel
 	install -d $(DESTDIR)$(PREFIX)/lib/pkgconfig
 	install -m 644 $(LIB) $(DESTDIR)$(PREFIX)/lib/
-	install -m 644 include/keel/*.h $(DESTDIR)$(PREFIX)/include/keel/
+	@# Install ONLY the reviewed public headers (docs/f2/public_headers.txt), never a wildcard, so an
+	@# internal header placed in include/keel/ cannot leak into the installed surface.
+	@set -e; while IFS= read -r h; do \
+	  case "$$h" in ''|\#*) continue ;; esac; \
+	  install -m 644 include/keel/$$h $(DESTDIR)$(PREFIX)/include/keel/$$h; \
+	done < docs/f2/public_headers.txt
 	install -m 644 keel.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB)
-	rm -rf $(DESTDIR)$(PREFIX)/include/keel
 	rm -f $(DESTDIR)$(PREFIX)/lib/pkgconfig/keel.pc
+	@# Remove ONLY the headers Keel installed (the reviewed manifest); leave any unrelated file intact.
+	@while IFS= read -r h; do \
+	  case "$$h" in ''|\#*) continue ;; esac; \
+	  rm -f $(DESTDIR)$(PREFIX)/include/keel/$$h; \
+	done < docs/f2/public_headers.txt
+	@# Remove the directories Keel created only when now empty: rmdir fails harmlessly (preserving the
+	@# directory) if anything unrelated remains. Never rm -rf a shared dir.
+	-rmdir $(DESTDIR)$(PREFIX)/include/keel 2>/dev/null || true
+	-rmdir $(DESTDIR)$(PREFIX)/lib/pkgconfig 2>/dev/null || true
 
-keel.pc: keel.pc.in
-	sed 's|@PREFIX@|$(PREFIX)|g' $< > $@
+# keel.pc reflects the current PREFIX. Regenerate it whenever the configuration changes (not only when
+# keel.pc.in does): rebuild the content each time and replace the file only when it differs, so its
+# mtime advances exactly on a real change and a stale prefix can never be installed.
+keel.pc: keel.pc.in FORCE
+	@sed 's|@PREFIX@|$(PREFIX)|g' $< > $@.tmp; \
+	 if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
+	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX))"; fi
+
+FORCE:
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
@@ -852,7 +878,7 @@ clean:
 	find . -name '*.compose_*.o' -delete
 	rm -f libkeel_freestanding_compose_*.a keel_freestanding_dgram_compose*.efi keel_freestanding_dns_compose*.efi
 	rm -rf .aarch64 src/.aarch64 src/protocols/*/.aarch64 vendor/llhttp/.aarch64
-	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
+	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	-$(MAKE) -C integrations clean
@@ -975,6 +1001,40 @@ check-tier1-boundary:
 # (so `../include/keel/stream.h`, `datagram_contract.md`, `audits/README.md` all check). External
 # (http/mailto) and pure `#anchor` links are skipped. Backstop for docs/architecture/invariants.md.
 DOC_REF_FILES = docs/architecture/overview.md docs/architecture/invariants.md
+check-allocator-boundaries:
+	@sh tools/f2_allocator_boundaries.sh --selftest
+	@sh tools/f2_allocator_boundaries.sh
+
+# F2-1b: mechanical enforcement of the public-header contract against the accepted inventories and
+# classifications. Composes: extraction canaries + exact inventory/classification joins
+# (f2_public_inventory.sh), standalone staged C11/C++11 header compilation with a negative canary
+# (f2_standalone_headers.sh), and the linkage guards with their negative controls (f2_opaque_probe.sh,
+# f2_cxx_link_test.sh). No behavior; purely a gate.
+check-install:
+	@sh tools/f2_install_test.sh
+
+# F2-3: build, link, and RUN an out-of-tree C consumer against the INSTALLED library using only a
+# staged prefix + pkg-config (logical PREFIX and DESTDIR staging), confirming no repo/vendor include
+# leakage and that keel.pc selects the right library + platform-private link flags.
+check-installed-consumer:
+	@sh tools/f2_installed_consumer.sh
+
+check-public-headers:
+	@sh tools/f2_public_inventory.sh --selftest
+	@sh tools/f2_public_inventory.sh --check
+	@sh tools/f2_standalone_headers.sh
+	@sh tools/f2_opaque_probe.sh >/dev/null && echo "opaque-probe: OK (opaque public types reject layout access; pointer use links; C + C++)"
+	@sh tools/f2_cxx_link_test.sh >/dev/null && echo "cxx-link: OK (C++ links the C archive with guards; unguarded linkage fails)"
+	@echo "check-public-headers: OK"
+
+# F2-4: the public-function coverage manifest is an exact, default-deny join - every public function is
+# classified with concrete evidence (no unreviewed rows, no empty citations). Delegates to the exact
+# coverage-manifest check (and its extraction canaries) in f2_public_inventory.sh.
+check-public-coverage:
+	@sh tools/f2_public_inventory.sh --selftest
+	@sh tools/f2_public_inventory.sh --check
+	@echo "check-public-coverage: OK"
+
 check-doc-refs:
 	@bad=0; \
 	for doc in $(DOC_REF_FILES); do \
@@ -1159,6 +1219,12 @@ check-protocol-home:
 # tests/ tree stays owned by check-test-layout. See tools/check_old_layout.sh.
 check-old-layout:
 	@sh tools/check_old_layout.sh
+
+# F2-D resurrection gate: KlEventLoop.fd stays removed (the epoll/kqueue descriptor is backend-owned
+# private state in loop->_backend). Default-deny, self-canaried, file:line diagnostics. Standalone
+# only; not enrolled in the aggregate/remote CI gate set until F2-6.
+check-no-eventloop-fd:
+	@sh tools/check_no_eventloop_fd.sh
 
 # Comments-only milestone/phase archaeology gate (C2-6). Scans every tracked first-party .c/.h
 # (vendor/ excluded), extracting COMMENT text only via a real C-comment state machine; so string
@@ -1991,7 +2057,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

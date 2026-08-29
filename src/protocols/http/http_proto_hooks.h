@@ -24,6 +24,7 @@
  */
 
 #include <keel/http_connection.h>   /* KlHttpConn */
+#include "http_conn_internal.h"
 #include <keel/http_router.h>       /* KlHttpRouter */
 #include <keel/http2_server.h>    /* KlHttp2ServerConfig */
 #include <keel/proxy_protocol.h> /* KlProxyResult / KlCidr / KlSockAddr (PROXY seam) */

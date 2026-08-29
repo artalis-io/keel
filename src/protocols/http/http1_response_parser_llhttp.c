@@ -10,6 +10,7 @@
 #include <keel/http_client.h>
 #include <keel/http1_parser.h>
 #include <keel/allocator.h>
+#include "../../allocator_validate.h"
 #include "llhttp.h"
 
 #include <stdint.h>
@@ -408,6 +409,7 @@ static KlHttp1ResponseParser *create_parser(size_t max_response_size,
                                          void (*on_complete)(void *),
                                          void *stream_user_data)
 {
+    if (!kl_allocator_ops_valid(alloc)) return NULL;
     RespLlhttpParser *p = kl_malloc(alloc, sizeof(*p));
     if (!p)
         return NULL;

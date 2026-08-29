@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <keel/keel.h>
 #include "../src/socket.h"     /* internal kl_socket_provider_iocp() */
+#include "../src/protocols/http/http_conn_internal.h"  /* white-box: KlHttpConn layout + state enum */
 
 #include <pthread.h>
 #include <string.h>

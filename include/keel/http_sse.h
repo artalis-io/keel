@@ -3,6 +3,10 @@
 
 #include <keel/http_response.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief SSE (Server-Sent Events) stream handle.
@@ -67,5 +71,9 @@ int kl_http_sse_comment(KlHttpSse *sse, const char *text, size_t len);
  * @return 0 on success, -1 on error.
  */
 int kl_http_sse_end(KlHttpSse *sse);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

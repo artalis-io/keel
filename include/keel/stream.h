@@ -26,6 +26,10 @@
 #include <stddef.h>
 #include <keel/handle.h>      /* KlSocketHandle, kl_ssize_t */
 #include <keel/allocator.h>   /* KlAllocator (write-queue init) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @brief Opaque raw-transport stream. Full layout in <keel/stream_detail.h> (opt-in). */
 typedef struct KlStream KlStream;
@@ -144,5 +148,9 @@ int  kl_stream_cancel(KlStream *s);
 KlStreamCloseState kl_stream_close_state(const KlStream *s);
 /** 1 once on_close has fired (fully detached; reusable), else 0. */
 int  kl_stream_is_detached(const KlStream *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_STREAM_H */

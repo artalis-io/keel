@@ -1,4 +1,5 @@
 #include <keel/http_body_reader_multipart.h>
+#include "../../allocator_validate.h"
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
@@ -651,7 +652,7 @@ KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br
 
 /* cppcheck-suppress constParameterPointer ; signature must match KlHttpBodyReaderFactory typedef */
 KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
-    if (!alloc || !req) return NULL;
+    if (!kl_allocator_ops_valid(alloc) || !req) return NULL;
 
     size_t ct_len = 0;
     const char *ct = kl_http_request_header_len(req, "Content-Type", &ct_len);

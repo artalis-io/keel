@@ -1,0 +1,193 @@
+header	type	kind	category	note
+allocator.h	KlAllocator	struct	caller-constructed	caller-built; F2-C append-only
+async.h	KlAsyncFn	callback	api-signature	-
+async.h	KlAsyncOp	struct	caller-owned-value	caller-owned value; caller sets callbacks, library owns the rest
+async.h	KlHttpConn	opaque	opaque	opaque handle; layout + server/driver fns private (http_conn_internal.h); pool holds KlHttpConn*
+compress.h	KlCompress	struct	caller-constructed	caller-built; F2-C append-only
+compress.h	KlCompressConfig	struct	caller-constructed	caller-built; F2-C append-only
+compress.h	KlCompressCtx	opaque	opaque	private handle
+compress.h	KlCompressFactory	callback	api-signature	-
+connect_op.h	KlConnectArmDeadlineFn	callback	api-signature	-
+connect_op.h	KlConnectArmDelayFn	callback	api-signature	-
+connect_op.h	KlConnectAttemptCancelFn	callback	api-signature	-
+connect_op.h	KlConnectAttemptFn	callback	api-signature	-
+connect_op.h	KlConnectCancelDeadlineFn	callback	api-signature	-
+connect_op.h	KlConnectCancelDelayFn	callback	api-signature	-
+connect_op.h	KlConnectDetachFn	callback	api-signature	-
+connect_op.h	KlConnectDisposeFn	callback	api-signature	-
+connect_op.h	KlConnectDoneFn	callback	api-signature	-
+connect_op.h	KlConnectOp	opaque	opt-in-unstable-layout	layout in *_detail.h (opt-in)
+connect_op.h	KlConnectOpHooks	struct	caller-constructed	caller-built; F2-C append-only
+connect_op.h	KlConnectOpState	enum	enum-constants	-
+connect_op.h	KlConnectResolveCancelFn	callback	api-signature	-
+connect_op.h	KlConnectResolveFn	callback	api-signature	-
+connect_op.h	KlConnectResult	enum	enum-constants	-
+datagram.h	KlDatagram	opaque	opt-in-unstable-layout	layout in *_detail.h (opt-in)
+datagram.h	KlDatagramCloseFn	callback	api-signature	-
+datagram.h	KlDatagramCloseResult	enum	enum-constants	-
+datagram.h	KlDatagramConfig	struct	caller-constructed	caller-built; F2-C append-only
+datagram.h	KlDatagramDrainFn	callback	api-signature	-
+datagram.h	KlDatagramMessage	struct	caller-constructed	caller-built; F2-C append-only
+datagram.h	KlDatagramQueuePolicy	enum	enum-constants	-
+datagram.h	KlDatagramRecvFn	callback	api-signature	-
+datagram.h	KlDatagramSendStatus	enum	enum-constants	-
+datagram.h	KlDatagramSocketConfig	struct	caller-constructed	caller-built; F2-C append-only
+datagram.h	KlDatagramWritableFn	callback	api-signature	-
+datagram.h	KlDgramCloseState	enum	enum-constants	-
+datagram_batch.h	KlDatagramBatch	opaque	opaque	private handle
+datagram_batch.h	KlDatagramRecvSegmentsFn	callback	api-signature	-
+datagram_batch.h	KlDgramBatchDir	enum	enum-constants	-
+decompress.h	KlDecompress	struct	caller-constructed	caller-built; F2-C append-only
+decompress.h	KlDecompressConfig	struct	caller-constructed	caller-built; F2-C append-only
+decompress.h	KlDecompressFactory	callback	api-signature	-
+decompress.h	KlDecompressStream	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+dns_resolver.h	KlDnsResolverConfig	struct	caller-constructed	caller-built; F2-C append-only
+drain.h	KlDrain	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+drain.h	KlDrainCb	callback	api-signature	-
+drain.h	KlDrainWriteFn	callback	api-signature	-
+error.h	KlError	enum	enum-constants	-
+event.h	KlEvent	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+event.h	KlEventLoop	struct	caller-owned-value	F2-B/F2-D caller-owned value; fd removed to backend state
+event.h	KlEventMask	enum	enum-constants	-
+event.h	KlEventOps	struct	caller-constructed	caller-built; F2-C append-only
+event.h	KlEventProvider	struct	caller-constructed	caller-built; F2-C append-only
+event_ctx.h	KlEventCtx	struct	caller-owned-value	F2-B caller-owned value; .loop via kl_event_ctx_loop accessor
+event_ctx.h	KlTimerEntry	opaque	opaque	opaque handle; layout private (src/event_ctx_internal.h)
+event_ctx.h	KlWatcher	opaque	opaque	opaque handle; layout private (src/event_ctx_internal.h)
+event_ctx.h	KlWatcherFn	callback	api-signature	-
+file_io.h	KlFileIO	struct	caller-constructed	caller-built; F2-C append-only
+file_io.h	KlFileIOResult	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+handle.h	KlSocketHandle	alias	type-alias	-
+handle.h	kl_ssize_t	alias	type-alias	-
+http1_chunked.h	KlHttp1ChunkedDecoder	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+http1_chunked.h	KlHttp1ChunkedState	enum	enum-constants	-
+http1_parser.h	KlHttp1ParseResult	enum	enum-constants	-
+http1_parser.h	KlHttp1Parser	alias	type-alias	-
+http1_parser.h	KlHttp1RequestParser	struct	caller-constructed	caller-built; F2-C append-only
+http1_parser.h	KlHttp1ResponseParser	struct	caller-constructed	caller-built; F2-C append-only
+http1_parser.h	KlHttp1ResponseParserFactory	callback	api-signature	-
+http2_client.h	KlHttp2ClientCallbacks	struct	caller-constructed	caller-built; F2-C append-only
+http2_client.h	KlHttp2ClientConfig	struct	caller-constructed	caller-built; F2-C append-only
+http2_client.h	KlHttp2ClientConn	opaque	opaque	private handle
+http2_client.h	KlHttp2ClientErrorFn	callback	api-signature	-
+http2_client.h	KlHttp2ClientHeader	struct	caller-constructed	caller-built; F2-C append-only
+http2_client.h	KlHttp2ClientResponse	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http2_client.h	KlHttp2ClientResponseFn	callback	api-signature	-
+http2_client.h	KlHttp2ClientSession	struct	caller-constructed	caller-built; F2-C append-only
+http2_client.h	KlHttp2ClientSessionFactory	callback	api-signature	-
+http2_client.h	KlHttp2ClientStream	opaque	opaque	private handle
+http2_server.h	KlHttp2ServerCallbacks	struct	caller-constructed	caller-built; F2-C append-only
+http2_server.h	KlHttp2ServerConfig	struct	caller-constructed	caller-built; F2-C append-only
+http2_server.h	KlHttp2ServerConn	opaque	opaque	private handle
+http2_server.h	KlHttp2ServerSession	struct	caller-constructed	caller-built; F2-C append-only
+http2_server.h	KlHttp2ServerSessionFactory	callback	api-signature	-
+http2_server.h	KlHttp2ServerStream	opaque	opaque	private handle
+http_body_reader.h	KlHttpBodyReader	struct	caller-constructed	caller-built; F2-C append-only
+http_body_reader.h	KlHttpBodyReaderFactory	callback	api-signature	-
+http_body_reader.h	KlHttpBufReader	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+http_body_reader_multipart.h	KlHttpMultipartConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_body_reader_multipart.h	KlHttpMultipartErrorCode	enum	enum-constants	-
+http_body_reader_multipart.h	KlHttpMultipartEvent	enum	enum-constants	-
+http_body_reader_multipart.h	KlHttpMultipartPartMeta	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_body_reader_multipart.h	KlHttpMultipartReader	opaque	opaque	private handle
+http_client.h	KlHttpClient	opaque	opaque	private handle
+http_client.h	KlHttpClientBodyFn	callback	api-signature	-
+http_client.h	KlHttpClientConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_client.h	KlHttpClientDoneFn	callback	api-signature	-
+http_client.h	KlHttpClientHeader	struct	caller-constructed	caller-built; F2-C append-only
+http_client.h	KlHttpClientHeadersFn	callback	api-signature	-
+http_client.h	KlHttpClientReadFn	callback	api-signature	-
+http_client.h	KlHttpClientResponse	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_client.h	KlHttpClientStreamCfg	struct	caller-constructed	caller-built; F2-C append-only
+http_client.h	KlHttpProxyConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_client_pool.h	KlHttpClientPool	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+http_client_pool.h	KlHttpClientPoolConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_client_pool.h	KlHttpClientPoolConn	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_client_pool.h	KlHttpClientPoolEntry	opaque	opaque	F2-B1 opaque in v3; KlHttpClientPool holds a pointer; def -> private
+http_compress.h	KlHttpCompressStream	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+http_connection.h	KlHttpConnPool	struct	caller-owned-value	F2-B1 caller-owned value; embedded in caller-owned KlHttpServer; visible to permit enclosing layout
+http_cors.h	KlHttpCorsConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_redirect.h	KlHttpRedirectClient	opaque	opaque	private handle
+http_redirect.h	KlHttpRedirectConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_redirect.h	KlHttpRedirectDoneFn	callback	api-signature	-
+http_request.h	KlHttpParam	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_request.h	KlHttpRequest	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_response.h	KlHttpBodyMode	enum	enum-constants	-
+http_response.h	KlHttpResponse	struct	caller-owned-value	F2-B1 caller-owned value; kl_http_response_init() accepts caller storage
+http_response.h	KlHttpResponseWriteFn	callback	api-signature	-
+http_router.h	KlHttpHandler	callback	api-signature	-
+http_router.h	KlHttpMiddleware	callback	api-signature	-
+http_router.h	KlHttpMiddlewareEntry	opaque	opaque	F2-B1 opaque in v3; router stores pointers, no public API returns it; def -> private
+http_router.h	KlHttpRoute	struct	caller-inspectable	F2-B1 caller-inspectable; kl_http_router_match() returns KlHttpRoute** (public result)
+http_router.h	KlHttpRouter	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+http_server.h	KlHttp1ParserFactory	callback	api-signature	-
+http_server.h	KlHttpAccessLogFn	callback	api-signature	-
+http_server.h	KlHttpServer	struct	caller-owned-value	F2-B caller-owned value; .ev facet; bound_port/event_ctx accessors
+http_server.h	KlHttpServerConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_server.h	KlHttpServerLogFn	callback	api-signature	-
+http_server.h	KlHttpServerStats	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_server.h	KlHttpServerTransport	enum	enum-constants	-
+http_server.h	KlPeerCred	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+http_server.h	KlPlatformCap	enum	enum-constants	-
+http_sse.h	KlHttpSse	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+listener.h	KlListener	opaque	opt-in-unstable-layout	layout in *_detail.h (opt-in)
+listener.h	KlListenerAcceptFn	callback	api-signature	-
+listener.h	KlListenerArmFn	callback	api-signature	-
+listener.h	KlListenerCancelFn	callback	api-signature	-
+listener.h	KlListenerCloseFn	callback	api-signature	-
+listener.h	KlListenerDisarmFn	callback	api-signature	-
+listener.h	KlListenerDisposeFn	callback	api-signature	-
+listener.h	KlListenerHooks	struct	caller-constructed	caller-built; F2-C append-only
+listener.h	KlListenerState	enum	enum-constants	-
+listener.h	KlSlotLease	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+listener.h	KlSlotReleaseFn	callback	api-signature	-
+listener.h	KlSlotReserveFn	callback	api-signature	-
+proxy_protocol.h	KlCidr	struct	caller-constructed	caller-built; F2-C append-only
+proxy_protocol.h	KlProxyResult	enum	enum-constants	-
+resolver.h	KlResolveDoneFn	callback	api-signature	-
+resolver.h	KlResolveReq	struct	caller-constructed	F2-B1 provider seam; custom resolvers embed and return it
+resolver.h	KlResolveResult	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+resolver.h	KlResolver	struct	caller-constructed	caller-built; F2-C append-only
+resolver_cache.h	KlResolverCacheConfig	struct	caller-constructed	caller-built; F2-C append-only
+sockaddr.h	KlAddrFamily	enum	enum-constants	-
+sockaddr.h	KlSockAddr	struct	caller-constructed	caller-built; F2-C append-only
+socket.h	KlIoStatus	enum	enum-constants	-
+socket.h	KlIoVec	struct	caller-constructed	caller-built; F2-C append-only
+socket.h	KlSocketOps	struct	caller-constructed	caller-built; F2-C append-only
+socket.h	KlSocketProvider	struct	caller-constructed	caller-built; F2-C append-only
+socket_dgram.h	KlDatagramOps	struct	caller-constructed	caller-built; F2-C append-only
+socket_dgram.h	KlDgramRxMeta	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+socket_dgram.h	KlDgramRxSlot	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+socket_dgram.h	KlDgramTxDesc	struct	caller-constructed	caller-built; F2-C append-only
+stream.h	KlStream	opaque	opt-in-unstable-layout	layout in *_detail.h (opt-in)
+stream.h	KlStreamCancelFn	callback	api-signature	-
+stream.h	KlStreamCloseFn	callback	api-signature	-
+stream.h	KlStreamCloseState	enum	enum-constants	-
+stream.h	KlStreamReadArmFn	callback	api-signature	-
+stream.h	KlStreamReadDeliverFn	callback	api-signature	-
+stream.h	KlStreamReadDisarmFn	callback	api-signature	-
+stream.h	KlStreamSubmitFn	callback	api-signature	-
+stream.h	KlStreamWriteFn	callback	api-signature	-
+stream.h	KlStreamWriteStatus	enum	enum-constants	-
+thread_pool.h	KlThreadPool	opaque	opaque	private handle
+thread_pool.h	KlThreadPoolConfig	struct	caller-constructed	caller-built; F2-C append-only
+thread_pool.h	KlWorkCancelFn	callback	api-signature	-
+thread_pool.h	KlWorkDoneFn	callback	api-signature	-
+thread_pool.h	KlWorkFn	callback	api-signature	-
+thread_pool.h	KlWorkItem	struct	caller-constructed	caller-built; F2-C append-only
+timer.h	KlTimerFn	callback	api-signature	-
+tls.h	KlPeerCert	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+tls.h	KlTls	struct	caller-constructed	caller-built; F2-C append-only
+tls.h	KlTlsConfig	struct	caller-constructed	caller-built; F2-C append-only
+tls.h	KlTlsCtx	opaque	opaque	private handle
+tls.h	KlTlsFactory	callback	api-signature	-
+tls.h	KlTlsResult	enum	enum-constants	-
+url.h	KlUrl	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
+websocket.h	KlWsFrameParseState	enum	enum-constants	-
+websocket.h	KlWsFrameParser	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
+websocket_client.h	KlWsClientCallbacks	struct	caller-constructed	caller-built; F2-C append-only
+websocket_client.h	KlWsClientConfig	struct	caller-constructed	caller-built; F2-C append-only
+websocket_client.h	KlWsClientConn	opaque	opaque	private handle
+websocket_server.h	KlWsServerCallbacks	struct	caller-constructed	caller-built; F2-C append-only
+websocket_server.h	KlWsServerConfig	struct	caller-constructed	caller-built; F2-C append-only
+websocket_server.h	KlWsServerConn	opaque	opaque	F2-B1 opaque in v3; borrowed handle via kl_ws_server_* API; def -> private

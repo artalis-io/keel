@@ -4,6 +4,10 @@
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** @file http_cors.h
  *  @brief Built-in CORS middleware.
@@ -22,6 +26,12 @@
 /** @brief Maximum origin string length. */
 #define KL_HTTP_CORS_ORIGIN_SIZE 256
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after max_age_seconds.
+ */
 typedef struct {
     char allowed_origins[KL_HTTP_CORS_MAX_ORIGINS][KL_HTTP_CORS_ORIGIN_SIZE];
     int origin_count;             /**< 0 = allow all (*) */
@@ -69,5 +79,9 @@ int  kl_http_cors_is_allowed(const KlHttpCorsConfig *config, const char *origin,
  * @return 0 to continue, 1 to short-circuit (OPTIONS preflight).
  */
 int  kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

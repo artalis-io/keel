@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include <keel/http2.h>
 #include <keel/http2_server.h>
@@ -281,6 +282,57 @@ UTEST(h2, session_vtable_validation) {
     /* destroy should have been called during cleanup */
     ASSERT_EQ(mock.destroy_count, 1);
 
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
+/* Parity: each REQUIRED op missing (recv/submit_response/want_write/flush/shutdown/destroy)
+ * causes the upgrade to fail (KL_HTTP_CONN_CLOSED), without crashing during cleanup. */
+UTEST(h2, session_vtable_each_missing_required_rejected) {
+    test_setup();
+    for (int omit = 0; omit < 6; omit++) {
+        MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+        int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+        KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+        conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+        mock.skip_vtable_init = 1;
+        mock.base.recv = mock_recv;
+        mock.base.submit_response = mock_submit_response;
+        mock.base.want_write = mock_want_write;
+        mock.base.flush = mock_flush;
+        mock.base.shutdown = mock_shutdown;
+        mock.base.destroy = mock_destroy;
+        switch (omit) {
+            case 0: mock.base.recv = NULL; break;
+            case 1: mock.base.submit_response = NULL; break;
+            case 2: mock.base.want_write = NULL; break;
+            case 3: mock.base.flush = NULL; break;
+            case 4: mock.base.shutdown = NULL; break;
+            case 5: mock.base.destroy = NULL; break;
+        }
+        int r = kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+        ASSERT_EQ(r, (int)KL_HTTP_CONN_CLOSED);
+        kl_test_closesock(pfd[0]);
+        kl_test_closesock(pfd[1]);
+    }
+    test_teardown();
+}
+
+/* Parity: the OPTIONAL want_read slot may be NULL; the upgrade still succeeds. */
+UTEST(h2, session_vtable_optional_want_read_null_accepted) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    /* Full required set via the normal factory; want_read left NULL (mock never sets it). */
+    mock.skip_vtable_init = 0;
+    int r = kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_TRUE(conn.h2 != NULL);
+    ASSERT_TRUE(conn.h2->session->want_read == NULL);   /* optional slot stayed NULL, still accepted */
+    kl_http2_server_cleanup(&conn);
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
@@ -1153,6 +1205,62 @@ UTEST(h2, cleanup_null_is_noop) {
     conn.h2 = NULL;
     kl_http2_server_cleanup(&conn);
     ASSERT_TRUE(conn.h2 == NULL);
+}
+
+/* ── h2c upgrade from HTTP/1 (kl_http2_server_upgrade_from_h1) ──────────────── */
+
+/* Success: the 101 Switching Protocols response is emitted, then the session is wired. */
+UTEST(h2, upgrade_from_h1_success) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_TRUE(conn.h2 != NULL);
+    ASSERT_TRUE(conn.h2->session != NULL);
+
+    /* The 101 was written to the peer before the upgrade. */
+    char buf[128];
+    ASSERT_GT(kl_test_poll1(pfd[0], 0, 1000), 0);
+    long n = kl_test_sockread(pfd[0], buf, sizeof(buf) - 1);
+    ASSERT_GT(n, (long)0);
+    buf[n] = '\0';
+    ASSERT_EQ(strncmp(buf, "HTTP/1.1 101 Switching Protocols", 32), 0);
+
+    kl_http2_server_cleanup(&conn);
+    ASSERT_TRUE(conn.h2 == NULL);
+    ASSERT_EQ(mock.destroy_count, 1);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
+/* Malformed session vtable: the upgrade is rejected (CLOSED), the session is destroyed
+ * (ownership cleanup), and conn.h2 is left NULL (no dangling connection state). */
+UTEST(h2, upgrade_from_h1_malformed_rejected) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    mock.skip_vtable_init = 1;
+    mock.base.recv = NULL;                       /* missing required op */
+    mock.base.submit_response = mock_submit_response;
+    mock.base.want_write = mock_want_write;
+    mock.base.flush = mock_flush;
+    mock.base.shutdown = mock_shutdown;
+    mock.base.destroy = mock_destroy;
+
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_CLOSED);
+    ASSERT_EQ(mock.destroy_count, 1);            /* the rejected session was destroyed */
+    ASSERT_TRUE(conn.h2 == NULL);                /* no dangling h2 connection */
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
 }
 
 UTEST_MAIN();

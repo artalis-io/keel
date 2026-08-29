@@ -13,6 +13,7 @@
 
 #include <keel/http_client.h>
 #include <keel/decompress.h>
+#include "../../decompress_internal.h"   /* kl_decompress_vtable_valid: required-subset gate */
 
 #include <limits.h>
 #include <stdint.h>
@@ -254,6 +255,10 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
     KlDecompress *decomp = dcfg->factory(dcfg->ctx, &resp->alloc);
     if (!decomp)
         return -1;
+    if (!kl_decompress_vtable_valid(decomp)) {
+        if (decomp->destroy) decomp->destroy(decomp);   /* guard: a malformed table may omit destroy */
+        return -1;
+    }
 
     const char *supported = decomp->encoding(decomp);
     if (kl_ascii_strcasecmp(enc, supported) != 0) {
@@ -303,6 +308,12 @@ int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *heade
             /* Create session and check encoding */
             KlDecompress *decomp = w->dcfg->factory(w->dcfg->ctx,
                                                       w->ds.alloc);
+            if (decomp && !kl_decompress_vtable_valid(decomp)) {
+                /* Malformed session: leave decompression inactive (graceful, like an
+                 * encoding mismatch). Guard destroy (a malformed table may omit it). */
+                if (decomp->destroy) decomp->destroy(decomp);
+                decomp = NULL;
+            }
             if (decomp) {
                 const char *supported = decomp->encoding(decomp);
                 if (kl_ascii_strcasecmp(headers[i].value, supported) == 0) {

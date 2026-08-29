@@ -11,13 +11,18 @@
 #include <keel/tls.h>
 #include <keel/http2_server.h>
 #include <keel/http_connection.h>
+#include <keel/file_io.h>          /* KlFileIO (was transitive via http_connection.h before it slimmed) */
+#include <keel/async.h>            /* KlAsyncOp (was transitive via http_connection.h before it slimmed) */
 #include <keel/listener_detail.h>  /* struct KlListener layout: KlHttpServer embeds it */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
@@ -53,6 +58,12 @@ typedef enum {
     KL_HTTP_SERVER_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
 } KlHttpServerTransport;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after event_provider.
+ */
 typedef struct KlHttpServerConfig {
     int port;
     const char *bind_addr;      /**< default: "0.0.0.0" */
@@ -168,8 +179,8 @@ typedef struct KlHttpServer {
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
-    _Atomic int running;        /**< Server is running */
-    _Atomic int draining;       /**< Graceful shutdown in progress */
+    int running;                /**< Server is running (accessed atomically via src/kl_atomic.h) */
+    int draining;               /**< Graceful shutdown in progress (accessed atomically via src/kl_atomic.h) */
     uint64_t drain_deadline_ms; /**< Drain timeout deadline */
     /* Self-pipe/loopback wakeup so kl_http_server_stop() wakes the run loop immediately
      * instead of waiting up to KL_POLL_TIMEOUT_MS for the current wait/drain to
@@ -308,6 +319,33 @@ typedef struct {
  * @param out  Output struct (may be NULL, no-op).
  */
 void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out);
+
+/**
+ * @brief Borrowed accessor for the server's embedded event context.
+ *
+ * Returns the `KlEventCtx` the server drives, for registering watchers, timers, and a thread pool
+ * (for example `kl_watcher_add()`, `kl_thread_pool_create()`). The field `s->ev` remains a supported
+ * facet, but new code should PREFER this accessor so it does not depend on the field's name or
+ * placement.
+ *
+ * Ownership: borrowed; the context is owned by @p s, so the caller must not free it or use it after
+ * `kl_http_server_free(s)`. Lifetime: valid while @p s is initialized. Mutability: the context is
+ * live; drive it through the watcher/timer/thread-pool APIs, not by re-initializing it. NULL:
+ * returns NULL when @p s is NULL (deterministic).
+ */
+KlEventCtx       *kl_http_server_event_ctx(KlHttpServer *s);
+const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
+
+/**
+ * @brief Bound TCP port the server is listening on.
+ *
+ * Resolved even when the config requested an ephemeral port (port 0): after the listen socket is
+ * bound this returns the actual port. Prefer this over reading `s->bound_port` directly.
+ *
+ * Ownership: none (returns a value). Lifetime: meaningful once the listener is bound (0 before
+ * binding). NULL: returns -1 when @p s is NULL (deterministic).
+ */
+int kl_http_server_bound_port(const KlHttpServer *s);
 
 /**
  * @brief Optional platform capabilities.
@@ -451,5 +489,9 @@ int kl_systemd_listen_fds(int *count);
  * @return The matching fd (>= 3), or -1 if not socket-activated / no match.
  */
 int kl_systemd_listen_fd_by_name(const char *name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

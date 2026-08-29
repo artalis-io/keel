@@ -4,6 +4,10 @@
 #include <keel/allocator.h>
 #include <keel/handle.h>   /* kl_ssize_t */
 #include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * @brief Write function for KlDrain.
@@ -156,5 +160,9 @@ void kl_drain_consume(KlDrain *d, size_t n);
  * @param d Drain handle.
  */
 void kl_drain_free(KlDrain *d);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_DRAIN_H */

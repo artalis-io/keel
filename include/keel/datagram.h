@@ -138,6 +138,14 @@ typedef void (*KlDatagramDrainFn)(void *ud);      /* send non-empty→empty edge
 typedef void (*KlDatagramCloseFn)(void *ud, KlDatagramCloseResult result);  /* terminal (fires once) */
 
 /* ── Configuration (all pointers borrowed) ────────────────────────────────────────────────────── */
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers zero-initialize and recompile per
+ * major version. Required (kl_datagram_init fails without them): ctx, alloc, fd. sockets is optional
+ * (NULL selects the built-in datagram provider). The sizing fields send_slots/send_slot_cap/recv_cap
+ * are supplied by the caller on this advanced adopt path; kl_datagram_socket_init derives them.
+ * want_caps/optional_caps/accepted_rx_caps are optional (0 = none). New members are appended after
+ * accepted_rx_caps.
+ */
 typedef struct {
     struct KlEventCtx       *ctx;        /* the event loop (selects completion vs readiness) */
     KlAllocator             *alloc;      /* MUST outlive posted ops (frees the life-owned rx holder) */
@@ -188,6 +196,13 @@ typedef enum {
     KL_DATAGRAM_QUEUE_BOTH,         /* count + byte backpressure */
 } KlDatagramQueuePolicy;
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers zero-initialize and recompile per
+ * major version; ctx is required; every other member is optional and its zero/NULL value selects the
+ * documented built-in default (alloc NULL = ctx->alloc; sockets NULL = ctx->sockets or the built-in
+ * provider; 0 sizing = documented defaults; queue_policy 0 = BOTH). New members are appended after
+ * want_rx_caps.
+ */
 typedef struct KlDatagramSocketConfig {   /* named tag: the datagram provider seam (socket_dgram.h
                                            * configure() + M0 kl_datagram_open) references it by tag */
     struct KlEventCtx             *ctx;        /* event loop (selects completion vs readiness) */

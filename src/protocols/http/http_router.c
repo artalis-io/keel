@@ -1,10 +1,13 @@
 #include <keel/http_router.h>
+#include "http_router_internal.h"
+#include "../../allocator_validate.h"
 #include <string.h>
 #include <limits.h>
 
 #define KL_ROUTER_INIT_CAP 16
 
 int kl_http_router_init(KlHttpRouter *r, KlAllocator *alloc) {
+    if (!r || !kl_allocator_ops_valid(alloc)) return -1;
     r->alloc = alloc;
     r->count = 0;
     r->capacity = KL_ROUTER_INIT_CAP;

@@ -7,6 +7,10 @@
 #include <stdint.h>        /* uint64_t (submit offset): file offsets are non-negative,
                               same neutral type as the sendfile seam (src/socket.h) */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct KlFileIO KlFileIO;
 
 typedef struct {
@@ -15,6 +19,12 @@ typedef struct {
     int zero_copy;     /**< 1 = data already sent to socket (splice path) */
 } KlFileIOResult;
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): implementers
+ * zero-initialize and recompile per major version. All four ops (submit, cancel,
+ * tick, destroy) are required; core calls each. New ops are appended after
+ * destroy.
+ */
 struct KlFileIO {
     /** Submit an async file read into buf.
      *  sock_fd is an opaque key for routing/cancellation.
@@ -37,5 +47,9 @@ struct KlFileIO {
  *  Returns NULL if the backend doesn't support async file I/O.
  *  Caller owns the returned object; free with fio->destroy(fio). */
 KlFileIO *kl_file_io_create(KlEventLoop *loop, KlAllocator *alloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

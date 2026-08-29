@@ -7,6 +7,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * dns_resolver.h: Built-in async DNS resolver over KlDatagram.
@@ -22,6 +26,11 @@
 
 /**
  * @brief DNS resolver configuration.
+ *
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; every member is optional and
+ * its zero/NULL value selects the built-in default. New members are appended
+ * after alloc.
  */
 typedef struct {
     const char  *nameserver;  /**< Single numeric NS address (overrides resolv.conf). NULL = use resolv.conf. */
@@ -75,5 +84,9 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
 int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
                           int want_qtype, const uint8_t *expect_q, size_t expect_q_len,
                           KlResolveResult *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KEEL_DNS_RESOLVER_H */

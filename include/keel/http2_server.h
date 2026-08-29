@@ -17,6 +17,10 @@
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>
 #include <keel/http_router.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -61,6 +65,13 @@ struct KlHttp2ServerCallbacks {
 
 /* ── KlHttp2ServerSession: user-provided vtable ───────────────────── */
 
+/*
+ * Append-only vtable (see docs/contracts/compatibility.md): the adapter
+ * zero-initializes and recompiles per major version. Required (the adapter fills
+ * them; core calls them): recv, submit_response, want_write, flush, shutdown,
+ * destroy. Optional (NULL = legacy behavior): want_read. New ops are appended
+ * after want_read.
+ */
 struct KlHttp2ServerSession {
     kl_ssize_t (*recv)(KlHttp2ServerSession *self, const void *data,
                        size_t len);                /**< Feed received network data. */
@@ -86,13 +97,22 @@ struct KlHttp2ServerSession {
 
 /* ── Factory ─────────────────────────────────────────────────────── */
 
-/** @brief Factory for creating server-side HTTP/2 sessions. */
+/** @brief Factory for creating server-side HTTP/2 sessions.
+ *  The signature is frozen (see docs/contracts/compatibility.md): pass new
+ *  construction inputs through KlHttp2ServerCallbacks, user_data, or the allocator
+ *  context, never by changing it. */
 typedef KlHttp2ServerSession *(*KlHttp2ServerSessionFactory)(KlAllocator *alloc,
                                                         KlHttp2ServerCallbacks *callbacks,
                                                         void *user_data);
 
 /* ── Config ──────────────────────────────────────────────────────── */
 
+/*
+ * Append-only config (see docs/contracts/compatibility.md): callers
+ * zero-initialize and recompile per major version; factory is required; every
+ * other member is optional and its zero/NULL value selects the built-in default.
+ * New members are appended after initial_window_size.
+ */
 typedef struct KlHttp2ServerConfig {
     KlHttp2ServerSessionFactory factory; /**< Session factory (required). */
     int max_concurrent_streams;  /**< 0 = KL_HTTP2_DEFAULT_MAX_STREAMS */
@@ -122,5 +142,9 @@ int  kl_http2_server_on_writable(KlHttpConn *c);
 void kl_http2_server_drain_shutdown(KlHttpConn *c);
 /** @brief Clean up all HTTP/2 state for a connection. */
 void kl_http2_server_cleanup(KlHttpConn *c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

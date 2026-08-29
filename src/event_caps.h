@@ -54,4 +54,18 @@ int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets)
 struct KlEventCtx;
 int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx);
 
+/* True iff a runtime-injected event backend supplies every REQUIRED op. A provider
+ * installed on the loop has init/add/mod/del/wait/close/caps called unconditionally
+ * by the kl_event_* dispatch (event_dispatch.c) with no builtin fallback, so all
+ * seven are required. Optional: `native_provider` (NULL means the provider offers no
+ * native socket provider; kl_event_native_provider returns NULL, and the caller keeps
+ * its configured sockets) and `completion` (NULL for a readiness backend). Validated
+ * once, before any op is called (a malformed table would otherwise fault at the first
+ * dispatch). Header-only so the install boundary (event_dispatch.c) and the ctx
+ * wire-up (event_ctx.c) share one definition. */
+static inline int kl_event_ops_required_valid(const KlEventOps *ops) {
+    return ops && ops->init && ops->add && ops->mod && ops->del &&
+           ops->wait && ops->close && ops->caps;
+}
+
 #endif /* KEEL_SRC_EVENT_CAPS_H */
