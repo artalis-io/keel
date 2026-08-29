@@ -68,7 +68,11 @@ static const KlSocketProvider *mock_provider(int omit) {
     return &g_prov;
 }
 
-/* ── hand-built completion loop (caps advertise COMPLETION) ── */
+/* ── hand-built completion loop (caps advertise COMPLETION) ──
+ * Completion-only: the KEEL_NO_COMPLETION build stubs the completion axis (kl_comp_post_dgram_*) to
+ * abort() (completion_absent.c), so the completion case below cannot run there. It is compiled out
+ * under KEEL_NO_COMPLETION; the readiness/path-specific cases above still run. */
+#ifndef KEEL_NO_COMPLETION
 static int cmp_post_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) { (void)ctx;(void)op; return 0; }
 static int cmp_post_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) { (void)ctx;(void)op; return 0; }
 static int cmp_cancel(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind) {
@@ -86,6 +90,7 @@ static unsigned cmp_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_CO
 static int  cmp_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l;(void)fd;(void)m;(void)u; return 0; }
 static int  cmp_del(KlEventLoop *l, KlSocketHandle fd) { (void)l;(void)fd; return 0; }
 static const KlEventOps CMP_EVOPS = { .caps = cmp_caps, .completion = &MIN_COMP, .add = cmp_add, .del = cmp_del };
+#endif /* !KEEL_NO_COMPLETION */
 
 static KlSocketHandle mk_udp(void) { return (KlSocketHandle)socket(AF_INET, SOCK_DGRAM, 0); }
 
@@ -147,7 +152,9 @@ UTEST(datagram_ops_vtable, open_rejects_missing_configure) {
     kl_event_ctx_free(&ev);
 }
 
-/* COMPLETION mode does not require the readiness send/recv ops: init succeeds without them. */
+/* COMPLETION mode does not require the readiness send/recv ops: init succeeds without them.
+ * Completion-only (skipped under KEEL_NO_COMPLETION, where the completion axis aborts). */
+#ifndef KEEL_NO_COMPLETION
 UTEST(datagram_ops_vtable, completion_does_not_require_send_recv) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ev; memset(&ev, 0, sizeof(ev));
@@ -164,6 +171,7 @@ UTEST(datagram_ops_vtable, completion_does_not_require_send_recv) {
     ASSERT_EQ(0, kl_datagram_init(&dg, &c));   /* completion path: send/recv not required */
     ASSERT_EQ(0, teardown(&dg));
 }
+#endif /* !KEEL_NO_COMPLETION */
 
 UTEST_MAIN();
 

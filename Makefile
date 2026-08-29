@@ -177,6 +177,10 @@ DNS_SYS_SRC ?= src/protocols/dns/dns_sys_posix.c
 # completion_absent.c + the HTTP surface in completion_http_absent.c (R2f); the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c src/protocols/http/completion_http_absent.c
+  # Expose the build config to code so a TU can compile out completion-only cases (here the axis is
+  # stubbed to abort()). No library source branches on this; only tests that exercise a completion
+  # loop directly (e.g. the completion case in test_datagram_ops_vtable.c) use it.
+  CFLAGS += -DKEEL_NO_COMPLETION
 else
   COMPLETION_CORE = src/completion_core.c src/protocols/http/completion_http_server.c \
                     src/protocols/http2/completion_http2.c src/protocols/websocket/completion_ws.c src/completion_dispatch.c
