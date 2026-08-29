@@ -825,13 +825,28 @@ uninstall:
 	-rmdir $(DESTDIR)$(PREFIX)/include/keel 2>/dev/null || true
 	-rmdir $(DESTDIR)$(PREFIX)/lib/pkgconfig 2>/dev/null || true
 
-# keel.pc reflects the current PREFIX. Regenerate it whenever the configuration changes (not only when
-# keel.pc.in does): rebuild the content each time and replace the file only when it differs, so its
-# mtime advances exactly on a real change and a stale prefix can never be installed.
-keel.pc: keel.pc.in FORCE
-	@sed 's|@PREFIX@|$(PREFIX)|g' $< > $@.tmp; \
+# The authoritative version. Single source of truth (R3-1): the root VERSION file feeds keel.pc,
+# include/keel/version.h, and the SBOM through tools/version_sync.sh. Read once at parse time.
+KEEL_VERSION := $(shell cat VERSION 2>/dev/null)
+
+# keel.pc reflects the current PREFIX and the single-source version. Regenerate it whenever the
+# configuration changes (not only when keel.pc.in does): rebuild the content each time and replace the
+# file only when it differs, so its mtime advances exactly on a real change and a stale prefix or
+# version can never be installed. @VERSION@ is substituted from VERSION so keel.pc.in holds no literal.
+keel.pc: keel.pc.in VERSION FORCE
+	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(KEEL_VERSION)|g' $< > $@.tmp; \
 	 if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
-	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX))"; fi
+	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX), version=$(KEEL_VERSION))"; fi
+
+# Regenerate every derived version value from VERSION (version.h + SBOM); keel.pc regenerates on build.
+version-sync:
+	@sh tools/version_sync.sh --generate
+
+# Default-deny version-drift gate: fail if any machine-readable version value disagrees with VERSION,
+# or if a stray KL_VERSION_* literal or a keel.pc.in version literal reappears. Self-canaried.
+check-version-drift:
+	@sh tools/version_sync.sh --selftest
+	@sh tools/version_sync.sh --check
 
 FORCE:
 
@@ -2057,7 +2072,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: FORCE version-sync check-version-drift check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

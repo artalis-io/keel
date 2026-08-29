@@ -34,14 +34,10 @@
  * addresses for excluded features and stay out.
  */
 
-/* ── Linked-library version (mirrors <keel/keel.h>; keep in sync) ──────────── */
-#ifndef KL_VERSION_STRING
-#define KL_VERSION_MAJOR  2
-#define KL_VERSION_MINOR  9
-#define KL_VERSION_PATCH  0
-#define KL_VERSION_STRING "2.9.0"
-#define KL_VERSION_NUMBER \
-    ((KL_VERSION_MAJOR) * 10000 + (KL_VERSION_MINOR) * 100 + (KL_VERSION_PATCH))
+/* ── Linked-library version ───────────────────────────────────────────────────
+ * The version macros come from the single source of truth (root VERSION generated into
+ * <keel/version.h> by tools/version_sync.sh); version.h is freestanding-safe (macros only). */
+#include <keel/version.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,7 +45,6 @@ const char *kl_version(void);
 int         kl_version_number(void);
 #ifdef __cplusplus
 }
-#endif
 #endif
 
 /* ── The freestanding-clean client + protocol header subset ───────────────────

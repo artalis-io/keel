@@ -430,6 +430,9 @@ jobs:
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 
+      - name: "Version-drift gate (R3-1: root VERSION is the single source; version.h, keel.pc.in, and the SBOM must agree; no stray version literals)"
+        run: make check-version-drift
+
       - name: "Public-header contract gate (F2-1b: exact inventory/classification joins, standalone C11/C++11 compile, opacity + linkage guards, negative canaries)"
         run: make check-public-headers
 

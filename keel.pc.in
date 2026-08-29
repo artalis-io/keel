@@ -4,7 +4,7 @@ includedir=${prefix}/include
 
 Name: keel
 Description: Minimal event-driven HTTP server library for C
-Version: 2.9.0
+Version: @VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lkeel
 Libs.private: -lpthread
