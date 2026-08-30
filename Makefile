@@ -888,6 +888,15 @@ rc-validate:
 	@$(MAKE) --no-print-directory check-version-drift
 	@echo "== rc-validate: workflow + documentation/text gates =="
 	@$(MAKE) --no-print-directory check-workflows check-doc-refs check-no-em-dash check-no-milestones
+	@# Establish a clean, non-instrumented release library BEFORE any gate that links a consumer against
+	@# libkeel.a. The sanitizer run below (debug-test) rebuilds libkeel.a with -fsanitize=address and
+	@# leaves it instrumented; without this boundary the NEXT rc-validate (or any workspace where ASan
+	@# was already built) would link the plain consumer probes against an instrumented archive and fail
+	@# on undefined __asan_* symbols. Cleaning once here, at the aggregate level, keeps the individual
+	@# consumer gates non-destructive and makes rc-validate self-contained and repeatable.
+	@echo "== rc-validate: clean release library (non-instrumented; repeatable regardless of prior state) =="
+	@$(MAKE) --no-print-directory clean
+	@$(MAKE) --no-print-directory
 	@echo "== rc-validate: public-surface + install gates =="
 	@$(MAKE) --no-print-directory check-public-headers check-public-coverage check-allocator-boundaries check-no-eventloop-fd
 	@$(MAKE) --no-print-directory check-install check-installed-consumer
