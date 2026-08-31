@@ -122,6 +122,22 @@ static inline KlHttpConn *kl_http_request_conn(const KlHttpRequest *req) {
 void kl_http_request_pause_body(const KlHttpRequest *req);
 void kl_http_request_resume_body(const KlHttpRequest *req);
 
+/**
+ * @brief Streaming-async handler: yield for more request body ("park on the body reader").
+ *
+ * The only supported way for a kl_http_server_route_streaming_async / kl_http_router_add_streaming_async
+ * handler to signal "I have not produced a response; keep reading body bytes and re-enter me via the
+ * body reader's on_data callback." Call this (instead of writing a response) when your incremental
+ * reader returns NEED_DATA. Without it the dispatch treats the returning handler as having produced a
+ * buffered response and sends it, ending the stream.
+ *
+ * Call from the streaming-async handler (or its on_data resume) on the event-loop thread. Orthogonal to
+ * kl_http_request_pause_body / kl_http_request_resume_body, which are read-side flow control WITHIN the
+ * body-reading state; this selects the body-reading state itself. Outside a streaming handler it has no
+ * useful effect.
+ */
+void kl_http_request_await_body(const KlHttpRequest *req);
+
 /** @brief Find header by name (case-insensitive).
  *  @return Null-terminated value pointer, or NULL if not found. */
 static inline const char *kl_http_request_header(const KlHttpRequest *req,

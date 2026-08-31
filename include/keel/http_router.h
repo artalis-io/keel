@@ -125,9 +125,10 @@ int  kl_http_router_add_streaming(KlHttpRouter *r, const char *method, const cha
  *
  *        Identical to kl_http_router_add_streaming, plus: the handler is
  *        invoked BEFORE any leftover body bytes are fed via on_data.
- *        It MUST yield on NEED_DATA: the body reader's on_data
- *        callback will resume it when bytes arrive (both the leftover
- *        from the headers-read and subsequent socket reads).
+ *        It MUST yield on NEED_DATA by calling kl_http_request_await_body(req)
+ *        (see keel/http_request.h) instead of producing a response: the body
+ *        reader's on_data callback then resumes it when bytes arrive (both the
+ *        leftover from the headers-read and subsequent socket reads).
  *
  *        Enables the full error-path mid-stream early-exit: if the
  *        body reader rejects bytes (on_data returns -1) at any point,
