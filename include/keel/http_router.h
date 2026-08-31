@@ -128,7 +128,11 @@ int  kl_http_router_add_streaming(KlHttpRouter *r, const char *method, const cha
  *        It MUST yield on NEED_DATA by calling kl_http_request_await_body(req)
  *        (see keel/http_request.h) instead of producing a response: the body
  *        reader's on_data callback then resumes it when bytes arrive (both the
- *        leftover from the headers-read and subsequent socket reads).
+ *        leftover from the headers-read and subsequent socket reads). When the
+ *        handler is resumed from on_data (not via kl_async_complete) and its
+ *        response is ready, it signals completion with
+ *        kl_http_request_send_response(req) (the send-side partner to
+ *        await_body), which transitions the connection to sending.
  *
  *        Enables the full error-path mid-stream early-exit: if the
  *        body reader rejects bytes (on_data returns -1) at any point,

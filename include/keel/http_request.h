@@ -138,6 +138,24 @@ void kl_http_request_resume_body(const KlHttpRequest *req);
  */
 void kl_http_request_await_body(const KlHttpRequest *req);
 
+/**
+ * @brief Streaming-async handler: the response is complete, send it (the send-side partner to
+ *        kl_http_request_await_body).
+ *
+ * A kl_http_server_route_streaming_async / kl_http_router_add_streaming_async handler that is resumed
+ * from the body reader's on_data callback (rather than via kl_async_complete) has no KlAsyncOp to
+ * complete and is not re-invoked by the dispatch, which returns the connection state as the handler left
+ * it. Where kl_http_request_await_body says "keep reading", this says "I am done reading; the response I
+ * built on kl_http_conn_response() is ready". Call it (on the event-loop thread, from the handler or its
+ * on_data resume) after producing the response, including an error response such as 413.
+ *
+ * This transitions the connection to sending; it does NOT itself flush, unlike kl_http_response_send
+ * (which operates on a KlHttpResponse and writes bytes to the fd). The existing write machinery performs
+ * the send, handling partial writes / would-block by re-arming WRITE. Outside a streaming-async handler
+ * it has no useful effect.
+ */
+void kl_http_request_send_response(const KlHttpRequest *req);
+
 /** @brief Find header by name (case-insensitive).
  *  @return Null-terminated value pointer, or NULL if not found. */
 static inline const char *kl_http_request_header(const KlHttpRequest *req,

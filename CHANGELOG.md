@@ -7,6 +7,31 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 No changes yet.
 
+## [3.0.0-rc.3]
+
+Release candidate; no release date (the tag and prerelease are a separately authorized step).
+Supersedes 3.0.0-rc.2 and restarts the release-candidate window.
+
+### Fixed
+
+- Streaming-async completion is usable from outside the tree. rc.2 restored the "keep reading" half of
+  the streaming-async contract (`kl_http_request_await_body`), but the symmetric "handler done, send the
+  response" half was still missing. A streaming-async handler resumed from the body reader's `on_data`
+  callback (rather than via `kl_async_complete`) has no `KlAsyncOp` to complete and is not re-invoked by
+  the dispatch, which returns the connection state as the handler left it (`streaming_async` returns
+  `c->state` verbatim). With `KlHttpConn` opaque after F2, there was no public way to leave the
+  connection in the sending state, so a completed handler stayed in the body-reading state and the
+  request timed out (408) instead of sending its response (including error responses such as 413). Added
+  `kl_http_request_send_response(req)` (`keel/http_request.h`) as the public send-side signal.
+
+### Added
+
+- `kl_http_request_send_response(const KlHttpRequest *req)` - the send-side partner to
+  `kl_http_request_await_body`: a streaming-async handler resumed from `on_data` calls it after building
+  its response on `kl_http_conn_response()` to transition the connection to sending. It does not itself
+  flush (unlike `kl_http_response_send`); the existing write machinery performs the send, handling
+  partial writes / would-block.
+
 ## [3.0.0-rc.2]
 
 Release candidate; no release date (the tag and prerelease are a separately authorized step).
