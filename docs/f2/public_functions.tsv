@@ -160,6 +160,7 @@ kl_http_request_peer_cred	http_server.h
 kl_http_request_peer_label	http_server.h
 kl_http_request_peer_sockaddr	http_server.h
 kl_http_request_resume_body	http_request.h
+kl_http_request_send_response	http_request.h
 kl_http_response_begin_stream	http_response.h
 kl_http_response_body_borrow	http_response.h
 kl_http_response_body_compress	http_compress.h

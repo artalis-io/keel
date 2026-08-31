@@ -235,7 +235,10 @@ int  kl_http_server_route_streaming(KlHttpServer *s, const char *method, const c
  *        handler MUST yield on NEED_DATA by calling
  *        kl_http_request_await_body(req) instead of producing a response:
  *        the body reader's on_data callback resumes it for the leftover
- *        and subsequent reads.
+ *        and subsequent reads. When resumed from on_data (not via
+ *        kl_async_complete), it signals a finished response with
+ *        kl_http_request_send_response(req), the send-side partner to
+ *        await_body.
  *
  *        Enables the full error-path mid-stream early-exit: caps
  *        that fire during leftover processing now resume the parked

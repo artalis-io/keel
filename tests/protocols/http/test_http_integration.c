@@ -374,12 +374,14 @@ static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
  *
  * Synthetic body reader + handler pair used by the
  * streaming_mid_stream_early_exit test. Together they simulate what a
- * Lua/JS coroutine-based handler would do: yield at dispatch time
- * (state = READING_BODY), then "resume" inside on_data, set up the
- * response, and transition state to SENDING. Without the early-exit
- * branch in kl_http_conn_on_readable's READING_BODY mid-stream return,
- * Keel would override that SENDING with READING_BODY and the response
- * would never be sent.
+ * Lua/JS coroutine-based handler would do: yield at dispatch time via
+ * kl_http_request_await_body(req), then "resume" inside on_data, set up
+ * the response, and signal completion via kl_http_request_send_response(req)
+ * (the public send-side partner to await_body). This is the exact
+ * out-of-tree pattern: neither the park nor the send touches the now-opaque
+ * KlHttpConn. Without the early-exit branch in kl_http_conn_on_readable's
+ * READING_BODY mid-stream return, Keel would override that SENDING with
+ * READING_BODY and the response would never be sent.
  */
 /* Set by handle_early_exit when it runs. The test thread polls this
  * to know when the handler has run (and therefore when it's safe to
@@ -390,7 +392,7 @@ static volatile int eer_handler_called = 0;
 typedef struct {
     KlHttpBodyReader  base;
     KlAllocator  *alloc;
-    KlHttpConn       *conn;        /* stashed by handler at dispatch time */
+    const KlHttpRequest *req;      /* stashed by handler at dispatch time */
     KlHttpResponse   *res;         /* same */
     int           responded;   /* one-shot guard */
 } EarlyExitReader;
@@ -398,15 +400,16 @@ typedef struct {
 static int  eer_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     EarlyExitReader *r = (EarlyExitReader *)self;
     (void)data; (void)len;
-    if (r->responded || !r->conn || !r->res) return 0;
-    /* Mimic a coroutine waking on first on_data: set up the response,
-     * transition state to SENDING. The new mid-stream early-exit
+    if (r->responded || !r->req || !r->res) return 0;
+    /* Mimic a coroutine waking on first on_data: set up the response, then
+     * signal completion via the public kl_http_request_send_response(req),
+     * which transitions the connection to SENDING. The mid-stream early-exit
      * branch in http_connection.c sees the terminal state and returns it
      * instead of forcing READING_BODY. */
     kl_http_response_status(r->res, 200);
     kl_http_response_header(r->res, "Content-Type", "text/plain");
     kl_http_response_body_borrow(r->res, "early exit", 10);
-    r->conn->state = KL_HTTP_CONN_SENDING;
+    kl_http_request_send_response(r->req);
     r->responded = 1;
     return 0;
 }
@@ -433,15 +436,15 @@ static KlHttpBodyReader *eer_factory(KlAllocator *alloc, const KlHttpRequest *re
 
 static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    /* Stash conn + res on the body reader so on_data can wake "us"
-     * with the response. Then yield by leaving state as READING_BODY
+    /* Stash req + res on the body reader so on_data can wake "us"
+     * with the response. Then yield via kl_http_request_await_body(req)
      * so conn_invoke_streaming_handler returns READING_BODY and the
      * event loop keeps pumping on_data. */
     EarlyExitReader *r = (EarlyExitReader *)req->body_reader;
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
-    r->conn = kl_http_request_conn(req);
+    r->req  = req;
     r->res  = res;
-    r->conn->state = KL_HTTP_CONN_READING_BODY;
+    kl_http_request_await_body(req);
     /* Signal the test thread that we've run; it polls this before
      * sending the second body chunk so the test isn't timing-fragile. */
     eer_handler_called = 1;

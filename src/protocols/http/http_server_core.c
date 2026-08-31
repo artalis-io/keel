@@ -683,6 +683,21 @@ void kl_http_request_await_body(const KlHttpRequest *req) {
     c->state = KL_HTTP_CONN_READING_BODY;
 }
 
+/* Streaming-async completion: the send-side partner to kl_http_request_await_body. A streaming-async
+ * handler that is resumed from the body reader's on_data (not via kl_async_complete) has no KlAsyncOp
+ * to complete and is never re-invoked by the dispatch, which returns the connection state verbatim
+ * (http_connection.c: `if (c->route->streaming_async) return c->state;`). After building its response on
+ * kl_http_conn_response(), such a handler calls this to leave the connection in SENDING so the existing
+ * write machinery flushes the response (partial/would-block-safe via the WRITE re-arm). It does NOT flush
+ * synchronously (unlike kl_http_response_send); it only selects the state the dispatch inspects. This is
+ * the public replacement for the direct conn->state = SENDING write the (now-opaque) KlHttpConn no longer
+ * permits. Outside a streaming-async handler it has no useful effect. */
+void kl_http_request_send_response(const KlHttpRequest *req) {
+    KlHttpConn *c = req ? kl_http_request_conn(req) : NULL;
+    if (!c) return;
+    c->state = KL_HTTP_CONN_SENDING;
+}
+
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */
 void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out) {
     if (!out) return;
