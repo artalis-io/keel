@@ -314,7 +314,11 @@ static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_http_request_conn(req);
     r->res  = res;
-    r->conn->state = KL_HTTP_CONN_READING_BODY;
+    /* Public streaming-async yield: park for more body via the public API (not the internal
+     * conn->state write), so this exercises kl_http_request_await_body exactly as an out-of-tree
+     * consumer must. The test below asserts the parked handler catches the mid-stream cap and emits
+     * the structured error response, which only happens if await_body kept the body feeding. */
+    kl_http_request_await_body(req);
     eer_async_err_handler_called = 1;
 }
 

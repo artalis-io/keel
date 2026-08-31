@@ -671,6 +671,18 @@ void kl_http_request_resume_body(const KlHttpRequest *req) {
         (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }
 
+/* Streaming-async yield: the public signal a streaming handler uses to park for more body. The
+ * streaming dispatch (conn_invoke_streaming_handler) reads the connection state on return: READING_BODY
+ * means "handler parked, keep feeding the body reader and re-enter it"; anything else means "handler
+ * produced a response, send it". This is the public replacement for the direct conn->state write the
+ * (now-opaque) KlHttpConn no longer permits. No event-axis work here: it only selects the state the
+ * dispatch inspects; the actual reads are driven by the existing READING_BODY machinery. */
+void kl_http_request_await_body(const KlHttpRequest *req) {
+    KlHttpConn *c = req ? kl_http_request_conn(req) : NULL;
+    if (!c) return;
+    c->state = KL_HTTP_CONN_READING_BODY;
+}
+
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */
 void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out) {
     if (!out) return;

@@ -7,6 +7,27 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 No changes yet.
 
+## [3.0.0-rc.2]
+
+Release candidate; no release date (the tag and prerelease are a separately authorized step).
+Supersedes 3.0.0-rc.1 and restarts the release-candidate window.
+
+### Fixed
+
+- Streaming-async routes are usable from outside the tree again. `kl_http_server_route_streaming_async`
+  / `kl_http_router_add_streaming_async` require the handler to "yield on NEED_DATA," but the only
+  mechanism was a direct `conn->state = KL_HTTP_CONN_READING_BODY` write, which the F2 `KlHttpConn`
+  opacity made internal with no public replacement (the streaming dispatch otherwise defaults a
+  returning handler to sending a response, ending the stream). Added `kl_http_request_await_body(req)`
+  (`keel/http_request.h`) as the public yield signal, so a streaming-async handler can park for more
+  body without reaching into the now-private connection header.
+
+### Added
+
+- `kl_http_request_await_body(const KlHttpRequest *req)` - park a streaming-async handler for more
+  request body. Orthogonal to `kl_http_request_pause_body` / `_resume_body` (flow control within the
+  body-reading state); this selects that state.
+
 ## [3.0.0-rc.1]
 
 Release candidate; no release date (the tag and prerelease are a separately authorized step). 3.0.0 is

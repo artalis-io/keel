@@ -148,6 +148,7 @@ kl_http_redirect_request_pooled	http_redirect.h
 kl_http_redirect_response	http_redirect.h
 kl_http_redirect_start	http_redirect.h
 kl_http_redirect_start_pooled	http_redirect.h
+kl_http_request_await_body	http_request.h
 kl_http_request_conn	http_request.h
 kl_http_request_header	http_request.h
 kl_http_request_header_len	http_request.h

@@ -301,3 +301,4 @@ kl_http_conn_response_const	http_connection.h	direct-assertion	tests/protocols/h
 kl_http_server_bound_port	http_server.h	direct-assertion	tests/protocols/http/test_http_server_stats.c:109 (==bound_port; NULL==-1)
 kl_http_server_event_ctx	http_server.h	direct-assertion	tests/protocols/http/test_http_server_stats.c:107 (==&s.ev; NULL==NULL)
 kl_http_server_event_ctx_const	http_server.h	direct-assertion	tests/protocols/http/test_http_server_stats.c:108 (==&s.ev; NULL==NULL)
+kl_http_request_await_body	http_request.h	direct-assertion	tests/protocols/http/test_http_integration.c (streaming_async_single_read_leftover_cap: the streaming-async handler parks via kl_http_request_await_body, and the parked handler catches the mid-stream cap and emits the structured error response, which only occurs if await_body kept the body feeding)
