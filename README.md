@@ -22,6 +22,12 @@ make analyze            # Clang static analyzer (scan-build)
 make cppcheck           # cppcheck static analysis
 make fuzz               # build libFuzzer fuzz targets (requires clang)
 make clean              # remove artifacts
+
+# Embedder hooks: build Keel's TUs with the SAME flags as the tree vendoring it.
+make KEEL_OPT=-O0                     # optimization level (default -O2), applied
+                                      #   to Keel's own AND vendored TUs
+make KEEL_EXTRA_CFLAGS=-flto=thin     # appended last, so it wins over Keel's own
+make KEEL_EXTRA_LDFLAGS=-flto=thin    # likewise, for links
 ```
 
 Supported toolchains, event backends, socket/platform providers, integrations, and the version and
