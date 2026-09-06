@@ -25,22 +25,51 @@ endif
 ifeq ($(CC),cosmocc)
   COSMO_FAT := 1
 endif
+# ── Embedder hooks ───────────────────────────────────────────────────────────
+#
+# Keel is normally vendored into a larger tree (Hull, and anything else that
+# embeds it), and that tree needs Keel's TUs built with the SAME flags as its
+# own. Before these hooks there was no supported way to do that: CFLAGS and
+# VENDOR_CFLAGS are set per platform branch below with a hardcoded -O2, so an
+# embedder could only override them wholesale - which means restating every one
+# of Keel's own flags, per platform, and re-doing it on every Keel release.
+#
+# KEEL_OPT           optimization level for Keel's own AND vendored TUs.
+# KEEL_EXTRA_CFLAGS  appended to both, LAST, so they win over everything here.
+# KEEL_EXTRA_LDFLAGS appended to LDFLAGS, likewise.
+#
+# Defaults are exactly the previous behaviour, so a build that sets none of
+# them is byte-for-byte unchanged.
+#
+# The concrete case that motivated this: Hull builds on Windows with cosmocc,
+# whose gcc wedges indefinitely (~0 CPU, not an ICE) on large TUs at -O2, so
+# Hull builds everything at -O0 there. Keel silently ignored that and kept
+# building at -O2, which wedged the build. Hull's LTO and CFI flags reached
+# Keel just as far - nowhere.
+KEEL_OPT ?= -O2
+
+# _FORTIFY_SOURCE is built on __builtin_object_size, which folds to "unknown"
+# without optimization: at -O0 the flag is a silent no-op AND gcc warns about
+# it, which Keel's -Werror turns into a hard build failure. So it is gated on
+# the level actually in use rather than assumed. (Hull gates its own the same
+# way; see mk/hardening.mk there.)
+KEEL_FORTIFY := $(if $(filter -O0,$(KEEL_OPT)),,-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
   # APE binaries have their own non-relocatable layout; no PIE / RELRO / FORTIFY here.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else ifdef WINDOWS
   # Windows (MinGW-w64): WSAPoll event backend + Winsock socket provider, its own
   # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c; no #ifdef in the
   # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
             -fstack-protector-strong -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -Iinclude -Ivendor/llhttp
   # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
   # The IOCP TU is the only place the completion model lives; no #ifdef leaks into
   # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
@@ -76,11 +105,11 @@ else
   # _FORTIFY_SOURCE at the command line. Undefine first so our value wins
   # without provoking a "macro redefined" warning that -Werror would
   # promote to a hard error.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
+            $(KEEL_FORTIFY) \
             -fstack-protector-strong -fPIE \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -fPIE -Iinclude -Ivendor/llhttp
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
   # it as "unused during compilation"; Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise
@@ -256,6 +285,15 @@ ifeq ($(KEEL_COMPRESS),miniz)
 endif
 endif
 COMPRESS_MINIZ_OBJ ?=
+
+# Embedder-supplied flags, appended AFTER every block above so they win over
+# Keel's own choices - that is the whole point of a hook. Applied to
+# VENDOR_CFLAGS too: the vendored TUs (llhttp, the miniz adapter) are exactly
+# where the Windows -O2 wedge was observed, so a hook reaching only CFLAGS
+# would have missed it.
+CFLAGS        += $(KEEL_EXTRA_CFLAGS)
+VENDOR_CFLAGS += $(KEEL_EXTRA_CFLAGS)
+LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 
 CORE_OBJ = $(CORE_SRC:.c=.o)
 LLHTTP_OBJ = $(LLHTTP_SRC:.c=.o)
