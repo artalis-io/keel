@@ -291,9 +291,17 @@ COMPRESS_MINIZ_OBJ ?=
 # VENDOR_CFLAGS too: the vendored TUs (llhttp, the miniz adapter) are exactly
 # where the Windows -O2 wedge was observed, so a hook reaching only CFLAGS
 # would have missed it.
-CFLAGS        += $(KEEL_EXTRA_CFLAGS)
-VENDOR_CFLAGS += $(KEEL_EXTRA_CFLAGS)
-LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
+# `override`, not a plain +=, because a variable set on make's COMMAND LINE
+# beats an ordinary += in the makefile. Keel's own `debug` and `coverage`
+# targets recurse with CFLAGS=... LDFLAGS=... on the command line, so without
+# override the hooks silently vanish from core compilation and linking while
+# still applying to VENDOR_CFLAGS (which those targets do not set). That split
+# is worse than losing them outright: under LTO it yields an archive of mixed
+# LTO and non-LTO objects, which is exactly the state the hook exists to avoid.
+# KEEL_EXTRA_* reaches the sub-make on its own, via MAKEFLAGS.
+override CFLAGS        += $(KEEL_EXTRA_CFLAGS)
+override VENDOR_CFLAGS += $(KEEL_EXTRA_CFLAGS)
+override LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 
 CORE_OBJ = $(CORE_SRC:.c=.o)
 LLHTTP_OBJ = $(LLHTTP_SRC:.c=.o)
