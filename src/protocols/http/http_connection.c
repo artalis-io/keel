@@ -252,6 +252,17 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
         kl_free(pool->alloc, pool->conns,
                 sizeof(KlHttpConn) * (size_t)pool->capacity);
         pool->conns = NULL;
+        /* Clear the shape too, not just the pointer. Leaving capacity at its old value
+         * describes a pool that no longer exists, and every slot walk here is bounded by
+         * capacity rather than by conns: kl_http_server_sweep_conn_timeouts and
+         * kl_http_server_drain_progress both walk 0..capacity and dereference &conns[i]
+         * unconditionally, so a freed pool that still claims 256 slots turns any stray
+         * sweep into a NULL dereference instead of a no-op. Zeroing makes a freed pool
+         * describe itself honestly and those walks degrade to nothing. */
+        pool->capacity = 0;
+        pool->active_count = 0;
+        pool->free_credits = 0;
+        pool->free_list = NULL;
     }
 }
 
