@@ -36,6 +36,22 @@
 #include <stdint.h>
 #include "kl_atomic.h"    /* lock-free int atomics for the running/draining flags */
 
+/* ABI guard for KlHttpServer.unix_node. The public header spells that union's alignment members
+ * out (long double / void * / long long) instead of using max_align_t, which MSVC does not define
+ * in C mode. The substitution is only ABI-neutral while it yields the SAME alignment, so pin it
+ * here rather than trusting the reasoning: gcc's and clang's max_align_t is itself defined in
+ * terms of long long and long double, so the two agree on every target they support.
+ *
+ * Verified to bite: dropping long double from the union takes it from 16-byte to 8-byte alignment
+ * on x86-64 and this assert fails. It names the union's own type, which is what the tag in the
+ * header is for, so it stays exact regardless of what alignment the other members of KlHttpServer
+ * happen to carry. Skipped where max_align_t does not exist, which is the case it exists to
+ * permit. */
+#ifndef _MSC_VER
+_Static_assert(_Alignof(union KlHttpServerUnixNode) >= _Alignof(max_align_t),
+               "KlHttpServer.unix_node must stay max_align_t-aligned");
+#endif
+
 /* Same tick bound http_server.c's readiness loop uses; a local copy keeps this TU
  * independent of http_server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000

@@ -127,6 +127,7 @@ KlHttpServerConfig	struct	http_server.h
 KlHttpServerLogFn	callback	http_server.h
 KlHttpServerStats	struct	http_server.h
 KlHttpServerTransport	enum	http_server.h
+KlHttpServerUnixNode	union	http_server.h
 KlHttpSse	struct	http_sse.h
 KlIoStatus	enum	socket.h
 KlIoVec	struct	socket.h
