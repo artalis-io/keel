@@ -285,6 +285,10 @@ kl_version	freestanding.h
 kl_version	keel.h
 kl_version_number	freestanding.h
 kl_version_number	keel.h
+kl_wakeup_close	wakeup.h
+kl_wakeup_drain	wakeup.h
+kl_wakeup_open	wakeup.h
+kl_wakeup_signal	wakeup.h
 kl_watcher_add	event_ctx.h
 kl_watcher_del	event_ctx.h
 kl_watcher_mod	event_ctx.h
