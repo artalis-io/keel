@@ -192,3 +192,4 @@ websocket_server.h	KlWsServerCallbacks	struct	caller-constructed	caller-built; F
 websocket_server.h	KlWsServerConfig	struct	caller-constructed	caller-built; F2-C append-only
 websocket_server.h	KlWsServerConn	opaque	opaque	F2-B1 opaque in v3; borrowed handle via kl_ws_server_* API; def -> private
 wakeup.h	KlWakeup	struct	caller-inspectable	library-filled by kl_wakeup_open; caller reads .rd to register the watcher
+http_server.h	KlHttpServerUnixNode	union	caller-owned-value	opaque substrate storage embedded in caller-owned KlHttpServer; visible to permit enclosing layout; tagged only so an ABI alignment assert can name it; callers never touch it

@@ -18,7 +18,7 @@
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stddef.h>   /* max_align_t (aligns the opaque unix_node storage) */
+#include <stddef.h>   /* size_t */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -172,10 +172,23 @@ typedef struct KlHttpServer {
      * substrate. Zeroed and set to the not-open sentinel by kl_http_server_init. Unused on non-UNIX
      * transports and on platforms without the POSIX node lifecycle. The 192 bytes match
      * KL_UNIX_NODE_STORAGE; a static_assert in http_server_plat_posix.c verifies this storage is
-     * large enough, and one in unix_socket_node_posix.c bounds the state. max_align_t gives the
-     * storage suitable alignment for any member the module places in it.
+     * large enough, and one in unix_socket_node_posix.c bounds the state.
+     *
+     * The alignment members give the storage suitable alignment for any member the module
+     * places in it. They spell out the widest scalars rather than using max_align_t, which
+     * MSVC does not define in C mode: a public header must compile for every consumer, not
+     * just the ones that build the library. This is ABI-neutral, because the max_align_t
+     * that gcc and clang ship is itself defined in terms of long long and long double. The
+     * union carries a tag solely so a _Static_assert in http_server_core.c can name its
+     * type and hold it to max_align_t's alignment wherever max_align_t exists; the tag adds
+     * no member and changes no layout.
      * Adding this is a pre-3.0 source/ABI revision; see docs/archive/designs/unix_socket_cleanup_security_design.md. */
-    union { unsigned char opaque[192]; max_align_t _align; } unix_node;
+    union KlHttpServerUnixNode {
+        unsigned char opaque[192];
+        long double _align_ld;
+        void       *_align_p;
+        long long   _align_ll;
+    } unix_node;
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
     int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
