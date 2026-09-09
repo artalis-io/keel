@@ -122,6 +122,7 @@ typedef struct KlIocpOp {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
     };
     int           watcher_removed;             /* WATCHER: kl_event_del'd; free, don't re-post */
+    KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
     /* Global outstanding-op registry: EVERY posted op is linked here so teardown
      * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
      * (including the otherwise-untracked READ/WRITE/SENDFILE/UDP ops). op_sock is the socket the
@@ -152,17 +153,35 @@ static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock);
 /* Cancel + dequeue every tracked outstanding overlapped op before free; below. */
 static void iocp_quiesce_port_for_close(KlIocpState *st);
 
-/* Post (or re-post) the persistent WSARecv for a watcher socket. */
+/* Retarget a tracked watch onto a new interest mask (defined below kl_event_add_builtin). */
+struct KlIocpWatch;
+static int iocp_watch_reinterest(KlIocpState *st, struct KlIocpWatch *w, KlEventMask mask, void *udata);
+
+/* Post (or re-post) the readiness probe for a watcher socket, per op->watch_mask.
+ *
+ * The completion port has no poll primitive, so readiness is expressed as ZERO-BYTE overlapped
+ * I/O, the standard IOCP idiom: a zero-byte WSARecv completes when the socket becomes readable, a
+ * zero-byte WSASend when it becomes writable, and neither moves payload. Zero-byte is required,
+ * not just tidier: this used to WSARecv into op->accept_buf, which CONSUMES what arrived. That was
+ * invisible while the only watcher was the thread-pool wakeup (a byte the watcher exists to
+ * discard), but the async client watches its own connection socket, and a consuming probe would
+ * eat response bytes. WRITE is tested first: a watcher carries one interest at a time.
+ *
+ * KNOWN WART (#265): the caller re-posts from the completion, before the callback has drained the
+ * socket, so a still-ready socket completes again at once and delivers the same readiness twice.
+ * That is one spurious callback per signal, harmless for the wakeup (its drain finds nothing) but
+ * real; tests/test_wakeup.c drained_channel_stops_firing is the oracle for fixing it. */
 static int iocp_watch_post(KlIocpOp *op) {
-    WSABUF b = { (ULONG)sizeof(op->accept_buf), op->accept_buf };
-    DWORD flags = 0, recvd = 0;
+    WSABUF b = { 0, NULL };   /* zero-byte: readiness only, consumes nothing */
+    DWORD n = 0, flags = 0;
     memset(&op->ov, 0, sizeof(op->ov));
-    int rc = WSARecv(op->accept_sock, &b, 1, &recvd, &flags, &op->ov, NULL);
+    int rc = (op->watch_mask & KL_EVENT_WRITE)
+             ? WSASend(op->accept_sock, &b, 1, &n, 0, &op->ov, NULL)
+             : WSARecv(op->accept_sock, &b, 1, &n, &flags, &op->ov, NULL);
     return (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) ? -1 : 0;
 }
 
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    (void)mask;   /* completion model: no readiness mask; I/O is posted, not armed */
     if (!kl_handle_valid(fd))
         return -1;
     KlIocpState *st = loop->_backend;
@@ -174,8 +193,18 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
      * tag, not on any IOCP specific. */
     if ((uintptr_t)udata & 1) {
         for (KlIocpWatch *w = st->watches; w; w = w->next)
-            if (w->fd == (SOCKET)fd) { w->op->watcher_udata = udata; return 0; }  /* idempotent */
-        if (!CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port, (ULONG_PTR)udata, 0))
+            if (w->fd == (SOCKET)fd) {   /* idempotent re-add; the interest may have changed */
+                w->op->watcher_udata = udata;
+                return iocp_watch_reinterest(st, w, mask, udata);
+            }
+        /* A socket the completion connect already posted ConnectEx on is ALREADY associated with
+         * the port, and a repeat association fails with ERROR_INVALID_PARAMETER. That is benign:
+         * the original association stands, and a watcher completion is routed by
+         * op->watcher_udata, not by the completion key. Treating it as fatal is what stopped the
+         * client's detached connect watcher from ever being armed for the send phase.
+         * Any other failure is real. */
+        if (!CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port, (ULONG_PTR)udata, 0) &&
+            GetLastError() != ERROR_INVALID_PARAMETER)
             return -1;
         KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
         if (!op) return -1;
@@ -184,6 +213,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         op->alloc = st->alloc;
         op->accept_sock = (SOCKET)fd;
         op->watcher_udata = udata;
+        op->watch_mask = mask;
         iocp_op_register(st, op, (SOCKET)fd);
         if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
         KlIocpWatch *w = kl_malloc(st->alloc, sizeof(*w));
@@ -200,13 +230,49 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     return h ? 0 : -1;
 }
 
+/* Retarget a watch onto a new interest. An outstanding probe covers the OLD mask and would never
+ * fire for the new one (a pending zero-byte WSARecv on a socket that is writable but not readable
+ * never completes), so cancel it and post a fresh one. The cancelled probe still completes later,
+ * aborted; watcher_removed makes the drain retire it instead of dispatching or re-posting, the
+ * same retirement kl_event_del uses. An unchanged mask needs nothing: the probe already covers it
+ * and the drain keeps re-posting it. */
+static int iocp_watch_reinterest(KlIocpState *st, KlIocpWatch *w, KlEventMask mask, void *udata) {
+    if (w->op->watch_mask == mask) return 0;
+
+    KlIocpOp *old = w->op;
+    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_WATCHER;
+    op->alloc = st->alloc;
+    op->accept_sock = w->fd;
+    op->watcher_udata = udata;
+    op->watch_mask = mask;
+    iocp_op_register(st, op, w->fd);
+    if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
+
+    /* Retarget the watch BEFORE cancelling, so the aborted completion cannot match this watch
+     * and unlink it during teardown. */
+    w->op = op;
+    old->watcher_removed = 1;
+    CancelIoEx((HANDLE)(uintptr_t)w->fd, &old->ov);
+    return 0;
+}
+
 int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    (void)mask;   /* no readiness re-arm; a watcher just updates its tag */
     if (!((uintptr_t)udata & 1)) return 0;
     KlIocpState *st = loop->_backend;
     for (KlIocpWatch *w = st->watches; w; w = w->next)
-        if (w->fd == (SOCKET)fd) { w->op->watcher_udata = udata; return 0; }
-    return 0;
+        if (w->fd == (SOCKET)fd) {
+            w->op->watcher_udata = udata;
+            return iocp_watch_reinterest(st, w, mask, udata);
+        }
+    /* No watch yet: a DETACHED watcher being armed for the first time. kl_watcher_add_detached
+     * registers the ctx node with no kl_event_add, because the completion connect fires its tagged
+     * pointer directly; its contract is that a later kl_watcher_mod arms the real relay for the
+     * send/recv phase. Returning 0 here left the async client with no relay at all after connect.
+     * event_pollcomp.c's kl_pollcomp_ev_mod does the same add-if-absent. */
+    return kl_event_add_builtin(loop, fd, mask, udata);
 }
 
 int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
@@ -965,7 +1031,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = op->watcher_udata;
-            out[count].bytes = (size_t)KL_EVENT_READ;
+            out[count].bytes = (size_t)op->watch_mask;
             out[count].ok = 1;
             count++;
             if (iocp_watch_post(op) < 0)
