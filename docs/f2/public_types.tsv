@@ -175,6 +175,7 @@ KlTlsCtx	opaque	tls.h
 KlTlsFactory	callback	tls.h
 KlTlsResult	enum	tls.h
 KlUrl	struct	url.h
+KlWakeup	struct	wakeup.h
 KlWatcher	opaque	event_ctx.h
 KlWatcherFn	callback	event_ctx.h
 KlWorkCancelFn	callback	thread_pool.h
