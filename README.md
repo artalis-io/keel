@@ -301,7 +301,8 @@ Below the axes sit orthogonal, independently testable modules:
 | **cors** | `http_cors.h` | Built-in CORS middleware with configurable origins |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
 | **async** | `async.h` | Connection suspension for async operations |
-| **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
+| **wakeup** | `wakeup.h` | Cross-thread event-loop wakeup channel (watchable on every backend) |
+| **thread_pool** | `thread_pool.h` | Worker thread pool with `KlWakeup`-based event loop wakeup |
 | **url** | `url.h` | URL parser (http/https/ws/wss, IPv6, CRLF injection guard) |
 | **client** | `http_client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
 | **websocket** | `websocket.h` + `websocket_server.h` | RFC 6455 WebSocket server (shared frame parser + server API) |
@@ -524,18 +525,23 @@ void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     ctx->op.on_resume = my_resume_cb;
     ctx->op.on_cancel = my_cancel_cb;
 
-    /* Create a pipe: watcher fires when the pipe is written to */
-    socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    /* Create a wakeup channel: the watcher fires when it is signalled */
+    kl_wakeup_open(&ctx->wakeup);
+    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->wakeup.rd, KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection (removes it from event loop, exempt from timeouts) */
     kl_async_suspend(srv, conn, &ctx->op);
 
-    /* Later: write to pipe → watcher fires → kl_async_complete → connection resumes */
+    /* Later: kl_wakeup_signal(&ctx->wakeup) from any thread → watcher fires
+       → kl_async_complete → connection resumes */
 }
 ```
 
 The watcher callback runs on the event loop thread, making it safe to call `kl_async_complete()` which re-registers the connection FD and drives the state machine forward.
+
+`KlWakeup` is the portable signal channel: a raw `pipe(2)` is not watchable on Windows (WSAPoll and IOCP watch sockets only), so `kl_wakeup_open()` gives you a pipe where a pipe works and a loopback socket pair where it does not. `kl_wakeup_signal()` is the one call a foreign thread may make; everything else, including `kl_async_complete()`, belongs in the watcher callback.
+
+`on_resume` does not have to set anything. If it returns having only built the response (on `kl_http_conn_response(op->conn)`), `kl_async_complete()` sends it.
 
 ## Thread Pool
 

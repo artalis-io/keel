@@ -116,4 +116,5 @@ tests/test_unix_socket_node.c
 tests/test_unix_socket_node_win.c
 tests/test_url.c
 tests/test_version.c
+tests/test_wakeup.c
 tests/test_watcher_aba.c

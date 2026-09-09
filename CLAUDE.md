@@ -61,7 +61,7 @@ Below the axes, orthogonal modules, each independently testable:
 13. **cors**: Built-in CORS middleware with configurable origins/methods/headers
 14. **tls**: Pluggable TLS transport vtable (bring-your-own backend)
 15. **async**: Connection suspension for async operations (uses KlEventCtx)
-16. **thread_pool**: Worker thread pool with pipe-based event loop wakeup
+16. **thread_pool**: Worker thread pool with `KlWakeup`-based event loop wakeup
 17. **url**: URL parser (http/https/ws/wss, IPv6, CRLF injection guard)
 18. **client**: HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx), response streaming (push) + request streaming (chunked pull). Async connect uses Happy Eyeballs (RFC 8305): races the resolved address list with a configurable Connection Attempt Delay, first handshake wins, plus an overall request deadline timer
 19. **websocket_client**: Async WebSocket client with masked frames (RFC 6455)
@@ -80,6 +80,7 @@ Below the axes, orthogonal modules, each independently testable:
 32. **proxy_protocol**: PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 33. **datagram**: `KlDatagram`, the Tier-1 datagram primitive over `KlEventCtx`: a caller-owned, single-threaded, event-loop-driven handle over a prepared UDP fd, validated live across every backend (readiness epoll/kqueue/poll/WSAPoll + completion pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4) with a **STABLE** function+type contract (opt-in layout via `<keel/datagram_detail.h>`). One-call socket create/configure/bind/adopt (`kl_datagram_socket_init` + `KlDatagramSocketConfig`), provider-neutral `kl_datagram_connect`, async per-datagram receive with source + local (dest) address via `IP_PKTINFO`, a fixed-slot whole-datagram send queue with on-drain backpressure (`kl_datagram_send` + `KlDatagramMessage`), source-pinned sends + per-packet TOS/ECN, multicast/broadcast (`kl_datagram_multicast_join`/`leave` + `SO_BROADCAST`, `IP_MULTICAST_TTL`/`LOOP`/`IF`), transparent `recvmmsg`/`sendmmsg` batching + UDP GSO/GRO offload (Linux; per-datagram/plain fallbacks elsewhere), and ECN/TOS/DSCP marking (`kl_datagram_set_tos`, `kl_datagram_recv_tos`, `KL_TOS()`/DSCP defines). Confirmed-detachment close (`kl_datagram_close_begin`/`_cancel` → drive loop → `_free`). Base for portable message protocols (a future QUIC/HTTP-3, mDNS/CoAP) and the built-in DNS resolver (see `docs/archive/designs/udp_design.md`, `docs/contracts/datagram.md`)
 34. **dns_resolver**: Built-in async DNS resolver over `KlDatagram` implementing the `KlResolver` vtable: non-blocking, dual-family A+AAAA queries issued concurrently (RFC 8305) with per-family timeout/retransmit, a Resolution-Delay cap (§3) so a slow/absent family never stalls, and a family-interleaved multi-address result (§4, preferred family first); plus `/etc/hosts` lookup, EDNS0, multiple nameservers with failover, `resolv.conf` `search`/`ndots` expansion, persistent TCP fallback (RFC 7766) on truncated (TC) responses, a per-nameserver pipelined, idle-closed connection routed through a `(fd, KlTls*)` I/O helper (the DoT hook), and DNS cookies (RFC 7873, on by default): a per-nameserver client cookie + learned server cookie carried in an EDNS0 COOKIE option, with echoed-client-cookie spoof rejection and a bounded BADCOOKIE retry, replacing the blocking `getaddrinfo` fallback. The bounds-safe response parser (`kl_dns_parse_response`, which also collects the full multi-address list) is fuzzed (`fuzz_dns`)
+35. **wakeup**: `KlWakeup`, the public cross-thread event-loop wakeup channel: a connected handle pair whose `.rd` registers as a `KlWatcher` and whose `.wr` any thread may signal, so a foreign thread can reach `kl_async_complete` (loop-thread-only) safely. A pipe where a pipe is watchable, a loopback socket pair where it is not (WSAPoll and IOCP watch sockets only), so one piece of caller code runs on every backend. `KlThreadPool` uses it internally; callers use it directly when the completion signal comes from somewhere the pool does not own
 
 **Deliberate design choices:**
 
@@ -128,6 +129,7 @@ Below the axes, orthogonal modules, each independently testable:
 | `KlThreadPool` | `thread_pool.h` | Opaque thread pool: workers, work/done queues, pipe watcher |
 | `KlWorkItem` | `thread_pool.h` | Work item: work_fn (worker), done_fn (event loop), cancel_fn (shutdown) |
 | `KlThreadPoolConfig` | `thread_pool.h` | Config: num_workers, queue_capacity, allocator |
+| `KlWakeup` | `wakeup.h` | Cross-thread wakeup channel: `.rd` registers as a KlWatcher, `.wr` is signalled from any thread (pipe or loopback socket pair, per platform) |
 | `KlUrl` | `url.h` | Parsed URL: is_https, host, port, path |
 | `KlHttpClientHeader` | `http_client.h` | Request/response header: name, value |
 | `KlHttpClientResponse` | `http_client.h` | Response: status, body, headers, allocator (by value) |
@@ -310,7 +312,9 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
 ```
 
 Three callbacks per op (separate because deadline semantics differ per use case):
-- `on_resume`: called by `kl_async_complete`, handler sets response and state
+- `on_resume`: called by `kl_async_complete`. Building the response (on `kl_http_conn_response(op->conn)`,
+  from here or from the `done_fn` that ran first) is enough: `kl_async_complete` transitions the connection
+  to sending on its own. `KlHttpConn` is opaque, so a caller could not set the state anyway
 - `on_deadline`: called when `deadline_ms` reached (sleep = success, HTTP = timeout)
 - `on_cancel`: called if connection dies while suspended
 
@@ -328,20 +332,20 @@ void handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     ctx->op.on_resume = my_resume;
     ctx->op.on_cancel = my_cancel;
 
-    /* Create a pipe/socket for completion signal */
-    socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    /* Create the completion signal channel (kl_wakeup_open: portable, watchable everywhere) */
+    kl_wakeup_open(&ctx->wakeup);
+    kl_watcher_add(kl_http_server_event_ctx(srv), ctx->wakeup.rd, KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection */
     kl_async_suspend(srv, conn, &ctx->op);
 
-    /* Trigger completion later (e.g. from another thread via pipe write) */
+    /* Trigger completion later: kl_wakeup_signal(&ctx->wakeup) from any thread */
 }
 ```
 
 ## Thread Pool Pattern
 
-`KlThreadPool` bridges blocking work (SQLite, file I/O, DNS, crypto) and the event loop. Submit work from the event loop, execute on a worker thread, signal completion back via a pipe + `KlWatcher`.
+`KlThreadPool` bridges blocking work (SQLite, file I/O, DNS, crypto) and the event loop. Submit work from the event loop, execute on a worker thread, signal completion back via a `KlWakeup` + `KlWatcher`.
 
 ### Architecture
 

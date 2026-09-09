@@ -610,11 +610,102 @@ UTEST(async, e2e_handler_suspend_resume) {
     kl_http_server_free(&async_server);
 }
 
+/* Regression: a resume that only builds a response, the shape every async example
+ * and every public consumer has to use. done_fn writes the response through the
+ * public kl_http_conn_response() accessor and on_resume has nothing left to do.
+ * Nothing below reaches into KlHttpConn, deliberately: the type is opaque, so a
+ * consumer has no way to set the connection state and kl_async_complete has to
+ * default it. Without that default the readiness path re-registers no fd (the
+ * request hangs) and the completion path closes the socket with no response. */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpServer *server;
+    int signal_fds[2];
+    int resume_called;
+} NoStateCtx;
+
+static NoStateCtx nostate_ctx;
+
+static void nostate_resume(KlAsyncOp *op, void *user_data) {
+    (void)op;
+    ((NoStateCtx *)user_data)->resume_called++;   /* no state, no response: nothing left to do */
+}
+
+static void nostate_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+    (void)ready;
+    NoStateCtx *ctx = user_data;
+    char buf[8];
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
+    kl_watcher_del(kl_http_server_event_ctx(ctx->server), fd);
+    kl_test_closesock(ctx->signal_fds[0]);
+    kl_test_closesock(ctx->signal_fds[1]);
+
+    /* Public surface only: the response goes through the borrowed-handle accessor. */
+    kl_http_response_json(kl_http_conn_response(ctx->op.conn), 200,
+                          "{\"resumed\":true}", 16);
+    kl_async_complete(ctx->server, &ctx->op);
+}
+
+static void handle_async_nostate(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
+    (void)res;
+    KlHttpServer *srv = user_data;
+    KlHttpConn *conn = kl_http_request_conn(req);
+
+    memset(&nostate_ctx, 0, sizeof(nostate_ctx));
+    nostate_ctx.server = srv;
+    nostate_ctx.op.on_resume = nostate_resume;
+    nostate_ctx.op.user_data = &nostate_ctx;
+
+    kl_test_socketpair(nostate_ctx.signal_fds);
+    set_nonblocking(nostate_ctx.signal_fds[0]);
+    set_nonblocking(nostate_ctx.signal_fds[1]);
+    kl_watcher_add(kl_http_server_event_ctx(srv), nostate_ctx.signal_fds[0],
+                   KL_EVENT_READ, nostate_watcher, &nostate_ctx);
+
+    kl_async_suspend(srv, conn, &nostate_ctx.op);
+    (void)kl_test_sockwrite(nostate_ctx.signal_fds[1], "!", 1);
+}
+
+UTEST(async, e2e_resume_without_state_still_sends) {
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&async_server, &cfg);
+    kl_http_server_route(&async_server, "GET", "/nostate",
+                    handle_async_nostate, &async_server, NULL);
+
+    pthread_create(&async_server_tid, NULL, async_server_thread, NULL);
+    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) usleep(10000);
+
+    int fd = connect_to(async_server.bound_port);
+    ASSERT_TRUE(fd >= 0);
+    /* Bound the read: a regression here stalls the connection forever, and a hung
+     * CI job is a worse signal than a failed assertion. */
+    kl_test_set_rcvtimeo(fd, 3000);
+
+    const char *req = "GET /nostate HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)kl_test_sockwrite(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    kl_test_closesock(fd);
+
+    ASSERT_EQ(nostate_ctx.resume_called, 1);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "{\"resumed\":true}") != NULL);
+
+    kl_http_server_stop(&async_server);
+    pthread_join(async_server_tid, NULL);
+    kl_http_server_free(&async_server);
+}
+
 /* ── Exactly-one-terminal guarantees ─────────────────────────
- * These test the terminal *guard* in async.c, not the post-resume state drive:
- * the resume callback only counts and leaves conn->state as PROCESSING, so
- * kl_async_complete takes no SENDING/READING/CLOSED branch (no socket I/O, no
- * release): keeping the op + conn valid for the idempotency assertions. */
+ * These test the terminal *guard* in async.c, not the post-resume state drive.
+ * The resume callback only counts, so kl_async_complete defaults the connection
+ * to SENDING and flushes: the setup gives it a real response and a keep-alive
+ * request so the drive parks in READING (conn + op stay valid for the
+ * idempotency assertions) instead of releasing the connection. */
 static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     (void)op; ((AsyncCtx *)ud)->resume_called++;
 }
@@ -631,6 +722,11 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);                              \
     ASSERT_TRUE(c != NULL);                                                    \
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);          \
+    c->res.alloc = &s.alloc_storage;                                           \
+    ASSERT_EQ(kl_http_response_init(&c->res, c->res.alloc), 0);                \
+    kl_http_response_json(&c->res, 200, "{}", 2);                              \
+    c->res.conn_fd = fds[1];                                                   \
+    c->req.keep_alive = 1;  /* a completed send parks in READING, not CLOSED */\
     AsyncCtx actx = {0};                                                       \
     KlAsyncOp op = { .conn = c, .on_resume = terminal_resume_cb,              \
                      .on_cancel = test_cancel_cb, .user_data = &actx };        \

@@ -51,6 +51,7 @@ timer.h
 tls.h
 url.h
 version.h
+wakeup.h
 websocket.h
 websocket_client.h
 websocket_server.h

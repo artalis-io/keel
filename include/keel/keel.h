@@ -87,6 +87,7 @@ int kl_version_number(void);
 #include <keel/websocket_client.h>
 #include <keel/async.h>
 #include <keel/thread_pool.h>
+#include <keel/wakeup.h>
 #include <keel/url.h>
 #include <keel/resolver.h>
 #include <keel/resolver_cache.h>

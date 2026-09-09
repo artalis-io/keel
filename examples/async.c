@@ -2,16 +2,20 @@
  * async.c: Async suspend/resume with FD watchers
  *
  * Concepts: KlWatcher, KlAsyncOp, kl_async_suspend, kl_async_complete,
- * pipe-based completion signaling, kl_http_request_conn().
+ * KlWakeup cross-thread signaling, kl_http_request_conn().
  *
  * GET /delay/:ms suspends the connection, spawns a thread that sleeps
- * for the requested duration, then signals completion via a pipe.
+ * for the requested duration, then signals completion over a KlWakeup.
  * The watcher callback fires on the event loop thread and resumes
  * the connection.
  *
  * IMPORTANT: kl_async_complete() must be called from the event loop
- * thread. Never call it directly from a worker thread; use a pipe
- * or the thread pool's done_fn to marshal back.
+ * thread. Never call it directly from a worker thread; signal a
+ * KlWakeup (or use the thread pool's done_fn) to marshal back.
+ *
+ * The signal channel is a KlWakeup rather than a raw pipe(2) because
+ * the Windows event backends can only watch sockets, never pipe
+ * HANDLEs; KlWakeup is watchable on every backend.
  *
  * Build:  make examples
  * Run:    ./examples/async
@@ -31,7 +35,7 @@
 typedef struct {
     KlAsyncOp op;
     KlHttpServer *server;
-    int pipe_fds[2];       /* [0]=read (watcher), [1]=write (thread) */
+    KlWakeup wakeup;       /* .rd watched by the loop, .wr signalled by the thread */
     int delay_ms;
 } DelayCtx;
 
@@ -48,8 +52,7 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
     KlHttpConn *conn = op->conn;
     kl_http_response_json(kl_http_conn_response(conn),200, body, (size_t)n);
 
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_wakeup_close(&ctx->wakeup);
     free(ctx);
 }
 
@@ -57,35 +60,30 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
 static void delay_on_cancel(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     DelayCtx *ctx = (DelayCtx *)op;
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_wakeup_close(&ctx->wakeup);
     free(ctx);
 }
 
-/* Watcher callback: pipe became readable → complete the async op */
+/* Watcher callback: the wakeup became readable → complete the async op */
 static void delay_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)fd; (void)ready;
     DelayCtx *ctx = user_data;
 
-    /* Drain the pipe */
-    char buf[1];
-    if (read(ctx->pipe_fds[0], buf, 1) < 0) { /* ignore */ }
+    kl_wakeup_drain(&ctx->wakeup);
 
     /* Remove watcher before completing */
-    kl_watcher_del(kl_http_server_event_ctx(ctx->server), ctx->pipe_fds[0]);
+    kl_watcher_del(kl_http_server_event_ctx(ctx->server), ctx->wakeup.rd);
 
     /* Resume connection (must be on event loop thread, we are) */
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-/* Worker thread: sleep then signal via pipe */
+/* Worker thread: sleep then signal the event loop */
 static void *delay_thread(void *arg) {
     DelayCtx *ctx = arg;
     usleep((unsigned)ctx->delay_ms * 1000);
 
-    /* Signal the event loop */
-    char c = 1;
-    if (write(ctx->pipe_fds[1], &c, 1) < 0) { /* ignore */ }
+    kl_wakeup_signal(&ctx->wakeup);
     return NULL;
 }
 
@@ -122,18 +120,17 @@ static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     ctx->op.on_resume = delay_on_resume;
     ctx->op.on_cancel = delay_on_cancel;
 
-    /* Create pipe for signaling */
-    if (pipe(ctx->pipe_fds) < 0) {
+    /* Create the cross-thread signal channel */
+    if (kl_wakeup_open(&ctx->wakeup) < 0) {
         free(ctx);
-        kl_http_response_error(res, 500, "pipe() failed");
+        kl_http_response_error(res, 500, "wakeup_open failed");
         return;
     }
 
     /* Register read end with event loop */
-    if (kl_watcher_add(kl_http_server_event_ctx(srv), ctx->pipe_fds[0], KL_EVENT_READ,
+    if (kl_watcher_add(kl_http_server_event_ctx(srv), ctx->wakeup.rd, KL_EVENT_READ,
                         delay_watcher, ctx) < 0) {
-        close(ctx->pipe_fds[0]);
-        close(ctx->pipe_fds[1]);
+        kl_wakeup_close(&ctx->wakeup);
         free(ctx);
         kl_http_response_error(res, 500, "watcher_add failed");
         return;
@@ -150,6 +147,7 @@ static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
         pthread_attr_destroy(&attr);
         /* Thread creation failed; resume connection with error */
+        kl_watcher_del(kl_http_server_event_ctx(srv), ctx->wakeup.rd);
         kl_http_response_json(kl_http_conn_response(conn),500,
                          "{\"error\":\"thread create failed\"}", 32);
         kl_async_complete(srv, &ctx->op);

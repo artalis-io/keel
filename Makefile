@@ -225,7 +225,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/protocols/http/http_body_reader_buffer.c \
            src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
            src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c src/protocols/websocket/websocket_client.c \
-           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c src/url.c \
+           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c src/wakeup.c src/url.c \
            src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
            src/protocols/http/http_client_proxy.c \
            src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \
@@ -361,8 +361,18 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
            examples/custom_allocator examples/custom_socket_provider \
  examples/url_parser \
            examples/sse examples/streaming_client examples/timer \
-           examples/redirect_client examples/proxy_client \
+           examples/redirect_client \
            examples/unix_socket_server
+
+# proxy_client is POSIX-only: the Keel half is portable, but the example is
+# self-contained and its local target-server + CONNECT-relay harness is written
+# straight against BSD sockets (sys/socket.h, poll, read/write/close on int fds),
+# which MinGW does not provide. Excluded on Windows rather than carrying a Winsock
+# rewrite of demo scaffolding; the proxy code paths it exercises are covered on
+# Windows by the client suites.
+ifneq ($(WINDOWS),1)
+EXAMPLES += examples/proxy_client
+endif
 
 examples/%: examples/%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
@@ -463,7 +473,7 @@ WIN_TEST_SUITES = allocator http_body_reader http1_chunked http_cors decompress 
                   http_integration http_server_integration peer_addr http_client_happy_eyeballs \
                   async http_async http_client_pool cross_module event_ctx event_caps \
                   http2 http_response socket_provider websocket compress event http_sse \
-                  tls http_tls tls_integration peer_cert unix_socket_node_win
+                  tls http_tls tls_integration peer_cert unix_socket_node_win wakeup
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -755,7 +765,7 @@ IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chu
                           proxy_protocol read_flow_control http_redirect http_request resolver_cache \
                           http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
                           stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
-                          udp_cmsg unix_socket url version websocket websocket_client iouring_sqe_fail
+                          udp_cmsg unix_socket url version wakeup websocket websocket_client iouring_sqe_fail
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
