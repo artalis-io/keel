@@ -497,15 +497,30 @@ test-win: $(WIN_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
 
-# Windows IOCP backend (BACKEND=iocp) test subset. The completion connection driver
-# does not exist over IOCP yet, so a server cannot run over IOCP; hence the
-# backend-lifecycle + negotiation suite (no server-over-IOCP). stream_single_shot is a
-# BARE-stream test (raw kl_comp_post_recv/_send + drain, no HTTP connection driver), so
-# it validates the IOCP single-shot completion contract natively (R3b-T1); it skips on a
-# readiness build. Build with BACKEND=iocp so libkeel.a carries event_iocp.o.
-# (test_event_caps is a *readiness*-backend suite, it asserts READINESS caps, so it
-# runs in the WSAPoll/POSIX jobs, NOT here.)
-WIN_IOCP_TEST_SUITES = iocp_engine stream_single_shot
+# Windows IOCP backend (BACKEND=iocp) test subset. Mirrors the Completion (io_uring) unit-suite
+# job: the suites here run DIRECTLY over the completion backend, not just transitively through the
+# HTTP smokes. The list is the intersection of WIN_TEST_SUITES (runs on Windows) and
+# IOURING_TEST_SUITES (vetted against a completion backend), minus the exclusions below; every
+# member was confirmed to pass twice in a row over IOCP before being enrolled.
+#
+# stream_single_shot is a BARE-stream test (raw kl_comp_post_recv/_send + drain, no HTTP connection
+# driver), so it validates the IOCP single-shot completion contract natively; it skips on a
+# readiness build. test_event_caps is a *readiness*-backend suite (it asserts READINESS caps), so it
+# runs in the WSAPoll/POSIX jobs, NOT here.
+#
+# EXCLUDED, and why (issue #265): async, http_client, http_client_happy_eyeballs, http_client_pool,
+# http_client_stream, http_integration and http_redirect all fail over IOCP and pass over WSAPoll and
+# io_uring. One root cause: event_iocp.c's kl_event_mod_builtin ignores the interest mask, so
+# kl_watcher_mod cannot arm WRITE on a completion loop. test_async's watcher_mod_changes_interest
+# hits it head-on; the client suites hit it through http_client_async.c, which arms WRITE that way.
+# Enrol them here as the fix lands, rather than widening the list past what actually passes.
+WIN_IOCP_TEST_SUITES = allocator compress cross_module decompress drain error http1_chunked http1_parser \
+                       http1_response_parser http2 http2_client http2_overflow http_async http_body_reader \
+                       http_connection http_cors http_multipart_stream http_overflow http_request \
+                       http_response http_router http_server_integration http_server_stats http_sse http_tls \
+                       iocp_engine peer_addr peer_cert proxy_protocol resolver_cache stream_single_shot \
+                       thread_pool timeout timer tls tls_integration url wakeup websocket websocket_client \
+                       websocket_overflow
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \

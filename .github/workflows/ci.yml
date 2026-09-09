@@ -244,16 +244,19 @@ jobs:
 
       # IOCP completion backend (BACKEND=iocp) on a real Windows runner. This job
       # provides native runtime coverage: it links the whole library with event_iocp.c
-      # + the overlapped provider, boots a real IOCP loop for the engine lifecycle +
-      # capability-negotiation suite (test-win-iocp), and drives end-to-end
-      # HTTP-, mock-TLS-, and async/thread-pool-over-IOCP roundtrips (the smoke steps
-      # below). Broadening direct unit/integration coverage under BACKEND=iocp is
-      # tracked in #236. See docs/phase8_iocp_design.md.
+      # + the overlapped provider, runs 41 unit/integration suites DIRECTLY over a real
+      # IOCP loop (test-win-iocp, mirroring the Completion (io_uring) unit-suite job),
+      # and drives end-to-end HTTP-, mock-TLS-, and async/thread-pool-over-IOCP
+      # roundtrips (the smoke steps below). The suites the async-client watcher defect
+      # still blocks are listed as exclusions in WIN_IOCP_TEST_SUITES; see #265.
+      # See docs/phase8_iocp_design.md.
       - name: Build full core (IOCP link gate)
         run: make OS=windows BACKEND=iocp CC=gcc
 
-      - name: Run IOCP backend lifecycle + negotiation suite
-        timeout-minutes: 5
+      # 41 suites build and run here, so this needs more headroom than the single-suite
+      # step it replaces: ~1 min cold (build + run) on a dev box, and CI runners are slower.
+      - name: Run the IOCP unit + integration suite
+        timeout-minutes: 15
         run: make OS=windows BACKEND=iocp CC=gcc test-win-iocp
 
       - name: End-to-end HTTP-over-IOCP roundtrip smoke test
