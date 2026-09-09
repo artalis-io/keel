@@ -78,6 +78,22 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (conn->state == KL_HTTP_CONN_SUSPENDED)
         return;
 
+    /* Default the post-resume state the same way conn_process() defaults it after a
+     * synchronous handler returns: a resume that only built the response (the common
+     * shape, where done_fn writes it and on_resume has nothing left to do) leaves the
+     * connection in PROCESSING, which neither drive path acts on. The readiness path
+     * below would re-register no fd (silent hang) and the completion path's
+     * comp_after_state() would take its CLOSED arm (socket closed, no response). A
+     * streaming response was already written by the handler, so it follows the
+     * streaming transition instead: keep SENDING only while a drain is pending. */
+    if (conn->state == KL_HTTP_CONN_PROCESSING) {
+        if (conn->res.body_mode == KL_HTTP_BODY_STREAM &&
+            !(conn->res.drain_enabled && kl_drain_pending(&conn->res.drain)))
+            conn->state = KL_HTTP_CONN_CLOSED;
+        else
+            conn->state = KL_HTTP_CONN_SENDING;
+    }
+
     /* On a completion loop, drive the completion send path instead of re-arming the fd;
      * the readiness re-register + kl_http_conn_on_writable below is a no-op there (kl_event_add
      * is inert, kl_http_conn_on_writable does readiness socket writes). Branch on the abstract
