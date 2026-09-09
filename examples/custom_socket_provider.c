@@ -4,7 +4,7 @@
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
  * and selecting a provider via KlHttpServerConfig.sockets (server) + KlHttpClientConfig.sockets
  * (client). This provider is a *decorator*: it wraps the built-in provider
- * (kl_socket_provider_posix) and counts sockets + bytes, forwarding each op it
+ * (the platform's kl_socket_provider_*) and counts sockets + bytes, forwarding each op it
  * intercepts to the wrapped provider. Ops it does not implement are left NULL;
  * Keel falls back to its built-in default for those. Uses only installed public
  * headers (no internal/POSIX types: KlIoVec, kl_ssize_t, KlSocketHandle).
@@ -21,6 +21,19 @@
 #include <time.h>
 
 /* ── A counting decorator over a wrapped provider ──────────────────── */
+
+/* The built-in provider is platform-named: kl_socket_provider_posix() on POSIX,
+ * kl_socket_provider_winsock() on Windows. <keel/socket.h> declares both
+ * unconditionally, but a build compiles only its own platform's socket TU, so only
+ * that factory is defined; a decorator picks its base here rather than hard-coding
+ * one and failing to link on the other platform. */
+static const KlSocketProvider *builtin_provider(void) {
+#if defined(_WIN32)
+    return kl_socket_provider_winsock();
+#else
+    return kl_socket_provider_posix();
+#endif
+}
 
 typedef struct {
     const KlSocketProvider *base;   /* the wrapped built-in provider */
@@ -74,7 +87,7 @@ int main(void) {
 
     /* Server through a counting decorator over the built-in provider. It must
      * advertise KL_SOCK_CAP_NATIVE_FD; the readiness event loop polls real fds. */
-    CountingCtx srv = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
+    CountingCtx srv = { .base = builtin_provider(), 0, 0, 0, 0 };
     KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD, NULL };
 
     KlHttpServer s;
@@ -92,7 +105,7 @@ int main(void) {
     }
 
     /* Client through its OWN counting decorator, selected via KlHttpClientConfig. */
-    CountingCtx cli = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
+    CountingCtx cli = { .base = builtin_provider(), 0, 0, 0, 0 };
     KlSocketProvider cli_prov = { &counting_ops, &cli, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator alloc = kl_allocator_default();
 

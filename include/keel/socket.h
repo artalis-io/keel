@@ -164,9 +164,12 @@ typedef struct KlSocketProvider {
 #define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* zero-copy sendfile usable on this fd */
 #define KL_SOCK_CAP_DATAGRAM   (1ull << 3)  /* provider->dgram datagram ops present */
 
-/* Built-in provider factories (static storage, no allocation). POSIX is defined
- * everywhere; the Winsock factory is defined only on Windows (the declaration is
- * unconditional but only ever called there). */
+/* Built-in provider factories (static storage, no allocation). A build compiles
+ * exactly one platform socket TU, so exactly one of these is DEFINED: the POSIX
+ * factory off Windows, the Winsock factory on it. Both declarations are
+ * unconditional so the header stays platform-neutral, but calling the wrong one
+ * fails to link, so portable code that needs the built-in provider (a decorator
+ * wrapping it, say) selects on _WIN32; see examples/custom_socket_provider.c. */
 const KlSocketProvider *kl_socket_provider_posix(void);
 const KlSocketProvider *kl_socket_provider_winsock(void);
 
