@@ -490,13 +490,23 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 /* ── Server lifecycle ───────────────────────────────────────────────── */
 
 static pthread_t server_tid;
+static int server_tid_live;   /* a start_server thread is running and not yet joined */
+static void stop_server(void);
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
+/* Every utest ASSERT_* returns from the test on failure, so a test that fails between
+ * start_server() and stop_server() never joins its server thread. The next start_server()
+ * would then overwrite server_tid (leaking the old thread), re-init test_server underneath
+ * it, and its stop_server() would free the pool while the orphan was still in the run loop.
+ * Reclaim any such orphan here so one failing test cannot corrupt the tests after it. */
 static void start_server(void) {
+    if (server_tid_live)
+        stop_server();
+
     KlHttpServerConfig cfg = {.port = 0, .max_body_size = 4096};
     kl_http_server_init(&test_server, &cfg);
     kl_http_server_route(&test_server, "GET", "/hello", handle_hello, NULL, NULL);
@@ -537,13 +547,17 @@ static void start_server(void) {
     kl_http_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
                     NULL, NULL);
     pthread_create(&server_tid, NULL, server_thread, NULL);
+    server_tid_live = 1;
     wait_for_bind(&test_server);
     test_port = test_server.bound_port;
 }
 
 static void stop_server(void) {
+    if (!server_tid_live)
+        return;              /* already reclaimed; keep this idempotent */
     kl_http_server_stop(&test_server);
     pthread_join(server_tid, NULL);
+    server_tid_live = 0;
     kl_http_server_free(&test_server);
 }
 
