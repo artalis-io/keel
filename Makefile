@@ -361,8 +361,18 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
            examples/custom_allocator examples/custom_socket_provider \
  examples/url_parser \
            examples/sse examples/streaming_client examples/timer \
-           examples/redirect_client examples/proxy_client \
+           examples/redirect_client \
            examples/unix_socket_server
+
+# proxy_client is POSIX-only: the Keel half is portable, but the example is
+# self-contained and its local target-server + CONNECT-relay harness is written
+# straight against BSD sockets (sys/socket.h, poll, read/write/close on int fds),
+# which MinGW does not provide. Excluded on Windows rather than carrying a Winsock
+# rewrite of demo scaffolding; the proxy code paths it exercises are covered on
+# Windows by the client suites.
+ifneq ($(WINDOWS),1)
+EXAMPLES += examples/proxy_client
+endif
 
 examples/%: examples/%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
