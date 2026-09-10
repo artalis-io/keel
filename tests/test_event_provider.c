@@ -12,26 +12,41 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include "net_compat.h"
-#include <poll.h>
 #include <pthread.h>
 #include <string.h>
 #include <time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+
+/* The in-test backend polls readiness directly, so it needs the one primitive net_compat does
+ * not wrap: a multi-fd poll. WSAPoll is the Winsock spelling, and there POLLIN/POLLOUT are
+ * OUTPUT-only aliases; POLLRDNORM/POLLWRNORM are the settable input flags (same distinction
+ * src/event_wsapoll.c documents). net_compat.h already resolved winsock2.h vs poll.h above. */
+#if defined(_WIN32)
+typedef WSAPOLLFD ep_pollfd_t;
+typedef SOCKET    ep_fd_t;
+#define EP_POLL(f, n, t)  WSAPoll((f), (ULONG)(n), (t))
+#define EP_IN             POLLRDNORM
+#define EP_OUT            POLLWRNORM
+#else
+typedef struct pollfd ep_pollfd_t;
+typedef int           ep_fd_t;
+#define EP_POLL(f, n, t)  poll((f), (nfds_t)(n), (t))
+#define EP_IN             POLLIN
+#define EP_OUT            POLLOUT
+#endif
 
 /* ── a minimal poll()-based runtime event backend ───────────────────── */
 
 #define EP_MAX 64
-typedef struct { struct pollfd fds[EP_MAX]; void *ud[EP_MAX]; int n; KlAllocator *a; } EpState;
+typedef struct { ep_pollfd_t fds[EP_MAX]; void *ud[EP_MAX]; int n; KlAllocator *a; } EpState;
 
 static int          ep_wait_calls;   /* proves this backend drove the loop */
 
 static int ep_find(EpState *s, KlSocketHandle fd) {
-    for (int i = 0; i < s->n; i++) if (s->fds[i].fd == (int)fd) return i;
+    for (int i = 0; i < s->n; i++) if (s->fds[i].fd == (ep_fd_t)fd) return i;
     return -1;
 }
 static short ep_ev(KlEventMask m) {
-    short e = 0; if (m & KL_EVENT_READ) e |= POLLIN; if (m & KL_EVENT_WRITE) e |= POLLOUT; return e;
+    short e = 0; if (m & KL_EVENT_READ) e |= EP_IN; if (m & KL_EVENT_WRITE) e |= EP_OUT; return e;
 }
 static int ep_init(KlEventLoop *l) {
     EpState *s = kl_malloc(l->alloc, sizeof(*s));
@@ -43,7 +58,7 @@ static int ep_init(KlEventLoop *l) {
 static int ep_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask mask, void *ud) {
     EpState *s = l->_backend;
     int i = ep_find(s, fd);
-    if (i < 0) { if (s->n >= EP_MAX) return -1; i = s->n++; s->fds[i].fd = (int)fd; }
+    if (i < 0) { if (s->n >= EP_MAX) return -1; i = s->n++; s->fds[i].fd = (ep_fd_t)fd; }
     s->fds[i].events = ep_ev(mask); s->fds[i].revents = 0; s->ud[i] = ud;
     return 0;
 }
@@ -60,14 +75,14 @@ static int ep_del(KlEventLoop *l, KlSocketHandle fd) {
 static int ep_wait(KlEventLoop *l, KlEvent *out, int max, int timeout_ms) {
     EpState *s = l->_backend;
     ep_wait_calls++;
-    int n = poll(s->fds, (nfds_t)s->n, timeout_ms);
+    int n = EP_POLL(s->fds, s->n, timeout_ms);
     if (n < 0) return -1;
     int c = 0;
     for (int i = 0; i < s->n && c < max; i++) {
         short r = s->fds[i].revents; if (!r) continue;
         KlEventMask rd = 0;
-        if (r & (POLLIN | POLLHUP | POLLERR)) rd |= KL_EVENT_READ;
-        if (r & POLLOUT) rd |= KL_EVENT_WRITE;
+        if (r & (EP_IN | POLLHUP | POLLERR)) rd |= KL_EVENT_READ;
+        if (r & EP_OUT) rd |= KL_EVENT_WRITE;
         if (rd) { out[c].udata = s->ud[i]; out[c].ready = rd; c++; }
     }
     return c;
