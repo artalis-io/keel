@@ -356,6 +356,12 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
         } else if (comp_send_response(c) < 0) {
             kl_comp_close(s, c);
         }
+    } else if (st == KL_HTTP_CONN_DRAINING) {
+        /* Post-rejection drain (#278): the final response is out (and on this axis physically
+         * retired before we got here) and SEND is half-closed. Post a recv so each completion
+         * discards one bounded chunk; the idle sweep enforces the deadline. */
+        c->stream.read_len = 0;
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
     } else if (st == KL_HTTP_CONN_READING_BODY) {
         comp_start_body_read(s, c);
     } else if (st == KL_HTTP_CONN_HTTP2) {
@@ -438,21 +444,18 @@ static int comp_grow_headers_or_431(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->stream.read_len < c->stream.read_cap)
         return 0;                                   /* room remains: read into it as-is */
     if (c->stream.read_cap >= c->max_header_size) {
-        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
-        kl_comp_close(s, c);
+        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     size_t new_cap = c->stream.read_cap * 2;
     if (new_cap > c->max_header_size) new_cap = c->max_header_size;
     if (new_cap <= c->stream.read_cap || new_cap > SIZE_MAX / 2) {
-        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
-        kl_comp_close(s, c);
+        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf, c->stream.read_cap, new_cap);
     if (!nb) {
-        best_effort_conn_write(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
-        kl_comp_close(s, c);
+        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     c->stream.read_buf = nb;
@@ -750,6 +753,21 @@ static void comp_drive_proxy(struct KlHttpServer *s, KlHttpConn *c) {
 static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
+    /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
+     * final response, so account for them and discard, never parse them as a new request. One
+     * bounded recv was posted per completion, so this is the non-blocking drain progression. */
+    if (c->state == KL_HTTP_CONN_DRAINING) {
+        c->drain_budget = (c->drain_budget > ev->bytes) ? c->drain_budget - ev->bytes : 0;
+        c->body_consumed += ev->bytes;
+        c->stream.read_len = 0;
+        if (kl_http_conn_drain_step(c, kl_monotonic_ms()) == KL_HTTP_CONN_CLOSED) {
+            kl_comp_close(s, c);
+            return;
+        }
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        return;
+    }
+
     /* PROXY header phase (plaintext, before TLS/HTTP): must run before the TLS branch since a
      * PROXY+TLS conn has c->tls set but hasn't started the handshake yet. The recv used the
      * plaintext read_buf (kl_comp_post_recv picks it while state == PROXY_HEADER). */

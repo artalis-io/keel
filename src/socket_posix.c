@@ -179,6 +179,12 @@ ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     do { r = recv((int)fd, buf, len, MSG_PEEK); } while (r < 0 && errno == EINTR);
     return r;
 }
+
+/* Half-close the send side: the peer sees orderly end-of-response while we keep receiving, so a
+ * post-rejection drain can run without the close RST'ing away the response (#278). */
+int kl_sockdef_shutdown_send(KlSocketHandle fd) {
+    return shutdown((int)fd, SHUT_WR);
+}
 ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     /* Translate the Keel-owned vector into POSIX struct iovec here, so struct
      * iovec never escapes this provider TU. */

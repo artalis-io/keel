@@ -52,6 +52,10 @@ typedef void (*KlHttpServerLogFn)(int level, const char *fmt, va_list ap,
 #define KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT   30000           /**< ms */
 /** @brief Default max body size. */
 #define KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /**< 1 MB */
+/* Post-rejection drain bounds (#278): caps on how much inbound request body the server will read
+ * and discard, after a final rejection response, to keep the close from RST'ing that response away. */
+#define KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES (64u * 1024u)
+#define KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS    500u
 
 typedef enum {
     KL_HTTP_SERVER_TRANSPORT_TCP = 0,   /**< TCP/IP stream socket (default) */
@@ -82,6 +86,17 @@ typedef struct KlHttpServerConfig {
     KlTlsConfig *tls;           /**< TLS config: NULL = plaintext (default) */
     KlHttp2ServerConfig *h2;             /**< HTTP/2 config: NULL = disabled (default) */
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
+    /* Post-rejection drain (see docs: early-response teardown). When the server answers a request
+     * EARLY, while the client is still uploading, the request body is left unread. Closing a socket
+     * with unread received data makes TCP send RST, and the peer then discards the response it had
+     * already buffered, so the client sees a reset instead of the 413/431/415/500/408 explaining
+     * why. After the response is fully flushed the connection therefore half-closes its send side
+     * and drains inbound bytes, bounded BOTH ways so a slow or hostile uploader cannot pin the
+     * single-threaded loop. Draining is asynchronous: one bounded read per loop progression, never
+     * a blocking read-until-empty. Successful keep-alive responses never enter it (their body is
+     * already consumed). 0 selects the default; set bytes to 0 and timeout to 0 to disable. */
+    size_t   reject_drain_max_bytes;   /**< cap on post-rejection drained bytes; default 64 KiB */
+    uint32_t reject_drain_timeout_ms;  /**< cap on post-rejection drain time; default 500 ms */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config: NULL = disabled (default) */
     KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path

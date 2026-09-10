@@ -142,6 +142,13 @@ typedef struct KlSocketOps {
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);
     const char *name;                 /* provider identity, for diagnostics */
+    /* Half-close the SEND direction (shutdown(SHUT_WR) / SD_SEND), leaving receive open, so the
+     * peer sees orderly end-of-response while the server still drains inbound request bytes. Used
+     * by the post-rejection drain: closing with unread received data makes TCP send RST, which
+     * discards the response the peer had already buffered. Best-effort: NULL selects the built-in
+     * native shutdown, and a provider with no half-close concept may return -1, which the caller
+     * ignores. Appended per the append-only rule above. */
+    int     (*shutdown_send)(void *ctx, KlSocketHandle fd);
 } KlSocketOps;
 
 typedef struct KlSocketProvider {

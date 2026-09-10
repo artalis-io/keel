@@ -451,7 +451,7 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
-# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 70 of the
+# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 71 of the
 # 105 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
 # socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
 # network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
@@ -484,7 +484,7 @@ WIN_TEST_SUITES = allocator alpn async compress cross_module datagram_batch data
                   http_client_pool http_client_proxy http_client_stream http_connection http_cors \
                   http_integration http_multipart_stream http_overflow http_redirect http_request \
                   http_response http_router http_server_integration http_server_stats http_sse http_tls \
-                  peer_addr peer_cert proxy_protocol read_flow_control resolver_cache sockaddr \
+                  peer_addr peer_cert proxy_protocol read_flow_control reject_drain resolver_cache sockaddr \
                   socket_provider stream_transport thread_pool timeout timer tls tls_integration \
                   unix_socket_node_win url version wakeup websocket websocket_client websocket_overflow
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
@@ -541,8 +541,8 @@ WIN_IOCP_TEST_SUITES = allocator alpn async compress cross_module datagram_batch
                        http_client_stream http_connection http_cors http_multipart_stream http_overflow \
                        http_redirect http_request http_response http_router http_server_integration \
                        http_server_stats http_sse http_tls iocp_engine peer_addr peer_cert proxy_protocol \
-                       read_flow_control resolver_cache sockaddr stream_single_shot thread_pool timeout timer tls \
-                       tls_integration url version websocket websocket_client websocket_overflow
+                       read_flow_control reject_drain resolver_cache sockaddr stream_single_shot thread_pool \
+                       timeout timer tls tls_integration url version websocket websocket_client websocket_overflow
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
@@ -793,16 +793,18 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async http_async http_body_reader http1_chunked http_client http_client_happy_eyeballs http_client_pool \
-                          http_client_stream compress http_connection http_cors cross_module \
-                          datagram_batch datagram_life datagram_public datagram_live datagram_socket datagram_multicast \
-                          dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
-                          dns_resolver drain error event_provider file_io http2 http2_client http_integration \
-                          http_multipart_stream http_overflow http2_overflow websocket_overflow http1_parser peer_addr peer_cert http_client_proxy \
-                          proxy_protocol read_flow_control http_redirect http_request resolver_cache \
-                          http_response http1_response_parser http_router http_server_integration http_server_stats sockaddr http_sse \
-                          stream_single_shot stream_transport thread_pool timeout timer tls http_tls tls_integration \
-                          udp_cmsg unix_socket url version wakeup websocket websocket_client iouring_sqe_fail
+IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch datagram_life datagram_live \
+                          datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
+                          dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
+                          event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
+                          http2_overflow http_async http_body_reader http_client http_client_happy_eyeballs \
+                          http_client_pool http_client_proxy http_client_stream http_connection http_cors \
+                          http_integration http_multipart_stream http_overflow http_redirect http_request \
+                          http_response http_router http_server_integration http_server_stats http_sse http_tls \
+                          iouring_sqe_fail peer_addr peer_cert proxy_protocol read_flow_control reject_drain \
+                          resolver_cache sockaddr stream_single_shot stream_transport thread_pool timeout timer tls \
+                          tls_integration udp_cmsg unix_socket url version wakeup websocket websocket_client \
+                          websocket_overflow
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
