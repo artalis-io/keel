@@ -1,4 +1,5 @@
 #include "utest.h"
+#include "net_compat.h"
 #include "../src/protocols/http/http_conn_internal.h"
 #include <keel/file_io.h>
 #include <keel/http_connection.h>
@@ -6,10 +7,7 @@
 #include <keel/http_response.h>
 #include <keel/event.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <sys/socket.h>
 
 /* File I/O phase constants (mirror http_connection.c) */
 #define FILE_IO_IDLE       0
@@ -180,11 +178,11 @@ UTEST(file_io, complete_writes) {
 
     /* Use a socketpair to test real writes */
     int fds[2];
-    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    int rc = kl_test_socketpair(fds);
     ASSERT_EQ(rc, 0);
 
     /* Make write end non-blocking */
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -216,13 +214,13 @@ UTEST(file_io, complete_writes) {
 
     /* Read from the other end to verify */
     char buf[64];
-    ssize_t nr = read(fds[1], buf, sizeof(buf));
+    ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
     ASSERT_EQ(nr, 11);
     ASSERT_EQ(memcmp(buf, "hello world", 11), 0);
 
     kl_free(&a, c.stream.read_buf, 8192);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(file_io, partial_write) {
@@ -233,13 +231,13 @@ UTEST(file_io, partial_write) {
 
     /* Use socketpair, fill the write buffer to trigger EAGAIN */
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     /* Fill the socket buffer */
     char fill[65536];
     memset(fill, 'X', sizeof(fill));
-    while (write(fds[0], fill, sizeof(fill)) > 0) {}
+    while (kl_test_sockwrite(fds[0], fill, sizeof(fill)) > 0) {}
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -266,8 +264,8 @@ UTEST(file_io, partial_write) {
     ASSERT_EQ(c.file_io_phase, FILE_IO_WRITING);
 
     kl_free(&a, c.stream.read_buf, 8192);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(file_io, multi_chunk) {
@@ -277,8 +275,8 @@ UTEST(file_io, multi_chunk) {
     KlAllocator a = kl_allocator_default();
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -329,18 +327,18 @@ UTEST(file_io, multi_chunk) {
     ASSERT_EQ(c.res.file_offset, (uint64_t)250);
 
     /* Drain the data from the read end (non-blocking) */
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
+    (void)kl_test_set_nonblock(fds[1]);
     char drain_buf[4096];
     size_t total = 0;
     ssize_t nr;
-    while ((nr = read(fds[1], drain_buf, sizeof(drain_buf))) > 0)
+    while ((nr = kl_test_sockread(fds[1], drain_buf, sizeof(drain_buf))) > 0)
         total += (size_t)nr;
 
     ASSERT_EQ(total, (size_t)250);
 
     kl_free(&a, c.stream.read_buf, bufcap);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(file_io, cancel_on_timeout) {
@@ -434,8 +432,8 @@ UTEST(file_io, head_request) {
     KlAllocator a = kl_allocator_default();
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -462,8 +460,8 @@ UTEST(file_io, head_request) {
     ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
 
     kl_free(&a, c.stream.read_buf, 8192);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(file_io, read_error) {
@@ -500,8 +498,8 @@ UTEST(file_io, zero_copy_skips_write) {
     KlAllocator a = kl_allocator_default();
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -532,8 +530,8 @@ UTEST(file_io, zero_copy_skips_write) {
     ASSERT_EQ(state, KL_HTTP_CONN_CLOSED);
 
     kl_free(&a, c.stream.read_buf, 8192);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(file_io, zero_copy_multi_chunk) {
@@ -543,8 +541,8 @@ UTEST(file_io, zero_copy_multi_chunk) {
     KlAllocator a = kl_allocator_default();
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -584,8 +582,8 @@ UTEST(file_io, zero_copy_multi_chunk) {
     /* File done */
 
     kl_free(&a, c.stream.read_buf, bufcap);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 /* Mock submit that rejects buf=NULL (no splice), accepts buf!=NULL */
@@ -613,8 +611,8 @@ UTEST(file_io, splice_fallback) {
     KlAllocator a = kl_allocator_default();
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    (void)kl_test_set_nonblock(fds[0]);
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -643,8 +641,8 @@ UTEST(file_io, splice_fallback) {
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
 
     kl_free(&a, c.stream.read_buf, 8192);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST_MAIN();
