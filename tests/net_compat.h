@@ -41,6 +41,14 @@
 
 /* Portable test helpers (implemented in tests/net_compat_{posix,win}.c). */
 
+/* The platform's built-in KlSocketProvider: kl_socket_provider_posix() off Windows,
+ * kl_socket_provider_winsock() on it. A build compiles exactly one platform socket TU, so
+ * exactly one of those factories is DEFINED and naming the wrong one fails to link. Tests that
+ * need a real provider go through this instead of hard-coding either name.
+ * Returns an opaque pointer; cast to const KlSocketProvider * (tests that use it include
+ * src/socket.h themselves, which this header deliberately does not pull in). */
+const void *kl_test_builtin_provider(void);
+
 /* close() a socket fd. */
 int kl_test_closesock(int fd);
 

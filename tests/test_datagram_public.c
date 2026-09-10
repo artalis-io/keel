@@ -20,10 +20,9 @@
 #endif
 
 #include "../vendor/utest.h"
+#include "net_compat.h"
 
 #if !defined(_WIN32)
-#include <sys/socket.h>
-#include <netinet/in.h>
 #endif
 
 #include <keel/datagram.h>
@@ -40,7 +39,6 @@
 #include <unistd.h>                 /* close() */
 
 #include <string.h>
-#include <sys/socket.h>
 
 /* ── scripted completion double ───────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -924,6 +922,9 @@ UTEST(datagram_public, m2_multicast_routes) {
  * set. The expected mask is built under the SAME family-specific compile guards the provider uses (so
  * this passes on reduced-capability POSIX builds where a macro is absent), with explicit assertions for
  * the always-available CONNECTED and the IPv4-only BROADCAST. */
+/* POSIX-provider specific: it mirrors socket_dgram_posix.c's pdg_caps bit for bit. The Windows
+ * provider (socket_dgram_win.c) grants a different set, so this asserts nothing meaningful there. */
+#if !defined(_WIN32)
 UTEST(datagram_public, m2_posix_provider_caps_per_family) {
     mk_ctx(); mc_reset();
     unsigned exp4 = KL_DGRAM_CAP_CONNECTED;      /* connect()+send: always */
@@ -980,6 +981,7 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
         m2_close(&dg6);
     }
 }
+#endif
 
 /* kl_datagram_fd/local_port require a LIVE core: a zeroed handle, a failed init, and a freed
  * datagram all report the invalid fd / port 0 (never a zeroed or stale-closed descriptor). */
@@ -1008,6 +1010,9 @@ UTEST(datagram_public, m4_fd_accessors_require_live_core) {
 
 /* A control (source-pinned) send whose completion is a TERMINAL ERROR retires the single in-flight op
  * exactly once (sticky error, no re-post, no queued-without-op state): the completion guarantee. */
+/* Needs KL_DGRAM_CAP_SOURCE_PIN, which the POSIX provider grants on a real fd and the Windows
+ * provider does not, so kl_datagram_init_ex refuses the want_caps up front. */
+#if !defined(_WIN32)
 UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
     mk_ctx(); mc_reset();
     KlDatagram dg; memset(&dg, 0, sizeof(dg));
@@ -1032,6 +1037,7 @@ UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
     ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
+#endif
 
 /* ══ Additive KlDatagram prerequisites (optional_caps + send_queued_bytes) ════════════════════════ */
 
