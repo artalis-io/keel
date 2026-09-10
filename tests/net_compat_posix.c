@@ -6,6 +6,7 @@
  * their pre-port form on POSIX. See tests/net_compat.h.
  */
 #include "net_compat.h"
+#include "../src/socket.h"   /* kl_socket_provider_* */
 
 int kl_test_closesock(int fd) {
     return close(fd);
@@ -41,4 +42,9 @@ int kl_test_set_rcvtimeo(int fd, int ms) {
 
 int kl_test_socketpair(int sv[2]) {
     return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+}
+
+/* See net_compat.h: the platform's built-in socket provider, named per platform. */
+const void *kl_test_builtin_provider(void) {
+    return (const void *)kl_socket_provider_posix();
 }

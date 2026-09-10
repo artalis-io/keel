@@ -26,8 +26,6 @@
 #include <pthread.h>
 #include <string.h>
 #include <time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #define ST_PORT      18488
 #define ST_HDR       4                 /* 4-byte BE length prefix */
@@ -119,7 +117,7 @@ static void fc_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
 static void st_on_accept(KlSocketHandle lfd, KlEventMask ready, void *ud) {
     (void)ready;
     KlEventCtx *ev = ud;
-    const KlSocketProvider *sp = ev->sockets ? ev->sockets : kl_socket_provider_posix();
+    const KlSocketProvider *sp = ev->sockets ? ev->sockets : (const KlSocketProvider *)kl_test_builtin_provider();
     for (;;) {
         KlSocketHandle cfd = sp->ops->accept(sp->context, lfd, NULL);
         if (!kl_handle_valid(cfd)) break;            /* drained (would-block) */
@@ -143,7 +141,7 @@ static KlSocketHandle   g_listener;
 static volatile int     g_stop;
 
 static int st_listen(KlEventCtx *ev) {
-    const KlSocketProvider *sp = kl_socket_provider_posix();
+    const KlSocketProvider *sp = (const KlSocketProvider *)kl_test_builtin_provider();
     KlSocketHandle lfd = sp->ops->socket(sp->context, AF_INET, SOCK_STREAM, 0);
     if (!kl_handle_valid(lfd)) return -1;
     sp->ops->set_reuseaddr(sp->context, lfd, 1);
@@ -250,7 +248,7 @@ UTEST(stream_transport, framed_echo_roundtrip) {
 
     /* Server-side teardown: close listener, then free ctx (frees any watchers). */
     if (kl_handle_valid(g_listener)) {
-        const KlSocketProvider *sp = kl_socket_provider_posix();
+        const KlSocketProvider *sp = (const KlSocketProvider *)kl_test_builtin_provider();
         kl_watcher_del(&g_ev, g_listener);
         sp->ops->close(sp->context, g_listener);
     }

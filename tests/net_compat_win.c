@@ -11,6 +11,7 @@
  * constructor), which every test links, so tests need no explicit WSAStartup.
  */
 #include "net_compat.h"
+#include "../src/socket.h"   /* kl_socket_provider_* */
 
 #include <string.h>   /* memset */
 
@@ -71,4 +72,9 @@ fail:
     if (client != INVALID_SOCKET) closesocket(client);
     if (server != INVALID_SOCKET) closesocket(server);
     return -1;
+}
+
+/* See net_compat.h: the platform's built-in socket provider, named per platform. */
+const void *kl_test_builtin_provider(void) {
+    return (const void *)kl_socket_provider_winsock();
 }
