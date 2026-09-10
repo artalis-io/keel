@@ -451,7 +451,7 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
-# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 66 of the
+# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 67 of the
 # 105 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
 # socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
 # network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
@@ -463,9 +463,6 @@ test: $(TEST_BIN)
 # Still needing work before they can be listed, with what each actually needs:
 #   datagram_batch  - calls fcntl() directly; needs the net_compat non-blocking helper.
 #   datagram_live   - uses struct cmsghdr; Windows spells it WSACMSGHDR.
-#   datagram_socket - builds once its includes are routed, but 4 cases then FAIL on Winsock
-#                     (connect/peerless-send semantics). Real behaviour to investigate, not a
-#                     porting chore.
 #   udp_cmsg        - tests src/udp_cmsg.h, the POSIX-only helper; Windows has the separate
 #                     udp_cmsg_win.c, which wants its own suite rather than this one ported.
 #   file_io         - POSIX file-path assumptions on top of the includes.
@@ -478,12 +475,12 @@ test: $(TEST_BIN)
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator alpn async compress cross_module datagram_life datagram_multicast datagram_public \
-                  decompress dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots \
-                  drain error event event_caps event_ctx http1_chunked http1_parser http1_response_parser \
-                  http2 http2_client http2_overflow http_async http_body_reader http_client \
-                  http_client_happy_eyeballs http_client_pool http_client_proxy http_client_stream \
-                  http_connection http_cors http_integration http_multipart_stream http_overflow \
-                  http_redirect http_request http_response http_router http_server_integration \
+                  datagram_socket decompress dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send \
+                  dgram_slots drain error event event_caps event_ctx http1_chunked http1_parser \
+                  http1_response_parser http2 http2_client http2_overflow http_async http_body_reader \
+                  http_client http_client_happy_eyeballs http_client_pool http_client_proxy \
+                  http_client_stream http_connection http_cors http_integration http_multipart_stream \
+                  http_overflow http_redirect http_request http_response http_router http_server_integration \
                   http_server_stats http_sse http_tls peer_addr peer_cert proxy_protocol read_flow_control \
                   resolver_cache sockaddr socket_provider stream_transport thread_pool timeout timer tls \
                   tls_integration unix_socket_node_win url version wakeup websocket websocket_client \
@@ -535,8 +532,8 @@ test-win: $(WIN_TEST_BIN)
 #                     stays enrolled in WIN_TEST_SUITES and excluded only here.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
 WIN_IOCP_TEST_SUITES = allocator alpn async compress cross_module datagram_life datagram_multicast datagram_public \
-                       decompress dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots \
-                       drain error http1_chunked http1_parser http1_response_parser http2 http2_client \
+                       datagram_socket decompress dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send \
+                       dgram_slots drain error http1_chunked http1_parser http1_response_parser http2 http2_client \
                        http2_overflow http_async http_body_reader http_client_happy_eyeballs http_client_pool \
                        http_client_proxy http_client_stream http_connection http_cors http_multipart_stream \
                        http_overflow http_redirect http_request http_response http_router http_server_integration \
