@@ -67,6 +67,15 @@ typedef enum {
                           * fall back. (KlIoStatus is append-only: existing values are stable.) */
 } KlIoStatus;
 
+/* Which half of a connection to shut down. A Keel enum rather than SHUT_WR / SD_SEND so the
+ * provider seam stays free of platform spellings: the built-in providers map it to the native
+ * constants, and a non-socket provider (lwIP, EFI) can interpret or refuse it on its own terms. */
+typedef enum {
+    KL_SHUT_RD,      /* further receives disallowed */
+    KL_SHUT_WR,      /* further sends disallowed; the peer sees orderly end-of-stream */
+    KL_SHUT_RDWR     /* both directions */
+} KlShutdownHow;
+
 /* Upper bound on scatter-gather segments a provider must handle in one writev.
  * Response assembly uses <= 7 (status line + headers + body); a provider
  * translates into a stack vector of this size and fails EINVAL beyond it. */
@@ -142,13 +151,13 @@ typedef struct KlSocketOps {
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);
     const char *name;                 /* provider identity, for diagnostics */
-    /* Half-close the SEND direction (shutdown(SHUT_WR) / SD_SEND), leaving receive open, so the
-     * peer sees orderly end-of-response while the server still drains inbound request bytes. Used
-     * by the post-rejection drain: closing with unread received data makes TCP send RST, which
-     * discards the response the peer had already buffered. Best-effort: NULL selects the built-in
-     * native shutdown, and a provider with no half-close concept may return -1, which the caller
-     * ignores. Appended per the append-only rule above. */
-    int     (*shutdown_send)(void *ctx, KlSocketHandle fd);
+    /* Shut down one or both halves of the connection. KL_SHUT_WR leaves receive open, so the peer
+     * sees orderly end-of-response while the server still drains inbound request bytes: closing with
+     * unread received data makes TCP send RST, which discards the response the peer had already
+     * buffered. Best-effort: NULL selects the built-in native shutdown, and a provider with no
+     * half-close concept may return -1, which the caller ignores. Appended per the append-only
+     * rule above. */
+    int     (*shutdown)(void *ctx, KlSocketHandle fd, KlShutdownHow how);
 } KlSocketOps;
 
 typedef struct KlSocketProvider {

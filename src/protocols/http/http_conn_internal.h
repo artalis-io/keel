@@ -83,8 +83,15 @@ struct KlHttpConn {
     uint64_t last_active_ms;
     uint64_t request_start_ms;
     uint64_t body_start_ms;
-    size_t   body_consumed;       /* request-body bytes fed so far; bounds the post-rejection drain
-                                   * so it never waits for bytes the client already finished sending */
+    /* Request-body framing progress. The post-rejection drain terminates on FRAMING COMPLETION, not
+     * on a byte count: for chunked, wire bytes and decoded bytes differ, so only the decoder knows
+     * when the request is actually finished (terminal chunk, trailers, or a malformed chunk). The
+     * byte figures are an optimization for Content-Length, where remaining is knowable, so the drain
+     * does not sit out its deadline waiting for bytes the client already finished sending. */
+    int      request_body_complete;    /* framing reached its terminal state */
+    int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
+                                        * cleared on decoder error, after which only the bounds apply */
+    uint64_t request_body_received;    /* body bytes accounted so far */
     uint64_t drain_deadline_ms;   /* DRAINING: absolute deadline (0 = not draining) */
     size_t   drain_budget;        /* DRAINING: remaining byte budget */
     size_t   reject_drain_max_bytes;   /* per-conn copy of the server config */
@@ -190,6 +197,10 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
 
 /* One bounded, non-blocking drain read. Returns DRAINING to stay, or CLOSED on body consumed,
  * peer EOF, budget exhaustion, deadline expiry or socket error. */
+/* Account nread bytes already sitting in read_buf and decide whether to keep draining: the single
+ * framing-aware step both axes share (the completion driver calls this from its recv completion). */
+KlHttpConnState kl_http_conn_drain_ingest(KlHttpConn *c, size_t nread, uint64_t now_ms);
+
 KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms);
 
 /* Response fully sent: log access, then keep-alive reset (-> READING) or close (-> CLOSED). */

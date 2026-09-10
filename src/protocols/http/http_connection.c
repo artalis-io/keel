@@ -1129,13 +1129,50 @@ KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router) 
  * connection closes in general: an ordinary keep-alive completion has already consumed its body,
  * and an idle/error close has no committed response to protect. */
 
-/* Bytes of request body we still expect. Exact for Content-Length (body_consumed is maintained by
- * the ingest path); unknown for chunked, where the cap alone bounds us. Returning 0 means the
- * client has nothing left to send, so there is nothing to drain and no reason to wait. */
-static size_t conn_body_remaining(const KlHttpConn *c) {
-    if (c->req.chunked) return SIZE_MAX;            /* framing unknown: bounded by the cap only */
-    if (c->req.content_length <= c->body_consumed) return 0;
-    return c->req.content_length - c->body_consumed;
+/* Is the request framing finished? This, not a byte count, is what ends the drain: for chunked the
+ * wire bytes and the decoded body differ, so only the decoder can say when the request is complete
+ * (terminal chunk and trailers), and a malformed chunk is also terminal for our purposes. */
+static int conn_body_framing_complete(const KlHttpConn *c) {
+    if (c->request_body_complete) return 1;
+    if (c->req.chunked) return 0;                   /* only the decoder can say; see conn_drain_feed */
+    return (uint64_t)c->req.content_length <= c->request_body_received;
+}
+
+/* How much is still outstanding, when that is knowable. Content-Length only: an OPTIMIZATION that
+ * keeps the drain from sitting out its deadline for bytes the client already finished sending.
+ * Chunked reports 'unknown', so only the cap and the decoder bound it. */
+static size_t conn_body_remaining_hint(const KlHttpConn *c) {
+    if (c->req.chunked) return SIZE_MAX;
+    if ((uint64_t)c->req.content_length <= c->request_body_received) return 0;
+    uint64_t rem = (uint64_t)c->req.content_length - c->request_body_received;
+    return (rem > (uint64_t)SIZE_MAX) ? SIZE_MAX : (size_t)rem;
+}
+
+/* Feed drained bytes through the REAL framing, so completion is the parser's verdict rather than a
+ * byte tally. Chunked goes through the decoder with a NULL reader (decode + discard); Content-Length
+ * has no encoding, so counting against the declared length IS its framing. Returns 1 when the
+ * request is complete or irrecoverably malformed (both mean stop draining), 0 to keep going. */
+static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
+    c->request_body_received += (uint64_t)len;
+    if (c->req.chunked) {
+        /* A chunked rejection is OFTEN the decoder itself reporting an error (malformed framing, or a
+         * body reader refusing), so the decoder can already be dead when the drain starts. Error is
+         * therefore NOT a stop signal: broken framing yields no completion signal at all, so the byte
+         * budget and deadline become the only bounds, and we must keep draining under them rather
+         * than closing at once with data still unread, which is the very RST this fix exists to
+         * avoid. Only a TERMINAL CHUNK (rc == 1) means the request is genuinely finished. */
+        if (c->drain_framing_usable) {
+            int rc = kl_http1_chunked_decode(&c->chunked_dec, data, len, NULL);
+            if (rc > 0) { c->request_body_complete = 1; return 1; }
+            if (rc < 0) c->drain_framing_usable = 0;   /* no oracle from here on; bounds only */
+        }
+        return 0;
+    }
+    if ((uint64_t)c->req.content_length <= c->request_body_received) {
+        c->request_body_complete = 1;
+        return 1;
+    }
+    return 0;
 }
 
 KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
@@ -1145,22 +1182,44 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
 
     size_t cap = c->reject_drain_max_bytes;
     uint32_t ms = c->reject_drain_timeout_ms;
-    size_t remaining = conn_body_remaining(c);
+    size_t remaining = conn_body_remaining_hint(c);
 
     /* Nothing to protect the response from: no unread input expected, drain disabled, or the fd is
      * already gone. Close directly, exactly as before this change. */
-    if (remaining == 0 || cap == 0 || ms == 0 || !kl_handle_valid(c->stream.fd)) {
+    if (conn_body_framing_complete(c) || remaining == 0 || cap == 0 || ms == 0 ||
+        !kl_handle_valid(c->stream.fd)) {
         c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
     /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
      * a provider without half-close returns -1 and the drain still removes the unread-data condition. */
-    (void)kl_sock_shutdown_send(conn_sp(c), c->stream.fd);
+    (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
 
     c->drain_budget = (remaining < cap) ? remaining : cap;   /* never drain past the known body */
     c->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
+    /* Assume the framing oracle is usable; the first decoder error clears this and the bounds take
+     * over. Non-chunked framing needs no oracle: the declared length is the framing. */
+    c->drain_framing_usable = 1;
     c->state = KL_HTTP_CONN_DRAINING;
+    return c->state;
+}
+
+/* Account bytes already received into read_buf[0..nread] and decide whether to keep draining. The
+ * single place both axes share: readiness reads then calls this; the completion driver calls it from
+ * the recv completion. Framing decides completion; budget and deadline only bound the effort. */
+KlHttpConnState kl_http_conn_drain_ingest(KlHttpConn *c, size_t nread, uint64_t now_ms) {
+    if (c->state != KL_HTTP_CONN_DRAINING) return c->state;
+    c->drain_budget = (c->drain_budget > nread) ? c->drain_budget - nread : 0;
+    (void)conn_drain_feed(c, c->stream.read_buf, nread);
+    /* Framing completion stops us REQUIRING more input, but it does not by itself mean the socket is
+     * empty: a client that over-sends its declared Content-Length (or pipelines into a connection we
+     * are about to close) leaves readable bytes behind, and closing on top of those is the very RST
+     * this fix exists to avoid. So after completion we keep draining only while bytes are ALREADY
+     * there, and stop the moment a read would block (see kl_http_conn_drain_step). Nothing waits:
+     * the budget and deadline still bound everything. */
+    if (c->drain_budget == 0 || now_ms >= c->drain_deadline_ms)
+        c->state = KL_HTTP_CONN_CLOSED;
     return c->state;
 }
 
@@ -1171,23 +1230,25 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
         return c->state;
     }
     /* ONE bounded read per loop progression: never a read-until-empty loop, which a slow uploader
-     * could use to pin the single-threaded loop. */
-    char sink[2048];
-    size_t want = (c->drain_budget < sizeof(sink)) ? c->drain_budget : sizeof(sink);
+     * could use to pin the single-threaded loop. Reads into read_buf so the framing feed below sees
+     * the bytes in the same place the completion path leaves them. */
+    size_t room = c->stream.read_cap;
+    size_t want = (c->drain_budget < room) ? c->drain_budget : room;
     if (want == 0) { c->state = KL_HTTP_CONN_CLOSED; return c->state; }
 
-    kl_ssize_t n = kl_sock_recv(conn_sp(c), c->stream.fd, sink, want);
-    if (n > 0) {
-        c->drain_budget -= (size_t)n;
-        c->body_consumed += (size_t)n;
-        if (c->drain_budget == 0 || conn_body_remaining(c) == 0)
-            c->state = KL_HTTP_CONN_CLOSED;                  /* budget spent, or body fully consumed */
-        return c->state;
-    }
+    kl_ssize_t n = kl_sock_recv(conn_sp(c), c->stream.fd, c->stream.read_buf, want);
+    if (n > 0)
+        return kl_http_conn_drain_ingest(c, (size_t)n, now_ms);
     if (n == 0) { c->state = KL_HTTP_CONN_CLOSED; return c->state; }   /* peer EOF */
     /* n < 0: would-block keeps draining (the loop re-arms READ); a real error closes. */
     { KlIoStatus st = kl_sock_io_status(conn_sp(c));
-      if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) return c->state; }
+      if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) {
+          /* Nothing pending right now. If the framing is already complete there is nothing further to
+           * wait for and the socket is drained, so close; otherwise keep the drain armed and let the
+           * deadline decide. */
+          if (c->request_body_complete) c->state = KL_HTTP_CONN_CLOSED;
+          return c->state;
+      } }
     c->state = KL_HTTP_CONN_CLOSED;
     return c->state;
 }
@@ -1198,12 +1259,10 @@ KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_
 }
 
 KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
-    /* Track body progress so the post-rejection drain (#278) never waits for bytes the client has
-     * already finished sending. Counting the bytes handed to the body phase over-counts chunked
-     * framing, which is harmless: chunked reports its remaining length as unknown and is bounded by
-     * the byte cap alone. Leftover fed during dispatch is not counted, so the estimate of what is
-     * still outstanding errs high, i.e. toward draining a little more rather than closing early. */
-    c->body_consumed += nread;
+    /* Account the bytes entering the body phase, so a drain that starts later (#278) knows where the
+     * framing already is. For Content-Length this is the framing; for chunked the decoder below is,
+     * and request_body_complete is set from ITS verdict, not from this tally. */
+    c->request_body_received += (uint64_t)nread;
     if (c->req.chunked) {
         int rc = kl_http1_chunked_decode(&c->chunked_dec, c->stream.read_buf, nread,
                                    c->req.body_reader);
@@ -1227,6 +1286,7 @@ KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
             return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
         }
         if (rc == 1) {
+            c->request_body_complete = 1;   /* terminal chunk: framing done (#278) */
             if (c->req.body_reader)
                 c->req.body_reader->on_complete(c->req.body_reader);
             /* c->router (not a param): READING_BODY is a continuation of the
@@ -1264,6 +1324,7 @@ KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
         return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
     }
     if (pr == KL_HTTP1_PARSE_OK) {
+        c->request_body_complete = 1;   /* declared length reached: framing done (#278) */
         if (c->route && c->route->streaming_handler)
             return c->state;
         return conn_run_post_middleware_and_handle(c, c->router);

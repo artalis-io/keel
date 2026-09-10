@@ -224,8 +224,9 @@ ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
 
 /* Half-close the send side: the peer sees orderly end-of-response while we keep receiving, so a
  * post-rejection drain can run without the close RST'ing away the response (#278). */
-int kl_sockdef_shutdown_send(KlSocketHandle fd) {
-    return (shutdown((SOCKET)fd, SD_SEND) == 0) ? 0 : -1;
+int kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how) {
+    int native = (how == KL_SHUT_RD) ? SD_RECEIVE : (how == KL_SHUT_RDWR) ? SD_BOTH : SD_SEND;
+    return (shutdown((SOCKET)fd, native) == 0) ? 0 : -1;
 }
 
 /* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf); WSABUF

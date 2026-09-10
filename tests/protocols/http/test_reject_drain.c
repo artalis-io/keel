@@ -302,4 +302,40 @@ UTEST(reject_drain, successful_keepalive_is_unaffected) {
     rd_stop();
 }
 
+
+/* The framing oracle, specifically. A WELL-FORMED chunked upload rejected on size, where the client
+ * then sends a proper terminal chunk. The drain must end because the decoder reached the terminal
+ * chunk, NOT because the 500 ms deadline expired, so the test also bounds the elapsed time: a drain
+ * that ignored framing and ran to the deadline would take ~500 ms and fail this. That distinction is
+ * the reason the drain feeds the real decoder instead of counting bytes. */
+UTEST(reject_drain, chunked_terminal_chunk_ends_drain_before_deadline) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 2000));   /* generous deadline: framing must be what ends it */
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    const char *hdr = "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
+                      "Connection: close\r\n\r\n";
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+    char body[4096];
+    memset(body, 'H', sizeof(body));
+    for (int i = 0; i < 20; i++) {   /* past the 64 KiB route cap, so it is rejected mid-stream */
+        char sz[32];
+        int n = snprintf(sz, sizeof(sz), "%zx\r\n", sizeof(body));
+        if (n <= 0 || kl_test_sockwrite(fd, sz, (size_t)n) < 0) break;
+        if (kl_test_sockwrite(fd, body, sizeof(body)) < 0) break;
+        if (kl_test_sockwrite(fd, "\r\n", 2) < 0) break;
+    }
+    (void)kl_test_sockwrite(fd, "0\r\n\r\n", 5);   /* proper terminal chunk */
+
+    uint64_t t0 = kl_monotonic_ms();
+    char buf[4096];
+    (void)rd_read_all(fd, buf, sizeof(buf));
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+    kl_test_closesock(fd);
+
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+    ASSERT_TRUE(elapsed < 1500);   /* framing ended it, not the deadline */
+    rd_stop();
+}
+
 UTEST_MAIN();

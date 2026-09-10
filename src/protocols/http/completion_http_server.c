@@ -757,13 +757,12 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
      * final response, so account for them and discard, never parse them as a new request. One
      * bounded recv was posted per completion, so this is the non-blocking drain progression. */
     if (c->state == KL_HTTP_CONN_DRAINING) {
-        c->drain_budget = (c->drain_budget > ev->bytes) ? c->drain_budget - ev->bytes : 0;
-        c->body_consumed += ev->bytes;
+        /* The bytes are in read_buf; hand them to the SAME framing-aware step the readiness path
+         * uses, so completion terminates on the terminal chunk exactly as readiness does rather than
+         * counting bytes. Never parsed as a new request. */
+        KlHttpConnState st = kl_http_conn_drain_ingest(c, ev->bytes, kl_monotonic_ms());
         c->stream.read_len = 0;
-        if (kl_http_conn_drain_step(c, kl_monotonic_ms()) == KL_HTTP_CONN_CLOSED) {
-            kl_comp_close(s, c);
-            return;
-        }
+        if (st == KL_HTTP_CONN_CLOSED) { kl_comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         return;
     }
