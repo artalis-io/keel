@@ -15,6 +15,7 @@
 #endif
 
 #include "../vendor/utest.h"
+#include "net_compat.h"
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
@@ -28,9 +29,6 @@
 #include "../src/event_caps.h"   /* kl_event_caps: completion detection (backend-adaptive tests) */
 
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>    /* inet_pton: source-pinned-reply test (Linux) */
 
 static KlAllocator g_alloc;
 
@@ -52,7 +50,7 @@ static int m_close(void *c, KlSocketHandle fd) { g_close_calls++; return g_real_
 static int m_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) { g_connect_calls++; return g_real_connect(c, fd, a); }
 
 static const KlSocketProvider *mock_provider(void) {
-    g_msp = *kl_socket_provider_posix();
+    g_msp = *(const KlSocketProvider *)kl_test_builtin_provider();
     g_mops = *g_msp.ops;
     g_mdg = *g_msp.dgram;
     g_real_caps = g_mdg.caps; g_real_configure = g_mdg.configure; g_real_close = g_mops.close;

@@ -319,18 +319,36 @@ static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
  * of WSASendMsg for this socket AND the family's cmsg macro. Multicast/broadcast are gated on their
  * family-specific macros; broadcast is IPv4-only; connected-mode send is always available. If the
  * family cannot be determined, grant nothing (fail-loud). */
+/* Report the address family WITHOUT getsockname(). On Winsock getsockname() fails with
+ * WSAEINVAL on an UNBOUND socket, where POSIX happily reports the family with port 0, and a
+ * sender-side datagram socket is normally never bound. Returning 0 caps in that case refused
+ * connect, source-pin, per-packet TOS, multicast and broadcast on exactly the common client
+ * shape: kl_datagram_connect answered KL_ERR_UNSUPPORTED for every unbound socket on Windows.
+ * SO_PROTOCOL_INFO reports iAddressFamily whether or not the socket is bound; getsockname stays
+ * as the fallback for a provider handle that does not answer the option. */
+static int wdg_family(SOCKET s) {
+    WSAPROTOCOL_INFOW pi;
+    int pil = (int)sizeof(pi);
+    if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&pi, &pil) == 0)
+        return pi.iAddressFamily;
+    struct sockaddr_storage ss;
+    int sl = (int)sizeof(ss);
+    if (getsockname(s, (struct sockaddr *)&ss, &sl) == 0)
+        return (int)ss.ss_family;
+    return AF_UNSPEC;
+}
+
 static unsigned wdg_caps(void *ctx, KlSocketHandle fd) {
     (void)ctx;
     SOCKET s = (SOCKET)fd;
-    struct sockaddr_storage ss;
-    int sl = (int)sizeof(ss);
-    if (getsockname(s, (struct sockaddr *)&ss, &sl) != 0)
+    int fam = wdg_family(s);
+    if (fam != AF_INET && fam != AF_INET6)
         return 0;
     unsigned caps = KL_DGRAM_CAP_CONNECTED;
 #if defined(IP_PKTINFO) || defined(IP_TOS) || defined(IPV6_PKTINFO) || defined(IPV6_TCLASS)
     int have_sendmsg = (dgram_get_sendmsg(s) != NULL);   /* probe the extension for THIS socket */
 #endif
-    if (ss.ss_family == AF_INET) {
+    if (fam == AF_INET) {
 #if defined(IP_PKTINFO) || defined(IP_TOS)
         if (have_sendmsg) {   /* source-pin + per-packet TOS both ride WSASendMsg */
 #if defined(IP_PKTINFO)
@@ -347,7 +365,7 @@ static unsigned wdg_caps(void *ctx, KlSocketHandle fd) {
 #if defined(SO_BROADCAST)
         caps |= KL_DGRAM_CAP_BROADCAST;   /* IPv4-only */
 #endif
-    } else if (ss.ss_family == AF_INET6) {
+    } else if (fam == AF_INET6) {
 #if defined(IPV6_PKTINFO) || defined(IPV6_TCLASS)
         if (have_sendmsg) {
 #if defined(IPV6_PKTINFO)
