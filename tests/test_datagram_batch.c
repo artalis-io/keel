@@ -11,6 +11,7 @@
  * Whitebox (internal batch + core layout).
  */
 #include "../vendor/utest.h"
+#include "net_compat.h"
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
@@ -26,11 +27,6 @@
 
 #include <errno.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 /* ── a counting allocator: injects failure at the Nth malloc + tracks outstanding allocations ──── */
 typedef struct { KlAllocator base; int calls; int fail_at; int live; } CountAlloc;
@@ -113,7 +109,7 @@ static KlSocketProvider g_mrx_sp;
 /* Build the mock provider, overriding recv_batch with `rb` (NULL → the default gro-fabricating one). */
 static const KlSocketProvider *mock_recv_provider(int (*rb)(void *, KlSocketHandle, void *, KlDgramRxSlot *, int));
 static const KlSocketProvider *mock_gro_provider(void) {
-    g_mrx_sp = *kl_socket_provider_posix();
+    g_mrx_sp = *(const KlSocketProvider *)kl_test_builtin_provider();
     g_mrx_dg = *g_mrx_sp.dgram;
     g_real_recv = g_mrx_dg.recv;
     g_real_caps = g_mrx_dg.caps;
@@ -469,7 +465,7 @@ static int mk_rx(int *fd_out) {
     if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return 0; }
     socklen_t sl = sizeof(a);
     if (getsockname(fd, (struct sockaddr *)&a, &sl) != 0) { close(fd); return 0; }
-    int fl = fcntl(fd, F_GETFL, 0); fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    (void)kl_test_set_nonblock(fd);   /* net_compat: fcntl on POSIX, ioctlsocket on Winsock */
     *fd_out = fd;
     return (int)ntohs(a.sin_port);
 }
@@ -641,7 +637,7 @@ static kl_ssize_t gate_send(void *ctx, KlSocketHandle fd, const void *data, size
 /* Wraps the built-in POSIX provider (real fds), overrides send, and nulls the tx-batch ops so the send
  * path always takes the portable single-send loop (so the gate intercepts every datagram). */
 static const KlSocketProvider *gating_provider(void) {
-    g_gate_sp = *kl_socket_provider_posix();
+    g_gate_sp = *(const KlSocketProvider *)kl_test_builtin_provider();
     g_gate_dg = *g_gate_sp.dgram;
     g_real_send = g_gate_dg.send;
     g_gate_dg.send = gate_send;
