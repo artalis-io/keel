@@ -9,6 +9,7 @@
 #endif
 
 #include "../vendor/utest.h"
+#include "net_compat.h"
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
@@ -17,7 +18,6 @@
 #include <keel/sockaddr.h>
 
 #include <string.h>
-#include <sys/socket.h>
 
 #define GROUP_V4 "239.255.13.7"
 #define GROUP_V6 "ff12::4b45:454c"
