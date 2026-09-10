@@ -32,6 +32,9 @@ typedef struct {
     int     force_connect_err; /* errno to fail the NEXT connect with (0 = none) */
     int     nb_calls, cloexec_calls, nosig_calls, send_calls, recv_calls;
     int     socket_calls, connect_calls, writev_calls, sendfile_calls;
+    int     shutdown_calls;
+    KlShutdownHow last_how;    /* the Keel spelling the seam handed us */
+    int     force_shutdown_err;
 } MockSock;
 
 static int mock_set_nonblocking(void *ctx, KlSocketHandle fd) {
@@ -73,6 +76,14 @@ static kl_ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uin
     *offset += (uint64_t)count;              /* pretend fully sent */
     return (ssize_t)count;
 }
+static int mock_shutdown(void *ctx, KlSocketHandle fd, KlShutdownHow how) {
+    MockSock *m = ctx;
+    m->shutdown_calls++;
+    m->last_how = how;
+    if (m->force_shutdown_err) { m->force_shutdown_err = 0; return -1; }
+    if (m->wrap) return kl_sockdef_shutdown(fd, how);
+    return 0;
+}
 static KlSocketHandle mock_socket(void *ctx, int domain, int type, int protocol) {
     MockSock *m = ctx; m->socket_calls++; return (KlSocketHandle)socket(domain, type, protocol);
 }
@@ -93,6 +104,7 @@ static const KlSocketOps MOCK_OPS = {
     .recv            = mock_recv,
     .writev          = mock_writev,
     .sendfile        = mock_sendfile,
+    .shutdown        = mock_shutdown,
     .name            = "mock",
     /* bind/listen/accept/close left NULL → POSIX fallback */
 };
@@ -195,6 +207,74 @@ UTEST(sockprov, per_op_null_fallback) {
 
 /* Decorator: mock wraps real I/O but caps each send: the tail still arrives
  * on a second send, proving faults compose with real bytes on the wire. */
+/* ── shutdown: the provider seam carries a Keel enum, not SHUT_WR/SD_SEND ─── */
+
+/* A provider that supplies .shutdown sees the request in Keel's own spelling. The HTTP
+ * post-rejection drain half-closes through this seam, so a provider with no send direction to
+ * close (lwIP raw, EFI_TCP4) can interpret or refuse it rather than being handed a POSIX
+ * constant it cannot honour. */
+UTEST(sockprov, mock_shutdown_receives_keel_enum) {
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
+    KlSocketProvider p = mock_provider(&m);
+
+    ASSERT_EQ(0, kl_sock_shutdown(&p, 9, KL_SHUT_WR));
+    ASSERT_EQ(1, m.shutdown_calls);
+    ASSERT_EQ((int)KL_SHUT_WR, (int)m.last_how);
+
+    ASSERT_EQ(0, kl_sock_shutdown(&p, 9, KL_SHUT_RD));
+    ASSERT_EQ((int)KL_SHUT_RD, (int)m.last_how);
+    ASSERT_EQ(0, kl_sock_shutdown(&p, 9, KL_SHUT_RDWR));
+    ASSERT_EQ((int)KL_SHUT_RDWR, (int)m.last_how);
+    ASSERT_EQ(3, m.shutdown_calls);
+}
+
+/* A provider may refuse the half-close; the seam reports it rather than masking it. */
+UTEST(sockprov, mock_shutdown_error_propagates) {
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
+    m.force_shutdown_err = 1;
+    KlSocketProvider p = mock_provider(&m);
+    ASSERT_EQ(-1, kl_sock_shutdown(&p, 9, KL_SHUT_WR));
+    ASSERT_EQ(1, m.shutdown_calls);
+}
+
+/* .shutdown NULL, and the NULL provider, both fall back to the built-in, which must perform a
+ * REAL half-close: the peer reads EOF while our own receive side still works. That is the
+ * property the drain depends on (the client sees the response end, we keep reading its body). */
+UTEST(sockprov, shutdown_wr_fallback_gives_peer_eof) {
+    static const KlSocketOps partial = { .name = "partial" };   /* .shutdown NULL */
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
+    KlSocketProvider p = { &partial, &m, 0, NULL };
+
+    int sv[2];
+    ASSERT_EQ(0, kl_test_socketpair(sv));
+
+    /* sv[1] still has something for us to read after we close our send side. */
+    ASSERT_EQ((ssize_t)4, kl_test_sockwrite(sv[1], "ping", 4));
+
+    ASSERT_EQ(0, kl_sock_shutdown(&p, sv[0], KL_SHUT_WR));   /* NULL op -> built-in */
+    ASSERT_EQ(0, m.shutdown_calls);                          /* provider was not consulted */
+
+    char buf[8];
+    ASSERT_EQ((ssize_t)4, kl_test_sockread(sv[0], buf, sizeof(buf)));  /* our RX still live */
+
+    /* The peer sees orderly end-of-stream, not a reset. */
+    ASSERT_EQ((ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
+
+    kl_test_closesock(sv[0]);
+    kl_test_closesock(sv[1]);
+}
+
+/* The same through the NULL provider, which takes the no-indirection fast path. */
+UTEST(sockprov, shutdown_wr_null_provider_gives_peer_eof) {
+    int sv[2];
+    ASSERT_EQ(0, kl_test_socketpair(sv));
+    ASSERT_EQ(0, kl_sock_shutdown(NULL, sv[0], KL_SHUT_WR));
+    char buf[8];
+    ASSERT_EQ((ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
+    kl_test_closesock(sv[0]);
+    kl_test_closesock(sv[1]);
+}
+
 UTEST(sockprov, decorator_short_write_real_io) {
     MockSock m; memset(&m, 0, sizeof(m)); m.wrap = 1; m.short_send = 4;
     KlSocketProvider p = mock_provider(&m);
