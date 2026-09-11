@@ -46,6 +46,15 @@ typedef struct KlHttp2ServerConn KlHttp2ServerConn;
 typedef struct KlHttp2ServerConfig KlHttp2ServerConfig;
 
 typedef enum {
+/* INVARIANT for every consumer of a state RETURNED by one of the kl_http_conn_* drivers: dispatch
+ * it semantically. Do not collapse it into a two-way "the one state I expect, else close" test.
+ * This enum grows, and such a test silently mis-handles each new member: DRAINING was added in #278
+ * and four completion-axis sites treating "not READING" as "close now" closed connections on top of
+ * unread request bytes (#270), destroying responses that had already been written. A fifth left the
+ * connection registered for nothing at all. Either switch over the states, or route anything the
+ * site does not specifically handle to a shared dispatcher (comp_after_state /
+ * comp_after_send_complete on the completion axis, the `transition:` block on the readiness axis)
+ * rather than to a close. */
     KL_HTTP_CONN_PROXY_HEADER,    /* Reading a PROXY protocol header (pre-TLS) */
     KL_HTTP_CONN_TLS_HANDSHAKE,   /* TLS handshake in progress */
     KL_HTTP_CONN_READING,         /* Reading request headers */
