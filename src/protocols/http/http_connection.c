@@ -12,6 +12,7 @@
 #include "http_proto_hooks.h"        /* ws/h2 upgrade seam: core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
+#include "internal_trace.h"
 #include "kl_cstr.h"          /* kl_ascii_strncasecmp: freestanding-safe, locale-free */
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
@@ -1175,6 +1176,17 @@ static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
     return 0;
 }
 
+/* Drain tracing (#281). Compiled out unless -DKEEL_INTERNAL_TRACE; see src/internal_trace.h for why
+ * this records rather than prints. Legend for the six slots:
+ *   fd, content_length, request_body_received, drain_budget, ms_until_deadline, flags
+ * where flags packs chunked | complete<<1 | framing_usable<<2. */
+#define DRAIN_TRACE(c, why)                                                          \
+    KL_TRACE("drain", (why), (c)->stream.fd, (c)->req.content_length,                 \
+             (c)->request_body_received, (c)->drain_budget,                          \
+             (int64_t)(c)->drain_deadline_ms - (int64_t)kl_monotonic_ms(),           \
+             ((c)->req.chunked ? 1 : 0) | ((c)->request_body_complete ? 2 : 0)       \
+                 | ((c)->drain_framing_usable ? 4 : 0))
+
 KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     /* Terminating the request: the connection cannot be reused either way. */
     c->req.keep_alive = 0;
@@ -1188,6 +1200,10 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * already gone. Close directly, exactly as before this change. */
     if (conn_body_framing_complete(c) || remaining == 0 || cap == 0 || ms == 0 ||
         !kl_handle_valid(c->stream.fd)) {
+        DRAIN_TRACE(c, conn_body_framing_complete(c) ? "skip-complete"
+                       : (remaining == 0)            ? "skip-no-remaining"
+                       : (cap == 0 || ms == 0)       ? "skip-disabled"
+                       :                               "skip-bad-fd");
         c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
@@ -1196,12 +1212,23 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * a provider without half-close returns -1 and the drain still removes the unread-data condition. */
     (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
 
-    c->drain_budget = (remaining < cap) ? remaining : cap;   /* never drain past the known body */
+    /* The configured cap is the ONLY byte bound (#281). This used to be min(remaining, cap), where
+     * `remaining` came from the declared Content-Length, to avoid sitting out the deadline waiting
+     * for bytes the client had already finished sending. That reason is now covered by the
+     * termination rule below: framing complete plus a read that would block means the receive queue
+     * is empty, so close. The clamp was therefore redundant, and harmful whenever a peer OVER-SENDS
+     * its declared length: the excess bytes fell outside the budget by construction, so the drain
+     * stopped with them still queued and the close reset the response away. A recorded trace showed
+     * the drain ending on budget-exhausted with 16 KiB unread and the full 500 ms deadline still
+     * unused, identically on passing and failing runs. reject_drain_max_bytes stays the real bound,
+     * so the normative guarantee in docs/contracts/early_rejection_drain.md is unchanged. */
+    c->drain_budget = cap;
     c->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
     /* Assume the framing oracle is usable; the first decoder error clears this and the bounds take
      * over. Non-chunked framing needs no oracle: the declared length is the framing. */
     c->drain_framing_usable = 1;
     c->state = KL_HTTP_CONN_DRAINING;
+    DRAIN_TRACE(c, "enter");
     return c->state;
 }
 
@@ -1218,14 +1245,17 @@ KlHttpConnState kl_http_conn_drain_ingest(KlHttpConn *c, size_t nread, uint64_t 
      * this fix exists to avoid. So after completion we keep draining only while bytes are ALREADY
      * there, and stop the moment a read would block (see kl_http_conn_drain_step). Nothing waits:
      * the budget and deadline still bound everything. */
-    if (c->drain_budget == 0 || now_ms >= c->drain_deadline_ms)
+    if (c->drain_budget == 0 || now_ms >= c->drain_deadline_ms) {
+        DRAIN_TRACE(c, (c->drain_budget == 0) ? "budget-exhausted" : "deadline-ingest");
         c->state = KL_HTTP_CONN_CLOSED;
+    }
     return c->state;
 }
 
 KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
     if (c->state != KL_HTTP_CONN_DRAINING) return c->state;
     if (now_ms >= c->drain_deadline_ms) {                    /* deadline: stop babysitting */
+        DRAIN_TRACE(c, "deadline-step");
         c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
@@ -1234,19 +1264,23 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
      * the bytes in the same place the completion path leaves them. */
     size_t room = c->stream.read_cap;
     size_t want = (c->drain_budget < room) ? c->drain_budget : room;
-    if (want == 0) { c->state = KL_HTTP_CONN_CLOSED; return c->state; }
+    if (want == 0) { DRAIN_TRACE(c, "budget-zero-preread"); c->state = KL_HTTP_CONN_CLOSED; return c->state; }
 
     kl_ssize_t n = kl_sock_recv(conn_sp(c), c->stream.fd, c->stream.read_buf, want);
     if (n > 0)
         return kl_http_conn_drain_ingest(c, (size_t)n, now_ms);
-    if (n == 0) { c->state = KL_HTTP_CONN_CLOSED; return c->state; }   /* peer EOF */
+    if (n == 0) { DRAIN_TRACE(c, "peer-eof"); c->state = KL_HTTP_CONN_CLOSED; return c->state; }
+    /* peer EOF */
     /* n < 0: would-block keeps draining (the loop re-arms READ); a real error closes. */
     { KlIoStatus st = kl_sock_io_status(conn_sp(c));
       if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) {
           /* Nothing pending right now. If the framing is already complete there is nothing further to
            * wait for and the socket is drained, so close; otherwise keep the drain armed and let the
            * deadline decide. */
-          if (c->request_body_complete) c->state = KL_HTTP_CONN_CLOSED;
+          if (c->request_body_complete) {
+              DRAIN_TRACE(c, "wouldblock-complete");
+              c->state = KL_HTTP_CONN_CLOSED;
+          }
           return c->state;
       } }
     c->state = KL_HTTP_CONN_CLOSED;

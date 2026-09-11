@@ -231,7 +231,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \
            src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
-           src/protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
+           src/protocols/http/http_compress.c src/decompress.c src/drain.c src/internal_trace.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
