@@ -490,4 +490,57 @@ UTEST(reject_drain, over_send_past_declared_length_is_drained) {
     rd_stop();
 }
 
+/* The adjacent gate: framing ALREADY COMPLETE, with excess bytes queued (#281).
+ *
+ * kl_http_conn_begin_drain() used to skip the drain outright when the declared framing was complete
+ * or the declared remainder was zero. Both are derived from Content-Length, which is a statement
+ * about the PROTOCOL, not about the socket: a peer that over-sends satisfies the framing while
+ * leaving bytes in the receive queue, and the server then closed straight on top of them. The gate
+ * now asks the transport with one non-destructive peek before skipping.
+ *
+ * This arrives through the SUCCESS path rather than a rejection: 4096 declared against a 4096 limit
+ * is a legal request, so the handler answers 200 and the connection closes (Connection: close) with
+ * 36864 over-sent bytes still queued. The invariant is the same one the whole file is about, and it
+ * does not care which status was committed to: once Keel has committed to a final response, teardown
+ * must not invalidate it because unread request bytes remain.
+ *
+ * Unlike the other over-send case in this file, this one is a real oracle: 8 failures in 10 runs
+ * before the fix, 0 in 10 after. What makes it work is asserting the TRANSPORT-level outcome, that
+ * the connection ends with an orderly FIN, rather than only that the body arrived. On loopback the
+ * 200 survived the abortive close either way, so a body-only assertion passes with the defect
+ * present and proves nothing; the close being abortive is the defect, and that is observable.
+ *
+ * Worth stating because I got it wrong first: an earlier draft of this case asserted "413" on the
+ * theory that the request was rejected. It is not, 4096 against a 4096 limit is legal, so the 8/8
+ * failures that draft produced were the wrong status code, not the defect. */
+UTEST(reject_drain, over_sent_bytes_after_a_complete_body_do_not_reset_the_response) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    const char *hdr = "POST /deny HTTP/1.1" CRLF "Host: x" CRLF
+                      "Content-Length: 4096" CRLF "Connection: close" CRLF CRLF;
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+
+    static char body[40960];   /* 4096 declared, 36864 bytes beyond it */
+    memset(body, 'X', sizeof(body));
+    ASSERT_TRUE(kl_test_sockwrite(fd, body, sizeof(body)) > 0);
+
+    char buf[2048];
+    size_t got = 0;
+    long last;
+    for (;;) {
+        last = kl_test_sockread(fd, buf + got, (sizeof(buf) - 1) - got);
+        if (last <= 0) break;
+        got += (size_t)last;
+        if (got >= sizeof(buf) - 1) break;
+    }
+    buf[got] = 0;
+    kl_test_closesock(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_EQ(0L, last);   /* orderly FIN: the close must not be abortive */
+    rd_stop();
+}
+
 UTEST_MAIN();
