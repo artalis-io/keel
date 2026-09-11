@@ -111,23 +111,48 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (new_state == KL_HTTP_CONN_SENDING)
         new_state = kl_http_conn_on_writable(conn);
 
-    /* Re-register FD with appropriate mask */
-    if (new_state == KL_HTTP_CONN_SENDING) {
+    /* Re-register FD with appropriate mask. Exhaustive over KlHttpConnState with no default: a new
+     * member must be a compile error here, not a connection that matches no arm (which is precisely
+     * what DRAINING did before it was added). */
+    switch (new_state) {
+    case KL_HTTP_CONN_SENDING:
         if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_WRITE, &conn->stream) < 0)
             kl_http_server_conn_release(s, conn);
-    } else if (new_state == KL_HTTP_CONN_READING) {
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
-            kl_http_server_conn_release(s, conn);
-    } else if (new_state == KL_HTTP_CONN_DRAINING) {
+        break;
+    case KL_HTTP_CONN_DRAINING:
         /* The handler answered without consuming the request body, so the response is flushed with
          * input still unread (#278). Arm READ so each readable tick discards one bounded chunk,
          * exactly as the main readiness transition does; the idle sweep enforces the byte and time
-         * bounds and releases. Before this arm the state matched no branch, so the connection was
-         * left unregistered and the drain could only limp forward on sweep ticks. */
+         * bounds and releases. */
         if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
             kl_http_server_conn_release(s, conn);
-    } else if (new_state == KL_HTTP_CONN_CLOSED) {
+        break;
+    case KL_HTTP_CONN_READING:
+        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+            kl_http_server_conn_release(s, conn);
+        break;
+    case KL_HTTP_CONN_SUSPENDED:
+        /* Suspended again by the resume callback (a handler chaining a second async op): it holds
+         * its own op and is exempt from the idle sweep, so leave it parked and unregistered. */
+        break;
+    case KL_HTTP_CONN_PROCESSING:
+        /* Normalised to SENDING or CLOSED a few lines above, precisely because no drive path acts
+         * on it, so this is unreachable. */
+        break;
+    /* These reach no arm, which is what the previous if-chain also did: no fd is registered and the
+     * idle sweep eventually reclaims the connection. That looks like a latent stall (a resume that
+     * leaves the conn awaiting more body would wait for the timeout rather than a readable event),
+     * but proving and changing it is a behaviour change, not this audit. Named here so the
+     * no-arm case is deliberate and visible rather than an accident of an if-chain. */
+    case KL_HTTP_CONN_READING_BODY:
+    case KL_HTTP_CONN_PROXY_HEADER:
+    case KL_HTTP_CONN_TLS_HANDSHAKE:
+    case KL_HTTP_CONN_WEBSOCKET:
+    case KL_HTTP_CONN_HTTP2:
+        break;
+    case KL_HTTP_CONN_CLOSED:
         kl_http_server_conn_release(s, conn);
+        break;
     }
 }
 

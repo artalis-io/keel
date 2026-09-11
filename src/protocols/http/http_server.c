@@ -576,13 +576,16 @@ rearm_listen:
 
 transition:
             /* Transition */
-            if (new_state == KL_HTTP_CONN_TLS_HANDSHAKE) {
+            switch (new_state) {
+            case KL_HTTP_CONN_TLS_HANDSHAKE: {
                 if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  (KlEventMask)c->tls_want, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_HTTP_CONN_SENDING) {
+                break;
+            }
+            case KL_HTTP_CONN_SENDING: {
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING: async read pending, no WRITE event */
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
@@ -590,7 +593,9 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_HTTP_CONN_WEBSOCKET) {
+                break;
+            }
+            case KL_HTTP_CONN_WEBSOCKET: {
                 KlEventMask ws_mask = KL_EVENT_READ;
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
                 if (wsh && wsh->drain_pending && wsh->drain_pending(c))
@@ -599,7 +604,9 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_HTTP_CONN_HTTP2) {
+                break;
+            }
+            case KL_HTTP_CONN_HTTP2: {
                 KlEventMask mask = KL_EVENT_READ;
                 const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
@@ -608,9 +615,11 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_HTTP_CONN_READING ||
-                       new_state == KL_HTTP_CONN_READING_BODY ||
-                       new_state == KL_HTTP_CONN_PROXY_HEADER) {
+                break;
+            }
+            case KL_HTTP_CONN_READING:
+            case KL_HTTP_CONN_READING_BODY:
+            case KL_HTTP_CONN_PROXY_HEADER: {
                 /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
                  * so the level-triggered loop stops delivering body bytes; kl_http_request_resume_body
                  * re-arms READ. Only READING_BODY pauses. */
@@ -620,7 +629,9 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_HTTP_CONN_DRAINING) {
+                break;
+            }
+            case KL_HTTP_CONN_DRAINING: {
                 /* Post-rejection drain (#278): the response is flushed and SEND is half-closed; keep
                  * READ armed so each readable tick discards one bounded chunk. The sweep enforces the
                  * deadline, so a client that simply stops sending still gets closed. */
@@ -628,13 +639,27 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s, c);
                 }
-            } else if (new_state == KL_HTTP_CONN_SUSPENDED) {
+                break;
+            }
+            case KL_HTTP_CONN_SUSPENDED: {
                 /* Handler suspended for async I/O; FD already removed
                  * from event loop by kl_async_suspend. */
-            } else if (new_state == KL_HTTP_CONN_CLOSED) {
+                break;
+            }
+            case KL_HTTP_CONN_CLOSED: {
                 kl_event_del(&s->ev.loop, c->stream.fd);
                 kl_http_server_conn_release(s,c);
+                break;
             }
+            case KL_HTTP_CONN_PROCESSING:
+                /* Transient inside dispatch, and normalised away before any drive path sees it:
+                 * conn_process() and kl_async_complete() both convert a left-over PROCESSING into
+                 * SENDING or CLOSED precisely because no drive path acts on it. Arriving here would
+                 * be a bug upstream, not something to recover from, and doing nothing is exactly
+                 * what the previous if-chain did. The arm exists so the state is named rather than
+                 * matched by nothing. */
+                break;
+            }   /* no default: a new KlHttpConnState must fail to compile here */
         }
         kl_event_ctx_dispatch_end(&s->ev);   /* reclaim watchers deferred during this batch */
 
