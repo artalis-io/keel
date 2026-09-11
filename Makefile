@@ -528,10 +528,12 @@ test-win: $(WIN_TEST_BIN)
 #                     that test as the oracle. It still runs on WSAPoll (WIN_TEST_SUITES).
 #   http_client     - 20 of 21 cases pass; async_default_resolver_localhost resolves a NAME, so it
 #                     drives the built-in DNS resolver over IOCP (KlDatagram + kl_watcher_mod). #265.
-#   http_integration- segfaults in kl_http_server_sweep_conn_timeouts on a server thread outliving
-#                     its server (#267). NOT a completion-backend defect: it reproduces on
-#                     WSAPoll too, just intermittently there rather than on every run, so it
-#                     stays enrolled in WIN_TEST_SUITES and excluded only here.
+#   http_integration- the #267 segfault that excluded it is fixed, and 31 of its 32 cases are now
+#                     solid on IOCP (streaming_mid_stream_early_exit[_on_error] were the last two,
+#                     fixed with #270). post_413 is the only one left: 0 failures in 20 ISOLATED
+#                     runs, but 3 of 8 runs of the full suite, so it is contention-sensitive rather
+#                     than broken. Enrolling the suite today would buy two cases of coverage at the
+#                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
 WIN_IOCP_TEST_SUITES = allocator alpn async compress cross_module datagram_batch datagram_life datagram_multicast \
                        datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
