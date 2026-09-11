@@ -444,4 +444,75 @@ UTEST(reject_drain, early_handler_response_survives_on_both_axes) {
     rd_stop();
 }
 
+/* OVER-SEND past the declared Content-Length (#281). A peer may send more than it advertised, and
+ * the drain must not stop merely because the DECLARED framing is satisfied: the excess is still
+ * sitting in the receive queue, and closing on top of it resets the response away.
+ *
+ * The budget used to be min(declared remainder, cap), which put those excess bytes outside the
+ * budget by construction, so no amount of remaining cap or deadline could reach them. It is now the
+ * cap alone; the drain still stops early on framing-complete plus a would-block, which is what the
+ * clamp was really for.
+ *
+ * The client writes EVERYTHING before reading, which is what makes this deterministic rather than a
+ * race: the over-sent bytes are guaranteed to be queued when the server decides to close, and the
+ * response has not been read yet, so a reset destroys it. integration.post_413 is the same shape and
+ * failed about 1 run in 10 precisely because its client sometimes got to read first. Total stays
+ * under a socket buffer so the writes cannot block against a server that has stopped reading.
+ *
+ * DETECTION RATE, measured rather than assumed: 3 failures in 12 runs against the old clamp, 0 in 10
+ * with the fix. It is a real oracle (it never fails on correct code) but not a deterministic one,
+ * and no arrangement of the client makes it deterministic: the SERVER-side defect is fully
+ * deterministic, but whether this side notices depends on whether the reset overtakes data already
+ * sitting in our receive queue. Widening the over-send from 24 KiB to 40 KiB did not help, and
+ * asserting only on the response body was weaker still (it passed 10/10 against the very clamp it
+ * was meant to catch, which is why the end-of-stream assertion above exists).
+ *
+ * The deterministic evidence is the recorded trace: build with -DKEEL_INTERNAL_TRACE and the drain
+ * shows `budget-exhausted` at exactly the declared length, framing complete, 40960 bytes still
+ * unread and the full deadline unused, identically on passing and failing runs. */
+UTEST(reject_drain, over_send_past_declared_length_does_not_truncate_the_drain) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    const char *hdr = "POST /deny HTTP/1.1" CRLF "Host: x" CRLF
+                      "Content-Length: 16384" CRLF "Connection: close" CRLF CRLF;
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+
+    char chunk[8192];
+    memset(chunk, 'O', sizeof(chunk));
+    for (int i = 0; i < 7; i++)   /* 57344 sent against 16384 declared: 40960 bytes beyond */
+        if (kl_test_sockwrite(fd, chunk, sizeof(chunk)) < 0) break;
+
+    /* Do not read yet. The server has everything it needs to finish draining and close, and this
+     * hands it the time to do so while the response is still sitting unread in OUR receive queue,
+     * which is the state a reset destroys. Without this the client usually reads the response before
+     * the reset arrives and the case cannot distinguish the two behaviours: it passed 10/10 against
+     * the very clamp it exists to catch. The wait is a window, not a measurement; nothing below
+     * asserts timing. */
+    usleep(250000);
+
+    /* Read to the very end and keep HOW the connection ended. That is the deterministic signal:
+     * an orderly close delivers FIN and the final read returns 0, while a close on top of unread
+     * bytes delivers RST and the read fails. Whether the RESPONSE TEXT survives a reset is racy (it
+     * depends on whether this side had already consumed it), which is why post_413 fails only about
+     * 1 run in 10 and why asserting only on the body makes a weak oracle. The end-of-stream kind
+     * does not depend on that race. */
+    char buf[2048];
+    size_t got = 0;
+    long last;
+    for (;;) {
+        last = kl_test_sockread(fd, buf + got, (sizeof(buf) - 1) - got);
+        if (last <= 0) break;
+        got += (size_t)last;
+        if (got >= sizeof(buf) - 1) break;
+    }
+    buf[got] = '\0';
+    kl_test_closesock(fd);
+
+    ASSERT_EQ(0L, last);                       /* orderly FIN, not an abortive reset */
+    ASSERT_TRUE(strstr(buf, "413") != NULL);   /* and the response really arrived */
+    rd_stop();
+}
+
 UTEST_MAIN();

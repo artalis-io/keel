@@ -160,6 +160,22 @@ immediately reintroduces the reset on exactly the connections this contract is a
 of sitting out its deadline waiting for bytes the client already finished sending. It is never the
 source of truth for completion.
 
+## Diagnosing it
+
+The drain is timing-sensitive, and an `fprintf` on its path is not a usable instrument: adding one
+while investigating a failure made that failure disappear entirely (1 run in 10 failed without it, 0
+in 10 with it, same binary). Build with `-DKEEL_INTERNAL_TRACE` instead, for example
+
+```
+make KEEL_EXTRA_CFLAGS=-DKEEL_INTERNAL_TRACE
+```
+
+and each drain records which terminal condition won, into a fixed ring formatted only at exit (see
+`src/internal_trace.h`). The records name the reason and carry fd, declared length, bytes received,
+remaining budget, milliseconds left on the deadline, and the framing flags, which is enough to tell
+the bounds apart from each other and from framing completion. It is internal and compiled out of a
+default build; it is not public API.
+
 ## Configuration
 
 Both caps live on `KlHttpServerConfig`:
