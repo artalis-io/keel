@@ -157,6 +157,12 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->config.parser = kl_http1_parser_llhttp;
     if (s->config.max_body_size == 0)
         s->config.max_body_size = KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE;
+    /* Post-rejection drain bounds (#278). Both are caps, not targets: the drain stops at whichever
+     * comes first, and 0 for EITHER disables the drain so teardown behaves as it did before. */
+    if (s->config.reject_drain_max_bytes == 0 && s->config.reject_drain_timeout_ms == 0) {
+        s->config.reject_drain_max_bytes = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES;
+        s->config.reject_drain_timeout_ms = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS;
+    }
     if (s->config.max_header_size == 0)
         s->config.max_header_size = KL_HTTP_CONN_READ_BUF_SIZE;
     if (s->config.max_header_size > SIZE_MAX / 2) {
@@ -272,6 +278,8 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].router = &s->router;
         s->pool.conns[i].stream.ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
         s->pool.conns[i].max_body_size = s->config.max_body_size;
+        s->pool.conns[i].reject_drain_max_bytes = s->config.reject_drain_max_bytes;
+        s->pool.conns[i].reject_drain_timeout_ms = s->config.reject_drain_timeout_ms;
         s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
 
@@ -562,6 +570,20 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         /* Suspended: exempt from idle timeout; has its own deadline */
         if (tc->state == KL_HTTP_CONN_SUSPENDED)
             continue;
+        /* Draining (#278): exempt from the idle timeout, which would otherwise try to send a 408 on
+         * a connection whose final response is already out. It carries its own deadline, so a client
+         * that simply stops sending is closed by the drain rather than left parked. */
+        if (tc->state == KL_HTTP_CONN_DRAINING) {
+            if (kl_http_conn_drain_step(tc, now) == KL_HTTP_CONN_CLOSED) {
+                if (completion_loop) {
+                    kl_comp_cancel(&s->ev, tc->stream.fd);
+                } else {
+                    kl_event_del(&s->ev.loop, tc->stream.fd);
+                    kl_http_server_conn_release(s, tc);
+                }
+            }
+            continue;
+        }
         /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). */
         if (tc->state == KL_HTTP_CONN_WEBSOCKET) {
             const KlWsServerHooks *wsh = kl_ws_server_hooks();
@@ -600,9 +622,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 continue;  /* FILE_IO_CANCELLING: still waiting */
             /* Best-effort 408 (skip for TLS handshake, no HTTP framing yet). */
             if (tc->state == KL_HTTP_CONN_READING ||
-                tc->state == KL_HTTP_CONN_READING_BODY)
-                best_effort_conn_write(tc, kl_408_response,
-                                       sizeof(kl_408_response) - 1);
+                tc->state == KL_HTTP_CONN_READING_BODY) {
+                /* 408 is a final response too, so it goes through the same ownership point; a
+                 * timed-out upload is precisely the case with unread body left (#278). */
+                if (kl_http_conn_reject_final(tc, kl_408_response,
+                                             sizeof(kl_408_response) - 1) == KL_HTTP_CONN_DRAINING)
+                    continue;   /* drain first; the branch above closes it when a bound is reached */
+            }
             if (completion_loop) {
                 kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort op → release via its completion */
             } else {

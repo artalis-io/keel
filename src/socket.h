@@ -97,6 +97,7 @@ ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
 struct KlDatagramOps;
 const struct KlDatagramOps *kl_sockdef_dgram(void);
 ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
+int            kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
 /* The hosted default I/O-result classifier: maps the current `errno` to a
@@ -228,6 +229,14 @@ static inline ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandl
                                         void *buf, size_t len) {
     if (p && p->ops->recv_peek) return p->ops->recv_peek(p->context, fd, buf, len);
     return kl_sockdef_recv_peek(fd, buf, len);
+}
+
+/* Shut down one or both halves. Best-effort by contract: returns -1 when unsupported and the
+ * caller ignores it (the post-rejection drain still helps without it). */
+static inline int kl_sock_shutdown(const KlSocketProvider *p, KlSocketHandle fd,
+                                   KlShutdownHow how) {
+    if (p && p->ops->shutdown) return p->ops->shutdown(p->context, fd, how);
+    return kl_sockdef_shutdown(fd, how);
 }
 
 static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,

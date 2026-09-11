@@ -149,6 +149,7 @@ KlResolveReq	struct	resolver.h
 KlResolveResult	struct	resolver.h
 KlResolver	struct	resolver.h
 KlResolverCacheConfig	struct	resolver_cache.h
+KlShutdownHow	enum	socket.h
 KlSlotLease	struct	listener.h
 KlSlotReleaseFn	callback	listener.h
 KlSlotReserveFn	callback	listener.h

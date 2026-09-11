@@ -55,6 +55,8 @@ typedef enum {
     KL_HTTP_CONN_WEBSOCKET,       /* WebSocket connection (upgraded) */
     KL_HTTP_CONN_HTTP2,           /* HTTP/2 connection (upgraded) */
     KL_HTTP_CONN_SUSPENDED,       /* Suspended for async operation */
+    KL_HTTP_CONN_DRAINING,        /* Final response flushed; draining the unread request body
+                                   * before close so the peer is not RST'd (see #278). */
     KL_HTTP_CONN_CLOSED           /* Connection closed */
 } KlHttpConnState;
 
@@ -81,6 +83,19 @@ struct KlHttpConn {
     uint64_t last_active_ms;
     uint64_t request_start_ms;
     uint64_t body_start_ms;
+    /* Request-body framing progress. The post-rejection drain terminates on FRAMING COMPLETION, not
+     * on a byte count: for chunked, wire bytes and decoded bytes differ, so only the decoder knows
+     * when the request is actually finished (terminal chunk, trailers, or a malformed chunk). The
+     * byte figures are an optimization for Content-Length, where remaining is knowable, so the drain
+     * does not sit out its deadline waiting for bytes the client already finished sending. */
+    int      request_body_complete;    /* framing reached its terminal state */
+    int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
+                                        * cleared on decoder error, after which only the bounds apply */
+    uint64_t request_body_received;    /* body bytes accounted so far */
+    uint64_t drain_deadline_ms;   /* DRAINING: absolute deadline (0 = not draining) */
+    size_t   drain_budget;        /* DRAINING: remaining byte budget */
+    size_t   reject_drain_max_bytes;   /* per-conn copy of the server config */
+    uint32_t reject_drain_timeout_ms;
     KlHttp1ChunkedDecoder chunked_dec;
 
     KlTls *tls;
@@ -168,6 +183,25 @@ KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router);
 /* Feed `nread` freshly-received request-body bytes (in read_buf[0..nread]) to the chunked decoder /
  * body reader. Returns the next state (KL_HTTP_CONN_READING_BODY = need more). */
 KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread);
+
+/* Post-rejection teardown (#278). ONE ownership point for a final response that intentionally
+ * terminates a request: writes the response, then chooses between DRAINING (request input may
+ * still be unread, so closing now would RST the response away) and CLOSED. Ordinary keep-alive
+ * completions never come through here. */
+KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_t len);
+
+/* Begin drain teardown for a connection whose final response is ALREADY fully flushed (the
+ * send path's counterpart to kl_http_conn_reject_final). On a completion backend the caller must
+ * only call this once the write is physically retired. Returns DRAINING or CLOSED. */
+KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
+
+/* One bounded, non-blocking drain read. Returns DRAINING to stay, or CLOSED on body consumed,
+ * peer EOF, budget exhaustion, deadline expiry or socket error. */
+/* Account nread bytes already sitting in read_buf and decide whether to keep draining: the single
+ * framing-aware step both axes share (the completion driver calls this from its recv completion). */
+KlHttpConnState kl_http_conn_drain_ingest(KlHttpConn *c, size_t nread, uint64_t now_ms);
+
+KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms);
 
 /* Response fully sent: log access, then keep-alive reset (-> READING) or close (-> CLOSED). */
 KlHttpConnState kl_http_conn_send_complete(KlHttpConn *c);
