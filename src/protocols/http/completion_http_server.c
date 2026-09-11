@@ -417,10 +417,16 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * no pending op and is exempt from the idle sweep. kl_async_complete resumes it
          * (via kl_http_comp_resume) once the async op finishes. Do nothing. */
         break;
+    /* The old if-chain's final `else` caught all of these, and they keep its exact behaviour: a TLS
+     * streaming flush, then close. READING belongs here because a dispatch result of READING means
+     * the request was answered and the connection is being reused by the caller's own path, not that
+     * this helper should post anything; PROCESSING is transient inside dispatch, and a connection
+     * cannot still be reading a PROXY header or handshaking once a request has been acted on.
+     * Spelled out with no default: so a new member is a compile error rather than a silent close. */
     case KL_HTTP_CONN_READING:
-        /* A dispatch that wants more header bytes; the headers path posts its own read, so this
-         * only arrives when the caller already handled it. Nothing to do. */
-        break;
+    case KL_HTTP_CONN_PROXY_HEADER:
+    case KL_HTTP_CONN_TLS_HANDSHAKE:
+    case KL_HTTP_CONN_PROCESSING:
     case KL_HTTP_CONN_CLOSED:
         /* A TLS streaming response that finished during dispatch reports CLOSED (the handler
          * "already sent" it), but on a completion loop its chunks were written into the
@@ -430,14 +436,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
             (void)kl_comp_tls_flush(c);
         kl_comp_close(s, c);
         break;
-    /* Not reachable as a dispatch RESULT: the connection cannot still be reading a PROXY header or
-     * handshaking once a request has been acted on, and PROCESSING is transient inside dispatch.
-     * Spelled out with no default: so a new member is a compile error rather than a silent close. */
-    case KL_HTTP_CONN_PROXY_HEADER:
-    case KL_HTTP_CONN_TLS_HANDSHAKE:
-    case KL_HTTP_CONN_PROCESSING:
-        kl_comp_close(s, c);
-        break;
+
     }
 }
 
