@@ -1211,8 +1211,18 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * does NOT route every close through the drain. (#281: declaring 4096, sending 40960 and being
      * rejected on the first read reproduced the lost response 8 times out of 8 before this.) */
     if (conn_body_framing_complete(c) || remaining == 0) {
+        /* Only a request that DECLARED a body can over-send one. Requiring content_length > 0 keeps
+         * every other close on the old path, which matters: a slowloris times out with
+         * content_length 0, where "framing complete" is vacuously true, and peeking there found its
+         * trickle and parked the connection in the drain instead of closing it. That regressed the
+         * idle-timeout smoke on the completion axis, and it is precisely the "do not route all
+         * connection closes through this behaviour" line. Chunked bodies cannot over-send by
+         * definition: the terminal chunk ends the body, so anything after it is a new request. */
+        int may_have_over_sent = (!c->req.chunked && c->req.content_length > 0);
         char probe;
-        kl_ssize_t pk = kl_sock_recv_peek(conn_sp(c), c->stream.fd, &probe, 1);
+        kl_ssize_t pk = may_have_over_sent
+                          ? kl_sock_recv_peek(conn_sp(c), c->stream.fd, &probe, 1)
+                          : 0;
         if (pk <= 0) {
             DRAIN_TRACE(c, conn_body_framing_complete(c) ? "skip-complete" : "skip-no-remaining");
             c->state = KL_HTTP_CONN_CLOSED;
