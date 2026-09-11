@@ -87,6 +87,28 @@ dispatcher rather than to a close:
 | completion, after a response is retired | `comp_after_send_complete()` |
 | readiness | the `transition:` block in `http_server.c` |
 
+### How this is enforced
+
+Not by convention. These four dispatchers are exhaustive `switch`es over `KlHttpConnState` with **no
+`default:`**, and the compiler does the rest: `-Wall` enables `-Wswitch`, which under `-Werror` makes
+an omitted member a build error. Adding a state to the enum therefore fails to compile until every
+dispatcher has decided what to do with it.
+
+A `default:` silences that check completely, which is the one thing review reliably fails to notice.
+`make check-state-dispatch` keeps it out, and `make check-state-dispatch-selftest` proves the gate
+still detects a planted `default:`. Both run in CI.
+
+`-Wswitch-enum` was considered and not adopted. It differs from `-Wswitch` only in also warning on
+switches that *do* have a `default:`, so for these dispatchers it adds nothing over the no-`default:`
+rule already enforced above. Tree-wide it would flag 17 further switches whose `default:` is the
+right design (for instance dispatching a couple of `KL_COMP_*` event kinds and ignoring the rest),
+where enumerating every member would be noise and would force unrelated edits whenever any of those
+enums grew.
+
+A state that genuinely cannot occur at a site still gets a named arm, with a comment saying why and
+what the site does anyway. That is the point: the decision is recorded per state, not left to an
+`else`.
+
 ## Termination conditions
 
 The drain ends on the **first** of these:
