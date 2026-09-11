@@ -303,8 +303,21 @@ override CFLAGS        += $(KEEL_EXTRA_CFLAGS)
 override VENDOR_CFLAGS += $(KEEL_EXTRA_CFLAGS)
 override LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 
-CORE_OBJ = $(CORE_SRC:.c=.o)
-LLHTTP_OBJ = $(LLHTTP_SRC:.c=.o)
+# Per-backend object tree (#280). Objects used to be written beside their sources, at paths that do
+# not mention the backend, so `make BACKEND=iocp` followed by a plain `make` recompiled only the few
+# TUs whose SOURCES differ and reused the rest, packing objects from two backends into one
+# libkeel.a. That produced false test failures (capability negotiation and provider selection fail
+# when the compiled-in provider and the loop disagree) and, when both event backends landed in the
+# archive, duplicate-symbol link errors. Neither pointed at the real cause.
+#
+# EVENT_SRC names the backend uniquely (event_wsapoll / event_iocp / event_epoll / event_kqueue /
+# event_poll / event_pollcomp / event_iouring), so it is the natural build id; BACKEND itself is
+# empty for each platform's default. KEEL_NO_COMPLETION and COSMO change the shape of the same
+# EVENT_SRC, so they discriminate too.
+KEEL_BUILD_ID = $(basename $(notdir $(EVENT_SRC)))$(if $(KEEL_NO_COMPLETION),-nocomp)$(if $(COSMO),-cosmo)
+OBJDIR = build/$(KEEL_BUILD_ID)
+CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
+LLHTTP_OBJ = $(LLHTTP_SRC:%.c=$(OBJDIR)/%.o)
 LIB = libkeel.a
 
 all: $(LIB)
@@ -312,18 +325,54 @@ all: $(LIB)
 # Include generated dependency files (after default target)
 -include $(CORE_OBJ:.o=.d) $(LLHTTP_OBJ:.o=.d)
 
-$(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(COMPRESS_MINIZ_OBJ)
+# `ar rcs` REPLACES members of the same name and leaves every other member in place, so archiving a
+# different backend's objects over an existing libkeel.a keeps the old backend's event TU: the
+# archive ends up with both event_wsapoll.o and event_iocp.o and the link fails on duplicate
+# symbols. Per-backend object directories alone do not prevent that, because the ARCHIVE path is
+# shared. Remove it first so each archive is built from exactly one backend's objects (#280).
+LIB_OBJ = $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(COMPRESS_MINIZ_OBJ)
+
+# Which backend the CURRENT libkeel.a was archived from. Only one of these exists at a time, so
+# switching BACKEND makes the archive out of date even when that backend's objects are already built
+# and older than the archive. Without it, build wsapoll -> build iocp -> build wsapoll leaves an IOCP
+# archive in place: make sees libkeel.a newer than every wsapoll object and skips the rule, and the
+# test run that follows is measuring the wrong backend. Per-backend object directories do not help
+# there, because the ARCHIVE path is what is stale (#280).
+# The pair check-backend-isolation switches between. Windows has two native backends; on Linux the
+# readiness default plus the portable completion double are always available. Override to test others:
+#   make check-backend-isolation KEEL_ISOLATION_BACKENDS="iouring poll"
+# The backend event TUs, as archive member names. event_ctx.o and event_dispatch.o are part of every
+# build and are deliberately NOT in this list.
+KEEL_EVENT_TU_RE = ^event_(epoll|kqueue|poll|pollcomp|iouring|wsapoll|iocp)[.]o$$
+
+ifdef WINDOWS
+  KEEL_ISOLATION_BACKENDS ?= wsapoll iocp
+else
+  KEEL_ISOLATION_BACKENDS ?= poll pollcomp
+endif
+
+KEEL_STAMP = build/.archived-$(KEEL_BUILD_ID)
+$(KEEL_STAMP):
+	@mkdir -p $(dir $@)
+	@rm -f build/.archived-*
+	@touch $@
+
+# $(KEEL_STAMP) is a real prerequisite, not order-only: order-only would never mark the archive out
+# of date, which is the whole point. It is therefore excluded from the ar arguments by using
+# $(LIB_OBJ) rather than $^.
+$(LIB): $(KEEL_STAMP) $(LIB_OBJ)
+	@rm -f $@ .aarch64/$@   # ar rcs REPLACES same-named members and keeps the rest; start clean
 ifdef COSMO_FAT
 	@# Fat cosmocc: use single-arch cosmo ar (not cosmoar which fails with .aarch64/ recursion,
 	@# and not macOS ar which creates BSD archives that GNU ld.bfd can't resolve symbols from)
-	x86_64-unknown-cosmo-ar rcs $@ $^
+	x86_64-unknown-cosmo-ar rcs $@ $(LIB_OBJ)
 	@mkdir -p .aarch64
-	@aarch64-unknown-cosmo-ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+	@aarch64-unknown-cosmo-ar rcs .aarch64/$@ $(foreach o,$(LIB_OBJ),$(dir $(o)).aarch64/$(notdir $(o)))
 else ifdef COSMO
 	@# Single-arch cosmo: use the AR passed by the caller (e.g. x86_64-unknown-cosmo-ar)
-	$(AR) rcs $@ $^
+	$(AR) rcs $@ $(LIB_OBJ)
 else
-	$(AR) rcs $@ $^
+	$(AR) rcs $@ $(LIB_OBJ)
 endif
 
 # $(EXTRA_INC) is an empty-by-default per-target include add-on. Protocol objects reach the substrate
@@ -336,14 +385,36 @@ endif
 %.o: %.c
 	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
 
+# Library objects live under $(OBJDIR) so two backends cannot share one object path. mkdir -p per
+# object keeps the rule independent of any directory-creation ordering.
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
+
 src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
+$(OBJDIR)/src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 
 # The lwIP-raw completion backend (integrations/platform/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
 # the core lib (BACKEND=lwipraw was retired in RC-3). Its object build rules live in
 # integrations/platform/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
 
-# Vendor code: relaxed warnings
+# Vendor code: relaxed warnings. Spelled out per file rather than as a pattern rule because an
+# EXPLICIT rule beats a pattern rule in every make version, whereas the more-specific of two
+# competing patterns does not on GNU Make 3.81 (macOS); without that the $(OBJDIR)/%.o rule would
+# claim these and compile vendor sources with -Werror.
+$(OBJDIR)/vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
+	@mkdir -p $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+$(OBJDIR)/vendor/llhttp/api.o: vendor/llhttp/api.c
+	@mkdir -p $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+$(OBJDIR)/vendor/llhttp/http.o: vendor/llhttp/http.c
+	@mkdir -p $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+
+# The in-tree paths stay defined: fuzz, freestanding and the smoke targets build vendor objects
+# beside their sources, and those builds are not backend-varying.
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
 	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
 vendor/llhttp/api.o: vendor/llhttp/api.c
@@ -1022,7 +1093,7 @@ clean:
 	# (never .c/.h; a `test_*` glob would delete the sources too).
 	rm -f tests/protocols/*/test_*.exe tests/protocols/*/smoke_*.exe tests/protocols/*/*.d
 	rm -rf tests/protocols/*/*.dSYM
-	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
+	rm -rf build   # the per-backend object tree (#280) covers every library object
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
 	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
 	# escape $(CORE_OBJ) on a default clean; remove them unconditionally to prevent a
@@ -1472,6 +1543,31 @@ check-readiness-identity:
 # -Wswitch, which errors under -Werror when an enum switch omits a member and has no default:.
 # A default: silences that completely, so this gate keeps the default: out, which is the part review
 # does not catch. See docs/contracts/early_rejection_drain.md; #270 is the cost of not having it.
+# Backend isolation (#280): build two backends back to back WITHOUT cleaning and assert the archive
+# contains exactly one event backend. Deliberately NOT in CI: each CI job builds a single backend
+# from a fresh checkout, so CI cannot observe the failure this guards, and wiring it in would add two
+# full library builds to a job for no signal. It is the switching workflow, a developer concern, so
+# it is a local target you can run after touching the object or archive rules.
+check-backend-isolation:
+	@set -e; \
+	a=$(word 1,$(KEEL_ISOLATION_BACKENDS)); b=$(word 2,$(KEEL_ISOLATION_BACKENDS)); \
+	echo "building $$a, then $$b, with no clean in between"; \
+	$(MAKE) BACKEND=$$a >/dev/null; \
+	$(MAKE) BACKEND=$$b >/dev/null; \
+	n=$$($(AR) t $(LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
+	if [ "$$n" != "1" ]; then \
+	  echo "check-backend-isolation: FAIL - $(LIB) holds $$n event backends:"; \
+	  $(AR) t $(LIB) | grep -E '$(KEEL_EVENT_TU_RE)'; \
+	  echo "  A backend switch reused objects or kept stale archive members. See the OBJDIR and"; \
+	  echo "  KEEL_STAMP comments in this Makefile."; exit 1; \
+	fi; \
+	$(MAKE) BACKEND=$$a >/dev/null; \
+	m=$$($(AR) t $(LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
+	if [ "$$m" != "1" ]; then \
+	  echo "check-backend-isolation: FAIL - switching back left $$m event backends"; exit 1; \
+	fi; \
+	echo "backend-isolation: OK ($$a <-> $$b, one event backend per archive, no clean needed)"
+
 check-state-dispatch:
 	@perl tools/check_state_dispatch.pl src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/completion_http_server.c src/protocols/http/http_server_core.c
 
@@ -2249,7 +2345,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

@@ -1,5 +1,7 @@
 # Build artifacts
 *.o
+# per-backend object tree (#280): build/<event backend>/**.o and .d
+build/
 *.a
 *.so
 *.dylib
