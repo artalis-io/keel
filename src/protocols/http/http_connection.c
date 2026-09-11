@@ -1196,16 +1196,29 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     uint32_t ms = c->reject_drain_timeout_ms;
     size_t remaining = conn_body_remaining_hint(c);
 
-    /* Nothing to protect the response from: no unread input expected, drain disabled, or the fd is
-     * already gone. Close directly, exactly as before this change. */
-    if (conn_body_framing_complete(c) || remaining == 0 || cap == 0 || ms == 0 ||
-        !kl_handle_valid(c->stream.fd)) {
-        DRAIN_TRACE(c, conn_body_framing_complete(c) ? "skip-complete"
-                       : (remaining == 0)            ? "skip-no-remaining"
-                       : (cap == 0 || ms == 0)       ? "skip-disabled"
-                       :                               "skip-bad-fd");
+    /* Drain disabled, or the fd is already gone: close directly, exactly as before #278. */
+    if (cap == 0 || ms == 0 || !kl_handle_valid(c->stream.fd)) {
+        DRAIN_TRACE(c, (cap == 0 || ms == 0) ? "skip-disabled" : "skip-bad-fd");
         c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
+    }
+
+    /* The declared framing says nothing more is coming. That is a statement about the PROTOCOL, not
+     * about the socket: a peer that over-sends its Content-Length satisfies the framing while leaving
+     * bytes in the receive queue, and closing on those is the abortive teardown this exists to
+     * prevent. So ask the transport rather than trusting the declaration, with one non-destructive
+     * peek. Nothing queued means the ordinary case, and the drain is skipped exactly as before: this
+     * does NOT route every close through the drain. (#281: declaring 4096, sending 40960 and being
+     * rejected on the first read reproduced the lost response 8 times out of 8 before this.) */
+    if (conn_body_framing_complete(c) || remaining == 0) {
+        char probe;
+        kl_ssize_t pk = kl_sock_recv_peek(conn_sp(c), c->stream.fd, &probe, 1);
+        if (pk <= 0) {
+            DRAIN_TRACE(c, conn_body_framing_complete(c) ? "skip-complete" : "skip-no-remaining");
+            c->state = KL_HTTP_CONN_CLOSED;
+            return c->state;
+        }
+        DRAIN_TRACE(c, "queued-past-framing");   /* over-sent: drain it rather than reset it away */
     }
 
     /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
