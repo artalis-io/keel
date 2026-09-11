@@ -144,15 +144,33 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
  * assumption, so the fix is a single owner rather than four corrected branches. Add the arm here
  * when a new state becomes reachable from send_complete; see the note at KlHttpConnState. */
 static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
-    if (st == KL_HTTP_CONN_READING) {
+    switch (st) {
+    case KL_HTTP_CONN_READING:            /* keep-alive: next request */
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else if (st == KL_HTTP_CONN_DRAINING) {
+        break;
+    case KL_HTTP_CONN_DRAINING:
         /* Final response physically retired and SEND half-closed: post a recv so each completion
          * discards one bounded chunk. The idle sweep enforces the byte and time bounds. */
         c->stream.read_len = 0;
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else {
+        break;
+    case KL_HTTP_CONN_CLOSED:             /* response was final and nothing is outstanding */
         kl_comp_close(s, c);
+        break;
+    /* send_complete() decides only between those three. Reaching any other state here means the
+     * state machine moved under us, which is not recoverable on a connection whose response is
+     * already out, so close rather than guess. Listed individually and with no default: so that a
+     * new member is a compile error here instead of a silent close. */
+    case KL_HTTP_CONN_PROXY_HEADER:
+    case KL_HTTP_CONN_TLS_HANDSHAKE:
+    case KL_HTTP_CONN_READING_BODY:
+    case KL_HTTP_CONN_PROCESSING:
+    case KL_HTTP_CONN_SENDING:
+    case KL_HTTP_CONN_WEBSOCKET:
+    case KL_HTTP_CONN_HTTP2:
+    case KL_HTTP_CONN_SUSPENDED:
+        kl_comp_close(s, c);
+        break;
     }
 }
 
@@ -354,7 +372,8 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
-    if (st == KL_HTTP_CONN_SENDING) {
+    switch (st) {
+    case KL_HTTP_CONN_SENDING:
         if (c->tls) {
             if (c->res.body_mode == KL_HTTP_BODY_STREAM)
                 comp_tls_send_stream(s, c);    /* flush encrypted chunks synchronously */
@@ -365,41 +384,60 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
         } else if (comp_send_response(c) < 0) {
             kl_comp_close(s, c);
         }
-    } else if (st == KL_HTTP_CONN_DRAINING) {
+        break;
+    case KL_HTTP_CONN_DRAINING:
         /* Post-rejection drain (#278): the final response is out (and on this axis physically
          * retired before we got here) and SEND is half-closed. Post a recv so each completion
          * discards one bounded chunk; the idle sweep enforces the deadline. */
         c->stream.read_len = 0;
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else if (st == KL_HTTP_CONN_READING_BODY) {
+        break;
+    case KL_HTTP_CONN_READING_BODY:
         comp_start_body_read(s, c);
-    } else if (st == KL_HTTP_CONN_HTTP2) {
+        break;
+    case KL_HTTP_CONN_HTTP2:
         /* Entered h2 via an h2c Upgrade (plaintext): upgrade_from_h1 already sent the
          * 101 + initial SETTINGS through conn_write and consumed the leftover. Reset the
          * read window so the next recv starts a fresh h2 frame buffer (the HTTP/1.1
          * upgrade request must not be re-fed), then read h2 frames. */
         c->stream.read_len = 0;
-        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else if (st == KL_HTTP_CONN_WEBSOCKET) {
+        break;
+    case KL_HTTP_CONN_WEBSOCKET:
         /* WS upgrade done during dispatch: kl_ws_server_upgrade wrote the 101 handshake
          * (and processed any leftover frames) through conn_write; for TLS that ciphertext
          * is in the out ring. Flush it, reset the read window, then read WS frames. */
         c->stream.read_len = 0;
-        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else if (st == KL_HTTP_CONN_SUSPENDED) {
+        break;
+    case KL_HTTP_CONN_SUSPENDED:
         /* Handler suspended for async I/O: leave the connection parked; it holds
          * no pending op and is exempt from the idle sweep. kl_async_complete resumes it
          * (via kl_http_comp_resume) once the async op finishes. Do nothing. */
-    } else {
-        /* CLOSED. A TLS streaming response that finished during dispatch reports CLOSED
-         * (the handler "already sent" it), but on a completion loop its chunks were
-         * written into the memory-BIO out ring rather than the socket; flush them before
-         * closing so the response is actually delivered. */
+        break;
+    case KL_HTTP_CONN_READING:
+        /* A dispatch that wants more header bytes; the headers path posts its own read, so this
+         * only arrives when the caller already handled it. Nothing to do. */
+        break;
+    case KL_HTTP_CONN_CLOSED:
+        /* A TLS streaming response that finished during dispatch reports CLOSED (the handler
+         * "already sent" it), but on a completion loop its chunks were written into the
+         * memory-BIO out ring rather than the socket; flush them before closing so the response
+         * is actually delivered. */
         if (c->tls && c->res.body_mode == KL_HTTP_BODY_STREAM)
             (void)kl_comp_tls_flush(c);
         kl_comp_close(s, c);
+        break;
+    /* Not reachable as a dispatch RESULT: the connection cannot still be reading a PROXY header or
+     * handshaking once a request has been acted on, and PROCESSING is transient inside dispatch.
+     * Spelled out with no default: so a new member is a compile error rather than a silent close. */
+    case KL_HTTP_CONN_PROXY_HEADER:
+    case KL_HTTP_CONN_TLS_HANDSHAKE:
+    case KL_HTTP_CONN_PROCESSING:
+        kl_comp_close(s, c);
+        break;
     }
 }
 

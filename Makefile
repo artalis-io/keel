@@ -1468,6 +1468,24 @@ check-readiness-identity:
 	     src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/completion_http_server.c \
 	  && echo "readiness-identity: OK, all connection registrations use &conn->stream"
 
+# Exhaustiveness of KlHttpConnState dispatch. The compiler does the real work: -Wall enables
+# -Wswitch, which errors under -Werror when an enum switch omits a member and has no default:.
+# A default: silences that completely, so this gate keeps the default: out, which is the part review
+# does not catch. See docs/contracts/early_rejection_drain.md; #270 is the cost of not having it.
+check-state-dispatch:
+	@perl tools/check_state_dispatch.pl src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/completion_http_server.c src/protocols/http/http_server_core.c
+
+# Self-test: a clean fixture must pass, and one whose default: hides a missing state must fail.
+check-state-dispatch-selftest:
+	@perl tools/check_state_dispatch.pl tests/fixtures/state_dispatch_good.c >/dev/null \
+	  && echo "selftest: good fixture PASSED (as expected)" \
+	  || { echo "selftest FAIL: clean fixture was flagged"; exit 1; }
+	@if perl tools/check_state_dispatch.pl tests/fixtures/state_dispatch_bad.c 2>/dev/null; then \
+	  echo "selftest FAIL: a default: over KlHttpConnState was NOT flagged"; exit 1; \
+	else \
+	  echo "selftest: default: fixture flagged (as expected)"; \
+	fi
+
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
 # and a clean fixture (must PASS), proving the gate actually detects multiline regressions.
 check-readiness-identity-selftest:
@@ -2231,7 +2249,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
