@@ -1211,24 +1211,28 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * does NOT route every close through the drain. (#281: declaring 4096, sending 40960 and being
      * rejected on the first read reproduced the lost response 8 times out of 8 before this.) */
     if (conn_body_framing_complete(c) || remaining == 0) {
-        /* Only a request that DECLARED a body can over-send one. Requiring content_length > 0 keeps
-         * every other close on the old path, which matters: a slowloris times out with
-         * content_length 0, where "framing complete" is vacuously true, and peeking there found its
-         * trickle and parked the connection in the drain instead of closing it. That regressed the
-         * idle-timeout smoke on the completion axis, and it is precisely the "do not route all
-         * connection closes through this behaviour" line. Chunked bodies cannot over-send by
-         * definition: the terminal chunk ends the body, so anything after it is a new request. */
-        int may_have_over_sent = (!c->req.chunked && c->req.content_length > 0);
-        char probe;
-        kl_ssize_t pk = may_have_over_sent
-                          ? kl_sock_recv_peek(conn_sp(c), c->stream.fd, &probe, 1)
-                          : 0;
-        if (pk <= 0) {
+        /* The declared framing says nothing more is coming. That is a statement about the PROTOCOL,
+         * not about the socket: a peer that over-sends its Content-Length satisfies the framing while
+         * leaving bytes queued, and closing on those is the abortive teardown this exists to prevent.
+         *
+         * Detect it from what has ALREADY been accounted, with no syscall: reading more than the
+         * declared length is proof of over-send. A peek on the socket would be more thorough, and was
+         * tried and reverted: on the completion axis a synchronous peek on a socket the driver owns
+         * hung test_http_integration under io_uring, and it also parked timed-out slowloris
+         * connections in the drain (content_length 0 makes framing vacuously complete). This test
+         * cannot fire for a request with no declared body, and in practice the read that triggers a
+         * rejection already overshoots, which is the case that matters.
+         *
+         * Known limit: excess that arrives in a LATER packet, after a read that landed exactly on the
+         * declared length, is not seen here. Tracked on #281 with the rest of the residual. */
+        int over_sent = (!c->req.chunked && c->req.content_length > 0 &&
+                         c->request_body_received > (uint64_t)c->req.content_length);
+        if (!over_sent) {
             DRAIN_TRACE(c, conn_body_framing_complete(c) ? "skip-complete" : "skip-no-remaining");
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
-        DRAIN_TRACE(c, "queued-past-framing");   /* over-sent: drain it rather than reset it away */
+        DRAIN_TRACE(c, "over-sent-past-framing");   /* drain the excess rather than reset it away */
     }
 
     /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
