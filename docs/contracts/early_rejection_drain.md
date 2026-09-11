@@ -1,0 +1,137 @@
+# Keel early-rejection drain
+
+Authoritative contract for what Keel does to a connection when it sends a **final response that
+terminates a request while unread request-body data may still be arriving**: a 413 on an oversized
+upload, a 431, a 415, a 408 on a stalled upload, a 500 from a body reader. Companion to
+`docs/contracts/stream.md`. Identical across the readiness and completion axes; only the read
+mechanism differs.
+
+## Why this exists
+
+Closing a socket that still has unread received data makes TCP send **RST**, not FIN. A reset
+discards data the peer has already buffered, so on Windows the client loses the very response that
+explains the rejection; the symptom is a response the server provably sent and the client never
+saw. POSIX is exposed to the same reset and is merely more forgiving about what the peer can still
+read afterwards.
+
+So the invariant is about teardown, not about writing:
+
+> Once Keel has committed to sending a final response, connection teardown must not invalidate that
+> response merely because unread request bytes remain.
+
+## The bounded-effort guarantee, and its limit
+
+The guarantee is deliberately narrow:
+
+> Keel makes a **bounded** best effort to preserve the final response during early rejection. It
+> does not permit an untrusted peer to force unbounded draining in order to guarantee delivery.
+
+Those two goals genuinely conflict, and a flooding client can always create the conflict:
+
+| goal | when they collide |
+|---|---|
+| deliver the final response reliably | loses |
+| keep resource consumption bounded | **wins** |
+
+Stated normatively, because it is a security boundary rather than an implementation detail:
+
+> **If the peer continues transmitting beyond the configured rejection-drain budget, Keel may
+> terminate the connection even if doing so prevents reliable delivery of the final response.**
+
+`byte_cap_ends_the_drain_without_promising_delivery` in `tests/protocols/http/test_reject_drain.c`
+exists to pin exactly that sentence. It asserts the drain **stops**, and deliberately does **not**
+assert the client received the response. It is not an incomplete test and it is not a bug: making
+the drain unlimited would make it pass and would hand any peer an unbounded hold on a
+single-threaded loop. Do not "fix" it.
+
+## Ownership
+
+One internal entry point owns the whole transition, so no rejection site carries teardown policy
+and none of them mentions TCP:
+
+```
+kl_http_conn_reject_final(conn, response, len)
+
+    response
+      -> physical write retirement      (completion axis: the write is retired, not merely queued)
+      -> shutdown(KL_SHUT_WR)           (peer sees orderly end-of-stream; our receive side stays up)
+      -> bounded input drain            (KL_HTTP_CONN_DRAINING)
+      -> close
+```
+
+HTTP decides only *"this is a terminal rejection with potentially live inbound input"*. Entry is
+gated on unread input remaining, not on which status code it is, so an ordinary successful
+keep-alive response (whose body is already consumed) never enters the drain.
+
+## Termination conditions
+
+The drain ends on the **first** of these:
+
+| condition | note |
+|---|---|
+| a read would block **and** the body framing is complete | the transport-level completion test |
+| peer EOF | nothing more is coming |
+| byte budget exhausted | `reject_drain_max_bytes`, default 64 KiB |
+| deadline expired | `reject_drain_timeout_ms`, default 500 ms |
+| socket error or reset | no point continuing |
+
+Draining is asynchronous throughout: **one bounded read per loop progression**, never a blocking
+read-until-empty. It must never stall the single-threaded loop, which is why both caps exist and
+why a stalled client is resolved by the deadline rather than parked.
+
+### Framing complete is not the same as receive queue empty
+
+A subtle point worth stating, because the obvious rule is wrong:
+
+```
+framing COMPLETE   !=   socket receive queue empty
+```
+
+A peer that declares `Content-Length: 100000` and then pushes 122880 bytes has satisfied the
+framing while leaving 22880 bytes queued. Closing there provokes the same abortive reset the drain
+exists to avoid. So framing completion stops Keel **requiring** more input; the drain itself ends
+when a read would block, i.e. when the receive queue is actually empty. Nothing waits for that:
+the budget and the deadline still bound everything, and before framing completes a would-block
+keeps the drain armed so the deadline resolves it.
+
+## Body completion is the framing's verdict
+
+Discarded bytes are fed through the **real** body framing, not counted. For chunked transfer
+encoding, wire bytes and decoded body bytes differ, so a byte tally can never tell when the request
+ended: such a drain could only ever finish on a cap, never on the terminal chunk.
+
+| decoder state | meaning for the drain |
+|---|---|
+| finished | the framing oracle says the body ended |
+| still active | keep parsing and draining |
+| already errored | the oracle is **unavailable**; bounded raw drain, caps only |
+
+That last row matters: a chunked rejection is frequently the decoder *itself* reporting the error,
+so it can already be dead when the drain starts. Treating decoder failure as permission to close
+immediately reintroduces the reset on exactly the connections this contract is about.
+
+`request_body_received` is only an optimization: it lets a `Content-Length` drain stop early instead
+of sitting out its deadline waiting for bytes the client already finished sending. It is never the
+source of truth for completion.
+
+## Configuration
+
+Both caps live on `KlHttpServerConfig`:
+
+| field | default |
+|---|---|
+| `reject_drain_max_bytes` | `KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES` (64 KiB) |
+| `reject_drain_timeout_ms` | `KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS` (500 ms) |
+
+Leaving both at 0 selects the defaults. Setting **both** to 0 disables the drain entirely and
+restores pre-drain teardown, for an embedder who would rather reset than spend anything on a
+rejected request.
+
+## Transport requirement
+
+The half-close goes through the socket seam as `KlSocketOps.shutdown(ctx, fd, KlShutdownHow)`, a
+Keel enum (`KL_SHUT_RD` / `_WR` / `_RDWR`) rather than `SHUT_WR` or `SD_SEND`, so a provider with no
+POSIX notion of a half-close (lwIP raw, EFI_TCP4) can interpret or refuse it on its own terms. The
+op is best-effort: a NULL slot selects the built-in native shutdown, and a provider returning -1 is
+tolerated. The drain still reduces the reset window without it; the half-close simply lets the peer
+see an orderly end-of-stream while Keel keeps reading.

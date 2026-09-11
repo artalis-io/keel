@@ -94,7 +94,14 @@ typedef struct KlHttpServerConfig {
      * and drains inbound bytes, bounded BOTH ways so a slow or hostile uploader cannot pin the
      * single-threaded loop. Draining is asynchronous: one bounded read per loop progression, never
      * a blocking read-until-empty. Successful keep-alive responses never enter it (their body is
-     * already consumed). 0 selects the default; set bytes to 0 and timeout to 0 to disable. */
+     * already consumed). 0 selects the default; set bytes to 0 and timeout to 0 to disable.
+     *
+     * The effort is BOUNDED, and the bound wins: if the peer keeps transmitting past
+     * reject_drain_max_bytes, Keel may terminate the connection even though doing so prevents
+     * reliable delivery of the final response. Delivery and bounded resource consumption genuinely
+     * conflict under a flooding peer, and a server must choose the bound. Full contract, including
+     * why the byte-cap regression test deliberately does not assert delivery:
+     * docs/contracts/early_rejection_drain.md */
     size_t   reject_drain_max_bytes;   /**< cap on post-rejection drained bytes; default 64 KiB */
     uint32_t reject_drain_timeout_ms;  /**< cap on post-rejection drain time; default 500 ms */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */

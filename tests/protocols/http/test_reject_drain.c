@@ -191,7 +191,11 @@ UTEST(reject_drain, no_reader_oversized_declared_body) {
  * still RST the response away. That is the deliberate trade the cap exists to make: bounded work
  * beats guaranteed delivery to a client that keeps sending past the bound. So this asserts what IS
  * promised at the boundary, that the server retires the connection and keeps serving, and not that
- * the response arrives. Delivery is covered by the cases above, where the outstanding body fits. */
+ * the response arrives. Delivery is covered by the cases above, where the outstanding body fits.
+ *
+ * DO NOT "fix" this test by removing the cap or raising it until delivery succeeds. It is pinning a
+ * security boundary, not tolerating an incomplete assertion: an unlimited drain hands any peer an
+ * unbounded hold on the single-threaded loop. See docs/contracts/early_rejection_drain.md. */
 UTEST(reject_drain, byte_cap_ends_the_drain_without_promising_delivery) {
     ASSERT_EQ(0, rd_start(1024, 5000));
     int fd = rd_connect();
