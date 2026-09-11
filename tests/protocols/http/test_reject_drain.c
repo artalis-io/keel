@@ -311,9 +311,16 @@ UTEST(reject_drain, successful_keepalive_is_unaffected) {
  * then sends a proper terminal chunk. The drain must end because the decoder reached the terminal
  * chunk, NOT because the 500 ms deadline expired, so the test also bounds the elapsed time: a drain
  * that ignored framing and ran to the deadline would take ~500 ms and fail this. That distinction is
- * the reason the drain feeds the real decoder instead of counting bytes. */
+ * the reason the drain feeds the real decoder instead of counting bytes.
+ *
+ * Both OTHER bounds are deliberately put out of reach, because this case is only meaningful if
+ * framing is the one that can fire. The budget is 1 MiB against ~80 KiB of upload: at 64 KiB it sat
+ * in the same order as the unread remainder, so a faster or slower loop could end the drain on the
+ * CAP instead, which legitimately loses the response and made this flake on io_uring. Raising it
+ * costs the test nothing, because the elapsed-time bound below is what does the discriminating: a
+ * drain that ignored framing would run to the 2000 ms deadline and fail. */
 UTEST(reject_drain, chunked_terminal_chunk_ends_drain_before_deadline) {
-    ASSERT_EQ(0, rd_start(64 * 1024, 2000));   /* generous deadline: framing must be what ends it */
+    ASSERT_EQ(0, rd_start(1024 * 1024, 2000));   /* only framing is in reach; see above */
     int fd = rd_connect();
     ASSERT_TRUE(fd >= 0);
 
