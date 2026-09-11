@@ -21,6 +21,7 @@ src/datagram_send.c
 src/datagram_slots.c
 src/decompress.c
 src/drain.c
+src/internal_trace.c
 src/error.c
 src/event_ctx.c
 src/event_dispatch.c

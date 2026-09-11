@@ -444,4 +444,50 @@ UTEST(reject_drain, early_handler_response_survives_on_both_axes) {
     rd_stop();
 }
 
+/* OVER-SEND past the declared Content-Length (#281). A peer may send more than it advertised, and
+ * the drain must not stop merely because the DECLARED framing is satisfied: the excess is still in
+ * the receive queue, and closing on top of it resets the response away. The budget used to be
+ * min(declared remainder, cap), which put those bytes outside the budget by construction; it is now
+ * the cap alone.
+ *
+ * PATH COVERAGE, NOT AN ORACLE. Read this before trusting a pass. I could not build a portable
+ * deterministic test for this defect from the client side, and measured three attempts rather than
+ * assuming:
+ *
+ *   body assertion only, chunked writes    passed 10/10 against the very clamp it targets
+ *   plus an orderly-FIN assertion          caught it 3 times in 12 on Windows, but FAILED on kqueue,
+ *                                          because between two writes the server may legitimately
+ *                                          see an empty queue with declared framing complete, close,
+ *                                          and race the rest of the body (the #281 residual)
+ *   single write, no inter-write gap       portable and stable, but detects nothing: 0/10 both ways
+ *
+ * The last form is what is here, because a test that is red on one backend is worse than one that is
+ * honest about its reach. The server-side defect IS deterministic; what is racy is whether the
+ * client notices, since the reset has to overtake data already in its receive queue. The real
+ * evidence is the recorded trace: build with -DKEEL_INTERNAL_TRACE and the drain shows
+ * `budget-exhausted` at exactly the declared length, framing complete, bytes still unread and the
+ * full deadline unused. Do not read a pass here as proof the defect is absent. */
+UTEST(reject_drain, over_send_past_declared_length_is_drained) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    const char *hdr = "POST /deny HTTP/1.1" CRLF "Host: x" CRLF
+                      "Content-Length: 16384" CRLF "Connection: close" CRLF CRLF;
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+
+    /* One write: between two, the server may see an empty queue with the declared framing complete
+     * and close, which is the residual race above rather than anything this case is testing. */
+    static char body[40960];   /* 40960 sent against 16384 declared: 24576 bytes beyond */
+    memset(body, 'O', sizeof(body));
+    ASSERT_TRUE(kl_test_sockwrite(fd, body, sizeof(body)) > 0);
+
+    char buf[2048];
+    (void)rd_read_all(fd, buf, sizeof(buf));
+    kl_test_closesock(fd);
+
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+    rd_stop();
+}
+
 UTEST_MAIN();
