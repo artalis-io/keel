@@ -118,6 +118,14 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     } else if (new_state == KL_HTTP_CONN_READING) {
         if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
             kl_http_server_conn_release(s, conn);
+    } else if (new_state == KL_HTTP_CONN_DRAINING) {
+        /* The handler answered without consuming the request body, so the response is flushed with
+         * input still unread (#278). Arm READ so each readable tick discards one bounded chunk,
+         * exactly as the main readiness transition does; the idle sweep enforces the byte and time
+         * bounds and releases. Before this arm the state matched no branch, so the connection was
+         * left unregistered and the drain could only limp forward on sweep ticks. */
+        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+            kl_http_server_conn_release(s, conn);
     } else if (new_state == KL_HTTP_CONN_CLOSED) {
         kl_http_server_conn_release(s, conn);
     }

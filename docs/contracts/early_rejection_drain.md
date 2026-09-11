@@ -63,6 +63,30 @@ HTTP decides only *"this is a terminal rejection with potentially live inbound i
 gated on unread input remaining, not on which status code it is, so an ordinary successful
 keep-alive response (whose body is already consumed) never enters the drain.
 
+## Dispatching the state, for implementers
+
+`DRAINING` is a state the connection drivers **return**, so every consumer of a returned
+`KlHttpConnState` has to dispatch it. The rule:
+
+> Dispatch a returned state semantically. Never collapse it into a two-way "the state I expect,
+> else close" test.
+
+This is not a style preference. The enum grows, and a two-way test silently mis-handles each new
+member. When `DRAINING` was added, four completion-axis sites treating "not `READING`" as "close
+now" closed connections on top of unread request bytes and destroyed responses that had already
+been written, which is the exact failure this contract exists to prevent. A fifth site, on the async
+resume path, matched no branch at all and left the connection registered for nothing, so the drain
+could only limp forward on idle-sweep ticks.
+
+Either switch over the states, or route anything a site does not specifically handle to a shared
+dispatcher rather than to a close:
+
+| axis | dispatcher |
+|---|---|
+| completion, after a dispatch | `comp_after_state()` |
+| completion, after a response is retired | `comp_after_send_complete()` |
+| readiness | the `transition:` block in `http_server.c` |
+
 ## Termination conditions
 
 The drain ends on the **first** of these:
