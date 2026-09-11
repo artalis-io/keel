@@ -20,6 +20,8 @@
 #include <stdio.h>
 #include <pthread.h>
 
+#define CRLF "\r\n"
+
 static KlHttpServer rd_server;
 static pthread_t    rd_tid;
 static int          rd_port;
@@ -33,6 +35,54 @@ static void rd_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 
+/* A body reader that produces the FINAL response from inside on_data, while the declared body is
+ * still outstanding. This is the other way into the drain: not a rejection, but a handler deciding
+ * mid-stream that it has seen enough. It reaches teardown through kl_http_conn_send_complete()
+ * rather than through the rejection helper, which is a genuinely different code path on the
+ * completion axis (a write completion, not a dispatch return). #270 was exactly this path being
+ * closed instead of drained. */
+typedef struct { KlHttpBodyReader base; KlAllocator *alloc; const KlHttpRequest *req; KlHttpResponse *res; int done; } RdEarly;
+
+static int rd_early_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    RdEarly *r = (RdEarly *)self;
+    (void)data; (void)len;
+    if (r->done || !r->req || !r->res) return 0;
+    kl_http_response_status(r->res, 200);
+    kl_http_response_header(r->res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(r->res, "seen enough", 11);
+    kl_http_request_send_response(r->req);   /* -> SENDING; the rest of the body is never read */
+    r->done = 1;
+    return 0;
+}
+static void rd_early_noop(KlHttpBodyReader *self) { (void)self; }
+static void rd_early_destroy(KlHttpBodyReader *self) {
+    RdEarly *r = (RdEarly *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+static KlHttpBodyReader *rd_early_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)ud; (void)req;
+    RdEarly *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data = rd_early_on_data;
+    r->base.on_complete = rd_early_noop;
+    r->base.on_error = rd_early_noop;
+    r->base.destroy = rd_early_destroy;
+    r->alloc = alloc;
+    return &r->base;   /* req + res are stashed by the streaming handler below */
+}
+
+/* Streaming route handler: runs at dispatch, BEFORE the body is complete, hands the reader the req
+ * and res, then yields so the loop keeps pumping on_data. */
+static void rd_early_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    RdEarly *r = (RdEarly *)req->body_reader;
+    if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
+    r->req = req;
+    r->res = res;
+    kl_http_request_await_body(req);
+}
+
 static void *rd_thread(void *a) { (void)a; kl_http_server_run(&rd_server); return NULL; }
 
 static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
@@ -45,6 +95,8 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
     kl_http_server_route(&rd_server, "POST", "/echo", rd_echo,
                          (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
     kl_http_server_route(&rd_server, "POST", "/deny", rd_echo, NULL, NULL);   /* no reader: discard path */
+    kl_http_server_route_streaming(&rd_server, "POST", "/early", rd_early_handler, NULL,
+                                   rd_early_factory);
     if (pthread_create(&rd_tid, NULL, rd_thread, NULL) != 0) return -1;
     rd_live = 1;
     for (int i = 0; i < 400 && rd_server.bound_port == 0; i++) usleep(5000);
@@ -346,6 +398,49 @@ UTEST(reject_drain, chunked_terminal_chunk_ends_drain_before_deadline) {
 
     ASSERT_TRUE(strstr(buf, "413") != NULL);
     ASSERT_TRUE(elapsed < 1500);   /* framing ended it, not the deadline */
+    rd_stop();
+}
+
+/* The send-complete path into the drain, on both axes. The handler answers from inside on_data with
+ * most of the declared body still outstanding, so teardown is decided by kl_http_conn_send_complete()
+ * after the write is retired. On the completion axis that is a write completion, and treating
+ * anything-but-keep-alive as "close now" there closed on top of unread bytes and destroyed the
+ * response (#270: the readiness axis delivered all 75 bytes, the completion axis delivered 0 and the
+ * client saw WSAECONNABORTED). Asserts only the observable outcome, so it is backend-agnostic.
+ *
+ * Honest about its own power: this exercises the path (dispatch -> SENDING -> write retired ->
+ * send_complete -> DRAINING) but it is NOT a sharp oracle for #270. It passes even with the defect,
+ * because the client is already blocked in recv when the reset arrives and so reads the response
+ * out of its own receive queue first. Widening that window is what makes the failure appear, which
+ * is why the deterministic oracle is integration.streaming_mid_stream_early_exit[_on_error] (whose
+ * client polls for the handler before reading), now enrolled on the completion axis. Keep this case
+ * for the path coverage on BOTH axes; do not read a pass here as proof the defect is absent. */
+UTEST(reject_drain, early_handler_response_survives_on_both_axes) {
+    ASSERT_EQ(0, rd_start(1024 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    /* Declare far more than we send, then stop: the body stays outstanding forever. */
+    const char *hdr = "POST /early HTTP/1.1" CRLF "Host: x" CRLF
+                      "Content-Length: 200000" CRLF "Connection: close" CRLF CRLF;
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+
+    /* Push 32 KiB in one burst. The server answers on its first on_data, so the REST is still
+     * sitting unread in the receive queue at the moment teardown is decided, which is what makes a
+     * close abortive. A client that merely stops sending does not reproduce this: the queue drains
+     * to empty on its own and the close is graceful, so the bug hides. 32 KiB also stays well under
+     * the 1 MiB budget, so the cap cannot be what ends the drain. */
+    char chunk[8192];
+    memset(chunk, 'Z', sizeof(chunk));
+    for (int i = 0; i < 4; i++)
+        if (kl_test_sockwrite(fd, chunk, sizeof(chunk)) < 0) break;
+
+    char buf[2048];
+    (void)rd_read_all(fd, buf, sizeof(buf));
+    kl_test_closesock(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "seen enough") != NULL);
     rd_stop();
 }
 

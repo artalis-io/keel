@@ -132,6 +132,24 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
+/* Act on what kl_http_conn_send_complete() decided once a response is fully out. Shared by the
+ * buffered/file path (comp_on_write) and the streaming path (comp_stream_pump) so the two cannot
+ * drift: both previously treated anything that was not READING as "close now", which silently
+ * swallowed the post-rejection DRAINING state and closed on top of unread request bytes, the exact
+ * abortive close the drain exists to prevent. */
+static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
+    if (st == KL_HTTP_CONN_READING) {
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+    } else if (st == KL_HTTP_CONN_DRAINING) {
+        /* Final response physically retired and SEND half-closed: post a recv so each completion
+         * discards one bounded chunk. The idle sweep enforces the byte and time bounds. */
+        c->stream.read_len = 0;
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+    } else {
+        kl_comp_close(s, c);
+    }
+}
+
 /* Drive a plaintext streaming connection over the completion loop. Post the
  * outbound buffer's pending bytes as ONE overlapped send (bounded, at most one in flight)
  * instead of busy-spinning a blocking flush on a slow client (the head-of-line defect:
@@ -157,13 +175,8 @@ static void comp_stream_pump(struct KlHttpServer *s, KlHttpConn *c) {
     if (!c->res.stream_ended)
         return;   /* async producer will write more and resume (kl_async_complete) */
 
-    /* Fully sent + ended: keep-alive read or close. */
-    KlHttpConnState st = kl_http_conn_send_complete(c);
-    if (st == KL_HTTP_CONN_READING) {
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else {
-        kl_comp_close(s, c);
-    }
+    /* Fully sent + ended: keep-alive read, bounded drain, or close. */
+    comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
 
 static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
@@ -176,12 +189,7 @@ static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
     do { r = kl_http_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
     if (r < 0) { kl_comp_close(s, c); return; }
-    KlHttpConnState st = kl_http_conn_send_complete(c);
-    if (st == KL_HTTP_CONN_READING) {
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else {
-        kl_comp_close(s, c);
-    }
+    comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
 
 /* TLS-over-completion output. In completion mode the mbedTLS BIO writes outgoing
@@ -335,12 +343,7 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
         if (r < 0) { kl_comp_close(s, c); return; }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → socket */
     } while (r == 1 && c->res.stream_ended);
-    KlHttpConnState st = kl_http_conn_send_complete(c);
-    if (st == KL_HTTP_CONN_READING) {
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else {
-        kl_comp_close(s, c);
-    }
+    comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
 
 /* Act on the state a completed request produced. */
@@ -827,13 +830,8 @@ static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         return;
     }
     /* The backend only reports a WRITE once the whole response is out (it handles
-     * partial sends internally). Response fully sent: keep-alive reset or close. */
-    KlHttpConnState st = kl_http_conn_send_complete(c);
-    if (st == KL_HTTP_CONN_READING) {
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-    } else {
-        kl_comp_close(s, c);
-    }
+     * partial sends internally). Response fully sent: keep-alive reset, bounded drain, or close. */
+    comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
 
 /* Recover the server from its embedded event ctx. Every pooled connection's ctx is
