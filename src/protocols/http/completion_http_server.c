@@ -136,7 +136,13 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
  * buffered/file path (comp_on_write) and the streaming path (comp_stream_pump) so the two cannot
  * drift: both previously treated anything that was not READING as "close now", which silently
  * swallowed the post-rejection DRAINING state and closed on top of unread request bytes, the exact
- * abortive close the drain exists to prevent. */
+ * abortive close the drain exists to prevent.
+ *
+ * This helper exists to hold the invariant in ONE place: every state kl_http_conn_send_complete()
+ * can return is dispatched on its own terms, never collapsed into READING-vs-close. The bug was
+ * possible because the return type grew while four call sites encoded an implicit two-state
+ * assumption, so the fix is a single owner rather than four corrected branches. Add the arm here
+ * when a new state becomes reachable from send_complete; see the note at KlHttpConnState. */
 static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
     if (st == KL_HTTP_CONN_READING) {
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
