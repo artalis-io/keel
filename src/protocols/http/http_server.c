@@ -418,6 +418,8 @@ int kl_http_server_run(KlHttpServer *s) {
                     }
                 } else if (fstate == KL_HTTP_CONN_READING) {
                     kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
+                } else if (fstate == KL_HTTP_CONN_DRAINING) {
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_http_server_conn_release(s, fc);
@@ -537,6 +539,15 @@ rearm_listen:
                 goto transition;
             }
 
+            /* Post-rejection drain (#278): the final response is already out and SEND half-closed;
+             * every readable tick discards one bounded chunk until the body is consumed, the peer
+             * EOFs, a bound is hit or the socket errors. Handled before the generic READ dispatch so
+             * drained bytes are never parsed as a new request. */
+            if (c->state == KL_HTTP_CONN_DRAINING) {
+                new_state = kl_http_conn_drain_step(c, kl_monotonic_ms());
+                goto transition;
+            }
+
             /* HTTP/2: handle read/write events through the h2 seam. */
             if (c->state == KL_HTTP_CONN_HTTP2) {
                 const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
@@ -608,6 +619,14 @@ transition:
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
+                }
+            } else if (new_state == KL_HTTP_CONN_DRAINING) {
+                /* Post-rejection drain (#278): the response is flushed and SEND is half-closed; keep
+                 * READ armed so each readable tick discards one bounded chunk. The sweep enforces the
+                 * deadline, so a client that simply stops sending still gets closed. */
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, KL_EVENT_READ, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
+                    kl_http_server_conn_release(s, c);
                 }
             } else if (new_state == KL_HTTP_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O; FD already removed
