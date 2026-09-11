@@ -400,10 +400,10 @@ jobs:
       - name: Em-dash gate (no U+2014 in any tracked non-binary file)
         run: make check-no-em-dash
 
-      - name: State-dispatch gate (KlHttpConnState switches stay exhaustive, no default:)
+      - name: "State-dispatch gate (KlHttpConnState switches stay exhaustive, no default:)"
         run: make check-state-dispatch
 
-      - name: State-dispatch gate self-test (a planted default: must be caught)
+      - name: "State-dispatch gate self-test (a planted default: must be caught)"
         run: make check-state-dispatch-selftest
 
       - name: Site gate (offline site validation + reproducible build)
