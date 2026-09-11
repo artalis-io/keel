@@ -314,7 +314,12 @@ override LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 # event_poll / event_pollcomp / event_iouring), so it is the natural build id; BACKEND itself is
 # empty for each platform's default. KEEL_NO_COMPLETION and COSMO change the shape of the same
 # EVENT_SRC, so they discriminate too.
-KEEL_BUILD_ID = $(basename $(notdir $(EVENT_SRC)))$(if $(KEEL_NO_COMPLETION),-nocomp)$(if $(COSMO),-cosmo)
+# $(firstword ...): EVENT_SRC is TWO files for the pollcomp backend
+# (event_pollcomp.c + event_pollcomp_builtin.c). Without firstword the id became two words, OBJDIR
+# expanded to two paths, and every object path was mangled: the build died with
+#   No rule to make target `build/event_pollcomp', needed by `libkeel.a'
+# on exactly the two jobs that use it. The first file names the backend uniquely on its own.
+KEEL_BUILD_ID = $(basename $(notdir $(firstword $(EVENT_SRC))))$(if $(KEEL_NO_COMPLETION),-nocomp)$(if $(COSMO),-cosmo)
 OBJDIR = build/$(KEEL_BUILD_ID)
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 LLHTTP_OBJ = $(LLHTTP_SRC:%.c=$(OBJDIR)/%.o)
@@ -2349,3 +2354,7 @@ uefi-dgram-gate:
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan
+
+# Print the resolved build id (debugging the per-backend object tree).
+print-build-id:
+	@echo "KEEL_BUILD_ID=[$(KEEL_BUILD_ID)] OBJDIR=[$(OBJDIR)] STAMP=[$(KEEL_STAMP)]"
