@@ -39,6 +39,8 @@ src/kl_cstr.c
 src/kl_cstr_builtin.c
 src/listener.c
 src/platform_posix.c
+src/platform_socket_posix.c
+src/platform_socket_win.c
 src/platform_thread_posix.c
 src/platform_thread_win.c
 src/platform_wakeup_posix.c

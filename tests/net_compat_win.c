@@ -12,27 +12,38 @@
  */
 #include "net_compat.h"
 #include "../src/socket.h"   /* kl_socket_provider_* */
+#include "../src/platform_socket.h"   /* kl_plat_socket_runtime_init: tests reach ws2_32 directly too */
 
 #include <string.h>   /* memset */
 
+/* PAL-gate: the helpers below call ws2_32 directly, on descriptors the harness may not have
+ * created, so each states the PAL invariant itself (src/platform_socket.h). This used to be
+ * satisfied for free by socket_winsock.c's load-time constructor; nothing initialises Winsock
+ * implicitly any more, and a test binary whose first socket call comes from the harness rather
+ * than from Keel would otherwise see WSANOTINITIALISED. */
 int kl_test_closesock(int fd) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return closesocket((SOCKET)fd);
 }
 
 int kl_test_set_nonblock(int fd) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     u_long m = 1;
     return ioctlsocket((SOCKET)fd, FIONBIO, &m) == 0 ? 0 : -1;
 }
 
 long kl_test_sockwrite(int fd, const void *buf, size_t len) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return send((SOCKET)fd, (const char *)buf, (int)len, 0);
 }
 
 long kl_test_sockread(int fd, void *buf, size_t len) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return recv((SOCKET)fd, (char *)buf, (int)len, 0);
 }
 
 int kl_test_poll1(int fd, int for_write, int timeout_ms) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     WSAPOLLFD p;
     p.fd = (SOCKET)fd;
     p.events = (SHORT)(for_write ? POLLWRNORM : POLLRDNORM);
@@ -41,11 +52,13 @@ int kl_test_poll1(int fd, int for_write, int timeout_ms) {
 }
 
 int kl_test_set_rcvtimeo(int fd, int ms) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     DWORD tv = (DWORD)ms;
     return setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
 }
 
 int kl_test_socketpair(int sv[2]) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
     if (listener == INVALID_SOCKET) return -1;
     struct sockaddr_in addr;

@@ -406,6 +406,12 @@ jobs:
       - name: "State-dispatch gate self-test (a planted default: must be caught)"
         run: make check-state-dispatch-selftest
 
+      - name: "Winsock-init gate (every native socket-runtime boundary states the PAL invariant)"
+        run: make check-winsock-init
+
+      - name: "Winsock-init gate self-test (a planted ungated Winsock call must be caught)"
+        run: make check-winsock-init-selftest
+
       - name: Site gate (offline site validation + reproducible build)
         run: make check-site
 

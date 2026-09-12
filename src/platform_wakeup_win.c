@@ -6,6 +6,7 @@
  * WSAPoll can watch, so the channel is a connected loopback TCP pair.
  */
 #include "platform.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */
 
 #include "sockcompat.h"   /* winsock2.h before windows.h */
 #include <windows.h>
@@ -52,6 +53,7 @@ fail:
 
 int kl_plat_wakeup_open(KlPlatWakeup *w)
 {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant: builds a loopback socket pair */
     w->rd = w->wr = KL_INVALID_SOCKET;
 
     SOCKET sv[2];
@@ -66,6 +68,9 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
     return 0;
 }
 
+/* PAL-gate: dominated-by kl_plat_wakeup_open
+ * signal/drain/close, and the win_wakeup_pair helper, all act on a KlPlatWakeup that only
+ * kl_plat_wakeup_open can have filled in, so the PAL gate there has already run. Local to this TU. */
 void kl_plat_wakeup_signal(const KlPlatWakeup *w)
 {
     char c = 1;

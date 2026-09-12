@@ -17,7 +17,8 @@
 #include "event_builtin.h"
 #include "event_caps.h"
 
-#include "sockcompat.h"   /* winsock2.h + kl_wsa_set_errno() */
+#include "sockcompat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */   /* winsock2.h + kl_wsa_set_errno() */
 #include <limits.h>
 #include <string.h>
 
@@ -77,6 +78,7 @@ static int grow_arrays(KlWsaPollState *st) {
 }
 
 int kl_event_init_builtin(KlEventLoop *loop) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     KlAllocator *alloc = loop->alloc;
     KlWsaPollState *st = kl_malloc(alloc, sizeof(*st));
     if (!st)
@@ -103,6 +105,10 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     return 0;
 }
 
+/* PAL-gate: dominated-by kl_event_init_builtin
+ * Every other function here operates on the KlWsaPollState that kl_event_init_builtin allocated, so
+ * reaching one means the PAL gate in that function has already run in this process. The domination is
+ * local to this TU, which is the only kind check_winsock_init.pl will accept. */
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlWsaPollState *st = loop->_backend;
 

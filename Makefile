@@ -88,6 +88,7 @@ else ifdef WINDOWS
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   # PAL threading (src/platform_thread.h): CreateThread + SRWLOCK + CONDITION_VARIABLE.
   PLATFORM_THREAD_SRC = src/platform_thread_win.c
+  PLATFORM_SOCKET_SRC = src/platform_socket_win.c   # PAL socket runtime: WSAStartup under InitOnce
   SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
   UNIX_NODE_SRC = src/unix_socket_node_win.c   # identity-anchored AF_UNIX node lifecycle (NTFS)
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
@@ -184,6 +185,9 @@ PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
 # PAL threading (src/platform_thread.h): the pthreads backend.
 PLATFORM_THREAD_SRC ?= src/platform_thread_posix.c
+# PAL socket runtime (platform_socket.h): brings ws2_32 up on Windows, a no-op where there is no
+# socket runtime to start. Replaces the retired GCC/Clang load-time Winsock constructor.
+PLATFORM_SOCKET_SRC ?= src/platform_socket_posix.c
 SERVER_PLAT_SRC ?= src/protocols/http/http_server_plat_posix.c
 # AF_UNIX filesystem-node lifecycle (substrate transport module; see src/unix_socket_node.h).
 UNIX_NODE_SRC ?= src/unix_socket_node_posix.c
@@ -224,7 +228,7 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) $(PLATFORM_SOCKET_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
            src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
            src/protocols/http/http_body_reader_buffer.c \
            src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
@@ -569,7 +573,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtab
                    http_response http_router http_server_integration http_server_state http_server_stats \
                    http_sse http_tls io_status kl_cstr kl_cstr_builtin listener peer_addr peer_cert \
                    proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
-                   socket_provider socket_provider_vtable stream stream_close stream_read stream_transport \
+                   socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_read stream_transport \
                    thread_pool timeout timer tls tls_integration tls_vtable transport_public \
                    unix_socket_node_win url version wakeup watcher_aba websocket websocket_client \
                    websocket_client_hostname_fail websocket_overflow ws_server_close
@@ -629,7 +633,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async compress compress
                         http_redirect http_request http_response http_router http_server_integration \
                         http_server_state http_server_stats http_sse http_tls io_status iocp_engine kl_cstr \
                         kl_cstr_builtin listener peer_addr peer_cert proxy_protocol read_flow_control \
-                        reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable stream \
+                        reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
                         stream_close stream_read stream_single_shot thread_pool timeout timer tls \
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
                         websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
@@ -1584,6 +1588,18 @@ check-backend-isolation:
 	  echo "check-backend-isolation: FAIL - switching back left $$m event backends"; exit 1; \
 	fi; \
 	echo "backend-isolation: OK ($$a <-> $$b, one event backend per archive, no clean needed)"
+
+# Every native socket-runtime boundary must state the PAL invariant (src/platform_socket.h). Keel used
+# to get this from a GCC/Clang load-time constructor; MSVC has none, so it is now a convention in the
+# source, and this keeps the convention true. See tools/check_winsock_init.pl for why it matters.
+check-winsock-init:
+	@perl tools/check_winsock_init.pl $(wildcard src/*_win.c src/protocols/*/*_win.c) \
+	  src/socket_winsock.c src/event_wsapoll.c src/event_iocp.c src/resolve_sync.c \
+	  tests/net_compat_win.c tests/test_datagram_public.c tests/loopback_listener.h
+
+check-winsock-init-selftest:
+	@perl tools/check_winsock_init.pl tests/fixtures/winsock_init_good.c >/dev/null 	  && echo "selftest: good fixture PASSED (as expected)" 	  || { echo "selftest FAIL: clean fixture was flagged"; exit 1; }
+	@if perl tools/check_winsock_init.pl tests/fixtures/winsock_init_bad.c 2>/dev/null; then 	  echo "selftest FAIL: an ungated Winsock call was NOT flagged"; exit 1; 	 else 	  echo "selftest: ungated fixture flagged (as expected)"; 	fi
 
 check-state-dispatch:
 	@perl tools/check_state_dispatch.pl src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/completion_http_server.c src/protocols/http/http_server_core.c
