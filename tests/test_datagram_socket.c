@@ -586,4 +586,37 @@ UTEST(datagram_socket, broadcast_flag_applied) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Socket-default TOS reaches the REAL provider, on every platform (#276).
+ *
+ * The existing set_tos coverage in test_datagram_public.c is mock-based: it proves the routing, the
+ * UNSUPPORTED path and the family derivation, but never the platform provider. #276 was exactly a
+ * real-provider defect that mock coverage could not see: on Windows wdg_caps returned 0 for the
+ * socket, so nothing was granted and kl_datagram_set_tos refused with KL_ERR_UNSUPPORTED. It was
+ * fixed by #275 (report capabilities on an UNBOUND socket rather than zero); this is the regression
+ * test that would have caught it, and it runs on both Windows axes.
+ *
+ * The oracle is a getsockopt read-back, matching how broadcast_flag_applied and reuse_port_shared_bind
+ * verify theirs: it proves the option landed on the socket. Proving it is also marked on EGRESS needs a
+ * raw recvmsg peer with IP_RECVTOS, which is what test_datagram_live does and what is still unported
+ * on Windows. Only the DSCP bits are asserted, because a kernel may legitimately carry or clear the
+ * two ECN bits of the same byte. */
+UTEST(datagram_socket, socket_default_tos_reaches_the_provider) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramSocketConfig c = { .ctx = &ctx, .alloc = &g_alloc,
+                                 .want_caps = KL_DGRAM_CAP_TOS };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &c));
+    ASSERT_TRUE((kl_datagram_caps(&dg) & KL_DGRAM_CAP_TOS) != 0);   /* granted, not silently dropped */
+
+    ASSERT_EQ(0, kl_datagram_set_tos(&dg, KL_TOS(0x0a, 0)));        /* DSCP 0x0a -> byte 0x28 */
+
+    int back = -1; socklen_t l = sizeof(back);
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&dg), IPPROTO_IP, IP_TOS, (char *)&back, &l));
+    ASSERT_EQ(0x28, (back & 0xFC));                                   /* DSCP bits; ECN bits not asserted */
+
+    close_free(&ctx, &dg);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();
