@@ -1196,7 +1196,9 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     uint32_t ms = c->reject_drain_timeout_ms;
     size_t remaining = conn_body_remaining_hint(c);
 
-    /* Drain disabled, or the fd is already gone: close directly, exactly as before #278. */
+    /* Drain disabled, or the fd is already gone: close directly, exactly as before #278. A zero cap or
+     * timeout reaching a connection means reject_drain_disable was set: kl_http_server_init normalises
+     * every other zero to its default, so these cannot be "unset" here (#293). */
     if (cap == 0 || ms == 0 || !kl_handle_valid(c->stream.fd)) {
         DRAIN_TRACE(c, (cap == 0 || ms == 0) ? "skip-disabled" : "skip-bad-fd");
         c->state = KL_HTTP_CONN_CLOSED;
