@@ -5,6 +5,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+No changes yet.
+
+## [3.0.1]
+
+Patch release. No release date here (the tag and publish are a separately authorized step).
+
+One public configuration-semantics fix, one contract clarification, and a large expansion of the
+Windows test subsets. No behaviour change for an embedder who leaves the drain configuration alone.
+
 ### Added
 
 - `KlHttpServerConfig.reject_drain_disable`. Setting it to 1 turns the post-rejection drain off; it is
@@ -27,6 +36,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   selects that field's default as `KlHttpServerConfig` promises for every member, and disabling is
   explicit. Embedders who leave the fields alone, including anyone zero-initialising the struct, are
   unaffected: they got the defaults before and still do.
+
+### Testing
+
+- The Windows test subsets grew from 71 to 98 suites on the readiness axis (WSAPoll) and from 66 to 93
+  on the completion axis (IOCP). Most of those suites already built and passed there and had simply
+  never been listed; one needed a port off the POSIX-only `kl_socket_provider_posix()`. Enrolling them
+  found two defects that were invisible while the suites were absent: a watcher probe re-armed before
+  its completion had been dispatched, and a test fixture whose assertion failure became a SIGSEGV
+  because utest's `ASSERT_*` returns before the teardown that joins a running server thread.
+- `make release` now refuses to build an archive containing CRLF, and `.gitattributes` keeps the
+  worktree LF on every platform, so the source archive is byte-reproducible regardless of who builds
+  it. A Windows-built 3.0.0 archive differed from the canonical one by 174080 bytes.
 
 ## [3.0.0]
 
