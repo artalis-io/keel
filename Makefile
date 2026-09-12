@@ -598,12 +598,7 @@ test-win: $(WIN_TEST_BIN)
 # runs in the WSAPoll/POSIX jobs, NOT here.
 #
 # EXCLUDED, and why:
-#   wakeup          - drained_channel_stops_firing fails: the zero-byte probe is re-posted from the
-#                     completion, before the callback drains, so a still-ready socket delivers the
-#                     same readiness twice. One spurious callback per signal; tracked on #265 with
-#                     that test as the oracle. It still runs on WSAPoll (WIN_TEST_SUITES).
-#   http_client     - 20 of 21 cases pass; async_default_resolver_localhost resolves a NAME, so it
-#                     drives the built-in DNS resolver over IOCP (KlDatagram + kl_watcher_mod). #265.
+# (wakeup and http_client were excluded for #265; both are fixed and enrolled below.)
 #   http_integration- the #267 segfault that excluded it is fixed, and 31 of its 32 cases are now
 #                     solid on IOCP (streaming_mid_stream_early_exit[_on_error] were the last two,
 #                     fixed with #270). post_413 is the only one left: 0 failures in 20 ISOLATED
@@ -619,7 +614,8 @@ WIN_IOCP_TEST_SUITES = allocator alpn async compress cross_module datagram_batch
                        http_client_stream http_connection http_cors http_multipart_stream http_overflow \
                        http_redirect http_request http_response http_router http_server_integration \
                        http_server_stats http_sse http_tls iocp_engine peer_addr peer_cert proxy_protocol \
-                       read_flow_control reject_drain resolver_cache sockaddr stream_single_shot thread_pool \
+                       http_client read_flow_control reject_drain resolver_cache sockaddr stream_single_shot \
+                       thread_pool wakeup \
                        timeout timer tls tls_integration url version websocket websocket_client websocket_overflow
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)

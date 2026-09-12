@@ -25,6 +25,7 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     int family;
     KlSockAddr bind_sa;
     int have_bind = 0;
+    int bind_required = 0;   /* the CALLER asked for this address; a failure is fatal */
 
     if (!out)
         return -1;   /* the fd is returned through out; nothing to do without it */
@@ -52,9 +53,22 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
             return -1;   /* KL_ERR_INVALID_ARG: bad bind address; nothing created */
         family = (kl_sockaddr_family(&bind_sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
         have_bind = 1;
+        bind_required = 1;
     } else if (family != AF_INET && family != AF_INET6) {
         family = AF_INET;
     }
+
+    /* No bind address given: bind the WILDCARD on an ephemeral port anyway. An unbound UDP socket
+     * resolves to exactly that on first use, so this changes no observable behaviour, but it removes
+     * a real difference between the axes: POSIX lets a receive wait on an unbound socket, while
+     * Windows refuses a POSTED receive on one with WSAEINVAL. A completion-mode kl_datagram_recv_start
+     * therefore failed on IOCP for any caller that wanted an ephemeral source port (the built-in DNS
+     * resolver is one), while the readiness path worked because it only polls for readability and the
+     * first send binds implicitly. Doing it here keeps the fix in the shared prep step rather than in
+     * a Windows branch or in each caller. A parse failure leaves the socket unbound, as before. */
+    if (!have_bind &&
+        kl_sockaddr_parse(&bind_sa, (family == AF_INET6) ? "::" : "0.0.0.0", 0) == 0)
+        have_bind = 1;
 
     /* 1. create */
     out->fd = kl_sock_socket(sockets, family, SOCK_DGRAM, 0);
@@ -77,11 +91,13 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
      *    accepted; surface it (it cannot be reconstructed later). */
     out->rx_caps = dg->configure(sp_ctx, out->fd, family, cfg);
 
-    /* 4. bind (only when a bind address was supplied) */
-    if (have_bind && kl_sock_bind(sockets, out->fd, &bind_sa) < 0) {
+    /* 4. bind (the requested address, or the wildcard ephemeral default above) */
+    if (have_bind && kl_sock_bind(sockets, out->fd, &bind_sa) < 0 && bind_required) {
         out->err = KL_ERR_BIND;
         goto fail_close;
     }
+    /* An implicit wildcard bind is BEST EFFORT: a provider with no bind concept (lwIP raw, EFI) must
+     * keep working exactly as before, so only a bind the caller actually asked for is fatal. */
 
     out->err = KL_ERR_NONE;
     return 0;   /* out->fd prepared + (optionally) bound; ownership transfers to the caller */
