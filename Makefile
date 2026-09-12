@@ -611,11 +611,6 @@ test-win: $(WIN_TEST_BIN)
 #                     runs, but 3 of 8 runs of the full suite, so it is contention-sensitive rather
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
-#   io_status       - 3 of its 4 cases pass on IOCP; async_client_consults_io_status_end_to_end
-#                     SEGFAULTS (rc 139, isolated). Its client provider advertises only
-#                     KL_SOCK_CAP_NATIVE_FD, which is wrong for a completion loop, so capability
-#                     negotiation should REFUSE it the way sockprov.select_native_fd_guard proves the
-#                     server does, rather than crash. Filed separately; enrolled on WSAPoll only.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
 WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtable connect_op \
                         cross_module datagram_batch datagram_life datagram_multicast datagram_open \
@@ -628,7 +623,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async compress compress
                         http_client_hostname_fail http_client_pool http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
-                        http_server_state http_server_stats http_sse http_tls iocp_engine kl_cstr \
+                        http_server_state http_server_stats http_sse http_tls io_status iocp_engine kl_cstr \
                         kl_cstr_builtin listener peer_addr peer_cert proxy_protocol read_flow_control \
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable stream \
                         stream_close stream_read stream_single_shot thread_pool timeout timer tls \
