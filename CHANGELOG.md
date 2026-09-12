@@ -7,6 +7,81 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 No changes yet.
 
+## [3.0.0]
+
+First stable 3.0 release. No release date here (the tag and publish are a separately authorized step).
+Supersedes 3.0.0-rc.1 through rc.3; everything in those entries is included.
+
+The release-candidate window was spent on correctness rather than features, mostly on Windows, where
+making previously-unrunnable suites runnable is what exposed the defects. The Windows readiness subset
+went from 51 to 71 suites and the IOCP completion subset from 2 to 66.
+
+### Added
+
+- `KlWakeup` (`keel/wakeup.h`), the public cross-thread event-loop wakeup channel: a connected handle
+  pair whose `.rd` registers as a `KlWatcher` and whose `.wr` any thread may signal, so a foreign
+  thread can reach `kl_async_complete` (which is loop-thread-only) safely. A pipe where pipes are
+  watchable, a loopback socket pair where they are not (WSAPoll and IOCP watch sockets only), so one
+  piece of caller code runs on every backend. `KlThreadPool` uses it internally; callers use it
+  directly when the completion signal comes from somewhere the pool does not own.
+- `KlShutdownHow` (`KL_SHUT_RD` / `_WR` / `_RDWR`) and `KlSocketOps.shutdown`, appended to the socket
+  provider vtable. A Keel spelling rather than `SHUT_WR` / `SD_SEND`, so the seam carries no platform
+  constant and a provider with no half-close concept (lwIP raw, EFI_TCP4) can interpret or refuse it.
+  A NULL slot selects the built-in native shutdown, as with every other op.
+- `KlHttpServerConfig.reject_drain_max_bytes` and `.reject_drain_timeout_ms`, with
+  `KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES` (64 KiB) and `..._MS` (500 ms). They bound the
+  post-rejection drain described under Changed. Setting both to 0 disables it and restores the previous
+  teardown.
+- `docs/contracts/early_rejection_drain.md`, the authoritative contract for teardown after a final
+  response when request-body data may still be arriving, including the explicit security boundary: if a
+  peer keeps transmitting past the configured budget, Keel may terminate the connection even though
+  that prevents reliable delivery of the response. Bounded resource consumption wins over delivery.
+- `KEEL_OPT` and `KEEL_EXTRA_CFLAGS` / `KEEL_EXTRA_LDFLAGS` build hooks for embedders, applied with
+  override appends so they survive the debug and coverage sub-makes.
+
+### Changed
+
+- **An early final response is no longer destroyed by its own teardown.** A server that answers early
+  (413, 431, 415, 500, a 408 on a stalled upload, or a handler that simply stops reading) left the rest
+  of the request body unread, and closing a socket with unread received data makes TCP send RST, which
+  discards data the peer had already buffered. The client saw a reset instead of the response
+  explaining why. Keel now flushes the response, half-closes its send side, and drains inbound bytes
+  asynchronously (one bounded read per loop progression, never a blocking read-until-empty), bounded by
+  both caps above. Entry is gated on unread input remaining, not on the call site, so ordinary
+  keep-alive is untouched. Body completion comes from the real framing, not a byte count, so a chunked
+  upload ends on its terminal chunk rather than sitting out the deadline.
+- `max_align_t` no longer appears in a public header, so MSVC consumers can compile the installed
+  headers.
+- Objects are built under `build/<backend>/` and the archive records which backend produced it, so
+  switching `BACKEND=` can no longer mix incompatible objects into one `libkeel.a`. Affects the build
+  only, not the library.
+
+### Fixed
+
+- The post-rejection drain state was mis-handled at five completion-axis and async sites that treated
+  anything other than keep-alive as "close now", which closed connections on top of unread bytes and
+  destroyed responses that had already been written. `KlHttpConnState` dispatch is now exhaustive and
+  compiler-enforced (no `default:`, so a new state fails to build until every dispatcher handles it),
+  with a CI gate keeping the `default:` out.
+- The drain is bounded by the configured cap alone. It was `min(declared Content-Length remainder,
+  cap)`, which put an over-sending peer's excess outside the budget by construction, and it skipped
+  the drain entirely when the declared framing was complete even with bytes still queued.
+- On IOCP, a watcher probe was re-armed before its completion had been dispatched, so a still-readable
+  socket delivered the same readiness twice; a readiness backend reports a level-triggered fd once per
+  wait. Re-arming now happens after dispatch, and `kl_event_del` plus teardown understand the resulting
+  state in which an op is tracked but owns no kernel I/O.
+- On IOCP, `kl_watcher_mod` discarded the interest mask, so a watcher that switched to
+  `KL_EVENT_WRITE` never fired again and the async HTTP client stalled on a completion loop.
+- `kl_datagram_open` binds the wildcard on an ephemeral port when the caller supplies no bind address.
+  POSIX lets a receive wait on an unbound UDP socket; Windows refuses a POSTED receive on one, so the
+  built-in DNS resolver could not start on IOCP. Best effort: only a bind the caller asked for is
+  fatal, so a provider with no bind concept is unaffected.
+- A Winsock datagram socket reports its capabilities when UNBOUND instead of reporting none.
+- A freed connection pool no longer claims its old capacity, which made a server that outlived its
+  pool sweep freed slots.
+- `kl_async_complete` sends the response when `on_resume` leaves the connection in the processing
+  state, and arms READ when it leaves it draining.
+
 ## [3.0.0-rc.3]
 
 Release candidate; no release date (the tag and prerelease are a separately authorized step).
