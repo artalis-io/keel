@@ -10,6 +10,7 @@
  * Public boundaries: kl_http_server_init, kl_http_client_request (sync), kl_http_client_start (async).
  */
 #include "utest.h"
+#include "net_compat.h"   /* kl_test_builtin_provider: the platform default, POSIX or Winsock */
 #include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include <string.h>
@@ -46,7 +47,10 @@ UTEST(socket_provider_vtable, server_accepts_valid_provider) {
     KlHttpServer s;
     KlHttpServerConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0; cfg.max_connections = 2;
-    cfg.sockets = kl_socket_provider_posix();   /* a real, complete provider */
+    /* The platform's own complete provider. Via net_compat rather than kl_socket_provider_posix(),
+     * which is the POSIX TU's symbol and does not exist in a Winsock build: naming it directly is what
+     * kept this suite off Windows (#273). */
+    cfg.sockets = (const KlSocketProvider *)kl_test_builtin_provider();
     ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
     kl_http_server_free(&s);
 }
