@@ -10,6 +10,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - `KlHttpServerConfig.reject_drain_disable`. Setting it to 1 turns the post-rejection drain off; it is
   now the only way to do that, and it overrides both numeric fields.
 
+### Changed
+
+- `docs/contracts/early_rejection_drain.md` now states the one case the drain deliberately does not
+  protect: if HTTP framing is complete and the transport reports nothing currently readable, Keel may
+  close immediately, so a peer that resumes transmitting after that observation can still cause an
+  abortive close. Keel does not delay every early rejection to guard against future protocol-invalid
+  excess input. Accepted behaviour for 3.x, with the alternatives and their costs recorded.
 ### Fixed
 
 - **The documented way to disable the post-rejection drain was the configuration that enabled it.**

@@ -125,6 +125,42 @@ Draining is asynchronous throughout: **one bounded read per loop progression**, 
 read-until-empty. It must never stall the single-threaded loop, which is why both caps exist and
 why a stalled client is resolved by the deadline rather than parked.
 
+### The residual: a peer that resumes sending after an empty queue
+
+One case is deliberately not protected, and this is the normative statement of it:
+
+> After an early final response, Keel drains unread inbound data within the configured byte and time
+> bounds. If HTTP framing is complete and the transport reports no currently readable data, Keel may
+> close immediately. A peer that continues transmitting after that observation may therefore still
+> cause an abortive TCP close. Keel does not delay every early rejection solely to guard against
+> future protocol-invalid excess input.
+
+The reason it stays this way is that the condition is not decidable from HTTP state:
+
+```
+framing complete
++ the current read would block
++ the peer may or may not send more
+```
+
+Nothing in the protocol distinguishes "the peer is finished" from "the peer is between writes", so the
+choice is a policy one rather than a correctness one. Three policies were considered:
+
+| policy | cost |
+|---|---|
+| close on would-block (what Keel does) | bounded and prompt; a rare abortive close remains possible if bytes arrive just after the empty-queue observation |
+| linger to the deadline after framing completes | every ordinary early rejection pays the timeout, or extra loop state, even when the peer is plainly done |
+| a short post-empty grace window | a better compromise, but it invents a new teardown semantic needing its own cross-platform definition and tests |
+
+The first is chosen because the mechanism's whole purpose is BOUNDED effort, and the other two spend
+unbounded-in-practice attention on a protocol-violating peer. Measured residual:
+`integration.post_413`, whose client over-sends its declared Content-Length, fails about 2 runs in 16
+in-suite on both axes and 0 in 20 in isolation, with the trace signature `wouldblock-complete`.
+
+This is accepted behaviour for 3.x, not an open defect. It would be worth revisiting only if a real
+workload shows the residual abortive-close rate mattering enough to justify a transport-level grace
+mechanism, which would need the event axis rather than a blocking check on the drain path.
+
 ### Framing complete is not the same as receive queue empty
 
 A subtle point worth stating, because the obvious rule is wrong:
