@@ -122,6 +122,8 @@ typedef struct KlIocpOp {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
     };
     int           watcher_removed;             /* WATCHER: kl_event_del'd; free, don't re-post */
+    int           watch_rearm;                 /* WATCHER: dispatched; re-post at the next drain, not
+                                                * before the callback has had a chance to consume */
     KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
     /* Global outstanding-op registry: EVERY posted op is linked here so teardown
      * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
@@ -281,8 +283,16 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
         if ((*link)->fd == (SOCKET)fd) {
             KlIocpWatch *w = *link;
             *link = w->next;
-            w->op->watcher_removed = 1;   /* on the (aborted) completion: free, don't re-post */
-            CancelIoEx((HANDLE)(uintptr_t)fd, &w->op->ov);
+            if (w->op->watch_rearm) {
+                /* Between a dispatched completion and its re-arm the op owns NO kernel I/O, so
+                 * CancelIoEx would cancel nothing and no completion would ever arrive to free it.
+                 * Free it here instead; leaving it tracked made kl_event_close_builtin's quiesce
+                 * loop wait forever for a completion that could not come. */
+                iocp_op_free(w->op);
+            } else {
+                w->op->watcher_removed = 1;   /* on the (aborted) completion: free, don't re-post */
+                CancelIoEx((HANDLE)(uintptr_t)fd, &w->op->ov);
+            }
             kl_free(st->alloc, w, sizeof(*w));
             return 0;
         }
@@ -868,8 +878,25 @@ static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
     }
 }
 
+/* Re-arm every watcher probe whose previous completion has now been dispatched. Called at the top of
+ * the drain, so it runs after the driver has delivered the last batch to its callbacks: the socket
+ * has had its chance to be drained, and a fresh probe reports the CURRENT readiness rather than
+ * repeating the one already handled. */
+static void iocp_watch_rearm_dispatched(KlIocpState *st) {
+    if (st->quiescing) return;
+    for (KlIocpWatch *w = st->watches; w; w = w->next) {
+        KlIocpOp *op = w->op;
+        if (!op || !op->watch_rearm || op->watcher_removed) continue;
+        op->watch_rearm = 0;
+        if (iocp_watch_post(op) < 0)
+            op->watcher_removed = 1;   /* re-post failed: freed at kl_event_close */
+    }
+}
+
 static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
+
+    iocp_watch_rearm_dispatched(st);
 
     OVERLAPPED_ENTRY entries[64];
     ULONG got = 0;
@@ -1034,8 +1061,14 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].bytes = (size_t)op->watch_mask;
             out[count].ok = 1;
             count++;
-            if (iocp_watch_post(op) < 0)
-                op->watcher_removed = 1;   /* re-post failed: freed at kl_event_close */
+            /* Do NOT re-post here. This completion has only been QUEUED into `out`; the driver
+             * dispatches it to the watcher callback after this drain returns, and the callback is
+             * what consumes the readable bytes. A zero-byte WSARecv posted now would find the socket
+             * still readable and complete immediately, delivering the same readiness a second time.
+             * A readiness backend reports a level-triggered fd once per wait, not twice, so the probe
+             * is re-armed at the top of the NEXT drain instead, which is after the dispatch. The op is
+             * no longer kernel-owned at this point, so holding it across the gap is safe. */
+            op->watch_rearm = 1;
         } else if (op->type == KL_IOCP_CONNECT) {
             /* ConnectEx finished. Untrack it; if the client aborted the attempt
              * (watcher_removed, set by iocp_comp_cancel) drop it silently; the detached
@@ -1110,6 +1143,18 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
      * not just watch/connect/accept) on its owning socket, so all their completions post. The
      * conn/udp sockets are still open at this point (kl_http_conn_pool_free runs after), so CancelIoEx
      * reaches them; the listen socket is already closed (its AcceptEx are completing regardless). */
+    /* First retire every watcher op that is waiting to be re-armed: it owns no kernel I/O, so
+     * CancelIoEx cannot make it complete and the drain below would spin on it forever. */
+    for (KlIocpOp *op = st->ops, *next = NULL; op; op = next) {
+        next = op->g_next;
+        if (op->type == KL_IOCP_WATCHER && op->watch_rearm) {
+            for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
+                if ((*l)->op == op) {
+                    KlIocpWatch *w = *l; *l = w->next; kl_free(st->alloc, w, sizeof(*w)); break;
+                }
+            iocp_op_free(op);
+        }
+    }
     for (KlIocpOp *op = st->ops; op; op = op->g_next)
         CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);
     /* Dequeue every completion before freeing its op: no OVERLAPPED freed while kernel-owned.
