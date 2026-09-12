@@ -101,7 +101,17 @@ typedef struct {
                                          *   built-in default. When set, applied to the client's
                                          *   event context. The async client may instead set
                                          *   ctx.sockets directly; a non-NULL value here takes
-                                         *   precedence. Must advertise KL_SOCK_CAP_NATIVE_FD. */
+                                         *   precedence. Must advertise KL_SOCK_CAP_NATIVE_FD.
+                                         *
+                                         *   ON A COMPLETION LOOP (io_uring, IOCP) this provider is
+                                         *   REPLACED, not used, unless it advertises
+                                         *   KL_SOCK_CAP_OVERLAPPED: the client adopts the backend's
+                                         *   own overlapped provider so a completion backend stays a
+                                         *   drop-in. A readiness-shaped decorator is therefore
+                                         *   silently not consulted there, which matters if you rely
+                                         *   on it for instrumentation. Only a pairing that cannot be
+                                         *   repaired that way is refused (kl_http_client_start
+                                         *   returns NULL). */
 } KlHttpClientConfig;
 
 /* ── Streaming types ──────────────────────────────────────────────── */

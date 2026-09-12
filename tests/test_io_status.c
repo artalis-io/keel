@@ -13,6 +13,7 @@
  */
 #include "utest.h"
 #include "../src/socket.h"
+#include "../src/event_caps.h"   /* kl_event_caps: the completion axis substitutes the provider */
 
 #include <keel/http_client.h>
 #include <keel/http_server.h>
@@ -208,18 +209,34 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
         kl_timer_fire(&ev);
     }
 
-    ASSERT_TRUE(x.done);
-    ASSERT_EQ(200, x.status);
-    /* The async client classified at least one -1 I/O result through the
-     * provider's io_status op (nonblocking connect EINPROGRESS and/or an EAGAIN
-     * on recv while draining); it never read errno itself. */
-    ASSERT_GT(g_cdeco.io_status_calls, 0);
+    /* Capture BEFORE asserting, and tear down BEFORE asserting. utest's ASSERT_* macros RETURN from
+     * the test body on failure, so asserting here would skip the stop/join below and leave the server
+     * thread running on `srv`, which lives on this frame. The frame then dies under it and the thread
+     * faults in iocp_accept_untrack with a dangling allocator. That is what #295 actually was: a
+     * fixture that turns any assertion failure into a SIGSEGV, hiding the assertion it was trying to
+     * report. Same class as #267. */
+    int done = x.done, status = x.status, io_calls = g_cdeco.io_status_calls;
+    int completion = (kl_event_caps(&ev.loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
 
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_http_server_free(&srv);
+
+    ASSERT_TRUE(done);
+    ASSERT_EQ(200, status);
+    /* The async client classified at least one -1 I/O result through the provider's io_status op
+     * (nonblocking connect EINPROGRESS and/or an EAGAIN on recv while draining); it never read errno
+     * itself.
+     *
+     * Readiness only. On a COMPLETION loop kl_http_client_start deliberately replaces a configured
+     * provider that lacks KL_SOCK_CAP_OVERLAPPED with the backend's own overlapped provider, so that a
+     * completion backend is a drop-in for the client. This decorator is readiness-shaped
+     * (KL_SOCK_CAP_NATIVE_FD), so it is substituted away and its io_status is correctly never called.
+     * The request still has to succeed, which the assertions above check on both axes. */
+    if (!completion)
+        ASSERT_GT(io_calls, 0);
 }
 
 UTEST_MAIN();
