@@ -1,0 +1,16 @@
+# Line endings are LF in the worktree on every platform, and therefore in everything built from the
+# tracked tree. Without this, `core.autocrlf=true` (the normal Windows Git setting) puts CRLF in the
+# worktree AND in `git archive` output, so `make release` on Windows produced an archive that did not
+# match the one CI builds from the same commit: 2356 CR bytes in the Makefile alone, 9338880 bytes
+# against 9164800, a different SHA-256. An explicit eol attribute overrides core.autocrlf, which is
+# what makes the release reproducible across platforms rather than per-checkout. It also fixes
+# check-version-drift, check-release-artifacts and check-public-coverage, which compare generated LF
+# output against tracked files and so could not pass on a Windows checkout.
+* text=auto eol=lf
+
+# Fuzz corpora are BYTE SEEDS, not text. Several deliberately contain CRLF because CRLF is the
+# protocol syntax under test (HTTP request and response seeds, PROXY v1 headers): 20 tracked corpus
+# files have CR in their committed content. Normalising them would silently change what they test, so
+# they are binary as far as Git is concerned and pass through byte for byte.
+fuzz/corpus_*/** -text
+*.bin -text
