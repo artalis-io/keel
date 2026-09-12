@@ -185,9 +185,41 @@ Both caps live on `KlHttpServerConfig`:
 | `reject_drain_max_bytes` | `KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES` (64 KiB) |
 | `reject_drain_timeout_ms` | `KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS` (500 ms) |
 
-Leaving both at 0 selects the defaults. Setting **both** to 0 disables the drain entirely and
-restores pre-drain teardown, for an embedder who would rather reset than spend anything on a
-rejected request.
+This section is the NORMATIVE description of the zero handling. The header comment and any other prose
+summarise it and link here; if they ever disagree, this is the one that is right.
+
+Each field is **independent**, and a zero value selects **that field's default**. That is the rule
+`KlHttpServerConfig` states for every one of its members: "every member is optional and its zero/NULL
+value selects the built-in default". So:
+
+| `reject_drain_max_bytes` | `reject_drain_timeout_ms` | result |
+|---|---|---|
+| 0 | 0 | 64 KiB, 500 ms |
+| 128 KiB | 0 | 128 KiB, 500 ms |
+| 0 | 1000 | 64 KiB, 1000 ms |
+| 4096 | 250 | 4096 bytes, 250 ms |
+
+**Zeroing these fields cannot disable the drain.** To turn it off, set `reject_drain_disable = 1`. The
+flag DOMINATES: the numeric fields are ignored when it is set, not merged, so
+
+```c
+cfg.reject_drain_disable   = 1;
+cfg.reject_drain_max_bytes = 65536;   /* ignored */
+cfg.reject_drain_timeout_ms = 500;    /* ignored */
+```
+
+is disabled. With the drain off, teardown after an early final response behaves as it did before the
+drain existed: the connection closes immediately, which can reset away a response the peer has not yet
+read. That is the whole point of the mechanism, so choose it only deliberately.
+
+### This was wrong in 3.0.0
+
+3.0.0 shipped documentation, here and in the header, saying that setting **both** fields to 0 disabled
+the drain. It did the opposite: `kl_http_server_init` applied the defaults only when both were zero, so
+zeroing both ENABLED the drain at 64 KiB / 500 ms, while zeroing exactly one disabled it as an
+undocumented side effect. An embedder who read the header and chose to disable got the drain; an
+embedder who set nothing got the right behaviour by accident. The fields are now normalised
+independently and `reject_drain_disable` is the only off switch (#293).
 
 ## Transport requirement
 

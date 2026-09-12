@@ -94,7 +94,12 @@ typedef struct KlHttpServerConfig {
      * and drains inbound bytes, bounded BOTH ways so a slow or hostile uploader cannot pin the
      * single-threaded loop. Draining is asynchronous: one bounded read per loop progression, never
      * a blocking read-until-empty. Successful keep-alive responses never enter it (their body is
-     * already consumed). 0 selects the default; set bytes to 0 and timeout to 0 to disable.
+     * already consumed).
+     *
+     * Each field is INDEPENDENT and a zero value selects that field's default, per this struct's rule
+     * that every member is optional: 0/0 is 64 KiB + 500 ms, 128 KiB/0 is 128 KiB + the default
+     * timeout, 0/1000 is the default cap + 1000 ms. To turn the drain OFF use reject_drain_disable
+     * below; zeroing these fields cannot do it.
      *
      * The effort is BOUNDED, and the bound wins: if the peer keeps transmitting past
      * reject_drain_max_bytes, Keel may terminate the connection even though doing so prevents
@@ -150,6 +155,22 @@ typedef struct KlHttpServerConfig {
     const KlEventProvider *event_provider; /**< custom event backend (bring-your-own readiness
                                       *   loop, e.g. lwIP); NULL = compiled-in default. Pair it
                                       *   with a `sockets` provider whose handles it can poll. */
+    int reject_drain_disable;   /**< 1 = do not drain after an early final response; 0 (default) = drain.
+                                 *
+                                 *   This is the ONLY way to turn the drain off. The two numeric fields
+                                 *   above follow this struct's universal rule, that a zero member
+                                 *   selects the built-in default, so neither of them can express
+                                 *   "disabled": 0 means 64 KiB / 500 ms, not off.
+                                 *
+                                 *   When this is 1 the numeric fields are IGNORED, and teardown after
+                                 *   an early final response behaves as it did before the drain existed:
+                                 *   the connection closes immediately, which can reset away a response
+                                 *   the peer had not yet read. Choose it only if you would rather reset
+                                 *   than spend bounded work on a rejected request.
+                                 *
+                                 *   An int rather than a bool because these headers are C11 with no
+                                 *   <stdbool.h> dependency, matching has_pid and unix_socket_unlink.
+                                 *   Full semantics: docs/contracts/early_rejection_drain.md */
 } KlHttpServerConfig;
 
 /**

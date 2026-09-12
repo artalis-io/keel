@@ -543,4 +543,88 @@ UTEST(reject_drain, over_sent_bytes_after_a_complete_body_do_not_reset_the_respo
     rd_stop();
 }
 
+/* ── Config normalisation (#293) ─────────────────────────────────────────────────────────────── */
+/* The documented way to disable the drain used to be the exact configuration that ENABLED it with
+ * defaults, because init applied defaults only when BOTH numeric fields were zero. So zeroing both
+ * gave 64 KiB / 500 ms, while zeroing exactly one disabled the drain as an undocumented side effect.
+ *
+ * The rule is now the one KlHttpServerConfig states for every member: a zero field selects that
+ * field's default, independently, and reject_drain_disable is the only off switch. These assert the
+ * normalised config rather than timing, so they are deterministic on every backend. */
+
+static int rd_init_cfg(KlHttpServer *s, const KlHttpServerConfig *cfg) {
+    return kl_http_server_init(s, cfg);
+}
+
+UTEST(reject_drain, zeroed_config_enables_the_drain_with_defaults) {
+    /* The case this protects: an embedder who sets nothing, or uses a designated initialiser. */
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES, s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS, s.config.reject_drain_timeout_ms);
+    ASSERT_EQ(0, s.config.reject_drain_disable);
+    kl_http_server_free(&s);
+}
+
+UTEST(reject_drain, only_max_bytes_set_keeps_the_default_timeout) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    cfg.reject_drain_max_bytes = 128u * 1024u;
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)(128u * 1024u), s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS, s.config.reject_drain_timeout_ms);
+    kl_http_server_free(&s);
+}
+
+UTEST(reject_drain, only_timeout_set_keeps_the_default_cap) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    cfg.reject_drain_timeout_ms = 1000u;
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES, s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)1000u, s.config.reject_drain_timeout_ms);
+    kl_http_server_free(&s);
+}
+
+UTEST(reject_drain, both_set_are_both_honoured) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    cfg.reject_drain_max_bytes = 4096; cfg.reject_drain_timeout_ms = 250u;
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)4096, s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)250u, s.config.reject_drain_timeout_ms);
+    kl_http_server_free(&s);
+}
+
+UTEST(reject_drain, disable_flag_turns_the_drain_off) {
+    /* Zeroed bounds are how the runtime gate (kl_http_conn_begin_drain) sees "disabled"; init
+     * normalises every other zero to a default, so zero here can only mean the flag was set. */
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    cfg.reject_drain_disable = 1;
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)0, s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)0, s.config.reject_drain_timeout_ms);
+    kl_http_server_free(&s);
+}
+
+UTEST(reject_drain, disable_flag_dominates_nonzero_bounds) {
+    /* Precedence: the flag wins and the numeric fields are ignored, not merged. */
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {0};
+    cfg.port = 0; cfg.bind_addr = "127.0.0.1";
+    cfg.reject_drain_disable = 1;
+    cfg.reject_drain_max_bytes = 65536; cfg.reject_drain_timeout_ms = 500u;
+    ASSERT_EQ(0, rd_init_cfg(&s, &cfg));
+    ASSERT_EQ((size_t)0, s.config.reject_drain_max_bytes);
+    ASSERT_EQ((uint32_t)0, s.config.reject_drain_timeout_ms);
+    kl_http_server_free(&s);
+}
+
 UTEST_MAIN();

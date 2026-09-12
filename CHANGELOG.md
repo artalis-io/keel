@@ -5,7 +5,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- `KlHttpServerConfig.reject_drain_disable`. Setting it to 1 turns the post-rejection drain off; it is
+  now the only way to do that, and it overrides both numeric fields.
+
+### Fixed
+
+- **The documented way to disable the post-rejection drain was the configuration that enabled it.**
+  3.0.0's header and contract both said that zeroing `reject_drain_max_bytes` and
+  `reject_drain_timeout_ms` disabled the drain. `kl_http_server_init` applied the defaults exactly when
+  both were zero, so zeroing both ENABLED it at 64 KiB / 500 ms, while zeroing exactly one disabled it
+  as an undocumented side effect. The two fields are now normalised independently, so a zero field
+  selects that field's default as `KlHttpServerConfig` promises for every member, and disabling is
+  explicit. Embedders who leave the fields alone, including anyone zero-initialising the struct, are
+  unaffected: they got the defaults before and still do.
 
 ## [3.0.0]
 

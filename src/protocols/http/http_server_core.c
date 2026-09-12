@@ -158,10 +158,25 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (s->config.max_body_size == 0)
         s->config.max_body_size = KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE;
     /* Post-rejection drain bounds (#278). Both are caps, not targets: the drain stops at whichever
-     * comes first, and 0 for EITHER disables the drain so teardown behaves as it did before. */
-    if (s->config.reject_drain_max_bytes == 0 && s->config.reject_drain_timeout_ms == 0) {
-        s->config.reject_drain_max_bytes = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES;
-        s->config.reject_drain_timeout_ms = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS;
+     * comes first.
+     *
+     * Each field is normalised INDEPENDENTLY, because this struct's rule is that a zero member selects
+     * that member's default. The first version coupled them, applying defaults only when BOTH were
+     * zero, which made the documented way to disable the drain (zero both) the exact configuration
+     * that enabled it, and left "exactly one zero" as an undocumented accidental off switch (#293).
+     *
+     * reject_drain_disable is now the only off switch and it DOMINATES: the numeric fields are zeroed
+     * so the runtime gate in kl_http_conn_begin_drain sees 0 and skips, which is also why that gate
+     * needs no separate flag. After this, a zero cap or timeout reaching a connection means disabled
+     * and nothing else. */
+    if (s->config.reject_drain_disable) {
+        s->config.reject_drain_max_bytes = 0;     /* ignored while disabled, by contract */
+        s->config.reject_drain_timeout_ms = 0;
+    } else {
+        if (s->config.reject_drain_max_bytes == 0)
+            s->config.reject_drain_max_bytes = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES;
+        if (s->config.reject_drain_timeout_ms == 0)
+            s->config.reject_drain_timeout_ms = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS;
     }
     if (s->config.max_header_size == 0)
         s->config.max_header_size = KL_HTTP_CONN_READ_BUF_SIZE;
