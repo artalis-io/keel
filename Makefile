@@ -86,6 +86,8 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
+  # thread.h seam (src/thread.h): Win32 CreateThread + SRWLOCK + CONDITION_VARIABLE.
+  THREAD_SRC = src/thread_win.c
   SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
   UNIX_NODE_SRC = src/unix_socket_node_win.c   # identity-anchored AF_UNIX node lifecycle (NTFS)
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
@@ -180,6 +182,8 @@ VENDOR_CFLAGS += -MMD -MP
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
+# thread.h seam (src/thread.h): the pthreads backend.
+THREAD_SRC ?= src/thread_posix.c
 SERVER_PLAT_SRC ?= src/protocols/http/http_server_plat_posix.c
 # AF_UNIX filesystem-node lifecycle (substrate transport module; see src/unix_socket_node.h).
 UNIX_NODE_SRC ?= src/unix_socket_node_posix.c
@@ -225,7 +229,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/protocols/http/http_body_reader_buffer.c \
            src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
            src/protocols/websocket/websocket.c src/protocols/websocket/http_server_ws.c src/protocols/websocket/websocket_client.c \
-           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c src/wakeup.c src/url.c \
+           src/protocols/http2/http2_server.c src/protocols/http2/http2_client.c src/thread_pool.c $(THREAD_SRC) src/wakeup.c src/url.c \
            src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
            src/protocols/http/http_client_proxy.c \
            src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \

@@ -2,7 +2,7 @@
 #include <keel/event_ctx.h>
 #include "platform.h"
 #include "allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
-#include <pthread.h>
+#include "thread.h"   /* the library's only threading primitives; no pthreads above this */
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -40,25 +40,25 @@ struct KlThreadPool {
     int inflight;
 
     /* Synchronization */
-    pthread_mutex_t mutex;
-    pthread_cond_t work_avail;
+    KlMutex mutex;
+    KlCond work_avail;
     int shutdown;
 
     /* Workers */
-    pthread_t *threads;
+    KlThread *threads;
     int num_workers;
 };
 
 /* ── Worker thread ────────────────────────────────────────────────── */
 
-static void *worker_thread(void *arg)
+static void worker_thread(void *arg)
 {
     KlThreadPool *pool = arg;
 
-    pthread_mutex_lock(&pool->mutex);
+    kl_mutex_lock(&pool->mutex);
     while (!pool->shutdown) {
         while (pool->work_count == 0 && !pool->shutdown)
-            pthread_cond_wait(&pool->work_avail, &pool->mutex);
+            kl_cond_wait(&pool->work_avail, &pool->mutex);
 
         if (pool->shutdown)
             break;
@@ -66,25 +66,24 @@ static void *worker_thread(void *arg)
         KlWorkItem item = pool->work_queue[pool->work_head];
         pool->work_head = (pool->work_head + 1) % pool->work_cap;
         pool->work_count--;
-        pthread_mutex_unlock(&pool->mutex);
+        kl_mutex_unlock(&pool->mutex);
 
         /* Execute blocking work; no lock held */
         item.work_fn(item.user_data);
 
         /* Push to done queue */
-        pthread_mutex_lock(&pool->mutex);
+        kl_mutex_lock(&pool->mutex);
         pool->done_queue[pool->done_tail] = item;
         pool->done_tail = (pool->done_tail + 1) % pool->done_cap;
         pool->done_count++;
-        pthread_mutex_unlock(&pool->mutex);
+        kl_mutex_unlock(&pool->mutex);
 
         /* Signal event loop */
         kl_plat_wakeup_signal(&pool->wakeup);
 
-        pthread_mutex_lock(&pool->mutex);
+        kl_mutex_lock(&pool->mutex);
     }
-    pthread_mutex_unlock(&pool->mutex);
-    return NULL;
+    kl_mutex_unlock(&pool->mutex);
 }
 
 /* ── Pipe watcher callback (runs on event loop thread) ────────────── */
@@ -97,19 +96,19 @@ static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user
     /* Drain wakeup channel; exact count doesn't matter */
     kl_plat_wakeup_drain(fd);
 
-    pthread_mutex_lock(&pool->mutex);
+    kl_mutex_lock(&pool->mutex);
     while (pool->done_count > 0) {
         KlWorkItem item = pool->done_queue[pool->done_head];
         pool->done_head = (pool->done_head + 1) % pool->done_cap;
         pool->done_count--;
         pool->inflight--;
-        pthread_mutex_unlock(&pool->mutex);
+        kl_mutex_unlock(&pool->mutex);
 
         item.done_fn(item.user_data);
 
-        pthread_mutex_lock(&pool->mutex);
+        kl_mutex_lock(&pool->mutex);
     }
-    pthread_mutex_unlock(&pool->mutex);
+    kl_mutex_unlock(&pool->mutex);
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -141,7 +140,7 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 
     if ((size_t)queue_cap > SIZE_MAX / sizeof(KlWorkItem)) return NULL;
     if ((size_t)done_cap > SIZE_MAX / sizeof(KlWorkItem)) return NULL;
-    if ((size_t)num_workers > SIZE_MAX / sizeof(pthread_t)) return NULL;
+    if ((size_t)num_workers > SIZE_MAX / sizeof(KlThread)) return NULL;
 
     KlThreadPool *pool = kl_malloc(alloc, sizeof(KlThreadPool));
     if (!pool) {
@@ -169,8 +168,8 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     if (kl_plat_wakeup_open(&pool->wakeup) < 0) { ctx->last_error = KL_ERR_PIPE; goto fail_done; }
 
     /* Init synchronization */
-    if (pthread_mutex_init(&pool->mutex, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_pipe; }
-    if (pthread_cond_init(&pool->work_avail, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_mutex; }
+    if (kl_mutex_init(&pool->mutex) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_pipe; }
+    if (kl_cond_init(&pool->work_avail) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_mutex; }
 
     /* Register wakeup watcher with event loop */
     if (kl_watcher_add(ctx, pool->wakeup.rd, KL_EVENT_READ,
@@ -180,13 +179,13 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     }
 
     /* Allocate thread array */
-    pool->threads = kl_malloc(alloc, (size_t)num_workers * sizeof(pthread_t));
+    pool->threads = kl_malloc(alloc, (size_t)num_workers * sizeof(KlThread));
     if (!pool->threads) { ctx->last_error = KL_ERR_ALLOC; goto fail_watcher; }
 
     /* Spawn worker threads */
     int started = 0;
     for (int i = 0; i < num_workers; i++) {
-        if (pthread_create(&pool->threads[i], NULL, worker_thread, pool) != 0)
+        if (kl_thread_create(&pool->threads[i], worker_thread, pool) != 0)
             break;
         started++;
     }
@@ -197,13 +196,13 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     return pool;
 
 fail_threads:
-    kl_free(alloc, pool->threads, (size_t)num_workers * sizeof(pthread_t));
+    kl_free(alloc, pool->threads, (size_t)num_workers * sizeof(KlThread));
 fail_watcher:
     kl_watcher_del(ctx, pool->wakeup.rd);
 fail_cond:
-    pthread_cond_destroy(&pool->work_avail);
+    kl_cond_destroy(&pool->work_avail);
 fail_mutex:
-    pthread_mutex_destroy(&pool->mutex);
+    kl_mutex_destroy(&pool->mutex);
 fail_pipe:
     kl_plat_wakeup_close(&pool->wakeup);
 fail_done:
@@ -219,10 +218,10 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item)
 {
     if (!pool || !item || !item->work_fn || !item->done_fn) return -1;
 
-    pthread_mutex_lock(&pool->mutex);
+    kl_mutex_lock(&pool->mutex);
 
     if (pool->inflight >= pool->done_cap) {
-        pthread_mutex_unlock(&pool->mutex);
+        kl_mutex_unlock(&pool->mutex);
         return -1;
     }
 
@@ -231,8 +230,8 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item)
     pool->work_count++;
     pool->inflight++;
 
-    pthread_cond_signal(&pool->work_avail);
-    pthread_mutex_unlock(&pool->mutex);
+    kl_cond_signal(&pool->work_avail);
+    kl_mutex_unlock(&pool->mutex);
 
     return 0;
 }
@@ -242,14 +241,14 @@ void kl_thread_pool_free(KlThreadPool *pool)
     if (!pool) return;
 
     /* Signal shutdown */
-    pthread_mutex_lock(&pool->mutex);
+    kl_mutex_lock(&pool->mutex);
     pool->shutdown = 1;
-    pthread_cond_broadcast(&pool->work_avail);
-    pthread_mutex_unlock(&pool->mutex);
+    kl_cond_broadcast(&pool->work_avail);
+    kl_mutex_unlock(&pool->mutex);
 
     /* Join all workers */
     for (int i = 0; i < pool->num_workers; i++)
-        pthread_join(pool->threads[i], NULL);
+        kl_thread_join(&pool->threads[i]);
 
     /* Remove wakeup watcher from event loop */
     kl_watcher_del(pool->ev_ctx, pool->wakeup.rd);
@@ -275,12 +274,12 @@ void kl_thread_pool_free(KlThreadPool *pool)
     kl_plat_wakeup_close(&pool->wakeup);
 
     /* Destroy synchronization */
-    pthread_cond_destroy(&pool->work_avail);
-    pthread_mutex_destroy(&pool->mutex);
+    kl_cond_destroy(&pool->work_avail);
+    kl_mutex_destroy(&pool->mutex);
 
     /* Free allocations */
     KlAllocator *alloc = pool->alloc;
-    kl_free(alloc, pool->threads, (size_t)pool->num_workers * sizeof(pthread_t));
+    kl_free(alloc, pool->threads, (size_t)pool->num_workers * sizeof(KlThread));
     kl_free(alloc, pool->done_queue, (size_t)pool->done_cap * sizeof(KlWorkItem));
     kl_free(alloc, pool->work_queue, (size_t)pool->work_cap * sizeof(KlWorkItem));
     kl_free(alloc, pool, sizeof(KlThreadPool));
