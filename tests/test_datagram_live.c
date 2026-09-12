@@ -295,11 +295,19 @@ UTEST(datagram_live, completion_tos_send_verifies_tos) {
  * egresses with that default. A RAW recvmsg peer with IP_RECVTOS reads the received TOS and asserts the
  * socket default actually applied. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy),
  * the completion send path applies the kernel socket default just like readiness. */
-/* Skipped on Windows pending #276: kl_datagram_set_tos refuses there because wdg_caps gates
- * KL_DGRAM_CAP_TOS behind the WSASendMsg extension probe, which per-packet TOS needs but
- * socket-default TOS (a plain setsockopt) does not. Measured on Windows 11: the raw
- * setsockopt(IPPROTO_IP, IP_TOS) succeeds while the cap stays ungranted. Guarded rather than
- * fixed here so this port stays a port. */
+/* Skipped on Windows because the ORACLE is unported, not because set_tos fails there.
+ *
+ * The earlier note here blamed #276: that wdg_caps gated KL_DGRAM_CAP_TOS behind the WSASendMsg
+ * extension probe. Measurement disproved both halves. WSASendMsg resolves on Windows 11 for bound
+ * AND unbound sockets, IPv4 and IPv6; the actual cause was wdg_caps returning 0 for the socket
+ * entirely, which #275 fixed. kl_datagram_set_tos now succeeds there and the socket carries the
+ * value (verified by getsockopt read-back in
+ * test_datagram_socket.c: socket_default_tos_reaches_the_provider, which runs on both Windows axes).
+ *
+ * What is still missing on Windows is this test's oracle: a RAW recvmsg peer with IP_RECVTOS reading
+ * the received TOS off the wire, which is what proves the default applied to EGRESS rather than just
+ * to the socket. That needs WSARecvMsg plumbing in the test harness and belongs with the remaining
+ * Windows test ports (#273). */
 #if !defined(_WIN32)
 UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
     g_alloc = kl_allocator_default();
