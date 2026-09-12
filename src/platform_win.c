@@ -47,6 +47,11 @@ int kl_plat_cpu_count(void)
     return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
 }
 
+long kl_plat_pid(void)
+{
+    return (long)GetCurrentProcessId();
+}
+
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
 {
     if (_lseeki64(fd, offset, SEEK_SET) < 0)

@@ -6,12 +6,11 @@
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <string.h>
-#include <strings.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include "http_internal.h"
+#include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 #include "http2_internal.h"       /* KlHttp2ServerConn / KlHttp2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
 #include "http_proto_hooks.h"       /* H2 server upgrade seam: registered for the core */
@@ -147,7 +146,7 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
                                                err_body, strlen(err_body));
                 return 0;
             }
-            ssize_t nr = kl_plat_file_pread(res->file_fd, file_buf, fsize, 0);
+            kl_ssize_t nr = kl_plat_file_pread(res->file_fd, file_buf, fsize, 0);
             if (nr > 0) {
                 body = file_buf;
                 body_len = (size_t)nr;
@@ -172,9 +171,9 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
     const char *filt_values[H2_MAX_RESP_HEADERS];
     int filt_count = 0;
     for (int i = 0; i < num_hdrs; i++) {
-        if (strcasecmp(names[i], "connection") == 0) continue;
-        if (strcasecmp(names[i], "transfer-encoding") == 0) continue;
-        if (strcasecmp(names[i], "keep-alive") == 0) continue;
+        if (kl_ascii_strcasecmp(names[i], "connection") == 0) continue;
+        if (kl_ascii_strcasecmp(names[i], "transfer-encoding") == 0) continue;
+        if (kl_ascii_strcasecmp(names[i], "keep-alive") == 0) continue;
         filt_names[filt_count] = names[i];
         filt_values[filt_count] = values[i];
         filt_count++;
@@ -218,7 +217,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
      * peer already sent one (it should not, in HTTP/2). */
     int has_host = 0;
     for (int i = 0; i < num_headers; i++) {
-        if (hdr_name_lens[i] == 4 && strncasecmp(hdr_names[i], "host", 4) == 0) {
+        if (hdr_name_lens[i] == 4 && kl_ascii_strncasecmp(hdr_names[i], "host", 4) == 0) {
             has_host = 1;
             break;
         }
@@ -302,7 +301,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         p += hdr_value_lens[i] + 1;
 
         if (hdr_name_lens[i] == 14 &&
-            strncasecmp(req->headers[hdr_count].name, "content-length", 14) == 0) {
+            kl_ascii_strncasecmp(req->headers[hdr_count].name, "content-length", 14) == 0) {
             content_length = 0;
             int cl_valid = (hdr_value_lens[i] > 0) ? 1 : 0;
             for (size_t j = 0; j < hdr_value_lens[i]; j++) {
@@ -470,14 +469,14 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
 
 /* Default output writer: write the socket (TLS-aware conn_write). Used on the readiness
  * path and whenever a completion driver has not installed a buffering writer. */
-static ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
+static kl_ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ctx;
     return conn_write(h2c->conn, data, len);
 }
 
 /* The session emits produced frame bytes here; route them through the output seam
  * (default: the socket; a completion driver can install a buffering writer). */
-static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
+static kl_ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     return h2c->out_write(h2c->out_ctx, data, len);
 }
@@ -554,7 +553,7 @@ int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerCo
     }
 
     if (leftover && leftover_len > 0) {
-        ssize_t r = h2c->session->recv(h2c->session, leftover, leftover_len);
+        kl_ssize_t r = h2c->session->recv(h2c->session, leftover, leftover_len);
         if (r < 0) {
             h2c->session->destroy(h2c->session);
             kl_free(alloc, h2c->streams, streams_size);
@@ -595,7 +594,7 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
 
     c->last_active_ms = kl_monotonic_ms();
 
-    ssize_t consumed = h2c->session->recv(h2c->session, data, len);
+    kl_ssize_t consumed = h2c->session->recv(h2c->session, data, len);
     if (consumed < 0) return KL_HTTP_CONN_CLOSED;
 
     if (h2c->session->want_write(h2c->session)) {
@@ -622,7 +621,7 @@ int kl_http2_server_on_readable(KlHttpConn *c) {
     int drains = 0;
 read_more:
     ;
-    ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
+    kl_ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
     if (nr <= 0) return KL_HTTP_CONN_CLOSED;
 
     KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)nr);
@@ -692,14 +691,11 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .drain_shutdown  = kl_http2_server_drain_shutdown,
 };
 
+/* No GCC constructor auto-installing this. kl_http_server_init() calls every installer
+ * explicitly and is the documented mechanism, so the constructor was a second lifecycle
+ * mechanism for the same thing: redundant on GCC and unavailable under MSVC. kl_proxy_hooks_install
+ * never had one and works the same way, which is what confirmed the explicit path is sufficient. */
 void kl_http2_server_hooks_install(void) {
     kl_http2_server_hooks_set(&kl_http2_server_hooks_table);
 }
 
-/* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
- * (without kl_http_server_init, e.g. the unit tests) has the seam wired. Runs only if
- * this object is linked (a direct kl_http2_server_* reference pulls it in). */
-__attribute__((constructor))
-static void kl_http2_server_hooks_autoinstall(void) {
-    kl_http2_server_hooks_install();
-}

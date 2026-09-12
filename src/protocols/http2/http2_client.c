@@ -17,7 +17,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/types.h>
 
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
@@ -77,14 +76,14 @@ static void h2c_close_connection(KlHttp2ClientConn *c);
 
 /* ── I/O abstraction ───────────────────────────────────────────── */
 
-static ssize_t h2c_write(KlHttp2ClientConn *c, const void *buf, size_t len)
+static kl_ssize_t h2c_write(KlHttp2ClientConn *c, const void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->write(c->tls, c->fd, buf, len);
     return kl_sock_send(c->ev->sockets, c->fd, buf, len);
 }
 
-static ssize_t h2c_read(KlHttp2ClientConn *c, void *buf, size_t len)
+static kl_ssize_t h2c_read(KlHttp2ClientConn *c, void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->read(c->tls, c->fd, buf, len);
@@ -151,7 +150,7 @@ static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
     const char *p = (const char *)data;
     size_t sent = 0;
     while (sent < len) {
-        ssize_t w = h2c_write(c, p + sent, len - sent);
+        kl_ssize_t w = h2c_write(c, p + sent, len - sent);
         if (w < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return (int)sent;  /* partial send */
@@ -398,7 +397,7 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
 static void h2c_handle_active(KlHttp2ClientConn *c)
 {
     char buf[KL_HTTP2_CLIENT_RECV_BUF_SIZE];
-    ssize_t nread = h2c_read(c, buf, sizeof(buf));
+    kl_ssize_t nread = h2c_read(c, buf, sizeof(buf));
 
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {

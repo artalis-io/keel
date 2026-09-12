@@ -13,7 +13,7 @@
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <stdint.h>
-#include <sys/types.h>           /* ssize_t (TLS read return): previously pulled
+#include <sys/types.h>           /* kl_ssize_t (TLS read return): previously pulled
                                     transitively via http_response.h before off_t neutralization */
 
 /* Drive an established WebSocket connection over the completion loop. Feed
@@ -25,7 +25,7 @@
 void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
+            kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ: need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);

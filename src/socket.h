@@ -16,14 +16,14 @@
  *   - kl_sock_*     : inline dispatchers that route through a provider's op when
  *                     present, else the kl_sockdef_* default.
  *
- * Logic-neutral: no raw syscall appears here. Internal types (ssize_t, off_t)
+ * Logic-neutral: no raw syscall appears here. Internal types (kl_ssize_t, off_t)
  * are used only in these internal decls; the public header exposes none of them.
  *
  * INTERNAL header: not installed, no ABI commitment.
  */
 
 #include <keel/socket.h>      /* public: KlSocketProvider/KlSocketOps/KlIoVec/caps/... */
-#include "sockcompat.h"       /* ssize_t (+ struct sockaddr / socklen_t on both platforms) */
+#include "sockcompat.h"       /* struct sockaddr / socklen_t / KlIoVec layout on both platforms */
 
 /* Internal socket-provider capability, reserving bit 3 out of the
  * public KL_SOCK_CAP_* space (bits 0-2 in <keel/socket.h>). Kept OUT of the public
@@ -89,17 +89,17 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer);
 int            kl_sockdef_close(KlSocketHandle fd);
 int            kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *addr);
 int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
-ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
-ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
+kl_ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
+kl_ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
 /* The built-in provider's datagram ops (POSIX / Winsock per platform): the default
  * datagram data-plane when KlEventCtx.sockets is NULL, mirroring the kl_sockdef_*
  * stream fallback. Defined in socket_posix.c / socket_winsock.c. */
 struct KlDatagramOps;
 const struct KlDatagramOps *kl_sockdef_dgram(void);
-ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
+kl_ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
 int            kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how);
-ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
-ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
+kl_ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
+kl_ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
 /* The hosted default I/O-result classifier: maps the current `errno` to a
  * KlIoStatus. This is the ONLY place the errno mapping lives; the inline
  * dispatcher below never reads errno itself, so this header stays freestanding.
@@ -111,7 +111,7 @@ KlIoStatus     kl_sockdef_io_status(void);
  * goes straight through the ops table; otherwise the platform default
  * `kl_sockdef_*` (one direct call, negligible next to the syscall it wraps).
  * No raw syscall in this header, so it compiles on any platform. Returns are
- * ssize_t internally (== kl_ssize_t == pointer-width) for the consumers' benefit.
+ * kl_ssize_t internally (== kl_ssize_t == pointer-width) for the consumers' benefit.
  */
 static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nonblocking) return p->ops->set_nonblocking(p->context, fd);
@@ -158,13 +158,13 @@ static inline int kl_sock_set_cork(const KlSocketProvider *p, KlSocketHandle fd,
     return kl_sockdef_set_cork(fd, on);
 }
 
-static inline ssize_t kl_sock_send(const KlSocketProvider *p, KlSocketHandle fd,
+static inline kl_ssize_t kl_sock_send(const KlSocketProvider *p, KlSocketHandle fd,
                                    const void *buf, size_t len) {
     if (p && p->ops->send) return p->ops->send(p->context, fd, buf, len);
     return kl_sockdef_send(fd, buf, len);
 }
 
-static inline ssize_t kl_sock_recv(const KlSocketProvider *p, KlSocketHandle fd,
+static inline kl_ssize_t kl_sock_recv(const KlSocketProvider *p, KlSocketHandle fd,
                                    void *buf, size_t len) {
     if (p && p->ops->recv) return p->ops->recv(p->context, fd, buf, len);
     return kl_sockdef_recv(fd, buf, len);
@@ -225,7 +225,7 @@ static inline KlIoStatus kl_sock_io_status(const KlSocketProvider *p) {
     return kl_sockdef_io_status();
 }
 
-static inline ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandle fd,
+static inline kl_ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandle fd,
                                         void *buf, size_t len) {
     if (p && p->ops->recv_peek) return p->ops->recv_peek(p->context, fd, buf, len);
     return kl_sockdef_recv_peek(fd, buf, len);
@@ -239,13 +239,13 @@ static inline int kl_sock_shutdown(const KlSocketProvider *p, KlSocketHandle fd,
     return kl_sockdef_shutdown(fd, how);
 }
 
-static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,
+static inline kl_ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,
                                      const KlIoVec *iov, int iovcnt) {
     if (p && p->ops->writev) return p->ops->writev(p->context, fd, iov, iovcnt);
     return kl_sockdef_writev(fd, iov, iovcnt);
 }
 
-static inline ssize_t kl_sock_sendfile(const KlSocketProvider *p, KlSocketHandle out_fd,
+static inline kl_ssize_t kl_sock_sendfile(const KlSocketProvider *p, KlSocketHandle out_fd,
                                        int in_fd, uint64_t *offset, size_t count) {
     if (p && p->ops->sendfile)
         return p->ops->sendfile(p->context, out_fd, in_fd, offset, count);

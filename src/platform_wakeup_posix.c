@@ -33,7 +33,7 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
 void kl_plat_wakeup_signal(const KlPlatWakeup *w)
 {
     char c = 1;
-    ssize_t wr = write((int)w->wr, &c, 1);
+    kl_ssize_t wr = write((int)w->wr, &c, 1);
     (void)wr;
 }
 
@@ -43,7 +43,7 @@ void kl_plat_wakeup_drain(KlSocketHandle rd)
      * mutex regardless of how many bytes we consume here, and any residue
      * re-fires the level-triggered watcher harmlessly. */
     char buf[64];
-    ssize_t rc = read((int)rd, buf, sizeof(buf));
+    kl_ssize_t rc = read((int)rd, buf, sizeof(buf));
     (void)rc;
 }
 

@@ -1,7 +1,7 @@
 #include <keel/http_body_reader_multipart.h>
 #include "../../allocator_validate.h"
+#include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 #include <string.h>
-#include <strings.h>
 #include <stdint.h>
 #include <limits.h>
 
@@ -121,7 +121,7 @@ static const char *mp_find_param(const char *val, size_t vlen,
             if (prev != ';' && prev != ' ' && prev != '\t')
                 continue;
         }
-        if (strncasecmp(val + i, needle, nlen) == 0)
+        if (kl_ascii_strncasecmp(val + i, needle, nlen) == 0)
             return val + i + nlen;
     }
     return NULL;
@@ -322,11 +322,11 @@ static int mp_parse_headers(KlHttpMultipartReader *mr) {
             while (val_len > 0 && *val == ' ') { val++; val_len--; }
 
             if (name_len == 19 &&
-                strncasecmp(buf, "Content-Disposition", 19) == 0) {
+                kl_ascii_strncasecmp(buf, "Content-Disposition", 19) == 0) {
                 if (mp_parse_disposition(mr, val, val_len) < 0) return -1;
                 got_disposition = 1;
             } else if (name_len == 12 &&
-                       strncasecmp(buf, "Content-Type", 12) == 0) {
+                       kl_ascii_strncasecmp(buf, "Content-Type", 12) == 0) {
                 /* Free any prior Content-Type allocation in this same
                  * part: duplicate header lines would otherwise leak
                  * the first allocation. Last header wins. */
@@ -661,7 +661,7 @@ KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttp
     const char *prefix = "multipart/form-data";
     const size_t prefix_len = 19;
     if (ct_len < prefix_len) return NULL;
-    if (strncasecmp(ct, prefix, prefix_len) != 0) return NULL;
+    if (kl_ascii_strncasecmp(ct, prefix, prefix_len) != 0) return NULL;
     /* Require a separator after the prefix so subtypes like
      * "multipart/form-data-extra" do not falsely match. */
     if (ct_len > prefix_len) {

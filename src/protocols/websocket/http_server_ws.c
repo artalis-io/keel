@@ -10,12 +10,12 @@
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
 #include "websocket_server_internal.h"
+#include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
 #include <keel/http_server.h>   /* KlHttpServer: kl_http_server_ws_upgrade registration API lives here */
 #include <keel/http_router.h>   /* kl_http_router_add + KlHttpRoute.ws_config */
 #include <string.h>
-#include <strings.h>
 #include <stdio.h>
 #include "http_internal.h"
 #include "http_proto_hooks.h"   /* WS server upgrade seam: registered for the core */
@@ -81,7 +81,7 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 
 static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
-    ssize_t nw = conn_write(ws->conn, data, len);
+    kl_ssize_t nw = conn_write(ws->conn, data, len);
     if (nw < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return 0;
@@ -215,7 +215,7 @@ static int connection_has_upgrade(const char *val, size_t val_len) {
         const char *tok = p;
         while (p < end && *p != ',' && *p != ' ' && *p != '\t') p++;
         size_t tok_len = (size_t)(p - tok);
-        if (tok_len == 7 && strncasecmp(tok, "upgrade", 7) == 0)
+        if (tok_len == 7 && kl_ascii_strncasecmp(tok, "upgrade", 7) == 0)
             return 1;
     }
     return 0;
@@ -252,7 +252,7 @@ int kl_ws_server_upgrade(KlHttpConn *c, const char *leftover,
 
     /* Validate: Upgrade must be "websocket" */
     if (!upgrade_hdr || upgrade_len != 9 ||
-        strncasecmp(upgrade_hdr, "websocket", 9) != 0) {
+        kl_ascii_strncasecmp(upgrade_hdr, "websocket", 9) != 0) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
         return KL_HTTP_CONN_CLOSED;
@@ -589,7 +589,7 @@ int kl_ws_server_on_readable(KlHttpConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
     uint8_t buf[KL_HTTP_CONN_READ_BUF_SIZE];
-    ssize_t nr = conn_read(c, buf, sizeof(buf));
+    kl_ssize_t nr = conn_read(c, buf, sizeof(buf));
     if (nr <= 0) {
         /* Connection closed or error */
         return KL_HTTP_CONN_CLOSED;
@@ -675,6 +675,10 @@ static const KlWsServerHooks kl_ws_server_hooks_table = {
     .drain_close         = kl_ws_server_drain_close,
 };
 
+/* No GCC constructor auto-installing this. kl_http_server_init() calls every installer
+ * explicitly and is the documented mechanism, so the constructor was a second lifecycle
+ * mechanism for the same thing: redundant on GCC and unavailable under MSVC. kl_proxy_hooks_install
+ * never had one and works the same way, which is what confirmed the explicit path is sufficient. */
 void kl_ws_server_hooks_install(void) {
     kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
 }
@@ -689,10 +693,3 @@ int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerCo
     return 0;
 }
 
-/* Also self-install at load, so a consumer driving http_connection.c's dispatch directly
- * (without kl_http_server_init, e.g. the unit tests) has the seam wired. Runs only if
- * this object is linked (a direct kl_ws_server_* reference pulls it in). */
-__attribute__((constructor))
-static void kl_ws_server_hooks_autoinstall(void) {
-    kl_ws_server_hooks_install();
-}

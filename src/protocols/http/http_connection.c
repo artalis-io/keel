@@ -443,7 +443,7 @@ KlHttpConnState kl_http_conn_on_handshake(KlHttpConn *c) {
 
 int kl_http_conn_read_proxy_header(KlHttpConn *c) {
     uint8_t buf[KL_PROXY_HEADER_MAX];
-    ssize_t n;
+    kl_ssize_t n;
     do {
         n = kl_stream_recv_peek(&c->stream, buf, sizeof(buf));
     } while (n < 0 && kl_stream_io_status(&c->stream) == KL_IO_INTERRUPTED);
@@ -474,7 +474,7 @@ int kl_http_conn_read_proxy_header(KlHttpConn *c) {
     size_t left = consumed;
     while (left > 0) {
         size_t want = left < sizeof(buf) ? left : sizeof(buf);
-        ssize_t rd;
+        kl_ssize_t rd;
         rd = kl_stream_recv(&c->stream, buf, want);
         if (rd <= 0)
             return -1;
@@ -846,7 +846,7 @@ read_more_headers: ;
             space = c->stream.read_cap - c->stream.read_len;
         }
 
-        ssize_t nr = conn_read(c, c->stream.read_buf + c->stream.read_len, space);
+        kl_ssize_t nr = conn_read(c, c->stream.read_buf + c->stream.read_len, space);
         if (nr <= 0) {
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
@@ -918,7 +918,7 @@ read_more_body: ;
         /* Transport: sliding window read into the start of the buffer, then feed
          * the model-blind body core. On TLS, drain buffered records before
          * re-arming (the socket won't signal readable again). */
-        ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
+        kl_ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
@@ -1013,7 +1013,7 @@ static KlHttpConnState conn_file_submit_read(KlHttpConn *c) {
 
 static KlHttpConnState conn_file_flush(KlHttpConn *c) {
     while (c->file_io_sent < c->file_io_len) {
-        ssize_t nw = kl_stream_send(&c->stream, c->stream.read_buf + c->file_io_sent,
+        kl_ssize_t nw = kl_stream_send(&c->stream, c->stream.read_buf + c->file_io_sent,
                                     c->file_io_len - c->file_io_sent);
         if (nw < 0) {
             KlIoStatus st = kl_stream_io_status(&c->stream);
@@ -1035,7 +1035,7 @@ static KlHttpConnState conn_file_flush(KlHttpConn *c) {
     return conn_file_submit_read(c);  /* next chunk or finish */
 }
 
-KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, ssize_t result, int zero_copy) {
+KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, int zero_copy) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->file_io_phase == FILE_IO_CANCELLING) {

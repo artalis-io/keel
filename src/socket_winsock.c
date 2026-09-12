@@ -206,17 +206,17 @@ int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
     return 0;
 }
 
-ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
+kl_ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
-ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
+kl_ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
-ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
+kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
@@ -231,7 +231,7 @@ int kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how) {
 
 /* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf); WSABUF
  * stays inside this provider TU. */
-ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+kl_ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     if (iovcnt <= 0)
         return 0;
     WSABUF stackbufs[KL_SOCK_IOV_MAX];
@@ -253,13 +253,13 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
         kl_wsa_set_errno();
         return -1;
     }
-    return (ssize_t)sent;
+    return (kl_ssize_t)sent;
 }
 
 /* No TransmitFile yet (an offset-aware OVERLAPPED optimization); a
  * pread+send loop is correct and cross-compiles. Sends one chunk per call from
  * *offset, advancing it; same one-chunk-per-tick shape as the POSIX fallback. */
-ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+kl_ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     char buf[KL_WSK_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
     if (_lseeki64(in_fd, (long long)*offset, SEEK_SET) < 0)

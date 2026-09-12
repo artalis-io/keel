@@ -595,7 +595,7 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
     }
     size_t got = 0;
     while (got < (size_t)count) {
-        ssize_t nr = kl_plat_file_pread(file_fd, op->sendbuf + head_total + got,
+        kl_ssize_t nr = kl_plat_file_pread(file_fd, op->sendbuf + head_total + got,
                                         (size_t)count - got, (long long)got);
         if (nr < 0) { if (errno == EINTR) continue; iou_op_free(op); return -1; }
         if (nr == 0) break;                          /* short file: send what we have */

@@ -226,11 +226,11 @@ static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 int kl_comp_tls_flush(KlHttpConn *c) {
     const KlSocketProvider *sp = c->stream.ctx ? c->stream.ctx->sockets : NULL;
     unsigned char buf[KL_TLS_FLUSH_CHUNK];
-    ssize_t n;
+    kl_ssize_t n;
     while ((n = c->tls->drain_output(c->tls, buf, sizeof(buf))) > 0) {
         size_t off = 0;
         while (off < (size_t)n) {
-            ssize_t w = kl_sock_send(sp, c->stream.fd, buf + off, (size_t)n - off);
+            kl_ssize_t w = kl_sock_send(sp, c->stream.fd, buf + off, (size_t)n - off);
             if (w <= 0) return -1;           /* seam retries EINTR; <=0 is fatal here */
             off += (size_t)w;
         }
@@ -251,7 +251,7 @@ static int comp_tls_encrypt_all(KlHttpConn *c, const KlIoVec *iov, int n,
     for (int i = 0; i < n; i++) {
         size_t off = 0;
         while (off < iov[i].len) {
-            ssize_t w = c->tls->write(c->tls, c->stream.fd,
+            kl_ssize_t w = c->tls->write(c->tls, c->stream.fd,
                                       (const char *)iov[i].base + off, iov[i].len - off);
             if (w < 0) goto fail;
             if (w > 0) off += (size_t)w;
@@ -265,7 +265,7 @@ static int comp_tls_encrypt_all(KlHttpConn *c, const KlIoVec *iov, int n,
                     buf = nb;
                     cap = ncap;
                 }
-                ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
+                kl_ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
                 if (d < 0) goto fail;
                 if (d == 0) break;
                 len += (size_t)d;
@@ -296,7 +296,7 @@ int kl_comp_tls_drain_output(KlHttpConn *c, unsigned char **out, size_t *outlen,
             buf = nb;
             cap = ncap;
         }
-        ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
+        kl_ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
         if (d < 0) { kl_free(c->stream.alloc, buf, cap); return -1; }
         if (d == 0) break;
         len += (size_t)d;
@@ -330,7 +330,7 @@ static int comp_tls_send_file_chunk(KlHttpConn *c) {
     size_t remaining = (size_t)(c->res.file_size - c->res.file_offset);
     char fbuf[KL_COMP_TLS_FILE_CHUNK];
     size_t to_read = remaining < sizeof(fbuf) ? remaining : sizeof(fbuf);
-    ssize_t nr = kl_plat_file_pread(c->res.file_fd, fbuf, to_read,
+    kl_ssize_t nr = kl_plat_file_pread(c->res.file_fd, fbuf, to_read,
                                     (long long)c->res.file_offset);
     if (nr <= 0) return -1;
     KlIoVec seg = { fbuf, (size_t)nr };
@@ -565,7 +565,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
 
     if (c->state == KL_HTTP_CONN_READING_BODY) {
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
+            kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ: need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -589,7 +589,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
             if (comp_grow_headers_or_431(s, c) < 0) return;
             /* grew: read_cap increased, off (== read_len) unchanged, so space is now available */
         }
-        ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
+        kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
         if (p < 0) { kl_comp_close(s, c); return; }
         if (p == 0) {                                  /* WANT_READ: need the network */
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);

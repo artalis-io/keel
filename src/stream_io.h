@@ -20,13 +20,13 @@
 static inline const KlSocketProvider *kl_stream_provider(const KlStream *s) {
     return s->ctx ? s->ctx->sockets : NULL;
 }
-static inline ssize_t kl_stream_recv(const KlStream *s, void *buf, size_t len) {
+static inline kl_ssize_t kl_stream_recv(const KlStream *s, void *buf, size_t len) {
     return kl_sock_recv(kl_stream_provider(s), s->fd, buf, len);
 }
-static inline ssize_t kl_stream_send(const KlStream *s, const void *buf, size_t len) {
+static inline kl_ssize_t kl_stream_send(const KlStream *s, const void *buf, size_t len) {
     return kl_sock_send(kl_stream_provider(s), s->fd, buf, len);
 }
-static inline ssize_t kl_stream_recv_peek(const KlStream *s, void *buf, size_t len) {
+static inline kl_ssize_t kl_stream_recv_peek(const KlStream *s, void *buf, size_t len) {
     return kl_sock_recv_peek(kl_stream_provider(s), s->fd, buf, len);
 }
 /* Classify the last raw stream op's status (would-block / interrupted / etc.). */
