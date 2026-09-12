@@ -552,17 +552,23 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator alpn async compress cross_module datagram_batch datagram_life datagram_multicast \
-                  datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
-                  dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
-                  event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
-                  http2_overflow http_async http_body_reader http_client http_client_happy_eyeballs \
-                  http_client_pool http_client_proxy http_client_stream http_connection http_cors \
-                  http_integration http_multipart_stream http_overflow http_redirect http_request \
-                  http_response http_router http_server_integration http_server_stats http_sse http_tls \
-                  peer_addr peer_cert proxy_protocol read_flow_control reject_drain resolver_cache sockaddr \
-                  socket_provider stream_transport thread_pool timeout timer tls tls_integration \
-                  unix_socket_node_win url version wakeup websocket websocket_client websocket_overflow
+WIN_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtable connect_op cross_module \
+                   datagram_batch datagram_life datagram_multicast datagram_open datagram_ops_vtable \
+                   datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
+                   dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
+                   event_provider event_provider_vtable file_io http1_chunked http1_parser \
+                   http1_parser_vtable http1_response_parser http2 http2_client http2_client_hostname_fail \
+                   http2_client_vtable http2_overflow http_async http_body_reader http_body_reader_vtable \
+                   http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
+                   http_client_proxy http_client_stream http_connection http_cors http_integration \
+                   http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
+                   http_response http_router http_server_integration http_server_state http_server_stats \
+                   http_sse http_tls io_status kl_cstr kl_cstr_builtin listener peer_addr peer_cert \
+                   proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
+                   socket_provider socket_provider_vtable stream stream_close stream_read stream_transport \
+                   thread_pool timeout timer tls tls_integration tls_vtable transport_public \
+                   unix_socket_node_win url version wakeup watcher_aba websocket websocket_client \
+                   websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -605,18 +611,29 @@ test-win: $(WIN_TEST_BIN)
 #                     runs, but 3 of 8 runs of the full suite, so it is contention-sensitive rather
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
+#   io_status       - 3 of its 4 cases pass on IOCP; async_client_consults_io_status_end_to_end
+#                     SEGFAULTS (rc 139, isolated). Its client provider advertises only
+#                     KL_SOCK_CAP_NATIVE_FD, which is wrong for a completion loop, so capability
+#                     negotiation should REFUSE it the way sockprov.select_native_fd_guard proves the
+#                     server does, rather than crash. Filed separately; enrolled on WSAPoll only.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
-WIN_IOCP_TEST_SUITES = allocator alpn async compress cross_module datagram_batch datagram_life datagram_multicast \
-                       datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
-                       dgram_recv_classify dgram_send dgram_slots drain error event_provider file_io http1_chunked \
-                       http1_parser http1_response_parser http2 http2_client http2_overflow http_async \
-                       http_body_reader http_client_happy_eyeballs http_client_pool http_client_proxy \
-                       http_client_stream http_connection http_cors http_multipart_stream http_overflow \
-                       http_redirect http_request http_response http_router http_server_integration \
-                       http_server_stats http_sse http_tls iocp_engine peer_addr peer_cert proxy_protocol \
-                       http_client read_flow_control reject_drain resolver_cache sockaddr stream_single_shot \
-                       thread_pool wakeup \
-                       timeout timer tls tls_integration url version websocket websocket_client websocket_overflow
+WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtable connect_op \
+                        cross_module datagram_batch datagram_life datagram_multicast datagram_open \
+                        datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
+                        event_provider event_provider_vtable file_io http1_chunked http1_parser \
+                        http1_parser_vtable http1_response_parser http2 http2_client \
+                        http2_client_hostname_fail http2_client_vtable http2_overflow http_async \
+                        http_body_reader http_body_reader_vtable http_client http_client_happy_eyeballs \
+                        http_client_hostname_fail http_client_pool http_client_proxy http_client_stream \
+                        http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
+                        http_redirect http_request http_response http_router http_server_integration \
+                        http_server_state http_server_stats http_sse http_tls iocp_engine kl_cstr \
+                        kl_cstr_builtin listener peer_addr peer_cert proxy_protocol read_flow_control \
+                        reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable stream \
+                        stream_close stream_read stream_single_shot thread_pool timeout timer tls \
+                        tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
+                        websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
