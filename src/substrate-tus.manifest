@@ -3,6 +3,7 @@
 # .c fails check-protocol-home until it is declared substrate here OR moved under
 # src/protocols/<fam>/; that is the default-deny that stops a protocol impl landing at bare src/.
 # Regenerate intentionally: git ls-files 'src/*.c' | grep -vE '^src/protocols/' | LC_ALL=C sort
+
 src/allocator.c
 src/allocator_default_stdlib.c
 src/completion_absent.c
@@ -21,7 +22,6 @@ src/datagram_send.c
 src/datagram_slots.c
 src/decompress.c
 src/drain.c
-src/internal_trace.c
 src/error.c
 src/event_ctx.c
 src/event_dispatch.c
@@ -34,10 +34,13 @@ src/event_pollcomp.c
 src/event_pollcomp_builtin.c
 src/event_wsapoll.c
 src/file_io.c
+src/internal_trace.c
 src/kl_cstr.c
 src/kl_cstr_builtin.c
 src/listener.c
 src/platform_posix.c
+src/platform_thread_posix.c
+src/platform_thread_win.c
 src/platform_wakeup_posix.c
 src/platform_wakeup_win.c
 src/platform_win.c

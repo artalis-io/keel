@@ -7,8 +7,13 @@
  * The narrow, logic-free declarations for the handful of services that are
  * genuinely OS-specific and not socket-shaped: monotonic clock, secure random,
  * thread-pool wakeup. Each is DEFINED per-OS in platform_posix.c / platform_win.c
- * (one selected by the Makefile PLATFORM_SRC branch): the same one-platform-per-
- * TU pattern as event_epoll.c/event_wsapoll.c and socket_posix.c/socket_winsock.c.
+ * (one selected by the Makefile PLATFORM_SRC branch).
+ *
+ * THREADS are part of this layer too but live in platform_thread.h, because their types are
+ * <pthread.h> and <windows.h> types and this header is included by protocol TUs that must stay free
+ * of platform headers.
+ *
+ * The same one-platform-per-TU pattern as event_epoll.c/event_wsapoll.c and socket_posix.c/socket_winsock.c.
  * See docs/archive/phases/phase6_winsock_design.md §B.0/§B.3.
  *
  * Deliberately several narrow functions rather than one KlPlatformOps god-object
@@ -42,7 +47,7 @@ void kl_plat_random(void *buf, size_t len);
  *
  * POSIX: pipe(2). Windows: a connected loopback TCP socket pair, because WSAPoll
  * can only watch sockets, not pipe HANDLEs (see docs/archive/phases/phase6_winsock_design.md
- * §B.3). This is the one platform seam the thread pool needs. */
+ * §B.3). */
 typedef struct {
     KlSocketHandle rd;
     KlSocketHandle wr;
