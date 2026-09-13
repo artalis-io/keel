@@ -29,7 +29,7 @@ void kl_plat_random(void *buf, size_t len) {
         unsigned char *p = buf;
         size_t total = 0;
         while (total < len) {
-            ssize_t r = read(fd, p + total, len - total);
+            kl_ssize_t r = read(fd, p + total, len - total);
             if (r <= 0) break;
             total += (size_t)r;
         }
@@ -53,9 +53,14 @@ int kl_plat_cpu_count(void)
     return n > 0 ? (int)n : 1;
 }
 
+long kl_plat_pid(void)
+{
+    return (long)getpid();
+}
+
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
 {
-    ssize_t r = pread(fd, buf, count, (off_t)offset);
+    kl_ssize_t r = pread(fd, buf, count, (off_t)offset);
     return (int)r;
 }
 

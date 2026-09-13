@@ -12,6 +12,7 @@
 #include <keel/url.h>
 #include <keel/drain.h>
 #include "../../allocator_validate.h"
+#include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -19,8 +20,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <time.h>
 
@@ -107,21 +106,21 @@ static void wsc_ping_timer(void *user_data);
 
 /* ── I/O abstraction (plain or TLS) ────────────────────────────── */
 
-static ssize_t wsc_write(KlWsClientConn *ws, const void *buf, size_t len)
+static kl_ssize_t wsc_write(KlWsClientConn *ws, const void *buf, size_t len)
 {
     if (ws->tls)
         return ws->tls->write(ws->tls, ws->fd, buf, len);
     return kl_sock_send(ws->ev->sockets, ws->fd, buf, len);
 }
 
-static ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
+static kl_ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
 {
     if (ws->tls)
         return ws->tls->read(ws->tls, ws->fd, buf, len);
     return kl_sock_recv(ws->ev->sockets, ws->fd, buf, len);
 }
 
-/* KlDrain writer: adapts wsc_write's ssize_t contract to the drain's
+/* KlDrain writer: adapts wsc_write's kl_ssize_t contract to the drain's
  * (>0 bytes written, 0 would-block, -1 error).  Both plain-socket EAGAIN
  * and TLS WANT_READ/WANT_WRITE (which wsc_write returns as 0) map to
  * would-block, so the drain buffers the unsent tail instead of the frame
@@ -129,7 +128,7 @@ static ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
 static kl_ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
 {
     KlWsClientConn *ws = ctx;
-    ssize_t r = wsc_write(ws, data, len);
+    kl_ssize_t r = wsc_write(ws, data, len);
     if (r > 0) return r;
     if (r == 0) return 0;  /* TLS WANT_*, treat as would-block */
     if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
@@ -284,7 +283,7 @@ static int wsc_parse_handshake_response(const KlWsClientConn *ws)
         if (!line_end) break;
         if (line_end == p) break;  /* empty line = end of headers */
 
-        if (strncasecmp(p, "Sec-WebSocket-Accept:", 21) == 0) {
+        if (kl_ascii_strncasecmp(p, "Sec-WebSocket-Accept:", 21) == 0) {
             const char *val = p + 21;
             while (val < line_end && *val == ' ') val++;
             accept_val = val;
@@ -483,7 +482,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     if (ws->upgrade_sent < ws->upgrade_len) {
         if (!(ready & KL_EVENT_WRITE)) return;
 
-        ssize_t w = wsc_write(ws, ws->upgrade_buf + ws->upgrade_sent,
+        kl_ssize_t w = wsc_write(ws, ws->upgrade_buf + ws->upgrade_sent,
                                ws->upgrade_len - ws->upgrade_sent);
         if (w < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -542,7 +541,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     }
 
     /* Reserve the last byte for the NUL terminator written below. */
-    ssize_t nread = wsc_read(ws, ws->handshake_buf + ws->handshake_len,
+    kl_ssize_t nread = wsc_read(ws, ws->handshake_buf + ws->handshake_len,
                               ws->handshake_cap - ws->handshake_len - 1);
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -781,7 +780,7 @@ static void wsc_handle_open(KlWsClientConn *ws)
 {
     uint8_t buf[KL_WS_CLIENT_RECV_BUF_SIZE];
 
-    ssize_t nread = wsc_read(ws, buf, sizeof(buf));
+    kl_ssize_t nread = wsc_read(ws, buf, sizeof(buf));
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             kl_watcher_rearm(ws->ev, ws->fd);

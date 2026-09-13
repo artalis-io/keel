@@ -22,8 +22,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>   /* strcasecmp (no longer pulled transitively via http_request.h) */
-#include <unistd.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -347,7 +345,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -361,7 +359,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
             if (pr <= 0)
                 return -1;
 
-            ssize_t w = kl_http_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
+            kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
             if (w <= 0)
                 return -1;
             sent += (size_t)w;
@@ -431,7 +429,7 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -451,7 +449,7 @@ static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlT
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
+        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -467,7 +465,7 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
     char hdr_buf[KL_HTTP_CLIENT_CHUNK_HDR_SIZE];
 
     for (;;) {
-        ssize_t nread = body_read(data_buf, sizeof(data_buf), user_data);
+        kl_ssize_t nread = body_read(data_buf, sizeof(data_buf), user_data);
         if (nread < 0)
             return -1;
 
@@ -521,7 +519,7 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         if (pr <= 0)
             break;
 
-        ssize_t nread = kl_http_client_io_read(sockets, fd, tls, buf, sizeof(buf));
+        kl_ssize_t nread = kl_http_client_io_read(sockets, fd, tls, buf, sizeof(buf));
         if (nread < 0) {
             /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
              * finalize a close-delimited response rather than failing it. */

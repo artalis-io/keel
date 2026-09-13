@@ -506,7 +506,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         return 1;
     }
     case PC_READ: {
-        ssize_t n = recv(op->fd, op->buf, op->buflen, 0);
+        kl_ssize_t n = recv(op->fd, op->buf, op->buflen, 0);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
         ev->kind = KL_COMP_READ;
@@ -517,7 +517,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
     }
     case PC_WRITE: {
         while (op->send_done < op->send_total) {
-            ssize_t n = send(op->fd, op->sendbuf + op->send_done,
+            kl_ssize_t n = send(op->fd, op->sendbuf + op->send_done,
                              op->send_total - op->send_done, 0);
             if (n < 0) {
                 if (errno == EINTR) continue;
@@ -533,7 +533,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
     }
     case PC_SENDFILE: {
         while (op->send_done < op->send_total) {          /* head first */
-            ssize_t n = send(op->fd, op->sendbuf + op->send_done,
+            kl_ssize_t n = send(op->fd, op->sendbuf + op->send_done,
                              op->send_total - op->send_done, 0);
             if (n < 0) {
                 if (errno == EINTR) continue;
@@ -545,7 +545,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         }
         while (op->file_off < op->file_count) {           /* then the file bytes */
             uint64_t off = op->file_off;
-            ssize_t n = kl_sockdef_sendfile(op->fd, op->file_fd, &off,
+            kl_ssize_t n = kl_sockdef_sendfile(op->fd, op->file_fd, &off,
                                             (size_t)(op->file_count - op->file_off));
             if (n < 0) {
                 if (errno == EINTR) continue;
@@ -573,7 +573,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         msg.msg_iovlen = 1;
         msg.msg_control = ctrl;                    /* capture pktinfo (local addr) cmsg */
         msg.msg_controllen = sizeof(ctrl);
-        ssize_t n;
+        kl_ssize_t n;
         do { n = recvmsg(op->fd, &msg, 0); } while (n < 0 && errno == EINTR);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return 0;
@@ -604,7 +604,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         return 1;
     }
     case PC_DGRAM_SEND: {
-        ssize_t n;
+        kl_ssize_t n;
         if (op->send_ctrllen) {                    /* source-pin / TOS → sendmsg with the copied cmsg */
             struct iovec iov = { .iov_base = op->sendbuf, .iov_len = op->send_total };
             struct msghdr msg;

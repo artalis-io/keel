@@ -72,6 +72,13 @@ void kl_plat_wakeup_close(KlPlatWakeup *w);
  * sysconf(_SC_NPROCESSORS_ONLN). Windows: GetSystemInfo. Returns 1 if unknown. */
 int kl_plat_cpu_count(void);
 
+/* This process's id, for the systemd socket-activation LISTEN_PID check, which must confirm the
+ * inherited fds were meant for THIS process. POSIX: getpid(). Windows: GetCurrentProcessId(), where
+ * socket activation never happens, so the check simply never matches. Here rather than branched inside
+ * http_server_activation.c, because a protocol TU must not carry a platform branch; it previously got
+ * getpid() by accident, through a <unistd.h> that http_internal.h included for ssize_t. */
+long kl_plat_pid(void);
+
 /* Positioned read from a file descriptor at @offset, up to @count bytes into
  * @buf. Returns bytes read (0 = EOF), or -1 on error. POSIX: pread (offset
  * unchanged). Windows: _lseeki64 + _read (advances the fd offset, fine for the

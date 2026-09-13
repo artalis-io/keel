@@ -5,12 +5,13 @@
  * loop, TCP listener construction, and peer accessors. Parses the LISTEN_PID / LISTEN_FDS /
  * LISTEN_FDNAMES environment the service manager sets, validates it belongs to THIS process,
  * and returns the inherited listen fd (SD_LISTEN_FDS_START = 3). The env vars are cleared so
- * they are not inherited by children. Hosted-only; getpid()/getenv() come via internal.h's
- * <unistd.h> (the same chain http_server.c used), so cross-platform behavior is unchanged.
+ * they are not inherited by children. Hosted-only; the pid comes from the PAL (kl_plat_pid) and
+ * getenv from <stdlib.h>, so no POSIX header is needed and cross-platform behaviour is unchanged.
  */
 
 #include <keel/http_server.h>
-#include "http_internal.h"      /* <unistd.h> (getpid) on a hosted build */
+#include "http_internal.h"
+#include "platform.h"           /* kl_plat_pid: the LISTEN_PID check, no platform branch here */
 #include "http_server_plat.h"   /* kl_http_server_plat_unsetenv */
 #include <stdlib.h>        /* getenv, strtol */
 #include <string.h>        /* strchr, strlen, memcmp */
@@ -24,7 +25,7 @@ int kl_systemd_listen_fds(int *count) {
     if (pid_s && fds_s) {
         char *end;
         long lpid = strtol(pid_s, &end, 10);
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
+        if (end != pid_s && *end == '\0' && kl_plat_pid() == lpid) {
             long nfds = strtol(fds_s, &end, 10);
             if (end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096) {
                 n = (int)nfds;
@@ -58,7 +59,7 @@ int kl_systemd_listen_fd_by_name(const char *name) {
         char *end;
         long lpid = strtol(pid_s, &end, 10);
         long nfds = 0;
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
+        if (end != pid_s && *end == '\0' && kl_plat_pid() == lpid) {
             nfds = strtol(fds_s, &end, 10);
             if (!(end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096))
                 nfds = 0;

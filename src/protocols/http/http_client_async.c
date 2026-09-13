@@ -751,7 +751,7 @@ static void async_handle_sending_stream(KlHttpClient *c)
         switch (c->chunk_phase) {
         case 0: {
             /* Read next chunk from body_read */
-            ssize_t nr = c->body_read(c->chunk_buf, sizeof(c->chunk_buf),
+            kl_ssize_t nr = c->body_read(c->chunk_buf, sizeof(c->chunk_buf),
                                        c->stream_user_data);
             if (nr < 0) {
                 async_complete_error(c);

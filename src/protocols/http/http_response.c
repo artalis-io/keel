@@ -291,15 +291,15 @@ static inline const KlSocketProvider *res_provider(const KlHttpResponse *res) {
 /* Vectored write through the socket provider: the raw writev() when the provider
  * supports vectored I/O (POSIX / NULL), else a serialized kl_sock_send over the
  * iov. Same return contract as writev (bytes written, -1 on error, errno set). */
-static ssize_t seam_writev(const KlSocketProvider *p, int fd,
+static kl_ssize_t seam_writev(const KlSocketProvider *p, int fd,
                            const KlIoVec *iov, int iovcnt) {
     if (!p || p->ops->writev)                     /* NULL=POSIX, or a writev op */
         return kl_sock_writev(p, fd, iov, iovcnt);
-    ssize_t total = 0;                            /* no writev op → serialize */
+    kl_ssize_t total = 0;                            /* no writev op → serialize */
     for (int i = 0; i < iovcnt; i++) {
         size_t off = 0;
         while (off < iov[i].len) {
-            ssize_t nw = kl_sock_send(p, fd, (char *)iov[i].base + off,
+            kl_ssize_t nw = kl_sock_send(p, fd, (char *)iov[i].base + off,
                                       iov[i].len - off);
             if (nw < 0) return total > 0 ? total : -1;   /* errno from send */
             if (nw == 0) return total;
@@ -312,10 +312,10 @@ static ssize_t seam_writev(const KlSocketProvider *p, int fd,
 
 /* ── try_writev: single attempt, returns bytes written ──────────── */
 
-static ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
+static kl_ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
                           KlIoVec *iov, int iovcnt) {
     if (!tls) {
-        ssize_t nw = seam_writev(p, fd, iov, iovcnt);
+        kl_ssize_t nw = seam_writev(p, fd, iov, iovcnt);
         if (nw < 0) {
             KlIoStatus st = kl_sock_io_status(p);
             if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) return 0;
@@ -325,7 +325,7 @@ static ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
     /* TLS: write first non-empty segment */
     for (int i = 0; i < iovcnt; i++) {
         if (iov[i].len == 0) continue;
-        ssize_t nw = tls->write(tls, fd, iov[i].base, iov[i].len);
+        kl_ssize_t nw = tls->write(tls, fd, iov[i].base, iov[i].len);
         if (nw < 0) return -1;
         return nw;  /* 0 = WANT_WRITE, >0 = bytes written */
     }
@@ -340,7 +340,7 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
 
     if (!tls) {
         while (iovcnt > 0) {
-            ssize_t nw = seam_writev(p, fd, iov, iovcnt);
+            kl_ssize_t nw = seam_writev(p, fd, iov, iovcnt);
             if (nw < 0) {
                 KlIoStatus st = kl_sock_io_status(p);
                 if (st == KL_IO_INTERRUPTED) continue;
@@ -370,7 +370,7 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
         const char *seg = iov[i].base;
         size_t remaining = iov[i].len;
         while (remaining > 0) {
-            ssize_t nw = tls->write(tls, fd, seg, remaining);
+            kl_ssize_t nw = tls->write(tls, fd, seg, remaining);
             if (nw < 0) return -1;
             if (nw == 0) {
                 if (++spins > KL_WRITE_SPIN_MAX) return -1;
@@ -459,7 +459,7 @@ int kl_http_response_send(KlHttpResponse *res) {
         iov[first].base = (char *)iov[first].base + skip;
         iov[first].len -= skip;
 
-        ssize_t nw = try_writev(res_provider(res), res->conn_fd, res->tls,
+        kl_ssize_t nw = try_writev(res_provider(res), res->conn_fd, res->tls,
                                 &iov[first], iovcnt - first);
         if (nw < 0) return -1;
         res->send_offset += (size_t)nw;
@@ -536,12 +536,12 @@ int kl_http_response_send(KlHttpResponse *res) {
             size_t remaining = (size_t)(res->file_size - res->file_offset);
             char buf[KL_FILE_BUF_SIZE];
             size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
-            ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
+            kl_ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
             if (nr <= 0) return -1;
             const char *p = buf;
             size_t left = (size_t)nr;
             while (left > 0) {
-                ssize_t nw = res->tls->write(res->tls, res->conn_fd, p, left);
+                kl_ssize_t nw = res->tls->write(res->tls, res->conn_fd, p, left);
                 if (nw < 0) return -1;
                 if (nw == 0) break;  /* WANT_WRITE: yield to event loop */
                 p += nw;
@@ -560,12 +560,12 @@ int kl_http_response_send(KlHttpResponse *res) {
             size_t remaining = (size_t)(res->file_size - res->file_offset);
             char buf[KL_FILE_BUF_SIZE];
             size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
-            ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
+            kl_ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
             if (nr <= 0) return -1;
             const char *p = buf;
             size_t left = (size_t)nr;
             while (left > 0) {
-                ssize_t nw = kl_sock_send(sp, res->conn_fd, p, left);
+                kl_ssize_t nw = kl_sock_send(sp, res->conn_fd, p, left);
                 if (nw < 0) {
                     if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) break;
                     return -1;
@@ -584,7 +584,7 @@ int kl_http_response_send(KlHttpResponse *res) {
         while (remaining > 0) {
             /* file_offset is uint64_t end to end, matching the sendfile seam op;
              * the kernel advances it in place, no off_t conversion needed. */
-            ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
+            kl_ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
                                             &res->file_offset, remaining);
             if (sent < 0) {
                 if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) return 1;
@@ -604,7 +604,7 @@ int kl_http_response_send(KlHttpResponse *res) {
 
 static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
     KlHttpResponse *res = ctx;
-    ssize_t nw;
+    kl_ssize_t nw;
     if (res->tls) {
         nw = res->tls->write(res->tls, res->conn_fd, data, len);
         if (nw < 0) return -1;

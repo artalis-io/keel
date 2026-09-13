@@ -843,12 +843,12 @@ static int dns_ns_index(const KlDnsResolver *r, const KlSockAddr *src) {
 static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud);
 
 /* Transport read/write: plaintext today; the tls branch is the DoT hook. */
-static ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
+static kl_ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
     if (t->tls)
         return t->tls->write(t->tls, t->fd, b, n);
     return kl_sock_send(t->r->ctx->sockets, t->fd, b, n);
 }
-static ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
+static kl_ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
     if (t->tls)
         return t->tls->read(t->tls, t->fd, b, n);
     return kl_sock_recv(t->r->ctx->sockets, t->fd, b, n);
@@ -1008,7 +1008,7 @@ static void dns_tcp_deliver(KlDnsResolver *r, KlDnsTcp *t) {
 
 static void dns_tcp_flush(KlDnsResolver *r, KlDnsTcp *t) {
     while (t->wsent < t->wlen) {
-        ssize_t n = dns_tcp_write(t, t->wbuf + t->wsent, t->wlen - t->wsent);
+        kl_ssize_t n = dns_tcp_write(t, t->wbuf + t->wsent, t->wlen - t->wsent);
         if (n > 0) { t->wsent += (size_t)n; continue; }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return;                                  /* keep WRITE interest */
@@ -1047,7 +1047,7 @@ static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
                 if (!nb) { dns_tcp_fail(r, t); return; }
                 t->rbuf = nb; t->rcap = ncap;
             }
-            ssize_t n = dns_tcp_read(t, t->rbuf + t->rlen, t->rcap - t->rlen);
+            kl_ssize_t n = dns_tcp_read(t, t->rbuf + t->rlen, t->rcap - t->rlen);
             if (n > 0) {
                 t->rlen += (size_t)n;
                 dns_tcp_deliver(r, t);

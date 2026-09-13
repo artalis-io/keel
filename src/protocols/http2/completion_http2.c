@@ -19,7 +19,7 @@
  * frames land in one buffer the driver posts as a single overlapped send. The buffer +
  * grow logic live here, not the HTTP/2 server adapter (http2_server.c), which only exposes the generic writer seam. */
 typedef struct { KlAllocator *alloc; char *buf; size_t len, cap; int err; } CompH2Cap;
-static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
+static kl_ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
     CompH2Cap *cp = ctx;
     if (cp->err) return -1;
     if (len > SIZE_MAX - cp->len) { cp->err = 1; return -1; }
@@ -36,7 +36,7 @@ static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
     }
     memcpy(cp->buf + cp->len, data, len);
     cp->len += len;
-    return (ssize_t)len;
+    return (kl_ssize_t)len;
 }
 
 /* Drive an established HTTP/2 connection over the completion loop. Feed received
@@ -54,7 +54,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
          * deferring the next recv to comp_on_write, so at most one h2 send is in flight
          * and frames cannot reorder. */
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
+            kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) break;                         /* WANT_READ, batch done */
             KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)p);

@@ -14,11 +14,10 @@
 #include <keel/http_server.h>
 #include <keel/tls.h>
 #include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
-#ifdef KEEL_FREESTANDING
-#include <sys/types.h>        /* ssize_t (no <unistd.h> in a freestanding build) */
-#else
-#include <unistd.h>
-#endif
+/* No <unistd.h> or <sys/types.h>: this header reached for them only to obtain ssize_t, and the I/O
+ * helpers below now use kl_ssize_t from <keel/handle.h>, which every build already has. Dropping it
+ * also stops a POSIX-only header leaking into every protocol TU that includes this one, which is what
+ * blocked ten of them under MSVC. */
 
 #include "stream_io.h"        /* kl_stream_* raw I/O (substrate, -Isrc) */
 
@@ -43,12 +42,12 @@ static inline const KlSocketProvider *conn_provider(const KlHttpConn *c) {
     return kl_stream_provider(&c->stream);
 }
 
-static inline ssize_t conn_read(KlHttpConn *c, void *buf, size_t len) {
+static inline kl_ssize_t conn_read(KlHttpConn *c, void *buf, size_t len) {
     if (c->tls) return c->tls->read(c->tls, c->stream.fd, buf, len);
     return kl_stream_recv(&c->stream, buf, len);
 }
 
-static inline ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
+static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
     if (c->tls) return c->tls->write(c->tls, c->stream.fd, buf, len);
     return kl_stream_send(&c->stream, buf, len);
 }
@@ -59,7 +58,7 @@ static inline int conn_write_all(KlHttpConn *c, const void *buf, size_t len) {
     size_t remaining = len;
     int spins = 0;
     while (remaining > 0) {
-        ssize_t nw = conn_write(c, p, remaining);
+        kl_ssize_t nw = conn_write(c, p, remaining);
         if (nw < 0) return -1;
         if (nw == 0) {
             if (++spins > KL_HTTP_CONN_WRITE_SPIN_MAX) return -1;
@@ -74,7 +73,7 @@ static inline int conn_write_all(KlHttpConn *c, const void *buf, size_t len) {
 
 /* Suppress warn_unused_result on best-effort error writes */
 static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t len) {
-    ssize_t r = conn_write(c, buf, len);
+    kl_ssize_t r = conn_write(c, buf, len);
     (void)r;
 }
 
@@ -103,7 +102,7 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 
 /* Server logging helpers (defined in http_server.c; used by the per-platform
  * http_server_plat_*.c TUs too). */
-__attribute__((format(printf, 3, 4)))
+KL_PRINTF_FMT(3, 4)
 void kl_http_server_log(KlHttpServer *s, int level, const char *fmt, ...);
 void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg);
 

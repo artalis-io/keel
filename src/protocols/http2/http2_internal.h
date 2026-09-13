@@ -34,7 +34,7 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
  * per-connection writer; the default writes the socket (conn_write). A completion driver
  * installs its own buffering writer around a feed, then restores the default (fn == NULL).
  * Defined in http2_server.c. */
-typedef ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
+typedef kl_ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
 void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
 
 /* ── Per-stream state ────────────────────────────────────────────── */

@@ -160,8 +160,8 @@ int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
     return 0;
 }
 
-ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
-    ssize_t r;
+kl_ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
+    kl_ssize_t r;
 #ifdef MSG_NOSIGNAL
     do { r = send((int)fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
 #else
@@ -169,13 +169,13 @@ ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
 #endif
     return r;
 }
-ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
-    ssize_t r;
+kl_ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
+    kl_ssize_t r;
     do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;
 }
-ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
-    ssize_t r;
+kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
+    kl_ssize_t r;
     do { r = recv((int)fd, buf, len, MSG_PEEK); } while (r < 0 && errno == EINTR);
     return r;
 }
@@ -186,7 +186,7 @@ int kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how) {
     int native = (how == KL_SHUT_RD) ? SHUT_RD : (how == KL_SHUT_RDWR) ? SHUT_RDWR : SHUT_WR;
     return shutdown((int)fd, native);
 }
-ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+kl_ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     /* Translate the Keel-owned vector into POSIX struct iovec here, so struct
      * iovec never escapes this provider TU. */
     if (iovcnt <= 0 || iovcnt > KL_SOCK_IOV_MAX) { errno = EINVAL; return -1; }
@@ -198,12 +198,12 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     return writev((int)fd, sysv, iovcnt);
 }
 
-ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+kl_ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     /* The seam offset is uint64_t; translate to the platform off_t here so off_t
      * never crosses the provider boundary. */
     off_t soff = (off_t)*offset;
 #if defined(__linux__)
-    ssize_t ret = sendfile((int)out_fd, in_fd, &soff, count);   /* advances soff */
+    kl_ssize_t ret = sendfile((int)out_fd, in_fd, &soff, count);   /* advances soff */
     *offset = (uint64_t)soff;
     return ret;
 #elif defined(__APPLE__)
@@ -211,20 +211,20 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, 
     int r = sendfile(in_fd, (int)out_fd, soff, &len, NULL, 0);
     if (r < 0 && errno != EAGAIN) return -1;
     *offset = (uint64_t)(soff + len);
-    return (ssize_t)len;
+    return (kl_ssize_t)len;
 #else
     char buf[KL_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
-    ssize_t nr = pread(in_fd, buf, to_read, soff);
+    kl_ssize_t nr = pread(in_fd, buf, to_read, soff);
     if (nr <= 0) return nr;
     const char *p = buf;
     size_t remaining = (size_t)nr;
     while (remaining > 0) {
-        ssize_t nw = write((int)out_fd, p, remaining);
+        kl_ssize_t nw = write((int)out_fd, p, remaining);
         if (nw < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                ssize_t wrote = (ssize_t)((size_t)nr - remaining);
+                kl_ssize_t wrote = (kl_ssize_t)((size_t)nr - remaining);
                 *offset = (uint64_t)(soff + wrote);
                 return wrote > 0 ? wrote : -1;
             }

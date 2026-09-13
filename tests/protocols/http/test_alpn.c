@@ -15,6 +15,7 @@
  */
 #include "utest.h"
 #include "../../../src/protocols/http/http_conn_internal.h"
+#include "../../../src/protocols/http/http_proto_hooks.h"
 #include <keel/keel.h>
 #include "mock_tls.h"
 #include "net_compat.h"
@@ -47,6 +48,12 @@ static int ta_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 static void ta_setup(void) {
+    /* This suite drives kl_http_conn_on_handshake() directly, with no KlHttpServer, so
+     * kl_http_server_init() (which installs the per-protocol hook tables) never runs.
+     * Install them here: the installers are the documented registration mechanism, and
+     * without them the ALPN h2 branch has no adapter to dispatch into. */
+    kl_ws_server_hooks_install();
+    kl_http2_server_hooks_install();
     ta_alloc = kl_allocator_default();
     kl_http_router_init(&ta_router, &ta_alloc);
     kl_http_router_add(&ta_router, "GET", "/x", ta_handler, NULL, NULL);

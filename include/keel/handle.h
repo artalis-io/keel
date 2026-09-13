@@ -41,6 +41,16 @@ typedef intptr_t KlSocketHandle;
  */
 typedef intptr_t kl_ssize_t;
 
+/* printf-style format checking where the compiler offers it. GCC and Clang diagnose mismatched
+ * varargs through the format attribute; MSVC has no equivalent in C mode, so it expands to nothing
+ * there. A diagnostic aid only: nothing depends on it for correctness, which is why losing it under
+ * MSVC is acceptable where losing a semantic attribute would not be. */
+#if defined(__GNUC__) || defined(__clang__)
+#define KL_PRINTF_FMT(fmt_idx, first_arg) __attribute__((format(printf, fmt_idx, first_arg)))
+#else
+#define KL_PRINTF_FMT(fmt_idx, first_arg)
+#endif
+
 #define KL_INVALID_SOCKET ((KlSocketHandle)-1)
 
 static inline int kl_handle_valid(KlSocketHandle h) {
