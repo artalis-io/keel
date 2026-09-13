@@ -85,7 +85,24 @@ static void rd_early_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 
 static void *rd_thread(void *a) { (void)a; kl_http_server_run(&rd_server); return NULL; }
 
+/* Defined below; rd_start() calls it to clean up after a test that returned early. */
+static void rd_stop(void);
+
 static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
+    /* Tear down anything a PREVIOUS test left running, before touching the shared statics.
+     *
+     * utest's ASSERT_* macros RETURN from the test body, so any failing assertion between rd_start()
+     * and rd_stop() skips the stop/join entirely and leaves rd_thread running against rd_server. The
+     * next test then called kl_http_server_init(&rd_server, ...), whose memset zeroes the server --
+     * including ev.loop._backend -- underneath that live thread, which promptly dereferenced NULL
+     * (src/event_iouring.c iou_sqe) and took the whole process down with it.
+     *
+     * The crash landed several tests AFTER the one that actually failed, and destroyed utest's
+     * buffered stdout on the way, so CI reported a bare "Segmentation fault" with no indication of
+     * which assertion had flaked. That is what made this expensive to diagnose (#307). Cleaning up
+     * here makes a failed assertion cost one reported test failure instead of the whole suite. */
+    rd_stop();
+
     KlHttpServerConfig cfg = {
         .port = 0, .bind_addr = "127.0.0.1", .max_body_size = 4096,
         .reject_drain_max_bytes = drain_bytes,
