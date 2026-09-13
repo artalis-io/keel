@@ -975,6 +975,26 @@ IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch 
                           websocket_overflow
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 # ---------------------------------------------------------------------------
+# Completion-axis suite exclusions: ONE source, used by every completion lane
+# ---------------------------------------------------------------------------
+#
+# A completion semantic suite set is:  derived eligible suites  -  documented temporary exclusions.
+# Both halves matter. The derivation stops a list becoming a hand-curated wish list; this exclusion
+# set stops a KNOWN-unstable suite being enrolled into a standing job, which would make the job red
+# for a reason nobody learns anything from.
+#
+# Used by the unsanitized pollcomp lane AND the sanitized lanes, deliberately. Separate exclusion
+# lists for "ordinary" and "sanitized" would mean enrolling a suite twice and, worse, could leave a
+# suite excluded from one lane and not the other with no one noticing. When the work behind an entry
+# lands, deleting the line here enrols it EVERYWHERE at once.
+#
+# Every entry names the reason and where it is tracked, and is meant to be deleted, not grown.
+#   reject_drain  #307: timing-sensitive teardown, flaky on the completion axis independently of
+#                 sanitizers. The crash it used to cause is fixed (#308); the flakiness is not. It
+#                 still runs in the Windows and io_uring unsanitized lanes, which predate this.
+COMPLETION_EXCLUDE ?= reject_drain
+
+# ---------------------------------------------------------------------------
 # Portable completion double (BACKEND=pollcomp): unit suites
 # ---------------------------------------------------------------------------
 #
@@ -996,7 +1016,9 @@ IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 #
 # Regenerate after changing either source list:
 #   make print-pollcomp-suites
-POLLCOMP_TEST_SUITES ?= allocator alpn async compress cross_module datagram_batch datagram_life \
+# The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
+# COMPLETION_EXCLUDE, which is what the lanes actually run.
+POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch datagram_life \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
@@ -1008,6 +1030,7 @@ POLLCOMP_TEST_SUITES ?= allocator alpn async compress cross_module datagram_batc
                         reject_drain resolver_cache sockaddr stream_single_shot thread_pool timeout \
                         timer tls tls_integration url version wakeup websocket websocket_client \
                         websocket_overflow
+POLLCOMP_TEST_SUITES = $(filter-out $(COMPLETION_EXCLUDE),$(POLLCOMP_ELIGIBLE))
 POLLCOMP_TEST_BIN = $(foreach s,$(POLLCOMP_TEST_SUITES),$(call test_bin_for,$(s)))
 
 test-pollcomp: $(POLLCOMP_TEST_BIN)
@@ -1018,22 +1041,25 @@ test-pollcomp: $(POLLCOMP_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME pollcomp TESTS FAILED"; exit 1; fi
 
-# The literal list must stay equal to its own derivation. Without this the two drift the moment a suite
+# The ELIGIBLE list must stay equal to its own derivation. Checked before exclusions on purpose: the
+# exclusion set is a separate, deliberate subtraction, and folding it in here would leave the gate
+# unable to tell a derivation drift from an exclusion change.
+# Without this the two drift the moment a suite
 # is enrolled on IOCP or io_uring: the comment would still claim the list is derived while it had become
 # hand-maintained, which is worse than never having claimed it.
 check-pollcomp-suite-list:
 	@derived=$$(\
 	    echo $(sort $(filter-out iocp_engine unix_socket_node_win socket_runtime socket_runtime_first_use iouring_sqe_fail,\
 	        $(filter $(WIN_IOCP_TEST_SUITES),$(IOURING_TEST_SUITES))))); \
-	literal=$$(echo $(sort $(POLLCOMP_TEST_SUITES))); \
+	literal=$$(echo $(sort $(POLLCOMP_ELIGIBLE))); \
 	if [ "$$derived" != "$$literal" ]; then \
-	  echo "check-pollcomp-suite-list: POLLCOMP_TEST_SUITES has drifted from its derivation."; \
+	  echo "check-pollcomp-suite-list: POLLCOMP_ELIGIBLE has drifted from its derivation."; \
 	  echo "  derived: $$derived"; \
 	  echo "  literal: $$literal"; \
 	  echo "  Re-derive with: make print-pollcomp-suites"; \
 	  exit 1; \
 	fi; \
-	echo "check-pollcomp-suite-list: OK ($(words $(POLLCOMP_TEST_SUITES)) suites, equal to the derivation)"
+	echo "check-pollcomp-suite-list: OK ($(words $(POLLCOMP_ELIGIBLE)) eligible = derivation; $(words $(POLLCOMP_TEST_SUITES)) run after excluding [$(COMPLETION_EXCLUDE)])"
 # The derivation above, as a command, so the list can be re-derived rather than re-reasoned.
 print-pollcomp-suites:
 	@echo $(sort $(filter-out iocp_engine unix_socket_node_win socket_runtime socket_runtime_first_use iouring_sqe_fail,\

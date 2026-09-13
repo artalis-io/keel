@@ -92,7 +92,9 @@ jobs:
       # on every POSIX runner, so it is where completion-axis coverage is cheapest; before this the
       # backend had smoke tests only. The matrix runs it on macOS too, which had no completion-axis
       # unit coverage at all. The list is derived from the suites already passing on both IOCP and
-      # io_uring (see the Makefile), and the gate below keeps it that way.
+      # io_uring, minus COMPLETION_EXCLUDE -- the single documented exclusion set shared with the
+      # sanitized lanes, so a suite is never enrolled in one completion lane and held out of another
+      # by accident. The gate below keeps the derivation honest.
       - name: Completion-axis unit suites (portable double)
         timeout-minutes: 15
         run: make BACKEND=pollcomp test-pollcomp
