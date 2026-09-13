@@ -1330,6 +1330,105 @@ ifeq ($(UNAME_S),Linux)
 endif
 DEBUG_LDFLAGS = -fsanitize=address,undefined
 
+# ---------------------------------------------------------------------------
+# Sanitized COMPLETION lanes
+# ---------------------------------------------------------------------------
+#
+# Sanitized completion coverage already exists, but ONLY as smoke roundtrips: smoke-pollcomp-asan,
+# smoke-completion-inject-asan and smoke-iouring-asan each drive a handful of end-to-end exchanges.
+# What has never run is a UNIT SUITE on a completion backend under sanitizers -- `debug-test` builds
+# the DEFAULT backend, epoll on Linux, so the ~65 suites have only ever been sanitized on readiness.
+#
+# That distinction is the whole gap. The completion axis is where lifetime, ownership, cancel/retire
+# and callback-order bugs live, because a completion op outlives the call that posted it; and a smoke
+# roundtrip exercises the happy path, while the unit suites are what deliberately abort, cancel, reset
+# and tear down mid-flight. #307 lived in exactly that space: a connection-lifetime bug in
+# test_reject_drain that survived multiple CI runs as an unattributable "Segmentation fault", and that
+# one sanitized run of THAT SUITE named immediately (src/event_iouring.c:174, member access within
+# null pointer). The smoke lanes could not have caught it; they never run that suite.
+#
+# TWO lanes, because they answer different questions:
+#
+#   pollcomp  the portable double. Deterministic, no kernel or liburing dependency, runs anywhere a
+#             POSIX build does. The better STANDING oracle: a failure here is a bug in the completion
+#             driver itself rather than in one kernel implementation of it.
+#   iouring   the real native completion backend. Catches what a double cannot, at the cost of
+#             depending on the runner kernel.
+#
+# KEEL_EXTRA_LDFLAGS rather than plain LDFLAGS for -luring: `debug` overrides LDFLAGS on the sub-make
+# command line, which a makefile `+=` cannot modify, and the embedder hooks are `override +=`
+# specifically so they survive that (see the KEEL_OPT/KEEL_EXTRA block at the top).
+
+# DERIVED from the lanes they sanitize, not listed again. The invariant this expresses is:
+#
+#     every suite eligible for the completion axis runs in the sanitized lane too, unless it is in
+#     COMPLETION_EXCLUDE
+#
+# rather than "these happen to be the suites somebody listed today". Adding a completion-compatible
+# suite therefore gives unsanitized AND sanitized coverage in one step, and holding one back requires
+# consciously adding a documented exclusion that applies to both. check-completion-lane-parity below
+# makes that machine-checkable instead of a convention.
+#
+# POLLCOMP_TEST_SUITES has already had COMPLETION_EXCLUDE subtracted, so the sanitized pollcomp set is
+# it, unchanged -- there is deliberately no second list to drift. IOURING_TEST_SUITES is the older
+# hand-curated list (its enrolment history is documented above it), so the same subtraction is applied
+# to it here.
+POLLCOMP_SAN_SUITES = $(POLLCOMP_TEST_SUITES)
+IOURING_SAN_SUITES  = $(filter-out $(COMPLETION_EXCLUDE),$(IOURING_TEST_SUITES))
+POLLCOMP_SAN_BIN = $(foreach s,$(POLLCOMP_SAN_SUITES),$(call test_bin_for,$(s)))
+IOURING_SAN_BIN  = $(foreach s,$(IOURING_SAN_SUITES),$(call test_bin_for,$(s)))
+
+# Run targets. Invoked by the debug-* wrappers below with the sanitizer flags already in CFLAGS, so
+# the test binaries are built sanitized by the ordinary rules rather than by a parallel recipe.
+test-pollcomp-san: $(POLLCOMP_SAN_BIN)
+	@failed=0; \
+	for t in $(POLLCOMP_SAN_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME SANITIZED pollcomp TESTS FAILED"; exit 1; fi; \
+	echo "sanitized pollcomp: $(words $(POLLCOMP_SAN_BIN)) suites, all green"
+
+test-iouring-san: $(IOURING_SAN_BIN)
+	@failed=0; \
+	for t in $(IOURING_SAN_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME SANITIZED iouring TESTS FAILED"; exit 1; fi; \
+	echo "sanitized iouring: $(words $(IOURING_SAN_BIN)) suites, all green"
+
+# The set relationship, made enforceable rather than conventional:
+#
+#   sanitized pollcomp  ==  the pollcomp lane           (which is already eligible - exclusions)
+#   sanitized io_uring   ==  IOURING_TEST_SUITES - COMPLETION_EXCLUDE
+#
+# Without this the two could drift silently, and the failure mode is the quiet one: a suite enrolled
+# on the completion axis but never sanitized there looks exactly like a suite that is covered. That is
+# the shape of gap that hid #307 for months, so it gets a gate rather than a comment.
+check-completion-lane-parity:
+	@pl=$$(echo $(sort $(POLLCOMP_TEST_SUITES))); ps=$$(echo $(sort $(POLLCOMP_SAN_SUITES))); \
+	if [ "$$pl" != "$$ps" ]; then \
+	  echo "check-completion-lane-parity: the sanitized pollcomp set differs from the pollcomp lane."; \
+	  echo "  lane:      $$pl"; echo "  sanitized: $$ps"; exit 1; \
+	fi; \
+	il=$$(echo $(sort $(filter-out $(COMPLETION_EXCLUDE),$(IOURING_TEST_SUITES)))); \
+	is=$$(echo $(sort $(IOURING_SAN_SUITES))); \
+	if [ "$$il" != "$$is" ]; then \
+	  echo "check-completion-lane-parity: the sanitized io_uring set differs from its lane minus exclusions."; \
+	  echo "  expected:  $$il"; echo "  sanitized: $$is"; exit 1; \
+	fi; \
+	echo "check-completion-lane-parity: OK (pollcomp $(words $(POLLCOMP_SAN_SUITES)), io_uring $(words $(IOURING_SAN_SUITES)); excluded [$(COMPLETION_EXCLUDE)])"
+
+debug-pollcomp:
+	$(MAKE) clean
+	$(MAKE) BACKEND=pollcomp CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
+	$(MAKE) BACKEND=pollcomp CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)" test-pollcomp-san
+
+debug-iouring:
+	$(MAKE) clean
+	$(MAKE) BACKEND=iouring CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)" KEEL_EXTRA_LDFLAGS=-luring
+	$(MAKE) BACKEND=iouring CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)" KEEL_EXTRA_LDFLAGS=-luring test-iouring-san
 debug:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"

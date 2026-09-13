@@ -112,9 +112,19 @@ dynamically loaded.
 
 ## Sanitizer, fuzz, static-analysis, and CodeQL coverage
 
-- **ASan + UBSan**: standing. Job `ASan + UBSan`; also completion roundtrips under ASan+UBSan
-  (`Completion (poll)`, `Completion (io_uring)`), and `make debug-test` locally. LeakSanitizer runs in
-  the freestanding DNS harness and the lwIP raw ASan run.
+- **ASan + UBSan**: standing, on both axes. Job `ASan + UBSan` covers the readiness default
+  (`make debug-test`, epoll on Linux). Jobs `Sanitized completion (pollcomp)` and
+  `Sanitized completion (io_uring)` cover the completion axis with the UNIT SUITES
+  (`make debug-pollcomp` / `make debug-iouring`), and the `Completion (poll)` / `Completion (io_uring)`
+  jobs additionally run sanitized end-to-end ROUNDTRIPS (`smoke-pollcomp-asan`,
+  `smoke-completion-inject-asan`, `smoke-iouring-asan`). The distinction matters: a smoke exercises the
+  happy path, while the unit suites abort, cancel, reset and tear down mid-flight, which is where
+  completion-lifetime bugs surface. LeakSanitizer runs in the freestanding DNS harness and the lwIP raw
+  ASan run.
+- **Standing guarantee**: at least one completion backend runs under ASan+UBSan on every PR. The
+  portable double carries that guarantee because it is deterministic and depends on no kernel feature;
+  io_uring runs sanitized alongside it as a separate job, so a kernel or runner problem there cannot
+  take the guarantee down with it.
 - **Fuzzing**: standing. Job `Fuzz Testing` builds libFuzzer targets with `make fuzz CC=clang` and runs
   the HTTP request parser, multipart parser, WebSocket frame parser, response parser, DNS response
   parser, PROXY protocol parser, and URL parser (a decompression-bomb fuzzer builds on demand with the
