@@ -6,8 +6,8 @@
     "component": {
       "type": "library",
       "name": "keel",
-      "version": "3.0.1",
-      "purl": "pkg:github/artalis-io/keel@3.0.1",
+      "version": "3.1.0",
+      "purl": "pkg:github/artalis-io/keel@3.1.0",
       "licenses": [
         {
           "license": {
