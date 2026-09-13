@@ -9,6 +9,7 @@
  */
 
 #include "udp_cmsg_win.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */
 
 #include <windows.h>
 #include <mswsock.h>       /* WSAID_WSARECVMSG, LPFN_WSARECVMSG */
@@ -20,6 +21,7 @@
 static LPFN_WSARECVMSG udp_fn_recvmsg = NULL;
 
 LPFN_WSARECVMSG kl_udp_win_get_recvmsg(SOCKET s) {
+    if (kl_plat_socket_runtime_init() != 0) return NULL;   /* PAL invariant: WSAIoctl needs ws2_32 up */
     if (udp_fn_recvmsg)
         return udp_fn_recvmsg;
     GUID guid = WSAID_WSARECVMSG;
@@ -66,6 +68,7 @@ socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
 static LPFN_WSASENDMSG udp_fn_sendmsg = NULL;
 
 LPFN_WSASENDMSG kl_udp_win_get_sendmsg(SOCKET s) {
+    if (kl_plat_socket_runtime_init() != 0) return NULL;   /* PAL invariant: WSAIoctl needs ws2_32 up */
     if (udp_fn_sendmsg)
         return udp_fn_sendmsg;
     GUID guid = WSAID_WSASENDMSG;
@@ -138,6 +141,7 @@ int kl_udp_win_build_control(unsigned char *buf, size_t bufsz,
     return 0;
 }
 int kl_udp_win_send_family(SOCKET s, const struct sockaddr *dest, const struct sockaddr *src) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant: may fall back to getsockname */
     if (dest && (dest->sa_family == AF_INET || dest->sa_family == AF_INET6))
         return dest->sa_family;
     if (src && (src->sa_family == AF_INET || src->sa_family == AF_INET6))

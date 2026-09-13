@@ -102,6 +102,8 @@ tests/test_listener.c
 tests/test_resolver_cache.c
 tests/test_sockaddr.c
 tests/test_socket_provider.c
+tests/test_socket_runtime.c
+tests/test_socket_runtime_first_use.c
 tests/test_stream.c
 tests/test_stream_close.c
 tests/test_stream_read.c

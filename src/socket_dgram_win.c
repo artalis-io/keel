@@ -14,7 +14,8 @@
 #include <keel/datagram.h>     /* KlDatagramSocketConfig (configure) + KlDatagramOps */
 #include <keel/socket.h>
 #include "sockaddr_native.h"   /* KlSockAddr <-> Winsock sockaddr at the boundary */
-#include "udp_cmsg_win.h"      /* kl_udp_win_get_recvmsg / kl_udp_win_parse_local (shared w/ IOCP) */
+#include "udp_cmsg_win.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */      /* kl_udp_win_get_recvmsg / kl_udp_win_parse_local (shared w/ IOCP) */
 
 #include <windows.h>
 #include <mswsock.h>           /* WSAID_WSASENDMSG, LPFN_WSASENDMSG */
@@ -79,6 +80,7 @@ static int dgram_parse_tos(WSAMSG *msg) {
 
 static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                            const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     struct sockaddr_storage ds, ss;
@@ -125,6 +127,7 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
 
 static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
                            KlSockAddr *src, KlDgramRxMeta *meta) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     memset(meta, 0, sizeof(*meta));
@@ -189,6 +192,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
 
 static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                                uint16_t seg, const KlSockAddr *dest) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     (void)ctx; (void)fd; (void)data; (void)len; (void)seg; (void)dest;
     errno = EIO;   /* no UDP GSO on Winsock; the datagram core falls back to per-segment sends */
     return -1;
@@ -198,6 +202,7 @@ static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, s
 
 static uint32_t wdg_configure(void *ctx, KlSocketHandle fd, int family,
                               const struct KlDatagramSocketConfig *cfg) {
+    if (kl_plat_socket_runtime_init() != 0) return 0;   /* PAL invariant: no capture option accepted */
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     uint32_t caps = 0;
@@ -266,6 +271,7 @@ static uint32_t wdg_configure(void *ctx, KlSocketHandle fd, int family,
 }
 
 static int wdg_set_tos(void *ctx, KlSocketHandle fd, int family, int tos) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     (void)ctx;
 #if defined(IP_TOS) || defined(IPV6_TCLASS)
     SOCKET s = (SOCKET)fd; int rc = -1;
@@ -287,6 +293,7 @@ static int wdg_set_tos(void *ctx, KlSocketHandle fd, int family, int tos) {
 
 static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
                      const char *group, unsigned iface_index, int join) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     if (family == AF_INET) {
@@ -327,6 +334,7 @@ static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
  * SO_PROTOCOL_INFO reports iAddressFamily whether or not the socket is bound; getsockname stays
  * as the fallback for a provider handle that does not answer the option. */
 static int wdg_family(SOCKET s) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     WSAPROTOCOL_INFOW pi;
     int pil = (int)sizeof(pi);
     if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&pi, &pil) == 0)
@@ -339,6 +347,7 @@ static int wdg_family(SOCKET s) {
 }
 
 static unsigned wdg_caps(void *ctx, KlSocketHandle fd) {
+    if (kl_plat_socket_runtime_init() != 0) return 0;   /* PAL invariant: no datagram capability */
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     int fam = wdg_family(s);

@@ -6,6 +6,7 @@
  */
 
 #include "platform.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */
 
 #include "sockcompat.h"   /* winsock2.h before windows.h (avoids winsock.h v1 clash) */
 #include <windows.h>
@@ -68,6 +69,7 @@ void kl_plat_file_close(int fd)
 
 int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
 {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant: WSAPoll needs ws2_32 up */
     WSAPOLLFD pfd;
     pfd.fd = (SOCKET)fd;
     pfd.events = (SHORT)(((events & KL_POLL_IN) ? POLLRDNORM : 0) |

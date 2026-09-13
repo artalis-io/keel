@@ -10,6 +10,7 @@
  * TLS handshake would parse a success; the discriminator for fail-closed client behavior.
  */
 #include "net_compat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: raw native calls below */
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -35,6 +36,12 @@ typedef struct {
 static const char kHttp200[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
 
+/* PAL-gate: dominated-by listener_start
+ * This header builds its loopback listener with raw native calls rather than through a Keel seam, so
+ * it states the PAL socket-runtime invariant itself (src/platform_socket.h). For many client suites
+ * this is the process's FIRST native socket call, which the retired load-time Winsock constructor
+ * used to cover for free. listener_thread() needs no gate of its own: it only accept()s the listener
+ * that listener_start() created, so it cannot run first. */
 static void *listener_thread(void *arg)
 {
     Listener *l = arg;
@@ -62,6 +69,7 @@ static void *listener_thread(void *arg)
 
 static int listener_start(Listener *l)
 {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     memset(l, 0, sizeof(*l));
     l->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (l->listen_fd < 0) return -1;
@@ -86,6 +94,7 @@ fail:
 
 static void listener_stop(Listener *l)
 {
+    if (kl_plat_socket_runtime_init() != 0) return;   /* PAL invariant */
     l->stop = 1;
     /* Kick accept() by connecting once. */
     int fd = socket(AF_INET, SOCK_STREAM, 0);

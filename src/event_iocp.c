@@ -20,7 +20,8 @@
 #include "completion.h"          /* the abstract axis this TU implements */
 #include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
 
-#include "sockcompat.h"          /* winsock2.h */
+#include "sockcompat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */          /* winsock2.h */
 #include <windows.h>             /* IOCP */
 #include <mswsock.h>             /* AcceptEx / GetAcceptExSockaddrs / TransmitFile */
 #include "udp_cmsg_win.h"        /* WSARecvMsg fetch + pktinfo parse: UDP local addr (shared) */
@@ -138,6 +139,7 @@ typedef struct KlIocpOp {
 /* ── KlEventLoop lifecycle over an IOCP port ─────────────────────────── */
 
 int kl_event_init_builtin(KlEventLoop *loop) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
     if (port == NULL)
         return -1;
@@ -359,7 +361,17 @@ static const KlSocketProvider IOCP_PROVIDER = {
     &IOCP_OPS, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
     &kl_socket_winsock_dgram_ops,
 };
-const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
+/* PAL-gate: dominated-by kl_event_init_builtin
+ * The overlapped op handlers below all complete against the completion port that
+ * kl_event_init_builtin created, and the provider ops are reached either through it (via
+ * kl_event_native_provider_builtin) or through kl_socket_provider_iocp, which carries its own gate.
+ * Either way the PAL gate has run before any of this TU touches ws2_32. kl_socket_provider_iocp is
+ * gated despite only handing back a static vtable, because unlike the handlers it is callable with
+ * no loop in existence. */
+const KlSocketProvider *kl_socket_provider_iocp(void) {
+    (void)kl_plat_socket_runtime_init();   /* cannot report: public signature, callers expect non-NULL */
+    return &IOCP_PROVIDER;
+}
 
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 

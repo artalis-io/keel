@@ -5,7 +5,8 @@
  * resolve_sync.h). A foreign stack (lwIP) swaps in its own resolve_sync_lwip.c.
  */
 #include "resolve_sync.h"
-#include "sockcompat.h"        /* getaddrinfo / struct addrinfo (POSIX + Winsock) */
+#include "sockcompat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */        /* getaddrinfo / struct addrinfo (POSIX + Winsock) */
 #include "sockaddr_native.h"   /* kl_sockaddr_from_native */
 
 #include <stdio.h>
@@ -13,6 +14,7 @@
 
 int kl_resolve_sync(const char *host, uint16_t port, int socktype,
                     KlSockAddr *out, int max, int *n) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant: getaddrinfo needs ws2_32 up on Windows */
     if (!host || !out || max <= 0 || !n)
         return -1;
 

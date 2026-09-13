@@ -21,6 +21,7 @@
 
 #include "../vendor/utest.h"
 #include "net_compat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: this harness calls socket() itself */
 
 #if !defined(_WIN32)
 #endif
@@ -161,7 +162,14 @@ static int mk_ctx(void) {   /* a completion-capable mock loop; sockets=NULL → 
     g_ctx.alloc = &g_alloc;
     return 0;
 }
-static KlSocketHandle mk_fd(void) { return (KlSocketHandle)socket(AF_INET, SOCK_DGRAM, 0); }
+/* A real UDP descriptor handed to Keel as if by an embedder. This is the suite's FIRST native
+ * socket call, and it is the harness making it, not Keel, so it states the PAL socket-runtime
+ * invariant itself (src/platform_socket.h). It used to be satisfied for free by the load-time
+ * Winsock constructor in socket_winsock.c, which no longer exists. */
+static KlSocketHandle mk_fd(void) {
+    if (kl_plat_socket_runtime_init() != 0) return KL_INVALID_SOCKET;
+    return (KlSocketHandle)socket(AF_INET, SOCK_DGRAM, 0);
+}
 static KlSockAddr addr4(int a, int b, int c, int d, int port) {
     uint8_t ip[4] = { (uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d };
     KlSockAddr s; kl_sockaddr_from_ipv4(&s, ip, (uint16_t)port); return s;
@@ -970,6 +978,8 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
 #endif
     m2_close(&dg);
     /* AF_INET6 (skip if unavailable) */
+    /* Same harness-owned native call as mk_fd(), for the v6 family. */
+    ASSERT_EQ(0, kl_plat_socket_runtime_init());
     KlSocketHandle fd6 = (KlSocketHandle)socket(AF_INET6, SOCK_DGRAM, 0);
     if (kl_handle_valid(fd6)) {
         KlDatagram dg6; memset(&dg6, 0, sizeof(dg6));

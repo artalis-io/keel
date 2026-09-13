@@ -29,24 +29,9 @@ const struct KlDatagramOps *kl_sockdef_dgram(void) { return &kl_socket_winsock_d
 #include <io.h>        /* _read, _lseeki64, _get_osfhandle */
 #include <limits.h>
 #include <errno.h>
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */
 
 #define KL_WSK_SENDFILE_BUF 8192
-
-/* Winsock must be started before ANY socket call. The provider factory does it
- * too (refcounted), but the default path (kl_sockdef_* via a NULL provider)
- * calls socket()/connect() directly, so without this an unconfigured process
- * would get WSANOTINITIALISED. A library constructor initializes it once at
- * load (socket_winsock.o is always linked in on Windows); WSAStartup is
- * refcounted, so this composes with the factory's own WSAStartup/WSACleanup. */
-__attribute__((constructor))
-static void kl_winsock_global_init(void) {
-    WSADATA wsa;
-    (void)WSAStartup(MAKEWORD(2, 2), &wsa);
-}
-__attribute__((destructor))
-static void kl_winsock_global_fini(void) {
-    WSACleanup();
-}
 
 static int clamp_int(size_t n) {
     return n > (size_t)INT_MAX ? INT_MAX : (int)n;
@@ -97,18 +82,21 @@ void kl_wsa_set_errno(void) {
 /* ── Platform default socket ops (Winsock) ─────────────────────────────── */
 
 int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     u_long mode = 1;
     if (ioctlsocket((SOCKET)fd, FIONBIO, &mode) != 0) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
 
 int kl_sockdef_set_blocking(KlSocketHandle fd) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     u_long mode = 0;
     if (ioctlsocket((SOCKET)fd, FIONBIO, &mode) != 0) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
 
 void kl_sockdef_set_cloexec(KlSocketHandle fd) {
+    /* No PAL gate: SetHandleInformation is kernel32, not ws2_32, so it needs no socket runtime. */
     /* Clear inherit so the socket isn't leaked into child processes: the
      * Windows analog of FD_CLOEXEC. Best-effort. */
     (void)SetHandleInformation((HANDLE)(SOCKET)fd, HANDLE_FLAG_INHERIT, 0);
@@ -119,6 +107,7 @@ void kl_sockdef_set_nosigpipe(KlSocketHandle fd) {
 }
 
 int kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return setsockopt((SOCKET)fd, SOL_SOCKET, SO_REUSEADDR,
                       (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
 }
@@ -127,10 +116,12 @@ int kl_sockdef_set_reuseport(KlSocketHandle fd, int on) {
     return -1;   /* no SO_REUSEPORT on Windows; best-effort, caller ignores */
 }
 int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_V6ONLY,
                       (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
 }
 int kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY,
                       (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
 }
@@ -140,11 +131,13 @@ int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
 }
 
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
+    if (kl_plat_socket_runtime_init() != 0) return KL_INVALID_SOCKET;   /* PAL invariant */
     SOCKET s = socket(domain, type, protocol);
     if (s == INVALID_SOCKET) kl_wsa_set_errno();
     return (KlSocketHandle)s;
 }
 int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     struct sockaddr_storage ss;
     socklen_t l = kl_sockaddr_to_native(addr, &ss);
     if (l == 0) { errno = EAFNOSUPPORT; return -1; }
@@ -158,6 +151,7 @@ int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr) {
     return 0;
 }
 int kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *addr) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     struct sockaddr_storage ss;
     socklen_t l = kl_sockaddr_to_native(addr, &ss);
     if (l == 0) { errno = EAFNOSUPPORT; return -1; }
@@ -165,6 +159,7 @@ int kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *addr) {
     return 0;
 }
 int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     if (listen((SOCKET)fd, backlog) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
@@ -174,6 +169,7 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
  * Keeps the seam's accept contract identical across platforms so shared callers can rely on
  * it and skip the separate nonblock/cloexec setup. */
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer) {
+    if (kl_plat_socket_runtime_init() != 0) return KL_INVALID_SOCKET;   /* PAL invariant */
     struct sockaddr_storage ss;
     socklen_t sl = sizeof(ss);
     struct sockaddr *sa = peer ? (struct sockaddr *)&ss : NULL;
@@ -187,15 +183,18 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer) {
     return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return closesocket((SOCKET)fd);
 }
 int kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *out) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     struct sockaddr_storage ss;
     socklen_t l = sizeof(ss);
     if (getsockname((SOCKET)fd, (struct sockaddr *)&ss, &l) != 0) { kl_wsa_set_errno(); return -1; }
     return kl_sockaddr_from_native(out, (struct sockaddr *)&ss, l);
 }
 int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     int err = 0;
     int len = sizeof(err);   /* Winsock getsockopt optlen is int*, optval char* */
     if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0) {
@@ -207,16 +206,19 @@ int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
 }
 
 kl_ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
 kl_ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
 kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
@@ -225,6 +227,7 @@ kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
 /* Half-close the send side: the peer sees orderly end-of-response while we keep receiving, so a
  * post-rejection drain can run without the close RST'ing away the response (#278). */
 int kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     int native = (how == KL_SHUT_RD) ? SD_RECEIVE : (how == KL_SHUT_RDWR) ? SD_BOTH : SD_SEND;
     return (shutdown((SOCKET)fd, native) == 0) ? 0 : -1;
 }
@@ -232,6 +235,7 @@ int kl_sockdef_shutdown(KlSocketHandle fd, KlShutdownHow how) {
 /* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf); WSABUF
  * stays inside this provider TU. */
 kl_ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     if (iovcnt <= 0)
         return 0;
     WSABUF stackbufs[KL_SOCK_IOV_MAX];
@@ -260,6 +264,7 @@ kl_ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) 
  * pread+send loop is correct and cross-compiles. Sends one chunk per call from
  * *offset, advancing it; same one-chunk-per-tick shape as the POSIX fallback. */
 kl_ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     char buf[KL_WSK_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
     if (_lseeki64(in_fd, (long long)*offset, SEEK_SET) < 0)
@@ -357,9 +362,12 @@ static kl_ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, i
 static kl_ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
-static void wsk_destroy(void *ctx) {
-    (void)ctx; WSACleanup();   /* balance the WSAStartup in the factory */
-}
+/* No destroy hook, matching socket_posix.c. There is nothing to release: the provider is a static
+ * vtable with a NULL context, and the socket runtime is deliberately process-lifetime (see
+ * platform_socket.h). The WSACleanup that used to live here balanced the factory's own WSAStartup;
+ * keeping it would now be unsound rather than merely redundant, because the PAL caches the fact that
+ * the runtime came up, so tearing it down behind the PAL's back would leave every later socket call
+ * failing with WSANOTINITIALISED and no way to recover. kl_sock_destroy() NULL-checks the hook. */
 
 static const KlSocketOps WINSOCK_OPS = {
     .set_nonblocking = wsk_set_nonblocking,
@@ -384,7 +392,6 @@ static const KlSocketOps WINSOCK_OPS = {
     .recv_peek       = wsk_recv_peek,
     .writev          = wsk_writev,
     .sendfile        = wsk_sendfile,
-    .destroy         = wsk_destroy,
     .name            = "winsock",
 };
 
@@ -394,9 +401,15 @@ static const KlSocketProvider WINSOCK_PROVIDER = {
     &kl_socket_winsock_dgram_ops,
 };
 
+/* Brings the runtime up eagerly, as this factory always has, so the common case pays for it once
+ * here rather than inside the first op. A failure is deliberately NOT surfaced through the return
+ * value: the signature is public (an embedder decorating the built-in provider calls it, see
+ * examples/custom_socket_provider.c) and callers do not expect NULL, so reshaping it for a failure
+ * mode that cannot occur on a working system would be the wrong trade. Nothing is lost, because every
+ * op in this provider asserts the same invariant independently and reports failure through its own
+ * error contract; an unavailable runtime surfaces at first use instead of here. */
 const KlSocketProvider *kl_socket_provider_winsock(void) {
-    WSADATA wsa;
-    (void)WSAStartup(MAKEWORD(2, 2), &wsa);   /* refcounted; WSACleanup on destroy */
+    (void)kl_plat_socket_runtime_init();
     return &WINSOCK_PROVIDER;
 }
 
