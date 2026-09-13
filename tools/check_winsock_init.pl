@@ -16,23 +16,53 @@
 #   1. call kl_plat_socket_runtime_init() itself, or
 #   2. live in a TU whose header declares   PAL-gate: dominated-by <function>
 #      where <function> is a gated function IN THAT TU that every path here must pass through first.
-#      Cross-TU domination is deliberately NOT expressible: it cannot be checked here and it is not
-#      local enough to stay true as callers change.
+#
+# THE HARD RULE FOR RULE 2, which this gate enforces structurally and which must survive future edits:
+# a dominated boundary is dominated within the SAME TU, through an invariant obvious enough to state in
+# one sentence beside it -- "these all operate on the state that <function> allocated", "this only
+# accepts the listener that <function> created". Cross-TU domination, or anything resting on a long
+# call-chain assumption, is NOT expressible here and must not be argued for in review: it cannot be
+# checked, it stops being true the moment a caller moves, and the exceptions would decay into
+# archaeology that nobody can re-derive. When in doubt, take rule 1. The InitOnce fast path is an
+# interlocked read in front of a call that is already entering the kernel, so rule 1 is never the
+# expensive choice -- rule 2 exists to keep hot paths and internal helpers honest about WHY they are
+# safe, not to buy back cycles.
 #
 # The API list is empirical, not theoretical: each name below was confirmed to return
 # WSANOTINITIALISED (10093) when called before WSAStartup. inet_pton/inet_ntop/htons/ntohl were
 # confirmed NOT to, which is why the shared parser TUs (proxy_protocol.c, sockaddr.c, dns_sys_win.c)
 # need no gate and stay free of the PAL.
 #
-# WHAT THIS IS RUN OVER (see the check-winsock-init recipe): every Windows-compiled TU under src/,
-# plus the two test TUs that make native socket calls of their own rather than going through a Keel
-# seam -- tests/net_compat_win.c (the harness every Windows test binary links) and
-# tests/test_datagram_public.c (whose mk_fd() models an embedder-supplied descriptor). Other test TUs
-# are deliberately OUT of scope: their native calls are test-local, they are reached only after the
-# suite has already driven Keel, and a violation there fails immediately and unmistakably in CI with
-# WSANOTINITIALISED rather than silently. Library code has no such tight feedback loop, which is why
-# src/ is checked exhaustively and the file list is wildcard-driven so a new src/*_win.c is picked up
-# without anyone remembering to add it.
+# WHAT THIS IS RUN OVER, AND WHY THAT IS NOT EXHAUSTIVE (see the check-winsock-init recipe).
+#
+# Scanned: every Windows-compiled TU under src/, via a wildcard so a new src/*_win.c is covered
+# without anyone remembering to add it. Plus exactly three test TUs, which are scanned because they
+# are test INFRASTRUCTURE and were each capable of masking the product invariant:
+#
+#   tests/net_compat_win.c        the harness every Windows test binary links
+#   tests/loopback_listener.h     the shared loopback listener many client suites start with
+#   tests/test_datagram_public.c  whose mk_fd() models an embedder-supplied descriptor
+#
+# All three call socket() themselves rather than going through a Keel seam, and all three had been
+# living off the retired load-time constructor. They were found by this gate, after the constructor
+# was deleted, which is the clearest evidence available that deleting it was right: a constructor
+# hides exactly this class of lifecycle dependency.
+#
+# NOT scanned, and this is a DELIBERATE ASYMMETRY rather than an omission -- do not "finish the job"
+# later by adding PAL calls to every test that touches a socket. Roughly sixty isolated test-local
+# native calls exist across the suites. They are not scanned because:
+#
+#   - src/ is product code shipped to embedders, so it must be protected STRUCTURALLY; a gap there
+#     reaches consumers and surfaces as a wrong errno on an unrelated operation, which is close to
+#     undebuggable from the outside.
+#   - an isolated test-local call fails immediately, loudly and unambiguously in the very environment
+#     built to exercise it. The feedback loop that library code lacks is precisely what tests have.
+#   - requiring PAL setup in every networking test would bloat each one with ceremony that tests
+#     nothing, to re-state a guarantee the suite itself already demonstrates.
+#
+# So: exhaustive and wildcard-driven over src/, deliberately narrow over tests/. If a test suite ever
+# does fail with WSANOTINITIALISED, the fix is a gate in that suite's own helper, not a policy change
+# here.
 #
 # Usage: check_winsock_init.pl <file.c> ...   Exit 0 clean, 1 on a violation.
 use strict;
