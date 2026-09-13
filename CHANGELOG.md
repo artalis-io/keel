@@ -5,7 +5,59 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+No changes yet.
+
+## [3.1.0]
+
+Minor release. No release date here (the tag and publish are a separately authorized step).
+
+Headline: **Keel builds natively with MSVC.** `cl.exe` and `lib.exe` produce a native static library
+from the same source tree, the same Make graph and the same PAL implementations as every other
+toolchain, so the compiler choice does not change runtime architecture. Supporting that took a
+constructor-free Winsock lifecycle in the PAL, and the work surfaced several 64-bit portability
+defects that MinGW had never diagnosed.
+
+One source-compatible signature change (`kl_http_response_file`) is why this is a minor release
+rather than a patch.
+
+### Added
+
+- **Native MSVC build path.** The supported workflow is two commands:
+
+  ```sh
+  source scripts/msvc-env.sh
+  make CC=cl
+  ```
+
+  `scripts/msvc-env.sh` locates the Build Tools through `vswhere` and handles the two MSYS2
+  behaviours that otherwise break a native build: its own `link.exe` shadowing the real one, and
+  argument/environment path conversion mangling `/Fo`, `/std:c11` and `INCLUDE`/`LIB`. The resulting
+  binaries import only `WS2_32.dll` and `KERNEL32.dll`, with no MinGW runtime dependency. Both Windows
+  event backends build (`BACKEND=iocp` as well as the WSAPoll default). See
+  [docs/msvc_build.md](docs/msvc_build.md).
+
+- **`mk/toolchain.mk`**, a toolchain mapping layer. Build intent (`CC_STD`, `CC_WARN`, `OBJ_OUT`,
+  `AR_CMD`, ...) is expressed once and mapped to GCC/Clang or MSVC; nothing else in the build tests
+  which compiler is in use. Not a second build system: there is no Visual Studio project and no CMake.
+
+- **PAL socket-runtime seam** (`src/platform_socket.h` + per-OS TUs). Winsock is started through
+  `InitOnceExecuteOnce`, once per process, with no `WSACleanup`, replacing the GCC/Clang load-time
+  constructor that MSVC has no equivalent of. One mechanism for every Windows toolchain.
+
+- **Sanitized completion coverage for the unit suites.** Jobs `Sanitized completion (pollcomp)` and
+  `Sanitized completion (io_uring)` run the completion-axis unit suites under ASan+UBSan on every PR.
+  Sanitized completion *smoke* roundtrips already existed; the unit suites, which abort, cancel, reset
+  and tear down mid-flight, did not.
+
+- **Completion suite lists are derived, not curated.** The portable double now runs the unit suites it
+  is eligible for, derived from the suites already passing on both existing completion backends, with
+  `check-pollcomp-suite-list` and `check-completion-lane-parity` keeping the derivation and the
+  sanitized/unsanitized set relationship machine-checked. There are currently **no exclusions**.
+
+- **`ISOLATED_SUITES`**: suites that need a fresh process per test, via `tools/run_suites.sh`.
+
 ### Changed
+
 
 - `kl_http_response_file()` takes `int fd` again, instead of `KlSocketHandle fd`. The parameter is a
   FILE descriptor, and every other file descriptor on the public surface is already an `int`:
@@ -26,6 +78,53 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
   Because it changes a public declaration, the next release carrying it is a MINOR bump, not a patch.
 
+### Fixed
+
+- **`strtok_r` was an implicit declaration under MSVC**, which truncates the returned pointer on a
+  64-bit build: a crash, not a warning. Mapped to the CRT `strtok_s` in the build layer so the sources
+  stay POSIX-spelled (`dns_resolver.c`, `proxy_protocol.c`).
+
+- **Pointer-width socket handles narrowed into `int`** in three static helpers in `http_response.c`
+  (`seam_writev`, `try_writev`, `stream_writev_all`), and the keep-alive reinit path round-tripped the
+  connection handle through an `int` local. Harmless where a socket handle is 32-bit; a real
+  truncation on 64-bit Windows.
+
+- **The Makefile's `LIB` variable collided with MSVC's linker search path.** `LIB` is an environment
+  variable the toolchain reads, and make re-exports a variable it reassigns that also came from the
+  environment, so `LIB = libkeel.a` silently replaced the linker's search path in every recipe.
+  Renamed to `KEEL_LIB`.
+
+- **The C11 atomics lock-free contract** asserted `ATOMIC_INT_LOCK_FREE == 2`, which reads as "require
+  lock-free atomics" but means "refuse to build wherever the implementation declines to promise it in
+  a macro". MSVC reports 1 while `atomic_is_lock_free()` returns true for the object Keel uses. The
+  policy now tests the requirement: 0 fails the build, 2 is a compile-time guarantee, and 1 triggers a
+  runtime query on the actual flag during `kl_http_server_init`, before any signal handler can be
+  installed, refusing the platform with `KL_ERR_UNSUPPORTED` if it fails.
+
+- **Object trees are per-toolchain.** An MSVC object and a MinGW object of the same TU are not
+  interchangeable and the archive path is shared, so a `make CC=cl` after a `make` could mix them.
+
+- **`test_reject_drain` intermittently crashed the whole suite** on the completion backends. Two
+  defects: utest `ASSERT_*` returns from the test body, so a failing assertion skipped the fixture
+  teardown and left a server thread running against a static that the next test then re-initialised;
+  and the residual flakiness was accumulated process state, not a drain defect. Measured: the failure
+  rate rose with the number of server lifecycles already run in the same process (0/100 alone, 23/100
+  after eleven) and fell to 0/100 in a fresh process after identical work. Fixed by running that suite
+  one process per test. No assertion was weakened.
+
+### Upgrade notes
+
+- `kl_http_response_file()` now takes `int fd`. **Source-compatible**: C applies the integer conversion
+  implicitly, so every call that compiled before still compiles. **Not binary-compatible on 64-bit
+  Windows**, where the parameter changes width; 3.x does not promise a cross-version ABI. The one
+  construct needing an edit is taking the function's ADDRESS into a `KlSocketHandle`-typed function
+  pointer.
+
+- MSVC builds do **not** track header dependencies (MSVC has no usable `-MMD` equivalent), so run
+  `make clean` after editing a header. CI always builds clean.
+
+- No behaviour change for existing GCC/Clang/MinGW/Cosmopolitan builds: their compile and link command
+  lines are byte-for-byte unchanged, verified by diffing `make -n` output.
 ## [3.0.1]
 
 Patch release. No release date here (the tag and publish are a separately authorized step).
