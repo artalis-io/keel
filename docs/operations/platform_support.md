@@ -36,6 +36,7 @@ and do not pin a version).
 | GCC (musl / Alpine) | Standing-CI tested | job `Linux (musl/Alpine)` |
 | AppleClang (macOS) | Standing-CI tested | job `macOS (kqueue)` (`make`) |
 | MinGW-w64 GCC (Windows) | Standing-CI tested | job `Windows (MinGW, full core)` (`make OS=windows CC=gcc`) |
+| MSVC `cl.exe` (Windows) | Standing-CI tested, library + probes | job `Windows (native MSVC, cl.exe)` (`source scripts/msvc-env.sh` then `make CC=cl`). Builds the library on both Windows backends and runs a curated probe set; the FULL test suite is MinGW-only, because several test harnesses use `<pthread.h>` directly even though the library does not. See [msvc_build.md](../msvc_build.md). |
 | Cosmopolitan `cosmocc` | Standing-CI tested | job `Cosmopolitan (APE)` (`make CC=cosmocc`) |
 | Clang (Linux) | Standing-CI for fuzz + static analysis; full build+test is locally tested | `make fuzz CC=clang` (job `Fuzz Testing`), `make analyze` / `make cppcheck` (job `Static Analysis`); a full `make test CC=clang` is a documented local run, not a standing job |
 

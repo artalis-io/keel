@@ -10,6 +10,7 @@ make BACKEND=iocp    # completion: IOCP (Windows)
 make BACKEND=pollcomp# completion: portable poll()-based double (test the completion driver on any POSIX host)
 make BACKEND=wsapoll # readiness: WSAPoll (Windows)
 make CC=cosmocc      # build with Cosmopolitan C (APE, auto-selects poll backend)
+make CC=cl           # native MSVC on Windows (source scripts/msvc-env.sh first; docs/msvc_build.md)
 make test            # build and run the unit-test suites (tests/, tests/protocols/)
 make examples     # build the example programs under examples/
 make bench        # build bench server + run 4-endpoint wrk benchmark suite
