@@ -331,6 +331,15 @@ int kl_http_server_run(KlHttpServer *s) {
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
      * a console Ctrl handler (Windows). Done here (past the setup early-returns)
      * so a failed bind never leaves handlers installed without a restore. */
+    /* This is where the signal-safe path is ENABLED, so it is also where the invariant has to hold.
+     * kl_http_server_init() already refused any platform that fails the check; re-stating it at the
+     * point the handler goes live keeps the ordering visible to a reader, and costs one constant-folded
+     * comparison on every toolchain that promises lock-freedom at compile time. */
+    if (!kl_atomic_int_is_lock_free(&s->running)) {
+        s->last_error = KL_ERR_UNSUPPORTED;
+        kl_http_server_close_listener(s);
+        return -1;
+    }
     kl_http_server_plat_signals_install(s);
 
     kl_atomic_store_int(&s->running, 1);

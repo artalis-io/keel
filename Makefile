@@ -4,6 +4,12 @@ NM      = nm
 UNAME_S := $(shell uname -s)
 LDFLAGS =
 
+# The ONE place compilers differ: normalized build-intent variables (CC_STD, CC_WARN, OBJ_OUT,
+# AR_CMD, ...) mapped onto GCC/Clang or MSVC cl. Nothing below here tests which compiler is in use.
+#   make              GCC or Clang
+#   make CC=cl        MSVC, after `source scripts/msvc-env.sh` (see docs/build.md)
+include mk/toolchain.mk
+
 # Windows detection: explicit `make OS=windows` (e.g. MinGW cross-compile from
 # Linux: make CC=x86_64-w64-mingw32-gcc OS=windows) or a native MSYS2/MinGW shell
 # where uname reports MINGW*/MSYS*. Selects the WSAPoll event backend + Winsock.
@@ -46,30 +52,31 @@ endif
 # Hull builds everything at -O0 there. Keel silently ignored that and kept
 # building at -O2, which wedged the build. Hull's LTO and CFI flags reached
 # Keel just as far - nowhere.
-KEEL_OPT ?= -O2
+# Spelled by the toolchain (-O2 / /O2). An embedder overriding it passes its own compiler spelling.
+KEEL_OPT ?= $(CC_OPT_DEFAULT)
 
 # _FORTIFY_SOURCE is built on __builtin_object_size, which folds to "unknown"
 # without optimization: at -O0 the flag is a silent no-op AND gcc warns about
 # it, which Keel's -Werror turns into a hard build failure. So it is gated on
 # the level actually in use rather than assumed. (Hull gates its own the same
 # way; see mk/hardening.mk there.)
-KEEL_FORTIFY := $(if $(filter -O0,$(KEEL_OPT)),,-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
+KEEL_FORTIFY := $(if $(filter -O0 /Od,$(KEEL_OPT)),,-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
   # APE binaries have their own non-relocatable layout; no PIE / RELRO / FORTIFY here.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
+  CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else ifdef WINDOWS
   # Windows (MinGW-w64): WSAPoll event backend + Winsock socket provider, its own
   # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c; no #ifdef in the
   # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
-            -fstack-protector-strong -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -Iinclude -Ivendor/llhttp
+  CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
+            $(CC_HARDEN) $(CC_DEFS) -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
   # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
   # The IOCP TU is the only place the completion model lives; no #ifdef leaks into
   # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
@@ -96,7 +103,9 @@ else ifdef WINDOWS
   DNS_SYS_SRC = src/protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
-  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi -ladvapi32 -lshell32   # advapi32: ACL/SID/token APIs (unix_socket_node_win.c); shell32: SHGetFolderPath (test trusted-dir setup)
+  # advapi32: ACL/SID/token APIs (unix_socket_node_win.c); shell32: SHGetFolderPath (test
+  # trusted-dir setup). Spelled per toolchain in mk/toolchain.mk.
+  LDFLAGS += $(LD_WIN_PLATFORM)
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
@@ -108,16 +117,16 @@ else
   # _FORTIFY_SOURCE at the command line. Undefine first so our value wins
   # without provoking a "macro redefined" warning that -Werror would
   # promote to a hard error.
-  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror $(KEEL_OPT) \
+  CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
             $(KEEL_FORTIFY) \
-            -fstack-protector-strong -fPIE \
+            $(CC_HARDEN) $(CC_PIE) \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 $(KEEL_OPT) -fPIE -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_PIE) -Iinclude -Ivendor/llhttp
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
   # it as "unused during compilation"; Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise
   # promote that warning to a hard error.
-  LDFLAGS += -Wl,-pie
+  LDFLAGS += $(LD_PIE)
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
@@ -173,9 +182,10 @@ else
   endif
 endif
 
-# Header dependency tracking
-CFLAGS += -MMD -MP
-VENDOR_CFLAGS += -MMD -MP
+# Header dependency tracking, where the compiler can emit it. Empty under MSVC (see mk/toolchain.mk):
+# those builds do not track headers, so run `make clean` after editing one. CI always builds clean.
+CFLAGS += $(CC_DEPFLAGS)
+VENDOR_CFLAGS += $(CC_DEPFLAGS)
 
 # Core library: parser-agnostic
 # Socket provider + platform services: POSIX defaults; the Windows branch sets
@@ -327,13 +337,23 @@ override LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 # expanded to two paths, and every object path was mangled: the build died with
 #   No rule to make target `build/event_pollcomp', needed by `libkeel.a'
 # on exactly the two jobs that use it. The first file names the backend uniquely on its own.
-KEEL_BUILD_ID = $(basename $(notdir $(firstword $(EVENT_SRC))))$(if $(KEEL_NO_COMPLETION),-nocomp)$(if $(COSMO),-cosmo)
+# The toolchain is part of the build identity, not just the backend. An MSVC object and a MinGW object
+# of the same TU are not interchangeable, and the archive path is shared, so without this a
+# `make CC=cl` after a `make` would mix the two into one libkeel.a -- the same class of failure as the
+# per-backend mixing that #280 fixed, and just as confusing to diagnose. With it, the two toolchains
+# keep separate object trees and the KEEL_STAMP rule makes the archive stale when you switch.
+KEEL_BUILD_ID = $(basename $(notdir $(firstword $(EVENT_SRC))))$(if $(KEEL_NO_COMPLETION),-nocomp)$(if $(COSMO),-cosmo)$(if $(filter msvc,$(TOOLCHAIN)),-msvc)
 OBJDIR = build/$(KEEL_BUILD_ID)
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 LLHTTP_OBJ = $(LLHTTP_SRC:%.c=$(OBJDIR)/%.o)
-LIB = libkeel.a
+# NOT named LIB. LIB is MSVC's linker search-path ENVIRONMENT variable (vcvars64 sets it, and
+# scripts/msvc-env.sh exports it), and make re-exports any variable it reassigns that also came from
+# the environment -- so a makefile `LIB` silently replaces the linker's search path in every recipe and
+# an MSVC link fails unable to find the CRT. Verified, not theorised. Same reasoning applies to
+# INCLUDE, LINK and CL: never use those as make variable names here.
+KEEL_LIB = libkeel.a
 
-all: $(LIB)
+all: $(KEEL_LIB)
 
 # Include generated dependency files (after default target)
 -include $(CORE_OBJ:.o=.d) $(LLHTTP_OBJ:.o=.d)
@@ -373,7 +393,7 @@ $(KEEL_STAMP):
 # $(KEEL_STAMP) is a real prerequisite, not order-only: order-only would never mark the archive out
 # of date, which is the whole point. It is therefore excluded from the ar arguments by using
 # $(LIB_OBJ) rather than $^.
-$(LIB): $(KEEL_STAMP) $(LIB_OBJ)
+$(KEEL_LIB): $(KEEL_STAMP) $(LIB_OBJ)
 	@rm -f $@ .aarch64/$@   # ar rcs REPLACES same-named members and keeps the rest; start clean
 ifdef COSMO_FAT
 	@# Fat cosmocc: use single-arch cosmo ar (not cosmoar which fails with .aarch64/ recursion,
@@ -385,7 +405,7 @@ else ifdef COSMO
 	@# Single-arch cosmo: use the AR passed by the caller (e.g. x86_64-unknown-cosmo-ar)
 	$(AR) rcs $@ $(LIB_OBJ)
 else
-	$(AR) rcs $@ $(LIB_OBJ)
+	$(AR_CMD)$@ $(LIB_OBJ)
 endif
 
 # $(EXTRA_INC) is an empty-by-default per-target include add-on. Protocol objects reach the substrate
@@ -396,13 +416,13 @@ endif
 # sub-make command line (debug/asan/coverage), unlike a target-specific `CFLAGS +=`, and portably
 # across GNU Make 3.81 (macOS) which does not prefer the more-specific `src/protocols/%.o` pattern.
 %.o: %.c
-	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_INC) -c $(OBJ_OUT)$@ $<
 
 # Library objects live under $(OBJDIR) so two backends cannot share one object path. mkdir -p per
 # object keeps the rule independent of any directory-creation ordering.
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_INC) -c $(OBJ_OUT)$@ $<
 
 src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
 $(OBJDIR)/src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protocols/http2
@@ -418,22 +438,22 @@ $(OBJDIR)/src/protocols/%.o: EXTRA_INC = -Isrc -Isrc/protocols/http -Isrc/protoc
 # claim these and compile vendor sources with -Werror.
 $(OBJDIR)/vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
 	@mkdir -p $(dir $@)
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 $(OBJDIR)/vendor/llhttp/api.o: vendor/llhttp/api.c
 	@mkdir -p $(dir $@)
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 $(OBJDIR)/vendor/llhttp/http.o: vendor/llhttp/http.c
 	@mkdir -p $(dir $@)
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 
 # The in-tree paths stay defined: fuzz, freestanding and the smoke targets build vendor objects
 # beside their sources, and those builds are not backend-varying.
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 vendor/llhttp/api.o: vendor/llhttp/api.c
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 vendor/llhttp/http.o: vendor/llhttp/http.c
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
+	$(CC) $(VENDOR_CFLAGS) -c $(OBJ_OUT)$@ $<
 
 # Examples
 EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
@@ -458,8 +478,8 @@ ifneq ($(WINDOWS),1)
 EXAMPLES += examples/proxy_client
 endif
 
-examples/%: examples/%.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+examples/%: examples/%.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
 # TLS example: only built when KEEL_TLS=mbedtls
 ifeq ($(KEEL_TLS),mbedtls)
@@ -515,17 +535,17 @@ TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
 # rebuild it on every invocation).
 .SECONDARY: $(TEST_COMPAT_OBJ)
 
-tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+tests/%: tests/%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
 
 # io_uring L2 SQ-exhaustion regression (excluded from the default wildcard; enrolled in
 # IOURING_TEST_SUITES, so only built under BACKEND=iouring). Links a -DKEEL_IOURING_TEST_HOOKS copy of
 # the io_uring backend AHEAD of libkeel.a: as a direct object it defines every event_iouring symbol,
 # so the archive's non-hooked member is never pulled (no duplicate), and the hooked iou_sqe()
 # (deterministic SQ-exhaustion) is the one exercised.
-tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(LIB) $(TEST_COMPAT_OBJ)
+tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
 	$(CC) $(CFLAGS) -DKEEL_IOURING_TEST_HOOKS -c -o tests/event_iouring_hooked.o src/event_iouring.c
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -560,7 +580,7 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtable connect_op cross_module \
+WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free compress compress_vtable connect_op cross_module \
                    datagram_batch datagram_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
@@ -584,14 +604,68 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 # to the extension-less `tests/%` rule above, so `test-win` also runs natively as
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
-tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+tests/test_%$(EXE): tests/test_%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
 # Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
 # so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
-tests/protocols/%$(EXE): tests/protocols/%.c $(LIB) $(TEST_COMPAT_OBJ)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
+tests/protocols/%$(EXE): tests/protocols/%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
 endif
 
+# Native MSVC (CC=cl). See docs/build.md; the supported invocation is:
+#
+#     source scripts/msvc-env.sh
+#     make CC=cl test-msvc
+#
+# A CURATED suite list, not the full Windows set, and the reason is specific: many test TUs include
+# <pthread.h> and spawn helper threads directly. The LIBRARY never does -- that is exactly what the PAL
+# threading seam exists for -- but those harnesses do, so they need MinGW. Rather than claim MSVC
+# support on the strength of library TUs compiling, this set is chosen to exercise the things that can
+# only be proven by linking and RUNNING against a native MSVC archive:
+#
+#   atomic_lock_free         the C11 atomics policy, and /experimental:c11atomics actually working
+#   socket_runtime           the PAL socket runtime, the PAL threading seam, adopted descriptors
+#   socket_runtime_first_use ws2_32 coming up with no load-time constructor (MSVC has none)
+#
+# These are ordinary Keel suites, so the same target also runs under GCC/MinGW and the set stays
+# honest: it cannot drift into MSVC-only test code.
+MSVC_TEST_SUITES ?= atomic_lock_free socket_runtime socket_runtime_first_use
+MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),tests/test_$(s)$(EXE))
+
+test-msvc: $(MSVC_TEST_BIN)
+	@failed=0; \
+	for t in $(MSVC_TEST_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME MSVC TESTS FAILED"; exit 1; fi
+
+# A native MSVC build must not drag in a MinGW runtime: that is the whole point for a consumer that
+# builds its stack with cl. Checks the actual import table of a linked executable rather than trusting
+# the flags, because a stray -lgcc or a MinGW-built object would show up here and nowhere else.
+# A PUBLIC-API-ONLY consumer, built with no -Isrc. The test suites in test-msvc link against the
+# archive too, but they reach internal headers, so they cannot answer a consumer's actual question:
+# is the installed surface sufficient, compiled by cl, linked against a lib.exe archive? This is the
+# acceptance property OTTO cares about, reduced to something Keel can run in its own CI.
+MSVC_CONSUMER_BIN = build/msvc-consumer$(EXE)
+
+check-msvc-consumer: $(KEEL_LIB)
+	@mkdir -p build $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(TEST_OBJ_TMP) $(EXE_OUT)$(MSVC_CONSUMER_BIN) tools/msvc_consumer.c $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
+	@./$(MSVC_CONSUMER_BIN)
+check-msvc-no-mingw: $(MSVC_TEST_BIN)
+	@bad=0; \
+	for t in $(MSVC_TEST_BIN); do \
+		deps=$$(dumpbin /nologo /dependents "$$t" 2>/dev/null | tr "A-Z" "a-z"); \
+		if [ -z "$$deps" ]; then echo "check-msvc-no-mingw: dumpbin unavailable (source scripts/msvc-env.sh)"; exit 1; fi; \
+		for dll in libgcc libwinpthread libstdc++ msys- cygwin1 libatomic; do \
+			if echo "$$deps" | grep -q "$$dll"; then echo "$$t depends on $$dll"; bad=1; fi; \
+		done; \
+	done; \
+	if [ $$bad -eq 1 ]; then echo "check-msvc-no-mingw: FAILED (MinGW runtime dependency)"; exit 1; fi; \
+	echo "check-msvc-no-mingw: OK ($(words $(MSVC_TEST_BIN)) binaries, no MinGW runtime imports)"
 test-win: $(WIN_TEST_BIN)
 	@failed=0; \
 	for t in $(WIN_TEST_BIN); do \
@@ -620,7 +694,7 @@ test-win: $(WIN_TEST_BIN)
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
-WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async compress compress_vtable connect_op \
+WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free compress compress_vtable connect_op \
                         cross_module datagram_batch datagram_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
@@ -652,8 +726,8 @@ test-win-iocp: $(WIN_IOCP_TEST_BIN)
 SMOKE_BIN = tests/protocols/http/smoke_tcp$(EXE)
 smoke-tcp: $(SMOKE_BIN)
 	./$(SMOKE_BIN)
-$(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
 # the completion connection driver; build libkeel with BACKEND=iocp first so the
@@ -661,8 +735,8 @@ $(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(LIB)
 SMOKE_IOCP_BIN = tests/smoke_iocp$(EXE)
 smoke-iocp: $(SMOKE_IOCP_BIN)
 	./$(SMOKE_IOCP_BIN)
-$(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # TLS-over-IOCP roundtrip (Windows, BACKEND=iocp) via the identity mock TLS: runtime
 # gate for event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV, feed-in-drain,
@@ -670,16 +744,16 @@ $(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
 SMOKE_IOCP_TLS_BIN = tests/smoke_iocp_tls$(EXE)
 smoke-iocp-tls: $(SMOKE_IOCP_TLS_BIN)
 	./$(SMOKE_IOCP_TLS_BIN)
-$(SMOKE_IOCP_TLS_BIN): tests/smoke_iocp_tls.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOCP_TLS_BIN): tests/smoke_iocp_tls.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Async/thread-pool over IOCP (Windows, BACKEND=iocp): runtime gate for the IOCP watcher
 # relay (overlapped WSARecv on the loopback wakeup surfaces KL_COMP_WATCHER). 8e-2c.
 SMOKE_IOCP_ASYNC_BIN = tests/smoke_iocp_async$(EXE)
 smoke-iocp-async: $(SMOKE_IOCP_ASYNC_BIN)
 	./$(SMOKE_IOCP_ASYNC_BIN)
-$(SMOKE_IOCP_ASYNC_BIN): tests/smoke_iocp_async.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOCP_ASYNC_BIN): tests/smoke_iocp_async.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # End-to-end HTTP-over-completion roundtrip on POSIX (BACKEND=pollcomp). The runtime
 # gate for the platform-independent completion driver off Windows; build libkeel with
@@ -688,31 +762,31 @@ $(SMOKE_IOCP_ASYNC_BIN): tests/smoke_iocp_async.c $(LIB)
 SMOKE_POLLCOMP_BIN = tests/smoke_pollcomp$(EXE)
 smoke-pollcomp: $(SMOKE_POLLCOMP_BIN)
 	./$(SMOKE_POLLCOMP_BIN)
-$(SMOKE_POLLCOMP_BIN): tests/smoke_pollcomp.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_BIN): tests/smoke_pollcomp.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # TLS-over-completion roundtrip on POSIX via the identity mock TLS (no mbedTLS). Runs the
 # completion driver's TLS paths (comp_tls_drive / send_response / file / stream) for real.
 SMOKE_POLLCOMP_TLS_BIN = tests/smoke_pollcomp_tls$(EXE)
 smoke-pollcomp-tls: $(SMOKE_POLLCOMP_TLS_BIN)
 	./$(SMOKE_POLLCOMP_TLS_BIN)
-$(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # WebSocket-over-completion roundtrip on POSIX via pollcomp; runs comp_ws_drive (8e-1).
 SMOKE_POLLCOMP_WS_BIN = tests/protocols/websocket/smoke_pollcomp_ws$(EXE)
 smoke-pollcomp-ws: $(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_WS_BIN)
-$(SMOKE_POLLCOMP_WS_BIN): tests/protocols/websocket/smoke_pollcomp_ws.c $(LIB)
-	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_WS_BIN): tests/protocols/websocket/smoke_pollcomp_ws.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Async/thread-pool handler over completion via pollcomp; runs the watcher relay + async
 # resume (8e-2b): a thread-pool wakeup watcher fires on the completion loop and resumes.
 SMOKE_POLLCOMP_ASYNC_BIN = tests/smoke_pollcomp_async$(EXE)
 smoke-pollcomp-async: $(SMOKE_POLLCOMP_ASYNC_BIN)
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
-$(SMOKE_POLLCOMP_ASYNC_BIN): tests/smoke_pollcomp_async.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_POLLCOMP_ASYNC_BIN): tests/smoke_pollcomp_async.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # LC-0 PROOF: async KlHttpClient connect+GET over the pollcomp completion loop: the completion
 # CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect) driving the client's connect over
@@ -724,9 +798,9 @@ SMOKE_POLLCOMP_CLIENT_BIN = tests/smoke_pollcomp_client$(EXE)
 # (the completion backend compiled in), mirroring smoke-pollcomp-asan.
 smoke-pollcomp-client:
 	$(MAKE) clean
-	$(MAKE) BACKEND=pollcomp $(LIB)
+	$(MAKE) BACKEND=pollcomp $(KEEL_LIB)
 	$(CC) $(CFLAGS) -Isrc -o $(SMOKE_POLLCOMP_CLIENT_BIN) tests/smoke_pollcomp_client.c \
-	      -L. -lkeel -lpthread $(LDFLAGS)
+	      $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 	./$(SMOKE_POLLCOMP_CLIENT_BIN)
 
 # Completion roundtrips (plaintext, TLS-via-mock, and WebSocket) under ASan+UBSan with
@@ -766,11 +840,11 @@ SMOKE_INJECT_BIN = tests/smoke_completion_inject$(EXE)
 SMOKE_INJECT_OBJ = src/event_pollcomp.inject.o
 smoke-completion-inject:
 	$(MAKE) clean
-	$(MAKE) $(LIB)
+	$(MAKE) $(KEEL_LIB)
 	# The injected provider TU, compiled against the SAME CFLAGS as the default lib.
 	$(CC) $(CFLAGS) -Isrc -c -o $(SMOKE_INJECT_OBJ) src/event_pollcomp.c
 	$(CC) $(CFLAGS) -Isrc -o $(SMOKE_INJECT_BIN) tests/smoke_completion_inject.c \
-	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread $(LDFLAGS)
+	      $(SMOKE_INJECT_OBJ) $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 	./$(SMOKE_INJECT_BIN)
 
 # ASan+UBSan variant of the RC-2 proof (leak detection on the injected-completion path).
@@ -808,16 +882,16 @@ smoke-iouring-asan:
 SMOKE_IOURING_BIN = tests/smoke_iouring$(EXE)
 smoke-iouring: $(SMOKE_IOURING_BIN)
 	./$(SMOKE_IOURING_BIN)
-$(SMOKE_IOURING_BIN): tests/smoke_iouring.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOURING_BIN): tests/smoke_iouring.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Async/thread-pool over the io_uring completion loop: the watcher relay via a single-shot
 # IORING_OP_POLL_ADD (a thread-pool wakeup fires on the completion loop and resumes).
 SMOKE_IOURING_ASYNC_BIN = tests/smoke_iouring_async$(EXE)
 smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 	./$(SMOKE_IOURING_ASYNC_BIN)
-$(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # LC-0: async KlHttpClient connect+GET over the io_uring completion loop: connect driven via
 # IORING_OP_CONNECT (kl_comp_post_connect → KL_COMP_CONNECT → he_on_writable). Build with
@@ -825,8 +899,8 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 SMOKE_IOURING_CLIENT_BIN = tests/smoke_iouring_client$(EXE)
 smoke-iouring-client: $(SMOKE_IOURING_CLIENT_BIN)
 	./$(SMOKE_IOURING_CLIENT_BIN)
-$(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Phase 8f-3: unit-test suites that run over the io_uring completion backend: a
 # regression gate alongside the smokes. Two groups: backend-agnostic logic suites (they
@@ -914,16 +988,16 @@ test-iouring: $(IOURING_TEST_BIN)
 SMOKE_DATAGRAM_BIN = tests/smoke_datagram$(EXE)
 smoke-datagram: $(SMOKE_DATAGRAM_BIN)
 	./$(SMOKE_DATAGRAM_BIN)
-$(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+$(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
 # DNS resolver link + init/resolve smoke test: the Windows CI gate for
 # dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
 SMOKE_DNS_BIN = tests/protocols/dns/smoke_dns$(EXE)
 smoke-dns: $(SMOKE_DNS_BIN)
 	./$(SMOKE_DNS_BIN)
-$(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+$(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
 # TLS handshake smoke test: a real mbedTLS handshake + request/response over
 # loopback with an embedded self-signed cert. The local/BYO validation gate for
@@ -934,16 +1008,16 @@ $(SMOKE_DNS_BIN): tests/protocols/dns/smoke_dns.c $(LIB)
 SMOKE_TLS_BIN = integrations/tls/mbedtls/tests/smoke_tls$(EXE)
 smoke-tls: $(SMOKE_TLS_BIN)
 	./$(SMOKE_TLS_BIN)
-$(SMOKE_TLS_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Buffered-BIO (completion-mode) TLS validation for 8b-5: a full mbedTLS handshake
 # + app data via feed_input/drain_output, no socket. Local/BYO gate (KEEL_TLS=mbedtls).
 SMOKE_TLS_COMP_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion$(EXE)
 smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
 	./$(SMOKE_TLS_COMP_BIN)
-$(SMOKE_TLS_COMP_BIN): integrations/tls/mbedtls/tests/smoke_tls_completion.c $(LIB)
-	$(CC) $(CFLAGS) -Isrc -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_COMP_BIN): integrations/tls/mbedtls/tests/smoke_tls_completion.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -Isrc -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # End-to-end real-mbedTLS over a completion event loop + real socket (broadens the in-memory
 # smoke-tls-completion above): smoke_tls.c with the server pinned to the completion provider.
@@ -953,8 +1027,8 @@ $(SMOKE_TLS_COMP_BIN): integrations/tls/mbedtls/tests/smoke_tls_completion.c $(L
 SMOKE_TLS_E2E_BIN = integrations/tls/mbedtls/tests/smoke_tls_completion_e2e$(EXE)
 smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
 	./$(SMOKE_TLS_E2E_BIN)
-$(SMOKE_TLS_E2E_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(LIB)
-	$(CC) $(CFLAGS) -Isrc -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+$(SMOKE_TLS_E2E_BIN): integrations/tls/mbedtls/tests/smoke_tls.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -Isrc -DSMOKE_TLS_COMPLETION -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # Optional first-party integrations (integrations/): bring-your-own libraries,
 # never required by `make` / `make test`. Each target skips with a notice when
@@ -988,11 +1062,11 @@ DESTDIR ?=
 
 # DESTDIR stages into a build root; PREFIX is the logical install prefix baked into keel.pc and the
 # runtime paths. Both are preserved: every path below is $(DESTDIR)$(PREFIX)/...
-install: $(LIB) keel.pc
+install: $(KEEL_LIB) keel.pc
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/include/keel
 	install -d $(DESTDIR)$(PREFIX)/lib/pkgconfig
-	install -m 644 $(LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 $(KEEL_LIB) $(DESTDIR)$(PREFIX)/lib/
 	@# Install ONLY the reviewed public headers (docs/f2/public_headers.txt), never a wildcard, so an
 	@# internal header placed in include/keel/ cannot leak into the installed surface.
 	@set -e; while IFS= read -r h; do \
@@ -1002,7 +1076,7 @@ install: $(LIB) keel.pc
 	install -m 644 keel.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB)
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(KEEL_LIB)
 	rm -f $(DESTDIR)$(PREFIX)/lib/pkgconfig/keel.pc
 	@# Remove ONLY the headers Keel installed (the reviewed manifest); leave any unrelated file intact.
 	@while IFS= read -r h; do \
@@ -1102,7 +1176,7 @@ rc-validate:
 FORCE:
 
 clean:
-	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
+	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(KEEL_LIB) $(TEST_BIN)
 	rm -f tests/protocols/http/smoke_tcp tests/protocols/http/smoke_tcp.exe \
 	      tests/protocols/dns/smoke_dns tests/protocols/dns/smoke_dns.exe \
 	      integrations/tls/mbedtls/tests/smoke_tls integrations/tls/mbedtls/tests/smoke_tls.exe \
@@ -1284,6 +1358,12 @@ check-install:
 # leakage and that keel.pc selects the right library + platform-private link flags.
 check-installed-consumer:
 	@sh tools/f2_installed_consumer.sh
+
+# The MSVC-side equivalent of check-public-headers' standalone property. Separate target rather than a
+# bilingual rewrite of a working gate: tools/f2_standalone_headers.sh spells -fsyntax-only and has a C++
+# pass that would need different flags entirely. Needs `source scripts/msvc-env.sh` first.
+check-msvc-headers:
+	@sh tools/msvc_standalone_headers.sh
 
 check-public-headers:
 	@sh tools/f2_public_inventory.sh --selftest
@@ -1575,15 +1655,15 @@ check-backend-isolation:
 	echo "building $$a, then $$b, with no clean in between"; \
 	$(MAKE) BACKEND=$$a >/dev/null; \
 	$(MAKE) BACKEND=$$b >/dev/null; \
-	n=$$($(AR) t $(LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
+	n=$$($(AR) t $(KEEL_LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
 	if [ "$$n" != "1" ]; then \
-	  echo "check-backend-isolation: FAIL - $(LIB) holds $$n event backends:"; \
-	  $(AR) t $(LIB) | grep -E '$(KEEL_EVENT_TU_RE)'; \
+	  echo "check-backend-isolation: FAIL - $(KEEL_LIB) holds $$n event backends:"; \
+	  $(AR) t $(KEEL_LIB) | grep -E '$(KEEL_EVENT_TU_RE)'; \
 	  echo "  A backend switch reused objects or kept stale archive members. See the OBJDIR and"; \
 	  echo "  KEEL_STAMP comments in this Makefile."; exit 1; \
 	fi; \
 	$(MAKE) BACKEND=$$a >/dev/null; \
-	m=$$($(AR) t $(LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
+	m=$$($(AR) t $(KEEL_LIB) | grep -cE '$(KEEL_EVENT_TU_RE)' || true); \
 	if [ "$$m" != "1" ]; then \
 	  echo "check-backend-isolation: FAIL - switching back left $$m event backends"; exit 1; \
 	fi; \
@@ -1692,7 +1772,7 @@ fuzz-decompress: fuzz/fuzz_decompress
 #   make decompress-miniz-test MINIZ_DIR=/path/to/miniz
 # (The miniz codec backend is otherwise not exercised in CI.) Built with ASan+UBSan;
 # miniz sources are compiled with relaxed warnings, the adapters + test under -Werror.
-decompress-miniz-test: $(LIB)
+decompress-miniz-test: $(KEEL_LIB)
 	@test -n "$(MINIZ_DIR)" || { echo "decompress-miniz-test: set MINIZ_DIR=/path/to/miniz"; exit 1; }
 	@set -e; mzobj=""; \
 	for f in $(MINIZ_DIR)/*.c; do \
@@ -1720,8 +1800,8 @@ docs:
 # Benchmark server + suite
 BENCH_SERVER = bench/bench_server
 
-$(BENCH_SERVER): bench/bench_server.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+$(BENCH_SERVER): bench/bench_server.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
 # Compile-only benchmark build (no wrk run): a public-API consumer outside src/tests/examples,
 # so headline renames (KlHttpServer/Request/Response, …) that miss bench/ are caught at compile time.

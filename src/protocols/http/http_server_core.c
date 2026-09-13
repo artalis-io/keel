@@ -105,6 +105,22 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         return -1;
     }
     memset(s, 0, sizeof(*s));
+
+    /* The stop path stores to s->running from a signal handler (POSIX) or a console control handler
+     * (Windows), so that store must be lock-free. Where the implementation promises that for every int
+     * at compile time this is free; where it only says "it depends on the object" the standard requires
+     * asking about the actual object, which is what this does -- here, during ordinary initialisation,
+     * with the real addresses, and never for the first time from inside a handler.
+     *
+     * Refusing here rather than merely skipping the handler install: a server whose stop flag is not
+     * lock-free cannot offer the graceful-stop contract the rest of the API documents, and silently
+     * downgrading to a potentially locking atomic on the handler path is the outcome this check exists
+     * to prevent. First thing after the memset, so there is nothing acquired to unwind. */
+    if (!kl_atomic_int_is_lock_free(&s->running) || !kl_atomic_int_is_lock_free(&s->draining)) {
+        s->last_error = KL_ERR_UNSUPPORTED;
+        return -1;
+    }
+
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
 

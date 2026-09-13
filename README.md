@@ -23,12 +23,23 @@ make cppcheck           # cppcheck static analysis
 make fuzz               # build libFuzzer fuzz targets (requires clang)
 make clean              # remove artifacts
 
+# Native MSVC on Windows (cl.exe / lib.exe), for consumers building their whole stack with one
+# toolchain. Same source tree, same PAL, same runtime semantics; only the compiler mapping changes.
+source scripts/msvc-env.sh   # finds the Build Tools via vswhere and fixes MSYS argument mangling
+make CC=cl                   # native libkeel.a via cl + lib
+make CC=cl test-msvc         # build + run the MSVC runtime probes
+make CC=cl BACKEND=iocp      # the completion backend, same way
+
 # Embedder hooks: build Keel's TUs with the SAME flags as the tree vendoring it.
 make KEEL_OPT=-O0                     # optimization level (default -O2), applied
                                       #   to Keel's own AND vendored TUs
 make KEEL_EXTRA_CFLAGS=-flto=thin     # appended last, so it wins over Keel's own
 make KEEL_EXTRA_LDFLAGS=-flto=thin    # likewise, for links
 ```
+
+MSVC notes: `cl` builds do not track header dependencies (MSVC has no `-MMD` equivalent whose output
+is worth parsing), so run `make clean` after editing a header. Object trees are per-toolchain, so a
+`make` and a `make CC=cl` never mix objects. See [docs/msvc_build.md](docs/msvc_build.md).
 
 Supported toolchains, event backends, socket/platform providers, integrations, and the version and
 compatibility policy are in one place: [docs/operations/platform_support.md](docs/operations/platform_support.md).

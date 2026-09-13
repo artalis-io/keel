@@ -159,7 +159,7 @@ void kl_http_response_reset(KlHttpResponse *res) {
     char *buf = res->hdr_buf;
     size_t cap = res->hdr_cap;
     KlAllocator *alloc = res->alloc;
-    int conn_fd = res->conn_fd;
+    KlSocketHandle conn_fd = res->conn_fd;   /* pointer-width: a Windows SOCKET does not fit an int */
     KlTls *tls = res->tls;
     struct KlEventCtx *ctx = res->ctx;
 
@@ -261,7 +261,10 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
 
 void kl_http_response_file(KlHttpResponse *res, KlSocketHandle fd, uint64_t size) {
     res->body_mode = KL_HTTP_BODY_FILE;
-    res->file_fd = fd;
+    /* Narrowing on purpose: file_fd is a CRT file descriptor, which is an int everywhere downstream
+     * (completion.h types it int; event_iocp.c passes it to _get_osfhandle). The public parameter is
+     * KlSocketHandle for historical reasons and is wider than the value it ever carries. */
+    res->file_fd = (int)fd;
     res->file_size = size;
     res->file_offset = 0;
 }
@@ -291,7 +294,7 @@ static inline const KlSocketProvider *res_provider(const KlHttpResponse *res) {
 /* Vectored write through the socket provider: the raw writev() when the provider
  * supports vectored I/O (POSIX / NULL), else a serialized kl_sock_send over the
  * iov. Same return contract as writev (bytes written, -1 on error, errno set). */
-static kl_ssize_t seam_writev(const KlSocketProvider *p, int fd,
+static kl_ssize_t seam_writev(const KlSocketProvider *p, KlSocketHandle fd,
                            const KlIoVec *iov, int iovcnt) {
     if (!p || p->ops->writev)                     /* NULL=POSIX, or a writev op */
         return kl_sock_writev(p, fd, iov, iovcnt);
@@ -312,7 +315,7 @@ static kl_ssize_t seam_writev(const KlSocketProvider *p, int fd,
 
 /* ── try_writev: single attempt, returns bytes written ──────────── */
 
-static kl_ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
+static kl_ssize_t try_writev(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                           KlIoVec *iov, int iovcnt) {
     if (!tls) {
         kl_ssize_t nw = seam_writev(p, fd, iov, iovcnt);
@@ -334,7 +337,7 @@ static kl_ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
 
 /* ── stream_writev_all: spin-write for streaming (small chunks) ── */
 
-static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
+static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                              KlIoVec *iov, int iovcnt) {
     int spins = 0;
 
