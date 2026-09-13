@@ -299,7 +299,11 @@ sub run_build {
     local $ENV{MAKEFLAGS} = '';
     local $ENV{MAKELEVEL} = '';
     local $ENV{MFLAGS}    = '';
-    my $rc = system("make BUILD_DIR='$builddir' build >/dev/null 2>&1");
+    # Whichever make is driving us, not the literal "make": GNU make exports MAKE to its recipes, and
+    # on Windows the driver is usually mingw32-make with no plain "make" on PATH at all. Hardcoding it
+    # made this gate exit 127 on every Windows checkout.
+    my $make = $ENV{MAKE} || 'make';
+    my $rc = system("$make BUILD_DIR='$builddir' build >/dev/null 2>&1");
     return $rc == 0 && -d $builddir;
 }
 

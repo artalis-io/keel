@@ -26,7 +26,7 @@ CXXSTD=${CXXSTD:-c++11}
 command -v pkg-config >/dev/null 2>&1 || { echo "cxx-link: pkg-config not found"; exit 2; }
 
 echo "cxx-link: building libkeel.a"
-make -s libkeel.a >/dev/null 2>&1 || make -s >/dev/null 2>&1
+"$MAKE" -s libkeel.a >/dev/null 2>&1 || "$MAKE" -s >/dev/null 2>&1
 
 stage=$(mktemp -d)
 build=$(mktemp -d)
@@ -34,7 +34,7 @@ trap 'rm -rf "$stage" "$build"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 
 echo "cxx-link: staging install into $stage"
 rm -f "$ROOT/keel.pc"                     # force keel.pc regeneration for the staged prefix
-make -s install PREFIX="$stage" >/dev/null 2>&1
+"$MAKE" -s install PREFIX="$stage" >/dev/null 2>&1
 
 PKG_CONFIG_PATH="$stage/lib/pkgconfig"; export PKG_CONFIG_PATH
 pkg-config --exists keel || { echo "cxx-link: staged keel.pc not found"; exit 1; }

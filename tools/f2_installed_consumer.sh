@@ -92,14 +92,14 @@ assert_no_repo_includes() {
 # --- Case A: logical PREFIX (no DESTDIR) ---
 pa="$work/prefixA"
 rm -f "$ROOT/keel.pc"
-make -s install PREFIX="$pa" >/dev/null 2>&1
+"$MAKE" -s install PREFIX="$pa" >/dev/null 2>&1
 assert_no_repo_includes "$pa/include/keel"
 run_case "PREFIX" "$pa/lib/pkgconfig" "" "$pa/include" "$pa/lib"
 
 # --- Case B: DESTDIR staging with a logical PREFIX ---
 db="$work/destB"; lp=/opt/keel-staged
 rm -f "$ROOT/keel.pc"
-make -s install DESTDIR="$db" PREFIX="$lp" >/dev/null 2>&1
+"$MAKE" -s install DESTDIR="$db" PREFIX="$lp" >/dev/null 2>&1
 # keel.pc records the LOGICAL prefix; pkg-config rewrites it under the staging root via the sysroot.
 grep -q "^prefix=$lp\$" "$db$lp/lib/pkgconfig/keel.pc" || bad "DESTDIR: keel.pc did not record the logical PREFIX"
 run_case "DESTDIR" "$db$lp/lib/pkgconfig" "$db" "$db$lp/include" "$db$lp/lib"

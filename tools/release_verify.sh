@@ -14,9 +14,22 @@ MODE=${1:---verify}
 V=$(cat VERSION)
 NAME="keel-$V"
 
-sha256_manifest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+sha256_manifest() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi \
+        | sed 's/^\([0-9a-f]*\) [*]/\1  /'
+}
 sha256_check()    { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$@"; else shasum -a 256 -c "$@"; fi; }
 sha256_hash()     { sha256_manifest "$1" | cut -d' ' -f1; }
+# Whichever make is driving us; a Windows checkout may only have mingw32-make.
+MAKE="${MAKE:-make}"
+# `make test` builds extension-less binaries with a POSIX-only recipe; Windows
+# test binaries need `.exe` and the win_prelude.h force-include, which is what
+# the separate `test-win` target does. Pick the one that exists for this host.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) TEST_TARGET=test-win ;;
+    *)                    TEST_TARGET=test ;;
+esac
+
 fail() { echo "check-release-artifacts: FAIL - $1" >&2; exit 1; }
 
 TMPS=""
@@ -82,14 +95,16 @@ run_verify() {
 
     # 9 (structure part, done early): SBOM is valid JSON; license + release docs present.
     if command -v python3 >/dev/null 2>&1; then
-        python3 -c "import json,sys; json.load(open('$T/sbom.cdx.json'))" 2>/dev/null || fail "SBOM is not valid JSON"
+        # Feed the file on stdin: a native-Windows python3 under MSYS bash cannot
+        # open a POSIX path, and passing one turns into a false "invalid JSON".
+        python3 -c "import json,sys; json.load(sys.stdin)" < "$T/sbom.cdx.json" 2>/dev/null || fail "SBOM is not valid JSON"
     fi
     for f in LICENSE CHANGELOG.md docs/migrations/2.x-to-3.0.md; do
         [ -s "$T/$f" ] || fail "release document missing or empty: $f"
     done
 
     # 6. Build and test from the EXTRACTED tree, with no reference to the original repo.
-    ( cd "$T" && make -s >/dev/null 2>&1 ) || fail "extracted tree does not build"
+    ( cd "$T" && "$MAKE" -s >/dev/null 2>&1 ) || fail "extracted tree does not build"
     # compiled kl_version() agreement.
     cat > "$ex/ver.c" <<EOF2
 #include <keel/keel.h>
@@ -99,11 +114,11 @@ EOF2
     cc -std=c11 -I"$T/include" "$ex/ver.c" "$T/libkeel.a" -o "$ex/ver" -lpthread 2>/dev/null \
         || fail "kl_version() consumer failed to link against the extracted libkeel.a"
     "$ex/ver" || fail "compiled kl_version() does not equal VERSION"
-    ( cd "$T" && make -s test >/dev/null 2>&1 ) || fail "extracted tree tests fail"
+    ( cd "$T" && "$MAKE" -s "$TEST_TARGET" >/dev/null 2>&1 ) || fail "extracted tree tests fail"
 
     # 7. Staged install + out-of-tree C and C++ compile-link-run consumers from the extracted tree.
     stage=$(mk)
-    ( cd "$T" && make -s install PREFIX="$stage" >/dev/null 2>&1 ) || fail "staged install from extracted tree failed"
+    ( cd "$T" && "$MAKE" -s install PREFIX="$stage" >/dev/null 2>&1 ) || fail "staged install from extracted tree failed"
     # In CI, a missing pkg-config is a hard failure (the installed-consumer path must not silently fall
     # back to direct flags); local hosts without pkg-config use the documented fallback.
     if [ "${RELEASE_REQUIRE_PKGCONFIG:-0}" = 1 ] && ! command -v pkg-config >/dev/null 2>&1; then
@@ -144,7 +159,7 @@ EOF2
     if grep -rqF "$ROOT" "$stage/include" 2>/dev/null; then fail "installed headers leak the source tree path"; fi
 
     # staged uninstall (ownership-safe, from the extracted tree).
-    ( cd "$T" && make -s uninstall PREFIX="$stage" >/dev/null 2>&1 ) || fail "staged uninstall from extracted tree failed"
+    ( cd "$T" && "$MAKE" -s uninstall PREFIX="$stage" >/dev/null 2>&1 ) || fail "staged uninstall from extracted tree failed"
 
     echo "check-release-artifacts: OK ($NAME.tar.gz deterministic; sha256 $H; extracted build+test+install+C/C++ consumers verified; no path leakage)"
 }

@@ -94,7 +94,80 @@ any functional change requires a new RC (see `docs/v3_release_version_policy_fre
 
 ## Where this sits in the release sequence
 
-R3-4 built and verified artifacts; R3-5 enrolls the verification in standing CI and defines the RC
-acceptance criteria above. Both publish nothing. Signing (checksum and tag), tagging, uploading, and
-creating the GitHub release are the separately authorized R3-6 publication step; the signing method is
-decided there. The version and maintenance policy is in `docs/v3_release_version_policy_freeze.md`.
+Everything above builds and verifies artifacts; it publishes nothing. The sections below are the
+publication step, which is separately authorized every time. The version and maintenance policy is in
+`docs/v3_release_version_policy_freeze.md`.
+
+## Choosing the version number
+
+`docs/v3_release_version_policy_freeze.md` is the frozen policy. Within a major version Keel promises
+**source** compatibility ("recompile-and-relink against a newer 3.y.z with no source edits") and
+explicitly does **not** promise a cross-version binary ABI.
+
+So:
+
+- a new user-visible capability, or **any changed public declaration**, is a MINOR bump
+- fixes that change no declaration are a PATCH
+
+3.1.0 was minor for both reasons at once: native MSVC support, and `kl_http_response_file()` changing
+from `KlSocketHandle fd` to `int fd`. That change is source-compatible, because C applies the integer
+conversion implicitly, but it still changes a declaration, so a patch number would have been wrong.
+
+## Publishing, step 1: the release-prep PR
+
+Strictly no code. The diff should be four files.
+
+```sh
+echo "3.1.0" > VERSION
+make version-sync        # regenerates include/keel/version.h and sbom.cdx.json; keel.pc at build time
+make check-version-drift # VERSION, version.h, keel.pc.in and the SBOM must all agree
+```
+
+Then promote the `[Unreleased]` section of `CHANGELOG.md` into a dated-by-tag `[X.Y.Z]` section, and
+write upgrade notes for anything a consumer must know before upgrading: changed declarations, changed
+build requirements, and explicitly whether existing builds are unaffected.
+
+Open it as its own PR. Do not carry code changes in it.
+
+## Publishing, step 2: tag and publish
+
+Only after step 1 has merged. **This is a separate, explicit authorization**: publishing is
+outward-facing and awkward to retract, so it is never bundled with "merge the prep PR".
+
+The verification chain, in order, and every link matters:
+
+```text
+audited commit
+  -> CI green on that exact SHA, with ZERO non-success jobs (not merely a green run)
+  -> the archive from THAT run's artifact, downloaded, never rebuilt locally
+  -> its SHA-256 recomputed and matched against the manifest
+  -> the VERSION file INSIDE the tarball checked
+  -> annotated tag created at the literal SHA, message "Keel X.Y.Z"
+  -> the tag dereferenced and confirmed to point at that SHA
+  -> published with --verify-tag
+```
+
+```sh
+gh run view <run-id> --json jobs -q '[.jobs[] | select(.conclusion != "success")] | length'
+gh run download <run-id> --dir build/rel        # keel-X.Y.Z-<sha>-source-validation
+# verify the checksum and the in-tarball VERSION, then:
+git tag -a vX.Y.Z <full-sha> -m "Keel X.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title "Keel X.Y.Z" --notes-file <notes> --verify-tag     build/rel/.../keel-X.Y.Z.tar.gz build/rel/.../keel-X.Y.Z.sha256
+```
+
+## Why the archive comes from CI
+
+`make release` builds an archive locally, and `check-release-artifacts` proves the build is
+deterministic, but the published asset must be the one CI produced from the audited commit. Building
+it again on a developer machine would mean publishing bytes nobody verified in their final form, and
+the reproducibility guarantee would be a claim rather than a property.
+
+That guarantee is why `.gitattributes` pins `eol=lf`: `git archive` applies `core.autocrlf`, so a
+Windows checkout would otherwise produce a different archive from the same commit.
+
+## Tagging the literal SHA
+
+Tag the full commit hash, not `main` or `HEAD`. Between verifying CI and creating the tag, `main` can
+move. Tagging a branch name silently releases whatever arrived in the meantime, and the tag would no
+longer name the commit whose jobs were checked.

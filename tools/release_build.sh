@@ -18,8 +18,14 @@ V=$(cat VERSION)
 NAME="keel-$V"
 
 # portable SHA-256 (Linux sha256sum, macOS shasum). Output is the standard "<hash>  <file>" manifest,
-# verifiable with the same tool's -c.
-sha256_manifest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+# verifiable with the same tool's -c. The sed normalises the BINARY-mode marker that GNU coreutils
+# emits on Windows ("<hash> *<file>"), so the published manifest is byte-identical whichever platform
+# built it -- the same guarantee the archive itself carries, and previously the reason
+# check-release-artifacts could not pass on a Windows checkout at all.
+sha256_manifest() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi \
+        | sed 's/^\([0-9a-f]*\) [*]/\1  /'
+}
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
