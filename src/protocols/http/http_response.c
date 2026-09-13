@@ -259,12 +259,9 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
     return 0;
 }
 
-void kl_http_response_file(KlHttpResponse *res, KlSocketHandle fd, uint64_t size) {
+void kl_http_response_file(KlHttpResponse *res, int fd, uint64_t size) {
     res->body_mode = KL_HTTP_BODY_FILE;
-    /* Narrowing on purpose: file_fd is a CRT file descriptor, which is an int everywhere downstream
-     * (completion.h types it int; event_iocp.c passes it to _get_osfhandle). The public parameter is
-     * KlSocketHandle for historical reasons and is wider than the value it ever carries. */
-    res->file_fd = (int)fd;
+    res->file_fd = fd;
     res->file_size = size;
     res->file_offset = 0;
 }

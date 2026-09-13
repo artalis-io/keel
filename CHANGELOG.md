@@ -5,7 +5,26 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-No changes yet.
+### Changed
+
+- `kl_http_response_file()` takes `int fd` again, instead of `KlSocketHandle fd`. The parameter is a
+  FILE descriptor, and every other file descriptor on the public surface is already an `int`:
+  `KlSocketOps.sendfile` takes `int in_fd` beside `KlSocketHandle out_fd`, `KlFileIO.submit` takes
+  `int file_fd` beside `KlSocketHandle sock_fd`, and `KlHttpResponse.file_fd` stores it as an `int`.
+  It reaches `sendfile(2)` on POSIX and `_get_osfhandle()` on Windows, both of which take an `int`.
+
+  This restores the original declaration. It was `int fd` from the first commit until the 3.0 work
+  retyped the socket-handle surface to `KlSocketHandle` (ledger item BLK-4), which swept up this one
+  file descriptor by mistake and left it the single place on the API where a file descriptor was typed
+  as a socket handle. On 64-bit Windows that is a real narrowing, which native MSVC diagnoses.
+
+  SOURCE-COMPATIBLE, which is what 3.x promises: C applies the integer conversion implicitly, so every
+  call that compiled before still compiles, and the value has always been a small `int`. It is not
+  binary-compatible on 64-bit Windows, where the parameter changes width; 3.x does not promise a
+  cross-version ABI (see `docs/contracts/compatibility.md`). Code that takes the ADDRESS of this
+  function and stores it in a `KlSocketHandle`-typed function pointer must update that pointer type.
+
+  Because it changes a public declaration, the next release carrying it is a MINOR bump, not a patch.
 
 ## [3.0.1]
 

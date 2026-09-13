@@ -110,11 +110,23 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
 
 /**
  * @brief Set a file body for zero-copy sendfile transfer.
+ *
+ * @p fd is a FILE descriptor, not a socket handle, and so is an `int` like every other file descriptor
+ * on this surface: `KlSocketOps.sendfile` takes `int in_fd` beside `KlSocketHandle out_fd`,
+ * `KlFileIO.submit` takes `int file_fd` beside `KlSocketHandle sock_fd`, and `KlHttpResponse.file_fd`
+ * stores it as an `int`. It reaches `sendfile(2)` on POSIX and `_get_osfhandle()` on Windows, both of
+ * which take an `int`.
+ *
+ * It was declared `KlSocketHandle` (pointer-width) through 3.0.1, which made it the one place on the
+ * public API where a file descriptor was typed as a socket handle. On 64-bit Windows that is a real
+ * narrowing, which MSVC correctly diagnoses; the value itself has always been a small `int`, so no
+ * call that ever worked stops working.
+ *
  * @param res  Response.
- * @param fd   Open file descriptor (ownership transferred to response).
+ * @param fd   Open file descriptor (ownership transferred to response; closed by kl_http_response_free).
  * @param size File size in bytes.
  */
-void kl_http_response_file(KlHttpResponse *res, KlSocketHandle fd, uint64_t size);
+void kl_http_response_file(KlHttpResponse *res, int fd, uint64_t size);
 
 /** @brief Free response resources (header buffer, close file fd). */
 void kl_http_response_free(KlHttpResponse *res);

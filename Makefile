@@ -580,7 +580,7 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free compress compress_vtable connect_op cross_module \
+WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op cross_module \
                    datagram_batch datagram_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
@@ -694,7 +694,7 @@ test-win: $(WIN_TEST_BIN)
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
-WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free compress compress_vtable connect_op \
+WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op \
                         cross_module datagram_batch datagram_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
