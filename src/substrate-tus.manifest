@@ -35,7 +35,6 @@ src/event_pollcomp_builtin.c
 src/event_wsapoll.c
 src/file_io.c
 src/internal_trace.c
-src/kl_atomic.c
 src/kl_cstr.c
 src/kl_cstr_builtin.c
 src/listener.c

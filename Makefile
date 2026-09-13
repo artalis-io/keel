@@ -238,7 +238,7 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_atomic.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) $(PLATFORM_SOCKET_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) $(PLATFORM_SOCKET_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
            src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
            src/protocols/http/http_body_reader_buffer.c \
            src/protocols/http/http_body_reader_multipart.c src/protocols/http/http1_chunked.c src/protocols/http/http_cors.c \
