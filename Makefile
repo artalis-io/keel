@@ -635,12 +635,7 @@ MSVC_TEST_SUITES ?= atomic_lock_free socket_runtime socket_runtime_first_use
 MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),tests/test_$(s)$(EXE))
 
 test-msvc: $(MSVC_TEST_BIN)
-	@failed=0; \
-	for t in $(MSVC_TEST_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME MSVC TESTS FAILED"; exit 1; fi
+	@sh tools/run_suites.sh "MSVC" "$(ISOLATED_SUITES)" $(MSVC_TEST_BIN)
 
 # A native MSVC build must not drag in a MinGW runtime: that is the whole point for a consumer that
 # builds its stack with cl. Checks the actual import table of a linked executable rather than trusting
@@ -667,12 +662,7 @@ check-msvc-no-mingw: $(MSVC_TEST_BIN)
 	if [ $$bad -eq 1 ]; then echo "check-msvc-no-mingw: FAILED (MinGW runtime dependency)"; exit 1; fi; \
 	echo "check-msvc-no-mingw: OK ($(words $(MSVC_TEST_BIN)) binaries, no MinGW runtime imports)"
 test-win: $(WIN_TEST_BIN)
-	@failed=0; \
-	for t in $(WIN_TEST_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
+	@sh tools/run_suites.sh "WINDOWS" "$(ISOLATED_SUITES)" $(WIN_TEST_BIN)
 
 # Windows IOCP backend (BACKEND=iocp) test subset. Mirrors the Completion (io_uring) unit-suite
 # job: the suites here run DIRECTLY over the completion backend, not just transitively through the
@@ -713,12 +703,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free 
                         websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
-	@failed=0; \
-	for t in $(WIN_IOCP_TEST_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS IOCP TESTS FAILED"; exit 1; fi
+	@sh tools/run_suites.sh "WINDOWS IOCP" "$(ISOLATED_SUITES)" $(WIN_IOCP_TEST_BIN)
 
 # Plaintext TCP link + roundtrip smoke test: the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone
@@ -974,25 +959,23 @@ IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch 
                           tls_integration udp_cmsg unix_socket url version wakeup websocket websocket_client \
                           websocket_overflow
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
-# ---------------------------------------------------------------------------
-# Completion-axis suite exclusions: ONE source, used by every completion lane
-# ---------------------------------------------------------------------------
+# Suites that need a FRESH PROCESS PER TEST rather than sharing one (#307).
 #
-# A completion semantic suite set is:  derived eligible suites  -  documented temporary exclusions.
-# Both halves matter. The derivation stops a list becoming a hand-curated wish list; this exclusion
-# set stops a KNOWN-unstable suite being enrolled into a standing job, which would make the job red
-# for a reason nobody learns anything from.
+# reject_drain measured a failure rate that rose with the number of server lifecycles already run in
+# the same process -- 0/100 alone, 10/100 after two, 23/100 after eleven -- and dropped to 0/100 when
+# the target ran in a fresh process after identical work. It was measuring accumulated process state,
+# not the drain path. One process per test removed it entirely (0 failures in 900 executions against
+# 6 failed cycles in 50 sharing a process). tools/run_suites.sh carries the full measurements.
 #
-# Used by the unsanitized pollcomp lane AND the sanitized lanes, deliberately. Separate exclusion
-# lists for "ordinary" and "sanitized" would mean enrolling a suite twice and, worse, could leave a
-# suite excluded from one lane and not the other with no one noticing. When the work behind an entry
-# lands, deleting the line here enrols it EVERYWHERE at once.
-#
-# Every entry names the reason and where it is tracked, and is meant to be deleted, not grown.
-#   reject_drain  #307: timing-sensitive teardown, flaky on the completion axis independently of
-#                 sanitizers. The crash it used to cause is fixed (#308); the flakiness is not. It
-#                 still runs in the Windows and io_uring unsanitized lanes, which predate this.
-COMPLETION_EXCLUDE ?= reject_drain
+# Per-suite, not global: it costs a process launch per test, which is real time under sanitizers, and
+# nothing else has shown this behaviour.
+ISOLATED_SUITES ?= reject_drain
+
+# Suites held out of the completion lanes entirely. EMPTY, and meant to stay that way: reject_drain
+# was the only entry and process isolation fixed it, so it is enrolled everywhere again rather than
+# excluded. Kept as the mechanism, because the next known-unstable suite should be documented here
+# rather than quietly deleted from a list.
+COMPLETION_EXCLUDE ?=
 
 # ---------------------------------------------------------------------------
 # Portable completion double (BACKEND=pollcomp): unit suites
@@ -1034,12 +1017,7 @@ POLLCOMP_TEST_SUITES = $(filter-out $(COMPLETION_EXCLUDE),$(POLLCOMP_ELIGIBLE))
 POLLCOMP_TEST_BIN = $(foreach s,$(POLLCOMP_TEST_SUITES),$(call test_bin_for,$(s)))
 
 test-pollcomp: $(POLLCOMP_TEST_BIN)
-	@failed=0; \
-	for t in $(POLLCOMP_TEST_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME pollcomp TESTS FAILED"; exit 1; fi
+	@sh tools/run_suites.sh "pollcomp" "$(ISOLATED_SUITES)" $(POLLCOMP_TEST_BIN)
 
 # The ELIGIBLE list must stay equal to its own derivation. Checked before exclusions on purpose: the
 # exclusion set is a separate, deliberate subtraction, and folding it in here would leave the gate
@@ -1065,12 +1043,7 @@ print-pollcomp-suites:
 	@echo $(sort $(filter-out iocp_engine unix_socket_node_win socket_runtime socket_runtime_first_use iouring_sqe_fail,\
 	          $(filter $(WIN_IOCP_TEST_SUITES),$(IOURING_TEST_SUITES))))
 test-iouring: $(IOURING_TEST_BIN)
-	@failed=0; \
-	for t in $(IOURING_TEST_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME iouring TESTS FAILED"; exit 1; fi
+	@sh tools/run_suites.sh "iouring" "$(ISOLATED_SUITES)" $(IOURING_TEST_BIN)
 
 # Public KlDatagram link + roundtrip smoke: the runtime proof of the facade's completion fd↔loop
 # registration (7B-7). On BACKEND=iocp it exercises CreateIoCompletionPort (the Windows IOCP CI gate);
@@ -1381,22 +1354,10 @@ IOURING_SAN_BIN  = $(foreach s,$(IOURING_SAN_SUITES),$(call test_bin_for,$(s)))
 # Run targets. Invoked by the debug-* wrappers below with the sanitizer flags already in CFLAGS, so
 # the test binaries are built sanitized by the ordinary rules rather than by a parallel recipe.
 test-pollcomp-san: $(POLLCOMP_SAN_BIN)
-	@failed=0; \
-	for t in $(POLLCOMP_SAN_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME SANITIZED pollcomp TESTS FAILED"; exit 1; fi; \
-	echo "sanitized pollcomp: $(words $(POLLCOMP_SAN_BIN)) suites, all green"
+	@sh tools/run_suites.sh "sanitized pollcomp" "$(ISOLATED_SUITES)" $(POLLCOMP_SAN_BIN)
 
 test-iouring-san: $(IOURING_SAN_BIN)
-	@failed=0; \
-	for t in $(IOURING_SAN_BIN); do \
-		echo "--- $$t ---"; \
-		./$$t || failed=1; \
-	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME SANITIZED iouring TESTS FAILED"; exit 1; fi; \
-	echo "sanitized iouring: $(words $(IOURING_SAN_BIN)) suites, all green"
+	@sh tools/run_suites.sh "sanitized iouring" "$(ISOLATED_SUITES)" $(IOURING_SAN_BIN)
 
 # The set relationship, made enforceable rather than conventional:
 #
