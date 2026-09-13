@@ -226,6 +226,70 @@ jobs:
         timeout-minutes: 5
         run: make OS=windows CC=gcc test-win
 
+  windows-msvc:
+    name: Windows (native MSVC, cl.exe)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # NOTE: SHA-pin this to match the repo's action-pinning policy.
+      #
+      # No compiler installed here on purpose: cl.exe comes from the Visual Studio Build Tools already
+      # present on the runner, and scripts/msvc-env.sh finds them through vswhere exactly as it does on
+      # a developer machine. MSYS2 is needed only for make, perl and sh -- the POSIX tools the Makefile
+      # and its gates call. UCRT64 rather than MINGW64 because no MinGW compiler is wanted in this job:
+      # if a MinGW gcc were on PATH, a mistake in the toolchain mapping could silently fall back to it
+      # and this job would pass while proving nothing.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          release: false
+          install: make perl
+
+      # The SUPPORTED developer path, verbatim, so this job cannot drift from what docs/build.md tells
+      # a human to type. Every step re-sources it because each `run:` is a fresh shell.
+      - name: Native MSVC library build (WSAPoll)
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl
+
+      - name: Run the MSVC runtime probes (PAL socket runtime, PAL threads, C11 atomics)
+        timeout-minutes: 5
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl test-msvc
+
+      # A public-API-only consumer, built with no -Isrc: proves the INSTALLED surface is sufficient,
+      # not merely that the library's own TUs compile.
+      - name: Link and run a public-API consumer
+        timeout-minutes: 5
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl check-msvc-consumer
+
+      # The acceptance property for a consumer that builds its whole stack with cl.
+      - name: No MinGW runtime dependency
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl check-msvc-no-mingw
+
+      - name: Public headers compile standalone under MSVC
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl check-msvc-headers
+
+      # The completion backend through the same toolchain mapping. Proves the MSVC path is not tied to
+      # one event backend, and that the per-toolchain object tree keeps the two archives apart.
+      - name: Native MSVC library build + probes (IOCP)
+        timeout-minutes: 10
+        run: |
+          source scripts/msvc-env.sh
+          make CC=cl BACKEND=iocp
+          make CC=cl BACKEND=iocp test-msvc
+
   windows-iocp:
     name: Windows (IOCP)
     runs-on: windows-latest
