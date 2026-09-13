@@ -298,7 +298,30 @@ UTEST(reject_drain, byte_cap_ends_the_drain_without_promising_delivery) {
 /* Deadline expiry: a large budget with a very short deadline against a client that under-delivers,
  * so the deadline is necessarily what ends the drain. */
 UTEST(reject_drain, deadline_ends_the_drain) {
-    ASSERT_EQ(0, rd_start(1024 * 1024, 50));
+    /* 1 s, not 50 ms. A TEST-STABILITY adjustment, not a correctness fix, and the evidence for it is
+     * weaker than it looks -- see below.
+     *
+     * The byte cap is 1 MiB and the client sends 80 KiB and stops, so the cap can never end this drain
+     * and the deadline still has to, which is what the test is named for. But the deadline is also a
+     * HARD bound on a BEST-EFFORT delivery (docs/contracts/early_rejection_drain.md), so a deadline
+     * that expires before the already-queued 413 flushes destroys the very response the next line
+     * asserts -- and does so entirely WITHIN contract. The test was therefore asserting more than the
+     * contract promises whenever the machine is slow enough. Under ASan it lost about 1 run in 7
+     * (#307); the client's 4 s receive timeout rules out mere impatience.
+     *
+     * IT DOES NOT MEASURABLY REDUCE THE FAILURE RATE, and that was measured rather than assumed. A
+     * controlled run -- one runner, one checkout, one library build, identical compile lines apart
+     * from this constant, the two variants ALTERNATING so host-load drift could not bias one side --
+     * gave 7 failures in 40 at 50 ms against 6 in 40 at 1 s. That is noise. This test's own failures
+     * went 4 to 2, also noise at those counts.
+     *
+     * What the experiment did show is that the suite is roughly 15-20% flaky under ASan on io_uring
+     * REGARDLESS of this constant, spread across at least four tests (#307). So the change is kept on
+     * the contract argument alone: the test should not assert delivery under a bound the contract
+     * permits to defeat it. It is not a fix for the flakiness, and treating it as one would be
+     * mistaking a tidier test for a more reliable one. The bound under test is "a deadline bounds the
+     * drain", not "50 ms specifically". */
+    ASSERT_EQ(0, rd_start(1024 * 1024, 1000));
     int fd = rd_connect();
     ASSERT_TRUE(fd >= 0);
 
