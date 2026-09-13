@@ -88,6 +88,20 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp
 
+      # Unit suites over the portable completion double. This is the only completion backend that runs
+      # on every POSIX runner, so it is where completion-axis coverage is cheapest; before this the
+      # backend had smoke tests only. The matrix runs it on macOS too, which had no completion-axis
+      # unit coverage at all. The list is derived from the suites already passing on both IOCP and
+      # io_uring, minus COMPLETION_EXCLUDE -- the single documented exclusion set shared with the
+      # sanitized lanes, so a suite is never enrolled in one completion lane and held out of another
+      # by accident. The gate below keeps the derivation honest.
+      - name: Completion-axis unit suites (portable double)
+        timeout-minutes: 15
+        run: make BACKEND=pollcomp test-pollcomp
+
+      - name: Suite list is still equal to its derivation
+        run: make check-pollcomp-suite-list
+
       # TLS-over-completion via the identity mock TLS (no mbedTLS): runs comp_tls_drive,
       # the memory-BIO feed/drain plumbing, and comp_tls_send_response/file/stream for real.
       - name: TLS-over-completion roundtrip smoke test

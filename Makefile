@@ -974,6 +974,96 @@ IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch 
                           tls_integration udp_cmsg unix_socket url version wakeup websocket websocket_client \
                           websocket_overflow
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
+# ---------------------------------------------------------------------------
+# Completion-axis suite exclusions: ONE source, used by every completion lane
+# ---------------------------------------------------------------------------
+#
+# A completion semantic suite set is:  derived eligible suites  -  documented temporary exclusions.
+# Both halves matter. The derivation stops a list becoming a hand-curated wish list; this exclusion
+# set stops a KNOWN-unstable suite being enrolled into a standing job, which would make the job red
+# for a reason nobody learns anything from.
+#
+# Used by the unsanitized pollcomp lane AND the sanitized lanes, deliberately. Separate exclusion
+# lists for "ordinary" and "sanitized" would mean enrolling a suite twice and, worse, could leave a
+# suite excluded from one lane and not the other with no one noticing. When the work behind an entry
+# lands, deleting the line here enrols it EVERYWHERE at once.
+#
+# Every entry names the reason and where it is tracked, and is meant to be deleted, not grown.
+#   reject_drain  #307: timing-sensitive teardown, flaky on the completion axis independently of
+#                 sanitizers. The crash it used to cause is fixed (#308); the flakiness is not. It
+#                 still runs in the Windows and io_uring unsanitized lanes, which predate this.
+COMPLETION_EXCLUDE ?= reject_drain
+
+# ---------------------------------------------------------------------------
+# Portable completion double (BACKEND=pollcomp): unit suites
+# ---------------------------------------------------------------------------
+#
+# pollcomp exists to let the COMPLETION DRIVER be exercised anywhere: it is a poll()-based double for
+# the completion seam, with no kernel version requirement, no liburing, and no Windows. Until now it
+# ran smoke tests only, so the one completion backend that works on every POSIX runner -- and the only
+# one that can run under ASan/UBSan -- had no unit-suite coverage at all, while IOCP ran ~97 suites and
+# io_uring ~72.
+#
+# The list is DERIVED, not chosen: it is exactly the suites already passing on BOTH existing completion
+# backends (WIN_IOCP_TEST_SUITES and IOURING_TEST_SUITES), minus the ones that are Windows-only by
+# construction (iocp_engine, unix_socket_node_win, the PAL socket-runtime pair) or io_uring-only
+# (iouring_sqe_fail). Passing on two independent completion backends is the strongest available
+# predictor for a third, and deriving the list means it cannot drift into a hand-curated wish list.
+#
+# Deliberately NOT the readiness-axis suites (event, event_caps, event_ctx): those drive
+# kl_event_wait directly, which is a readiness concept, and they are excluded from every completion
+# backend for that reason.
+#
+# Regenerate after changing either source list:
+#   make print-pollcomp-suites
+# The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
+# COMPLETION_EXCLUDE, which is what the lanes actually run.
+POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch datagram_life \
+                        datagram_multicast datagram_public datagram_socket decompress dgram_close \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
+                        event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
+                        http2_client http2_overflow http_async http_body_reader http_client \
+                        http_client_happy_eyeballs http_client_pool http_client_proxy http_client_stream \
+                        http_connection http_cors http_multipart_stream http_overflow http_redirect \
+                        http_request http_response http_router http_server_integration http_server_stats \
+                        http_sse http_tls peer_addr peer_cert proxy_protocol read_flow_control \
+                        reject_drain resolver_cache sockaddr stream_single_shot thread_pool timeout \
+                        timer tls tls_integration url version wakeup websocket websocket_client \
+                        websocket_overflow
+POLLCOMP_TEST_SUITES = $(filter-out $(COMPLETION_EXCLUDE),$(POLLCOMP_ELIGIBLE))
+POLLCOMP_TEST_BIN = $(foreach s,$(POLLCOMP_TEST_SUITES),$(call test_bin_for,$(s)))
+
+test-pollcomp: $(POLLCOMP_TEST_BIN)
+	@failed=0; \
+	for t in $(POLLCOMP_TEST_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME pollcomp TESTS FAILED"; exit 1; fi
+
+# The ELIGIBLE list must stay equal to its own derivation. Checked before exclusions on purpose: the
+# exclusion set is a separate, deliberate subtraction, and folding it in here would leave the gate
+# unable to tell a derivation drift from an exclusion change.
+# Without this the two drift the moment a suite
+# is enrolled on IOCP or io_uring: the comment would still claim the list is derived while it had become
+# hand-maintained, which is worse than never having claimed it.
+check-pollcomp-suite-list:
+	@derived=$$(\
+	    echo $(sort $(filter-out iocp_engine unix_socket_node_win socket_runtime socket_runtime_first_use iouring_sqe_fail,\
+	        $(filter $(WIN_IOCP_TEST_SUITES),$(IOURING_TEST_SUITES))))); \
+	literal=$$(echo $(sort $(POLLCOMP_ELIGIBLE))); \
+	if [ "$$derived" != "$$literal" ]; then \
+	  echo "check-pollcomp-suite-list: POLLCOMP_ELIGIBLE has drifted from its derivation."; \
+	  echo "  derived: $$derived"; \
+	  echo "  literal: $$literal"; \
+	  echo "  Re-derive with: make print-pollcomp-suites"; \
+	  exit 1; \
+	fi; \
+	echo "check-pollcomp-suite-list: OK ($(words $(POLLCOMP_ELIGIBLE)) eligible = derivation; $(words $(POLLCOMP_TEST_SUITES)) run after excluding [$(COMPLETION_EXCLUDE)])"
+# The derivation above, as a command, so the list can be re-derived rather than re-reasoned.
+print-pollcomp-suites:
+	@echo $(sort $(filter-out iocp_engine unix_socket_node_win socket_runtime socket_runtime_first_use iouring_sqe_fail,\
+	          $(filter $(WIN_IOCP_TEST_SUITES),$(IOURING_TEST_SUITES))))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
 	for t in $(IOURING_TEST_BIN); do \
