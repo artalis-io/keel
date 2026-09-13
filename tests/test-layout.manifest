@@ -88,6 +88,7 @@ tests/test_dgram_send.c
 tests/test_dgram_slots.c
 tests/test_drain.c
 tests/test_error.c
+tests/test_fd_type_convention.c
 tests/test_event.c
 tests/test_event_caps.c
 tests/test_event_ctx.c
