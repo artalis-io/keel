@@ -373,6 +373,51 @@ jobs:
         timeout-minutes: 10
         run: make debug-test
 
+  sanitized-completion:
+    name: Sanitized completion (pollcomp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Sanitized completion coverage already existed, but only as SMOKE roundtrips
+      # (smoke-pollcomp-asan, smoke-completion-inject-asan, smoke-iouring-asan). No UNIT SUITE had ever
+      # run on a completion backend under sanitizers: the ASan + UBSan job builds the default backend,
+      # epoll on Linux. A smoke exercises the happy path; the unit suites are what abort, cancel, reset
+      # and tear down mid-flight, which is where completion-lifetime bugs surface (#307).
+      #
+      # The portable double first, and always-on, because it is deterministic: no kernel version, no
+      # liburing, no Windows. A failure here is a bug in the completion DRIVER rather than in one
+      # kernel implementation of it, which makes it the better standing oracle.
+      - name: ASan + UBSan over the portable completion double
+        run: make debug-pollcomp
+
+      # The set relationship is an invariant, not a convention: every completion-eligible suite runs
+      # sanitized too, unless it is in the one documented exclusion set. A suite enrolled on the
+      # completion axis but never sanitized there looks exactly like a suite that is covered, which
+      # is the shape of gap that hid #307.
+      - name: Sanitized lanes cover the same suites as the lanes they sanitize
+        run: make check-completion-lane-parity
+
+  sanitized-completion-iouring:
+    name: Sanitized completion (io_uring)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+
+      # The real native completion backend, which a double cannot stand in for. Kept as its own job so
+      # a kernel or runner problem with io_uring cannot take the deterministic pollcomp lane down with
+      # it: the standing guarantee is "at least one completion backend is sanitized on every PR", and
+      # that guarantee should not depend on the runner kernel.
+      - name: ASan + UBSan over io_uring
+        run: make debug-iouring
+
   fuzz:
     name: Fuzz Testing
     runs-on: ubuntu-latest
