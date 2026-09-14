@@ -211,7 +211,7 @@ jobs:
         with:
           msystem: MINGW64
           release: false
-          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf perl
+          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf perl diffutils
 
       # WSAPoll event backend + Winsock provider. Builds and links the entire
       # library on Windows; TCP HTTP server + sync/async client, the UDP
