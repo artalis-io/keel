@@ -81,7 +81,7 @@ UTEST(response, send_to_pipe) {
     kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     kl_test_closesock(pipefd[0]);
@@ -112,7 +112,7 @@ UTEST(response, head_suppresses_body) {
     kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     kl_test_closesock(pipefd[0]);
@@ -147,7 +147,7 @@ UTEST(response, keep_alive_conditional) {
     kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     kl_test_closesock(pipefd[0]);
@@ -199,7 +199,7 @@ UTEST(response, streaming_chunked) {
     kl_test_closesock(pipefd[1]);
 
     char buf[2048];
-    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     kl_test_closesock(pipefd[0]);
@@ -409,7 +409,7 @@ UTEST(response, buffer_send_returns_1_on_eagain) {
     char fill[65536];
     memset(fill, 'X', sizeof(fill));
     while (1) {
-        ssize_t w = kl_test_sockwrite(sv[0], fill, sizeof(fill));
+        kl_ssize_t w = kl_test_sockwrite(sv[0], fill, sizeof(fill));
         if (w < 0) break;
     }
 
@@ -451,7 +451,7 @@ UTEST(response, buffer_send_resumes_from_offset) {
 
     /* Verify output */
     char buf[1024];
-    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     kl_test_closesock(pipefd[0]);

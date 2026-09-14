@@ -31,7 +31,9 @@
 #include "../src/socket.h"          /* KlSocketProvider / KlSocketOps + kl_sock_* seam (real close) */
 
 #include <string.h>
-#include <unistd.h>            /* close() */
+#if !defined(_MSC_VER)
+#include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; this TU never calls close() directly */
 
 /* ── fully-virtual mock provider: fake fds, injectable per-step failures, exact close accounting ──── */
 typedef struct {

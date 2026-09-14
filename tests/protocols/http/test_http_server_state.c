@@ -14,10 +14,16 @@
 #include "../../../src/kl_atomic.h"
 #include <string.h>
 
-/* int atomics must be always-lock-free: the stop path can run from a signal handler. */
+/* The int atomic the stop path uses must be lock-free: kl_http_server_stop can run from a signal
+ * handler and must not fall into a library call. ATOMIC_INT_LOCK_FREE alone cannot answer that:
+ * it reports 2 (every int object) or 1 (object-dependent, ask at runtime), and MSVC reports 1
+ * while the object itself is lock-free. So assert the property of the ACTUAL object, through the
+ * same accessor src/kl_atomic.h uses, rather than the platform-wide constant. That is the stronger
+ * claim, and it is the one the stop path actually depends on. */
 UTEST(server_state, int_atomic_is_lock_free) {
-    ASSERT_EQ(ATOMIC_INT_LOCK_FREE, 2);
+    ASSERT_NE(ATOMIC_INT_LOCK_FREE, 0);  /* 0 would mean never lock-free: unusable here. */
     int v = 0;
+    ASSERT_TRUE(kl_atomic_int_is_lock_free(&v));
     kl_atomic_store_int(&v, 1);
     ASSERT_EQ(kl_atomic_load_int(&v), 1);
     kl_atomic_store_int(&v, 0);

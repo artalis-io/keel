@@ -874,7 +874,7 @@ UTEST(auto_ping, sends_ping) {
 
     /* Read the ping frame from the other end */
     uint8_t buf[16];
-    ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
+    kl_ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
     ASSERT_EQ(nr, 2);  /* empty ping: 2-byte header */
     ASSERT_EQ(buf[0], 0x89);  /* FIN=1, opcode=ping */
     ASSERT_EQ(buf[1], 0x00);  /* no mask, 0 payload */

@@ -37,7 +37,9 @@
 #include "../src/datagram_life.h"   /* kl_dgram_life_dispatch/_target: drive completions like the driver */
 #include "../src/socket.h"          /* KlSocketProvider / KlSocketOps: the close-ordering mock provider */
 #include "../src/datagram_open.h"   /* kl_datagram_teardown: synchronous owner-destruction (Option A) */
+#if !defined(_MSC_VER)
 #include <unistd.h>                 /* close() */
+#endif   /* MSVC has no <unistd.h>; close replaced by kl_test_closesock */
 
 #include <string.h>
 
@@ -109,7 +111,7 @@ static const KlEventOps MC_EVOPS = { .caps = mc_caps, .completion = &MC_COMP, .a
 /* A mock socket provider whose only job is to record the close ordering (del must precede close). It
  * actually closes the fd so no descriptor leaks. Completion mode never calls its dgram send/recv. */
 static int mc_sock_close(void *pctx, KlSocketHandle fd) {
-    (void)pctx; g_mc.close_seq = ++g_mc.seq; return close((int)fd);
+    (void)pctx; g_mc.close_seq = ++g_mc.seq; return kl_test_closesock((int)fd);
 }
 static const KlSocketOps MC_SOCK_OPS = { .close = mc_sock_close };
 static const KlSocketProvider MC_SP = { .ops = &MC_SOCK_OPS };
@@ -232,7 +234,7 @@ UTEST(datagram_public, init_failure_keeps_fd) {
     KlDatagramConfig c = cfg_for(fd, 0 /*bad*/, 1500);   /* send_slots 0 → core init fails */
     ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
     ASSERT_NE((int)KL_ERR_NONE, (int)kl_datagram_last_error(&dg));   /* error set, fd NOT adopted */
-    (void)close((int)fd);   /* caller still owns the fd */
+    (void)kl_test_closesock((int)fd);   /* caller still owns the fd */
 }
 
 UTEST(datagram_public, send_fixed_slot_geometry_and_fifo) {
@@ -424,7 +426,7 @@ UTEST(datagram_public, registration_failure_keeps_fd) {
     ASSERT_EQ(0, g_mc.recv_posted);   /* nothing posted (init never reached the core) */
     ASSERT_EQ(0, g_mc.send_posted);
     ASSERT_EQ(0, g_mc.close_seq);      /* fd NOT closed; the caller retains it */
-    (void)close((int)fd);
+    (void)kl_test_closesock((int)fd);
 }
 
 /* Lifecycle ordering: register BEFORE the first post; on close, deregister BEFORE the socket close
@@ -480,7 +482,7 @@ UTEST(datagram_public, alloc_failure_during_prep_leaves_fd_unregistered) {
     ASSERT_EQ(0, g_mc.add_calls);   /* registration NEVER ran; prep failed first → fd NOT associated */
     ASSERT_EQ(0, g_mc.del_calls);   /* and no del-as-rollback was relied upon */
     ASSERT_NE((int)KL_ERR_NONE, (int)kl_datagram_last_error(&dg));
-    (void)close((int)fd);           /* the caller keeps a clean, un-associated fd */
+    (void)kl_test_closesock((int)fd);           /* the caller keeps a clean, un-associated fd */
 }
 
 /* Terminal QUARANTINE classification (the fail-closed leak of the life-owned inbound storage) is proven
@@ -823,7 +825,7 @@ UTEST(datagram_public, m2_want_caps_gate_failloud) {
     KlDatagramConfig bad = cfg_caps(fd, KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS);
     ASSERT_EQ(-1, kl_datagram_init(&dg, &bad));
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
-    (void)close((int)fd);   /* caller still owns the fd (not adopted) */
+    (void)kl_test_closesock((int)fd);   /* caller still owns the fd (not adopted) */
     /* a subset request succeeds */
     KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
     KlDatagramConfig ok = cfg_caps(mk_fd(), KL_DGRAM_CAP_SOURCE_PIN);
@@ -844,7 +846,7 @@ UTEST(datagram_public, m2_null_caps_no_optional) {
     KlDatagramConfig cc = cfg_caps(fd, KL_DGRAM_CAP_CONNECTED);
     ASSERT_EQ(-1, kl_datagram_init(&dg2, &cc));             /* any cap → fail */
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg2));
-    (void)close((int)fd);
+    (void)kl_test_closesock((int)fd);
     g_mock_caps_null = 0;
 }
 
@@ -859,7 +861,7 @@ UTEST(datagram_public, m2_family_limited_rejects_at_init) {
     KlDatagramConfig c = cfg_caps(fd, KL_DGRAM_CAP_BROADCAST);
     ASSERT_EQ(-1, kl_datagram_init(&dg, &c));               /* BROADCAST not usable on this fd */
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
-    (void)close((int)fd);
+    (void)kl_test_closesock((int)fd);
     /* model an IPv4 fd: BROADCAST now present → granted */
     g_mock_caps |= KL_DGRAM_CAP_BROADCAST;
     KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
@@ -1092,7 +1094,7 @@ UTEST(datagram_public, m6a_optional_caps_dont_relax_want_gate) {
     c.optional_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* satisfiable optional: must not rescue the bad want */
     ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
-    (void)close((int)fd);
+    (void)kl_test_closesock((int)fd);
 }
 
 /* kl_datagram_set_tos routes the socket-default TOS to the provider's set_tos op with the fd's family

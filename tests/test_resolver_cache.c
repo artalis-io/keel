@@ -187,8 +187,7 @@ UTEST(rescache, ttl_expiry) {
     ASSERT_EQ(mock_resolve_count, 1);
 
     /* Wait for TTL to expire (60 ms >> 20 ms TTL) */
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = 60000000 }; /* 60 ms */
-    nanosleep(&ts, NULL);
+    kl_test_sleep_ms(60);
 
     /* Should be a miss now */
     reset_done();

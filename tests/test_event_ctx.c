@@ -10,7 +10,7 @@ static int set_nonblocking(int fd) {
 
 typedef struct {
     int called;
-    int got_fd;
+    KlSocketHandle got_fd;
     KlEventMask got_mask;
 } WatcherCtx;
 

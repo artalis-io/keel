@@ -410,14 +410,14 @@ UTEST(dgram_batch, create_alloc_failure_recv_both_mock) {
 /* ── a non-IP datagram fd reports NONE of the high-throughput support bits (exact-fd family rule) ── */
 UTEST(dgram_batch, non_ip_fd_reports_no_m5_caps) {
 #if defined(AF_UNIX)
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (fd < 0) return;   /* AF_UNIX/SOCK_DGRAM not supported here: skip */
+    KlSocketHandle fd = (KlSocketHandle)socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (!kl_handle_valid(fd)) return;   /* AF_UNIX/SOCK_DGRAM not supported here: skip */
     const KlDatagramOps *ops = kl_sockdef_dgram();
-    unsigned caps = ops->caps(NULL, (KlSocketHandle)fd);
+    unsigned caps = ops->caps(NULL, fd);
     const unsigned m5 = KL_DGRAM_CAP_RX_BATCH | KL_DGRAM_CAP_TX_BATCH |
                         KL_DGRAM_CAP_GSO | KL_DGRAM_CAP_GRO;
     ASSERT_EQ(0u, (caps & m5));   /* a non-IP fd must never be told it has UDP batch/GSO/GRO */
-    close(fd);
+    kl_test_closesock((int)fd);   /* harness helper takes int by convention */
 #endif
 }
 
@@ -458,13 +458,13 @@ UTEST(dgram_batch, gso_busy_refuses_free) {
 
 /* A bound raw rx UDP socket on 127.0.0.1; returns its port (0 = fail). */
 static int mk_rx(int *fd_out) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_DGRAM, 0);   /* test fds are small: see net_compat.h */
     if (fd < 0) return 0;
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(0x7f000001);
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return 0; }
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { kl_test_closesock(fd); return 0; }
     socklen_t sl = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &sl) != 0) { close(fd); return 0; }
+    if (getsockname(fd, (struct sockaddr *)&a, &sl) != 0) { kl_test_closesock(fd); return 0; }
     (void)kl_test_set_nonblock(fd);   /* net_compat: fcntl on POSIX, ioctlsocket on Winsock */
     *fd_out = fd;
     return (int)ntohs(a.sin_port);
@@ -1048,11 +1048,11 @@ static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0;
 
 /* send `n` datagrams from a throwaway socket to `port` */
 static void blast(int n, uint16_t port, const char *const *msgs) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_DGRAM, 0);   /* test fds are small: see net_compat.h */
     struct sockaddr_in d; memset(&d, 0, sizeof(d));
     d.sin_family = AF_INET; d.sin_addr.s_addr = htonl(0x7f000001); d.sin_port = htons(port);
-    for (int i = 0; i < n; i++) (void)sendto(fd, msgs[i], strlen(msgs[i]), 0, (struct sockaddr *)&d, sizeof(d));
-    close(fd);
+    for (int i = 0; i < n; i++) (void)sendto(fd, msgs[i], (int)strlen(msgs[i]), 0, (struct sockaddr *)&d, sizeof(d));
+    kl_test_closesock(fd);
 }
 
 /* Basic recv batching over the DEFAULT provider (RX_BATCH on Linux, single-recv fallback on macOS):

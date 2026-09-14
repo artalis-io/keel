@@ -51,7 +51,7 @@ static kl_ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t le
     m->read_len -= to_copy;
     if (m->read_len > 0)
         memmove(m->read_buf, m->read_buf + to_copy, m->read_len);
-    return (ssize_t)to_copy;
+    return (kl_ssize_t)to_copy;
 }
 
 static kl_ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
@@ -62,7 +62,7 @@ static kl_ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, si
     size_t to_copy = len < space ? len : space;
     memcpy(m->write_buf + m->write_len, buf, to_copy);
     m->write_len += to_copy;
-    return (ssize_t)to_copy;
+    return (kl_ssize_t)to_copy;
 }
 
 static KlTlsResult mock_shutdown(KlTls *self, KlSocketHandle fd) {
@@ -297,7 +297,7 @@ UTEST(tls, response_file_through_mock) {
     ASSERT_TRUE(tmpfd >= 0);
     const char *file_content = "TLS file content here!";
     size_t file_len = strlen(file_content);
-    ASSERT_EQ((ssize_t)file_len, write(tmpfd, file_content, file_len));
+    ASSERT_EQ((kl_ssize_t)file_len, write(tmpfd, file_content, file_len));
 
     int pipefd[2];
     ASSERT_EQ(pipe(pipefd), 0);
@@ -338,7 +338,7 @@ UTEST(tls, file_send_yields_on_want_write) {
     ASSERT_TRUE(tmpfd >= 0);
     const char *data = "yield test data";
     size_t data_len = strlen(data);
-    ASSERT_EQ((ssize_t)data_len, write(tmpfd, data, data_len));
+    ASSERT_EQ((kl_ssize_t)data_len, write(tmpfd, data, data_len));
 
     int pipefd[2];
     ASSERT_EQ(pipe(pipefd), 0);

@@ -41,7 +41,7 @@ static kl_ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t le
     m->read_len -= to_copy;
     if (m->read_len > 0)
         memmove(m->read_buf, m->read_buf + to_copy, m->read_len);
-    return (ssize_t)to_copy;
+    return (kl_ssize_t)to_copy;
 }
 
 static kl_ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
@@ -52,7 +52,7 @@ static kl_ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, si
     size_t to_copy = len < space ? len : space;
     memcpy(m->write_buf + m->write_len, buf, to_copy);
     m->write_len += to_copy;
-    return (ssize_t)to_copy;
+    return (kl_ssize_t)to_copy;
 }
 
 static KlTlsResult mock_shutdown(KlTls *self, KlSocketHandle fd) {
@@ -129,14 +129,14 @@ UTEST(tls, mock_read_write) {
 
     /* Read through vtable */
     char buf[64];
-    ssize_t nr = m.base.read(&m.base, -1, buf, sizeof(buf));
+    kl_ssize_t nr = m.base.read(&m.base, -1, buf, sizeof(buf));
     ASSERT_EQ((size_t)nr, test_len);
     ASSERT_EQ(0, memcmp(buf, test_data, test_len));
 
     /* Write through vtable */
     const char *out = "Response";
     size_t out_len = strlen(out);
-    ssize_t nw = m.base.write(&m.base, -1, out, out_len);
+    kl_ssize_t nw = m.base.write(&m.base, -1, out, out_len);
     ASSERT_EQ((size_t)nw, out_len);
     ASSERT_EQ(0, memcmp(m.write_buf, out, out_len));
 }

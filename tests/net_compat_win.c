@@ -91,3 +91,8 @@ fail:
 const void *kl_test_builtin_provider(void) {
     return (const void *)kl_socket_provider_winsock();
 }
+
+/* See net_compat.h: millisecond sleep. */
+void kl_test_sleep_ms(unsigned ms) {
+    Sleep((DWORD)ms);
+}

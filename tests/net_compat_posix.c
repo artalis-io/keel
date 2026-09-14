@@ -6,6 +6,7 @@
  * their pre-port form on POSIX. See tests/net_compat.h.
  */
 #include "net_compat.h"
+#include <time.h>      /* nanosleep, struct timespec */
 #include "../src/socket.h"   /* kl_socket_provider_* */
 
 int kl_test_closesock(int fd) {
@@ -47,4 +48,12 @@ int kl_test_socketpair(int sv[2]) {
 /* See net_compat.h: the platform's built-in socket provider, named per platform. */
 const void *kl_test_builtin_provider(void) {
     return (const void *)kl_socket_provider_posix();
+}
+
+/* See net_compat.h: millisecond sleep. */
+void kl_test_sleep_ms(unsigned ms) {
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(ms / 1000u);
+    ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
+    nanosleep(&ts, NULL);
 }
