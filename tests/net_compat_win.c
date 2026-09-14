@@ -101,3 +101,23 @@ void kl_test_sleep_ms(unsigned ms) {
 KlTestThreadId kl_test_thread_id(void) {
     return (KlTestThreadId)GetCurrentThreadId();
 }
+
+#if defined(_MSC_VER)
+/* See tests/win_prelude.h. Returning from this handler is the entire point: it makes the UCRT
+ * report the error through errno like POSIX instead of fast-failing the process. Test-only;
+ * the library never installs it and its behaviour is unchanged. */
+#include <stdlib.h>
+#include <stdint.h>
+static void keel_test_invalid_parameter(const wchar_t *expr, const wchar_t *fn,
+                                        const wchar_t *file, unsigned int line, uintptr_t res) {
+    (void)expr; (void)fn; (void)file; (void)line; (void)res;
+}
+
+/* Defined by the test TU: UTEST_MAIN()'s main(), renamed by the prelude. */
+int keel_utest_main(int argc, const char *const argv[]);
+
+int main(int argc, const char *const argv[]) {
+    _set_invalid_parameter_handler(keel_test_invalid_parameter);
+    return keel_utest_main(argc, argv);
+}
+#endif

@@ -31,4 +31,21 @@
 #define strncasecmp _strnicmp
 #endif
 
+/* The UCRT TERMINATES the process when a CRT call is handed an invalid file descriptor:
+ * _close(10) on an unopened fd never returns, the process dies with 0xC0000409, and utest
+ * never flushes, so the suite reports nothing at all. glibc and MinGW return -1/EBADF.
+ * Several suites hand deliberately-fabricated descriptors to error paths and expect that
+ * POSIX behaviour; a no-op invalid-parameter handler restores it.
+ *
+ * The handler has to be installed before any test runs. utest.h generates main() from
+ * UTEST_MAIN(), and vendor/ is not ours to modify, so the generated entry point is renamed
+ * here -- this header is force-included ahead of utest.h -- and the real main() lives in
+ * tests/net_compat_win.c, which is built WITHOUT this prelude and so keeps the name. Every
+ * Windows test binary links that TU. A suite that writes its own main() (test_http_redirect)
+ * is renamed identically and works the same way. No CRT-section constructor tricks: this is
+ * one ordinary function calling another. */
+#if defined(_MSC_VER)
+#define main keel_utest_main
+#endif
+
 #endif /* KEEL_TESTS_WIN_PRELUDE_H */
