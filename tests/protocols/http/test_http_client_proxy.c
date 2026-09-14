@@ -12,7 +12,8 @@
 
 #include <string.h>
 #include "net_compat.h"
-#include <pthread.h>
+#include "platform_socket.h"   /* PAL gate: this TU calls socket() directly */
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 #include <stdio.h>
 
@@ -20,7 +21,8 @@
 
 static int make_listener(int *out_port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant: first native call */
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
     int on = 1;
@@ -52,10 +54,10 @@ static int accept_with_timeout(int listen_fd, int timeout_ms)
 {
     int rc = kl_test_poll1(listen_fd, 0, timeout_ms);
     if (rc <= 0) return -1;
-    return accept(listen_fd, NULL, NULL);
+    return (int)accept(listen_fd, NULL, NULL);
 }
 
-static ssize_t read_until(int fd, char *buf, size_t buf_sz,
+static kl_ssize_t read_until(int fd, char *buf, size_t buf_sz,
                            const char *needle, int timeout_ms)
 {
     size_t total = 0;
@@ -63,7 +65,7 @@ static ssize_t read_until(int fd, char *buf, size_t buf_sz,
         int rc = kl_test_poll1(fd, 0, timeout_ms);
         if (rc <= 0) break;
 
-        ssize_t r = kl_test_sockread(fd, buf + total, buf_sz - 1 - total);
+        kl_ssize_t r = kl_test_sockread(fd, buf + total, buf_sz - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
         buf[total] = '\0';
@@ -71,7 +73,7 @@ static ssize_t read_until(int fd, char *buf, size_t buf_sz,
         if (strstr(buf, needle))
             break;
     }
-    return (ssize_t)total;
+    return (kl_ssize_t)total;
 }
 
 /* ── Thread function context types ───────────────────────────────── */
@@ -86,7 +88,7 @@ typedef struct {
     const char     *method;
 } ProxyReqCtx;
 
-static void *proxy_request_thread(void *arg)
+static void proxy_request_thread(void *arg)
 {
     ProxyReqCtx *c = arg;
     KlHttpClientResponse resp;
@@ -96,7 +98,6 @@ static void *proxy_request_thread(void *arg)
     c->err = resp.error;
     if (rc == 0) kl_http_client_response_free(&resp);
     c->done = 1;
-    return NULL;
 }
 
 static KlTls *null_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)
@@ -132,14 +133,14 @@ UTEST(proxy, absolute_url_http) {
                           .err = KL_ERR_NONE,
                           .url = "http://example.com/hello", .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &rctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &rctx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
 
     char buf[2048];
-    ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+    kl_ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
     ASSERT_GT(n, 0);
 
     /* Verify absolute-form URL */
@@ -150,7 +151,7 @@ UTEST(proxy, absolute_url_http) {
     kl_test_sockwrite(client_fd, resp, strlen(resp));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     ASSERT_EQ(rctx.status, 200);
 
     kl_test_closesock(listen_fd);
@@ -178,14 +179,14 @@ UTEST(proxy, connect_request_format) {
                           .url = "https://secure.example.com:8443/api",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &cctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &cctx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
 
     char buf[2048];
-    ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+    kl_ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
     ASSERT_GT(n, 0);
 
     /* Verify CONNECT format */
@@ -198,7 +199,7 @@ UTEST(proxy, connect_request_format) {
     kl_test_sockwrite(client_fd, reject, strlen(reject));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(listen_fd);
 }
 
@@ -227,14 +228,14 @@ UTEST(proxy, connect_with_auth) {
                           .url = "https://secure.example.com/path",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &actx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &actx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
 
     char buf[2048];
-    ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+    kl_ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
     ASSERT_GT(n, 0);
 
     /* Verify Proxy-Authorization header present */
@@ -244,7 +245,7 @@ UTEST(proxy, connect_with_auth) {
     kl_test_sockwrite(client_fd, reject, strlen(reject));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(listen_fd);
 }
 
@@ -270,8 +271,8 @@ UTEST(proxy, connect_success_transitions_to_tls) {
                           .url = "https://example.com/path",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &tctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &tctx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
@@ -284,7 +285,7 @@ UTEST(proxy, connect_success_transitions_to_tls) {
     kl_test_sockwrite(client_fd, ok, strlen(ok));
 
     /* Client will try TLS handshake with null factory → fail with TLS error */
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(client_fd);
     kl_test_closesock(listen_fd);
 
@@ -313,8 +314,8 @@ UTEST(proxy, connect_rejected) {
                           .url = "https://example.com/blocked",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &rctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &rctx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
@@ -327,7 +328,7 @@ UTEST(proxy, connect_rejected) {
     kl_test_sockwrite(client_fd, reject, strlen(reject));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(listen_fd);
 
     ASSERT_EQ((int)rctx.err, (int)KL_ERR_PROXY);
@@ -354,8 +355,8 @@ UTEST(proxy, connect_buf_overflow) {
                           .url = "https://example.com/overflow",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &octx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &octx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
@@ -375,10 +376,10 @@ UTEST(proxy, connect_buf_overflow) {
     }
     /* No final \r\n\r\n: buffer fills without end-of-headers */
     kl_test_sockwrite(client_fd, giant, (size_t)off);
-    usleep(50000);
+    kl_test_sleep_ms(50);
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(listen_fd);
 
     ASSERT_TRUE(octx.err == KL_ERR_PROXY || octx.err == KL_ERR_IO);
@@ -403,15 +404,15 @@ UTEST(proxy, dns_resolves_proxy_host) {
                           .url = "http://nonexistent-host.invalid/test",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &dctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &dctx);
 
     /* If we get a connection, DNS resolved the proxy (not the target) */
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
 
     char buf[2048];
-    ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+    kl_ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
     ASSERT_GT(n, 0);
     ASSERT_TRUE(strstr(buf, "GET http://nonexistent-host.invalid/test HTTP/1.1\r\n") != NULL);
 
@@ -419,7 +420,7 @@ UTEST(proxy, dns_resolves_proxy_host) {
     kl_test_sockwrite(client_fd, resp, strlen(resp));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_test_closesock(listen_fd);
 }
 
@@ -442,14 +443,14 @@ UTEST(proxy, redirect_inherits) {
                           .url = "http://redirect-test.example.com/start",
                           .method = "GET" };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, proxy_request_thread, &rctx);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &rctx);
 
     int client_fd = accept_with_timeout(listen_fd, 3000);
     ASSERT_GE(client_fd, 0);
 
     char buf[2048];
-    ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+    kl_ssize_t n = read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
     ASSERT_GT(n, 0);
     ASSERT_TRUE(strstr(buf, "http://redirect-test.example.com/start") != NULL);
 
@@ -457,7 +458,7 @@ UTEST(proxy, redirect_inherits) {
     kl_test_sockwrite(client_fd, resp, strlen(resp));
     kl_test_closesock(client_fd);
 
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     ASSERT_EQ(rctx.status, 200);
 
     kl_test_closesock(listen_fd);

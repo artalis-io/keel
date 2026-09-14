@@ -7,26 +7,27 @@
  */
 #include "net_compat.h"
 #include <time.h>      /* nanosleep, struct timespec */
+#include <pthread.h>   /* pthread_self: harness thread identity only */
 #include "../src/socket.h"   /* kl_socket_provider_* */
 
-int kl_test_closesock(int fd) {
+int kl_test_closesock(KlSocketHandle fd) {
     return close(fd);
 }
 
-int kl_test_set_nonblock(int fd) {
+int kl_test_set_nonblock(KlSocketHandle fd) {
     int fl = fcntl(fd, F_GETFL, 0);
     return fl < 0 ? -1 : fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-long kl_test_sockwrite(int fd, const void *buf, size_t len) {
+long kl_test_sockwrite(KlSocketHandle fd, const void *buf, size_t len) {
     return (long)write(fd, buf, len);
 }
 
-long kl_test_sockread(int fd, void *buf, size_t len) {
+long kl_test_sockread(KlSocketHandle fd, void *buf, size_t len) {
     return (long)read(fd, buf, len);
 }
 
-int kl_test_poll1(int fd, int for_write, int timeout_ms) {
+int kl_test_poll1(KlSocketHandle fd, int for_write, int timeout_ms) {
     struct pollfd p;
     p.fd = fd;
     p.events = (short)(for_write ? POLLOUT : POLLIN);
@@ -34,7 +35,7 @@ int kl_test_poll1(int fd, int for_write, int timeout_ms) {
     return poll(&p, 1, timeout_ms);
 }
 
-int kl_test_set_rcvtimeo(int fd, int ms) {
+int kl_test_set_rcvtimeo(KlSocketHandle fd, int ms) {
     struct timeval tv;
     tv.tv_sec = ms / 1000;
     tv.tv_usec = (ms % 1000) * 1000;
@@ -56,4 +57,11 @@ void kl_test_sleep_ms(unsigned ms) {
     ts.tv_sec  = (time_t)(ms / 1000u);
     ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
     nanosleep(&ts, NULL);
+}
+
+/* See net_compat.h: calling thread identity. */
+KlTestThreadId kl_test_thread_id(void) {
+    /* pthread_t is not required to be integral, but on every platform Keel builds for it is a
+     * pointer or an integer, and this value is only ever compared with another from this run. */
+    return (KlTestThreadId)(uintptr_t)pthread_self();
 }

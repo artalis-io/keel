@@ -25,9 +25,11 @@
 #include <errno.h>
 #include <string.h>
 #if !defined(_MSC_VER)
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; the harness helpers cover it */
 #endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "net_compat.h"
 
 /* ── A provider whose io_status is caller-programmed and NEVER reads errno ──
@@ -170,7 +172,7 @@ static void iod_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *iod_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
+static void iod_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return; }
 
 typedef struct { int done, status; } IodCtx;
 static void iod_done(KlHttpClient *cl, void *ud) {
@@ -187,8 +189,8 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     KlHttpServerConfig scfg = { .port = 0, .max_connections = 8, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
     kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
-    pthread_t tid;
-    ASSERT_EQ(0, pthread_create(&tid, NULL, iod_server_thread, &srv));
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, iod_server_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_GT(srv.bound_port, 0);
     g_iod_port = srv.bound_port;
@@ -223,7 +225,7 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 
     ASSERT_TRUE(done);

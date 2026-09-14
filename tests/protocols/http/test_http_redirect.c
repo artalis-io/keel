@@ -8,9 +8,11 @@
 
 #include <string.h>
 #if !defined(_MSC_VER)
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; the harness helpers cover it */
 #endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 /* ══════════════════════════════════════════════════════════════════════
  * Part 1: URL resolution tests (pure, no server needed)
@@ -107,18 +109,17 @@ UTEST(url_resolve, bare_relative) {
 /* ── Test server globals ─────────────────────────────────────────── */
 
 static KlHttpServer redir_srv;
-static pthread_t redir_tid;
+static KlPlatThread redir_tid;
 static int redir_port;
 
 static KlHttpServer redir_srv2;
-static pthread_t redir_tid2;
+static KlPlatThread redir_tid2;
 static int redir_port2;
 
 static int servers_started;
 
-static void *server_thread(void *arg) {
+static void server_thread(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
-    return NULL;
 }
 
 static void wait_for_bind(KlHttpServer *s) {
@@ -271,7 +272,7 @@ static void ensure_servers(void) {
     kl_http_server_route(&redir_srv, "*", "/loop", handle_loop, NULL, NULL);
     kl_http_server_route(&redir_srv, "*", "/cross_origin", handle_cross_origin, NULL, NULL);
 
-    pthread_create(&redir_tid, NULL, server_thread, &redir_srv);
+    kl_plat_thread_create(&redir_tid, server_thread, &redir_srv);
     wait_for_bind(&redir_srv);
     redir_port = redir_srv.bound_port;
 
@@ -279,7 +280,7 @@ static void ensure_servers(void) {
     kl_http_server_init(&redir_srv2, &cfg2);
     kl_http_server_route(&redir_srv2, "*", "/auth_check", handle_auth_check, NULL, NULL);
 
-    pthread_create(&redir_tid2, NULL, server_thread, &redir_srv2);
+    kl_plat_thread_create(&redir_tid2, server_thread, &redir_srv2);
     wait_for_bind(&redir_srv2);
     redir_port2 = redir_srv2.bound_port;
 }
@@ -288,11 +289,11 @@ static void ensure_servers(void) {
 static void cleanup_servers(void) {
     if (!servers_started) return;
     kl_http_server_stop(&redir_srv);
-    pthread_join(redir_tid, NULL);
+    kl_plat_thread_join(&redir_tid);
     kl_http_server_free(&redir_srv);
 
     kl_http_server_stop(&redir_srv2);
-    pthread_join(redir_tid2, NULL);
+    kl_plat_thread_join(&redir_tid2);
     kl_http_server_free(&redir_srv2);
     servers_started = 0;
 }

@@ -2,7 +2,7 @@
 #include <keel/keel.h>
 #include "net_compat.h"
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Request header/param API tests
@@ -13,7 +13,7 @@
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* Shared state between handler and test */
@@ -46,14 +46,13 @@ static struct {
 
 static KlHttpServer req_server;
 
-static void *server_thread(void *arg) {
+static void server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&req_server);
-    return NULL;
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -67,7 +66,7 @@ static int connect_to(int port) {
     return fd;
 }
 
-static ssize_t read_response(int fd, char *buf, size_t buflen) {
+static kl_ssize_t read_response(int fd, char *buf, size_t buflen) {
     int r = kl_test_poll1(fd, 0, 2000);
     if (r <= 0) return r;
     return kl_test_sockread(fd, buf, buflen);
@@ -144,7 +143,7 @@ static int send_and_wait(int port, const char *raw_req) {
     if (fd < 0) return -1;
     (void)kl_test_sockwrite(fd, raw_req, strlen(raw_req));
     char buf[4096];
-    ssize_t n = read_response(fd, buf, sizeof(buf) - 1);
+    kl_ssize_t n = read_response(fd, buf, sizeof(buf) - 1);
     kl_test_closesock(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
@@ -160,8 +159,8 @@ UTEST(request, header_case_insensitive) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -176,7 +175,7 @@ UTEST(request, header_case_insensitive) {
     ASSERT_TRUE(memcmp(test_state.found_host, "localhost", 9) == 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -185,8 +184,8 @@ UTEST(request, header_missing_returns_null) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -199,7 +198,7 @@ UTEST(request, header_missing_returns_null) {
     ASSERT_TRUE(test_state.found_missing == NULL);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -208,8 +207,8 @@ UTEST(request, header_with_len) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -223,7 +222,7 @@ UTEST(request, header_with_len) {
     ASSERT_EQ(test_state.found_host_len, (size_t)15);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -232,8 +231,8 @@ UTEST(request, header_empty_value) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -248,7 +247,7 @@ UTEST(request, header_empty_value) {
     ASSERT_EQ(test_state.found_empty_len, (size_t)0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -262,8 +261,8 @@ UTEST(request, param_basic) {
     kl_http_server_route(&req_server, "GET", "/items/:id", handle_single_param,
                     NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -278,7 +277,7 @@ UTEST(request, param_basic) {
     ASSERT_TRUE(memcmp(test_state.found_id, "42", 2) == 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -288,8 +287,8 @@ UTEST(request, param_multi) {
     kl_http_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -308,7 +307,7 @@ UTEST(request, param_multi) {
     ASSERT_TRUE(memcmp(test_state.found_pid, "99", 2) == 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -318,8 +317,8 @@ UTEST(request, param_missing) {
     kl_http_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -333,7 +332,7 @@ UTEST(request, param_missing) {
     ASSERT_EQ(test_state.found_missing_param_len, (size_t)0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -346,8 +345,8 @@ UTEST(request, query_basic) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -362,7 +361,7 @@ UTEST(request, query_basic) {
     ASSERT_TRUE(memcmp(test_state.query, "foo=bar", 7) == 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -371,8 +370,8 @@ UTEST(request, query_empty) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -386,7 +385,7 @@ UTEST(request, query_empty) {
     ASSERT_EQ(test_state.query_len, (size_t)0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -395,8 +394,8 @@ UTEST(request, query_absent) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -410,7 +409,7 @@ UTEST(request, query_absent) {
     ASSERT_EQ(test_state.query_len, (size_t)0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -423,8 +422,8 @@ UTEST(request, header_null_terminated) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -438,7 +437,7 @@ UTEST(request, header_null_terminated) {
     ASSERT_EQ(strcmp(test_state.nt_host, "localhost"), 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -447,8 +446,8 @@ UTEST(request, method_null_terminated) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -462,7 +461,7 @@ UTEST(request, method_null_terminated) {
     ASSERT_EQ(strcmp(test_state.nt_method, "GET"), 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -471,8 +470,8 @@ UTEST(request, path_null_terminated) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -486,7 +485,7 @@ UTEST(request, path_null_terminated) {
     ASSERT_EQ(strcmp(test_state.nt_path, "/nultest"), 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 
@@ -495,8 +494,8 @@ UTEST(request, query_null_terminated) {
     ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
     kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
     int port = req_server.bound_port;
 
@@ -510,7 +509,7 @@ UTEST(request, query_null_terminated) {
     ASSERT_EQ(strcmp(test_state.nt_query, "a=1"), 0);
 
     kl_http_server_stop(&req_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&req_server);
 }
 

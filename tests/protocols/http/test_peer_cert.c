@@ -4,7 +4,7 @@
 #include "net_compat.h"
 #include "mock_tls.h"   /* shared completion-capable identity TLS mock */
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -64,10 +64,10 @@ static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
+static void srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return; }
 
 static int connect_local(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -81,7 +81,7 @@ static int connect_local(int port) {
 static void drain(int fd) {
     char buf[512];
     while (kl_test_poll1(fd, 0, 2000) > 0) {
-        ssize_t n = kl_test_sockread(fd, buf, sizeof(buf));
+        kl_ssize_t n = kl_test_sockread(fd, buf, sizeof(buf));
         if (n <= 0) break;
     }
 }
@@ -96,19 +96,19 @@ static int run_once(KlHttpServerConfig *cfg) {
     if (kl_http_server_init(&srv, cfg) != 0)
         return -1;
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
-    pthread_t t;
-    if (pthread_create(&t, NULL, srv_thread, &srv) != 0) {
+    KlPlatThread t;
+    if (kl_plat_thread_create(&t, srv_thread, &srv) != 0) {
         kl_http_server_free(&srv);
         return -1;
     }
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
 
     int rc = -1;
     if (srv.bound_port > 0) {
         int fd = connect_local(srv.bound_port);
         if (fd >= 0) {
             const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-            if (kl_test_sockwrite(fd, req, strlen(req)) == (ssize_t)strlen(req)) {
+            if (kl_test_sockwrite(fd, req, strlen(req)) == (kl_ssize_t)strlen(req)) {
                 drain(fd);
                 rc = 0;
             }
@@ -117,7 +117,7 @@ static int run_once(KlHttpServerConfig *cfg) {
     }
 
     kl_http_server_stop(&srv);
-    pthread_join(t, NULL);
+    kl_plat_thread_join(&t);
     kl_http_server_free(&srv);
     return rc;
 }

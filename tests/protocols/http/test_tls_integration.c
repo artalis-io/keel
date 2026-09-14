@@ -4,7 +4,7 @@
 #include "net_compat.h"
 #include "mock_tls.h"   /* shared identity TLS mock: completion-capable (feed_input/drain_output) */
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 
 /* The passthrough TLS mock (identity, no crypto) now lives in tests/mock_tls.h and implements
@@ -19,16 +19,15 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
-static void *server_thread_fn(void *arg) {
+static void server_thread_fn(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
-    return NULL;
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -42,12 +41,12 @@ static int connect_to(int port) {
     return fd;
 }
 
-static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
-    ssize_t total = 0;
-    while (total < (ssize_t)buflen - 1) {
+static kl_ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
+    kl_ssize_t total = 0;
+    while (total < (kl_ssize_t)buflen - 1) {
         int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
+        kl_ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
     }
@@ -55,12 +54,12 @@ static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
     return total;
 }
 
-static ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_ms) {
-    ssize_t total = 0;
-    while (total < (ssize_t)buflen - 1) {
+static kl_ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_ms) {
+    kl_ssize_t total = 0;
+    while (total < (kl_ssize_t)buflen - 1) {
         int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
+        kl_ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
         buf[total] = '\0';
@@ -96,8 +95,8 @@ UTEST(tls_integration, hello_request) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     ASSERT_TRUE(srv.bound_port > 0);
     int port = srv.bound_port;
@@ -116,7 +115,7 @@ UTEST(tls_integration, hello_request) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -133,8 +132,8 @@ UTEST(tls_integration, keep_alive) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     int port = srv.bound_port;
 
@@ -160,7 +159,7 @@ UTEST(tls_integration, keep_alive) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -177,8 +176,8 @@ UTEST(tls_integration, concurrent) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     int port = srv.bound_port;
 
@@ -205,7 +204,7 @@ UTEST(tls_integration, concurrent) {
     }
 
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 

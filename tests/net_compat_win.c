@@ -21,28 +21,28 @@
  * satisfied for free by socket_winsock.c's load-time constructor; nothing initialises Winsock
  * implicitly any more, and a test binary whose first socket call comes from the harness rather
  * than from Keel would otherwise see WSANOTINITIALISED. */
-int kl_test_closesock(int fd) {
+int kl_test_closesock(KlSocketHandle fd) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return closesocket((SOCKET)fd);
 }
 
-int kl_test_set_nonblock(int fd) {
+int kl_test_set_nonblock(KlSocketHandle fd) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     u_long m = 1;
     return ioctlsocket((SOCKET)fd, FIONBIO, &m) == 0 ? 0 : -1;
 }
 
-long kl_test_sockwrite(int fd, const void *buf, size_t len) {
+long kl_test_sockwrite(KlSocketHandle fd, const void *buf, size_t len) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return send((SOCKET)fd, (const char *)buf, (int)len, 0);
 }
 
-long kl_test_sockread(int fd, void *buf, size_t len) {
+long kl_test_sockread(KlSocketHandle fd, void *buf, size_t len) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     return recv((SOCKET)fd, (char *)buf, (int)len, 0);
 }
 
-int kl_test_poll1(int fd, int for_write, int timeout_ms) {
+int kl_test_poll1(KlSocketHandle fd, int for_write, int timeout_ms) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     WSAPOLLFD p;
     p.fd = (SOCKET)fd;
@@ -51,7 +51,7 @@ int kl_test_poll1(int fd, int for_write, int timeout_ms) {
     return WSAPoll(&p, 1, timeout_ms);
 }
 
-int kl_test_set_rcvtimeo(int fd, int ms) {
+int kl_test_set_rcvtimeo(KlSocketHandle fd, int ms) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     DWORD tv = (DWORD)ms;
     return setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
@@ -95,4 +95,9 @@ const void *kl_test_builtin_provider(void) {
 /* See net_compat.h: millisecond sleep. */
 void kl_test_sleep_ms(unsigned ms) {
     Sleep((DWORD)ms);
+}
+
+/* See net_compat.h: calling thread identity. */
+KlTestThreadId kl_test_thread_id(void) {
+    return (KlTestThreadId)GetCurrentThreadId();
 }

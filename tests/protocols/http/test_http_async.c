@@ -14,7 +14,7 @@
 #include <keel/async.h>
 #include "net_compat.h"
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -230,7 +230,7 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
 
     /* Wait for the deadline to pass */
-    usleep(30000);  /* 30ms */
+    kl_test_sleep_ms(30);  /* 30ms */
 
     /* Run the deadline sweep manually (mirrors http_server.c logic) */
     uint64_t now = kl_monotonic_ms();
@@ -490,12 +490,11 @@ UTEST(async, server_ctx_set_on_request) {
 /* ── Integration test: async handler in real server ──────────────── */
 
 static KlHttpServer async_server;
-static pthread_t async_server_tid;
+static KlPlatThread async_server_tid;
 
-static void *async_server_thread(void *arg) {
+static void async_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&async_server);
-    return NULL;
 }
 
 /* Handler that suspends, then completes synchronously via a watcher */
@@ -556,7 +555,7 @@ static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *us
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -570,9 +569,9 @@ static int connect_to(int port) {
     return fd;
 }
 
-static ssize_t read_response(int fd, char *buf, size_t buflen) {
-    ssize_t total = 0;
-    ssize_t n;
+static kl_ssize_t read_response(int fd, char *buf, size_t buflen) {
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     while ((n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1)) > 0)
         total += n;
     buf[total] = '\0';
@@ -585,8 +584,8 @@ UTEST(async, e2e_handler_suspend_resume) {
     kl_http_server_route(&async_server, "GET", "/async",
                     handle_async_sleep, &async_server, NULL);
 
-    pthread_create(&async_server_tid, NULL, async_server_thread, NULL);
-    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) usleep(10000);
+    kl_plat_thread_create(&async_server_tid, async_server_thread, NULL);
+    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) kl_test_sleep_ms(10);
     int port = async_server.bound_port;
 
     int fd = connect_to(port);
@@ -606,7 +605,7 @@ UTEST(async, e2e_handler_suspend_resume) {
     ASSERT_TRUE(strstr(buf, "{\"slept\":true}") != NULL);
 
     kl_http_server_stop(&async_server);
-    pthread_join(async_server_tid, NULL);
+    kl_plat_thread_join(&async_server_tid);
     kl_http_server_free(&async_server);
 }
 
@@ -672,8 +671,8 @@ UTEST(async, e2e_resume_without_state_still_sends) {
     kl_http_server_route(&async_server, "GET", "/nostate",
                     handle_async_nostate, &async_server, NULL);
 
-    pthread_create(&async_server_tid, NULL, async_server_thread, NULL);
-    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) usleep(10000);
+    kl_plat_thread_create(&async_server_tid, async_server_thread, NULL);
+    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) kl_test_sleep_ms(10);
 
     int fd = connect_to(async_server.bound_port);
     ASSERT_TRUE(fd >= 0);
@@ -696,7 +695,7 @@ UTEST(async, e2e_resume_without_state_still_sends) {
     ASSERT_TRUE(strstr(buf, "{\"resumed\":true}") != NULL);
 
     kl_http_server_stop(&async_server);
-    pthread_join(async_server_tid, NULL);
+    kl_plat_thread_join(&async_server_tid);
     kl_http_server_free(&async_server);
 }
 

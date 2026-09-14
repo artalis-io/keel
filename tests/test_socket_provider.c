@@ -19,14 +19,14 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "net_compat.h"
 
 /* ── Programmable mock provider ────────────────────────────────────── */
 
 typedef struct {
     int     wrap;              /* 1 = perform real send/recv on the given fd */
-    ssize_t short_send;        /* cap a send to this many bytes (-1 = no cap) */
+    kl_ssize_t short_send;        /* cap a send to this many bytes (-1 = no cap) */
     int     force_send_err;    /* errno to fail the NEXT send with (0 = none) */
     int     force_recv_err;    /* errno to fail the NEXT recv with (0 = none) */
     int     force_connect_err; /* errno to fail the NEXT connect with (0 = none) */
@@ -52,29 +52,29 @@ static kl_ssize_t mock_send(void *ctx, KlSocketHandle fd, const void *buf, size_
     if (m->force_send_err) { int e = m->force_send_err; m->force_send_err = 0; errno = e; return -1; }
     size_t n = len;
     if (m->short_send >= 0 && (size_t)m->short_send < n) n = (size_t)m->short_send;
-    if (m->wrap) return send((int)fd, buf, n, 0);
-    return (ssize_t)n;
+    if (m->wrap) return send((int)fd, buf, (int)n, 0);
+    return (kl_ssize_t)n;
 }
 static kl_ssize_t mock_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     MockSock *m = ctx;
     m->recv_calls++;
     if (m->force_recv_err) { int e = m->force_recv_err; m->force_recv_err = 0; errno = e; return -1; }
-    if (m->wrap) return recv((int)fd, buf, len, 0);
+    if (m->wrap) return recv((int)fd, buf, (int)len, 0);
     return 0;
 }
 static kl_ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     MockSock *m = ctx;
     m->writev_calls++;
     if (m->wrap) return kl_sockdef_writev(fd, iov, iovcnt);
-    ssize_t t = 0;
-    for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].len;
+    kl_ssize_t t = 0;
+    for (int i = 0; i < iovcnt; i++) t += (kl_ssize_t)iov[i].len;
     return t;
 }
 static kl_ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     MockSock *m = ctx; (void)out_fd; (void)in_fd;
     m->sendfile_calls++;
     *offset += (uint64_t)count;              /* pretend fully sent */
-    return (ssize_t)count;
+    return (kl_ssize_t)count;
 }
 static int mock_shutdown(void *ctx, KlSocketHandle fd, KlShutdownHow how) {
     MockSock *m = ctx;
@@ -133,9 +133,9 @@ UTEST(sockprov, posix_identity_and_caps) {
 UTEST(sockprov, null_provider_real_io) {
     int sv[2];
     ASSERT_EQ(0, kl_test_socketpair(sv));
-    ASSERT_EQ((ssize_t)5, kl_sock_send(NULL, sv[0], "hello", 5));
+    ASSERT_EQ((kl_ssize_t)5, kl_sock_send(NULL, sv[0], "hello", 5));
     char buf[8] = {0};
-    ASSERT_EQ((ssize_t)5, kl_sock_recv(NULL, sv[1], buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)5, kl_sock_recv(NULL, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("hello", buf);
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
@@ -146,9 +146,9 @@ UTEST(sockprov, explicit_posix_provider_real_io) {
     const KlSocketProvider *p = kl_socket_provider_posix();
     int sv[2];
     ASSERT_EQ(0, kl_test_socketpair(sv));
-    ASSERT_EQ((ssize_t)3, kl_sock_send(p, sv[0], "abc", 3));
+    ASSERT_EQ((kl_ssize_t)3, kl_sock_send(p, sv[0], "abc", 3));
     char buf[4] = {0};
-    ASSERT_EQ((ssize_t)3, kl_sock_recv(p, sv[1], buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)3, kl_sock_recv(p, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("abc", buf);
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
@@ -170,7 +170,7 @@ UTEST(sockprov, mock_dispatch_and_setup_hooks) {
 UTEST(sockprov, mock_short_write) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = 3;
     KlSocketProvider p = mock_provider(&m);
-    ASSERT_EQ((ssize_t)3, kl_sock_send(&p, 9, "0123456789", 10));  /* capped */
+    ASSERT_EQ((kl_ssize_t)3, kl_sock_send(&p, 9, "0123456789", 10));  /* capped */
     ASSERT_EQ(1, m.send_calls);
 }
 
@@ -178,7 +178,7 @@ UTEST(sockprov, mock_send_ewouldblock) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1; m.force_send_err = EWOULDBLOCK;
     KlSocketProvider p = mock_provider(&m);
     errno = 0;
-    ASSERT_EQ((ssize_t)-1, kl_sock_send(&p, 9, "x", 1));
+    ASSERT_EQ((kl_ssize_t)-1, kl_sock_send(&p, 9, "x", 1));
     ASSERT_EQ(EWOULDBLOCK, errno);
 }
 
@@ -187,7 +187,7 @@ UTEST(sockprov, mock_recv_econnreset) {
     KlSocketProvider p = mock_provider(&m);
     char buf[4];
     errno = 0;
-    ASSERT_EQ((ssize_t)-1, kl_sock_recv(&p, 9, buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)-1, kl_sock_recv(&p, 9, buf, sizeof(buf)));
     ASSERT_EQ(ECONNRESET, errno);
 }
 
@@ -197,9 +197,9 @@ UTEST(sockprov, per_op_null_fallback) {
     KlSocketProvider p = { &partial, NULL, 0, NULL };
     int sv[2];
     ASSERT_EQ(0, kl_test_socketpair(sv));
-    ASSERT_EQ((ssize_t)2, kl_sock_send(&p, sv[0], "hi", 2));   /* falls back */
+    ASSERT_EQ((kl_ssize_t)2, kl_sock_send(&p, sv[0], "hi", 2));   /* falls back */
     char buf[4] = {0};
-    ASSERT_EQ((ssize_t)2, kl_sock_recv(&p, sv[1], buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)2, kl_sock_recv(&p, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("hi", buf);
     ASSERT_EQ(0, kl_sock_set_nonblocking(&p, sv[0]));          /* fallback, no crash */
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
@@ -249,16 +249,16 @@ UTEST(sockprov, shutdown_wr_fallback_gives_peer_eof) {
     ASSERT_EQ(0, kl_test_socketpair(sv));
 
     /* sv[1] still has something for us to read after we close our send side. */
-    ASSERT_EQ((ssize_t)4, kl_test_sockwrite(sv[1], "ping", 4));
+    ASSERT_EQ((kl_ssize_t)4, kl_test_sockwrite(sv[1], "ping", 4));
 
     ASSERT_EQ(0, kl_sock_shutdown(&p, sv[0], KL_SHUT_WR));   /* NULL op -> built-in */
     ASSERT_EQ(0, m.shutdown_calls);                          /* provider was not consulted */
 
     char buf[8];
-    ASSERT_EQ((ssize_t)4, kl_test_sockread(sv[0], buf, sizeof(buf)));  /* our RX still live */
+    ASSERT_EQ((kl_ssize_t)4, kl_test_sockread(sv[0], buf, sizeof(buf)));  /* our RX still live */
 
     /* The peer sees orderly end-of-stream, not a reset. */
-    ASSERT_EQ((ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
 
     kl_test_closesock(sv[0]);
     kl_test_closesock(sv[1]);
@@ -270,7 +270,7 @@ UTEST(sockprov, shutdown_wr_null_provider_gives_peer_eof) {
     ASSERT_EQ(0, kl_test_socketpair(sv));
     ASSERT_EQ(0, kl_sock_shutdown(NULL, sv[0], KL_SHUT_WR));
     char buf[8];
-    ASSERT_EQ((ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
+    ASSERT_EQ((kl_ssize_t)0, kl_test_sockread(sv[1], buf, sizeof(buf)));
     kl_test_closesock(sv[0]);
     kl_test_closesock(sv[1]);
 }
@@ -282,14 +282,14 @@ UTEST(sockprov, decorator_short_write_real_io) {
     ASSERT_EQ(0, kl_test_socketpair(sv));
 
     const char *msg = "0123456789";
-    ssize_t w1 = kl_sock_send(&p, sv[0], msg, 10);
-    ASSERT_EQ((ssize_t)4, w1);                       /* capped to 4 */
-    ssize_t w2 = kl_sock_send(&p, sv[0], msg + 4, 6);
-    ASSERT_EQ((ssize_t)4, w2);                       /* capped again */
+    kl_ssize_t w1 = kl_sock_send(&p, sv[0], msg, 10);
+    ASSERT_EQ((kl_ssize_t)4, w1);                       /* capped to 4 */
+    kl_ssize_t w2 = kl_sock_send(&p, sv[0], msg + 4, 6);
+    ASSERT_EQ((kl_ssize_t)4, w2);                       /* capped again */
 
     char buf[16] = {0};
-    ssize_t r = recv(sv[1], buf, sizeof(buf), 0);
-    ASSERT_EQ((ssize_t)8, r);                        /* the 8 real bytes arrived */
+    kl_ssize_t r = recv(sv[1], buf, sizeof(buf), 0);
+    ASSERT_EQ((kl_ssize_t)8, r);                        /* the 8 real bytes arrived */
     ASSERT_EQ(0, memcmp(buf, "01234567", 8));
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
@@ -456,7 +456,7 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
 
 /* socket/bind/listen/connect/accept/close all via the seam over loopback. */
 UTEST(sockprov, lifecycle_posix_loopback) {
-    int lfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
+    KlSocketHandle lfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(lfd >= 0);
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     KlSockAddr a;
@@ -467,14 +467,14 @@ UTEST(sockprov, lifecycle_posix_loopback) {
     ASSERT_EQ(0, kl_sock_get_local_addr(NULL, lfd, &bound));
     ASSERT_GT((int)kl_sockaddr_port(&bound), 0);
 
-    int cfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
+    KlSocketHandle cfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(cfd >= 0);
     KlSockAddr target;
     kl_sockaddr_from_ipv4(&target, lo, kl_sockaddr_port(&bound));
     ASSERT_EQ(0, kl_sock_connect(NULL, cfd, &target));
 
     KlSockAddr pa;
-    int sfd = kl_sock_accept(NULL, lfd, &pa);
+    KlSocketHandle sfd = kl_sock_accept(NULL, lfd, &pa);
     ASSERT_TRUE(sfd >= 0);
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&pa));   /* peer captured */
 
@@ -487,7 +487,7 @@ UTEST(sockprov, lifecycle_posix_loopback) {
 UTEST(sockprov, mock_socket_dispatch) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
     KlSocketProvider p = mock_provider(&m);
-    int fd = kl_sock_socket(&p, AF_INET, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(&p, AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     ASSERT_EQ(1, m.socket_calls);
     ASSERT_EQ(0, kl_sock_close(&p, fd));       /* close op is NULL → POSIX */
@@ -575,18 +575,18 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
 
     char a[] = "AB", b[] = "CD";
     KlIoVec iov[2] = { { a, 2 }, { b, 2 } };
-    ASSERT_EQ((ssize_t)4, kl_sock_writev(&p, sv[0], iov, 2));  /* dispatches to op */
+    ASSERT_EQ((kl_ssize_t)4, kl_sock_writev(&p, sv[0], iov, 2));  /* dispatches to op */
     ASSERT_EQ(1, m.writev_calls);
     char buf[8] = {0};
-    ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
+    ASSERT_EQ((kl_ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
     ASSERT_EQ(0, memcmp(buf, "ABCD", 4));
 
-    ASSERT_EQ((ssize_t)4, kl_sock_writev(NULL, sv[0], iov, 2));/* NULL → real writev */
-    ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
+    ASSERT_EQ((kl_ssize_t)4, kl_sock_writev(NULL, sv[0], iov, 2));/* NULL → real writev */
+    ASSERT_EQ((kl_ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 
     uint64_t off = 0;
-    ASSERT_EQ((ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */
+    ASSERT_EQ((kl_ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */
     ASSERT_EQ(1, m.sendfile_calls);
     ASSERT_EQ((uint64_t)100, off);
 }
@@ -622,7 +622,7 @@ static void deco_ok_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *deco_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
+static void deco_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return; }
 
 /* #1: the native-fd guard: a non-native provider is rejected at init; a native
  * one (and NULL = built-in) is accepted. */
@@ -654,15 +654,14 @@ UTEST(sockprov, provider_selection_end_to_end) {
     KlHttpServerConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
     ASSERT_EQ(0, kl_http_server_init(&s, &scfg));
     kl_http_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
-    pthread_t th;
-    ASSERT_EQ(0, pthread_create(&th, NULL, deco_server_thread, &s));
+    KlPlatThread th;
+    ASSERT_EQ(0, kl_plat_thread_create(&th, deco_server_thread, &s));
 
     KlSocketProvider cprov = { &deco_ops, &cd, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator a = kl_allocator_default();
     int ok = 0;
     for (int i = 0; i < 50 && !ok; i++) {
-        struct timespec ts = { 0, 30 * 1000000L };
-        nanosleep(&ts, NULL);
+        kl_test_sleep_ms(30);
         KlHttpClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
         KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
@@ -673,7 +672,7 @@ UTEST(sockprov, provider_selection_end_to_end) {
         }
     }
     kl_http_server_stop(&s);
-    pthread_join(th, NULL);
+    kl_plat_thread_join(&th);
     kl_http_server_free(&s);
 
     ASSERT_TRUE(ok);

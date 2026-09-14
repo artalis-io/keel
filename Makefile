@@ -647,15 +647,10 @@ WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)
 # takes an explicit entry below with a reason. The invariant: any Windows semantic suite that does
 # not test a compiler/toolchain-specific path runs under BOTH MinGW and MSVC.
 #
-# Harnesses that include <pthread.h> directly. Keel has a PAL thread seam (src/platform_thread.h);
-# these predate it and carry their own POSIX threading assumptions. Migration is tracked separately;
-# this list shrinks to empty, it does not grow.
-MSVC_EXCLUDE_PTHREAD = cross_module event_provider http2_client_hostname_fail http_async http_body_reader_vtable \
-                       http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
-                       http_client_proxy http_client_stream http_integration http_redirect http_request \
-                       http_server_integration io_status peer_addr peer_cert read_flow_control reject_drain \
-                       socket_provider stream_transport thread_pool timeout tls_integration wakeup watcher_aba \
-                       websocket_client_hostname_fail
+# (was: harnesses that included <pthread.h> directly.) All of them now use the PAL thread seam
+# src/platform_thread.h, so the list is empty. It stays here as the named home for a future
+# exclusion of this kind -- and as the record that the migration completed rather than stalled.
+MSVC_EXCLUDE_PTHREAD =
 #
 # Tests that hand a fabricated or already-closed descriptor to a CRT call. The UCRT invokes the
 # invalid-parameter handler and TERMINATES the process (exit 0xC0000409) where glibc and MinGW

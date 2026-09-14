@@ -23,7 +23,7 @@
 #include "net_compat.h"
 
 #include <errno.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 #include <time.h>
 
@@ -33,8 +33,7 @@
 #define ST_MAXFRAME  (200 * 1024)
 
 static void st_nap(int ms) {
-    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
+    kl_test_sleep_ms((unsigned)ms);
 }
 
 /* ── framed-echo server, on the public transport surface ────────────── */
@@ -54,7 +53,7 @@ static kl_ssize_t fc_write(const char *data, size_t len, void *ctx) {
     FrameConn *fc = ctx;
     kl_ssize_t n = fc->sp->ops->send(fc->sp->context, fc->fd, data, len);
     if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
-    return (ssize_t)n;
+    return (kl_ssize_t)n;
 }
 
 static void fc_arm(FrameConn *fc) {
@@ -155,17 +154,16 @@ static int st_listen(KlEventCtx *ev) {
     return kl_watcher_add(ev, lfd, KL_EVENT_READ, st_on_accept, ev);
 }
 
-static void *st_srv_thread(void *arg) {
+static void st_srv_thread(void *arg) {
     (void)arg;
     while (!g_stop)
         if (kl_event_ctx_run(&g_ev, 32, 50) < 0) break;
-    return NULL;
 }
 
 /* ── client helpers (raw sockets) ───────────────────────────────────── */
 
 static int st_connect(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET; a.sin_port = htons(ST_PORT);
@@ -217,8 +215,8 @@ UTEST(stream_transport, framed_echo_roundtrip) {
     ASSERT_EQ(kl_event_ctx_init(&g_ev, &g_alloc), 0);
     ASSERT_EQ(st_listen(&g_ev), 0);
 
-    pthread_t tid;
-    ASSERT_EQ(pthread_create(&tid, NULL, st_srv_thread, NULL), 0);
+    KlPlatThread tid;
+    ASSERT_EQ(kl_plat_thread_create(&tid, st_srv_thread, NULL), 0);
 
     int fd = -1;
     for (int i = 0; i < 100 && fd < 0; i++) { fd = st_connect(); if (fd < 0) st_nap(5); }
@@ -244,7 +242,7 @@ UTEST(stream_transport, framed_echo_roundtrip) {
     kl_test_closesock(fd);
     st_nap(120);          /* let the server observe the peer close and reap the conn */
     g_stop = 1;
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
 
     /* Server-side teardown: close listener, then free ctx (frees any watchers). */
     if (kl_handle_valid(g_listener)) {

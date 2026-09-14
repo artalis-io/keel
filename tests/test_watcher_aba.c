@@ -33,7 +33,8 @@
 #include <string.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "kl_atomic.h"         /* the seam, not GCC __atomic builtins */
 #include <time.h>
 
 /* ── fixture allocator: deterministic same-size reuse for KlWatcher nodes ───────────────────────── */
@@ -276,7 +277,7 @@ UTEST(watcher_aba, overflow_refusal_completion_acquires_nothing) {
  * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C; the exact
  * ABA sequence, driven through the server loop (not a probe). */
 static KlHttpServer      g_srv;
-static volatile int  g_srv_batch_dispatched;
+static int  g_srv_batch_dispatched;   /* ordering comes from kl_atomic_*, not volatile */
 
 static int srv_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
     (void)l; (void)timeout;
@@ -288,8 +289,8 @@ static int srv_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
     }
     /* Second tick onward: the batch was fully dispatched last iteration. Signal + idle so
      * kl_http_server_stop (running=0) is observed at the loop top without a hot spin. */
-    __atomic_store_n(&g_srv_batch_dispatched, 1, __ATOMIC_RELEASE);
-    struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
+    kl_atomic_store_int(&g_srv_batch_dispatched, 1);
+    kl_test_sleep_ms(2);
     return 0;
 }
 static const KlEventOps SRV_RDY_OPS = {
@@ -297,7 +298,7 @@ static const KlEventOps SRV_RDY_OPS = {
     .wait = srv_wait, .close = noop_close, .caps = rdy_caps
 };
 static const KlEventProvider SRV_RDY_PROV = { &SRV_RDY_OPS, "aba-srv" };
-static void *srv_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
+static void srv_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return; }
 
 UTEST(watcher_aba, server_loop_no_misdelivery) {
     fa_reset();
@@ -321,14 +322,14 @@ UTEST(watcher_aba, server_loop_no_misdelivery) {
     g_wait.evs[1].udata = tag(g_Bnode); g_wait.evs[1].ready = KL_EVENT_READ;   /* stale B, same batch */
     g_srv_batch_dispatched = 0;
 
-    pthread_t th;
-    ASSERT_EQ(pthread_create(&th, NULL, srv_thread, NULL), 0);
-    for (int i = 0; i < 1000 && !__atomic_load_n(&g_srv_batch_dispatched, __ATOMIC_ACQUIRE); i++) {
-        struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
+    KlPlatThread th;
+    ASSERT_EQ(kl_plat_thread_create(&th, srv_thread, NULL), 0);
+    for (int i = 0; i < 1000 && !kl_atomic_load_int(&g_srv_batch_dispatched); i++) {
+        kl_test_sleep_ms(2);
     }
-    int dispatched = __atomic_load_n(&g_srv_batch_dispatched, __ATOMIC_ACQUIRE);
+    int dispatched = kl_atomic_load_int(&g_srv_batch_dispatched);
     kl_http_server_stop(&g_srv);
-    pthread_join(th, NULL);
+    kl_plat_thread_join(&th);
 
     ASSERT_TRUE(dispatched);
     ASSERT_NE((uintptr_t)g_Cnode, (uintptr_t)g_Bnode);   /* C did not reuse B's address */
