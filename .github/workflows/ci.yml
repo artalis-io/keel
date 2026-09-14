@@ -850,7 +850,7 @@ jobs:
 
       - name: Upload source archive + checksum (validation artifact, NOT a release asset)
         # NOTE: SHA-pin this to match the repo's action-pinning policy.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keel-${{ steps.rel.outputs.version }}-${{ steps.rel.outputs.sha }}-source-validation
           path: |
