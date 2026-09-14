@@ -2,7 +2,7 @@
 #include <keel/keel.h>
 #include "net_compat.h"
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 
 /* Short timeout for fast tests */
@@ -17,14 +17,13 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
  * and does init/stop/free, so sequential utest execution is safe. */
 static KlHttpServer timeout_server;
 
-static void *server_thread(void *arg) {
+static void server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&timeout_server);
-    return NULL;
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
     struct sockaddr_in addr = {
@@ -42,7 +41,7 @@ static int connect_to(int port) {
 
 /* Read with timeout (poll-based, avoids blocking forever if server
  * doesn't send anything before test timeout) */
-static ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
+static kl_ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
     int r = kl_test_poll1(fd, 0, ms);
     if (r <= 0) return r; /* 0 = timeout, -1 = error */
 
@@ -51,7 +50,7 @@ static ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 UTEST(timeout, idle_connection) {
@@ -62,8 +61,8 @@ UTEST(timeout, idle_connection) {
     ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
     kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -73,14 +72,14 @@ UTEST(timeout, idle_connection) {
 
     /* Wait for 408 */
     char buf[4096];
-    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    kl_ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -92,8 +91,8 @@ UTEST(timeout, partial_headers) {
     ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
     kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -105,14 +104,14 @@ UTEST(timeout, partial_headers) {
     (void)kl_test_sockwrite(fd, partial, strlen(partial));
 
     char buf[4096];
-    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    kl_ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -125,8 +124,8 @@ UTEST(timeout, partial_body) {
     kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
                     NULL, kl_http_body_reader_buffer);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -143,14 +142,14 @@ UTEST(timeout, partial_body) {
     (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
-    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    kl_ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -162,8 +161,8 @@ UTEST(timeout, active_not_affected) {
     ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
     kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -178,8 +177,8 @@ UTEST(timeout, active_not_affected) {
     (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
-    ssize_t total = 0;
-    ssize_t n;
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     while ((n = read_with_timeout(fd, buf + total,
                                   sizeof(buf) - (size_t)total - 1, 2000)) > 0) {
         total += n;
@@ -191,7 +190,7 @@ UTEST(timeout, active_not_affected) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -209,8 +208,8 @@ UTEST(timeout, body_timeout) {
     kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
                     NULL, kl_http_body_reader_buffer);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -228,14 +227,14 @@ UTEST(timeout, body_timeout) {
 
     /* Wait for timeout response */
     char buf[4096];
-    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 3000);
+    kl_ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 3000);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -248,8 +247,8 @@ UTEST(timeout, fast_large_body) {
     kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok,
                     NULL, kl_http_body_reader_buffer);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -274,8 +273,8 @@ UTEST(timeout, fast_large_body) {
 
     /* Should get 200 OK, not a timeout */
     char buf[4096];
-    ssize_t total = 0;
-    ssize_t n;
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     while ((n = read_with_timeout(fd, buf + total,
                                    sizeof(buf) - (size_t)total - 1, 3000)) > 0) {
         total += n;
@@ -285,7 +284,7 @@ UTEST(timeout, fast_large_body) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -297,8 +296,8 @@ UTEST(timeout, keepalive_idle_timeout) {
     ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
     kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -313,7 +312,7 @@ UTEST(timeout, keepalive_idle_timeout) {
 
     /* Read first response */
     char buf[4096];
-    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    kl_ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
@@ -332,7 +331,7 @@ UTEST(timeout, keepalive_idle_timeout) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 
@@ -344,8 +343,8 @@ UTEST(timeout, concurrent_timeouts) {
     ASSERT_EQ(kl_http_server_init(&timeout_server, &cfg), 0);
     kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
     int port = timeout_server.bound_port;
 
@@ -357,8 +356,8 @@ UTEST(timeout, concurrent_timeouts) {
 
     /* Both should timeout independently with 408 */
     char buf1[4096], buf2[4096];
-    ssize_t n1 = read_with_timeout(fd1, buf1, sizeof(buf1) - 1, 2000);
-    ssize_t n2 = read_with_timeout(fd2, buf2, sizeof(buf2) - 1, 2000);
+    kl_ssize_t n1 = read_with_timeout(fd1, buf1, sizeof(buf1) - 1, 2000);
+    kl_ssize_t n2 = read_with_timeout(fd2, buf2, sizeof(buf2) - 1, 2000);
 
     ASSERT_TRUE(n1 > 0);
     buf1[n1] = '\0';
@@ -371,7 +370,7 @@ UTEST(timeout, concurrent_timeouts) {
     kl_test_closesock(fd1);
     kl_test_closesock(fd2);
     kl_http_server_stop(&timeout_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&timeout_server);
 }
 

@@ -9,7 +9,7 @@
 #include <keel/keel.h>
 #include "net_compat.h"
 
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
@@ -26,9 +26,8 @@ static void wakeup_cb(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     ctx->called++;
 }
 
-static void *signal_thread(void *arg) {
+static void signal_thread(void *arg) {
     kl_wakeup_signal((const KlWakeup *)arg);
-    return NULL;
 }
 
 /* Run ticks until the callback has fired (or the attempts run out). */
@@ -69,10 +68,10 @@ UTEST(wakeup, signal_from_another_thread_runs_the_watcher) {
     SignalCtx ctx = {.wakeup = &w};
     ASSERT_EQ(kl_watcher_add(&ev, w.rd, KL_EVENT_READ, wakeup_cb, &ctx), 0);
 
-    pthread_t th;
-    ASSERT_EQ(pthread_create(&th, NULL, signal_thread, &w), 0);
+    KlPlatThread th;
+    ASSERT_EQ(kl_plat_thread_create(&th, signal_thread, &w), 0);
     pump_until_called(&ev, &ctx);
-    pthread_join(th, NULL);
+    kl_plat_thread_join(&th);
 
     ASSERT_EQ(ctx.called, 1);
 

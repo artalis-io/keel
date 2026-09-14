@@ -12,7 +12,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include "net_compat.h"
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 #include <time.h>
 
@@ -109,8 +109,8 @@ static void epp_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_json(res, 200, "{\"backend\":\"custom\"}", 20);
 }
 static KlHttpServer g_srv;
-static void *epp_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
-static void epp_nap(int ms) { struct timespec t = {ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&t,NULL); }
+static void epp_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return; }
+static void epp_nap(int ms) { kl_test_sleep_ms((unsigned)ms); }
 
 UTEST(event_provider, server_runs_on_injected_backend) {
     ep_wait_calls = 0; g_handler_called = 0;
@@ -120,12 +120,12 @@ UTEST(event_provider, server_runs_on_injected_backend) {
     ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
     kl_http_server_route(&g_srv, "GET", "/", epp_handler, NULL, NULL);
 
-    pthread_t tid;
-    ASSERT_EQ(0, pthread_create(&tid, NULL, epp_thread, NULL));
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, epp_thread, NULL));
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) epp_nap(5);
     ASSERT_TRUE(g_srv.bound_port > 0);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET; a.sin_port = htons((uint16_t)g_srv.bound_port);
@@ -149,7 +149,7 @@ UTEST(event_provider, server_runs_on_injected_backend) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&g_srv);
 }
 

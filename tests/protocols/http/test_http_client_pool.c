@@ -5,7 +5,7 @@
 #include <limits.h>
 #include <string.h>
 #include "net_compat.h"
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 
 /* ── Unit tests: pool init/free ──────────────────────────────────── */
@@ -280,7 +280,7 @@ UTEST(cpool, evict_expired) {
     ASSERT_EQ(kl_http_client_pool_release(&pool, &c1, "a.com", 80, 0, NULL, 0), 0);
 
     /* Wait for expiry */
-    usleep(5000);
+    kl_test_sleep_ms(5);
 
     /* Release a second (fresh) one */
     KlHttpClientPoolConn c2 = { .fd = fds[1][0], .tls = NULL, .reused = 0, ._entry = NULL };
@@ -311,7 +311,7 @@ UTEST(cpool, stale_detection) {
 
     /* Close the other end (simulate server disconnect) */
     kl_test_closesock(fds[1]);
-    usleep(10000);  /* let OS propagate the close */
+    kl_test_sleep_ms(10);  /* let OS propagate the close */
 
     /* Acquire should detect stale and return miss */
     KlHttpClientPoolConn acq;
@@ -378,13 +378,12 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *server_thread_fn(void *arg) {
+static void server_thread_fn(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
-    return NULL;
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 UTEST(cpool, sync_pooled_reuse) {
@@ -394,8 +393,8 @@ UTEST(cpool, sync_pooled_reuse) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     ASSERT_TRUE(srv.bound_port > 0);
 
@@ -427,7 +426,7 @@ UTEST(cpool, sync_pooled_reuse) {
 
     kl_http_client_pool_free(&pool);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -447,8 +446,8 @@ UTEST(cpool, async_pooled_reuse) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     ASSERT_TRUE(srv.bound_port > 0);
 
@@ -500,7 +499,7 @@ UTEST(cpool, async_pooled_reuse) {
     kl_http_client_pool_free(&pool);
     kl_event_ctx_free(&ev);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 

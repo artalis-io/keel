@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 /* ── configurable stub body reader (one required op omitted per mode) ──────── */
 static int  stub_on_data(KlHttpBodyReader *self, const char *d, size_t n) { (void)self;(void)d;(void)n; return 0; }
@@ -55,14 +55,14 @@ static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *server_thread_fn(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
+static void server_thread_fn(void *arg) { kl_http_server_run((KlHttpServer *)arg); return; }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -110,12 +110,12 @@ static int run_one(int mode) {
     cfg.max_connections = 2;
     if (kl_http_server_init(&srv, &cfg) != 0) return -2;
     kl_http_server_route(&srv, "POST", "/upload", handle_upload, NULL, reader_factory);
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     int status = post_upload_status(srv.bound_port);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
     return status;
 }

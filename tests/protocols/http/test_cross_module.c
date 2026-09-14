@@ -18,7 +18,7 @@
 #include <string.h>
 #include "net_compat.h"
 #include "mock_tls.h"   /* shared completion-capable identity TLS mock */
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <errno.h>
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -26,16 +26,15 @@
  * ═══════════════════════════════════════════════════════════════════ */
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
-static void *server_thread_fn(void *arg) {
+static void server_thread_fn(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
-    return NULL;
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -49,12 +48,12 @@ static int connect_to(int port) {
     return fd;
 }
 
-static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
-    ssize_t total = 0;
-    while (total < (ssize_t)buflen - 1) {
+static kl_ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
+    kl_ssize_t total = 0;
+    while (total < (kl_ssize_t)buflen - 1) {
         int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
+        kl_ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
     }
@@ -213,7 +212,7 @@ static kl_ssize_t mock_write(const char *data, size_t len, void *ctx) {
         accept = SINK_BUF_SIZE - w->len;
     memcpy(w->buf + w->len, data, accept);
     w->len += accept;
-    return (ssize_t)accept;
+    return (kl_ssize_t)accept;
 }
 
 static int drain_emit(void *ctx, const char *data, size_t len) {
@@ -369,8 +368,8 @@ UTEST(cross, tls_async_suspend_resume) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/tls-async", handle_tls_async, &srv, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
     ASSERT_TRUE(srv.bound_port > 0);
 
@@ -389,7 +388,7 @@ UTEST(cross, tls_async_suspend_resume) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -476,8 +475,8 @@ UTEST(cross, middleware_body_async) {
     kl_http_server_route(&srv, "POST", "/process", handle_mw_async, &srv,
                     kl_http_body_reader_buffer);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
 
     /* Test: missing auth header → 401 */
@@ -513,7 +512,7 @@ UTEST(cross, middleware_body_async) {
     }
 
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -615,8 +614,8 @@ UTEST(cross, tls_middleware_compress) {
     kl_http_server_use(&srv, "*", "/*", auth_middleware, NULL);
     kl_http_server_route(&srv, "GET", "/compressed", handle_compressed, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
 
     /* Unauthenticated → 401 (middleware short-circuits before compression) */
@@ -653,7 +652,7 @@ UTEST(cross, tls_middleware_compress) {
     }
 
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 
@@ -724,8 +723,8 @@ UTEST(cross, stats_during_async) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hold", handle_hold, &srv, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
 
     int fd = connect_to(srv.bound_port);
@@ -744,7 +743,7 @@ UTEST(cross, stats_during_async) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
 }
 

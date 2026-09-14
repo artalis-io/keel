@@ -1,12 +1,15 @@
 #include "utest.h"
+#include "net_compat.h"
 #include <keel/http_client.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <keel/http_server.h>
 #include <keel/event_ctx.h>
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; the harness helpers cover it */
 
 /* ── kl_http_client_response_free tests ───────────────────────────────── */
 
@@ -334,7 +337,7 @@ static void wire_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *wire_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
+static void wire_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return; }
 
 static int wire_run(KlEventCtx *ev, DnsWireCtx *c, int timeout_ms) {
     int elapsed = 0;
@@ -352,9 +355,9 @@ UTEST(client, async_default_resolver_localhost) {
     KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
     ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
     kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, wire_server_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
     char url[64];
@@ -374,7 +377,7 @@ UTEST(client, async_default_resolver_localhost) {
     kl_event_ctx_free(&ev);
 
     kl_http_server_stop(&srv);
-    pthread_join(t, NULL);
+    kl_plat_thread_join(&t);
     kl_http_server_free(&srv);
 }
 
@@ -384,9 +387,9 @@ UTEST(client, async_system_dns) {
     KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
     ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
     kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, wire_server_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
     char url[64];
@@ -409,7 +412,7 @@ UTEST(client, async_system_dns) {
     kl_event_ctx_free(&ev);
 
     kl_http_server_stop(&srv);
-    pthread_join(t, NULL);
+    kl_plat_thread_join(&t);
     kl_http_server_free(&srv);
 }
 

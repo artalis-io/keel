@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <signal.h>
 
 static int test_port;  /* set by start_server / individual tests */
@@ -452,14 +452,13 @@ static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx
 
 static KlHttpServer test_server;
 
-static void *server_thread(void *arg) {
+static void server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&test_server);
-    return NULL;
 }
 
 static int connect_to(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
     struct sockaddr_in addr = {
@@ -476,8 +475,8 @@ static int connect_to(int port) {
 }
 
 /* Read full response (until EOF or read returns 0) */
-static ssize_t read_response(int fd, char *buf, size_t buflen) {
-    ssize_t total = 0;
+static kl_ssize_t read_response(int fd, char *buf, size_t buflen) {
+    kl_ssize_t total = 0;
     long n;
     while ((n = kl_test_sockread(fd, buf + total,
                      buflen - (size_t)total - 1)) > 0) {
@@ -489,13 +488,13 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 
 /* ── Server lifecycle ───────────────────────────────────────────────── */
 
-static pthread_t server_tid;
+static KlPlatThread server_tid;
 static int server_tid_live;   /* a start_server thread is running and not yet joined */
 static void stop_server(void);
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* Every utest ASSERT_* returns from the test on failure, so a test that fails between
@@ -546,7 +545,7 @@ static void start_server(void) {
                     NULL, NULL);
     kl_http_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
                     NULL, NULL);
-    pthread_create(&server_tid, NULL, server_thread, NULL);
+    kl_plat_thread_create(&server_tid, server_thread, NULL);
     server_tid_live = 1;
     wait_for_bind(&test_server);
     test_port = test_server.bound_port;
@@ -556,7 +555,7 @@ static void stop_server(void) {
     if (!server_tid_live)
         return;              /* already reclaimed; keep this idempotent */
     kl_http_server_stop(&test_server);
-    pthread_join(server_tid, NULL);
+    kl_plat_thread_join(&server_tid);
     server_tid_live = 0;
     kl_http_server_free(&test_server);
 }
@@ -608,7 +607,7 @@ UTEST(integration, post_large_body) {
     (void)kl_test_sockwrite(fd, body, body_len);
 
     char buf[32768];
-    ssize_t total = read_response(fd, buf, sizeof(buf));
+    kl_ssize_t total = read_response(fd, buf, sizeof(buf));
     kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
@@ -670,8 +669,8 @@ UTEST(integration, keepalive_post) {
 
     /* Read first response: need to parse Content-Length to know when done */
     char buf[8192];
-    ssize_t total = 0;
-    ssize_t n;
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     /* Read until we have the full first response */
     while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
@@ -751,11 +750,11 @@ UTEST(integration, expect_100_continue) {
 
     /* Read the 100 Continue interim response */
     char buf[4096];
-    ssize_t n = 0;
+    kl_ssize_t n = 0;
     /* Wait for 100 Continue */
     for (int i = 0; i < 20 && n == 0; i++) {
-        usleep(50000);
-        ssize_t r = kl_test_sockread(fd, buf + n, sizeof(buf) - (size_t)n - 1);
+        kl_test_sleep_ms(50);
+        kl_ssize_t r = kl_test_sockread(fd, buf + n, sizeof(buf) - (size_t)n - 1);
         if (r > 0) n += r;
     }
     buf[n] = '\0';
@@ -766,7 +765,7 @@ UTEST(integration, expect_100_continue) {
 
     /* Read the final response */
     char buf2[4096];
-    ssize_t total = read_response(fd, buf2, sizeof(buf2));
+    kl_ssize_t total = read_response(fd, buf2, sizeof(buf2));
     kl_test_closesock(fd);
     (void)total;
 
@@ -838,10 +837,9 @@ static void test_access_log_fn(const KlHttpRequest *req, int status,
 static KlHttpServer log_server;
 static AccessLogCapture log_capture;
 
-static void *log_server_thread(void *arg) {
+static void log_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&log_server);
-    return NULL;
 }
 
 UTEST(integration, access_log) {
@@ -854,8 +852,8 @@ UTEST(integration, access_log) {
     kl_http_server_init(&log_server, &cfg);
     kl_http_server_route(&log_server, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, log_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, log_server_thread, NULL);
     wait_for_bind(&log_server);
     int log_port = log_server.bound_port;
 
@@ -873,10 +871,10 @@ UTEST(integration, access_log) {
     kl_test_closesock(fd);
 
     /* Wait briefly for the log callback to fire (it fires after send completes) */
-    usleep(50000);
+    kl_test_sleep_ms(50);
 
     kl_http_server_stop(&log_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&log_server);
 
     ASSERT_EQ(1, log_capture.call_count);
@@ -992,7 +990,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
      * polling pattern as wait_for_bind() above. Avoids fixed-sleep
      * flakiness on loaded CI. ~2-second cap covers slow runners; the
      * normal-case wait is much shorter (a few ms). */
-    for (int i = 0; i < 200 && !eer_handler_called; i++) usleep(10000);
+    for (int i = 0; i < 200 && !eer_handler_called; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(eer_handler_called);
 
     /* Write 2: chunk2. Arrives in READING_BODY state, on_data fires
@@ -1063,7 +1061,7 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
     (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
 
-    for (int i = 0; i < 200 && !eer_err_handler_called; i++) usleep(10000);
+    for (int i = 0; i < 200 && !eer_err_handler_called; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(eer_err_handler_called);
 
     /* Chunk 2 arrives in READING_BODY. on_data fires with conn+res
@@ -1390,8 +1388,8 @@ UTEST(integration, chunked_keepalive) {
 
     /* Read first response */
     char buf[8192];
-    ssize_t total = 0;
-    ssize_t n;
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
         buf[total] = '\0';
@@ -1444,10 +1442,10 @@ UTEST(integration, chunked_100_continue) {
 
     /* Wait for 100 Continue */
     char buf[4096];
-    ssize_t rn = 0;
+    kl_ssize_t rn = 0;
     for (int i = 0; i < 20 && rn == 0; i++) {
-        usleep(50000);
-        ssize_t r = kl_test_sockread(fd, buf + rn, sizeof(buf) - (size_t)rn - 1);
+        kl_test_sleep_ms(50);
+        kl_ssize_t r = kl_test_sockread(fd, buf + rn, sizeof(buf) - (size_t)rn - 1);
         if (r > 0) rn += r;
     }
     buf[rn] = '\0';
@@ -1519,7 +1517,7 @@ UTEST(integration, chunked_large_body) {
     (void)kl_test_sockwrite(fd, "0\r\n\r\n", 5);
 
     char buf[32768];
-    ssize_t total = read_response(fd, buf, sizeof(buf));
+    kl_ssize_t total = read_response(fd, buf, sizeof(buf));
     kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
@@ -1550,10 +1548,9 @@ UTEST(integration, chunked_large_body) {
 
 static KlHttpServer signal_server;
 
-static void *signal_server_thread(void *arg) {
+static void signal_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&signal_server);
-    return NULL;
 }
 
 UTEST(integration, signal_stop) {
@@ -1564,8 +1561,8 @@ UTEST(integration, signal_stop) {
     kl_http_server_init(&signal_server, &cfg);
     kl_http_server_route(&signal_server, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, signal_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, signal_server_thread, NULL);
     wait_for_bind(&signal_server);
     int sig_port = signal_server.bound_port;
 
@@ -1584,7 +1581,7 @@ UTEST(integration, signal_stop) {
 
     /* Send SIGTERM to ourselves; handler should stop the server */
     kill(getpid(), SIGTERM);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&signal_server);
 
     /* If we get here, the server exited cleanly */
@@ -1631,13 +1628,12 @@ static void handle_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static KlHttpServer mw_server;
 
-static void *mw_server_thread(void *arg) {
+static void mw_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&mw_server);
-    return NULL;
 }
 
-static pthread_t mw_server_tid;
+static KlPlatThread mw_server_tid;
 static int mw_port;
 
 static void start_mw_server(void) {
@@ -1654,14 +1650,14 @@ static void start_mw_server(void) {
     kl_http_server_route(&mw_server, "POST", "/api/echo", handle_mw_echo,
                     (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
 
-    pthread_create(&mw_server_tid, NULL, mw_server_thread, NULL);
+    kl_plat_thread_create(&mw_server_tid, mw_server_thread, NULL);
     wait_for_bind(&mw_server);
     mw_port = mw_server.bound_port;
 }
 
 static void stop_mw_server(void) {
     kl_http_server_stop(&mw_server);
-    pthread_join(mw_server_tid, NULL);
+    kl_plat_thread_join(&mw_server_tid);
     kl_http_server_free(&mw_server);
 }
 
@@ -1750,10 +1746,9 @@ static int mw_add_x_second(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static KlHttpServer chain_server;
 
-static void *chain_server_thread(void *arg) {
+static void chain_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&chain_server);
-    return NULL;
 }
 
 UTEST(integration, middleware_chain_order) {
@@ -1763,8 +1758,8 @@ UTEST(integration, middleware_chain_order) {
     kl_http_server_use(&chain_server, "*", "/*", mw_add_x_second, NULL);
     kl_http_server_route(&chain_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, chain_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, chain_server_thread, NULL);
     wait_for_bind(&chain_server);
 
     int fd = connect_to(chain_server.bound_port);
@@ -1792,16 +1787,15 @@ UTEST(integration, middleware_chain_order) {
     ASSERT_TRUE(p1 < p2);
 
     kl_http_server_stop(&chain_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&chain_server);
 }
 
 static KlHttpServer sc_body_server;
 
-static void *sc_body_server_thread(void *arg) {
+static void sc_body_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&sc_body_server);
-    return NULL;
 }
 
 static int mw_reject_all(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -1817,8 +1811,8 @@ UTEST(integration, middleware_short_circuit_body) {
     kl_http_server_route(&sc_body_server, "POST", "/echo", handle_mw_echo,
                     (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, sc_body_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, sc_body_server_thread, NULL);
     wait_for_bind(&sc_body_server);
 
     int fd = connect_to(sc_body_server.bound_port);
@@ -1840,7 +1834,7 @@ UTEST(integration, middleware_short_circuit_body) {
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
     kl_http_server_stop(&sc_body_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&sc_body_server);
 }
 
@@ -1892,10 +1886,9 @@ static void handle_post_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *c
 
 static KlHttpServer post_mw_server;
 
-static void *post_mw_server_thread(void *arg) {
+static void post_mw_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&post_mw_server);
-    return NULL;
 }
 
 UTEST(integration, post_middleware_body_access) {
@@ -1906,8 +1899,8 @@ UTEST(integration, post_middleware_body_access) {
                     (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
     kl_http_server_route(&post_mw_server, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, post_mw_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, post_mw_server_thread, NULL);
     wait_for_bind(&post_mw_server);
     int pmw_port = post_mw_server.bound_port;
 
@@ -1954,16 +1947,15 @@ UTEST(integration, post_middleware_body_access) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
     kl_http_server_stop(&post_mw_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&post_mw_server);
 }
 
 static KlHttpServer post_mw_ka_server;
 
-static void *post_mw_ka_server_thread(void *arg) {
+static void post_mw_ka_server_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&post_mw_ka_server);
-    return NULL;
 }
 
 UTEST(integration, post_middleware_keepalive_preserved) {
@@ -1974,8 +1966,8 @@ UTEST(integration, post_middleware_keepalive_preserved) {
                     (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
     kl_http_server_route(&post_mw_ka_server, "GET", "/hello", handle_hello, NULL, NULL);
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, post_mw_ka_server_thread, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, post_mw_ka_server_thread, NULL);
     wait_for_bind(&post_mw_ka_server);
 
     /* Post-middleware rejection should preserve keep-alive */
@@ -1992,8 +1984,8 @@ UTEST(integration, post_middleware_keepalive_preserved) {
 
     /* Read first response */
     char buf[8192];
-    ssize_t total = 0;
-    ssize_t n;
+    kl_ssize_t total = 0;
+    kl_ssize_t n;
     while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
         buf[total] = '\0';
@@ -2024,7 +2016,7 @@ UTEST(integration, post_middleware_keepalive_preserved) {
     ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
 
     kl_http_server_stop(&post_mw_ka_server);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&post_mw_ka_server);
 }
 
@@ -2106,7 +2098,7 @@ UTEST(integration, per_route_limit_unaffected) {
     (void)kl_test_sockwrite(fd, body, body_len);
 
     char buf[65536];
-    ssize_t total = read_response(fd, buf, sizeof(buf));
+    kl_ssize_t total = read_response(fd, buf, sizeof(buf));
     kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);

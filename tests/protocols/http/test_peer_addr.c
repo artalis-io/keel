@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <errno.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <stdio.h>
 #include <string.h>
 #include "net_compat.h"
@@ -18,7 +18,7 @@ static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
+static void srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return; }
 
 static void drain_response(int fd) {
     char buf[512];
@@ -34,12 +34,12 @@ UTEST(peer_addr, tcp_ipv4) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
 
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -54,7 +54,7 @@ UTEST(peer_addr, tcp_ipv4) {
     kl_test_closesock(fd);
 
     kl_http_server_stop(&srv);
-    pthread_join(t, NULL);
+    kl_plat_thread_join(&t);
     kl_http_server_free(&srv);
 
     ASSERT_EQ(0, g_rc);
@@ -69,15 +69,15 @@ UTEST(peer_addr, tcp_ipv6) {
         UTEST_SKIP("IPv6 unavailable");
 
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     if (srv.bound_port <= 0) {
-        kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
+        kl_http_server_stop(&srv); kl_plat_thread_join(&t); kl_http_server_free(&srv);
         UTEST_SKIP("IPv6 bind failed");
     }
 
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET6, SOCK_STREAM, 0);
     struct sockaddr_in6 a6;
     memset(&a6, 0, sizeof(a6));
     a6.sin6_family = AF_INET6;
@@ -92,7 +92,7 @@ UTEST(peer_addr, tcp_ipv6) {
     if (fd >= 0) kl_test_closesock(fd);
 
     kl_http_server_stop(&srv);
-    pthread_join(t, NULL);
+    kl_plat_thread_join(&t);
     kl_http_server_free(&srv);
 
     if (crc != 0)
@@ -104,7 +104,7 @@ UTEST(peer_addr, tcp_ipv6) {
 /* ── PROXY protocol integration ──────────────────────────────────────── */
 
 static int connect_local(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -122,9 +122,9 @@ UTEST(peer_addr, proxy_v1_trusted) {
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
     int fd = connect_local(srv.bound_port);
@@ -136,7 +136,7 @@ UTEST(peer_addr, proxy_v1_trusted) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
+    kl_http_server_stop(&srv); kl_plat_thread_join(&t); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("203.0.113.7", g_ip);   /* header address, not 127.0.0.1 */
     ASSERT_EQ(5000, g_port);
@@ -149,9 +149,9 @@ UTEST(peer_addr, proxy_v2_trusted) {
                      .proxy_trusted_cidrs = "127.0.0.0/8" };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
     int fd = connect_local(srv.bound_port);
@@ -173,7 +173,7 @@ UTEST(peer_addr, proxy_v2_trusted) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
+    kl_http_server_stop(&srv); kl_plat_thread_join(&t); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("198.51.100.9", g_ip);
     ASSERT_EQ(40000, g_port);
@@ -187,9 +187,9 @@ UTEST(peer_addr, proxy_trusted_no_header) {
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
-    pthread_t t;
-    ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    KlPlatThread t;
+    ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_TRUE(srv.bound_port > 0);
 
     int fd = connect_local(srv.bound_port);
@@ -199,7 +199,7 @@ UTEST(peer_addr, proxy_trusted_no_header) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
+    kl_http_server_stop(&srv); kl_plat_thread_join(&t); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("127.0.0.1", g_ip);
 }

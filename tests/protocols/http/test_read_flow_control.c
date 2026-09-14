@@ -13,7 +13,7 @@
 #include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include "net_compat.h"
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 #include <time.h>
 
@@ -22,8 +22,7 @@
 #define RFC_TOTAL (RFC_HALF * 2)
 
 static void rfc_nap(int ms) {
-    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
+    kl_test_sleep_ms((unsigned)ms);
 }
 
 /* Results recorded by the reader (survive its destroy). */
@@ -87,10 +86,10 @@ static void rfc_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static KlHttpServer g_srv;
-static void *rfc_srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
+static void rfc_srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return; }
 
 static int rfc_connect(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -108,8 +107,8 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
     ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
     kl_http_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_factory);
 
-    pthread_t tid;
-    ASSERT_EQ(0, pthread_create(&tid, NULL, rfc_srv_thread, NULL));
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, rfc_srv_thread, NULL));
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) rfc_nap(5);
     ASSERT_TRUE(g_srv.bound_port > 0);
 
@@ -152,7 +151,7 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
 
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&g_srv);
 }
 
@@ -187,8 +186,8 @@ UTEST(read_flow_control, shutdown_while_paused) {
     ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
     kl_http_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_pause_forever_factory);
 
-    pthread_t tid;
-    ASSERT_EQ(0, pthread_create(&tid, NULL, rfc_srv_thread, NULL));
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, rfc_srv_thread, NULL));
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) rfc_nap(5);
     ASSERT_TRUE(g_srv.bound_port > 0);
 
@@ -209,7 +208,7 @@ UTEST(read_flow_control, shutdown_while_paused) {
     /* Tear down with the conn still paused mid-body. join must return (no hang). */
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(&g_srv);
 }
 

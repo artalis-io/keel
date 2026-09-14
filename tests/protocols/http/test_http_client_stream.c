@@ -1,11 +1,14 @@
 #include "utest.h"
+#include "net_compat.h"
 #include <keel/keel.h>
 #include <keel/http_client.h>
 #include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; the harness helpers cover it */
 #include <stdlib.h>
 
 /* ── Test constants ────────────────────────────────────────────────── */
@@ -379,7 +382,7 @@ static kl_ssize_t mock_body_read(char *buf, size_t buf_len, void *user_data)
         to_copy = r->chunk_size;
     memcpy(buf, r->data + r->pos, to_copy);
     r->pos += to_copy;
-    return (ssize_t)to_copy;
+    return (kl_ssize_t)to_copy;
 }
 
 static kl_ssize_t mock_body_read_eof(char *buf, size_t buf_len, void *user_data)
@@ -400,7 +403,7 @@ static kl_ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_dat
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* Server handler: echo body back */
@@ -445,13 +448,12 @@ static void srv_no_content(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 }
 
 static KlHttpServer stream_test_server;
-static pthread_t stream_test_tid;
+static KlPlatThread stream_test_tid;
 
-static void *stream_server_thread(void *arg)
+static void stream_server_thread(void *arg)
 {
     (void)arg;
     kl_http_server_run(&stream_test_server);
-    return NULL;
 }
 
 static int stream_test_port;
@@ -469,7 +471,7 @@ static void start_stream_server(void)
     kl_http_server_route(&stream_test_server, "POST", "/echo",
                     srv_echo, (void *)(size_t)TEST_MAX_BODY,
                     kl_http_body_reader_buffer);
-    pthread_create(&stream_test_tid, NULL, stream_server_thread, NULL);
+    kl_plat_thread_create(&stream_test_tid, stream_server_thread, NULL);
     wait_for_bind(&stream_test_server);
     stream_test_port = stream_test_server.bound_port;
 }
@@ -477,7 +479,7 @@ static void start_stream_server(void)
 static void stop_stream_server(void)
 {
     kl_http_server_stop(&stream_test_server);
-    pthread_join(stream_test_tid, NULL);
+    kl_plat_thread_join(&stream_test_tid);
     kl_http_server_free(&stream_test_server);
 }
 

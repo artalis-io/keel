@@ -18,12 +18,12 @@
 #include "net_compat.h"
 #include <string.h>
 #include <stdio.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 #define CRLF "\r\n"
 
 static KlHttpServer rd_server;
-static pthread_t    rd_tid;
+static KlPlatThread    rd_tid;
 static int          rd_port;
 static int          rd_live;
 
@@ -83,7 +83,7 @@ static void rd_early_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_request_await_body(req);
 }
 
-static void *rd_thread(void *a) { (void)a; kl_http_server_run(&rd_server); return NULL; }
+static void rd_thread(void *a) { (void)a; kl_http_server_run(&rd_server); return; }
 
 /* Defined below; rd_start() calls it to clean up after a test that returned early. */
 static void rd_stop(void);
@@ -114,9 +114,9 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
     kl_http_server_route(&rd_server, "POST", "/deny", rd_echo, NULL, NULL);   /* no reader: discard path */
     kl_http_server_route_streaming(&rd_server, "POST", "/early", rd_early_handler, NULL,
                                    rd_early_factory);
-    if (pthread_create(&rd_tid, NULL, rd_thread, NULL) != 0) return -1;
+    if (kl_plat_thread_create(&rd_tid, rd_thread, NULL) != 0) return -1;
     rd_live = 1;
-    for (int i = 0; i < 400 && rd_server.bound_port == 0; i++) usleep(5000);
+    for (int i = 0; i < 400 && rd_server.bound_port == 0; i++) kl_test_sleep_ms(5);
     rd_port = rd_server.bound_port;
     return (rd_port > 0) ? 0 : -1;
 }
@@ -124,13 +124,13 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
 static void rd_stop(void) {
     if (!rd_live) return;
     kl_http_server_stop(&rd_server);
-    pthread_join(rd_tid, NULL);
+    kl_plat_thread_join(&rd_tid);
     rd_live = 0;
     kl_http_server_free(&rd_server);
 }
 
 static int rd_connect(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));

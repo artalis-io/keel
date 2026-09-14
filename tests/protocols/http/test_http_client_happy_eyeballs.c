@@ -17,7 +17,7 @@
 #include <keel/allocator.h>
 
 #include "net_compat.h"
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 
 /* Internal layout: the retirement/detachment assertions (6C review) inspect the embedded
@@ -88,33 +88,32 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *server_thread_fn(void *arg) {
+static void server_thread_fn(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
-    return NULL;
 }
 
-static int start_server(KlHttpServer *srv, pthread_t *tid) {
+static int start_server(KlHttpServer *srv, KlPlatThread *tid) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 8 };
     if (kl_http_server_init(srv, &cfg) != 0)
         return -1;
     kl_http_server_route(srv, "GET", "/ok", handle_ok, NULL, NULL);
-    if (pthread_create(tid, NULL, server_thread_fn, srv) != 0)
+    if (kl_plat_thread_create(tid, server_thread_fn, srv) != 0)
         return -1;
     for (int i = 0; i < 200 && srv->bound_port == 0; i++)
-        usleep(10000);
+        kl_test_sleep_ms(10);
     return srv->bound_port > 0 ? 0 : -1;
 }
 
-static void stop_server(KlHttpServer *srv, pthread_t tid) {
+static void stop_server(KlHttpServer *srv, KlPlatThread tid) {
     kl_http_server_stop(srv);
-    pthread_join(tid, NULL);
+    kl_plat_thread_join(&tid);
     kl_http_server_free(srv);
 }
 
 /* Reserve a loopback port then close it: connecting there yields a fast
  * ECONNREFUSED (nothing listening). */
 static int reserve_closed_port(void) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int s = (int)socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
@@ -131,7 +130,7 @@ static int reserve_closed_port(void) {
  * a default route; on a fully offline host it may error immediately). Timing
  * tests UTEST_SKIP when this returns 0, keeping them green everywhere. */
 static int blackhole_stalls(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     kl_test_set_nonblock(fd);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -191,10 +190,10 @@ static int he_fully_detached(const KlHttpClient *c) {
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
 UTEST(he, first_wins) {
-    KlHttpServer srv; pthread_t tid;
+    KlHttpServer srv; KlPlatThread tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ports[0] = srv.bound_port;     /* both live → first wins the race */
     g_res_ports[1] = srv.bound_port;
@@ -221,10 +220,10 @@ UTEST(he, first_wins) {
 }
 
 UTEST(he, fallback_on_refused) {
-    KlHttpServer srv; pthread_t tid;
+    KlHttpServer srv; KlPlatThread tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ports[0] = reserve_closed_port();  /* ECONNREFUSED → fast failover */
     g_res_ports[1] = srv.bound_port;         /* live: wins */
@@ -255,7 +254,7 @@ UTEST(he, all_fail) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ports[0] = reserve_closed_port();
     g_res_ports[1] = reserve_closed_port();
@@ -277,10 +276,10 @@ UTEST(he, all_fail) {
 #endif
 
 UTEST(he, single_address) {
-    KlHttpServer srv; pthread_t tid;
+    KlHttpServer srv; KlPlatThread tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 1;
     g_res_ports[0] = srv.bound_port;
 
@@ -306,10 +305,10 @@ UTEST(he, second_wins_on_slow_first) {
     if (!blackhole_stalls())
         UTEST_SKIP("no default route: " BLACKHOLE_IP " does not stall here");
 
-    KlHttpServer srv; pthread_t tid;
+    KlHttpServer srv; KlPlatThread tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ip[0] = BLACKHOLE_IP; g_res_ports[0] = 80;   /* stalls */
     g_res_ports[1] = srv.bound_port;                   /* live: wins after delay */
@@ -336,7 +335,7 @@ UTEST(he, deadline_fires_on_blackhole) {
     if (!blackhole_stalls())
         UTEST_SKIP("no default route: " BLACKHOLE_IP " does not stall here");
 
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 1;
     g_res_ip[0] = BLACKHOLE_IP; g_res_ports[0] = 80;   /* single stalling address */
 
@@ -365,9 +364,9 @@ UTEST(he, deadline_fires_on_blackhole) {
 /* Winner + (possibly outstanding) loser → confirmed detachment. Two live addresses raced with a
  * zero attempt-delay: one wins, the other is cancelled/disposed and must retire. */
 UTEST(he_detach, winner_and_loser) {
-    KlHttpServer srv; pthread_t tid;
+    KlHttpServer srv; KlPlatThread tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
-    memset(g_res_ip, 0, sizeof(g_res_ip));
+    memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ports[0] = srv.bound_port;
     g_res_ports[1] = srv.bound_port;
@@ -397,7 +396,7 @@ UTEST(he_detach, cancel_during_dns) {
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
     KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_defer = 1;                         /* resolve() defers: stays RESOLVING */
-    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+    g_res_n = 1; memset((void *)g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
@@ -448,7 +447,7 @@ UTEST(he_detach, resolve_failed_during_dns) {
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
     KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_defer = 1;                          /* stays RESOLVING until we complete it */
-    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+    g_res_n = 1; memset((void *)g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
@@ -473,7 +472,7 @@ UTEST(he_detach, resolver_returns_null) {
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
     KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_return_null = 1;                    /* resolve() cannot start */
-    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+    g_res_n = 1; memset((void *)g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",

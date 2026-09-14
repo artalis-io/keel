@@ -2,8 +2,11 @@
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 #include <keel/async.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "net_compat.h"        /* kl_test_thread_id */
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; the harness helpers cover it */
 #include <string.h>
 #include <stdatomic.h>
 
@@ -90,7 +93,7 @@ UTEST(thread_pool, submit_single) {
 
 static void slow_work_fn(void *ud) {
     (void)ud;
-    usleep(50000); /* 50ms: hold the slot */
+    kl_test_sleep_ms(50); /* 50ms: hold the slot */
 }
 static void noop_done_fn(void *ud) { (void)ud; }
 
@@ -129,12 +132,12 @@ UTEST(thread_pool, submit_fills_queue) {
 
 /* ── Test: work_fn runs on different thread ───────────────────────── */
 
-static pthread_t worker_tid;
+static KlTestThreadId worker_tid;
 static atomic_int worker_tid_set;
 
 static void capture_tid_work(void *ud) {
     (void)ud;
-    worker_tid = pthread_self();
+    worker_tid = kl_test_thread_id();
     atomic_fetch_add(&worker_tid_set, 1);
 }
 
@@ -162,7 +165,7 @@ UTEST(thread_pool, work_executes_on_worker) {
     (void)done_count;
 
     ASSERT_EQ(atomic_load(&worker_tid_set), 1);
-    ASSERT_TRUE(!pthread_equal(worker_tid, pthread_self()));
+    ASSERT_NE(worker_tid, kl_test_thread_id());   /* work_fn ran on a worker, not here */
 
     kl_thread_pool_free(pool);
     cleanup_test_server(&s);
@@ -170,12 +173,12 @@ UTEST(thread_pool, work_executes_on_worker) {
 
 /* ── Test: done_fn runs on main thread ────────────────────────────── */
 
-static pthread_t done_tid;
+static KlTestThreadId done_tid;
 static atomic_int done_tid_set;
 
 static void capture_done_tid(void *ud) {
     (void)ud;
-    done_tid = pthread_self();
+    done_tid = kl_test_thread_id();
     atomic_fetch_add(&done_tid_set, 1);
 }
 
@@ -199,7 +202,7 @@ UTEST(thread_pool, done_runs_on_main) {
     pump_until(&s, &done_tid_set, 1, 2000);
 
     ASSERT_EQ(atomic_load(&done_tid_set), 1);
-    ASSERT_TRUE(pthread_equal(done_tid, pthread_self()));
+    ASSERT_EQ(done_tid, kl_test_thread_id());     /* done_fn ran on the event-loop thread */
 
     kl_thread_pool_free(pool);
     cleanup_test_server(&s);
@@ -297,7 +300,7 @@ static void cancel_fn(void *ud) {
 
 static void blocking_work_fn(void *ud) {
     (void)ud;
-    usleep(200000); /* 200ms: hold worker busy */
+    kl_test_sleep_ms(200); /* 200ms: hold worker busy */
 }
 
 UTEST(thread_pool, shutdown_cancels_pending) {
@@ -322,7 +325,7 @@ UTEST(thread_pool, shutdown_cancels_pending) {
     ASSERT_EQ(kl_thread_pool_submit(pool, &blocker), 0);
 
     /* Let worker pick up the blocker */
-    usleep(10000);
+    kl_test_sleep_ms(10);
 
     /* Submit more items that will be pending when we free */
     for (int i = 0; i < 4; i++) {
@@ -350,7 +353,7 @@ static atomic_int running_completed;
 
 static void slow_complete_work(void *ud) {
     (void)ud;
-    usleep(50000); /* 50ms */
+    kl_test_sleep_ms(50); /* 50ms */
     atomic_fetch_add(&running_completed, 1);
 }
 
@@ -373,7 +376,7 @@ UTEST(thread_pool, shutdown_waits_for_running) {
     ASSERT_EQ(kl_thread_pool_submit(pool, &item), 0);
 
     /* Let worker pick it up */
-    usleep(10000);
+    kl_test_sleep_ms(10);
 
     /* Free: should block until the running item completes */
     kl_thread_pool_free(pool);
@@ -402,7 +405,7 @@ UTEST(thread_pool, null_cancel_fn) {
         .user_data = NULL,
     };
     ASSERT_EQ(kl_thread_pool_submit(pool, &blocker), 0);
-    usleep(10000);
+    kl_test_sleep_ms(10);
 
     /* Submit with NULL cancel_fn: should not crash on shutdown */
     KlWorkItem item = {

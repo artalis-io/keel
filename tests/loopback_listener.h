@@ -14,13 +14,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <pthread.h>
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <stdatomic.h>
 
 typedef struct {
     int      listen_fd;
     int      port;
-    pthread_t tid;
+    KlPlatThread tid;
     _Atomic int stop;      /* written by the test thread, read by the listener */
     int      reply_http;   /* 1 = write a canned HTTP/1.1 200 to each conn */
     /* accepted[]/n_accepted are written only by the listener and read only AFTER
@@ -42,11 +42,11 @@ static const char kHttp200[] =
  * this is the process's FIRST native socket call, which the retired load-time Winsock constructor
  * used to cover for free. listener_thread() needs no gate of its own: it only accept()s the listener
  * that listener_start() created, so it cannot run first. */
-static void *listener_thread(void *arg)
+static void listener_thread(void *arg)
 {
     Listener *l = arg;
     for (;;) {
-        int fd = accept(l->listen_fd, NULL, NULL);
+        int fd = (int)accept(l->listen_fd, NULL, NULL);
         if (fd < 0) {
             if (l->stop) break;
             continue;
@@ -64,14 +64,13 @@ static void *listener_thread(void *arg)
         /* Hold the connection open until teardown. */
         if (l->stop) { kl_test_closesock(fd); break; }
     }
-    return NULL;
 }
 
 static int listener_start(Listener *l)
 {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
     memset(l, 0, sizeof(*l));
-    l->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    l->listen_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (l->listen_fd < 0) return -1;
     struct sockaddr_in addr = { .sin_family = AF_INET };
     socklen_t sl = sizeof(addr);   /* declared before any goto (no jump over an initializer) */
@@ -84,7 +83,7 @@ static int listener_start(Listener *l)
     if (listen(l->listen_fd, 8) < 0) goto fail;
     if (getsockname(l->listen_fd, (struct sockaddr *)&addr, &sl) < 0) goto fail;
     l->port = ntohs(addr.sin_port);
-    if (pthread_create(&l->tid, NULL, listener_thread, l) != 0) goto fail;
+    if (kl_plat_thread_create(&l->tid, listener_thread, l) != 0) goto fail;
     return 0;
 fail:
     kl_test_closesock(l->listen_fd);
@@ -97,7 +96,7 @@ static void listener_stop(Listener *l)
     if (kl_plat_socket_runtime_init() != 0) return;   /* PAL invariant */
     l->stop = 1;
     /* Kick accept() by connecting once. */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     if (fd >= 0) {
         struct sockaddr_in addr = { .sin_family = AF_INET };
         inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
@@ -105,7 +104,7 @@ static void listener_stop(Listener *l)
         connect(fd, (struct sockaddr *)&addr, sizeof(addr));
         kl_test_closesock(fd);
     }
-    pthread_join(l->tid, NULL);
+    kl_plat_thread_join(&l->tid);
     for (int i = 0; i < l->n_accepted; i++) kl_test_closesock(l->accepted[i]);
     kl_test_closesock(l->listen_fd);
 }
