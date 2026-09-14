@@ -11,11 +11,13 @@ set -eu
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
+. "$ROOT/tools/msys_native_paths.sh"   # native tools must see paths unrewritten
 MAN=docs/f2/public_headers.txt
 
-stage=$(mktemp -d)
+stage=$(keel_native_path "$(mktemp -d)")
 trap 'rm -rf "$stage"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 PFX=/usr/local
+keel_keep_logical "$PFX"   # a logical prefix, not a directory: must not be rewritten
 D="$stage/root"
 
 fail=0

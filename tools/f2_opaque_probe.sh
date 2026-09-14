@@ -11,11 +11,12 @@ set -eu
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
+. "$ROOT/tools/msys_native_paths.sh"   # native tools must see paths unrewritten
 CC=${CC:-cc}
 CXX=${CXX:-c++}
 
-stage=$(mktemp -d)
-tmp=$(mktemp -d)
+stage=$(keel_native_path "$(mktemp -d)")
+tmp=$(keel_native_path "$(mktemp -d)")
 trap 'rm -rf "$stage" "$tmp"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 
 rm -f "$ROOT/keel.pc"                       # force keel.pc regeneration for the staged prefix
