@@ -1219,8 +1219,16 @@ KEEL_VERSION := $(shell cat VERSION 2>/dev/null)
 # configuration changes (not only when keel.pc.in does): rebuild the content each time and replace the
 # file only when it differs, so its mtime advances exactly on a real change and a stale prefix or
 # version can never be installed. @VERSION@ is substituted from VERSION so keel.pc.in holds no literal.
+# What a downstream consumer must add to link the STATIC archive, and it has to match what this
+# Makefile actually links or the .pc file is decoration. POSIX needs pthreads; Windows needs the
+# Win32 networking/crypto libraries and NOT pthreads, because the PAL uses Win32 threads. It was
+# hardcoded to -lpthread, which is exactly backwards on Windows: nothing there provides the
+# Winsock symbols, so a consumer could not statically link installed Keel at all. Spelled per
+# toolchain (mk/toolchain.mk), so a .pc generated from an MSVC build names .lib files.
+PC_LIBS_PRIVATE = $(strip $(if $(filter 1,$(WINDOWS)),$(LD_WIN_PLATFORM),$(LD_THREAD)) $(if $(filter iouring,$(BACKEND)),-luring))
+
 keel.pc: keel.pc.in VERSION FORCE
-	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(KEEL_VERSION)|g' $< > $@.tmp; \
+	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(KEEL_VERSION)|g' -e 's|@LIBS_PRIVATE@|$(PC_LIBS_PRIVATE)|g' $< > $@.tmp; \
 	 if cmp -s $@.tmp $@ 2>/dev/null; then rm -f $@.tmp; \
 	 else mv $@.tmp $@; echo "keel.pc: regenerated (prefix=$(PREFIX), version=$(KEEL_VERSION))"; fi
 

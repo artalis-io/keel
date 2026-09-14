@@ -19,6 +19,7 @@ set -eu
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
+. "$ROOT/tools/msys_native_paths.sh"   # native tools must see paths unrewritten
 SRC="$ROOT/tools/f2_cxx_link"
 CXX=${CXX:-c++}
 CXXSTD=${CXXSTD:-c++11}
@@ -28,8 +29,8 @@ command -v pkg-config >/dev/null 2>&1 || { echo "cxx-link: pkg-config not found"
 echo "cxx-link: building libkeel.a"
 "$MAKE" -s libkeel.a >/dev/null 2>&1 || "$MAKE" -s >/dev/null 2>&1
 
-stage=$(mktemp -d)
-build=$(mktemp -d)
+stage=$(keel_native_path "$(mktemp -d)")
+build=$(keel_native_path "$(mktemp -d)")
 trap 'rm -rf "$stage" "$build"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 
 echo "cxx-link: staging install into $stage"

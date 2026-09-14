@@ -211,7 +211,7 @@ jobs:
         with:
           msystem: MINGW64
           release: false
-          install: mingw-w64-x86_64-gcc make
+          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf
 
       # WSAPoll event backend + Winsock provider. Builds and links the entire
       # library on Windows; TCP HTTP server + sync/async client, the UDP
@@ -220,6 +220,19 @@ jobs:
       # tests for each.
       - name: Build full core (Winsock)
         run: make OS=windows CC=gcc
+
+      # The installed-artifact gates, on the platform whose packaging they describe. They ran only
+      # on Linux before, which is why keel.pc could advertise -lpthread on Windows -- wrong twice
+      # over, since the PAL uses Win32 threads and the Win32 networking libraries were missing, so
+      # no Windows consumer could statically link installed Keel. Standing CI now, not local-only.
+      - name: "Installed artifact: DESTDIR/PREFIX staging and safe uninstall"
+        run: make OS=windows CC=gcc check-install
+
+      - name: "Installed artifact: out-of-tree consumer links via pkg-config"
+        run: make OS=windows CC=gcc check-installed-consumer
+
+      - name: "Installed artifact: every public header compiles alone (C11 + C++11)"
+        run: make OS=windows CC=gcc check-public-headers
 
       - name: Link + plaintext TCP roundtrip smoke test
         timeout-minutes: 3

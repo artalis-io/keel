@@ -7,4 +7,4 @@ Description: Minimal event-driven HTTP server library for C
 Version: @VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lkeel
-Libs.private: -lpthread
+Libs.private: @LIBS_PRIVATE@

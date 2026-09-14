@@ -14,6 +14,7 @@ set -eu
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 cd "$ROOT"
+. "$ROOT/tools/msys_native_paths.sh"   # native tools must see paths unrewritten
 CC=${CC:-cc}
 
 # pkg-config may be absent on a general local host (SKIP), but a release/CI gate must not silently
@@ -25,7 +26,7 @@ if ! command -v pkg-config >/dev/null 2>&1; then
     echo "installed-consumer: SKIP (no pkg-config; set KEEL_REQUIRE_PKGCONFIG=1 to require it)"; exit 0
 fi
 
-work=$(mktemp -d)
+work=$(keel_native_path "$(mktemp -d)")
 trap 'rm -rf "$work"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 
 # The out-of-tree consumer: exercises the allocator, the event context, and the thread pool (the last
@@ -65,8 +66,24 @@ run_case() {
 
     # keel.pc selects -lkeel from the staged libdir + the platform-private flag.
     case " $libs " in *" -lkeel "*) ;; *) bad "$label: -lkeel missing from --libs";; esac
-    case " $libs " in *" -lpthread "*) ;; *) bad "$label: platform-private -lpthread missing from --libs --static";; esac
-    case " $cflags " in *"-I$incdir"*) ;; *) bad "$label: --cflags does not point at the staged includedir";; esac
+    # The platform-private flag is whatever THIS platform actually needs to link the archive:
+    # pthreads on POSIX, the Win32 networking libraries on Windows (where the PAL uses Win32
+    # threads and -lpthread would be both wrong and insufficient).
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) want_priv="ws2_32" ;;
+        *)                    want_priv="pthread" ;;
+    esac
+    case " $libs " in
+        *"$want_priv"*) ;;
+        *) bad "$label: platform-private $want_priv missing from --libs --static (got: $libs)";;
+    esac
+    # pkg-config is a native Windows binary under MSYS and prints C:/... where the shell built
+    # /tmp/...; both name the same directory, so compare the canonical spelling.
+    incdir_n=$(keel_native_path "$incdir")
+    case " $cflags " in
+        *"-I$incdir"*|*"-I$incdir_n"*) ;;
+        *) bad "$label: --cflags does not point at the staged includedir (wanted -I$incdir or -I$incdir_n, got: $cflags)";;
+    esac
     [ -f "$libdir/libkeel.a" ] || bad "$label: staged libdir has no libkeel.a"
 
     # Build + link + run from a scratch cwd (never the repo), using ONLY pkg-config flags. A missing
@@ -98,6 +115,7 @@ run_case "PREFIX" "$pa/lib/pkgconfig" "" "$pa/include" "$pa/lib"
 
 # --- Case B: DESTDIR staging with a logical PREFIX ---
 db="$work/destB"; lp=/opt/keel-staged
+keel_keep_logical "$lp"   # a logical prefix, not a directory: must not be rewritten
 rm -f "$ROOT/keel.pc"
 "$MAKE" -s install DESTDIR="$db" PREFIX="$lp" >/dev/null 2>&1
 # keel.pc records the LOGICAL prefix; pkg-config rewrites it under the staging root via the sysroot.
