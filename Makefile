@@ -711,6 +711,42 @@ check-msvc-consumer: $(KEEL_LIB)
 	@mkdir -p build $(OBJDIR)/tests
 	$(CC) $(CFLAGS) $(TEST_OBJ_TMP) $(EXE_OUT)$(MSVC_CONSUMER_BIN) tools/msvc_consumer.c $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 	@./$(MSVC_CONSUMER_BIN)
+# The MSVC set is derived (see MSVC_TEST_SUITES above); this makes that stay true. Passes both
+# backend base sets, because WSAPoll and IOCP derive from different Windows suite lists and a
+# contract that only holds for the default backend is not a contract. The exclusion lists go
+# through too, so the gate can tell "excluded on purpose" from "quietly missing".
+check-msvc-parity:
+	@MAKEFILE="$(firstword $(MAKEFILE_LIST))" sh tools/check_msvc_parity.sh --selftest
+	@$(MAKE) --no-print-directory check-msvc-parity-one
+	@$(MAKE) --no-print-directory check-msvc-parity-one BACKEND=iocp
+
+# One backend per invocation, because MSVC_TEST_SUITES derives from the backend being built.
+# ENROLLED_CUR is that variable ITSELF, not a re-derivation, so a command-line or environment
+# override of it (it is ?=) shows up as a violation instead of being quietly reproduced.
+check-msvc-parity-one:
+	@LABEL="$(if $(filter iocp,$(BACKEND)),iocp,wsapoll)" \
+	  BASE_CUR="$(MSVC_BASE_SUITES)" ENROLLED_CUR="$(MSVC_TEST_SUITES)" \
+	  BASE_WSAPOLL="$(WIN_TEST_SUITES)" BASE_IOCP="$(WIN_IOCP_TEST_SUITES)" \
+	  EXCL_ALL="$(MSVC_EXCLUDE)" MSVC_EXCLUDE_PTHREAD="$(MSVC_EXCLUDE_PTHREAD)" \
+	  MSVC_EXCLUDE_UCRT="$(MSVC_EXCLUDE_UCRT)" MSVC_EXCLUDE_ICE="$(MSVC_EXCLUDE_ICE)" \
+	  MAKEFILE="$(firstword $(MAKEFILE_LIST))" sh tools/check_msvc_parity.sh
+
+# An exclusion that has quietly become runnable should not stay an exclusion. Opt-in rather than
+# part of the gate: it BUILDS AND RUNS each excluded suite, needs a sourced MSVC environment, and
+# a UCRT fast-fail or a compiler ICE is not something to discover inside a lint. Run it when a
+# toolchain moves; if a suite passes here, drop it from its list.
+audit-msvc-exclusions:
+	@echo "auditing $(words $(MSVC_EXCLUDE)) excluded suite(s) against the current toolchain:"; \
+	freed=""; still=0; \
+	for b in $(foreach x,$(MSVC_EXCLUDE),$(call test_bin_for,$(x))); do \
+	  s=$$(basename "$$b" | sed -e "s/^test_//" -e "s/$(EXE)$$//"); \
+	  if $(MAKE) -s CC=cl "$$b" >/dev/null 2>&1 && "./$$b" >/dev/null 2>&1; then \
+	    echo "  NOW PASSES: $$s  (remove it from its MSVC_EXCLUDE_* list)"; freed="$$freed $$s"; \
+	  else echo "  still excluded: $$s"; still=$$((still+1)); fi; \
+	done; \
+	if [ -n "$$freed" ]; then echo "audit-msvc-exclusions: FAIL -$$freed can be re-enrolled"; exit 1; fi; \
+	echo "audit-msvc-exclusions: OK ($$still exclusion(s) still necessary)"
+
 check-msvc-no-mingw: $(MSVC_TEST_BIN)
 	@bad=0; \
 	for t in $(MSVC_TEST_BIN); do \
