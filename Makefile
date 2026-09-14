@@ -603,98 +603,6 @@ WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_ty
                    websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
-# On Windows the test binaries need the `.exe` suffix and the win_prelude.h
-# force-include (utest.h QueryPerformanceCounter clash). POSIX builds fall through
-# to the extension-less `tests/%` rule above, so `test-win` also runs natively as
-# a subset sanity check.
-ifeq ($(WINDOWS),1)
-tests/test_%$(EXE): tests/test_%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
-	@mkdir -p $(OBJDIR)/tests
-	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
-# Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
-# so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
-tests/protocols/%$(EXE): tests/protocols/%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
-	@mkdir -p $(OBJDIR)/tests
-	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
-endif
-
-# Native MSVC (CC=cl). See docs/build.md; the supported invocation is:
-#
-#     source scripts/msvc-env.sh
-#     make CC=cl test-msvc
-#
-# A CURATED suite list, not the full Windows set, and the reason is specific: many test TUs include
-# <pthread.h> and spawn helper threads directly. The LIBRARY never does -- that is exactly what the PAL
-# threading seam exists for -- but those harnesses do, so they need MinGW. Rather than claim MSVC
-# support on the strength of library TUs compiling, this set is chosen to exercise the things that can
-# only be proven by linking and RUNNING against a native MSVC archive:
-#
-#   atomic_lock_free         the C11 atomics policy, and /experimental:c11atomics actually working
-#   socket_runtime           the PAL socket runtime, the PAL threading seam, adopted descriptors
-#   socket_runtime_first_use ws2_32 coming up with no load-time constructor (MSVC has none)
-#
-# These are ordinary Keel suites, so the same target also runs under GCC/MinGW and the set stays
-# honest: it cannot drift into MSVC-only test code.
-# The MSVC suite set is DERIVED from WIN_TEST_SUITES minus documented exclusions, not curated
-# separately. A new Windows suite is therefore enrolled in MSVC coverage by default; keeping it out
-# takes an explicit entry below with a reason. The invariant: any Windows semantic suite that does
-# not test a compiler/toolchain-specific path runs under BOTH MinGW and MSVC.
-#
-# Harnesses that include <pthread.h> directly. Keel has a PAL thread seam (src/platform_thread.h);
-# these predate it and carry their own POSIX threading assumptions. Migration is tracked separately;
-# this list shrinks to empty, it does not grow.
-MSVC_EXCLUDE_PTHREAD = cross_module event_provider http2_client_hostname_fail http_async http_body_reader_vtable \
-                       http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
-                       http_client_proxy http_client_stream http_integration http_redirect http_request \
-                       http_server_integration io_status peer_addr peer_cert read_flow_control reject_drain \
-                       socket_provider stream_transport thread_pool timeout tls_integration wakeup watcher_aba \
-                       websocket_client_hostname_fail
-#
-# Tests that hand a fabricated or already-closed descriptor to a CRT call. The UCRT invokes the
-# invalid-parameter handler and TERMINATES the process (exit 0xC0000409) where glibc and MinGW
-# return EBADF, so the suite dies before utest flushes any output. A harness-level
-# _set_invalid_parameter_handler restores the POSIX behaviour these tests assume; tracked separately.
-MSVC_EXCLUDE_UCRT = datagram_batch datagram_public file_io
-#
-# MSVC 19.44 internal compiler error (C1001, compiler file p2/main.cpp) on this TU, at every
-# optimisation level including /Od and under both /std:c11 and /std:c17. A compiler defect, not a
-# Keel one: the compiler crashes rather than rejecting the code. Revisit on a newer toolset.
-MSVC_EXCLUDE_ICE = http2
-#
-MSVC_EXCLUDE = $(MSVC_EXCLUDE_PTHREAD) $(MSVC_EXCLUDE_UCRT) $(MSVC_EXCLUDE_ICE)
-MSVC_TEST_SUITES ?= $(filter-out $(MSVC_EXCLUDE),$(WIN_TEST_SUITES))
-MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),$(call test_bin_for,$(s)))
-
-test-msvc: $(MSVC_TEST_BIN)
-	@sh tools/run_suites.sh "MSVC" "$(ISOLATED_SUITES)" $(MSVC_TEST_BIN)
-
-# A native MSVC build must not drag in a MinGW runtime: that is the whole point for a consumer that
-# builds its stack with cl. Checks the actual import table of a linked executable rather than trusting
-# the flags, because a stray -lgcc or a MinGW-built object would show up here and nowhere else.
-# A PUBLIC-API-ONLY consumer, built with no -Isrc. The test suites in test-msvc link against the
-# archive too, but they reach internal headers, so they cannot answer a consumer's actual question:
-# is the installed surface sufficient, compiled by cl, linked against a lib.exe archive? This is the
-# acceptance property OTTO cares about, reduced to something Keel can run in its own CI.
-MSVC_CONSUMER_BIN = build/msvc-consumer$(EXE)
-
-check-msvc-consumer: $(KEEL_LIB)
-	@mkdir -p build $(OBJDIR)/tests
-	$(CC) $(CFLAGS) $(TEST_OBJ_TMP) $(EXE_OUT)$(MSVC_CONSUMER_BIN) tools/msvc_consumer.c $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
-	@./$(MSVC_CONSUMER_BIN)
-check-msvc-no-mingw: $(MSVC_TEST_BIN)
-	@bad=0; \
-	for t in $(MSVC_TEST_BIN); do \
-		deps=$$(dumpbin /nologo /dependents "$$t" 2>/dev/null | tr "A-Z" "a-z"); \
-		if [ -z "$$deps" ]; then echo "check-msvc-no-mingw: dumpbin unavailable (source scripts/msvc-env.sh)"; exit 1; fi; \
-		for dll in libgcc libwinpthread libstdc++ msys- cygwin1 libatomic; do \
-			if echo "$$deps" | grep -q "$$dll"; then echo "$$t depends on $$dll"; bad=1; fi; \
-		done; \
-	done; \
-	if [ $$bad -eq 1 ]; then echo "check-msvc-no-mingw: FAILED (MinGW runtime dependency)"; exit 1; fi; \
-	echo "check-msvc-no-mingw: OK ($(words $(MSVC_TEST_BIN)) binaries, no MinGW runtime imports)"
-test-win: $(WIN_TEST_BIN)
-	@sh tools/run_suites.sh "WINDOWS" "$(ISOLATED_SUITES)" $(WIN_TEST_BIN)
-
 # Windows IOCP backend (BACKEND=iocp) test subset. Mirrors the Completion (io_uring) unit-suite
 # job: the suites here run DIRECTLY over the completion backend, not just transitively through the
 # HTTP smokes. The list is the intersection of WIN_TEST_SUITES (runs on Windows) and
@@ -733,6 +641,96 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free 
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
                         websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
+
+# The MSVC suite set is DERIVED from WIN_TEST_SUITES minus documented exclusions, not curated
+# separately. A new Windows suite is therefore enrolled in MSVC coverage by default; keeping it out
+# takes an explicit entry below with a reason. The invariant: any Windows semantic suite that does
+# not test a compiler/toolchain-specific path runs under BOTH MinGW and MSVC.
+#
+# Harnesses that include <pthread.h> directly. Keel has a PAL thread seam (src/platform_thread.h);
+# these predate it and carry their own POSIX threading assumptions. Migration is tracked separately;
+# this list shrinks to empty, it does not grow.
+MSVC_EXCLUDE_PTHREAD = cross_module event_provider http2_client_hostname_fail http_async http_body_reader_vtable \
+                       http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
+                       http_client_proxy http_client_stream http_integration http_redirect http_request \
+                       http_server_integration io_status peer_addr peer_cert read_flow_control reject_drain \
+                       socket_provider stream_transport thread_pool timeout tls_integration wakeup watcher_aba \
+                       websocket_client_hostname_fail
+#
+# Tests that hand a fabricated or already-closed descriptor to a CRT call. The UCRT invokes the
+# invalid-parameter handler and TERMINATES the process (exit 0xC0000409) where glibc and MinGW
+# return EBADF, so the suite dies before utest flushes any output. A harness-level
+# _set_invalid_parameter_handler restores the POSIX behaviour these tests assume; tracked separately.
+MSVC_EXCLUDE_UCRT = datagram_batch datagram_public file_io
+#
+# MSVC 19.44 internal compiler error (C1001, compiler file p2/main.cpp) on this TU, at every
+# optimisation level including /Od and under both /std:c11 and /std:c17. A compiler defect, not a
+# Keel one: the compiler crashes rather than rejecting the code. Revisit on a newer toolset.
+MSVC_EXCLUDE_ICE = http2
+#
+MSVC_EXCLUDE = $(MSVC_EXCLUDE_PTHREAD) $(MSVC_EXCLUDE_UCRT) $(MSVC_EXCLUDE_ICE)
+# Derive from the suite set for the backend actually being built: IOCP is a completion engine
+# with its own eligible set (WIN_IOCP_TEST_SUITES), not the readiness one.
+MSVC_BASE_SUITES = $(if $(filter iocp,$(BACKEND)),$(WIN_IOCP_TEST_SUITES),$(WIN_TEST_SUITES))
+MSVC_TEST_SUITES ?= $(filter-out $(MSVC_EXCLUDE),$(MSVC_BASE_SUITES))
+
+# On Windows the test binaries need the `.exe` suffix and the win_prelude.h
+# force-include (utest.h QueryPerformanceCounter clash). POSIX builds fall through
+# to the extension-less `tests/%` rule above, so `test-win` also runs natively as
+# a subset sanity check.
+ifeq ($(WINDOWS),1)
+tests/test_%$(EXE): tests/test_%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
+# Nested protocol tests (§9): the flat `tests/test_%$(EXE)` rule can't match `tests/protocols/...`,
+# so mirror it for the nested `.exe` targets (POSIX uses the extension-less `tests/%` rule above).
+tests/protocols/%$(EXE): tests/protocols/%.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
+endif
+
+# Native MSVC (CC=cl). See docs/build.md; the supported invocation is:
+#
+#     source scripts/msvc-env.sh
+#     make CC=cl test-msvc
+#
+# DERIVED from the backend-appropriate Windows suite set (above), not curated: every Windows suite
+# runs under MSVC unless an exclusion list names it with a reason. These are ordinary Keel suites,
+# so the same sources also run under GCC/MinGW and the set cannot drift into MSVC-only test code.
+# test_bin_for (not a hand-rolled tests/test_$(s) path) so tests/protocols/ suites can enrol.
+MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),$(call test_bin_for,$(s)))
+
+test-msvc: $(MSVC_TEST_BIN)
+	@sh tools/run_suites.sh "MSVC" "$(ISOLATED_SUITES)" $(MSVC_TEST_BIN)
+
+# A native MSVC build must not drag in a MinGW runtime: that is the whole point for a consumer that
+# builds its stack with cl. Checks the actual import table of a linked executable rather than trusting
+# the flags, because a stray -lgcc or a MinGW-built object would show up here and nowhere else.
+# A PUBLIC-API-ONLY consumer, built with no -Isrc. The test suites in test-msvc link against the
+# archive too, but they reach internal headers, so they cannot answer a consumer's actual question:
+# is the installed surface sufficient, compiled by cl, linked against a lib.exe archive? This is the
+# acceptance property OTTO cares about, reduced to something Keel can run in its own CI.
+MSVC_CONSUMER_BIN = build/msvc-consumer$(EXE)
+
+check-msvc-consumer: $(KEEL_LIB)
+	@mkdir -p build $(OBJDIR)/tests
+	$(CC) $(CFLAGS) $(TEST_OBJ_TMP) $(EXE_OUT)$(MSVC_CONSUMER_BIN) tools/msvc_consumer.c $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
+	@./$(MSVC_CONSUMER_BIN)
+check-msvc-no-mingw: $(MSVC_TEST_BIN)
+	@bad=0; \
+	for t in $(MSVC_TEST_BIN); do \
+		deps=$$(dumpbin /nologo /dependents "$$t" 2>/dev/null | tr "A-Z" "a-z"); \
+		if [ -z "$$deps" ]; then echo "check-msvc-no-mingw: dumpbin unavailable (source scripts/msvc-env.sh)"; exit 1; fi; \
+		for dll in libgcc libwinpthread libstdc++ msys- cygwin1 libatomic; do \
+			if echo "$$deps" | grep -q "$$dll"; then echo "$$t depends on $$dll"; bad=1; fi; \
+		done; \
+	done; \
+	if [ $$bad -eq 1 ]; then echo "check-msvc-no-mingw: FAILED (MinGW runtime dependency)"; exit 1; fi; \
+	echo "check-msvc-no-mingw: OK ($(words $(MSVC_TEST_BIN)) binaries, no MinGW runtime imports)"
+test-win: $(WIN_TEST_BIN)
+	@sh tools/run_suites.sh "WINDOWS" "$(ISOLATED_SUITES)" $(WIN_TEST_BIN)
+
+
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@sh tools/run_suites.sh "WINDOWS IOCP" "$(ISOLATED_SUITES)" $(WIN_IOCP_TEST_BIN)
 
