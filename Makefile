@@ -652,11 +652,11 @@ WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)
 # exclusion of this kind -- and as the record that the migration completed rather than stalled.
 MSVC_EXCLUDE_PTHREAD =
 #
-# Tests that hand a fabricated or already-closed descriptor to a CRT call. The UCRT invokes the
-# invalid-parameter handler and TERMINATES the process (exit 0xC0000409) where glibc and MinGW
-# return EBADF, so the suite dies before utest flushes any output. A harness-level
-# _set_invalid_parameter_handler restores the POSIX behaviour these tests assume; tracked separately.
-MSVC_EXCLUDE_UCRT = datagram_batch datagram_public file_io
+# (was: tests that hand a fabricated descriptor to a CRT call, which the UCRT answered by
+# TERMINATING the process where POSIX returns EBADF.) tests/net_compat_win.c now installs a
+# no-op invalid-parameter handler before the first test, so the CRT reports through errno like
+# every other platform, and the list is empty.
+MSVC_EXCLUDE_UCRT =
 #
 # MSVC 19.44 internal compiler error (C1001, compiler file p2/main.cpp) on this TU, at every
 # optimisation level including /Od and under both /std:c11 and /std:c17. A compiler defect, not a
