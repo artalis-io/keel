@@ -490,6 +490,8 @@ make check-readiness-identity      # readiness registrations use &conn->stream (
 # Stale-name + docs + W^X
 make check-no-kludp        # the deleted KlUdp/kl_udp_* object API cannot reappear
 make check-no-httplegacy   # the renamed HTTP taxonomy keeps no pre-rename object-type, constant, or function names
+make check-msvc-parity     # the MSVC suite set stays derived from the Windows set minus documented exclusions
+make audit-msvc-exclusions # (opt-in, needs a sourced MSVC env) build+run the excluded suites: any that now pass should be re-enrolled
 make check-doc-refs        # every in-repo link in the living-architecture docs resolves
 make wx-guard              # no runtime-codegen surface (mmap PROT_EXEC, dlopen, JIT, popen, ...) under src/
 ```

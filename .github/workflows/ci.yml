@@ -535,6 +535,11 @@ jobs:
       - name: "Winsock-init gate self-test (a planted ungated Winsock call must be caught)"
         run: make check-winsock-init-selftest
 
+      # Pure make + sh: needs no MSVC toolchain, so it runs here with the other structural
+      # gates rather than in the Windows job. Covers both backend base sets and self-canaries.
+      - name: "MSVC suite parity (the MSVC set stays derived, exclusions stay documented)"
+        run: make check-msvc-parity
+
       - name: Site gate (offline site validation + reproducible build)
         run: make check-site
 
