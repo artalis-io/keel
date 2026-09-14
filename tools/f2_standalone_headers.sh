@@ -18,7 +18,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$stage" "$tmp"; rm -f "$ROOT/keel.pc"' EXIT INT TERM
 
 rm -f "$ROOT/keel.pc"                        # force keel.pc regeneration for the staged prefix
-make -s install PREFIX="$stage" >/dev/null 2>&1
+"$MAKE" -s install PREFIX="$stage" >/dev/null 2>&1
 INC="$stage/include"
 [ -f "$INC/keel/keel.h" ] || { echo "standalone-headers: staged headers missing"; exit 2; }
 

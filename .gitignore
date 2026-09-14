@@ -1,5 +1,7 @@
 # Build artifacts
 *.o
+# MSVC object files (cl /Fo); the MSVC build path landed without this.
+*.obj
 # per-backend object tree (#280): build/<event backend>/**.o and .d
 build/
 *.a

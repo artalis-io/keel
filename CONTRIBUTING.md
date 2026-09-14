@@ -1,5 +1,10 @@
 # Contributing to Keel
 
+## Releasing
+
+Cutting a release is a two-step process with a verification chain from the audited commit to the
+published assets: see [docs/operations/releasing.md](docs/operations/releasing.md).
+
 ## Getting Started
 
 ```bash

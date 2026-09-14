@@ -14,7 +14,7 @@ all: build
 # reproducibility check builds into temporary directories and never reads,
 # writes, or removes an existing build/.
 check:
-	@perl check_site.pl
+	@MAKE="$(MAKE)" perl check_site.pl
 
 build:
 	@mkdir -p $(BUILD_DIR)

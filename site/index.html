@@ -303,7 +303,7 @@ $ make examples</pre>
                 <tr>
                   <td>io_uring (Linux 5.6+)</td>
                   <td class="cmp-part">completion</td>
-                  <td>A curated completion unit suite (<code class="text-paper-200">make test-iouring</code>) plus HTTP and async smokes under ASan/UBSan on the io_uring CI jobs.</td>
+                  <td>Completion unit coverage is machine-checked: pollcomp derives its eligible suite set automatically, while io_uring&rsquo;s enrolled set (<code class="text-paper-200">make test-iouring</code>) is parity-checked against the sanitizer lane. There are currently no completion exclusions. Plus HTTP and async smokes under ASan/UBSan on the io_uring CI jobs.</td>
                 </tr>
                 <tr>
                   <td>IOCP (Windows)</td>

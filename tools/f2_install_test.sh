@@ -24,7 +24,7 @@ bad() { echo "install-test: FAIL - $1"; fail=1; }
 
 # 1. install ---------------------------------------------------------------------------------------
 rm -f "$ROOT/keel.pc"
-make -s install DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
+"$MAKE" -s install DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
 
 want=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$MAN" | sort)
 got=$(ls "$D$PFX/include/keel" 2>/dev/null | sort || true)
@@ -36,14 +36,14 @@ grep -q "^prefix=$PFX\$" "$D$PFX/lib/pkgconfig/keel.pc" || bad "keel.pc prefix d
 
 # 2. keel.pc regeneration on config change --------------------------------------------------------
 rm -f "$ROOT/keel.pc"
-make -s keel.pc PREFIX=/aaa >/dev/null 2>&1; a=$(grep '^prefix=' "$ROOT/keel.pc")
-make -s keel.pc PREFIX=/bbb >/dev/null 2>&1; b=$(grep '^prefix=' "$ROOT/keel.pc")
+"$MAKE" -s keel.pc PREFIX=/aaa >/dev/null 2>&1; a=$(grep '^prefix=' "$ROOT/keel.pc")
+"$MAKE" -s keel.pc PREFIX=/bbb >/dev/null 2>&1; b=$(grep '^prefix=' "$ROOT/keel.pc")
 [ "$a" = "prefix=/aaa" ] && [ "$b" = "prefix=/bbb" ] || bad "keel.pc did not regenerate on a PREFIX change"
 [ "$fail" = 0 ] && say "keel.pc regenerates when PREFIX changes"
 
 # 3. uninstall preserves unrelated files ----------------------------------------------------------
 touch "$D$PFX/include/keel/USER_OWNED.h" "$D$PFX/lib/pkgconfig/other.pc"
-make -s uninstall DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
+"$MAKE" -s uninstall DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
 [ -f "$D$PFX/include/keel/USER_OWNED.h" ] || bad "uninstall deleted an unrelated header"
 [ -d "$D$PFX/include/keel" ] || bad "uninstall removed a directory that still held an unrelated file"
 [ -f "$D$PFX/lib/pkgconfig/other.pc" ] || bad "uninstall deleted an unrelated .pc"
@@ -55,8 +55,8 @@ rem=$(ls "$D$PFX/include/keel" 2>/dev/null | grep -vx 'USER_OWNED.h' || true)
 
 # 4. clean uninstall removes an emptied directory -------------------------------------------------
 rm -f "$D$PFX/include/keel/USER_OWNED.h"
-make -s install DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
-make -s uninstall DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
+"$MAKE" -s install DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
+"$MAKE" -s uninstall DESTDIR="$D" PREFIX="$PFX" >/dev/null 2>&1
 [ -d "$D$PFX/include/keel" ] && bad "uninstall did not remove the emptied keel include directory"
 [ "$fail" = 0 ] && say "uninstall removes the include/keel directory once it is empty"
 

@@ -4,9 +4,48 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/artalis-io/keel/badge)](https://scorecard.dev/viewer/?uri=github.com/artalis-io/keel)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12186/badge)](https://www.bestpractices.dev/projects/12186)
 
-Minimal C11 HTTP client/server library over an async I/O core that spans **both** the readiness axis (epoll, kqueue, WSAPoll, poll) and the completion axis (io_uring, IOCP) behind one small event interface, on a platform-neutral socket seam (POSIX, Winsock, lwIP). The event model, the socket/platform implementation, and the protocol stack are three orthogonal axes: swap the event backend or the socket provider without touching a line of protocol code. Both the server and client support sync and async operation: sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
+Keel is a portable asynchronous networking substrate for C: model-neutral **stream**, **listener**
+and **datagram** transports driven by either execution model, over a socket seam that does not assume
+an OS. HTTP/1.1, HTTP/2, WebSocket, SSE and an async DNS resolver ship on top of it as consumers of
+that substrate, not as its purpose.
 
-**101K req/s** on a single thread. **Tested under ASan/UBSan.** **One vendored dependency** (llhttp).
+Three axes, orthogonal in the code rather than only in the diagram:
+
+```text
+            protocols        HTTP/1.1 · HTTP/2 · WebSocket · SSE · DNS
+                |
+                v
+   semantic transports       KlListener · KlStream · KlDatagram
+                |
+        +-------+-------+
+        v               v
+   event engine     socket provider
+   readiness        POSIX · Winsock
+   epoll kqueue     lwIP (BSD + raw NO_SYS)
+   WSAPoll poll     UEFI (EFI_TCP4 / EFI_UDP4)
+   completion
+   io_uring IOCP
+        |
+        v
+      PAL           clock · random · threads · wakeup · socket runtime
+```
+
+Readiness and completion are kept as **two honest execution models**, not one emulating the other:
+readiness registers interest and retries on `EAGAIN`; completion submits an owned operation and
+retires it. What is unified is the layer above them, the semantic transport contract, which is why
+the same async HTTP client runs unchanged over epoll, io_uring, IOCP, a raw lwIP callback stack with
+no OS sockets, and UEFI firmware tokens with no libc.
+
+Swapping the event backend or the socket provider touches no protocol code, and that is enforced
+mechanically rather than by convention: default-deny structural gates fail the build on a substrate
+that includes a protocol header, a protocol that reaches an integration, or an integration that
+leaves the frozen seam. See [docs/architecture/invariants.md](docs/architecture/invariants.md).
+
+Pluggable allocator, parser, TLS, compression and body readers; per-route middleware; streaming
+responses; multipart uploads; connection timeouts; thread pool; zero forced buffering.
+
+**101K req/s** on a single thread. **Tested under ASan/UBSan on both execution models.**
+**One vendored dependency** (llhttp).
 
 ## Build
 
