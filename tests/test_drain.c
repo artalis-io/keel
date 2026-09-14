@@ -35,7 +35,7 @@ static kl_ssize_t mock_write(const char *data, size_t len, void *ctx) {
     if (w->switch_after >= 0 && w->call_count > w->switch_after)
         mode = 0;
 
-    if (mode == 4) return (ssize_t)(len + 1);  /* buggy: overreport */
+    if (mode == 4) return (kl_ssize_t)(len + 1);  /* buggy: overreport */
     if (mode == 3) return -1;  /* error */
     if (mode == 2) return 0;   /* would-block */
 
@@ -47,7 +47,7 @@ static kl_ssize_t mock_write(const char *data, size_t len, void *ctx) {
         return -1;
     memcpy(w->buf + w->len, data, accept);
     w->len += accept;
-    return (ssize_t)accept;
+    return (kl_ssize_t)accept;
 }
 
 /* ── Drain callback tracking ─────────────────────────────────────────── */

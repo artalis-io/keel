@@ -1,6 +1,9 @@
 #include "utest.h"
+#include "net_compat.h"
 #include <keel/keel.h>
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
 
 /* ── Callback helpers ────────────────────────────────────────────── */
 
@@ -50,7 +53,7 @@ UTEST(timer, fire_after_delay) {
     ASSERT_EQ(cb_called, 0);
 
     /* Sleep past the deadline */
-    usleep(20000);  /* 20ms */
+    kl_test_sleep_ms(20);  /* 20ms */
 
     int fired = kl_timer_fire(&ctx);
     ASSERT_EQ(fired, 1);
@@ -72,7 +75,7 @@ UTEST(timer, fire_order) {
     kl_timer_add(&ctx, 10, order_cb_1, NULL);
 
     /* Wait for all to expire */
-    usleep(50000);  /* 50ms */
+    kl_test_sleep_ms(50);  /* 50ms */
 
     int fired = kl_timer_fire(&ctx);
     ASSERT_EQ(fired, 3);
@@ -94,7 +97,7 @@ UTEST(timer, cancel_prevents_fire) {
     int64_t id = kl_timer_add(&ctx, 10, counting_cb, NULL);
     ASSERT_EQ(kl_timer_cancel(&ctx, id), 0);
 
-    usleep(20000);
+    kl_test_sleep_ms(20);
     int fired = kl_timer_fire(&ctx);
     ASSERT_EQ(fired, 0);
     ASSERT_EQ(cb_called, 0);
@@ -150,7 +153,7 @@ UTEST(timer, next_timeout_overdue) {
 
     /* Add a timer 1ms from now, then wait for it to expire */
     kl_timer_add(&ctx, 1, counting_cb, NULL);
-    usleep(10000);  /* 10ms */
+    kl_test_sleep_ms(10);  /* 10ms */
 
     /* Timer is overdue: should return 0 */
     ASSERT_EQ(kl_timer_next_timeout(&ctx, 1000), 0);

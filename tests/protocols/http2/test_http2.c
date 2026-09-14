@@ -38,7 +38,7 @@ typedef struct {
     int last_num_headers;
 
     /* Configurable return values */
-    ssize_t recv_return;
+    kl_ssize_t recv_return;
     int submit_return;
     int want_write_return;
     int flush_return;
@@ -57,7 +57,7 @@ static kl_ssize_t mock_recv(KlHttp2ServerSession *self, const void *data, size_t
     m->recv_count++;
     (void)data;
     if (m->recv_return >= 0)
-        return (ssize_t)len;
+        return (kl_ssize_t)len;
     return m->recv_return;
 }
 
@@ -833,13 +833,13 @@ UTEST(h2, cb_send_wraps_conn_write) {
 
     /* Send callback should write to the socket fd */
     const char *data = "HTTP/2 frame data";
-    ssize_t r = mock.callbacks.send(mock.cb_user_data, data, 17);
-    ASSERT_EQ(r, (ssize_t)17);
+    kl_ssize_t r = mock.callbacks.send(mock.cb_user_data, data, 17);
+    ASSERT_EQ(r, (kl_ssize_t)17);
 
     /* Read from pipe to verify */
     char buf[64];
-    ssize_t nr = kl_test_sockread(pfd[0], buf, sizeof(buf));
-    ASSERT_EQ(nr, (ssize_t)17);
+    kl_ssize_t nr = kl_test_sockread(pfd[0], buf, sizeof(buf));
+    ASSERT_EQ(nr, (kl_ssize_t)17);
     ASSERT_EQ(memcmp(buf, "HTTP/2 frame data", 17), 0);
 
     kl_http2_server_cleanup(&conn);

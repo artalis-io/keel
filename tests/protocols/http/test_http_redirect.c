@@ -3,10 +3,13 @@
  */
 
 #include "utest.h"
+#include "net_compat.h"
 #include <keel/keel.h>
 
 #include <string.h>
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
 #include <pthread.h>
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -119,7 +122,7 @@ static void *server_thread(void *arg) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 
 static char url_buf[256];

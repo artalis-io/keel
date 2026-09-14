@@ -23,4 +23,12 @@
 #include <windows.h>
 #endif
 
+/* MSVC spells the POSIX case-insensitive compares with a leading underscore.
+ * MinGW provides the POSIX names, so key on the compiler, not the platform.
+ * Harness-only: the library never calls these. */
+#if defined(_MSC_VER)
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
+#endif
+
 #endif /* KEEL_TESTS_WIN_PRELUDE_H */

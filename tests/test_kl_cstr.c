@@ -7,7 +7,9 @@
 #include "../src/kl_cstr.h"
 
 #include <string.h>
+#if !defined(_MSC_VER)
 #include <strings.h>
+#endif   /* MSVC has no <strings.h>; win_prelude.h maps strcasecmp to _stricmp */
 #include <stdint.h>
 #include <stdio.h>
 
@@ -90,10 +92,10 @@ UTEST(kl_cstr, buf_append) {
     ASSERT_EQ(off, strlen(buf));
 
     /* Overflow: appending past cap fails, does not write OOB. */
-    char small[8];
+    char tiny[8];
     size_t o2 = 0;
-    ASSERT_EQ(kl_buf_append(small, sizeof(small), &o2, "abc"), 0);
-    ASSERT_NE(kl_buf_append(small, sizeof(small), &o2, "defghijkl"), 0); /* would overflow */
+    ASSERT_EQ(kl_buf_append(tiny, sizeof(tiny), &o2, "abc"), 0);
+    ASSERT_NE(kl_buf_append(tiny, sizeof(tiny), &o2, "defghijkl"), 0); /* would overflow */
 
     /* hex append */
     char hbuf[16]; size_t ho = 0;

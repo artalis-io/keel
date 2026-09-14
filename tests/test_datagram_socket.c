@@ -434,19 +434,19 @@ UTEST(datagram_socket, truncation_counted) {
 UTEST(datagram_socket, so_bufsize_applied) {
     g_alloc = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
-    KlDatagram def, small; memset(&def, 0, sizeof(def)); memset(&small, 0, sizeof(small));
+    KlDatagram def, shrunk; memset(&def, 0, sizeof(def)); memset(&shrunk, 0, sizeof(shrunk));
     KlDatagramSocketConfig dc = { .ctx = &ctx, .alloc = &g_alloc };
     KlDatagramSocketConfig sc = { .ctx = &ctx, .alloc = &g_alloc, .so_rcvbuf = 8192, .so_sndbuf = 8192 };
     ASSERT_EQ(0, kl_datagram_socket_init(&def, &dc));
-    ASSERT_EQ(0, kl_datagram_socket_init(&small, &sc));
+    ASSERT_EQ(0, kl_datagram_socket_init(&shrunk, &sc));
     int drb = 0, srb = 0, dsb = 0, ssb = 0; socklen_t l = sizeof(int);
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&def),   SOL_SOCKET, SO_RCVBUF, (char *)&drb, &l));
-    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&small), SOL_SOCKET, SO_RCVBUF, (char *)&srb, &l));
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&shrunk), SOL_SOCKET, SO_RCVBUF, (char *)&srb, &l));
     ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&def),   SOL_SOCKET, SO_SNDBUF, (char *)&dsb, &l));
-    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&small), SOL_SOCKET, SO_SNDBUF, (char *)&ssb, &l));
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&shrunk), SOL_SOCKET, SO_SNDBUF, (char *)&ssb, &l));
     ASSERT_TRUE(srb < drb);                          /* shrunk below default (deterministic across OSes) */
     ASSERT_TRUE(ssb < dsb);
-    close_free(&ctx, &def); close_free(&ctx, &small);
+    close_free(&ctx, &def); close_free(&ctx, &shrunk);
     kl_event_ctx_free(&ctx);
 }
 

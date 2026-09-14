@@ -54,8 +54,8 @@ UTEST(error, server_init_null) {
 
 UTEST(error, server_run_bind_in_use) {
     /* Occupy a port */
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    ASSERT_TRUE(sock >= 0);
+    KlSocketHandle sock = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(kl_handle_valid(sock));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -81,7 +81,7 @@ UTEST(error, server_run_bind_in_use) {
     ASSERT_EQ(s.last_error, KL_ERR_BIND);
 
     kl_http_server_free(&s);
-    kl_test_closesock(sock);
+    kl_test_closesock((int)sock);   /* harness helper takes int by convention */
 }
 
 /* ── KlHttpClientResponse.error (sync) ──────────────────────────────── */

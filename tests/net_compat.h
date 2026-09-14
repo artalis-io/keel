@@ -67,6 +67,11 @@ int kl_test_poll1(int fd, int for_write, int timeout_ms);
 /* Set a receive timeout (ms) on a socket fd (Winsock DWORD / POSIX timeval). */
 int kl_test_set_rcvtimeo(int fd, int ms);
 
+/* Sleep for ms milliseconds. POSIX has nanosleep; Windows does not, and the
+ * struct-timespec shape means a macro cannot bridge it. Harness-only: tests
+ * wait on a TTL or a timeout, they do not need sub-millisecond precision. */
+void kl_test_sleep_ms(unsigned ms);
+
 /* A connected stream fd pair: socketpair(AF_UNIX) on POSIX; a self-connected
  * loopback TCP pair on Windows (which has neither socketpair nor pollable pipes).
  * Also the portable replacement for pipe() in tests that need a pollable byte

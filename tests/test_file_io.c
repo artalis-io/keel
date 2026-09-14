@@ -6,6 +6,7 @@
 #include <keel/allocator.h>
 #include <keel/http_response.h>
 #include <keel/event.h>
+#include <keel/tls.h>          /* complete KlTls: the TLS-path test needs real storage */
 #include <string.h>
 #include <errno.h>
 
@@ -25,15 +26,15 @@ typedef struct {
     void *last_buf;
     size_t last_len;
     uint64_t last_offset;
-    int last_sock_fd;
+    KlSocketHandle last_sock_fd;
     void *last_udata;
     /* Completion to return from tick */
     int has_completion;
-    ssize_t completion_result;
+    kl_ssize_t completion_result;
     void *completion_udata;
     /* Cancel tracking */
     int cancelled;
-    int cancel_sock_fd;
+    KlSocketHandle cancel_sock_fd;
 } MockFileIO;
 
 static int mock_submit(KlFileIO *fio, int file_fd, void *buf,
@@ -214,7 +215,7 @@ UTEST(file_io, complete_writes) {
 
     /* Read from the other end to verify */
     char buf[64];
-    ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
+    kl_ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
     ASSERT_EQ(nr, 11);
     ASSERT_EQ(memcmp(buf, "hello world", 11), 0);
 
@@ -330,7 +331,7 @@ UTEST(file_io, multi_chunk) {
     (void)kl_test_set_nonblock(fds[1]);
     char drain_buf[4096];
     size_t total = 0;
-    ssize_t nr;
+    kl_ssize_t nr;
     while ((nr = kl_test_sockread(fds[1], drain_buf, sizeof(drain_buf))) > 0)
         total += (size_t)nr;
 
@@ -389,14 +390,34 @@ UTEST(file_io, cancel_cqe) {
     kl_free(&a, c.stream.read_buf, 8192);
 }
 
+/* A minimal TLS stub for the "TLS does not use file_io" path. The vtable entries must be
+ * real functions: the send path calls through them, and an indirect call to a NULL slot
+ * fast-fails under MSVC /guard:cf. Erroring writes are enough for what this asserts. */
+static kl_ssize_t stub_tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)self; (void)fd; (void)buf; (void)len; return -1;
+}
+static kl_ssize_t stub_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+    (void)self; (void)fd; (void)buf; (void)len; return -1;
+}
+static size_t stub_tls_pending(KlTls *self) { (void)self; return 0; }
+static int stub_tls_at_eof(KlTls *self) { (void)self; return 0; }
+
 UTEST(file_io, tls_fallback) {
     /* TLS connections use existing pread path, not file_io */
     MockFileIO mock;
     mock_file_io_init(&mock);
     KlAllocator a = kl_allocator_default();
 
-    /* Create a fake TLS pointer (just non-NULL to trigger TLS path) */
-    int fake_tls = 1;
+    /* Non-NULL selects the TLS path. This must be REAL KlTls-sized storage: the
+     * pointer is a struct of function pointers, so pointing it at a 4-byte int
+     * let the code read past the object. MSVC /GS caught that as a stack buffer
+     * overrun (STATUS_STACK_BUFFER_OVERRUN); MinGW happened not to. */
+    KlTls fake_tls;
+    memset(&fake_tls, 0, sizeof(fake_tls));
+    fake_tls.write   = stub_tls_write;
+    fake_tls.read    = stub_tls_read;
+    fake_tls.pending = stub_tls_pending;
+    fake_tls.at_eof  = stub_tls_at_eof;
 
     KlHttpConn c;
     memset(&c, 0, sizeof(c));
@@ -405,7 +426,7 @@ UTEST(file_io, tls_fallback) {
     c.state = KL_HTTP_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
-    c.tls = (KlTls *)(void *)&fake_tls;  /* non-NULL = TLS active */
+    c.tls = &fake_tls;                   /* non-NULL = TLS active */
 
     c.stream.read_buf = kl_malloc(&a, 8192);
     c.stream.read_cap = 8192;

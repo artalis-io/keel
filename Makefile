@@ -528,8 +528,12 @@ test_src_for = $(wildcard tests/test_$(1).c tests/protocols/*/test_$(1).c)
 test_bin_for = $(patsubst %.c,%$(EXE),$(if $(call test_src_for,$(1)),$(if $(word 2,$(call test_src_for,$(1))),$(error curated test suite '$(1)' is ambiguous: $(call test_src_for,$(1))),$(call test_src_for,$(1))),$(error curated test suite '$(1)' is unknown: no tests/test_$(1).c or tests/protocols/*/test_$(1).c)))
 
 # Per-platform test-network helpers (net_compat_posix.c / net_compat_win.c),
-# linked into every test binary. Built by the generic %.o rule.
-TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
+# linked into every test binary. Under $(OBJDIR) for the same reason library objects are:
+# two toolchains must not share one object path. It used to build in-tree via the generic
+# %.o rule, so switching between `make` and `make CC=cl` silently relinked a stale object
+# of the wrong ABI (MinGW -fstack-protector-strong leaves __stack_chk_fail unresolved
+# against the MSVC CRT).
+TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:%.c=$(OBJDIR)/%.o)
 # Keep the compat .o from being auto-deleted as a pattern-rule intermediate
 # (it's a prerequisite of the tests/% pattern rule, so Make would otherwise
 # rebuild it on every invocation).
@@ -631,8 +635,35 @@ endif
 #
 # These are ordinary Keel suites, so the same target also runs under GCC/MinGW and the set stays
 # honest: it cannot drift into MSVC-only test code.
-MSVC_TEST_SUITES ?= atomic_lock_free socket_runtime socket_runtime_first_use
-MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),tests/test_$(s)$(EXE))
+# The MSVC suite set is DERIVED from WIN_TEST_SUITES minus documented exclusions, not curated
+# separately. A new Windows suite is therefore enrolled in MSVC coverage by default; keeping it out
+# takes an explicit entry below with a reason. The invariant: any Windows semantic suite that does
+# not test a compiler/toolchain-specific path runs under BOTH MinGW and MSVC.
+#
+# Harnesses that include <pthread.h> directly. Keel has a PAL thread seam (src/platform_thread.h);
+# these predate it and carry their own POSIX threading assumptions. Migration is tracked separately;
+# this list shrinks to empty, it does not grow.
+MSVC_EXCLUDE_PTHREAD = cross_module event_provider http2_client_hostname_fail http_async http_body_reader_vtable \
+                       http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
+                       http_client_proxy http_client_stream http_integration http_redirect http_request \
+                       http_server_integration io_status peer_addr peer_cert read_flow_control reject_drain \
+                       socket_provider stream_transport thread_pool timeout tls_integration wakeup watcher_aba \
+                       websocket_client_hostname_fail
+#
+# Tests that hand a fabricated or already-closed descriptor to a CRT call. The UCRT invokes the
+# invalid-parameter handler and TERMINATES the process (exit 0xC0000409) where glibc and MinGW
+# return EBADF, so the suite dies before utest flushes any output. A harness-level
+# _set_invalid_parameter_handler restores the POSIX behaviour these tests assume; tracked separately.
+MSVC_EXCLUDE_UCRT = datagram_batch datagram_public file_io
+#
+# MSVC 19.44 internal compiler error (C1001, compiler file p2/main.cpp) on this TU, at every
+# optimisation level including /Od and under both /std:c11 and /std:c17. A compiler defect, not a
+# Keel one: the compiler crashes rather than rejecting the code. Revisit on a newer toolset.
+MSVC_EXCLUDE_ICE = http2
+#
+MSVC_EXCLUDE = $(MSVC_EXCLUDE_PTHREAD) $(MSVC_EXCLUDE_UCRT) $(MSVC_EXCLUDE_ICE)
+MSVC_TEST_SUITES ?= $(filter-out $(MSVC_EXCLUDE),$(WIN_TEST_SUITES))
+MSVC_TEST_BIN = $(foreach s,$(MSVC_TEST_SUITES),$(call test_bin_for,$(s)))
 
 test-msvc: $(MSVC_TEST_BIN)
 	@sh tools/run_suites.sh "MSVC" "$(ISOLATED_SUITES)" $(MSVC_TEST_BIN)

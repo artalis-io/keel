@@ -24,7 +24,9 @@
 
 #include <errno.h>
 #include <string.h>
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
 #include <pthread.h>
 #include "net_compat.h"
 
@@ -187,7 +189,7 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, iod_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     ASSERT_GT(srv.bound_port, 0);
     g_iod_port = srv.bound_port;
 
