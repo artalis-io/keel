@@ -61,19 +61,35 @@ static unsigned char g_mock_rxbuf[8][2048];
 static kl_ssize_t (*g_real_recv)(void *, KlSocketHandle, void *, size_t, KlSockAddr *, KlDgramRxMeta *);
 static void *mrx_new(KlAllocator *a, int n, size_t bufsz) { (void)n; (void)bufsz; return kl_malloc(a, 1); }
 static void  mrx_free(KlAllocator *a, void *b) { kl_free(a, b, 1); }
+/* Refill barrier: how many datagrams one refill must carry before the mock hands the batch over.
+ * The kernel decides how many of N loopback sends are already queued when readiness first fires (on
+ * Darwin lo0 input is deferred, so a 3-datagram blast can be seen as 2 then 1), which would otherwise
+ * make the SHAPE of a refill timing-dependent. With the barrier set, short refills are accumulated and
+ * reported as EAGAIN (the fd is genuinely drained at that instant), so a test that needs "one refill
+ * fills N slots" gets exactly that on every platform. 0 = hand over whatever arrived. */
+static int   g_mock_min_slots;
+static KlDgramRxSlot g_mock_pending[8];   /* slots pulled from the kernel, not yet handed over */
+static int   g_mock_npending;
 static int   mock_gro_recv_batch(void *ctx, KlSocketHandle fd, void *rxb, KlDgramRxSlot *slots, int max) {
     (void)rxb;
-    int n = 0;
-    while (n < max && n < 8) {
+    int n = g_mock_npending;             /* resume from what a barrier-short refill already pulled */
+    const int cap = max < 8 ? max : 8;   /* the mock's own slot-buffer bound */
+    while (n < cap) {
         KlSockAddr src; KlDgramRxMeta meta; memset(&meta, 0, sizeof(meta)); meta.tos = -1;
         kl_ssize_t r = g_real_recv(ctx, fd, g_mock_rxbuf[n], sizeof(g_mock_rxbuf[n]), &src, &meta);
         if (r < 0) break;
-        slots[n].data = g_mock_rxbuf[n]; slots[n].len = (size_t)r; slots[n].src = src;
+        g_mock_pending[n].data = g_mock_rxbuf[n]; g_mock_pending[n].len = (size_t)r; g_mock_pending[n].src = src;
         meta.gro_seg = g_mock_gro;       /* fabricate coalescing */
-        slots[n].meta = meta;
+        g_mock_pending[n].meta = meta;
         n++;
     }
-    if (n == 0) { errno = EAGAIN; return -1; }   /* drained */
+    g_mock_npending = n;
+    /* Short of the barrier: report the (true) drained state and keep the slots for the next refill.
+     * Reachable only when the loop above ended on a would-block recv, so the platform's I/O status
+     * already says WOULD_BLOCK; the errno store keeps the POSIX path explicit. */
+    if (n == 0 || (n < g_mock_min_slots && n < cap)) { errno = EAGAIN; return -1; }
+    for (int i = 0; i < n; i++) slots[i] = g_mock_pending[i];
+    g_mock_npending = 0;
     return n;
 }
 static unsigned (*g_real_caps)(void *, KlSocketHandle);
@@ -1044,7 +1060,8 @@ static void rx_on_recv_tos(void *ud, const void *data, size_t len, const KlSockA
     (void)ud; (void)data; (void)len; (void)peer; (void)local; (void)flags;
     g_rx_calls++; g_rx_tos = kl_datagram_recv_tos(g_rx_dg);
 }
-static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0; g_seg_size = 0; g_seg_len = 0; g_rx_tos = -2; }
+static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0; g_seg_size = 0; g_seg_len = 0; g_rx_tos = -2;
+                             g_mock_min_slots = 0; g_mock_npending = 0; }
 
 /* send `n` datagrams from a throwaway socket to `port` */
 static void blast(int n, uint16_t port, const char *const *msgs) {
@@ -1217,6 +1234,7 @@ UTEST(dgram_batch, recv_pause_resume_held_cursor) {
     KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
     ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
     rx_reset(); g_rx_dg = &rx; g_rx_stop_at = 0;   /* pause after delivery 0 */
+    g_mock_min_slots = 3;                          /* the refill carries all 3, however the kernel queues them */
     ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_pause, NULL));
 
     const char *msgs[3] = { "a", "bb", "ccc" };
@@ -1232,6 +1250,7 @@ UTEST(dgram_batch, recv_pause_resume_held_cursor) {
     ASSERT_EQ(3, g_rx_calls);                /* all three delivered, in order: none lost */
     ASSERT_EQ((size_t)1, g_rx_len[0]); ASSERT_EQ((size_t)2, g_rx_len[1]); ASSERT_EQ((size_t)3, g_rx_len[2]);
 
+    g_mock_min_slots = 0;
     ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
     kl_event_ctx_free(&ctx);
 }
