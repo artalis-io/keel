@@ -7,6 +7,47 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 No changes yet.
 
+## [3.1.1]
+
+Patch release. No release date here (the tag and publish are a separately authorized step).
+
+One packaging fix. No file under `src/` or `include/` changed since 3.1.0, so the compiled library
+behaves exactly as it did; what is fixed is the `keel.pc` that an installed Keel hands to
+`pkg-config`. An embedder who builds Keel in-tree, or who passes link flags by hand, is unaffected.
+
+### Fixed
+
+- **A consumer could not statically link an installed Keel on Windows.** `keel.pc` hardcoded
+  `Libs.private: -lpthread`, which is wrong twice over there: the PAL uses Win32 threads, so pthreads
+  is not what Keel links, and the libraries it does need (`ws2_32`, `mswsock`, `bcrypt`, `iphlpapi`,
+  `advapi32`, `shell32`) were absent. The link failed as `ld returned 5` with no diagnostic, which is
+  why it read as a toolchain quirk rather than a packaging bug. `Libs.private` is now derived from
+  what the Makefile actually links, per platform and per toolchain: `LD_THREAD` off Windows,
+  `LD_WIN_PLATFORM` on it, and `-luring` under `BACKEND=iouring`. A `.pc` generated from an MSVC
+  build names `.lib` files; one from MinGW names `-l` flags. Linux consumers building the io_uring
+  backend were affected by the missing `-luring` for the same reason. (#314)
+
+### Testing
+
+- The installed-artifact gates (`check-install`, `check-installed-consumer`, `check-public-headers`)
+  now run on Windows, which is where the packaging bug above lived. Five of them had invoked a literal
+  `make` and exited 127 before their first assertion, so they had never once executed on the platform
+  whose packaging they describe. `tools/msys_native_paths.sh` gives them the two path treatments MSYS
+  argument conversion requires: a real staging root has to reach a native tool in a spelling it
+  understands, while a logical prefix recorded verbatim in `keel.pc` must not be rewritten.
+- Three suites died under MSVC with exit `0xC0000409` and no output: the UCRT terminates the process
+  on a CRT call against an invalid file descriptor, where glibc and MinGW return `-1`/`EBADF`. The
+  Windows test prelude now installs an invalid-parameter handler so those deliberately fabricated
+  descriptors reach the error paths the tests were written against. Keel's own behaviour is untouched;
+  the library never installs a handler. (#316)
+- The MSVC suite set is derived from the Windows set minus a documented exclusion list, and
+  `check-msvc-parity` gates it so it cannot drift into a hand-curated list of whatever passes.
+- `dgram_batch.recv_pause_resume_held_cursor` no longer depends on how many of a three-datagram
+  loopback blast the kernel has queued when readiness first fires. It asserted that one `recv_batch`
+  refill carries all three; on Darwin, loopback input is deferred, so a loaded runner could present
+  two and then one, and the test failed on macOS CI while the machine under test was behaving
+  correctly.
+
 ## [3.1.0]
 
 Minor release. No release date here (the tag and publish are a separately authorized step).
