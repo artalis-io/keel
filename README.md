@@ -70,8 +70,15 @@ make CC=cl test-msvc         # build + run the MSVC suites (derived from the Win
 make CC=cl BACKEND=iocp      # the completion backend, same way
 
 # Embedder hooks: build Keel's TUs with the SAME flags as the tree vendoring it.
-make KEEL_OPT=-O0                     # optimization level (default -O2), applied
-                                      #   to Keel's own AND vendored TUs
+make KEEL_OPT=-O0                     # optimization level for Keel's own TUs
+                                      #   (default -O2); also the default for
+                                      #   KEEL_VENDOR_OPT below
+make KEEL_OPT=-O2 KEEL_VENDOR_OPT=-O0 # lower ONLY the vendored TUs (llhttp, the
+                                      #   miniz adapter). For toolchains that
+                                      #   cannot compile those at -O2 -- cosmocc
+                                      #   on Windows wedges on them -- this keeps
+                                      #   Keel's own code optimized instead of
+                                      #   dragging the whole library to -O0
 make KEEL_EXTRA_CFLAGS=-flto=thin     # appended last, so it wins over Keel's own
 make KEEL_EXTRA_LDFLAGS=-flto=thin    # likewise, for links
 ```
