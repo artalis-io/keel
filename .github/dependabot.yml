@@ -4,3 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # github/codeql-action/init and .../analyze MUST move together: init writes a config
+      # stamped with its version and analyze refuses one it does not own. Pinned by SHA, each
+      # path is a separate dependency to Dependabot, so ungrouped it opens a PR for init alone
+      # and CodeQL fails with "Loaded a configuration file for version X, but running version
+      # Y" (#322). Grouping makes every codeql-action path arrive in one PR, the only form
+      # that can pass.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
