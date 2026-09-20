@@ -44,7 +44,7 @@ leaves the frozen seam. See [docs/architecture/invariants.md](docs/architecture/
 Pluggable allocator, parser, TLS, compression and body readers; per-route middleware; streaming
 responses; multipart uploads; connection timeouts; thread pool; zero forced buffering.
 
-**101K req/s** on a single thread. **Tested under ASan/UBSan on both execution models.**
+**111K req/s** on a single thread. **Tested under ASan/UBSan on both execution models.**
 **One vendored dependency** (llhttp).
 
 ## Build
@@ -66,7 +66,7 @@ make clean              # remove artifacts
 # toolchain. Same source tree, same PAL, same runtime semantics; only the compiler mapping changes.
 source scripts/msvc-env.sh   # finds the Build Tools via vswhere and fixes MSYS argument mangling
 make CC=cl                   # native libkeel.a via cl + lib
-make CC=cl test-msvc         # build + run the MSVC runtime probes
+make CC=cl test-msvc         # build + run the MSVC suites (derived from the Windows set)
 make CC=cl BACKEND=iocp      # the completion backend, same way
 
 # Embedder hooks: build Keel's TUs with the SAME flags as the tree vendoring it.
@@ -859,7 +859,8 @@ Route params, middleware, and body reading add no measurable overhead; all withi
 | Linux | epoll (edge-triggered) | `make` |
 | Linux 5.6+ | io_uring (completion, SQE/CQE) | `make BACKEND=iouring` |
 | Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
-| Windows | WSAPoll (readiness) or IOCP (completion) | `make BACKEND=wsapoll` / `BACKEND=iocp` |
+| Windows (MinGW) | WSAPoll (readiness) or IOCP (completion) | `make BACKEND=wsapoll` / `BACKEND=iocp` |
+| Windows (native MSVC) | WSAPoll or IOCP, same PAL and Make graph | `source scripts/msvc-env.sh` then `make CC=cl` |
 | Any POSIX host | pollcomp (portable completion double) | `make BACKEND=pollcomp` |
 | Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
 | Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
@@ -887,52 +888,25 @@ The through-line: `KlHttpClient` is genuinely model-blind: the **same** client c
 
 ## Testing
 
-The unit and integration suites cover every module and both event axes:
+The unit and integration suites cover every module and both event axes. Each `tests/test_*.c` and
+`tests/protocols/<family>/test_*.c` compiles to a standalone utest.h binary, auto-discovered by the
+Makefile. A full `make test` on the default readiness backend currently runs **110 suites, 1,585
+individual tests**. Counts move as suites are added, so `make test` is the authority; the per-backend
+gate inventory is in [docs/operations/testing.md](docs/operations/testing.md).
 
-| Suite | Tests | Covers |
-|-------|-------|--------|
-| `test_allocator` | 4 | Default + custom tracking allocators |
-| `test_async` | 14 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
-| `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
-| `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
-| `test_client` | 18 | Sync/async client, response free, TLS config, error handling |
-| `test_client_happy_eyeballs` | 6 | Happy Eyeballs (RFC 8305): first-wins, refused-fallback, all-fail, single-address, slow-first race, deadline timer |
-| `test_client_pool` | 24 | Connection pool: acquire/release, per-host limits, idle expiry, stale detection |
-| `test_client_stream` | 27 | Response streaming (push), request streaming (pull), chunked body production |
-| `test_compress` | 16 | Compression vtable, buffer + streaming, miniz gzip backend |
-| `test_connection` | 12 | Pool init, acquire/release, exhaustion, active count, state machine, monotonic clock |
-| `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
-| `test_cross_module` | 7 | Cross-module integration: compress+drain, TLS+async, middleware+body+async, resolver cache, TLS+middleware+compress, stats during load |
-| `test_decompress` | 14 | Decompression vtable, gzip one-shot + streaming, CRC/ISIZE verification |
-| `test_drain` | 28 | Backpressure buffer: passthrough, partial, EAGAIN, flush, on_drain, max_size, overreport |
-| `test_error` | 11 | Error codes, kl_strerror, per-struct error storage |
-| `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
-| `test_event_ctx` | 7 | Standalone event context init/free, watcher lifecycle, dispatch helpers |
-| `test_file_io` | 14 | Async file I/O vtable: mock submit/cancel/tick, state machine, EAGAIN, TLS fallback |
-| `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway, body limits |
-| `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
-| `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
-| `test_overflow` | 20 | Integer overflow guards across all modules |
-| `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
-| `test_proxy` | 11 | HTTP proxy: forwarding, CONNECT tunnel, auth, async proxy states, pool keying |
-| `test_redirect` | 33 | 3xx redirect following, method transform, cross-origin auth strip, pooled |
-| `test_request` | 14 | Header case-insensitive lookup, params, query strings, empty/missing values |
-| `test_response` | 24 | Status, headers, body, JSON, error, streaming, sendfile, compression |
-| `test_response_parser` | 10 | HTTP response parsing, chunked, headers, body limits, malformed |
-| `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
-| `test_server_integration` | 6 | Pool exhaustion, backpressure recovery, concurrent requests, drain |
-| `test_server_stats` | 4 | Server stats: initial, active count, max connections, null safety |
-| `test_resolver_cache` | 13 | DNS cache: hit/miss, TTL expiry, eviction, cancel, error non-caching |
-| `test_sse` | 7 | SSE framing: event, data, id, comment, multiline, begin/end |
-| `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
-| `test_timeout` | 8 | Idle, partial headers, partial body, active connections, body timeout, keepalive idle, concurrent |
-| `test_timer` | 10 | Min-heap scheduling, cancellation, callback safety, next-timeout |
-| `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
-| `test_tls_integration` | 3 | Passthrough TLS mock: full handshake→read→write path |
-| `test_unix_socket` | 5 | UNIX socket server: HTTP round-trip, stale path policy, cleanup, path limits |
-| `test_url` | 20 | URL parsing, IPv6, CRLF rejection, default ports, ws/wss schemes |
-| `test_websocket` | 48 | Frame parsing, masking, opcode, fragments, close, echo, unmasked rejection |
-| `test_websocket_client` | 30 | Client frame encoding, mask XOR, handshake, parser, API, config, auto-ping |
+| Area | Suites | Tests | Covers |
+|---|---:|---:|---|
+| **Event core** | 10 | 64 | Readiness loop (init/add/mod/del/wait) and the completion driver, capability negotiation, the event-provider vtable, watcher lifecycle and ABA safety, async suspend/resume/deadline/cancel, the IOCP engine, io_uring SQE failure paths |
+| **Socket seam** | 8 | 110 | `KlSocketProvider` vtable, POSIX and Winsock runtimes, first-use socket-runtime init, `KlSockAddr` conversion, handle-type convention, UNIX-domain sockets and path-node lifecycle (POSIX + Windows) |
+| **Stream & listener** | 8 | 160 | `KlStream` read/close/single-shot and the transport contract oracle, `KlListener` accept lifecycle, the `connect_op` Happy Eyeballs connect machine, public transport surface |
+| **Datagram** | 15 | 273 | `KlDatagram` open/socket config/lifecycle/confirmed-detachment close, recv + classification, send + fixed-slot queue, `recvmmsg`/`sendmmsg` batching, multicast, cmsg (pktinfo/TOS/GRO), live loopback |
+| **Runtime services** | 16 | 204 | Allocator (default + validating), C11 atomics policy, timers, thread pool, cross-thread wakeup, drain backpressure, URL parser, error codes, version drift, `kl_cstr`, file-IO vtable, decompression, resolver cache, TLS vtable |
+| **HTTP/1.1** | 41 | 562 | Request/response/router/connection/integration, sync + async client with pooling, streaming, proxy, redirects and Happy Eyeballs, CORS, SSE, TLS, body readers, multipart streaming, chunked TE, parser vtables, server state + stats, timeouts, early-reject drain, compression, peer address + mTLS cert |
+| **HTTP/2** | 5 | 61 | Server sessions, streams, routing, ALPN, GOAWAY, body limits; client session vtable, stream tracking, hostname verification, overflow guards |
+| **WebSocket** | 5 | 95 | Frame parsing, masking, opcodes, fragments, close handshake, unmasked rejection; client encoding, handshake, auto-ping, overflow guards |
+| **DNS** | 1 | 47 | Built-in async resolver: dual A+AAAA, EDNS0, cookies, `resolv.conf` search/ndots, `/etc/hosts`, TCP fallback, retransmit and timeout |
+| **PROXY protocol** | 1 | 9 | v1/v2 header parsing + CIDR trust matching |
+| **Total** | **110** | **1,585** | |
 
 ```bash
 make test               # run all tests
@@ -950,11 +924,11 @@ The tradeoff is real: C has no borrow checker, no bounds-checked slices, no RAII
 - Pre-allocated connection pool (no per-request `malloc`, no fragmentation)
 - `SIZE_MAX/2` overflow guards on all arithmetic, bounds checks at system boundaries
 - ASan + UBSan in debug builds, Clang static analyzer + cppcheck in CI
-- libFuzzer on the HTTP parser and multipart parser (the primary attack surface)
+- libFuzzer on every untrusted-input parser: HTTP request + response, multipart, WebSocket, DNS, PROXY, URL
 - `pledge()`/`unveil()` sandboxing, `-D_FORTIFY_SOURCE=2 -fstack-protector-strong`
 - Pluggable allocator for arena/pool strategies with deterministic cleanup
 
-This is adequate for a focused ~14K LOC library with thorough testing, but it's not a language-level guarantee. If you're evaluating Keel and memory safety is your primary concern, that's a legitimate reason to look elsewhere.
+This is adequate for a focused ~32K LOC library with thorough testing, but it's not a language-level guarantee. If you're evaluating Keel and memory safety is your primary concern, that's a legitimate reason to look elsewhere.
 
 ## Not in Scope
 
@@ -987,7 +961,7 @@ Three embedded C HTTP libraries compared.
 | | Keel | [Mongoose](https://github.com/cesanta/mongoose) | [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) |
 |---|------|----------|---------------|
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
-| **LOC** | ~14K | ~33K | ~19K |
+| **LOC** | ~32K | ~33K | ~19K |
 | **Architecture** | 35+ independent modules on 3 orthogonal axes | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
@@ -1008,17 +982,22 @@ Three embedded C HTTP libraries compared.
 
 GitHub Actions runs on every push and PR against `main`:
 
-- **Linux (epoll)**: build, test, examples, smoke test
-- **Linux (io_uring)**: build, test, examples, smoke test
-- **Linux (poll fallback)**: build, test, examples, smoke test
-- **macOS (kqueue)**: build, test, examples, smoke test
-- **Linux (musl/Alpine)**: build, test, examples
-- **Cosmopolitan (APE)**: build, examples, smoke test
+- **Linux (epoll)** / **(poll fallback)** / **(no completion)** / **macOS (kqueue)**: build, full suite, example smokes
+- **Completion (poll)** / **(io_uring)** / **io_uring unit suite**: completion-axis roundtrips and unit gates
+- **Sanitized completion (pollcomp)** / **(io_uring)**: the same two completion axes under ASan + UBSan
+- **Windows (MinGW, full core)**: Winsock/WSAPoll build, `WIN_TEST_SUITES`, TCP/datagram/DNS smokes, installed-artifact gates
+- **Windows (native MSVC, cl.exe)**: `cl`/`lib` build + suites on WSAPoll and IOCP, public-API consumer link, no-MinGW-import assertion
+- **Windows (IOCP)**: IOCP lifecycle suite + HTTP/TLS/async/datagram roundtrips
+- **Linux (musl/Alpine)** / **Cosmopolitan (APE)**: build, test, examples
 - **ASan + UBSan**: build and test with sanitizers
-- **Static Analysis**: scan-build + cppcheck
-- **Fuzz Testing**: libFuzzer on HTTP parser + multipart (60s each)
+- **Static Analysis**: scan-build, cppcheck, and every structural, packaging and version-drift gate
+- **Fuzz Testing**: seven libFuzzer targets, 60s each (HTTP request + response, multipart, WebSocket, DNS, PROXY, URL)
+- **Integrations (mbedTLS + nghttp2)**: real-socket e2e, h2spec, h2load, curl + nghttpd interop
+- **Integration (lwIP)**: loopback over lwIP BSD sockets and the raw `NO_SYS` provider under ASan/UBSan/LSan
+- **Release archive** + **Archive build**: deterministic source archive, rebuilt and tested on Ubuntu, macOS and Windows
 
-A separate benchmark workflow runs on push to `main` (informational, not gating).
+Separate workflows run CodeQL, OpenSSF Scorecard, a Doxygen docs publish, the site deploy, and a
+benchmark on push to `main` (informational, not gating).
 
 ## License
 

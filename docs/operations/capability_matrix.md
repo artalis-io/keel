@@ -59,12 +59,12 @@ completion axis (the readiness axis is covered by the default `make test`).
 
 | Behavior | Readiness mechanism | Completion mechanism | Parity evidence |
 |---|---|---|---|
-| Accept | `EPOLLIN`/readable → `accept` loop | `comp_on_accept` on accept completion | `test_server_integration`, smokes (all axes) |
-| Recv / request read | readable → `recv` → EAGAIN re-arm | posted recv → `KL_COMP_READ` completion → re-post | `test_connection`, `test_request`, smokes |
+| Accept | `EPOLLIN`/readable → `accept` loop | `comp_on_accept` on accept completion | `test_http_server_integration`, smokes (all axes) |
+| Recv / request read | readable → `recv` → EAGAIN re-arm | posted recv → `KL_COMP_READ` completion → re-post | `test_http_connection`, `test_http_request`, smokes |
 | Read-side flow control (pause/resume) | `kl_event_mod(fd,0)` drops READ interest | `comp_start_body_read` skips next post; resume re-posts (`kl_http_comp_post_read`) | `test_read_flow_control` (both axes) |
 | Send + backpressure | writable → `writev`; buffer tail in `KlDrain` | `kl_comp_post_send` (copies iovec); ≤1 in-flight; re-pump on `KL_COMP_WRITE` | `test_drain`, `smoke-*` bigstream |
 | Streaming (SSE/chunked/response) | flush on writability | `comp_stream_pump` over `KlDrain`, `stream_inflight` ≤1 | `smoke-pollcomp`/`-iouring`/`-iocp` bigstream; `docs/contracts/streaming.md` |
-| Partial I/O (short read/write) | EAGAIN / short `writev` retried | completion reports `< requested`; driver re-posts remainder | `test_client_stream`, `multipart_stream` |
+| Partial I/O (short read/write) | EAGAIN / short `writev` retried | completion reports `< requested`; driver re-posts remainder | `test_http_client_stream`, `test_http_multipart_stream` |
 | TLS (handshake + app data) | `read`/`write` vtable on the socket | memory-BIO `feed_input`/`drain_output` | `tls`, `tls_integration`, `peer_cert` over completion; `smoke-*-tls` |
 | PROXY protocol header | `kl_http_conn_read_proxy_header` (peek+consume) | `comp_drive_proxy` + `kl_http_conn_ingest_proxy` from `read_buf` | `test_peer_addr` 6/6 over completion; `smoke-*` proxy |
 | Close with outstanding work | stale-event guard after close | single terminal completion; op/buffer freed once | ASan/LSan smokes; `test_read_flow_control.shutdown_while_paused` |

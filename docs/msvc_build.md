@@ -16,7 +16,7 @@ That produces a native `libkeel.a` whose only DLL imports are `WS2_32.dll` and `
 |---|---|
 | `make CC=cl` | the library, WSAPoll readiness backend |
 | `make CC=cl BACKEND=iocp` | the library, IOCP completion backend |
-| `make CC=cl test-msvc` | build and run the MSVC runtime probes |
+| `make CC=cl test-msvc` | build and run the MSVC test suites (derived from the Windows set) |
 | `make CC=cl check-msvc-no-mingw` | assert no MinGW runtime import crept in |
 | `make CC=cl check-msvc-headers` | every public header compiles alone under `cl` |
 
@@ -93,12 +93,31 @@ with `KL_ERR_UNSUPPORTED` rather than quietly running a handler that might take 
 
 ## What is not built under MSVC
 
-The full test suite. Many test TUs include `<pthread.h>` and spawn helper threads directly; the
-LIBRARY never does, which is what the PAL threading seam is for, but those harnesses do and so they
-need MinGW. `make CC=cl test-msvc` builds a curated set chosen to prove the things that only linking
-and running can prove: the PAL socket runtime with no load-time constructor, the PAL threading seam,
-adopted descriptors, and the atomics policy. They are ordinary Keel suites, so the same target also
-runs under MinGW and the set cannot drift into MSVC-only test code.
+Almost nothing, now. `make CC=cl test-msvc` runs a set **derived** from the Windows suite set for the
+backend being built (`WIN_TEST_SUITES`, or `WIN_IOCP_TEST_SUITES` under `BACKEND=iocp`) minus a
+documented exclusion list. A new Windows suite is therefore enrolled in MSVC coverage by default, and
+keeping one out takes an explicit entry with a reason. `make check-msvc-parity` gates that invariant on
+both backends, so the set cannot quietly decay into a hand-curated list of whatever happens to pass.
 
-Examples are also MinGW-only, for the same reason: several use `pthread_create` in the example code
-itself.
+One exclusion stands today:
+
+| Excluded | Why |
+|---|---|
+| `test_http2` | MSVC 19.44 internal compiler error (C1001) on this TU at every optimisation level, under both `/std:c11` and `/std:c17`. A compiler defect, not a Keel one. Revisit on a newer toolset. |
+
+Two earlier exclusion classes are now empty, and the empty lists stay in the Makefile as the record
+that each migration finished:
+
+- **Harnesses that included `<pthread.h>` directly.** They all use the PAL thread seam
+  (`src/platform_thread.h`) now. The library never used pthreads on Windows, which is what the PAL
+  threading seam is for; it was the test code that had not followed.
+- **Tests that hand a fabricated descriptor to a CRT call.** The UCRT answers those by *terminating*
+  the process where POSIX returns `EBADF`, so three suites died with `0xC0000409` and no output.
+  `tests/net_compat_win.c` installs a no-op invalid-parameter handler before the first test, so the CRT
+  reports through `errno` like every other platform. Keel itself never installs such a handler.
+
+`make audit-msvc-exclusions` builds and runs the excluded suites against the current toolchain and
+fails if any of them now passes, so a compiler fix does not leave a stale exclusion behind. It needs a
+sourced MSVC environment and is opt-in rather than part of the standing CI run.
+
+Examples remain MinGW-only: several use `pthread_create` in the example code itself.

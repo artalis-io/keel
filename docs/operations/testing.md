@@ -15,13 +15,13 @@ The default backend is the platform readiness engine: **epoll** on Linux, **kque
 clean tree `make test` builds the library and each test binary, then runs every suite:
 
 ```
---- tests/test_router ---
-[==========] 12 test cases ran.
-[  PASSED  ] 12 tests.
+--- tests/protocols/http/test_http_router ---
+[==========] 38 test cases ran.
+[  PASSED  ] 38 tests.
 ...
 ```
 
-A passing run exits `0`; a representative macOS/kqueue run reports **89 suites, 1318 individual tests,
+A passing run exits `0`; a representative macOS/kqueue run reports **110 suites, 1585 individual tests,
 0 failures**. Any failure prints `SOME TESTS FAILED` and exits non-zero.
 
 ## Test layout
@@ -115,7 +115,30 @@ make check-no-httplegacy             # no legacy KlServer/KlClient/KlH2 / old mo
 make check-doc-refs                  # living-architecture doc links resolve
 make check-tier1-boundary            # protocol TUs stay above KlListener/KlStream/KlDatagram
 make check-sockaddr-neutral          # protocol TUs are KlSockAddr-only (no host sockaddr)
+make check-readiness-identity        # readiness registrations use &conn->stream
+make check-no-eventloop-fd           # no KlEventLoop.fd resurrection
+make check-no-fsnode-in-protocols    # AF_UNIX node lifecycle stays out of the protocol tree
+make check-no-em-dash                # no U+2014 in any tracked non-binary file
+make check-no-milestones             # no milestone/phase archaeology in C/H comments
 ```
+
+Packaging, toolchain and site gates:
+
+```sh
+make check-version-drift             # VERSION, version.h, keel.pc.in and the SBOM all agree
+make check-public-headers            # installed header inventory + standalone C11/C++11 compile
+make check-install                   # manifest-only install, keel.pc regen, ownership-safe uninstall
+make check-installed-consumer        # out-of-tree consumer links the installed tree via pkg-config
+make check-msvc-parity               # the MSVC suite set stays derived, exclusions stay documented
+make check-site                      # offline site validation + reproducible build
+```
+
+`check-install` and `check-installed-consumer` run on Windows as well as Linux (job
+`Windows (MinGW, full core)`). They describe packaging, and until 3.1.1 they had never once executed
+on the platform whose packaging they describe. `make audit-msvc-exclusions` is opt-in rather than
+standing: it needs a sourced MSVC environment, builds the excluded suites against the current
+toolchain, and fails if any of them now passes, so a compiler fix cannot leave a stale exclusion
+behind.
 
 Freestanding gates additionally prove the client / server / datagram / DNS subsets compile and link
 with no hosted libc (`make freestanding-headers`, `freestanding-dgram`, `freestanding-dns`, the
@@ -141,13 +164,20 @@ CI (`.github/workflows/ci.yml`) runs on push / PR to `main`. Standing jobs:
 | **build** (matrix) | Linux epoll, Linux poll fallback, macOS kqueue, Linux `KEEL_NO_COMPLETION` -- build + full suite + example smokes |
 | **completion** | the pollcomp double: HTTP/TLS/WebSocket/async roundtrips, the stream single-shot oracle, ASan+UBSan leak run, runtime-injected provider |
 | **completion-iouring** / **-suite** | io_uring roundtrips + ASan/LSan, and the `IOURING_TEST_SUITES` unit gate |
-| **windows** / **windows-iocp** | Winsock/WSAPoll full-core build + `WIN_TEST_SUITES` subset; IOCP lifecycle suite + HTTP/TLS/async/KlDatagram roundtrips |
+| **sanitized-completion** / **-iouring** | the same two completion axes rebuilt and rerun under ASan+UBSan |
+| **windows** | Winsock/WSAPoll full-core build, `WIN_TEST_SUITES` subset, TCP/datagram/DNS loopback smokes, and the installed-artifact gates (`check-install`, `check-installed-consumer`) |
+| **windows-msvc** | native `cl.exe` / `lib.exe`: library + `test-msvc` on both WSAPoll and IOCP, public-API-only consumer link, no-MinGW-import assertion, standalone public headers |
+| **windows-iocp** | IOCP lifecycle suite + HTTP/TLS/async/KlDatagram roundtrips |
 | **sanitizers** | build + suite under ASan+UBSan |
-| **fuzz** | the parser fuzzers, 60 s each (see [fuzzing.md](fuzzing.md)) |
-| **analyze** | scan-build, cppcheck, all boundary/stale-name gates, the freestanding + EFI PE gates, W^X guard, hardening-flag assertion |
+| **fuzz** | seven parser fuzzers, 60 s each: HTTP request + response, multipart, WebSocket, DNS, PROXY, URL (see [fuzzing.md](fuzzing.md)) |
+| **analyze** | scan-build, cppcheck, all boundary/stale-name gates, the packaging and version-drift gates, `check-msvc-parity`, `check-site`, the freestanding + EFI PE gates, W^X guard, hardening-flag assertion |
 | **musl** / **cosmo** | Alpine/musl build + suite; Cosmopolitan APE build + example smokes |
 | **integrations** | mbedTLS + nghttp2 -- roundtrip, real-socket e2e, h2spec (pass-floor 130/146), h2load, curl + nghttpd interop, ALPN, real-TLS smoke |
 | **lwip** | lwIP providers -- loopback (server/client/UDP echo), HTTPS-over-lwIP, raw-completion backend under ASan+UBSan+LSan |
+| **release-archive** / **archive-validate** | builds and verifies the deterministic source archive, then rebuilds and tests from the extracted tree on Ubuntu, macOS and Windows/WSAPoll |
+
+Separate workflows run alongside `ci.yml`: **CodeQL** (`cpp`), **OpenSSF Scorecard**, **Benchmark**
+(informational, not gating), **Docs** (Doxygen publish) and **Deploy Keel Site**.
 
 The io_uring and IOCP axes and the integration jobs are CI-gated, not merely buildable; see the
 [capability matrix](capability_matrix.md) for the per-backend, per-feature detail.
