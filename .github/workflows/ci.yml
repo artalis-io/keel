@@ -877,7 +877,7 @@ jobs:
     steps:
       - name: Download the verified source archive
         # NOTE: SHA-pin this to match the repo's action-pinning policy.
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: keel-*-source-validation
           merge-multiple: true
@@ -911,7 +911,7 @@ jobs:
           install: mingw-w64-x86_64-gcc make tar gzip coreutils
       - name: Download the verified source archive
         # NOTE: SHA-pin this to match the repo's action-pinning policy.
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: keel-*-source-validation
           merge-multiple: true
