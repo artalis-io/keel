@@ -40,7 +40,10 @@ endif
 # embedder could only override them wholesale - which means restating every one
 # of Keel's own flags, per platform, and re-doing it on every Keel release.
 #
-# KEEL_OPT           optimization level for Keel's own AND vendored TUs.
+# KEEL_OPT           optimization level for Keel's own TUs.
+# KEEL_VENDOR_OPT    optimization level for the VENDORED TUs (llhttp, the miniz
+#                    adapter). Defaults to KEEL_OPT, so setting only KEEL_OPT
+#                    behaves exactly as before.
 # KEEL_EXTRA_CFLAGS  appended to both, LAST, so they win over everything here.
 # KEEL_EXTRA_LDFLAGS appended to LDFLAGS, likewise.
 #
@@ -52,8 +55,23 @@ endif
 # Hull builds everything at -O0 there. Keel silently ignored that and kept
 # building at -O2, which wedged the build. Hull's LTO and CFI flags reached
 # Keel just as far - nowhere.
+#
+# Why the level is TWO knobs rather than one. The wedge was observed in the
+# VENDORED TUs, not in Keel's own, so an embedder that lowers the level to get a
+# build at all had to lower it everywhere, and Keel's whole library was then
+# compiled unoptimized. That is a real cost rather than a theoretical one: at
+# -O0 Keel's .text is about a third larger and none of it is optimized, which an
+# embedder pays on every call and, through reduced code density, on process
+# start too. Splitting the knob lets a build keep Keel's own TUs optimized while
+# lowering only the TUs that cannot take it:
+#
+#     make KEEL_OPT=-O2 KEEL_VENDOR_OPT=-O0
+#
 # Spelled by the toolchain (-O2 / /O2). An embedder overriding it passes its own compiler spelling.
 KEEL_OPT ?= $(CC_OPT_DEFAULT)
+# Defaulting to KEEL_OPT is what keeps every existing invocation unchanged: a tree that sets only
+# KEEL_OPT still gets that level everywhere, exactly as it did before this split.
+KEEL_VENDOR_OPT ?= $(KEEL_OPT)
 
 # _FORTIFY_SOURCE is built on __builtin_object_size, which folds to "unknown"
 # without optimization: at -O0 the flag is a silent no-op AND gcc warns about
@@ -67,7 +85,7 @@ ifdef COSMO
   # APE binaries have their own non-relocatable layout; no PIE / RELRO / FORTIFY here.
   CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_VENDOR_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else ifdef WINDOWS
@@ -76,7 +94,7 @@ else ifdef WINDOWS
   # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
   CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
             $(CC_HARDEN) $(CC_DEFS) -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_VENDOR_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
   # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
   # The IOCP TU is the only place the completion model lives; no #ifdef leaks into
   # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
@@ -121,7 +139,7 @@ else
             $(KEEL_FORTIFY) \
             $(CC_HARDEN) $(CC_PIE) \
             -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_OPT) $(CC_PIE) -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_VENDOR_OPT) $(CC_PIE) -Iinclude -Ivendor/llhttp
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
   # it as "unused during compilation"; Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise

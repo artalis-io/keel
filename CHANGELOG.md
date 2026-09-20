@@ -5,7 +5,23 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- **`KEEL_VENDOR_OPT`: an optimization level for the vendored TUs, separate from Keel's own.** The
+  embedder hooks added in 3.1.0 made `KEEL_OPT` reach every TU at once, which is what an embedder
+  wanting its own flags asked for. It had a consequence nobody asked for. The toolchain wedge that
+  motivated the hook (cosmocc's GCC hanging indefinitely at `-O2` on Windows) is in the **vendored**
+  TUs, llhttp and the miniz adapter, not in Keel's own; but the only way to get a build at all was to
+  lower the level everywhere, so Keel's entire library was then compiled unoptimized. At `-O0` Keel's
+  `.text` is about a third larger (333 KB to 447 KB on MinGW-w64) and none of it is optimized, a cost
+  paid on every call and, through reduced code density, on process start.
+
+  `KEEL_VENDOR_OPT` defaults to `KEEL_OPT`, so every existing invocation is byte-for-byte unchanged:
+  verified by diffing `make -Bn` output against the previous Makefile for the default build on all six
+  platform/backend branches (POSIX, cosmocc, Windows MinGW, Windows IOCP, poll, pollcomp) and for
+  `KEEL_OPT=-O0`, `KEEL_OPT=-O0 CC=cosmocc`, `KEEL_OPT=-O1` and `KEEL_EXTRA_CFLAGS=-flto`. A build that
+  needs the split now spells it `make KEEL_OPT=-O2 KEEL_VENDOR_OPT=-O0`, which recovers 72% of the
+  `-O0` code-size regression (447 KB to 365 KB) and leaves every Keel TU optimized. (#328)
 
 ## [3.1.1]
 
