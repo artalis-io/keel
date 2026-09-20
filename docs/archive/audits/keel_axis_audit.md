@@ -5,6 +5,129 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Fourteenth pass: post-MSVC-coverage-campaign whole-repo re-audit; three-axis separation holds (2026-09-15)
+
+**Verdict: architecturally sound.** The event / socket / protocol axes remain genuinely orthogonal and
+separately replaceable. Trigger: the MSVC coverage campaign (#313, #315, #317, #318, #319, #320), which
+took the second Windows toolchain from 3 to 101 of 102 semantic suites and fixed the installed artifact.
+That campaign touched the PAL, the test harness and packaging, so this pass asks whether any of it leaked
+an event model or a platform assumption upward. It did not. **The thirteenth pass's F1 (oversized-header
+divergence between the two event models) is now FIXED.** One new Low finding, on handle-validity idiom in
+the protocol layer. All **ten** axis-boundary gates pass (the thirteenth pass cited six; four have been
+added since).
+
+### 1. Architecture map (verified current)
+
+- **Event axis:** `include/keel/event.h` (readiness) + `src/event_caps.h` (negotiation) +
+  `src/completion.h` + `src/completion_core.c` + `src/completion_dispatch.c` / `src/completion_io.h`.
+  Readiness backends `event_epoll.c` / `event_kqueue.c` / `event_poll.c` / `event_wsapoll.c`; completion
+  backends `event_iouring.c` / `event_iocp.c` / `event_pollcomp.c` (+ `event_pollcomp_builtin.c`). Two
+  neutral fillers exist for builds that omit an axis: `completion_absent.c` and
+  `completion_readiness_stub.c`. The retired `io_engine` TU is gone from the tracked tree, and unlike the
+  thirteenth pass no stale object lingers (that pass's F2 is closed).
+- **Socket axis:** `src/socket.h` (`KlSocketProvider` vtable + `KL_SOCK_CAP_*`), providers
+  `socket_posix.c` / `socket_winsock.c`, datagram data-plane siblings `socket_dgram_posix.c` /
+  `socket_dgram_win.c`; overlapped providers live in their event TUs. Handle type `KlSocketHandle`
+  (`include/keel/handle.h`, pointer-width `intptr_t`, `KL_INVALID_SOCKET`, `kl_handle_valid()`).
+- **Protocol layer:** `src/protocols/{http,http2,websocket,dns,proxy_protocol}/`, reaching I/O only
+  through `conn_read` / `conn_write` (`http_internal.h`) onto `kl_stream_recv` / `kl_stream_send` or the
+  `KlTls` vtable.
+
+### 2. Execution-path traces
+
+**Readiness receive (epoll / WSAPoll).** Registration uses `&conn->stream` as the udata identity
+(`http_server_core.c:731,741,744`, enforced by `check-readiness-identity`). The engine reports readiness,
+`kl_http_conn_on_readable` calls `conn_read` (`http_connection.c:849`), which resolves to
+`c->tls->read(...)` or `kl_stream_recv(&c->stream, ...)`. Bytes land in the sliding `read_buf` window;
+interest is re-armed with `kl_event_mod(..., KL_EVENT_READ, &c->stream)`. The protocol code names no
+engine and no platform type anywhere on this path.
+
+**Completion receive (io_uring / IOCP / pollcomp).** `kl_comp_post_recv`
+(`completion_http_server.c:76`) chooses the destination buffer (the TLS cipher buffer when `c->tls`,
+otherwise the `read_buf` headroom) and submits through `kl_comp_post_recv_raw(&c->stream, ...)`. On
+completion the driver feeds the SAME model-blind core the readiness path uses:
+`kl_http_conn_dispatch_request`, `kl_http_conn_ingest_body`, `kl_http_conn_send_complete`
+(`http_conn_internal.h:186,194,216`), whose definitions are thin non-static handles onto the identical
+statics (`http_connection.c:1100-1116`). This is the load-bearing property of the whole design: one
+parse/route/handle/lifecycle core, two submission models, no event model in the protocol TU.
+
+**Send with backpressure.** `conn_write_all` (`http_internal.h:56`) retries short writes with a bounded
+spin (`KL_HTTP_CONN_WRITE_SPIN_MAX`) rather than assuming one write drains the buffer; the completion
+side posts through `kl_comp_post_send(c, iov, iovcnt, total)` and retires on the completion. Both models
+treat a partial transfer as normal rather than exceptional.
+
+**Close with outstanding work.** `http_server_core.c:463` documents that teardown DEQUEUES every
+completion before freeing, so no `OVERLAPPED` is released while the kernel still owns it. The
+post-rejection drain (`http_connection.c:1125`) half-closes and performs a bounded, non-blocking drain so
+that a committed final response is not destroyed by an RST caused by unread request bytes.
+
+### 3. Findings
+
+| # | Severity | Files+symbols | Principle | Why / failure scenario | Smallest fix |
+|---|----------|---------------|-----------|------------------------|--------------|
+| F1 | Low | `src/protocols/http/http_server_core.c:162` (`if (s->config.listen_fd < 0)`); field `KlHttpServerConfig.listen_fd` (`include/keel/http_server.h:147`, type `KlSocketHandle`) | Goal 5: the socket abstraction must not carry POSIX assumptions that make Winsock second class. `include/keel/handle.h:24-27` states the rule outright: because a Winsock `SOCKET` is UNSIGNED, the POSIX idiom `if (fd < 0)` is unreliable on Windows; test validity with `kl_handle_valid()`, never `< 0`. | Protocol-layer code applies the forbidden numeric idiom to a handle-typed field, and the in-code rationale is POSIX-specific ("fds 0-2 are stdio, not listeners") used to justify `0 = disabled` on a cross-platform field. No failure today: Windows kernel handles are small positive values, so only `KL_INVALID_SOCKET` trips the test, and the documented absent value is `0`. The wart is that a handle-typed field uses an integer sentinel whose justification does not hold on one supported platform, and a caller who reasonably passes `KL_INVALID_SOCKET` to mean "none" receives `KL_ERR_INVALID_ARG` instead of "disabled". | Either document on the field that `0`, not `KL_INVALID_SOCKET`, is the absent sentinel and that the check is input validation rather than handle validation, or accept `KL_INVALID_SOCKET` as equivalent to `0`. Prefer the former: it is a comment change. Consider extending `tests/test_fd_type_convention.c`, which already pins the file-descriptor vs socket-handle distinction, to pin this sentinel too. |
+| F2 | Informational | `src/platform_thread_posix.c:28`, `src/platform_thread_win.c:35` | Allocator discipline (CLAUDE.md: no direct malloc/free; all allocation through `KlAllocator`). | The PAL thread trampoline heap-allocates its `{fn, arg}` carrier with raw `malloc`/`free`. The comment explains why it must be heap-allocated (it outlives the call) but not why it bypasses the allocator. `kl_plat_thread_create()` takes no allocator, so the bypass is structural and defensible; it is simply the only one outside `allocator_default_stdlib.c`, and it is unstated. | One sentence in `src/platform_thread.h` recording that the seam deliberately sits below the allocator. Also raised as L1 in the companion `/c-audit` pass of the same date. |
+
+**Thirteenth-pass F1 is RESOLVED.** `comp_grow_headers_or_431()` (`completion_http_server.c:489`) now
+grows the completion read buffer up to `max_header_size` and best-effort posts the same
+`KL_HTTP_431_RESPONSE` before closing, mirroring readiness (`http_connection.c:828-840`). The residual
+`if (space == 0) return -1;` at `completion_http_server.c:84` is a defensive guard below that helper, not
+the divergence. Both models now honor `max_header_size`, and both answer 431 rather than a bare TCP
+close.
+
+### 4. Compatibility matrix
+
+| Combination | Status | Evidence for this pass |
+|---|---|---|
+| Linux sockets + epoll | production; tested | CI `Linux (epoll)`, `Linux (poll fallback)`, `ASan + UBSan` |
+| Linux sockets + io_uring | production; tested | CI `Completion (io_uring)`, `Completion (io_uring) unit suite`, `Sanitized completion (io_uring)`. **Not run in this pass** (Linux only; this host is Windows) |
+| Darwin sockets + kqueue | production; tested | CI `macOS (kqueue)`, `Completion (poll) (macos-latest)` |
+| Winsock + WSAPoll | production; tested | **Run in this pass: 102 suites green** (`make test-win`) |
+| Winsock + IOCP | production; tested | **Run in this pass: 97 suites green** (`make BACKEND=iocp test-win-iocp`) |
+| pollcomp double | test instrument; tested | CI `Sanitized completion (pollcomp)`, `Completion (poll)`. **Not run in this pass** (POSIX only) |
+| Winsock + MSVC toolchain, both backends | production; tested | 101 of 102 (WSAPoll) and 96 of 97 (IOCP) semantic suites under `cl.exe`; one documented exclusion, an MSVC 19.44 C1001 compiler ICE |
+
+### 5. Mechanical evidence
+
+- **Protocol independence (Goal 4):** zero occurrences of `<sys/epoll.h>`, `<sys/event.h>`,
+  `<liburing.h>`, `io_uring_*`, `epoll_*`, `kevent(`, `WSAPoll`, `OVERLAPPED`, `CreateIoCompletionPort`,
+  `WSARecv` / `WSASend`, `<winsock2.h>`, `<windows.h>`, `<sys/socket.h>` or `<netinet/*>` in the protocol
+  CORE TUs. Every apparent hit is either a comment or one of exactly four platform-sibling TUs
+  (`http_server_plat_posix.c` / `http_server_plat_win.c`, `dns_sys_posix.c` / `dns_sys_win.c`) that
+  implement a type-neutral seam header, the same one-platform-per-TU pattern as `event_*.c` and
+  `socket_*.c`. Measured directly: `http_server.c`, `http_server_core.c`, `http_connection.c`,
+  `http2_server.c`, `websocket.c` and `dns_resolver.c` contain **zero** platform includes and **zero**
+  `#ifdef _WIN32` / `__linux__` / `__APPLE__`.
+- **Native error access:** no `WSAGetLastError()` outside the platform TUs; `src/sockcompat.h`
+  translates into the CRT `errno` space at the boundary.
+- **Handle typing:** `tests/test_fd_type_convention.c` pins the distinction that a FILE descriptor is an
+  `int` while a socket handle is a `KlSocketHandle`, which is why `kl_http_response_file(..., int fd,
+  ...)` is correct rather than an oversight.
+- **Axis gates:** all ten pass: `check-substrate-purity`, `check-protocol-no-integration`,
+  `check-integration-seam`, `check-protocol-home`, `check-sockaddr-neutral`, `check-readiness-identity`
+  (plus its selftest), `check-backend-isolation`, `check-no-eventloop-fd`, `check-tier1-boundary`.
+
+### 6. Limits of this pass
+
+Run on a Windows host, so the io_uring and pollcomp lanes were **not executed here**; the matrix cites CI
+for those and says so rather than implying local verification. The skill's suggested Apple `container`
+Linux VM was not available. `make cppcheck` and `make analyze` were likewise not run locally; they run in
+CI's `Static Analysis` and `Analyze` jobs, both green on `main`.
+
+### 7. Recommended roadmap
+
+1. **Immediate correctness:** none. Neither finding is a correctness defect.
+2. **Cheap clarity:** the F1 comment on `KlHttpServerConfig.listen_fd`; the F2 sentence in
+   `src/platform_thread.h`.
+3. **Test coverage:** extend `tests/test_fd_type_convention.c` to pin the `listen_fd` absent-sentinel
+   convention, so the POSIX-flavoured idiom cannot spread by imitation.
+4. **Deferred:** nothing architectural. The axes held under the heaviest recent pressure (a second
+   toolchain, a PAL thread migration, and a packaging fix), which is the useful signal from this pass.
+
+### 8. Changes made
+
+None. This pass is read-only: no source file was modified.
+
 ## Thirteenth pass: post-AF_UNIX-node-cleanup (#251) whole-repo re-audit; three-axis separation holds (2026-08-26)
 
 **Verdict: architecturally sound.** The event / socket / protocol axes remain genuinely orthogonal
