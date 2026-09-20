@@ -236,6 +236,10 @@ $ make BACKEND=iouring
 <span class="tk-com"># Universal POSIX fallback; also enables Cosmopolitan APE builds.</span>
 $ make BACKEND=poll
 
+<span class="tk-com"># Native MSVC on Windows: same tree, same PAL, only the compiler mapping changes.</span>
+$ source scripts/msvc-env.sh
+$ make CC=cl
+
 <span class="tk-com"># Run the test suite and example programs.</span>
 $ make test
 $ make examples</pre>
@@ -298,7 +302,7 @@ $ make examples</pre>
                 <tr>
                   <td>WSAPoll (Windows)</td>
                   <td class="cmp-yes">readiness</td>
-                  <td>TCP, datagram, and DNS smokes plus a unit subset on the Windows (MinGW / Winsock) CI job.</td>
+                  <td>TCP, datagram, and DNS smokes plus a unit subset on the Windows (MinGW / Winsock) CI job. Built and run again by a second native toolchain on the Windows (native MSVC, cl.exe) job, whose suite set is derived from the MinGW one rather than curated.</td>
                 </tr>
                 <tr>
                   <td>io_uring (Linux 5.6+)</td>
@@ -934,7 +938,8 @@ $ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene 
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
             CI runs the suite across Linux (epoll, poll fallback, and a
             no-completion build), macOS (kqueue), the pollcomp and io_uring
-            completion backends, and Windows (MinGW / WSAPoll + IOCP). The
+            completion backends, and Windows on two native toolchains
+            (MinGW and MSVC <code>cl.exe</code>, over WSAPoll and IOCP). The
             per-backend gates are enumerated in the
             <a href="https://github.com/artalis-io/keel/blob/main/docs/operations/testing.md" class="link">testing</a>
             and
@@ -984,7 +989,7 @@ $ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene 
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Page last updated <time datetime="2026-08">August&nbsp;2026</time>.
+        Page last updated <time datetime="2026-09">September&nbsp;2026</time>.
         A portable, event-driven transport substrate for C: an I/O core, TCP/UDP
         transports, and built-in protocol families.
       </p>

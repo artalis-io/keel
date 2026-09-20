@@ -36,7 +36,7 @@ and do not pin a version).
 | GCC (musl / Alpine) | Standing-CI tested | job `Linux (musl/Alpine)` |
 | AppleClang (macOS) | Standing-CI tested | job `macOS (kqueue)` (`make`) |
 | MinGW-w64 GCC (Windows) | Standing-CI tested | job `Windows (MinGW, full core)` (`make OS=windows CC=gcc`) |
-| MSVC `cl.exe` (Windows) | Standing-CI tested, library + probes | job `Windows (native MSVC, cl.exe)` (`source scripts/msvc-env.sh` then `make CC=cl`). Builds the library on both Windows backends and runs a curated probe set; the FULL test suite is MinGW-only, because several test harnesses use `<pthread.h>` directly even though the library does not. See [msvc_build.md](../msvc_build.md). |
+| MSVC `cl.exe` (Windows) | Standing-CI tested | job `Windows (native MSVC, cl.exe)` (`source scripts/msvc-env.sh` then `make CC=cl`). Builds the library on both Windows backends and runs `make CC=cl test-msvc` on each: a suite set DERIVED from the Windows set minus one documented exclusion (an MSVC 19.44 ICE), gated by `make check-msvc-parity` so it stays derived. Also links a public-API-only consumer, asserts no MinGW runtime import, and compiles every public header standalone under `cl`. Examples stay MinGW-only (they call `pthread_create` in the example code). See [msvc_build.md](../msvc_build.md). |
 | Cosmopolitan `cosmocc` | Standing-CI tested | job `Cosmopolitan (APE)` (`make CC=cosmocc`) |
 | Clang (Linux) | Standing-CI for fuzz + static analysis; full build+test is locally tested | `make fuzz CC=clang` (job `Fuzz Testing`), `make analyze` / `make cppcheck` (job `Static Analysis`); a full `make test CC=clang` is a documented local run, not a standing job |
 
@@ -140,12 +140,28 @@ claim (benchmark numbers are environment-specific and are not a support guarante
 
 Keel ships a static library `libkeel.a` plus a pkg-config module named `keel`
 (`pkg-config --cflags --libs keel`). There is no shared object and no soname: consumers link statically
-and there is no cross-version binary ABI promise. Release bundles are source-first (a deterministic
-source archive plus a SHA-256 manifest and the SBOM); how they are built and verified is in
-[releasing.md](releasing.md). The installed header set is exactly a reviewed manifest
+and there is no cross-version binary ABI promise.
+
+Because the link is static, `Libs.private` has to be right: it is what a consumer actually links
+against. It is derived from what the Makefile links for the platform and toolchain that produced the
+install, not hardcoded. Off Windows that is `LD_THREAD`; on Windows it is `LD_WIN_PLATFORM`
+(`ws2_32`, `mswsock`, `bcrypt`, `iphlpapi`, `advapi32`, `shell32`), spelled as `.lib` names from an
+MSVC build and as `-l` flags from MinGW; `BACKEND=iouring` adds `-luring`. Before 3.1.1 this field was
+the literal `-lpthread` on every platform, so no Windows consumer could statically link an installed
+Keel and io_uring consumers were missing `-luring`.
+
+Release bundles are source-first (a deterministic source archive plus a SHA-256 manifest and the
+SBOM); how they are built and verified is in [releasing.md](releasing.md). The installed header set
+is exactly a reviewed manifest
 (`make check-public-headers` / `make check-install`), and the pkg-config `Version` is single-sourced from
 the root `VERSION` file and always matches the compiled `kl_version()` and `keel/version.h`
 (`make check-version-drift`).
+
+The installed-artifact gates run on Windows as well as Linux: job `Windows (MinGW, full core)` runs
+`check-install` and `check-installed-consumer`. `check-public-headers` is Linux-only, because half of
+it compares a committed inventory against a freshly generated one and that generation is locale- and
+coreutils-sensitive on MSYS; its header-self-containment half is platform-independent and proven in the
+`Static Analysis` job.
 
 ## Version compatibility and maintenance
 
