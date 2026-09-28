@@ -59,6 +59,6 @@ int  kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *op);
 /* Request cancellation of `life`'s outstanding op of `kind`. Advisory and idempotent: the op still
  * completes exactly once (aborted, or with its real result if it won the race), and that completion
  * releases the ref. Never releases a ref itself. */
-void kl_comp_pipe_cancel(struct KlEventCtx *ctx, struct KlDgramLife *life, KlPipeOpKind kind);
+void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life, KlPipeOpKind kind);
 
 #endif /* KEEL_SRC_COMPLETION_PIPE_H */

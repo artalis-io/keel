@@ -850,7 +850,7 @@ int kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *pop) {
     return 0;
 }
 
-void kl_comp_pipe_cancel(struct KlEventCtx *ctx, struct KlDgramLife *life, KlPipeOpKind kind) {
+void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life, KlPipeOpKind kind) {
     if (!kl_comp_pipe_available(ctx) || !life) return;
     KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_PIPE_OP_WRITE) ? KL_IOCP_PIPE_WRITE : KL_IOCP_PIPE_READ;

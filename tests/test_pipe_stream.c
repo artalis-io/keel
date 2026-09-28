@@ -88,7 +88,6 @@ static void rec_on_close(void *ud) {
     if (r->sealed) r->late++;
     r->closes++;
 }
-static void rec_free(Rec *r) { free(r->buf); memset(r, 0, sizeof(*r)); }
 
 static KlPipeConfig rec_cfg(Rec *r, size_t rcap, size_t wcap) {
     KlPipeConfig c;
@@ -150,6 +149,8 @@ UTEST(pipe, unsupported_off_iocp) {
 #if defined(_WIN32)
 #include <sddl.h>                     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
 #include "../src/platform_thread.h"   /* the PAL thread seam, for the blocking pipe-server helper */
+
+static void rec_free(Rec *r) { free(r->buf); memset(r, 0, sizeof(*r)); }
 
 /* ── Harness: loop pump ─────────────────────────────────────────────────────────────────────── */
 
