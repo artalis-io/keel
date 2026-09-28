@@ -298,7 +298,7 @@ report its absence rather than silently misbehaving.
   the object is still alive**, but under strict detachment a completion after legal reuse is
   impossible, so the stamp is defensive, not the primary guarantee.
 - **Backend-owned stable token (the mechanism).** The neutral lifetime token lives in
-  `src/datagram_life.{h,c}` (a single-thread refcount + nullable target + `on_final`, allocated from
+  `src/completion_life.{h,c}` (a single-thread refcount + nullable target + `on_final`, allocated from
   the event-ctx allocator so it outlives the `KlDatagram`); `KlCompletionEvent` carries it in `life`.
   Each completion backend captures the recv buffer + flags at post and retains one token ref per
   posted op; the completion transfers that ref to the event (released after dispatch), and the op-free
@@ -502,7 +502,7 @@ A backend conforms to Tier-1 iff, over that backend (readiness natively; complet
 
 The stream conformance suite (`docs/contracts/stream.md`) is the template. The datagram suite
 (`tests/test_datagram_socket.c`, `test_datagram_open.c`, `test_datagram_batch.c`,
-`test_datagram_multicast.c`, `test_datagram_life.c`, `test_dgram_{close,core,recv,recv_classify,send,slots}.c`,
+`test_datagram_multicast.c`, `test_completion_life.c`, `test_dgram_{close,core,recv,recv_classify,send,slots}.c`,
 `test_udp_cmsg.c`, plus the live/public end-to-end suites `test_datagram_live.c` /
 `test_datagram_public.c`) adds packet-integrity, truncation, and source-presence gates, run over
 readiness (`make test`) and the completion backends (pollcomp, io_uring via `IOURING_TEST_SUITES`,

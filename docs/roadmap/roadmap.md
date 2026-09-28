@@ -34,7 +34,7 @@ The following work is complete and CI-protected; treat it as history rather than
 - The UEFI integration lives under `integrations/platform/uefi/` with production separated from test
   machinery; the live EFI ABI headers are promoted into the backend and `spikes/` is removed (former S3.5).
 - The freestanding client, server, datagram, and DNS compositions link and run under CI; the
-  `kl_dgram_life_*` composition gap is resolved (former F1).
+  `kl_comp_life_*` composition gap is resolved (former F1).
 
 Do not preserve this chronology in active source comments. The final architecture documentation should
 describe the resulting system directly.

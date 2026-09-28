@@ -73,7 +73,7 @@
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "completion_io.h"         /* kl_comp_post_dgram_* decls */
-#include "datagram_life.h"     /* kl_dgram_life_release: drop the caller-transferred ref */
+#include "completion_life.h"     /* kl_comp_life_release: drop the caller-transferred ref */
 
 #include <string.h>
 #include <time.h>
@@ -546,7 +546,7 @@ static int lwr_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp 
     KlLwrState *st = ctx->loop._backend;
     if (!st || !kl_handle_valid(rop->fd)) return -1;   /* caller releases its transferred ref */
     int rc = kl_lwr_udp_post_recv(st->lwrctx, (void *)rop->fd, rop->life);
-    if (rc == 0) kl_dgram_life_release(rop->life);      /* glue took its own ref → drop the transferred one */
+    if (rc == 0) kl_comp_life_release(rop->life);      /* glue took its own ref → drop the transferred one */
     return rc;
 }
 static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
@@ -557,7 +557,7 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     if (!sop->dest || kl_sockaddr_family(sop->dest) != KL_AF_INET) return -1;
     int rc = kl_lwr_udp_send(st->lwrctx, (void *)sop->fd, sop->life, sop->data, sop->len,
                              sop->dest->u.ip, kl_sockaddr_port(sop->dest));
-    if (rc == 0) kl_dgram_life_release(sop->life);      /* glue took its own ref → drop the transferred one */
+    if (rc == 0) kl_comp_life_release(sop->life);      /* glue took its own ref → drop the transferred one */
     return rc;
 }
 
@@ -567,13 +567,13 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
  * (kl_lwr_udp_cancel_recv), so recv_inflight retires. retire reports PENDING while that terminal is
  * queued, RETIRED once it has drained (or when there was nothing armed). lwIP never quarantines. Only
  * KlDatagram drives this (the removed UDP object never used cancel_dgram). */
-static int lwr_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+static int lwr_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgramOpKind kind) {
     if (kind != KL_DGRAM_OP_RECV) return 0;   /* sends drain synchronously; nothing to cancel */
     KlLwrState *st = ctx ? ctx->loop._backend : NULL;
     if (st) kl_lwr_udp_cancel_recv(st->lwrctx, life);
     return 0;
 }
-static KlDgramRetireResult lwr_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+static KlDgramRetireResult lwr_comp_retire_dgram(struct KlEventCtx *ctx, KlCompLife *life,
                                                  KlDgramOpKind kind, int *transport_err) {
     if (transport_err) *transport_err = 0;
     if (kind == KL_DGRAM_OP_RECV) {

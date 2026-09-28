@@ -23,7 +23,7 @@
 #include <keel/sockaddr.h>
 #include <keel/error.h>
 #include "../src/completion.h"     /* KlCompletionOps + KlDgramSendOp/RecvOp */
-#include "../src/datagram_life.h"  /* KlDgramOpKind / KlDgramRetireResult */
+#include "../src/completion_io.h"    /* KlDgramOpKind / KlDgramRetireResult */
 #include "../src/socket.h"         /* KlSocketProvider / KlSocketOps */
 #include <string.h>
 #include <sys/socket.h>
@@ -75,10 +75,10 @@ static const KlSocketProvider *mock_provider(int omit) {
 #ifndef KEEL_NO_COMPLETION
 static int cmp_post_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) { (void)ctx;(void)op; return 0; }
 static int cmp_post_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) { (void)ctx;(void)op; return 0; }
-static int cmp_cancel(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind) {
+static int cmp_cancel(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind) {
     (void)ctx;(void)life;(void)kind; return 0;
 }
-static KlDgramRetireResult cmp_retire(struct KlEventCtx *ctx, struct KlDgramLife *life,
+static KlDgramRetireResult cmp_retire(struct KlEventCtx *ctx, struct KlCompLife *life,
                                       KlDgramOpKind kind, int *terr) {
     (void)ctx;(void)life;(void)kind; if (terr) *terr = 0; return KL_DGRAM_RETIRE_RETIRED;
 }

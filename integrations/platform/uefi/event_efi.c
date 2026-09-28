@@ -20,11 +20,11 @@
  * KEEL_UEFI_DATAGRAM: only the datagram builds (the datagram image, the mock harness, the strict
  * two-arch datagram gate) define it. A TCP-only EFI build compiles
  * NONE of the datagram op storage / pumping / teardown / vtable wiring below, and therefore
- * references NO kl_uefi_udp_* / KlDgramLife symbols: completion is the execution model, UDP
+ * references NO kl_uefi_udp_* / KlCompLife symbols: completion is the execution model, UDP
  * is an optional transport, and the two do not link together unless asked. */
 #ifdef KEEL_UEFI_DATAGRAM
 #include "socket_efi_udp4.h"          /* datagram completion primitives + KlUefiUdpOpResult */
-#include "../../../src/datagram_life.h"   /* KlDgramLife retain/release: stable-token transfer */
+#include "../../../src/completion_life.h"   /* KlCompLife retain/release: stable-token transfer */
 #endif
 #include <keel/http_server.h>               /* KlHttpServer.pool: accept backpressure */
 
@@ -49,7 +49,7 @@
  * path. Firmware BSS cost: KL_EFI_MAX_IO_OPS * KL_EFI_SNDBUF. */
 #define KL_EFI_SNDBUF       16384
 /* Datagram completion ops. DNS drives one Receive + several Transmits per socket; a small
- * fixed pool, no allocation in the loop. Each op holds a KlDgramLife ref from post until it is
+ * fixed pool, no allocation in the loop. Each op holds a KlCompLife ref from post until it is
  * transferred to a completion event (DELIVERED), released (RETIRED/STALE_RETIRED), or RETAINED forever
  * (QUARANTINED/INVALID); see el_drain.
  *
@@ -71,7 +71,7 @@ typedef struct {
     unsigned long long  generation;   /* the op identity (captured when POSTED to the substrate) */
     void               *buf;          /* recv: the captured dg->recv_buf (copy target) */
     size_t              buflen;        /* recv: capacity */
-    struct KlDgramLife *life;          /* stable token ref: retained at post; NULLed on transfer/release */
+    struct KlCompLife *life;          /* stable token ref: retained at post; NULLed on transfer/release */
     /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
     int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
     int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
@@ -237,7 +237,7 @@ static void el_close(KlEventLoop *loop) {
                 ? KL_UEFI_UDP_OP_STALE_RETIRED             /* never posted → no firmware ref → release */
                 : kl_uefi_udp_op_state(op->fd, op->generation);
             if (st == KL_UEFI_UDP_OP_STALE_RETIRED || st == KL_UEFI_UDP_OP_RETIRED)
-                kl_dgram_life_release(op->life);           /* confirmed retirement → release */
+                kl_comp_life_release(op->life);           /* confirmed retirement → release */
             /* else QUARANTINED / INVALID / PENDING → retain (abandon the ref) */
             op->life = NULL;
         }
@@ -470,7 +470,7 @@ static int el_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) 
  * matching POSTED op (a queued/unposted send touched no firmware, nothing to cancel). The return is
  * IGNORED: ref release stays with the drain/el_close op_state classifier (never here), so cancel is
  * idempotent + does not double-release. Confirmed retirement then surfaces via retire_dgram. */
-static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+static int el_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgramOpKind kind) {
     (void)ctx;
     EfiDgramKind want = (kind == KL_DGRAM_OP_SEND) ? EFI_DG_SEND : EFI_DG_RECV;
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
@@ -504,7 +504,7 @@ static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpK
  * never-posted send touched no firmware → RETIRED; else consult the substrate. STALE_RETIRED/RETIRED →
  * RETIRED, PENDING/DELIVERED (live, not yet reaped) → PENDING, QUARANTINED/INVALID (unconfirmed) →
  * QUARANTINED (fail-closed, the override no other backend needs). No matching op → already retired. */
-static KlDgramRetireResult el_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+static KlDgramRetireResult el_retire_dgram(struct KlEventCtx *ctx, KlCompLife *life,
                                            KlDgramOpKind kind, int *transport_err) {
     (void)ctx;
     if (transport_err) *transport_err = 0;

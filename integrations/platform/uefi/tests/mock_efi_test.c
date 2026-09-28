@@ -32,9 +32,9 @@
 #include <keel/datagram.h>           /* public KlDatagram facade (close e2e) */
 #include <keel/datagram_detail.h>    /* opt-in KlDatagram layout (stack-allocate the handle) */
 #include "../../../../src/datagram_open.h" /* kl_datagram_teardown: synchronous owner-destruction */
-#include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
+#include <keel/allocator.h>          /* KlAllocator (KlCompLife tests) */
 #include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlDatagram test) */
-#include "../../../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead */
+#include "../../../../src/completion_life.h" /* KlCompLife create/retain/release/mark_dead */
 #include "../../../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
 #include "../../../../src/completion.h"    /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 #include <keel/event.h>
@@ -603,9 +603,9 @@ static void reset_counters(void) {
     for (int i = 0; i < MAX_EVENTS; i++) memset(&g_events[i], 0, sizeof(g_events[i]));
 }
 
-/* ── tracking allocator + on_final counter for the KlDgramLife tests ────────────────────
+/* ── tracking allocator + on_final counter for the KlCompLife tests ────────────────────
  * A KlAllocator over malloc that RECORDS live blocks, so a QUARANTINE test, which intentionally
- * leaks a KlDgramLife forever (on_final must NEVER run), can reclaim that heap block at test end
+ * leaks a KlCompLife forever (on_final must NEVER run), can reclaim that heap block at test end
  * WITHOUT running on_final (talloc_free_all frees it directly), keeping LSan clean while still
  * proving retention. Delivered/stale tests release normally (on_final frees the life via t_free). */
 #define TALLOC_MAX 32
@@ -1509,8 +1509,8 @@ static void t_udp_sync_send_quarantine(void) {
     kl_uefi_udp_close(fd2);
 }
 
-/* ── event_efi datagram completion wiring: KlDgramLife lifetime ───────────────────────────
- * These drive event_efi's post_dgram_recv/_send + drain against a REAL KlDgramLife over a REAL
+/* ── event_efi datagram completion wiring: KlCompLife lifetime ───────────────────────────
+ * These drive event_efi's post_dgram_recv/_send + drain against a REAL KlCompLife over a REAL
  * EFI_UDP4 socket (fake firmware), proving the frozen op-result → life contract:
  *   DELIVERED     → the event carries the transferred ref; after dispatch releases it AND the owner
  *                   ref is dropped, on_final runs (release on delivery + confirmed retirement);
@@ -1546,25 +1546,25 @@ typedef struct {
     void          *rx_life;
 } MockDgramXport;
 
-/* The datagram post seam is descriptor-based + caller-owned: the caller retains one KlDgramLife
+/* The datagram post seam is descriptor-based + caller-owned: the caller retains one KlCompLife
  * ref and TRANSFERS it into the op on a SUCCESSFUL post, releasing it on failure. These wrappers drive
  * the vtable exactly as the datagram core does (the EFI backend ignores the ctx arg: it reaches its
  * substrate via file-scope g_efi: so NULL is fine here). */
 static int mock_post_dgram_send(const KlEventProvider *ep, MockDgramXport *dg,
                                 const void *data, size_t len, const KlSockAddr *dest) {
     KlDgramSendOp op = { .fd = dg->fd, .data = data, .len = len, .dest = dest,
-                         .src = NULL, .tos = -1, .life = (KlDgramLife *)dg->rx_life };
-    kl_dgram_life_retain(op.life);
+                         .src = NULL, .tos = -1, .life = (KlCompLife *)dg->rx_life };
+    kl_comp_life_retain(op.life);
     int rc = COMP(ep)->post_dgram_send(NULL, &op);
-    if (rc < 0) kl_dgram_life_release(op.life);   /* failure → caller releases; backend took nothing */
+    if (rc < 0) kl_comp_life_release(op.life);   /* failure → caller releases; backend took nothing */
     return rc;
 }
 static int mock_post_dgram_recv(const KlEventProvider *ep, MockDgramXport *dg) {
     KlDgramRecvOp op = { .fd = dg->fd, .buf = dg->recv_buf, .cap = dg->recv_buf_size,
-                         .capture = 0, .life = (KlDgramLife *)dg->rx_life };
-    kl_dgram_life_retain(op.life);
+                         .capture = 0, .life = (KlCompLife *)dg->rx_life };
+    kl_comp_life_retain(op.life);
     int rc = COMP(ep)->post_dgram_recv(NULL, &op);
-    if (rc < 0) kl_dgram_life_release(op.life);
+    if (rc < 0) kl_comp_life_release(op.life);
     return rc;
 }
 
@@ -1578,7 +1578,7 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;   /* sends post but do NOT auto-complete: step them manually */
     KlSockAddr dA, dB, dC, dD;
@@ -1593,7 +1593,7 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     /* A retires → B posts */
     mock_complete_hung_tx();
     int dn = COMP(ep)->drain(NULL, evs, 8, 0);
-    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_dgram_life_release(evs[i].life); released++; }
+    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_comp_life_release(evs[i].life); released++; }
     CHECK(g_udp_tx_calls == 2 && g_udp_tx_dst[3] == 4, "after A retired, B posted (10.0.2.4)");
     /* D accepted: reuses A's freed array slot but has a later sequence than C */
     CHECK(mock_post_dgram_send(ep, &dg, "D", 1, &dD) == 0, "D accepted (reuses A's freed slot)");
@@ -1601,18 +1601,18 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     /* B retires → FIFO must pump C (older), NOT D */
     mock_complete_hung_tx();
     dn = COMP(ep)->drain(NULL, evs, 8, 0);
-    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_dgram_life_release(evs[i].life); released++; }
+    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_comp_life_release(evs[i].life); released++; }
     CHECK(g_udp_tx_dst[3] == 5, "FIFO: C posted next (10.0.2.5), NOT D, no reorder on slot reuse");
     /* drain C then D so nothing leaks */
     mock_complete_hung_tx();
     dn = COMP(ep)->drain(NULL, evs, 8, 0);
-    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_dgram_life_release(evs[i].life); released++; }
+    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_comp_life_release(evs[i].life); released++; }
     CHECK(g_udp_tx_dst[3] == 6, "D posted last (10.0.2.6)");
     mock_complete_hung_tx();
     dn = COMP(ep)->drain(NULL, evs, 8, 0);
-    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_dgram_life_release(evs[i].life); released++; }
+    for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_comp_life_release(evs[i].life); released++; }
     CHECK(released == 4, "all four sends retired (A,B,C,D)");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);
     CHECK(g_on_final_ran == 1, "owner drop after all sends released → on_final once");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1624,8 +1624,8 @@ static void t_dgram_life_delivered_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);   /* refcount 1 (owner) */
-    CHECK(life != NULL, "KlDgramLife created (owner ref)");
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);   /* refcount 1 (owner) */
+    CHECK(life != NULL, "KlCompLife created (owner ref)");
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1641,12 +1641,12 @@ static void t_dgram_life_delivered_recv(void) {
     CHECK(idx >= 0 && evs[idx].life == life, "event carries the TRANSFERRED life ref");
     CHECK(idx >= 0 && evs[idx].ok == 1 && evs[idx].bytes == 3, "delivered payload (3 bytes)");
     CHECK(g_on_final_ran == 0, "on_final NOT run yet (event + owner refs outstanding)");
-    if (idx >= 0) kl_dgram_life_release(evs[idx].life);   /* dispatch releases after delivery */
+    if (idx >= 0) kl_comp_life_release(evs[idx].life);   /* dispatch releases after delivery */
     CHECK(g_on_final_ran == 0, "still not run (owner ref remains)");
     CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_RETIRED,
           "7B-2 retire_dgram: delivered+drained recv → RETIRED (op physically gone)");
     CHECK(terr == 0, "7B-2 retire_dgram: no transport error on a clean retirement");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop (kl_datagram_free) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop (kl_datagram_free) */
     CHECK(g_on_final_ran == 1, "on_final RAN once event + owner refs released (confirmed retirement)");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1661,7 +1661,7 @@ static void t_dgram_two_concurrent_sends(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);   /* owner ref */
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);   /* owner ref */
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
@@ -1676,12 +1676,12 @@ static void t_dgram_two_concurrent_sends(void) {
     for (int d = 0; d < 3 && total < 2; d++) {
         int dn = COMP(ep)->drain(NULL, evs, 4, 0);
         for (int i = 0; i < dn; i++)
-            if (evs[i].kind == KL_COMP_DGRAM_SEND) { total++; kl_dgram_life_release(evs[i].life); }
+            if (evs[i].kind == KL_COMP_DGRAM_SEND) { total++; kl_comp_life_release(evs[i].life); }
     }
     CHECK(total == 2, "both sends completed (2 DGRAM_SEND completions, independent retirement)");
     CHECK(g_udp_tx_calls == 2, "send#2 was pumped onto the freed Tx token (2 Transmits total)");
     CHECK(g_udp_tx_dst[3] == 4 && g_udp_tx_dport == 5353, "send#2's distinct dest was posted (10.0.2.4:5353)");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop */
     CHECK(g_on_final_ran == 1, "both sends' refs released + owner drop → on_final once");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1764,7 +1764,7 @@ static void t_dgram_deferred_post_failure_releases(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
@@ -1777,12 +1777,12 @@ static void t_dgram_deferred_post_failure_releases(void) {
         int dn = COMP(ep)->drain(NULL, evs, 8, 0);
         for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) {
             if (evs[i].ok) ok_bytes = (int)evs[i].bytes; else fail_bytes = (int)evs[i].bytes;
-            kl_dgram_life_release(evs[i].life);
+            kl_comp_life_release(evs[i].life);
         }
     }
     CHECK(ok_bytes == 4, "send#1 (success) carried bytes==snd_len(4)");
     CHECK(fail_bytes == 5, "send#2 (deferred-post-failure) carried bytes==snd_len(5), releasing its reservation");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);
     CHECK(g_on_final_ran == 1, "both sends retired + owner drop → on_final once");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1794,7 +1794,7 @@ static void t_dgram_life_stale_release_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1802,7 +1802,7 @@ static void t_dgram_life_stale_release_recv(void) {
     CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 1;
     kl_uefi_udp_close(fd);   /* clean close reaps the token, bumps the generation */
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     CHECK(g_on_final_ran == 0, "on_final not run yet (op ref remains after owner drop)");
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
@@ -1815,7 +1815,7 @@ static void t_dgram_life_stale_release_recv(void) {
     CHECK(idx >= 0 && evs[idx].retain_life == 0, "the terminal TRANSFERS the ref (retain_life=0)");
     CHECK(g_on_final_ran == 0, "drain did NOT release: the ref is transferred to the event");
     /* Router (no-handler token → kl_comp_run fallback) releases the transferred ref iff !retain_life. */
-    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_dgram_life_release(evs[idx].life);
+    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_comp_life_release(evs[idx].life);
     CHECK(g_on_final_ran == 1, "router released the transferred ref → on_final RAN");
     kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1830,7 +1830,7 @@ static void t_dgram_teardown_clean_release(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1838,7 +1838,7 @@ static void t_dgram_teardown_clean_release(void) {
     CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 1;
     kl_uefi_udp_close(fd);   /* CLEAN close reaps the token */
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     CHECK(g_on_final_ran == 0, "on_final not run yet (op ref remains; NO drain happens)");
     ep->ops->close(NULL);   /* el_close: an ordinary ctx teardown, no further drain */
     CHECK(g_on_final_ran == 1, "el_close RELEASED the STALE_RETIRED op ref → on_final RAN (no leak)");
@@ -1852,7 +1852,7 @@ static void t_dgram_life_quarantine_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1864,7 +1864,7 @@ static void t_dgram_life_quarantine_recv(void) {
     CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_QUARANTINED,
           "7B-2 retire_dgram: unconfirmed Rx → QUARANTINED (the EFI override)");
     CHECK(terr == 0, "7B-2 retire_dgram: no transport error flagged under quarantine");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
     (void)COMP(ep)->drain(NULL, evs, 4, 0);   /* QUARANTINED → RETAIN (no release) */
     CHECK(g_on_final_ran == 0, "QUARANTINED Rx: op ref RETAINED → on_final NEVER runs");
@@ -1880,7 +1880,7 @@ static void t_dgram_life_quarantine_send(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;
@@ -1891,7 +1891,7 @@ static void t_dgram_life_quarantine_send(void) {
     int terr = 7;
     CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_SEND, &terr) == KL_DGRAM_RETIRE_QUARANTINED,
           "7B-2 retire_dgram: unconfirmed Tx → QUARANTINED (the EFI override)");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
     (void)COMP(ep)->drain(NULL, evs, 4, 0);
     CHECK(g_on_final_ran == 0, "QUARANTINED Tx: op ref RETAINED → on_final NEVER runs");
@@ -1910,7 +1910,7 @@ static void t_dgram_cancel_idempotent(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1924,12 +1924,12 @@ static void t_dgram_cancel_idempotent(void) {
     /* Retire the op the ordinary way; clean close then drain: STALE_RETIRED emits a terminal that
      * TRANSFERS the (single) op ref; the router releases it → on_final runs exactly once. */
     kl_uefi_udp_close(fd);
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
     CHECK(g_on_final_ran == 0, "drain TRANSFERS the ref to the event (7B-9), not released yet");
     int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
-    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_dgram_life_release(evs[idx].life);
+    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_comp_life_release(evs[idx].life);
     CHECK(g_on_final_ran == 1, "router released the transferred ref → on_final RAN once (no leak/double-release)");
     kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -2148,7 +2148,7 @@ static void t_dgram_router_retain_life_no_handler(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     /* NO dispatch handler → kl_comp_run routes the terminal via its no-handler fallback, not an owner. */
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -2156,7 +2156,7 @@ static void t_dgram_router_retain_life_no_handler(void) {
     CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 0;                                        /* unconfirmed → quarantine */
     kl_uefi_udp_close(fd);
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* owner drop → refcount 1 (op) */
     kl_event_ctx_run(&ev, 4, 0);   /* el_drain emits retain_life=1 (dispatch==NULL) → router fallback */
     CHECK(g_on_final_ran == 0, "router honoured retain_life=1: borrowed ref NOT released (on_final never ran)");
     kl_event_ctx_free(&ev);

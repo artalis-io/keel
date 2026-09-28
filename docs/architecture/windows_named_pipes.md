@@ -51,12 +51,12 @@ exists today.**
 - The IOCP port associates any overlapped `HANDLE` (`CreateIoCompletionPort` is not
   socket-specific). `ReadFile` / `WriteFile` / `ConnectNamedPipe` complete on the same port and are
   drained by the same `GetQueuedCompletionStatusEx` loop.
-- **Lifetime:** [datagram_life.h](../../src/datagram_life.h) (`KlDgramLife`) is, by its own banner, a
+- **Lifetime:** [completion_life.h](../../src/completion_life.h) (`KlCompLife`) is, by its own banner, a
   *transport-neutral* stable-liveness token. It carries an owner reference plus one reference per
   posted op, transfers the reference into the completion event, releases it exactly once after
   dispatch, and routes through a per-owner `dispatch` fn. That is exactly I3/I5 for an object whose
-  completions outlive it. A pipe op reuses it unchanged; the `Dgram` prefix is historical. Pipes add
-  no second IOCP lifetime model.
+  completions outlive it. A pipe op reuses it unchanged. (It was named for datagrams at audit time and renamed to
+  `KlCompLife` once pipes became its second owner; §8.) Pipes add no second IOCP lifetime model.
 - **Routing:** `completion_core.c` already routes `KL_COMP_DGRAM_*` through the token's dispatch.
   Pipe kinds join that same `case`, a one-line change.
 
@@ -172,7 +172,7 @@ Non-IOCP builds link `src/completion_pipe_absent.c` (available = 0) and, on POSI
   absent stub. No existing backend or provider changed.
 - **Completion kinds.** `KlCompKind` gains `KL_COMP_PIPE_READ` / `KL_COMP_PIPE_WRITE`, appended.
   `completion_core.c` routes them in the **same `case`** as the datagram kinds: by the event's
-  `KlDgramLife` token, never by `target`, and never through the HTTP server's `comp_conn_dispatch`
+  `KlCompLife` token, never by `target`, and never through the HTTP server's `comp_conn_dispatch`
   hook.
 - **IOCP ops.** Two new `KlIocpOpType`s carry a `HANDLE op_handle`. `iocp_op_cancel_target()` picks
   the handle or the socket for `CancelIoEx`. Every pipe op joins the global outstanding-op registry,
@@ -192,7 +192,7 @@ slots. It is not a separate **completion model**. The review, point by point:
 
 | Concern | Pipe path | Relationship to the existing machinery |
 |---|---|---|
-| Op-ref ownership | `KlDgramLife`: retain before post; transfer into the op on success; caller releases on a failed post; released after dispatch unless `retain_life` | identical to datagrams (the same token type and rule) |
+| Op-ref ownership | `KlCompLife`: retain before post; transfer into the op on success; caller releases on a failed post; released after dispatch unless `retain_life` | identical to datagrams (the same token type and rule) |
 | Routing in `kl_comp_run` | the datagram `case` arm, by token | identical |
 | Outstanding-op tracking + loop-close quiesce | the shared IOCP `st->ops` registry | identical |
 | Partial write / zero-byte read | re-issued inside the backend; one completion per logical op | the socket WRITE / SENDFILE re-post pattern |
@@ -203,12 +203,12 @@ slots. It is not a separate **completion model**. The review, point by point:
 A refusal to post while the loop was quiescing, which no other op kind has, was removed in review:
 it was unreachable, since nothing posts during teardown, and it was a divergence without a reason.
 
-Naming debt, not semantic duplication: the token is still called `KlDgramLife` although it now serves
-two transports. A rename to a neutral name is mechanical and belongs in its own change.
+The token was datagram-named when this work landed, which was naming debt rather than semantic
+duplication. It was renamed to `KlCompLife` (`src/completion_life.{h,c}`) in its own mechanical change.
 
 ### 3.3 Lifetime (I3, I4, I5)
 
-- **One token owns everything.** The whole `KlPipeStream` is owned by one `KlDgramLife`: the embedded
+- **One token owns everything.** The whole `KlPipeStream` is owned by one `KlCompLife`: the embedded
   `KlStream`, its write queue, the receive buffer and the handle. The owner holds one reference and
   every posted op holds another, transferred into its completion event and released after dispatch.
   The token's final release (`pipe_final`) closes the handle and frees the memory. So:
@@ -363,4 +363,5 @@ Type safety backs R3 at compile time: `KlPipeHandle *` does not convert implicit
 2. **`KlListener`'s accepted-connection handoff is socket-typed** (§5). This is the one remaining
    socket assumption this work found in the Tier-1 transports. It needs its own design exercise, and
    the fix is not to widen `KlSocketHandle` into a universal handle.
-3. **`KlDgramLife` is misnamed** now that it serves two transports (§3.2a).
+3. **Resolved:** the lifetime token, named for datagrams when pipes became its second owner, is now
+   `KlCompLife` (§3.2a), and `make check-no-dgram-life` keeps the old names from returning.

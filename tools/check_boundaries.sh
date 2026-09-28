@@ -18,7 +18,7 @@ mode="${1:?usage: check_boundaries.sh G1|G2|G3}"
 # Frozen §6.3 integration->substrate seam allowlist (EXACT basenames; longest-first where a prefix
 # collides). The ONLY private core headers an integration may include. A new seam is added here by
 # exact name, with a rationale; never a wildcard.
-seam_allow_alt='socket|platform|completion_io|completion|event_caps|event_builtin|sockaddr_native|sockcompat|watcher_internal|resolve_sync|datagram_life|datagram_open|udp_cmsg_win|udp_cmsg'
+seam_allow_alt='socket|platform|completion_io|completion|event_caps|event_builtin|sockaddr_native|sockcompat|watcher_internal|resolve_sync|completion_life|datagram_open|udp_cmsg_win|udp_cmsg'
 
 # Build a '|'-joined, dot-escaped alternation of the BASENAMES of the paths read on stdin.
 basenames_re() { sed 's#.*/##' | sort -u | sed 's/\./\\./g' | paste -sd'|' - ; }

@@ -34,7 +34,7 @@
 
 #include "datagram_send.h"
 #include "datagram_recv.h"
-#include "datagram_life.h"   /* KlDgramOpKind + KlDgramRetireResult (shared with the completion seam) */
+#include "completion_io.h"     /* KlDgramOpKind + KlDgramRetireResult (shared with the completion seam) */
 #include <keel/datagram.h>   /* KlDgramCloseState + KlDatagramCloseResult */
 
 /* KlDgramCloseState (lifecycle phase OPEN/CLOSING/CLOSED) and KlDatagramCloseResult (terminal
@@ -42,7 +42,7 @@
  * <keel/datagram.h>; this coordinator consumes them. */
 
 /* Per-op retirement classifier the backend reports to the coordinator: the coordinator joins
- * only once no op is PENDING. KlDgramRetireResult + KlDgramOpKind now live in datagram_life.h (shared
+ * only once no op is PENDING. KlDgramRetireResult + KlDgramOpKind live in completion_io.h (shared
  * with the completion seam KlCompletionOps.retire_dgram). */
 typedef KlDgramRetireResult (*KlDgramRetireFn)(void *ctx, KlDgramOpKind kind, int *transport_err);
 

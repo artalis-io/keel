@@ -272,7 +272,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/protocols/http/http_client_common.c src/protocols/http/http_client_sync.c src/protocols/http/http_client_async.c \
            src/protocols/http/http_client_proxy.c \
            src/protocols/http/http_client_pool.c src/protocols/http/http_redirect.c src/protocols/http/http_sse.c \
-           src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
+           src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/completion_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/protocols/http/http_compress.c src/decompress.c src/drain.c src/internal_trace.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c src/pipe_stream.c $(PLATFORM_PIPE_SRC) $(COMPLETION_PIPE_SRC) \
@@ -610,7 +610,7 @@ test: $(TEST_BIN)
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op cross_module \
-                   datagram_batch datagram_life datagram_multicast datagram_open datagram_ops_vtable \
+                   datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
                    event_provider event_provider_vtable file_io http1_chunked http1_parser \
@@ -649,7 +649,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
 WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op \
-                        cross_module datagram_batch datagram_life datagram_multicast datagram_open \
+                        cross_module datagram_batch completion_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider event_provider_vtable file_io http1_chunked http1_parser \
@@ -1031,7 +1031,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch datagram_life datagram_live \
+IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch completion_life datagram_live \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
                           dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
@@ -1086,7 +1086,7 @@ COMPLETION_EXCLUDE ?=
 #   make print-pollcomp-suites
 # The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
-POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch datagram_life \
+POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch completion_life \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
@@ -1576,6 +1576,12 @@ TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/
 # self-canaried (tools/check_pipe_seam.sh).
 check-pipe-seam:
 	@sh tools/check_pipe_seam.sh
+
+# Stale-name gate: the completion-lifetime token (KlCompLife, src/completion_life.{h,c}) was renamed
+# from its datagram-era name once Windows Named Pipe streams became its second owner. Rejects the old
+# names in code and living docs (docs/archive keeps them as history). Self-canaried.
+check-no-dgram-life:
+	@sh tools/check_no_dgram_life.sh
 
 check-tier1-boundary:
 	@bad=0; \
@@ -2129,17 +2135,17 @@ freestanding-headers:
 # out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
 # deliberately NOT in the manifest; a freestanding build supplies its own
 # provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
-# datagram_life.c is a hard LINK dependency of completion_core.c: the generic
+# completion_life.c is a hard LINK dependency of completion_core.c: the generic
 # completion loop's datagram-completion release site (7B-2a) calls
-# kl_dgram_life_dispatch/target/release. That branch is dead on the client (no
+# kl_comp_life_dispatch/target/release. That branch is dead on the client (no
 # KL_COMP_DGRAM_* events ever arrive), but the symbols must resolve; and
-# datagram_life.c is a transport-neutral refcount token (alloc-only, no UDP/DNS
+# completion_life.c is a transport-neutral refcount token (alloc-only, no UDP/DNS
 # I/O, no syscall), so it is completion infrastructure, not the UDP/DNS surface
 # the gate forbids. Every archive carrying completion_core.c must carry it.
 FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/datagram_life.c \
+    src/completion_dispatch.c src/completion_core.c src/completion_life.c \
     src/protocols/http/http_client_common.c src/protocols/http/http_client_async.c src/protocols/http/http_client_proxy.c src/protocols/http/http_client_pool.c src/decompress.c \
     src/connect_op.c \
     src/protocols/http/http1_response_parser_llhttp.c \
@@ -2259,7 +2265,7 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/datagram_life.c src/protocols/http/completion_http_server.c \
+    src/completion_dispatch.c src/completion_core.c src/completion_life.c src/protocols/http/completion_http_server.c \
     src/listener.c src/stream.c \
     src/protocols/http/http_connection.c src/protocols/http/http_response.c src/protocols/http/http_router.c src/protocols/http/http1_chunked.c src/drain.c \
     src/protocols/http/http_body_reader_buffer.c src/protocols/http/http_server_core.c src/protocols/http/http_proto_hooks.c \
@@ -2287,7 +2293,7 @@ FREESTANDING_DGRAM_SRC = \
     src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/datagram_slots.c src/datagram_send.c src/datagram_recv.c \
-    src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_open.c
+    src/datagram_close.c src/datagram_core.c src/completion_life.c src/datagram.c src/datagram_open.c
 
 freestanding-lib-dgram:
 	@echo "== freestanding DATAGRAM archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
@@ -2639,7 +2645,7 @@ freestanding-dns-harness:
 # PE backend. Host correctness is covered by the mock-EFI harness (build_mock_efi_test.sh).
 # Datagram build (KEEL_UEFI_DATAGRAM on): the unified provider + event_efi datagram completion +
 # the EFI_UDP4 substrate. TCP-only build (KEEL_UEFI_DATAGRAM off): event_efi + socket_efi_tcp4 must
-# compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references, the boundary that keeps
+# compile with NO datagram code and NO kl_uefi_udp_*/KlCompLife references, the boundary that keeps
 # U-3/U-4/U-7 + S-4/S-6/S-7 (which link event_efi.c but not the UDP provider) building. The gate
 # proves BOTH configs compile, both arches. socket_efi_udp4.c is datagram-only (no TCP-only pass).
 UEFI_DGRAM_TU     = integrations/platform/uefi/socket_efi_tcp4.c integrations/platform/uefi/socket_efi_udp4.c \
@@ -2683,7 +2689,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-pipe-seam check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-pipe-seam check-no-dgram-life check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

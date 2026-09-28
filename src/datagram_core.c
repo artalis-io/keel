@@ -40,12 +40,12 @@ static void core_backend_close(void *ctx) {
  * a DESTRUCTIVE TAIL: the caller may free the core. */
 static void core_on_close(void *ctx, KlDatagramCloseResult result) {
     KlDgramCore *core = ctx;
-    KlDgramLife *life = core->life;
+    KlCompLife *life = core->life;
     core->rx   = NULL;   /* token-owned now (freed by on_final on final release, or leaked on quarantine) */
     core->life = NULL;
     if (life) {
-        kl_dgram_life_mark_dead(life);   /* completions after this see a dead token → dropped */
-        kl_dgram_life_release(life);      /* owner ref; runs core_rx_final iff no posted op holds one */
+        kl_comp_life_mark_dead(life);   /* completions after this see a dead token → dropped */
+        kl_comp_life_release(life);      /* owner ref; runs core_rx_final iff no posted op holds one */
     }
     if (core->abandoning) {
         /* Owner-destruction: SILENT; do NOT invoke user_on_close (it could free the owner). Run
@@ -91,7 +91,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     /* Owner ref (refs=1). `cfg->dispatch` is the completion-routing identity: a live completion facade
      * installs kl_datagram_comp_dispatch so the driver routes this token via life->dispatch;
      * NULL (neutral-adapter tests) means completions are driven directly (kl_dgram_core_*_on_complete). */
-    KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx,
+    KlCompLife *life = kl_comp_life_create(a, core, core_rx_final, rx,
                                              cfg->dispatch);
     if (!life) {
         kl_dgram_inbound_free(&rx->inbound);
@@ -101,13 +101,13 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
 
     /* Object-owned outbound pool + send machine. */
     if (kl_dgram_slots_init(&core->out, a, cfg->send_slots, cfg->send_slot_cap) != 0) {
-        kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* runs core_rx_final */
+        kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* runs core_rx_final */
         return -1;
     }
     if (kl_dgram_send_init(&core->send, &core->out, a, cfg->completion, cfg->caps,
                            cfg->send_byte_budget, cfg->submit, cfg->submit_ctx) != 0) {
         kl_dgram_slots_free(&core->out);
-        kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
+        kl_comp_life_mark_dead(life); kl_comp_life_release(life);
         return -1;
     }
     /* Initial connected state (0 for a fresh facade datagram, kl_datagram_connect sets it later;
@@ -116,7 +116,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     if (kl_dgram_close_init(&core->close, &core->send, &rx->recv, core_on_close, core) != 0) {
         kl_dgram_send_free(&core->send);
         kl_dgram_slots_free(&core->out);
-        kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
+        kl_comp_life_mark_dead(life); kl_comp_life_release(life);
         return -1;
     }
     (void)kl_dgram_close_set_cancel(&core->close, cfg->cancel_recv, cfg->cancel_send, cfg->cancel_ctx);
@@ -131,7 +131,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         kl_dgram_close_free(&core->close);
         kl_dgram_send_free(&core->send);
         kl_dgram_slots_free(&core->out);
-        kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* runs core_rx_final → frees rx */
+        kl_comp_life_mark_dead(life); kl_comp_life_release(life);   /* runs core_rx_final → frees rx */
         return -1;   /* fd NOT adopted; registration (if any) did not commit */
     }
 
@@ -288,6 +288,6 @@ KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_inbound_slot(&core->rx->inbound) : (KlDgramSlot *)0;
 }
 
-KlDgramLife *kl_dgram_core_life(KlDgramCore *core) {
-    return (core && core->inited) ? core->life : (KlDgramLife *)0;
+KlCompLife *kl_dgram_core_life(KlDgramCore *core) {
+    return (core && core->inited) ? core->life : (KlCompLife *)0;
 }

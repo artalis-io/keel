@@ -29,14 +29,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* KlDgramLife API (forward-declared to drive the glue directly, as raw_udp_test does; resolves against
- * libkeel's datagram_life.o without pulling the internal src/ header). */
-typedef struct KlDgramLife KlDgramLife;
+/* KlCompLife API (forward-declared to drive the glue directly, as raw_udp_test does; resolves against
+ * libkeel's completion_life.o without pulling the internal src/ header). */
+typedef struct KlCompLife KlCompLife;
 struct KlCompletionEvent;
-typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
-KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
-                                  KlDgramDispatchFn dispatch);
-void         kl_dgram_life_release(KlDgramLife *l);
+typedef void (*KlCompLifeDispatchFn)(void *target, const struct KlCompletionEvent *ev);
+KlCompLife *kl_comp_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
+                                  KlCompLifeDispatchFn dispatch);
+void         kl_comp_life_release(KlCompLife *l);
 
 static int fail(const char *msg) { printf("7B-8 FAIL: %s\n", msg); return 1; }
 
@@ -142,7 +142,7 @@ static int t3_glue_cancel_semantics(void) {
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     void *rx = kl_lwr_udp_new();
     if (!rx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 bind"); }
-    KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *l = kl_comp_life_create(&alloc, NULL, noop_final, NULL, (KlCompLifeDispatchFn)0);
     if (!l) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 token"); }
 
     int rc = 0;
@@ -162,18 +162,18 @@ static int t3_glue_cancel_semantics(void) {
         int term = 0;
         for (int i = 0; i < n; i++) {
             if (recs[i].kind == KL_LWR_DGRAM_RECV && recs[i].terminal) term++;
-            kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
+            kl_comp_life_release((KlCompLife *)recs[i].life);   /* release each transferred ref */
         }
         if (term != 1) rc = fail("T3 not exactly one terminal");
         else if (kl_lwr_udp_recv_pending(lwrctx, l) != 0) rc = fail("T3 not RETIRED after drain");
         else {
             int n2 = kl_lwr_udp_drain(lwrctx, recs, 8);   /* no duplicate */
-            for (int i = 0; i < n2; i++) kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            for (int i = 0; i < n2; i++) kl_comp_life_release((KlCompLife *)recs[i].life);
             if (n2 != 0) rc = fail("T3 duplicate terminal");
         }
     }
     kl_lwr_udp_close(lwrctx, rx);          /* nothing left to release (arm cancelled, terminal drained) */
-    kl_dgram_life_release(l);              /* drop the owner ref → token freed (LSan-clean) */
+    kl_comp_life_release(l);              /* drop the owner ref → token freed (LSan-clean) */
     kl_lwr_ctx_destroy(lwrctx);
     return rc;
 }
@@ -186,7 +186,7 @@ static int t4_saturation_reuse(void) {
     void *lwrctx = kl_lwr_ctx_create(&alloc, 4);
     if (!lwrctx) return fail("T4 ctx");
     const uint8_t lo[4] = { 127, 0, 0, 1 };
-    KlDgramLife *life[16]; int n = 0; int rc = 0;
+    KlCompLife *life[16]; int n = 0; int rc = 0;
 
     /* Fill every udp slot: new+bind+arm+cancel (→ pending terminal on that slot) + close (frees the pcb
      * slot; the terminal stays queued and pins the slot against reuse). */
@@ -194,9 +194,9 @@ static int t4_saturation_reuse(void) {
         void *p = kl_lwr_udp_new();
         if (!p) break;                          /* slot table full */
         if (n >= 16) { rc = fail("T4 slot count > 16"); break; }
-        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, (KlDgramDispatchFn)0);
+        KlCompLife *l = kl_comp_life_create(&alloc, NULL, noop_final, NULL, (KlCompLifeDispatchFn)0);
         if (!l || kl_lwr_udp_bind(p, lo, 0) != 0 || kl_lwr_udp_post_recv(lwrctx, p, l) != 0) {
-            kl_dgram_life_release(l); kl_lwr_udp_close(lwrctx, p); rc = fail("T4 arm"); break;
+            kl_comp_life_release(l); kl_lwr_udp_close(lwrctx, p); rc = fail("T4 arm"); break;
         }
         life[n++] = l;
         kl_lwr_udp_cancel_recv(lwrctx, l);      /* → pending terminal tied to this slot */
@@ -213,7 +213,7 @@ static int t4_saturation_reuse(void) {
             int d = kl_lwr_udp_drain(lwrctx, recs, 16);
             for (int i = 0; i < d; i++) {
                 if (recs[i].kind == KL_LWR_DGRAM_RECV && recs[i].terminal) drained++;
-                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+                kl_comp_life_release((KlCompLife *)recs[i].life);
             }
             if (d == 0) break;
         }
@@ -225,7 +225,7 @@ static int t4_saturation_reuse(void) {
         if (!p) rc = fail("T4 no reuse after drain");
         else kl_lwr_udp_close(lwrctx, p);
     }
-    for (int i = 0; i < n; i++) kl_dgram_life_release(life[i]);   /* drop each owner ref → freed */
+    for (int i = 0; i < n; i++) kl_comp_life_release(life[i]);   /* drop each owner ref → freed */
     kl_lwr_ctx_destroy(lwrctx);
     return rc;
 }

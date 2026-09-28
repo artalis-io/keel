@@ -75,7 +75,7 @@ typedef struct KlEventCtx {
      * ABI-stable; embedders recompile when it changes. */
     int         dispatch_depth;
     KlWatcher  *retired;
-    /* Datagram completions (DGRAM_RECV/DGRAM_SEND) are routed by each token's own KlDgramDispatchFn
+    /* Datagram completions (DGRAM_RECV/DGRAM_SEND) are routed by each token's own KlCompLifeDispatchFn
      * (life->dispatch), not a ctx-global hook. */
 } KlEventCtx;
 

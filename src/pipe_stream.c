@@ -8,7 +8,7 @@
  * completion_pipe.h (overlapped ReadFile / WriteFile on the IOCP port).
  *
  * LIFETIME, which is the part that matters. The whole KlPipeStream (the KlStream, the receive
- * buffer, the write queue, the pipe handle) is owned by one KlDgramLife token, the transport-neutral
+ * buffer, the write queue, the pipe handle) is owned by one KlCompLife token, the transport-neutral
  * liveness + refcount token the datagram path uses. The owner holds one reference; every posted op
  * holds one more, transferred into its completion event and released after dispatch. The token's
  * final release (pipe_final) closes the handle and frees the memory, so:
@@ -30,7 +30,7 @@
 #include "completion.h"           /* KlCompletionEvent, KL_COMP_PIPE_* */
 #include "completion_pipe.h"
 #include "platform_pipe.h"
-#include "datagram_life.h"
+#include "completion_life.h"
 
 #include <string.h>
 
@@ -38,7 +38,7 @@ struct KlPipeStream {
     KlStream      stream;
     struct KlEventCtx *ctx;
     KlAllocator  *alloc;
-    KlDgramLife  *life;
+    KlCompLife  *life;
     KlPipeHandle *h;
     char         *rbuf;
     size_t        rcap;
@@ -77,9 +77,9 @@ static int pipe_post(KlPipeStream *p, KlPipeOpKind kind, const char *data, size_
     op.life = p->life;
     if (kind == KL_PIPE_OP_READ) op.buf = p->rbuf;
     else                         op.data = data;
-    kl_dgram_life_retain(p->life);                 /* transferred into the op on success */
+    kl_comp_life_retain(p->life);                 /* transferred into the op on success */
     if (kl_comp_pipe_post(p->ctx, &op) < 0) {
-        kl_dgram_life_release(p->life);            /* failed post took nothing */
+        kl_comp_life_release(p->life);            /* failed post took nothing */
         return -1;
     }
     return 0;
@@ -136,7 +136,7 @@ static void pipe_dispatch(void *target, const KlCompletionEvent *ev) {
                                                                      * kl_stream_write reports it */
         }
     }
-    if (!ev->retain_life) kl_dgram_life_release(ev->life);   /* may be the final release */
+    if (!ev->retain_life) kl_comp_life_release(ev->life);   /* may be the final release */
 }
 
 /* ── Public surface ────────────────────────────────────────────────────────────────────────── */
@@ -179,25 +179,25 @@ KlPipeStatus kl_pipe_connect(struct KlEventCtx *ctx, const char *path, const KlP
         kl_free(alloc, p->rbuf, rcap); kl_free(alloc, p, sizeof(*p));
         return KL_PIPE_ERROR;
     }
-    p->life = kl_dgram_life_create(alloc, p, pipe_final, p, pipe_dispatch);
+    p->life = kl_comp_life_create(alloc, p, pipe_final, p, pipe_dispatch);
     if (!p->life) { kl_free(alloc, p->rbuf, rcap); kl_free(alloc, p, sizeof(*p)); return KL_PIPE_NOMEM; }
     /* From here every failure is one owner release: pipe_final undoes whatever was built. */
 
     KlPipeStatus st = map_open(kl_plat_pipe_open_client(path, &p->h));
-    if (st != KL_PIPE_OK) { p->h = NULL; kl_dgram_life_release(p->life); return st; }
-    if (kl_comp_pipe_attach(ctx, p->h) != 0) { kl_dgram_life_release(p->life); return KL_PIPE_ERROR; }
+    if (st != KL_PIPE_OK) { p->h = NULL; kl_comp_life_release(p->life); return st; }
+    if (kl_comp_pipe_attach(ctx, p->h) != 0) { kl_comp_life_release(p->life); return KL_PIPE_ERROR; }
 
     p->stream.alloc = alloc;
     p->stream.ctx   = ctx;
     if (kl_stream_write_init(&p->stream, alloc, wcap) != 0) {
-        kl_dgram_life_release(p->life);
+        kl_comp_life_release(p->life);
         return KL_PIPE_NOMEM;
     }
     if (kl_stream_set_submit(&p->stream, pipe_submit, p, /*copying=*/1) != 0 ||
         kl_stream_read_init(&p->stream, /*completion=*/1, pipe_deliver, pipe_arm, NULL, p) != 0 ||
         kl_stream_close_init(&p->stream, pipe_on_close, p) != 0 ||
         kl_stream_set_cancel(&p->stream, pipe_cancel_recv, pipe_cancel_send) != 0) {
-        kl_dgram_life_release(p->life);
+        kl_comp_life_release(p->life);
         return KL_PIPE_ERROR;
     }
     *out = p;
@@ -212,7 +212,7 @@ void kl_pipe_free(KlPipeStream *p) {
     if (!p || p->freed) return;
     p->freed = 1;                       /* before the cancel: its on_close must not reach the consumer */
     (void)kl_stream_cancel(&p->stream); /* CancelIoEx whatever is outstanding; each still completes */
-    kl_dgram_life_release(p->life);     /* the owner ref; final once the last op has retired */
+    kl_comp_life_release(p->life);     /* the owner ref; final once the last op has retired */
 }
 
 const char *kl_pipe_status_str(KlPipeStatus s) {

@@ -37,7 +37,7 @@
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
 #include "completion.h"          /* the abstract axis this TU implements */
-#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
+#include "completion_life.h"       /* stable-liveness token for completion ops (neutral) */
 
 #include <poll.h>
 #include <string.h>
@@ -61,7 +61,7 @@ typedef struct KlPcOp {
     /* Datagram ops (PC_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
      * post so the op NEVER dereferences the transport owner afterwards. The recv buffer + capture flags are
      * COPIED at post (into buf/buflen/dg_pktinfo/dg_gro) so the completion touches only the op. */
-    KlDgramLife   *life;
+    KlCompLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
     int            dg_tos;                /* UDP_RECV: capture received TOS byte */
@@ -170,7 +170,7 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
         /* Release the datagram op's stable-token reference (loop teardown drops a never-reaped op
          * WITHOUT emitting an event); its final release frees the receive storage. Non-datagram ops
          * have op->life == NULL. */
-        if (op->life) kl_dgram_life_release(op->life);
+        if (op->life) kl_comp_life_release(op->life);
         if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
         kl_free(op->alloc, op, sizeof(*op));
         op = next;
@@ -225,7 +225,7 @@ static void pc_op_free(KlPcOp *op) {
      * post-failure unwind or loop teardown) releases it here. Emit paths transfer the ref to the
      * event and NULL op->life first, so this does not double-release. */
     if (op->life)
-        kl_dgram_life_release(op->life);
+        kl_comp_life_release(op->life);
     /* send_total is set to the sendbuf allocation size on every path that allocates one
      * (WRITE/SENDFILE/UDP = total, or 1 when total==0 since the alloc is `total ? total : 1`).
      * Fall back to 1 for a zero-length send, else a sized custom allocator mis-buckets the
@@ -372,7 +372,7 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
 /* Cancel the outstanding datagram op(s) of `kind` for `life`: mark them aborted so the next
  * drain delivers their terminal completion (which releases the token ref). Idempotent; NO ref release
  * here. Pollcomp has no in-kernel op; "cancel" just flips the abort flag on the tracked op. */
-static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgramOpKind kind) {
     KlPcState *st = ctx->loop._backend;
     PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;
     for (KlPcOp *o = st->ops; o; o = o->next)
@@ -383,7 +383,7 @@ static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgr
 /* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled
  * completion has not yet drained + released); none tracked means it physically retired. Pollcomp
  * never quarantines; a portable double where every posted op completes in a drain. */
-static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlCompLife *life,
                                                 KlDgramOpKind kind, int *transport_err) {
     const KlPcState *st = ctx->loop._backend;
     PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;

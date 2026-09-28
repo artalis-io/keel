@@ -57,15 +57,15 @@
 #include <stdint.h>
 #include <string.h>
 
-/* The stable-liveness token (src/datagram_life.h), forward-declared so this test manages op tokens for
- * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o.
+/* The stable-liveness token (src/completion_life.h), forward-declared so this test manages op tokens for
+ * the glue-level T7 without pulling the src/ header. Resolves against libkeel's completion_life.o.
  * (create takes a `dispatch` completion-routing handler: unused at the glue level here, so NULL.) */
-typedef struct KlDgramLife KlDgramLife;
+typedef struct KlCompLife KlCompLife;
 struct KlCompletionEvent;
-typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
-KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
-                                  KlDgramDispatchFn dispatch);
-void         kl_dgram_life_release(KlDgramLife *l);
+typedef void (*KlCompLifeDispatchFn)(void *target, const struct KlCompletionEvent *ev);
+KlCompLife *kl_comp_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
+                                  KlCompLifeDispatchFn dispatch);
+void         kl_comp_life_release(KlCompLife *l);
 static void  t7_noop_final(void *ctx) { (void)ctx; }
 
 static int fail(const char *msg) { printf("LC-3a FAIL: %s\n", msg); return 1; }
@@ -285,10 +285,10 @@ static int t6_glue_one_held(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T6: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *lrx = kl_comp_life_create(&alloc, NULL, t7_noop_final, NULL, (KlCompLifeDispatchFn)0);
+    KlCompLife *ltx = kl_comp_life_create(&alloc, NULL, t7_noop_final, NULL, (KlCompLifeDispatchFn)0);
     if (!lrx || !ltx) {
-        kl_dgram_life_release(lrx); kl_dgram_life_release(ltx);
+        kl_comp_life_release(lrx); kl_comp_life_release(ltx);
         kl_lwr_ctx_destroy(lwrctx); return fail("T6: token create");
     }
 
@@ -307,7 +307,7 @@ static int t6_glue_one_held(void) {
                 delivered++;
                 if (recs[i].len != 3 || memcmp(recs[i].data, "one", 3) != 0) held_ok = 0;
             }
-            kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            kl_comp_life_release((KlCompLife *)recs[i].life);
         }
         /* Re-arm + tick + drain: the dropped "two" was never held, so NOTHING stale surfaces. */
         if (kl_lwr_udp_post_recv(lwrctx, rx, lrx) != 0) rc = fail("T6: re-arm post_recv");
@@ -316,15 +316,15 @@ static int t6_glue_one_held(void) {
             int n2 = kl_lwr_udp_drain(lwrctx, recs, 8);
             for (int i = 0; i < n2; i++) {
                 if (recs[i].kind == KL_LWR_DGRAM_RECV && !recs[i].terminal) stale++;
-                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+                kl_comp_life_release((KlCompLife *)recs[i].life);
             }
         }
     }
 
     kl_lwr_udp_close(lwrctx, rx);       /* releases any un-drained arm ref */
     kl_lwr_udp_close(lwrctx, tx);       /* releases any un-drained pending-send refs */
-    kl_dgram_life_release(lrx);
-    kl_dgram_life_release(ltx);
+    kl_comp_life_release(lrx);
+    kl_comp_life_release(ltx);
     kl_lwr_ctx_destroy(lwrctx);
 
     if (rc != 0)        return rc;
@@ -358,11 +358,11 @@ static int t7_glue_unarmed_drop(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);   /* owner ref each */
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
+    KlCompLife *lrx = kl_comp_life_create(&alloc, NULL, t7_noop_final, NULL, (KlCompLifeDispatchFn)0);   /* owner ref each */
+    KlCompLife *ltx = kl_comp_life_create(&alloc, NULL, t7_noop_final, NULL, (KlCompLifeDispatchFn)0);
     if (!lrx || !ltx) {                 /* release whichever succeeded (NULL-safe) before teardown */
-        kl_dgram_life_release(lrx);
-        kl_dgram_life_release(ltx);
+        kl_comp_life_release(lrx);
+        kl_comp_life_release(ltx);
         kl_lwr_ctx_destroy(lwrctx);
         return fail("T7: token create");
     }
@@ -380,7 +380,7 @@ static int t7_glue_unarmed_drop(void) {
         int n1 = kl_lwr_udp_drain(lwrctx, recs, 8);
         for (int i = 0; i < n1; i++) {
             if (recs[i].kind == KL_LWR_DGRAM_RECV) got_recv1++;
-            kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
+            kl_comp_life_release((KlCompLife *)recs[i].life);   /* release each transferred ref */
         }
 
         /* (2) UNARMED: "b" MUST actually send: its SEND completion proves the datagram traversed the
@@ -393,7 +393,7 @@ static int t7_glue_unarmed_drop(void) {
             for (int i = 0; i < n2; i++) {
                 if (recs[i].kind == KL_LWR_DGRAM_RECV)      recv2++;
                 else if (recs[i].kind == KL_LWR_DGRAM_SEND) send2++;
-                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+                kl_comp_life_release((KlCompLife *)recs[i].life);
             }
 
             /* (3) RE-ARM + drain: the re-post MUST succeed (else the drain trivially yields no RECV and
@@ -404,7 +404,7 @@ static int t7_glue_unarmed_drop(void) {
                 int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
                 for (int i = 0; i < n3; i++) {
                     if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
-                    kl_dgram_life_release((KlDgramLife *)recs[i].life);
+                    kl_comp_life_release((KlCompLife *)recs[i].life);
                 }
             }
         }
@@ -412,8 +412,8 @@ static int t7_glue_unarmed_drop(void) {
 
     kl_lwr_udp_close(lwrctx, rx);       /* releases any un-drained arm ref */
     kl_lwr_udp_close(lwrctx, tx);       /* releases any un-drained pending-send refs */
-    kl_dgram_life_release(lrx);         /* owner refs → final release runs t7_noop_final */
-    kl_dgram_life_release(ltx);
+    kl_comp_life_release(lrx);         /* owner refs → final release runs t7_noop_final */
+    kl_comp_life_release(ltx);
     kl_lwr_ctx_destroy(lwrctx);
 
     if (rc != 0)        return rc;

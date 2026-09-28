@@ -108,7 +108,7 @@ unsigned long long kl_uefi_udp_generation_h(KlSocketHandle fd);
 int  kl_uefi_udp_valid_h(KlSocketHandle fd, unsigned long long generation);
 
 /* ── Completion-op result: the substrate MUST distinguish a cleanly-retired stale
- * op (the event layer drops it AND releases its KlDgramLife ref) from a QUARANTINED op (the event
+ * op (the event layer drops it AND releases its KlCompLife ref) from a QUARANTINED op (the event
  * layer removes it from polling but NEVER releases the ref; retirement was never confirmed). A bare
  * "terminal-drop" conflates the two and would release a quarantined op's life. Every poll/cancel/query
  * returns one of: ─────────────────────────────────────────────────────────────────────────────────── */

@@ -98,7 +98,7 @@ Any object a completion event references (op, buffer, transport core, life token
 life reference transfers into the op on submit and releases exactly once at its terminal event.
 
 A `KlStream` over a Windows Named Pipe is in the token class: its `KL_COMP_PIPE_READ`/`_WRITE`
-completions carry the same `KlDgramLife` token as datagrams and route by it
+completions carry the same `KlCompLife` token as datagrams and route by it
 ([windows_named_pipes.md](windows_named_pipes.md) §3.2). A socket stream is in the raw-`target` class
 below.
 
@@ -230,7 +230,7 @@ codec, platform). A substrate TU never includes a protocol header; a protocol TU
 integration adapter header; an integration reaches core only through the public `include/keel/*.h`
 surface or a **frozen, exactly-enumerated allowlist** of substrate seam headers (`socket.h`,
 `platform.h`, `completion.h`, `completion_io.h`, `event_caps.h`, `event_builtin.h`,
-`sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
+`sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `completion_life.h`,
 `datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`); never a protocol header. The deleted layouts
 (the interim top-level `protocols/…` tree, the old flat `parsers/` backend directory, and bare
 `src/<proto>.c` protocol modules) cannot return.

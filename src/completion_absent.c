@@ -66,11 +66,11 @@ int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) { (
 
 int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) { (void)ctx; (void)op; abort(); }
 
-int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind) {
+int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind) {
     (void)ctx; (void)life; (void)kind; abort();
 }
 
-KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life,
+KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlCompLife *life,
                                          KlDgramOpKind kind, int *transport_err) {
     (void)ctx; (void)life; (void)kind; (void)transport_err; abort();
 }

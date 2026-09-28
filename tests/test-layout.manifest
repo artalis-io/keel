@@ -72,7 +72,7 @@ tests/test_atomic_lock_free.c
 tests/test_async.c
 tests/test_connect_op.c
 tests/test_datagram_batch.c
-tests/test_datagram_life.c
+tests/test_completion_life.c
 tests/test_datagram_live.c
 tests/test_datagram_multicast.c
 tests/test_datagram_open.c

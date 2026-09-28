@@ -16,7 +16,7 @@ src/datagram.c
 src/datagram_batch.c
 src/datagram_close.c
 src/datagram_core.c
-src/datagram_life.c
+src/completion_life.c
 src/datagram_open.c
 src/datagram_recv.c
 src/datagram_send.c
