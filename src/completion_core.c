@@ -59,7 +59,10 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
          * untyped downcast of kl_dgram_life_target(). A dead token yields a NULL target the handler
          * drops; a token with no handler (or ev->life NULL) still has its transferred ref released. */
         case KL_COMP_DGRAM_RECV:
-        case KL_COMP_DGRAM_SEND: {
+        case KL_COMP_DGRAM_SEND:
+        /* Named-pipe completions route the same way: the pipe stream's token names its handler. */
+        case KL_COMP_PIPE_READ:
+        case KL_COMP_PIPE_WRITE: {
             KlDgramLife *life = ev[i].life;
             KlDgramDispatchFn d = life ? kl_dgram_life_dispatch(life) : (KlDgramDispatchFn)0;
             if (d)

@@ -101,6 +101,7 @@ tests/test_iouring_sqe_fail.c
 tests/test_kl_cstr.c
 tests/test_kl_cstr_builtin.c
 tests/test_listener.c
+tests/test_pipe_stream.c
 tests/test_resolver_cache.c
 tests/test_sockaddr.c
 tests/test_socket_provider.c

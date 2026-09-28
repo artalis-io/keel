@@ -38,6 +38,7 @@ keel.h
 listener.h
 listener_detail.h
 net.h
+pipe.h
 proxy_protocol.h
 resolver.h
 resolver_cache.h

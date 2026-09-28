@@ -61,6 +61,8 @@
 #include <keel/http2_client.h>
 #include <keel/http_response.h>
 #include <keel/file_io.h>
+/* Named-pipe client: a path + a KlStream; no HANDLE / OVERLAPPED / Win32 type in the public API. */
+#include <keel/pipe.h>
 /* Server protocol surface: the whole inbound public API, freestanding-clean. */
 #include <keel/http_router.h>
 #include <keel/compress.h>

@@ -307,3 +307,7 @@ kl_wakeup_close	wakeup.h	direct-assertion	tests/test_wakeup.c:51 (both ends asse
 kl_wakeup_drain	wakeup.h	direct-assertion	tests/test_wakeup.c:86 (drained channel asserted to stop re-firing)
 kl_wakeup_open	wakeup.h	direct-assertion	tests/test_wakeup.c:44 (ASSERT_EQ 0 + both handles valid and distinct)
 kl_wakeup_signal	wakeup.h	direct-assertion	tests/test_wakeup.c:61 (signalled from another thread; watcher-fired count asserted)
+kl_pipe_connect	pipe.h	direct-assertion	tests/test_pipe_stream.c:323 ASSERT_EQ(kl_pipe_connect(...), KL_PIPE_ABSENT) (+ OK/BUSY/DENIED/INVALID/UNSUPPORTED cases)
+kl_pipe_free	pipe.h	direct-assertion	tests/test_pipe_stream.c:575 (allocator balanced only after physical retirement; no late callback)
+kl_pipe_status_str	pipe.h	direct-assertion	tests/test_pipe_stream.c:122 ASSERT_STREQ(kl_pipe_status_str(KL_PIPE_BUSY), "busy")
+kl_pipe_stream	pipe.h	direct-assertion	tests/test_pipe_stream.c:124 ASSERT_TRUE(kl_pipe_stream(NULL) == NULL) (+ every KlStream case drives its result)

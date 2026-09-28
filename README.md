@@ -295,6 +295,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Two event axes, six backends**: **readiness** (epoll edge-triggered, kqueue edge-triggered, WSAPoll, poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
 - **Three orthogonal axes**: the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/archive/audits/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
 - **TCP or UNIX socket servers**: same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
+- **Windows Named Pipe client**: `kl_pipe_connect()` (`<keel/pipe.h>`) opens a local `\\.\pipe\` endpoint as an ordinary `KlStream`, the Windows local-IPC counterpart of an `AF_UNIX` stream. IOCP engine only (refused, not emulated, elsewhere); never routed through the socket provider. Client only: no pipe listener yet
 - **Pluggable HTTP parser**: ships with llhttp, swap via `KlHttpServerConfig.parser`
 - **Pluggable TLS**: bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
 - **Pluggable body readers**: vtable interface for request body processing

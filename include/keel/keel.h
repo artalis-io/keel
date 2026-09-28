@@ -109,5 +109,7 @@ int kl_version_number(void);
 #include <keel/stream.h>
 #include <keel/listener.h>
 #include <keel/connect_op.h>
+/* Windows Named Pipe client: an endpoint path that yields a KlStream (IOCP engine only). */
+#include <keel/pipe.h>
 
 #endif

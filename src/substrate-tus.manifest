@@ -9,6 +9,7 @@ src/allocator_default_stdlib.c
 src/completion_absent.c
 src/completion_core.c
 src/completion_dispatch.c
+src/completion_pipe_absent.c
 src/completion_readiness_stub.c
 src/connect_op.c
 src/datagram.c
@@ -38,6 +39,9 @@ src/internal_trace.c
 src/kl_cstr.c
 src/kl_cstr_builtin.c
 src/listener.c
+src/pipe_stream.c
+src/platform_pipe_posix.c
+src/platform_pipe_win.c
 src/platform_posix.c
 src/platform_socket_posix.c
 src/platform_socket_win.c
