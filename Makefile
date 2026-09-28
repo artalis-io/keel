@@ -114,6 +114,7 @@ else ifdef WINDOWS
   # PAL threading (src/platform_thread.h): CreateThread + SRWLOCK + CONDITION_VARIABLE.
   PLATFORM_THREAD_SRC = src/platform_thread_win.c
   PLATFORM_SOCKET_SRC = src/platform_socket_win.c   # PAL socket runtime: WSAStartup under InitOnce
+  PLATFORM_PIPE_SRC = src/platform_pipe_win.c       # PAL named pipes: CreateFileW client open
   SERVER_PLAT_SRC = src/protocols/http/http_server_plat_win.c
   UNIX_NODE_SRC = src/unix_socket_node_win.c   # identity-anchored AF_UNIX node lifecycle (NTFS)
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
@@ -256,6 +257,12 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
+# Named pipes (src/pipe_stream.c, <keel/pipe.h>). The PAL open/close is per-OS (a POSIX build reports
+# UNSUPPORTED: its local IPC is AF_UNIX). The byte I/O is IOCP-native: event_iocp.c defines the
+# completion_pipe.h ops, and EVERY other engine links the absent stub, whose availability check makes
+# kl_pipe_connect fail with KL_PIPE_UNSUPPORTED before any OS call. No readiness emulation.
+PLATFORM_PIPE_SRC ?= src/platform_pipe_posix.c
+COMPLETION_PIPE_SRC = $(if $(filter src/event_iocp.c,$(EVENT_SRC)),,src/completion_pipe_absent.c)
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(UNIX_NODE_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) $(PLATFORM_SOCKET_SRC) src/protocols/http/http_response.c src/protocols/http/http_router.c \
            src/protocols/http/http_connection.c src/protocols/http/http_server.c src/protocols/http/http_server_core.c src/protocols/http/http_server_activation.c src/protocols/http/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/protocols/http/async.c src/timer.c \
            src/protocols/http/http_body_reader_buffer.c \
@@ -268,7 +275,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/resolver_cache.c src/protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/protocols/http/http_compress.c src/decompress.c src/drain.c src/internal_trace.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
-           src/connect_op.c src/listener.c \
+           src/connect_op.c src/listener.c src/pipe_stream.c $(PLATFORM_PIPE_SRC) $(COMPLETION_PIPE_SRC) \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
@@ -613,7 +620,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_ty
                    http_client_proxy http_client_stream http_connection http_cors http_integration \
                    http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
                    http_response http_router http_server_integration http_server_state http_server_stats \
-                   http_sse http_tls io_status kl_cstr kl_cstr_builtin listener peer_addr peer_cert \
+                   http_sse http_tls io_status kl_cstr kl_cstr_builtin listener peer_addr peer_cert pipe_stream \
                    proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
                    socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_read stream_transport \
                    thread_pool timeout timer tls tls_integration tls_vtable transport_public \
@@ -653,7 +660,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free 
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
                         http_server_state http_server_stats http_sse http_tls io_status iocp_engine kl_cstr \
-                        kl_cstr_builtin listener peer_addr peer_cert proxy_protocol read_flow_control \
+                        kl_cstr_builtin listener peer_addr peer_cert pipe_stream proxy_protocol read_flow_control \
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
                         stream_close stream_read stream_single_shot thread_pool timeout timer tls \
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
@@ -1557,12 +1564,19 @@ check-sockaddr-neutral:
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
               $(wildcard src/platform_*.c) $(wildcard src/protocols/http/http_server_plat_*.c) $(wildcard src/protocols/http/completion_*.c) $(wildcard src/protocols/http2/completion_*.c) $(wildcard src/protocols/websocket/completion_*.c) $(wildcard src/protocols/dns/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) $(wildcard src/unix_socket_node*.c) \
-              src/listener.c src/connect_op.c \
+              src/listener.c src/connect_op.c src/pipe_stream.c \
               src/event_ctx.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/http_server.c src/protocols/http/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
 # and the socket-ADDRESS headers, plus the internal completion.h / completion_io.h / completion_http.h seams.
-TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|completion_io|completion_http)\.h"
+TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|completion_io|completion_http|completion_pipe|platform_pipe)\.h"
+# Named-pipe seam gate (docs/architecture/windows_named_pipes.md §6). Win32 pipe I/O stays in the two
+# mechanics TUs and is overlapped only; no pipe symbol reaches the socket axis or a protocol TU; the
+# transport names no consumer protocol. Default-deny over every tracked src/include/integrations file,
+# self-canaried (tools/check_pipe_seam.sh).
+check-pipe-seam:
+	@sh tools/check_pipe_seam.sh
+
 check-tier1-boundary:
 	@bad=0; \
 	for f in src/*.c src/protocols/*/*.c; do \
@@ -1572,7 +1586,7 @@ check-tier1-boundary:
 	  fi; \
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED, an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
-	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"completion_io.h"' '"completion_http.h"'; do \
+	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"completion_io.h"' '"completion_http.h"' '"completion_pipe.h"' '"platform_pipe.h"'; do \
 	  if ! printf '#include %s\n' "$$h" | grep -qE '$(TIER1_FORBIDDEN_RE)'; then \
 	    echo "check-tier1-boundary: SELF-TEST FAILED, the forbidden-header regex no longer matches $$h"; exit 1; \
 	  fi; \
@@ -2669,7 +2683,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-pipe-seam check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

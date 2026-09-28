@@ -86,6 +86,22 @@ Support is claimed only for local NTFS. ReFS, SMB, and FAT are explicitly NOT su
 lifecycle; the fail-closed behavior is the contract there. The provider itself is compiled in the
 standing Windows build; the filesystem-behavior verification is the local spike, not a standing job.
 
+### Windows Named Pipes
+
+A named-pipe client is a `KlStream` (`<keel/pipe.h>`, `kl_pipe_connect`). It is the Windows local-IPC
+counterpart of an `AF_UNIX` stream and deliberately does **not** go through `KlSocketProvider`.
+
+| | Level | Evidence |
+|---|---|---|
+| Client (`KlStream`) on IOCP, MinGW + MSVC | Standing-CI tested | `test_pipe_stream` in `WIN_IOCP_TEST_SUITES` (job `Windows (IOCP)`) and in the derived MSVC IOCP set (job `Windows (native MSVC, cl.exe)`) |
+| Client on WSAPoll / any readiness engine | Not supported, by design | `kl_pipe_connect` returns `KL_PIPE_UNSUPPORTED` before any OS call; asserted by `test_pipe_stream` in `WIN_TEST_SUITES` |
+| Client on POSIX, io_uring, pollcomp | Not applicable | same refusal (POSIX local IPC is `AF_UNIX`) |
+| Listener (server) | Not implemented | `KlListener` hands accepted connections off as `KlSocketHandle`; see [windows_named_pipes.md](../architecture/windows_named_pipes.md) §5 |
+
+Pipes run only on the IOCP engine because they are completion-native: there is no readiness emulation.
+Local only (`\\.\pipe\` names; a remote `\\host\pipe\` is refused), identification-level impersonation
+only. Design and security notes: [windows_named_pipes.md](../architecture/windows_named_pipes.md).
+
 ### UEFI
 
 UEFI is a freestanding target: the EFI_TCP4/EFI_UDP4 providers and the freestanding library subset are

@@ -105,6 +105,23 @@ or `..._CANCELLED` (`kl_connect_op_cancel`). Every non-winning connected fd is r
 `dispose_fd`. `on_detach` fires once after the terminal and all ops and both timers retire
 (`kl_connect_op_is_detached`); re-init is the reuse reset.
 
+## A non-socket KlStream: Windows Named Pipes
+
+`kl_pipe_connect(ctx, "\\\\.\\pipe\\name", &cfg, &p)` (`pipe.h`) hands back an ordinary `KlStream`
+(`kl_pipe_stream(p)`) over a named-pipe `HANDLE`. The pipe is not a socket and never touches
+`KlSocketProvider` or `KlSocketHandle` (the stream's `fd` stays `KL_INVALID_SOCKET`). The transport
+installs the completion-mode hooks above, and the consumer drives it with the same calls as any other
+stream. Differences sit below the contract:
+
+- **Engine:** IOCP only. Any other engine returns `KL_PIPE_UNSUPPORTED` before an OS call.
+- **Read termination:** EOF / broken pipe / error is the single `ok == 0`, exactly as here.
+- **Graceful close:** as for every completion-mode stream, it waits for the posted read to retire
+  (peer data or disconnect); `kl_stream_cancel` stops waiting.
+- **Lifetime:** `kl_pipe_free` is legal at any time. The memory, the handle and the receive buffer
+  outlive every posted op (a completion life token), so a free with I/O outstanding is safe.
+
+Design: [windows_named_pipes.md](../architecture/windows_named_pipes.md).
+
 ## Cross-cutting guarantees
 
 - **Confirmed detachment.** All three objects fire their detach/close callback exactly once, only
@@ -128,7 +145,10 @@ These are **not** part of the shipped surface (some are tracked in the roadmap /
   per read/write op; the only per-op terminal is the `KlConnectOp`.
 - **TLS as a stream facet**: TLS wraps the stream from above (the adapter's hooks), not inside it.
 - **Half-close / abort (`shutdown_write` / RST)**: no such provider op today.
-- **A tagged address-kind union**: addresses are `KlSockAddr`; there is no `KlEndpoint` type.
+- **A tagged address-kind union**: addresses are `KlSockAddr`; there is no `KlEndpoint` type. (A named
+  pipe's endpoint is a path argument to `kl_pipe_connect`, not an address kind.)
+- **A named-pipe listener**: `KlListener` hands accepted connections off as `KlSocketHandle`, which a
+  pipe instance is not; see [windows_named_pipes.md](../architecture/windows_named_pipes.md) §5.
 
 ## Conformance evidence
 
@@ -142,3 +162,4 @@ set) and the `pollcomp` double (`make smoke-pollcomp-asan`), plus IOCP on the Wi
 | Public transport surface | `tests/test_stream_transport.c`, `test_transport_public.c` |
 | Listener | `tests/test_listener.c` |
 | Connect op | `tests/test_connect_op.c` |
+| Non-socket stream (named pipe, IOCP) | `tests/test_pipe_stream.c` |

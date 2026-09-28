@@ -97,6 +97,11 @@ Any object a completion event references (op, buffer, transport core, life token
 *after* every event in the drained batch that could reach it has been dispatched. Ownership of a
 life reference transfers into the op on submit and releases exactly once at its terminal event.
 
+A `KlStream` over a Windows Named Pipe is in the token class: its `KL_COMP_PIPE_READ`/`_WRITE`
+completions carry the same `KlDgramLife` token as datagrams and route by it
+([windows_named_pipes.md](windows_named_pipes.md) §3.2). A socket stream is in the raw-`target` class
+below.
+
 For classes that carry a raw `target` instead of a life token (stream, accept, connect, watcher),
 the equivalent guarantee comes from **single-shot completion**; every backend emits exactly one
 completion per submitted op, with no duplicate and no post-retirement completion; combined with the
@@ -139,6 +144,9 @@ flags; never protocol-state enums.
   [socket.h](../../src/socket.h) (`KlSockAddr`).
 - **Enforced by:** `make check-sockaddr-neutral` ([Makefile](../../Makefile)) + the protocol-header grep
   in [keel_axis_audit.md](../archive/audits/keel_axis_audit.md) Goal 4. (R4 extends this to a protocol-state check.)
+  For the one non-socket transport, `make check-pipe-seam` keeps Windows Named Pipe I/O inside its two
+  mechanics TUs, overlapped only, off the socket axis, and free of consumer-protocol knowledge
+  ([windows_named_pipes.md](windows_named_pipes.md) §6).
 
 ### I7: Integration-owned types do not enter `include/keel/*.h`
 

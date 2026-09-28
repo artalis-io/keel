@@ -217,6 +217,10 @@ kl_listener_state	listener.h
 kl_malloc	allocator.h
 kl_monotonic_ms	clock.h
 kl_peer_cred_fd	http_server.h
+kl_pipe_connect	pipe.h
+kl_pipe_free	pipe.h
+kl_pipe_status_str	pipe.h
+kl_pipe_stream	pipe.h
 kl_platform_caps	http_server.h
 kl_proxy_parse	proxy_protocol.h
 kl_realloc	allocator.h

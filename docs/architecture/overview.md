@@ -33,6 +33,8 @@ three and touch no platform socket API or event engine directly.
     lease handoff, confirmed-detachment close). Contract: [transport_surface.md](public_api.md).
   - [`KlStream`](../../include/keel/stream.h): raw byte transport (bounded write queue, strict
     read pause/resume, graceful/abortive close). Contract: [stream_contract.md](../contracts/stream.md).
+    Not only sockets: a Windows Named Pipe is a `KlStream` too (`<keel/pipe.h>`, IOCP engine), over
+    its own seams and never through the socket provider. See [windows_named_pipes.md](windows_named_pipes.md).
   - [`KlDatagram`](../../include/keel/datagram.h): bounded message transport (fixed-slot admission,
     message boundaries, source/local metadata). Contract: [datagram_contract.md](../contracts/datagram.md).
     Extended-UDP features (batching, GSO/GRO, multicast, per-packet TOS/ECN) are capabilities of

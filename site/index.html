@@ -591,6 +591,11 @@ $ make examples</pre>
                   <td>Connection pool + state machine, keep-alive, timeouts, backpressure drain; blocking and async clients with pooling and redirects.</td>
                 </tr>
                 <tr>
+                  <td>Windows Named Pipes</td>
+                  <td class="cmp-yes">built-in</td>
+                  <td>Local-IPC client as an ordinary <code class="text-paper-200">KlStream</code>, the Windows counterpart of an AF_UNIX stream. IOCP engine only (refused, not emulated, on readiness engines); never routed through the socket seam. No pipe listener yet.</td>
+                </tr>
+                <tr>
                   <td>Datagram transport</td>
                   <td class="cmp-yes">built-in</td>
                   <td><code class="text-paper-200">KlDatagram</code> on the shared event loop: async receive with source and destination addressing. Batching (recvmmsg/sendmmsg), GSO/GRO offload, multicast, and per-packet ECN/DSCP are capability-gated, provider-dependent extensions.</td>

@@ -142,6 +142,11 @@ KlListenerHooks	struct	listener.h
 KlListenerState	enum	listener.h
 KlPeerCert	struct	tls.h
 KlPeerCred	struct	http_server.h
+KlPipeCloseFn	callback	pipe.h
+KlPipeConfig	struct	pipe.h
+KlPipeDataFn	callback	pipe.h
+KlPipeStatus	enum	pipe.h
+KlPipeStream	opaque	pipe.h
 KlPlatformCap	enum	http_server.h
 KlProxyResult	enum	proxy_protocol.h
 KlResolveDoneFn	callback	resolver.h

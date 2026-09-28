@@ -45,12 +45,18 @@ typedef enum {
                        * socket so getsockopt(SO_ERROR) reports the truth, so the client's
                        * existing win/fail logic is unchanged. See
                        * docs/archive/phases/phase10_lwip_raw_client_design.md §3 / §8. */
-    KL_COMP_WATCHER   /* a readiness FD watch fired (target = the tagged KlWatcher udata,
+    KL_COMP_WATCHER,  /* a readiness FD watch fired (target = the tagged KlWatcher udata,
                        * `bytes` carries the ready KlEventMask). Lets a completion
                        * loop relay generic FD watchers (thread-pool wakeup, timers) through
                        * the same abstract axis; the driver routes it to kl_event_dispatch.
                        * How a backend watches a readiness fd alongside its completions is
                        * the backend's business, not part of this abstract contract. */
+    KL_COMP_PIPE_READ, KL_COMP_PIPE_WRITE
+                      /* named-pipe byte I/O finished (completion_pipe.h). Routed like the datagram
+                       * kinds: by `life`, never `target`. READ: `bytes` landed in the token-owned
+                       * buffer, ok=0 = EOF / broken pipe / cancelled / error (one terminal, as the
+                       * KlStream contract has no close taxonomy). WRITE: ok=1 iff every byte went
+                       * out. Only the IOCP backend emits them. */
 } KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.
