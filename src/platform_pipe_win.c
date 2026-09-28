@@ -88,13 +88,15 @@ KlPipeOpenStatus kl_plat_pipe_open_client(const char *path, KlPipeHandle **out) 
 static int pipe_server_sd(PSECURITY_DESCRIPTOR *out) {
     HANDLE tok = NULL;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return -1;
-    union { TOKEN_USER u; unsigned char raw[256]; } tu;   /* TOKEN_USER + its SID, suitably aligned */
+    /* TOKEN_USER plus the SID it points into; aligned for the TOKEN_USER at its start. */
+    _Alignas(TOKEN_USER) unsigned char tu_buf[256];
     DWORD len = 0;
-    BOOL ok = GetTokenInformation(tok, TokenUser, &tu, (DWORD)sizeof(tu), &len);
+    BOOL ok = GetTokenInformation(tok, TokenUser, tu_buf, (DWORD)sizeof(tu_buf), &len);
     CloseHandle(tok);
     if (!ok) return -1;
+    const TOKEN_USER *tu = (const TOKEN_USER *)tu_buf;
     wchar_t *sid = NULL;
-    if (!ConvertSidToStringSidW(tu.u.User.Sid, &sid)) return -1;
+    if (!ConvertSidToStringSidW(tu->User.Sid, &sid)) return -1;
     wchar_t sddl[256];
     int n = (int)(sizeof(sddl) / sizeof(sddl[0]));
     int r = -1;
