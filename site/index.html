@@ -593,7 +593,7 @@ $ make examples</pre>
                 <tr>
                   <td>Windows Named Pipes</td>
                   <td class="cmp-yes">built-in</td>
-                  <td>Local-IPC client as an ordinary <code class="text-paper-200">KlStream</code>, the Windows counterpart of an AF_UNIX stream. IOCP engine only (refused, not emulated, on readiness engines); never routed through the socket seam. No pipe listener yet.</td>
+                  <td>Local-IPC client and listener, each connection an ordinary <code class="text-paper-200">KlStream</code>: the Windows counterpart of an AF_UNIX stream. IOCP engine only (refused, not emulated, on readiness engines); never routed through the socket seam.</td>
                 </tr>
                 <tr>
                   <td>Datagram transport</td>

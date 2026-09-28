@@ -32,10 +32,15 @@
 
 struct KlEventCtx;
 
-typedef enum { KL_PIPE_OP_READ = 0, KL_PIPE_OP_WRITE } KlPipeOpKind;
+/* READ / WRITE move bytes on a connected pipe. ACCEPT is an overlapped ConnectNamedPipe on a SERVER
+ * instance (platform_pipe.h kl_plat_pipe_create_instance): it completes when a client connects. A
+ * client that connected before the ConnectNamedPipe was issued (ERROR_PIPE_CONNECTED, which queues
+ * no packet) still completes asynchronously, as a success, like every other accepted post. */
+typedef enum { KL_PIPE_OP_READ = 0, KL_PIPE_OP_WRITE, KL_PIPE_OP_ACCEPT } KlPipeOpKind;
 
 /* One pipe op, by value. READ: `buf`/`len` is the receive buffer (lent, token-owned). WRITE:
- * `data`/`len` is copied before a successful return. `life` is transferred into the op on success. */
+ * `data`/`len` is copied before a successful return. ACCEPT: no buffer. `life` is transferred into the
+ * op on success. */
 typedef struct {
     KlPipeHandle       *h;
     KlPipeOpKind        kind;

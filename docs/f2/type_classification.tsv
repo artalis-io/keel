@@ -199,3 +199,8 @@ pipe.h	KlPipeConfig	struct	caller-constructed	caller-built; F2-C append-only
 pipe.h	KlPipeDataFn	callback	api-signature	-
 pipe.h	KlPipeStatus	enum	enum-constants	-
 pipe.h	KlPipeStream	opaque	opaque	private handle; layout in src/pipe_stream.c, owned by its completion life token
+listener.h	KlListenerAcceptObjFn	callback	api-signature	-
+listener.h	KlListenerDisposeObjFn	callback	api-signature	-
+pipe.h	KlPipeAcceptFn	callback	api-signature	-
+pipe.h	KlPipeListenConfig	struct	caller-constructed	caller-built; F2-C append-only
+pipe.h	KlPipeListener	opaque	opaque	private handle; layout in src/pipe_stream.c, embeds a KlListener (object handoff family)

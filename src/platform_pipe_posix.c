@@ -12,4 +12,9 @@ KlPipeOpenStatus kl_plat_pipe_open_client(const char *path, KlPipeHandle **out) 
     return KL_PIPE_OPEN_UNSUPPORTED;
 }
 
+KlPipeOpenStatus kl_plat_pipe_create_instance(const char *path, int first, KlPipeHandle **out) {
+    (void)path; (void)first; (void)out;
+    return KL_PIPE_OPEN_UNSUPPORTED;
+}
+
 void kl_plat_pipe_close(KlPipeHandle *h) { (void)h; }

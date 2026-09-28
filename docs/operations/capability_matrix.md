@@ -70,7 +70,7 @@ completion axis (the readiness axis is covered by the default `make test`).
 | Close with outstanding work | stale-event guard after close | single terminal completion; op/buffer freed once | ASan/LSan smokes; `test_read_flow_control.shutdown_while_paused` |
 | Timeout | idle sweep + timer heap | same timer heap; deadline on the loop | `test_timeout`, `test_timer` |
 | UDP datagram (source + local addr) | `recvmsg`/`IP_PKTINFO` | `kl_comp_post_dgram_recv`/`_send` (WSARecvMsg on IOCP) | `datagram_socket`, `datagram_batch`, `datagram_multicast`, `udp_cmsg` over completion |
-| Windows Named Pipe stream (`<keel/pipe.h>`) | **none** (refused: `KL_PIPE_UNSUPPORTED`; no readiness emulation) | overlapped `ReadFile`/`WriteFile` on the IOCP port (`completion_pipe.h`), routed by life token as `KL_COMP_PIPE_READ`/`_WRITE` | `pipe_stream` (IOCP, MinGW + MSVC); refusal asserted on WSAPoll |
+| Windows Named Pipe stream + listener (`<keel/pipe.h>`) | **none** (refused: `KL_PIPE_UNSUPPORTED`; no readiness emulation) | overlapped `ReadFile`/`WriteFile` on the IOCP port (`completion_pipe.h`), routed by life token as `KL_COMP_PIPE_READ`/`_WRITE` | `pipe_stream` (IOCP, MinGW + MSVC); refusal asserted on WSAPoll |
 
 **One documented asymmetry (by design, not a gap):** a broadcast send without
 `SO_BROADCAST` surfaces `EACCES` *synchronously* on readiness but on the *send

@@ -51,12 +51,13 @@ typedef enum {
                        * the same abstract axis; the driver routes it to kl_event_dispatch.
                        * How a backend watches a readiness fd alongside its completions is
                        * the backend's business, not part of this abstract contract. */
-    KL_COMP_PIPE_READ, KL_COMP_PIPE_WRITE
-                      /* named-pipe byte I/O finished (completion_pipe.h). Routed like the datagram
+    KL_COMP_PIPE_READ, KL_COMP_PIPE_WRITE, KL_COMP_PIPE_ACCEPT
+                      /* named-pipe op finished (completion_pipe.h). Routed like the datagram
                        * kinds: by `life`, never `target`. READ: `bytes` landed in the token-owned
                        * buffer, ok=0 = EOF / broken pipe / cancelled / error (one terminal, as the
                        * KlStream contract has no close taxonomy). WRITE: ok=1 iff every byte went
-                       * out. Only the IOCP backend emits them. */
+                       * out. ACCEPT: ok=1 iff a client connected to the server instance. Only the
+                       * IOCP backend emits them. */
 } KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.

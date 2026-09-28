@@ -88,7 +88,7 @@ standing Windows build; the filesystem-behavior verification is the local spike,
 
 ### Windows Named Pipes
 
-A named-pipe client is a `KlStream` (`<keel/pipe.h>`, `kl_pipe_connect`). It is the Windows local-IPC
+A named-pipe client, and each connection a named-pipe listener accepts, is a `KlStream` (`<keel/pipe.h>`, `kl_pipe_connect` / `kl_pipe_listen`). It is the Windows local-IPC
 counterpart of an `AF_UNIX` stream and deliberately does **not** go through `KlSocketProvider`.
 
 | | Level | Evidence |
@@ -96,7 +96,7 @@ counterpart of an `AF_UNIX` stream and deliberately does **not** go through `KlS
 | Client (`KlStream`) on IOCP, MinGW + MSVC | Standing-CI tested | `test_pipe_stream` in `WIN_IOCP_TEST_SUITES` (job `Windows (IOCP)`) and in the derived MSVC IOCP set (job `Windows (native MSVC, cl.exe)`) |
 | Client on WSAPoll / any readiness engine | Not supported, by design | `kl_pipe_connect` returns `KL_PIPE_UNSUPPORTED` before any OS call; asserted by `test_pipe_stream` in `WIN_TEST_SUITES` |
 | Client on POSIX, io_uring, pollcomp | Not applicable | same refusal (POSIX local IPC is `AF_UNIX`) |
-| Listener (server) | Not implemented | `KlListener` hands accepted connections off as `KlSocketHandle`; see [windows_named_pipes.md](../architecture/windows_named_pipes.md) §5 |
+| Listener (`kl_pipe_listen`) on IOCP, MinGW + MSVC | Standing-CI tested | the same `test_pipe_stream` enrolment; built on `KlListener`'s object handoff family ([listener_accept_handoff.md](../architecture/listener_accept_handoff.md)) |
 
 Pipes run only on the IOCP engine because they are completion-native: there is no readiness emulation.
 Local only (`\\.\pipe\` names; a remote `\\host\pipe\` is refused), identification-level impersonation

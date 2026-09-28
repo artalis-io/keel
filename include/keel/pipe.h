@@ -24,6 +24,13 @@
  *
  * SECURITY. The client connects with identification-level impersonation only (the server may learn
  * who connected, never act as them) and refuses a remote \\host\pipe\ name.
+ *
+ * LISTENER. kl_pipe_listen serves a local pipe name: each connecting client arrives as a
+ * KlPipeStream, the same object a client connect returns, so the server side is KlStream too. The
+ * accept machinery is KlListener (its object handoff family). Instances are created on demand, and
+ * each is closed only after its operation has physically retired, never recycled. Server instances
+ * reject remote clients and carry a DACL for the current user and LocalSystem only. The first
+ * instance claims the name, so a name another process already created fails with KL_PIPE_IN_USE.
  */
 #ifndef KEEL_PIPE_H
 #define KEEL_PIPE_H
@@ -48,7 +55,8 @@ typedef enum {
     KL_PIPE_INVALID,       /**< bad argument, or not a local \\.\pipe\ name */
     KL_PIPE_UNSUPPORTED,   /**< this engine/platform has no named pipes (not IOCP) */
     KL_PIPE_NOMEM,         /**< allocation failed */
-    KL_PIPE_ERROR          /**< any other failure */
+    KL_PIPE_ERROR,         /**< any other failure */
+    KL_PIPE_IN_USE         /**< listen: the name already exists (another server or a squatter) */
 } KlPipeStatus;
 
 /** Received bytes, same shape and rules as KlStreamReadDeliverFn: `ok`=1 is `len` bytes in `buf`
@@ -91,6 +99,47 @@ KlStream *kl_pipe_stream(KlPipeStream *p);
  *  are still cancelled and reclaimed memory-safely by the loop's close, but the object itself must
  *  already have been released with kl_pipe_free. */
 void kl_pipe_free(KlPipeStream *p);
+
+/** Set (or replace) a stream's callbacks. This is how the owner of an ACCEPTED stream attaches its
+ *  per-connection state: an accepted stream arrives with no callbacks and its read side not started,
+ *  so call this, then kl_stream_read_start. Works on a connected client stream too. Returns 0, or -1
+ *  if `p` or `on_data` is NULL. */
+int kl_pipe_bind(KlPipeStream *p, KlPipeDataFn on_data, KlPipeCloseFn on_close, void *user_data);
+
+/* ── Listener ──────────────────────────────────────────────────────────────────────────────── */
+
+/** @brief Opaque named-pipe listener (server). */
+typedef struct KlPipeListener KlPipeListener;
+
+/** A client connected. `p` is a connected stream the callback now owns: bind it, start reading, and
+ *  eventually kl_pipe_free it. It outlives the listener. */
+typedef void (*KlPipeAcceptFn)(void *user_data, KlPipeStream *p);
+
+#define KL_PIPE_LISTEN_INSTANCES_DEFAULT 4
+
+typedef struct {
+    int            instances;      /**< server instances kept waiting for a client (the accept
+                                        window); 0 = KL_PIPE_LISTEN_INSTANCES_DEFAULT */
+    size_t         read_capacity;  /**< per accepted stream; 0 = KL_PIPE_READ_CAP_DEFAULT */
+    size_t         write_capacity; /**< per accepted stream; 0 = KL_PIPE_WRITE_CAP_DEFAULT */
+    KlPipeAcceptFn on_accept;      /**< required */
+    KlPipeCloseFn  on_close;       /**< optional: the listener has detached (free is now legal) */
+    void          *user_data;
+} KlPipeListenConfig;
+
+/** Listen on the local pipe name `path` on `ctx` (IOCP engine only; otherwise KL_PIPE_UNSUPPORTED).
+ *  The name is claimed before this returns (KL_PIPE_IN_USE if it already exists). On KL_PIPE_OK
+ *  *out is listening; on any other status *out is NULL. */
+KlPipeStatus kl_pipe_listen(struct KlEventCtx *ctx, const char *path, const KlPipeListenConfig *cfg,
+                            KlPipeListener **out);
+
+/** Stop accepting: every waiting instance's connect is cancelled, and on_close fires once all of them
+ *  have physically retired. Accepted streams are unaffected. Idempotent. Returns 0, or -1 if NULL. */
+int kl_pipe_listener_close(KlPipeListener *pl);
+
+/** Free a DETACHED listener (after on_close, including from inside it). Returns 0, or -1 (freeing
+ *  nothing) if it has not detached yet. Drive the loop until on_close before kl_event_ctx_free. */
+int kl_pipe_listener_free(KlPipeListener *pl);
 
 /** A short constant name for a status ("ok", "absent", ...). */
 const char *kl_pipe_status_str(KlPipeStatus s);

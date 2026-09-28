@@ -8,8 +8,8 @@
 #       SetNamedPipeHandleState / TransactNamedPipe / CallNamedPipe / ImpersonateNamedPipeClient) and
 #       ReadFile / WriteFile appear ONLY in the pipe mechanics TUs: src/event_iocp.c (overlapped I/O on
 #       the port) and src/platform_pipe_win.c (open/close).
-#   R2  No blocking pipe I/O on the loop: WaitNamedPipe appears nowhere, and every ReadFile / WriteFile
-#       call passes an OVERLAPPED (`&op->ov`).
+#   R2  No blocking pipe I/O on the loop: WaitNamedPipe appears nowhere, and every ReadFile / WriteFile /
+#       ConnectNamedPipe call passes an OVERLAPPED (`&op->ov`).
 #   R3  The pipe never enters the socket axis: no pipe symbol (KlPipeHandle, kl_plat_pipe_*,
 #       kl_comp_pipe_*, KL_COMP_PIPE_*, KL_IOCP_PIPE_*) in a socket provider / socket seam TU, and no
 #       cast of a pipe handle to a socket or integer type in the pipe TUs.
@@ -23,7 +23,7 @@ set -eu
 
 CALL_RE='\b(CreateNamedPipe[AW]?|ConnectNamedPipe|DisconnectNamedPipe|PeekNamedPipe|SetNamedPipeHandleState|TransactNamedPipe|CallNamedPipe[AW]?|ImpersonateNamedPipeClient|ReadFile|WriteFile)[[:space:]]*\('
 WAIT_RE='\bWaitNamedPipe[AW]?[[:space:]]*\('
-RW_RE='\b(ReadFile|WriteFile)[[:space:]]*\('
+RW_RE='\b(ReadFile|WriteFile|ConnectNamedPipe)[[:space:]]*\('
 OVL_RE='&op->ov'
 SYM_RE='KlPipeHandle|kl_plat_pipe_|kl_comp_pipe_|KL_COMP_PIPE_|KL_IOCP_PIPE_'
 CAST_RE='\((KlSocketHandle|SOCKET|int|unsigned|long|intptr_t|uintptr_t)\)[[:space:]]*(p->h|h|op->op_handle|pop->h)\b'
@@ -45,6 +45,7 @@ selftest() {
     chk "$WAIT_RE" "" 'WaitNamedPipeW(name, 1000);' 1
     chk "$OVL_RE" "" 'r = ReadFile(op->op_handle, op->buf, n, NULL, &op->ov);' 1
     chk "$OVL_RE" "" 'r = ReadFile(h, buf, n, &got, NULL);' 0
+    chk "$RW_RE" "" 'r = ConnectNamedPipe(h, NULL);' 1
     chk "$SYM_RE" "" 'KlPipeHandle *h;' 1
     chk "$CAST_RE" "" 'KlSocketHandle fd = (KlSocketHandle)p->h;' 1
     chk "$CAST_RE" "" 'CancelIoEx(op->op_handle, &op->ov);' 0
@@ -75,7 +76,7 @@ rm -f "${TMPDIR:-/tmp}/pipe_seam.$$"
 # R2: every ReadFile / WriteFile in the mechanics TUs is overlapped.
 for f in $MECH; do
     grep -nE "$RW_RE" "$f" | grep -vF "$OVL_RE" | while IFS= read -r l; do
-        echo "PIPE-SEAM VIOLATION (R2 non-overlapped ReadFile/WriteFile): $f:$l"
+        echo "PIPE-SEAM VIOLATION (R2 non-overlapped ReadFile/WriteFile/ConnectNamedPipe): $f:$l"
     done
 done | grep . && bad=1
 
