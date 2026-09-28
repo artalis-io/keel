@@ -3,6 +3,9 @@
  *
  * Reserve-before-accept backpressure, sync-completion-safe posting (iterative pump trampoline),
  * guarded reentrant callbacks, cancel-once, total accepted-fd disposal, and confirmed detachment.
+ * The accepted value is a PASS-THROUGH: an fd (the socket handoff family) or an adapter-materialized
+ * connection object (the object family, for a transport that is not a socket). Nothing here
+ * interprets either; both ride one retire/commit/dispose/refill path.
  * The listener keeps up to `window` accepts posted concurrently, ONE reserved pool credit per
  * posted accept (window=1 for readiness / io_uring / pollcomp; KL_IOCP_ACCEPT_BACKLOG for IOCP so
  * its multi-deep AcceptEx concurrency is preserved). Each completion consumes exactly one
@@ -59,12 +62,21 @@ static void l_finalize(KlListener *l) {
     if (l->on_close) l->on_close(l->ctx);        /* reuse/free legal only after this returns */
 }
 
-/* Guarded destructive tail for disposing an accepted fd that cannot become a connection: dispose_fd
- * is an adapter callback that MAY reentrantly close the listener, so it runs under in_dispatch and
- * finalization happens after it returns. Callers must return immediately afterward. */
-static void l_dispose(KlListener *l, KlSocketHandle fd) {
+/* One accepted value, in whichever handoff family this listener was initialised with. Internal:
+ * callers only ever see their own family's type. */
+typedef struct {
+    int            is_obj;
+    KlSocketHandle fd;     /* fd family */
+    void          *conn;   /* object family: the adapter's connection object */
+} LAccepted;
+
+/* Guarded destructive tail for disposing an accepted value that cannot become a connection: the
+ * dispose hook is an adapter callback that MAY reentrantly close the listener, so it runs under
+ * in_dispatch and finalization happens after it returns. Callers must return immediately afterward. */
+static void l_dispose(KlListener *l, LAccepted a) {
     l->in_dispatch++;
-    l->dispose_fd(l->ctx, fd);
+    if (a.is_obj) l->dispose_obj(l->ctx, a.conn);
+    else          l->dispose_fd(l->ctx, a.fd);
     l->in_dispatch--;
     l_finalize(l);
 }
@@ -153,7 +165,14 @@ static void l_pump(KlListener *l) {
 
 int kl_listener_init(KlListener *l, int completion_mode, const KlListenerHooks *hooks, void *ctx) {
     if (!l || !hooks) return -1;
-    if (!hooks->arm_accept || !hooks->on_accept || !hooks->dispose_fd) return -1;
+    if (!hooks->arm_accept) return -1;
+    /* Exactly one COMPLETE handoff family: fd (on_accept + dispose_fd) or object (on_accept_obj +
+     * dispose_obj). Neither, both, or a half-configured family is rejected. */
+    int fd_family  = hooks->on_accept || hooks->dispose_fd;
+    int obj_family = hooks->on_accept_obj || hooks->dispose_obj;
+    if (fd_family == obj_family) return -1;
+    if (fd_family  && (!hooks->on_accept || !hooks->dispose_fd)) return -1;
+    if (obj_family && (!hooks->on_accept_obj || !hooks->dispose_obj)) return -1;
     if (!completion_mode && !hooks->disarm_accept) return -1;   /* readiness must drop interest */
     if (!!hooks->reserve != !!hooks->release) return -1;        /* reserve/release are paired */
     memset(l, 0, sizeof(*l));
@@ -168,6 +187,8 @@ int kl_listener_init(KlListener *l, int completion_mode, const KlListenerHooks *
     l->cancel_accept   = hooks->cancel_accept;
     l->on_accept       = hooks->on_accept;
     l->dispose_fd      = hooks->dispose_fd;
+    l->on_accept_obj   = hooks->on_accept_obj;
+    l->dispose_obj     = hooks->dispose_obj;
     l->on_close        = hooks->on_close;
     l->ctx             = ctx;
     l->state           = KL_LISTENER_STATE_IDLE;
@@ -194,15 +215,15 @@ int kl_listener_start(KlListener *l) {
     return 0;
 }
 
-void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
-    if (!l || !l->inited) return;
-    if (l->inflight <= 0) { l_dispose(l, fd); return; }   /* spurious accept: dispose its fd */
+/* The shared accept-completion body for both handoff families. */
+static void l_on_accepted(KlListener *l, LAccepted a) {
+    if (l->inflight <= 0) { l_dispose(l, a); return; }    /* spurious accept: dispose it */
     l->inflight--;                                        /* this posted accept retired */
 
     if (l->state == KL_LISTENER_STATE_CLOSING || l->state == KL_LISTENER_STATE_CLOSED) {
-        /* teardown: cannot hand off; return this accept's credit and dispose the fd */
+        /* teardown: cannot hand off; return this accept's credit and dispose the value */
         l_release_credit(l);
-        l_dispose(l, fd);          /* guarded tail: finalizes after dispose returns */
+        l_dispose(l, a);           /* guarded tail: finalizes after dispose returns */
         return;
     }
 
@@ -210,10 +231,31 @@ void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
      * POOL-OWNED release capability (by value) + the nullable liveness token, no listener ref. */
     KlSlotLease lease = { l->release, l->credit_ctx, l->liveness };
     l->in_dispatch++;
-    l->on_accept(l->ctx, fd, lease);    /* by value: ownership transfers to the accepted stream */
+    if (a.is_obj) l->on_accept_obj(l->ctx, a.conn, lease);   /* by value: ownership transfers */
+    else          l->on_accept(l->ctx, a.fd, lease);
     l->in_dispatch--;
 
     l_pump(l);         /* top up to the window (also finalizes if on_accept closed us) */
+}
+
+void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
+    if (!l || !l->inited) return;
+    if (l->on_accept_obj) {                  /* object-family listener: refuse, retire as failed */
+        kl_listener_on_accept_failed(l, -1);
+        return;
+    }
+    LAccepted a = { 0, fd, NULL };
+    l_on_accepted(l, a);
+}
+
+void kl_listener_on_accepted_obj(KlListener *l, void *conn) {
+    if (!l || !l->inited) return;
+    if (!l->on_accept_obj) {                 /* fd-family listener: refuse, retire as failed */
+        kl_listener_on_accept_failed(l, -1);
+        return;
+    }
+    LAccepted a = { 1, KL_INVALID_SOCKET, conn };
+    l_on_accepted(l, a);
 }
 
 void kl_listener_on_accept_failed(KlListener *l, int error) {

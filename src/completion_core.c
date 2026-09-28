@@ -62,7 +62,8 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_DGRAM_SEND:
         /* Named-pipe completions route the same way: the pipe stream's token names its handler. */
         case KL_COMP_PIPE_READ:
-        case KL_COMP_PIPE_WRITE: {
+        case KL_COMP_PIPE_WRITE:
+        case KL_COMP_PIPE_ACCEPT: {
             KlCompLife *life = ev[i].life;
             KlCompLifeDispatchFn d = life ? kl_comp_life_dispatch(life) : (KlCompLifeDispatchFn)0;
             if (d)

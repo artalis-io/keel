@@ -45,6 +45,8 @@ struct KlListener {
     KlListenerAcceptFn   on_accept;
     KlListenerDisposeFn  dispose_fd;
     KlListenerCloseFn    on_close;
+    KlListenerAcceptObjFn  on_accept_obj;  /* object handoff family (NULL in the fd family) */
+    KlListenerDisposeObjFn dispose_obj;
     void *ctx;
 };
 

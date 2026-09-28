@@ -109,6 +109,21 @@ typedef void (*KlListenerDisposeFn)(void *ctx, KlSocketHandle fd);
  *  retire. Reuse/free legal only after this returns. */
 typedef void (*KlListenerCloseFn)(void *ctx);
 
+/* ── Object handoff family (a transport that is not a socket) ──────────────────────────────────
+ * The listener never interprets what it hands off; it only passes the accepted value to on_accept or
+ * back to dispose. For a socket that value is the fd (above). For a transport whose accepted
+ * connection is NOT a socket (a Windows Named Pipe instance), the adapter that performed the accept
+ * materializes its own connection object and hands THAT over instead: `conn` is that adapter's object,
+ * opaque to the listener and typed by the adapter at both ends (it is never a native handle routed
+ * through here). A listener uses exactly ONE family, fixed at init. */
+
+/** An accepted connection object: ownership of `conn` and the lease transfer to the callback, with
+ *  the same exactly-once rules as KlListenerAcceptFn. */
+typedef void (*KlListenerAcceptObjFn)(void *ctx, void *conn, KlSlotLease lease);
+/** Dispose of an accepted `conn` that cannot be handed off (spurious / during teardown). Required in
+ *  the object family. */
+typedef void (*KlListenerDisposeObjFn)(void *ctx, void *conn);
+
 typedef struct {
     KlSlotReserveFn      reserve;      /**< optional (pairs with release); NULL = unbounded */
     KlSlotReleaseFn      release;      /**< optional (pairs with reserve) */
@@ -117,17 +132,20 @@ typedef struct {
     KlListenerArmFn      arm_accept;   /**< required */
     KlListenerDisarmFn   disarm_accept;/**< required in readiness mode */
     KlListenerCancelFn   cancel_accept;/**< optional (completion) */
-    KlListenerAcceptFn   on_accept;    /**< required */
-    KlListenerDisposeFn  dispose_fd;   /**< required */
+    KlListenerAcceptFn   on_accept;    /**< fd family: required with dispose_fd */
+    KlListenerDisposeFn  dispose_fd;   /**< fd family: required with on_accept */
     KlListenerCloseFn    on_close;     /**< optional */
+    KlListenerAcceptObjFn  on_accept_obj; /**< object family: required with dispose_obj */
+    KlListenerDisposeObjFn dispose_obj;   /**< object family: required with on_accept_obj */
 } KlListenerHooks;
 
 /* ── Contract (the public surface) ─────────────────────────────────────────────────────────── */
 
 /** Install hooks and reset state (zeroes the listener). `completion_mode` selects whether a posted
- *  accept survives disarm (completion) or is cancelled by disarm (readiness). Requires arm_accept,
- *  on_accept, dispose_fd; requires disarm_accept in readiness mode; reserve/release both-or-neither.
- *  Returns 0, or -1 on a bad/missing hook. */
+ *  accept survives disarm (completion) or is cancelled by disarm (readiness). Requires arm_accept and
+ *  EXACTLY ONE complete handoff family: on_accept + dispose_fd (sockets), or on_accept_obj +
+ *  dispose_obj (a non-socket transport); requires disarm_accept in readiness mode; reserve/release
+ *  both-or-neither. Returns 0, or -1 on a bad/missing/mixed hook set. */
 int  kl_listener_init(KlListener *l, int completion_mode, const KlListenerHooks *hooks, void *ctx);
 /** Set the bounded accept window: the max number of accepts kept posted concurrently, one reserved
  *  pool credit each (default 1). Use the IOCP AcceptEx backlog for IOCP so its multi-deep accept
@@ -143,6 +161,12 @@ int  kl_listener_start(KlListener *l);
  *  commits its reserved credit into the handed-off lease, then refills the window. During teardown
  *  the fd is disposed and the credit returned instead. */
 void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd);
+/** Object-family counterpart of kl_listener_on_accepted: a posted accept completed with the adapter's
+ *  connection object `conn`. Identical retire / commit / dispose / refill semantics. Called on an
+ *  fd-family listener it is a contract violation and is refused: the accept retires as FAILED (its
+ *  credit returned, last_error set) and `conn` stays the caller's. The fd entry point on an
+ *  object-family listener is refused the same way. */
+void kl_listener_on_accepted_obj(KlListener *l, void *conn);
 /** A posted accept failed/was cancelled with `error`: retires that accept (exactly-once) and
  *  returns its reserved credit, then refills the window (or, when closing, advances detachment). */
 void kl_listener_on_accept_failed(KlListener *l, int error);

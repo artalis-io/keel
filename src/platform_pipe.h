@@ -36,7 +36,8 @@ typedef enum {
     KL_PIPE_OPEN_DENIED,        /* the pipe's DACL refused the requested access */
     KL_PIPE_OPEN_INVALID,       /* not a local \\.\pipe\ name, too long, or not valid UTF-8 */
     KL_PIPE_OPEN_UNSUPPORTED,   /* this platform has no named pipes */
-    KL_PIPE_OPEN_ERROR          /* any other failure */
+    KL_PIPE_OPEN_ERROR,         /* any other failure */
+    KL_PIPE_OPEN_IN_USE         /* listen: the name already exists (another server, or a squatter) */
 } KlPipeOpenStatus;
 
 /* Open the client end of the LOCAL named pipe `path` (UTF-8, "\\.\pipe\<name>") for overlapped
@@ -45,7 +46,15 @@ typedef enum {
  * name (\\host\pipe\...) is rejected as INVALID: this is local IPC. */
 KlPipeOpenStatus kl_plat_pipe_open_client(const char *path, KlPipeHandle **out);
 
-/* Close a handle from kl_plat_pipe_open_client. Precondition: no overlapped op on it is outstanding
+/* Create one SERVER instance of the local named pipe `path` for overlapped duplex byte I/O, ready for
+ * an overlapped ConnectNamedPipe, the completion_pipe.h KL_PIPE_OP_ACCEPT op. `first` = 1 for a listener's
+ * first instance: it claims the name with FILE_FLAG_FIRST_PIPE_INSTANCE, so a name some other process
+ * already created (a squatter) fails with KL_PIPE_OPEN_IN_USE instead of being shared. Security is
+ * fixed, not configurable: remote clients are rejected, and the DACL grants the current user and
+ * LocalSystem only (the default pipe DACL would also grant Everyone read). */
+KlPipeOpenStatus kl_plat_pipe_create_instance(const char *path, int first, KlPipeHandle **out);
+
+/* Close a handle from kl_plat_pipe_open_client or kl_plat_pipe_create_instance. Precondition: no overlapped op on it is outstanding
  * (every op physically retired), so no completion can target it after this returns. NULL-safe. */
 void kl_plat_pipe_close(KlPipeHandle *h);
 

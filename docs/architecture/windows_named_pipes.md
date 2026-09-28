@@ -1,6 +1,7 @@
 # Windows Named Pipes: audit and design
 
-**Status:** implemented: client (`KlStream`) on the IOCP engine; listener deferred (§5). §1 and §2
+**Status:** implemented: client and listener (each connection a `KlStream`) on the IOCP engine; the
+listener arrived after the client, once `KlListener` gained an object handoff family (§5). §1 and §2
 are the pre-implementation audit, kept as written; §3 onward describe what was built. Scope: a Windows Named Pipe as a local-IPC ordered
 byte stream under the Tier-1 `KlStream` contract, beside the existing POSIX `AF_UNIX` path. Keel knows
 nothing about SSH agents or any other consumer protocol.
@@ -278,20 +279,26 @@ transport + `KlStream`.
 
 | | `KlStream` (client) | Pipe listener | Engine |
 |---|---|---|---|
-| Windows, `BACKEND=iocp` (MinGW + MSVC) | supported | not implemented (§5) | IOCP, native |
-| Windows, WSAPoll (default) | `KL_PIPE_UNSUPPORTED` | not implemented | none; no readiness emulation |
-| Windows, runtime-installed event provider | `KL_PIPE_UNSUPPORTED` | not implemented | none |
+| Windows, `BACKEND=iocp` (MinGW + MSVC) | supported | supported (§5) | IOCP, native |
+| Windows, WSAPoll (default) | `KL_PIPE_UNSUPPORTED` | `KL_PIPE_UNSUPPORTED` | none; no readiness emulation |
+| Windows, runtime-installed event provider | `KL_PIPE_UNSUPPORTED` | `KL_PIPE_UNSUPPORTED` | none |
 | POSIX (any engine), cosmocc | `KL_PIPE_UNSUPPORTED` (use `AF_UNIX`) | n/a | n/a |
 
-## 5. Listener: the mismatch and the options (deferred)
+## 5. Listener: the mismatch and the options
+
+**Resolved (listener implemented).** Option 1 was taken, in its narrowest form: `KlListener` gained an
+append-only **object handoff family** (`on_accept_obj` / `dispose_obj`, `kl_listener_on_accepted_obj`),
+and the Named Pipe listener (`kl_pipe_listen`) is built on it as the acceptance test. The design,
+including why a `KlStream *` output and a handle union were rejected, is
+[listener_accept_handoff.md](listener_accept_handoff.md). The analysis below is the pre-implementation
+record.
 
 1. **Append-only `KlListener` widening.** Add `kl_listener_on_accepted_obj(l, void *conn)` plus an
    optional `on_accept_obj` / `dispose_obj` hook pair. The window/credit/detach machine is reused
    unchanged and the sockets path is untouched. This is a public contract change and needs sign-off.
 2. **Separate pipe-listener object.** It exposes `kl_pipe_listen(…, on_accept(ud, KlPipeStream *))`,
    does not reuse `KlListener`, and duplicates its credit/detach machine.
-3. **Defer.** This is the chosen option. Tests stand up servers with raw Win32 in test code (test TUs
-   are not governed by the Tier-1 gates).
+3. **Defer.** Chosen for the client change; superseded once the listener design was done (above).
 
 Whichever option is chosen later, two Windows behaviours have a fixed treatment:
 
@@ -360,8 +367,8 @@ Type safety backs R3 at compile time: `KlPipeHandle *` does not convert implicit
    and datagram contracts states it as the general rule, and `async_lifecycle.md`'s "no silent loss"
    covers only `KlAsyncOp`, which the server cancels explicitly. It is a documentation gap in the
    generic completion contract and belongs in its own change.
-2. **`KlListener`'s accepted-connection handoff is socket-typed** (§5). This is the one remaining
-   socket assumption this work found in the Tier-1 transports. It needs its own design exercise, and
-   the fix is not to widen `KlSocketHandle` into a universal handle.
+2. **Resolved:** `KlListener`'s accepted-connection handoff was socket-typed (§5). It now has an
+   object handoff family for transports that are not sockets, without widening `KlSocketHandle` into
+   a universal handle ([listener_accept_handoff.md](listener_accept_handoff.md)).
 3. **Resolved:** the lifetime token, named for datagrams when pipes became its second owner, is now
    `KlCompLife` (§3.2a), and `make check-no-dgram-life` keeps the old names from returning.

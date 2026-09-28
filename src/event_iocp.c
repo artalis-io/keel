@@ -89,7 +89,8 @@ typedef enum {
     KL_IOCP_DGRAM_RECV, KL_IOCP_DGRAM_SEND,
     KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket */
     KL_IOCP_CONNECT,                           /* ConnectEx outbound connect */
-    KL_IOCP_PIPE_READ, KL_IOCP_PIPE_WRITE      /* ReadFile / WriteFile on a named-pipe HANDLE */
+    KL_IOCP_PIPE_READ, KL_IOCP_PIPE_WRITE,     /* ReadFile / WriteFile on a named-pipe HANDLE */
+    KL_IOCP_PIPE_ACCEPT                        /* ConnectNamedPipe on a server pipe instance */
 } KlIocpOpType;
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
@@ -740,7 +741,7 @@ static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDg
  * drain re-posts (like a partial WSASend). */
 #define KL_IOCP_PIPE_IO_MAX 0x40000000u
 
-/* Issue (or re-issue) the op's ReadFile/WriteFile. Every return of 0 guarantees EXACTLY ONE
+/* Issue (or re-issue) the op's ReadFile/WriteFile/ConnectNamedPipe. Every return of 0 guarantees EXACTLY ONE
  * completion packet for this issue: the OS queues one for success and for ERROR_IO_PENDING, and for
  * a failure it reports at once (ERROR_BROKEN_PIPE on a disconnected pipe, ...) it queues none, so we
  * queue one ourselves carrying the error in op->pipe_err. That keeps EOF and errors on the ordinary
@@ -752,6 +753,10 @@ static int iocp_pipe_issue(KlIocpState *st, KlIocpOp *op) {
     BOOL r;
     if (op->type == KL_IOCP_PIPE_READ) {
         r = ReadFile(op->op_handle, op->buf, (DWORD)op->buflen, NULL, &op->ov);
+    } else if (op->type == KL_IOCP_PIPE_ACCEPT) {
+        /* A client that connected before this call yields ERROR_PIPE_CONNECTED with NO packet; it
+         * falls through to the self-queue below and the drain treats it as a successful accept. */
+        r = ConnectNamedPipe(op->op_handle, &op->ov);
     } else {
         size_t left = op->send_total - op->send_done;
         if (left > KL_IOCP_PIPE_IO_MAX) left = KL_IOCP_PIPE_IO_MAX;
@@ -782,7 +787,12 @@ static int iocp_pipe_complete(KlIocpState *st, KlIocpOp *op, DWORD bytes, KlComp
     if (st->quiescing) { iocp_op_free(op); return 0; }   /* teardown: no re-issue, no event */
 
     memset(ev, 0, sizeof(*ev));
-    if (op->type == KL_IOCP_PIPE_READ) {
+    if (op->type == KL_IOCP_PIPE_ACCEPT) {
+        /* ERROR_PIPE_CONNECTED is a client that won the race to the instance: connected, success. */
+        if (err == ERROR_PIPE_CONNECTED) err = 0;
+        ev->kind = KL_COMP_PIPE_ACCEPT;
+        ev->ok   = err ? 0 : 1;
+    } else if (op->type == KL_IOCP_PIPE_READ) {
         /* A successful ZERO-byte read is a peer's zero-length WriteFile, not EOF: re-issue it rather
          * than hand the stream an empty delivery. EOF is ERROR_BROKEN_PIPE (all server handles
          * closed or disconnected), which surfaces as ok=0 below like every other failure. */
@@ -821,18 +831,21 @@ int kl_comp_pipe_attach(struct KlEventCtx *ctx, KlPipeHandle *h) {
 }
 
 int kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *pop) {
-    if (!kl_comp_pipe_available(ctx) || !pop || !pop->h || pop->len == 0) return -1;
+    if (!kl_comp_pipe_available(ctx) || !pop || !pop->h) return -1;
     KlIocpState *st = ctx->loop._backend;
+    int is_accept = (pop->kind == KL_PIPE_OP_ACCEPT);
     int is_read = (pop->kind == KL_PIPE_OP_READ);
-    if (is_read ? !pop->buf : !pop->data) return -1;
+    if (!is_accept && (pop->len == 0 || (is_read ? !pop->buf : !pop->data))) return -1;
 
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;                           /* nothing taken → caller releases its ref */
     memset(op, 0, sizeof(*op));
-    op->type      = is_read ? KL_IOCP_PIPE_READ : KL_IOCP_PIPE_WRITE;
+    op->type      = is_accept ? KL_IOCP_PIPE_ACCEPT : is_read ? KL_IOCP_PIPE_READ : KL_IOCP_PIPE_WRITE;
     op->alloc     = st->alloc;
     op->op_handle = (HANDLE)pop->h;
-    if (is_read) {
+    if (is_accept) {
+        /* no buffer: the completion only reports whether a client connected */
+    } else if (is_read) {
         op->buf    = pop->buf;                    /* LENT: the token owns it past this op */
         op->buflen = pop->len > KL_IOCP_PIPE_IO_MAX ? KL_IOCP_PIPE_IO_MAX : pop->len;
     } else {
@@ -853,7 +866,8 @@ int kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *pop) {
 void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlCompLife *life, KlPipeOpKind kind) {
     if (!kl_comp_pipe_available(ctx) || !life) return;
     KlIocpState *st = ctx->loop._backend;
-    KlIocpOpType want = (kind == KL_PIPE_OP_WRITE) ? KL_IOCP_PIPE_WRITE : KL_IOCP_PIPE_READ;
+    KlIocpOpType want = (kind == KL_PIPE_OP_WRITE)  ? KL_IOCP_PIPE_WRITE
+                      : (kind == KL_PIPE_OP_ACCEPT) ? KL_IOCP_PIPE_ACCEPT : KL_IOCP_PIPE_READ;
     /* An op whose error was self-queued has no kernel I/O left, so CancelIoEx finds nothing; its
      * packet is already on the port and completes it regardless. */
     for (KlIocpOp *o = st->ops; o; o = o->g_next)
@@ -1197,7 +1211,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].ok = (bytes > 0);
             count++;
             iocp_op_free(op);
-        } else if (op->type == KL_IOCP_PIPE_READ || op->type == KL_IOCP_PIPE_WRITE) {
+        } else if (op->type == KL_IOCP_PIPE_READ || op->type == KL_IOCP_PIPE_WRITE ||
+                   op->type == KL_IOCP_PIPE_ACCEPT) {
             if (iocp_pipe_complete(st, op, bytes, &out[count]))
                 count++;
         } else if (op->type == KL_IOCP_WATCHER) {

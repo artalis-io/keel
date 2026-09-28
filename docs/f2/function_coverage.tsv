@@ -311,3 +311,8 @@ kl_pipe_connect	pipe.h	direct-assertion	tests/test_pipe_stream.c:323 ASSERT_EQ(k
 kl_pipe_free	pipe.h	direct-assertion	tests/test_pipe_stream.c:575 (allocator balanced only after physical retirement; no late callback)
 kl_pipe_status_str	pipe.h	direct-assertion	tests/test_pipe_stream.c:122 ASSERT_STREQ(kl_pipe_status_str(KL_PIPE_BUSY), "busy")
 kl_pipe_stream	pipe.h	direct-assertion	tests/test_pipe_stream.c:124 ASSERT_TRUE(kl_pipe_stream(NULL) == NULL) (+ every KlStream case drives its result)
+kl_listener_on_accepted_obj	listener.h	direct-assertion	tests/test_listener.c:709 (listener_obj: handoff, teardown dispose, spurious, cross-family refusal, window)
+kl_pipe_bind	pipe.h	direct-assertion	tests/test_pipe_stream.c:1085 ASSERT_EQ(kl_pipe_bind(..., NULL, ...), -1) then 0; delivery only after bind + read_start
+kl_pipe_listen	pipe.h	direct-assertion	tests/test_pipe_stream.c:930 ASSERT_EQ(kl_pipe_listen(...), KL_PIPE_OK) (+ IN_USE / UNSUPPORTED cases)
+kl_pipe_listener_close	pipe.h	direct-assertion	tests/test_pipe_stream.c:1110 (idempotent close; on_close once after pending instances retire)
+kl_pipe_listener_free	pipe.h	direct-assertion	tests/test_pipe_stream.c:946 ASSERT_EQ(kl_pipe_listener_free(...), -1) before detach, 0 after

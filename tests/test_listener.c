@@ -650,4 +650,144 @@ UTEST(listener, credit_conservation_through_lifecycle) {
 #undef INV
 }
 
+/* ── Object handoff family (a non-socket transport's own connection object) ───────────────────── */
+
+typedef struct { int tag; } Conn;   /* stands in for an adapter object, e.g. a pipe stream */
+typedef struct {
+    LT      base;                  /* reuses the credit/arm mocks */
+    int     accept_obj_calls, dispose_obj_calls;
+    void   *last_conn, *disposed_conn;
+    KlSlotLease obj_lease;
+} LO;
+static void lo_on_accept_obj(void *ctx, void *conn, KlSlotLease lease) {
+    LO *m = ctx; m->accept_obj_calls++; m->last_conn = conn; m->obj_lease = lease;
+}
+static void lo_dispose_obj(void *ctx, void *conn) {
+    LO *m = ctx; m->dispose_obj_calls++; m->disposed_conn = conn;
+}
+static int lo_setup(LO *m, KlListener *l, int completion_mode) {
+    memset(m, 0, sizeof(*m));
+    m->base.l = l; m->base.slots = 1; m->base.alive = 1;
+    KlListenerHooks h = {
+        .reserve = lt_reserve, .release = lt_release, .credit_ctx = &m->base,
+        .liveness = &m->base.alive,
+        .arm_accept = lt_arm, .disarm_accept = lt_disarm, .cancel_accept = lt_cancel,
+        .on_close = lt_on_close,
+        .on_accept_obj = lo_on_accept_obj, .dispose_obj = lo_dispose_obj,
+    };
+    return kl_listener_init(l, completion_mode, &h, m);
+}
+/* lt_* hooks take the LT via ctx; the object hooks take the LO. The listener passes ONE ctx to every
+ * hook, so LT must be the first member of LO (it is) for the shared mocks to see their fields. */
+
+UTEST(listener_obj, init_requires_exactly_one_complete_family) {
+    KlListener l; LT m; memset(&m, 0, sizeof m);
+    KlListenerHooks base = { .arm_accept = lt_arm, .disarm_accept = lt_disarm };
+    KlListenerHooks h;
+    h = base;                                                         /* neither family */
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), -1);
+    h = base; h.on_accept = lt_on_accept; h.dispose_fd = lt_dispose;  /* fd family */
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), 0);
+    h = base; h.on_accept_obj = lo_on_accept_obj; h.dispose_obj = lo_dispose_obj;   /* obj family */
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), 0);
+    h = base; h.on_accept = lt_on_accept; h.dispose_fd = lt_dispose;  /* both families */
+    h.on_accept_obj = lo_on_accept_obj; h.dispose_obj = lo_dispose_obj;
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), -1);
+    h = base; h.on_accept_obj = lo_on_accept_obj;                    /* half an obj family */
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), -1);
+    h = base; h.dispose_obj = lo_dispose_obj;
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), -1);
+    h = base; h.on_accept = lt_on_accept; h.dispose_obj = lo_dispose_obj;   /* crossed halves */
+    ASSERT_EQ(kl_listener_init(&l, 0, &h, &m), -1);
+}
+
+UTEST(listener_obj, accept_hands_off_object_and_lease) {
+    KlListener l; LO m; ASSERT_EQ(lo_setup(&m, &l, 1), 0);
+    m.base.slots = 2;
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    Conn c = { 7 };
+    kl_listener_on_accepted_obj(&l, &c);
+    ASSERT_EQ(m.accept_obj_calls, 1);
+    ASSERT_TRUE(m.last_conn == &c);                  /* passed through untouched */
+    ASSERT_EQ(m.base.accept_calls, 0);               /* the fd hook is never used */
+    ASSERT_EQ(m.base.arm_calls, 2);                  /* refilled the window */
+    ASSERT_EQ(m.base.reserved_now, 2);               /* one committed, one held by the new post */
+    kl_slot_lease_release(&m.obj_lease);             /* the owner releases the committed credit */
+    ASSERT_EQ(m.base.reserved_now, 1);
+    kl_listener_close(&l);
+    kl_listener_on_accept_failed(&l, -1);            /* the batch cancel retires the posted accept */
+    ASSERT_EQ(m.base.reserved_now, 0);
+    ASSERT_EQ(m.base.close_calls, 1);
+}
+
+UTEST(listener_obj, teardown_disposes_object_and_returns_credit) {
+    KlListener l; LO m; ASSERT_EQ(lo_setup(&m, &l, 1), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    kl_listener_close(&l);                           /* CLOSING: one accept still posted */
+    ASSERT_EQ(m.base.close_calls, 0);
+    Conn c = { 1 };
+    kl_listener_on_accepted_obj(&l, &c);             /* it completes anyway (raced the cancel) */
+    ASSERT_EQ(m.accept_obj_calls, 0);                /* never handed off while closing */
+    ASSERT_EQ(m.dispose_obj_calls, 1);
+    ASSERT_TRUE(m.disposed_conn == &c);
+    ASSERT_EQ(m.base.reserved_now, 0);               /* its credit went back */
+    ASSERT_EQ(m.base.close_calls, 1);                /* and that was the last retirement */
+}
+
+UTEST(listener_obj, spurious_object_is_disposed) {
+    KlListener l; LO m; ASSERT_EQ(lo_setup(&m, &l, 1), 0);
+    Conn c = { 2 };
+    kl_listener_on_accepted_obj(&l, &c);             /* nothing posted (IDLE) */
+    ASSERT_EQ(m.dispose_obj_calls, 1);
+    ASSERT_EQ(m.accept_obj_calls, 0);
+}
+
+UTEST(listener_obj, wrong_family_entry_is_refused_not_leaked) {
+    /* object-family listener fed an fd: retired as failed, credit returned, fd never disposed here */
+    KlListener l; LO m; ASSERT_EQ(lo_setup(&m, &l, 1), 0);
+    m.base.slots = 1;
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.base.reserved_now, 1);
+    kl_listener_on_accepted(&l, (KlSocketHandle)42);
+    ASSERT_EQ(m.accept_obj_calls, 0);
+    ASSERT_EQ(m.base.accept_calls, 0);
+    ASSERT_EQ(m.dispose_obj_calls, 0);
+    ASSERT_EQ(m.base.dispose_calls, 0);
+    ASSERT_EQ(m.base.arm_calls, 2);                  /* the failed accept was refilled */
+    ASSERT_EQ(m.base.reserved_now, 1);               /* old credit returned, new one held: no leak */
+    kl_listener_close(&l);
+    kl_listener_on_accept_failed(&l, -1);
+    ASSERT_EQ(m.base.close_calls, 1);
+
+    /* fd-family listener fed an object: the same refusal */
+    KlListener l2; LT f; lt_setup(&f, &l2, 1);
+    ASSERT_EQ(kl_listener_start(&l2), 0);
+    Conn c = { 3 };
+    kl_listener_on_accepted_obj(&l2, &c);
+    ASSERT_EQ(f.accept_calls, 0);
+    ASSERT_EQ(f.dispose_calls, 0);
+    ASSERT_EQ(f.reserved_now, 1);
+    ASSERT_EQ(f.arm_calls, 2);
+    kl_listener_close(&l2);
+    kl_listener_on_accept_failed(&l2, -1);
+    ASSERT_EQ(f.close_calls, 1);
+}
+
+UTEST(listener_obj, window_accepts_objects_like_fds) {
+    KlListener l; LO m; ASSERT_EQ(lo_setup(&m, &l, 1), 0);
+    m.base.slots = 8;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 4), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.base.arm_calls, 4);
+    Conn c[3] = { {0}, {1}, {2} };
+    for (int i = 0; i < 3; i++) kl_listener_on_accepted_obj(&l, &c[i]);
+    ASSERT_EQ(m.accept_obj_calls, 3);
+    ASSERT_EQ(m.base.arm_calls, 7);                  /* each accept refilled the window */
+    kl_listener_close(&l);
+    ASSERT_EQ(m.base.cancel_calls, 1);               /* one batch cancel */
+    for (int i = 0; i < 4; i++) kl_listener_on_accept_failed(&l, -1);
+    ASSERT_EQ(m.base.close_calls, 1);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
 UTEST_MAIN();

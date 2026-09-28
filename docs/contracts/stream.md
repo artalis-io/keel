@@ -89,6 +89,11 @@ each holding one reserved pool credit. A completed accept is reported with
 `kl_listener_on_accepted(l, fd)` (delivered to the owner through the required `on_accept` hook, which
 takes ownership of `fd` and a by-value `KlSlotLease`) or `kl_listener_on_accept_failed(l, error)`
 (returns the credit). `kl_listener_notify_slot_free(l)` resumes a listener paused for lack of credit.
+A transport whose accepted connection is not a socket uses the **object handoff family** instead: hooks
+`on_accept_obj` / `dispose_obj` and `kl_listener_on_accepted_obj(l, conn)`, where `conn` is the adapter's own
+connection object, passed through untouched exactly as an fd is (a listener uses exactly one family; the
+Windows Named Pipe listener hands over a `KlPipeStream`). See
+[listener_accept_handoff.md](../architecture/listener_accept_handoff.md).
 `kl_listener_close(l)` retires every posted accept; `on_close` fires once after all have retired
 (`kl_listener_is_detached`). Pool-credit accounting is optional (NULL reserve/release = unbounded);
 a `KlSlotLease` carries a pool-owned release capability plus a nullable liveness token, so it stays
@@ -147,8 +152,6 @@ These are **not** part of the shipped surface (some are tracked in the roadmap /
 - **Half-close / abort (`shutdown_write` / RST)**: no such provider op today.
 - **A tagged address-kind union**: addresses are `KlSockAddr`; there is no `KlEndpoint` type. (A named
   pipe's endpoint is a path argument to `kl_pipe_connect`, not an address kind.)
-- **A named-pipe listener**: `KlListener` hands accepted connections off as `KlSocketHandle`, which a
-  pipe instance is not; see [windows_named_pipes.md](../architecture/windows_named_pipes.md) §5.
 
 ## Conformance evidence
 
@@ -162,4 +165,4 @@ set) and the `pollcomp` double (`make smoke-pollcomp-asan`), plus IOCP on the Wi
 | Public transport surface | `tests/test_stream_transport.c`, `test_transport_public.c` |
 | Listener | `tests/test_listener.c` |
 | Connect op | `tests/test_connect_op.c` |
-| Non-socket stream (named pipe, IOCP) | `tests/test_pipe_stream.c` |
+| Non-socket stream + listener (named pipe, IOCP) | `tests/test_pipe_stream.c`; object handoff family in `tests/test_listener.c` (`listener_obj`) |
