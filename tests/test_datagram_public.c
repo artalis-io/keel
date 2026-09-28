@@ -2,7 +2,7 @@
  * test_datagram_public.c: the PUBLIC KlDatagram surface over a scripted completion mock.
  *
  * No live backend: a hand-built KlEventCtx whose loop advertises KL_EVENT_CAP_COMPLETION and whose
- * completion vtable is a scripted double records the posted send/recv ops (by their KlDgramLife token)
+ * completion vtable is a scripted double records the posted send/recv ops (by their KlCompLife token)
  * and lets the test drive completions exactly as the real driver would: life->dispatch(target, ev).
  * This proves the public surface + ABI + ownership (init/reuse/free-refusal, fixed-slot send geometry,
  * copy-before-accept, recv delivery, strict pause/resume, confirmed-detachment close + terminal result)
@@ -34,7 +34,7 @@
 #include <keel/error.h>
 
 #include "../src/completion.h"      /* KlCompletionEvent + KL_COMP_DGRAM_* */
-#include "../src/datagram_life.h"   /* kl_dgram_life_dispatch/_target: drive completions like the driver */
+#include "../src/completion_life.h"   /* kl_comp_life_dispatch/_target: drive completions like the driver */
 #include "../src/socket.h"          /* KlSocketProvider / KlSocketOps: the close-ordering mock provider */
 #include "../src/datagram_open.h"   /* kl_datagram_teardown: synchronous owner-destruction (Option A) */
 #if !defined(_MSC_VER)
@@ -46,14 +46,14 @@
 /* ── scripted completion double ───────────────────────────────────────────────────────────────── */
 typedef struct {
     /* last posted send op */
-    struct KlDgramLife *send_life;
+    struct KlCompLife *send_life;
     unsigned char       send_copy[2048];   /* COPY the payload at submit (copy-before-accept contract) */
     size_t              send_len;
     KlSockAddr          send_dest;
     int                 send_posted;        /* count of send posts */
     int                 send_fail;          /* 1 → next post_dgram_send returns -1 (took nothing) */
     /* last posted recv op */
-    struct KlDgramLife *recv_life;
+    struct KlCompLife *recv_life;
     void               *recv_buf;
     size_t              recv_cap;
     int                 recv_posted;
@@ -84,10 +84,10 @@ static int mc_post_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) {
     g_mc.recv_posted++;
     return 0;
 }
-static int mc_cancel(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind) {
+static int mc_cancel(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind) {
     (void)ctx; (void)life; (void)kind; g_mc.cancels++; return 0;
 }
-static KlDgramRetireResult mc_retire(struct KlEventCtx *ctx, struct KlDgramLife *life,
+static KlDgramRetireResult mc_retire(struct KlEventCtx *ctx, struct KlCompLife *life,
                                      KlDgramOpKind kind, int *terr) {
     (void)ctx; (void)life; (void)kind; if (terr) *terr = 0; return g_mc.retire_result;
 }
@@ -118,40 +118,40 @@ static const KlSocketProvider MC_SP = { .ops = &MC_SOCK_OPS };
 
 /* Drive the pending SEND / RECV completion exactly as the real driver: life->dispatch(target, ev). */
 static void drive_send(int ok) {
-    struct KlDgramLife *life = g_mc.send_life;
+    struct KlCompLife *life = g_mc.send_life;
     KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
     ev.kind = KL_COMP_DGRAM_SEND; ev.ok = ok; ev.life = life;
-    kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
+    kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
 }
 static void drive_recv(const void *data, size_t len, const KlSockAddr *peer, int truncated) {
-    struct KlDgramLife *life = g_mc.recv_life;
+    struct KlCompLife *life = g_mc.recv_life;
     if (g_mc.recv_buf && len) memcpy(g_mc.recv_buf, data, len <= g_mc.recv_cap ? len : g_mc.recv_cap);
     KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
     ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 1; ev.bytes = len; ev.buf = g_mc.recv_buf;
     ev.truncated = truncated; ev.life = life;
     if (peer) ev.peer = *peer;
-    kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
+    kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
 }
 /* Drive a recv completion carrying a received-TOS byte, like a completion backend that parsed
  * the RX TOS cmsg into ev->tos. The facade's dispatch only trusts it when the socket's accepted_rx_caps
  * carry RX_TOS. */
 static void drive_recv_tos(const void *data, size_t len, const KlSockAddr *peer, int tos) {
-    struct KlDgramLife *life = g_mc.recv_life;
+    struct KlCompLife *life = g_mc.recv_life;
     if (g_mc.recv_buf && len) memcpy(g_mc.recv_buf, data, len <= g_mc.recv_cap ? len : g_mc.recv_cap);
     KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
     ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 1; ev.bytes = len; ev.buf = g_mc.recv_buf;
     ev.tos = tos; ev.life = life;
     if (peer) ev.peer = *peer;
-    kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
+    kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
 }
 
 /* The cancelled (terminal) completion of an outstanding recv op, as the driver would drain it after a
  * cancel at close. Retires the recv machine + releases the op's life ref so the close coordinator joins. */
 static void drive_recv_cancelled(void) {
-    struct KlDgramLife *life = g_mc.recv_life;
+    struct KlCompLife *life = g_mc.recv_life;
     KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
     ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 0; ev.life = life;
-    kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
+    kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
 }
 
 /* ── fixture ──────────────────────────────────────────────────────────────────────────────────── */
@@ -567,7 +567,7 @@ UTEST(datagram_public, teardown_then_reuse_late_terminal_drops) {
     KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
     ASSERT_EQ(0, kl_datagram_init(&dg, &c));
     ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
-    struct KlDgramLife *old_recv_life = g_mc.recv_life;   /* the FIRST datagram's recv op */
+    struct KlCompLife *old_recv_life = g_mc.recv_life;   /* the FIRST datagram's recv op */
 
     ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));
 
@@ -581,7 +581,7 @@ UTEST(datagram_public, teardown_then_reuse_late_terminal_drops) {
     {
         KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
         ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 0; ev.life = old_recv_life;
-        kl_dgram_life_dispatch(old_recv_life)(kl_dgram_life_target(old_recv_life), &ev);
+        kl_comp_life_dispatch(old_recv_life)(kl_comp_life_target(old_recv_life), &ev);
     }
 
     /* Tear the new one down cleanly too. */

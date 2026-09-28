@@ -4,7 +4,7 @@
  * Declares only the protocol-neutral completion surface a caller reaches without pulling the whole
  * backend contract (completion.h): the generic completion tick (kl_comp_run), the datagram post
  * descriptors + ops, neutral cancellation, and outbound connect. It names KlEventCtx / KlStream /
- * KlSocketHandle / KlDgramLife only; never an HTTP type. (completion.h is the backend CONTRACT:
+ * KlSocketHandle / KlCompLife only; never an HTTP type. (completion.h is the backend CONTRACT:
  * KlCompletionEvent / KlCompletionOps + the neutral kl_comp_*_raw dispatch decls; this is the neutral
  * CONSUMER seam over it.)
  *
@@ -21,10 +21,27 @@
 #include <stddef.h>   /* size_t (kl_comp_post_dgram_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
 #include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
-#include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
+#include "completion_life.h" /* KlCompLife: the completion-lifetime token the datagram ops carry */
 
 struct KlEventCtx;
 struct sockaddr;
+
+/* Which side of a datagram op a completion-axis cancel/retire query targets. Shared by the
+ * completion backend seam (KlCompletionOps.cancel_dgram/retire_dgram) and the datagram close
+ * coordinator (datagram_close.h KlDgramRetireFn). Datagram vocabulary, so it lives here beside the
+ * datagram op descriptors rather than on the transport-neutral token (completion_life.h). */
+typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
+
+/* Per-op retirement classification a completion backend reports to the close coordinator.
+ * PENDING keeps the object CLOSING (a cancelled completion op not yet drained); RETIRED = physically
+ * done (storage safe to free); QUARANTINED = could NOT be confirmed retired (EFI unconfirmed op →
+ * fail-closed, ref abandoned). `transport_err` (out) is 1 iff a terminal transport error occurred on
+ * the op; it becomes CLOSE_ERROR ONLY when every op is RETIRED (never under quarantine). */
+typedef enum {
+    KL_DGRAM_RETIRE_PENDING = 0,
+    KL_DGRAM_RETIRE_RETIRED,
+    KL_DGRAM_RETIRE_QUARANTINED
+} KlDgramRetireResult;
 
 /* ── Neutral datagram completion-op descriptors ───────────────────────────────────────
  * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so the public
@@ -41,7 +58,7 @@ typedef struct {
     const KlSockAddr   *dest;   /* NULL/UNSPEC = connected send */
     const KlSockAddr   *src;    /* NULL/UNSPEC = no source pin */
     int                 tos;    /* -1 = no mark */
-    struct KlDgramLife *life;   /* token ref: transferred into the op on success */
+    struct KlCompLife *life;   /* token ref: transferred into the op on success */
 } KlDgramSendOp;
 
 typedef struct {
@@ -49,7 +66,7 @@ typedef struct {
     void               *buf;    /* the inbound slot: LENT (life-owned); the backend writes it */
     size_t              cap;
     unsigned            capture; /* KL_DGRAM_RX_* metadata-capture flags */
-    struct KlDgramLife *life;
+    struct KlCompLife *life;
 } KlDgramRecvOp;
 
 /* Is the completion axis compiled into this build? 1 when the driver + dispatch are
@@ -91,14 +108,14 @@ int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op);
  * completion adapter binds a KlDgramClose cancel hook to this. Idempotent; does NOT release the
  * token ref; the op's terminal completion (even when cancelled) releases it. Stubbed on non-completion
  * builds. */
-int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind);
 
 /* Classify the retirement of `life`'s datagram op(s) of `kind` for the close coordinator (§4.3).
  * Pure query (no ownership effect): PENDING while a cancelled completion op has not yet drained; RETIRED
  * once physically done; QUARANTINED when a backend cannot confirm retirement (EFI unconfirmed op).
  * `*transport_err` is set to 1 iff a terminal transport error occurred. Stubbed on non-completion
  * builds. */
-KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life,
+KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlCompLife *life,
                                          KlDgramOpKind kind, int *transport_err);
 
 /* Post one outbound connect on a completion loop. `fd` is a nonblocking socket the

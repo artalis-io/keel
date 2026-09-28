@@ -98,7 +98,7 @@ void kl_dgram_slots_release(KlDgramSlots *s, KlDgramSlot *slot);
 static inline size_t kl_dgram_slots_free_count(const KlDgramSlots *s) { return s->free_n; }
 
 /* ── Inbound slot (LIFE-TOKEN-ownable) ─────────────────────────────────────────────────────────
- * ONE dedicated inbound slot with its OWN allocation, so a B.6 KlDgramLife on_final can free it
+ * ONE dedicated inbound slot with its OWN allocation, so a B.6 KlCompLife on_final can free it
  * independently of (and outliving) the outbound pool + the transport owner. */
 typedef struct {
     KlAllocator   *alloc;      /* borrowed; used only by init/free */

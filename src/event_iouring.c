@@ -50,7 +50,7 @@
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "completion.h"          /* the abstract axis this TU implements */
-#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
+#include "completion_life.h"       /* stable-liveness token for completion ops (neutral) */
 #include "platform.h"            /* kl_plat_file_pread: file body into the send buffer */
 
 #include <liburing.h>
@@ -101,7 +101,7 @@ typedef struct KlIouOp {
      * post so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is
      * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
      * dg_gro) so the completion touches only the op. */
-    KlDgramLife   *life;
+    KlCompLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
     int            dg_tos;                /* UDP_RECV: capture received TOS byte */
@@ -363,7 +363,7 @@ static void iou_op_free(KlIouOp *op) {
      * releases it here. Its final release frees the receive storage. iou_complete transfers the ref to
      * the event and NULLs op->life first, so an emitted op does not double-release. Non-datagram ops
      * carry op->life == NULL. */
-    if (op->life) kl_dgram_life_release(op->life);
+    if (op->life) kl_comp_life_release(op->life);
     /* A registered send buffer (reg_idx >= 0) is borrowed: its index is returned to the
      * pool at the completion/error site, not here; only a malloc'd sendbuf is freed. */
     if (op->sendbuf && op->reg_idx < 0) kl_free(op->alloc, op->sendbuf, op->sendcap);
@@ -749,7 +749,7 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
 /* Cancel the outstanding datagram op(s) of `kind` for `life`: mark aborted + post an
  * IORING_OP_ASYNC_CANCEL SQE (mirrors iou_comp_cancel). The op stays tracked until its (cancelled)
  * CQE drains and releases the token ref, so this is idempotent and does NOT release the ref here. */
-static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgramOpKind kind) {
     KlIouState *st = ctx->loop._backend;
     IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
     for (KlIouOp *o = st->ops; o; o = o->next)
@@ -767,7 +767,7 @@ static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDg
 /* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled CQE
  * has not yet drained + released); none tracked means it physically retired. io_uring never
  * quarantines: a posted op always yields a terminal CQE the drain reaps. */
-static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlCompLife *life,
                                                  KlDgramOpKind kind, int *transport_err) {
     const KlIouState *st = ctx->loop._backend;
     IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;

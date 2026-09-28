@@ -18,7 +18,7 @@
 /* ── scripted neutral adapter ─────────────────────────────────────────────────────────────── */
 
 static KlDgramCore *g_core;   /* the core under test: the adapters reach it to pin/retire ops */
-static KlDgramLife *g_send_life;  /* the outstanding posted-send op's token (captured at submit) */
+static KlCompLife *g_send_life;  /* the outstanding posted-send op's token (captured at submit) */
 
 /* submit: copy-before-accept of payload AND metadata into backend-owned storage, and, for an INFLIGHT
  * (async-posted) send, RETAIN a stable-token ref, uniform with the recv arm (the stable-token contract). */
@@ -42,7 +42,7 @@ static KlDgramSubmitResult test_submit(void *ctx, const void *data, size_t len,
     g_submit_tos       = tos;
     if (g_submit_result == KL_DGRAM_SUBMIT_INFLIGHT) {   /* posted async op → holds one token ref */
         g_send_life = kl_dgram_core_life(g_core);
-        kl_dgram_life_retain(g_send_life);
+        kl_comp_life_retain(g_send_life);
     }
     return g_submit_result;
 }
@@ -51,9 +51,9 @@ static KlDgramSubmitResult test_submit(void *ctx, const void *data, size_t len,
  * release that op's token ref. (Capture the token BEFORE completion: send_on_complete may pump the
  * next queued send, which retains a fresh ref on the same token.) */
 static void send_done(KlDgramCore *core, int ok) {
-    KlDgramLife *l = g_send_life;
+    KlCompLife *l = g_send_life;
     kl_dgram_core_send_on_complete(core, ok);
-    kl_dgram_life_release(l);
+    kl_comp_life_release(l);
 }
 
 /* per-op retirement classifier (§4.3) */
@@ -67,7 +67,7 @@ static KlDgramRetireResult test_retire(void *ctx, KlDgramOpKind kind, int *te) {
  * readiness interest is NOT a posted op, so it retains nothing. Readiness also tracks armed interest. */
 static int         g_completion;        /* the core's mode (set by base_cfg) */
 static int         g_arm_calls, g_disarm_calls, g_pull_calls, g_interest;
-static KlDgramLife *g_recv_life;
+static KlCompLife *g_recv_life;
 static int         g_recv_quarantine;   /* 1 = cancel drops the op but does NOT release its life ref */
 static int         g_avail;             /* readiness: datagrams available to pull before would-block */
 static const char *g_rx_payload; static size_t g_rx_len; static int g_rx_no_peer;
@@ -85,7 +85,7 @@ static int test_arm(void *ctx) {
     (void)ctx; g_arm_calls++;
     if (g_completion) {
         g_recv_life = kl_dgram_core_life(g_core);
-        kl_dgram_life_retain(g_recv_life);   /* posted op ref: released at terminal completion */
+        kl_comp_life_retain(g_recv_life);   /* posted op ref: released at terminal completion */
     } else {
         g_interest = 1;                       /* readiness: READ interest armed */
     }
@@ -106,7 +106,7 @@ static int g_cancel_recv_calls;
 static void test_cancel_recv(void *ctx) {
     (void)ctx; g_cancel_recv_calls++;
     kl_dgram_core_recv_on_complete(g_core, 0, 0);   /* drop machine inflight (stopped-drop) */
-    if (!g_recv_quarantine) kl_dgram_life_release(g_recv_life);
+    if (!g_recv_quarantine) kl_comp_life_release(g_recv_life);
 }
 
 /* delivery recorder (+ optional pause/stop from within the callback, invariant-9 confinement). */
@@ -130,10 +130,10 @@ static void test_deliver(void *ctx, const void *d, size_t n, const KlSockAddr *p
 /* A datagram arrives on a posted COMPLETION recv: fill the inbound slot, then signal completion and
  * release THIS op's token ref (capture it first: a delivery re-arms, retaining a fresh ref). */
 static void recv_arrive(KlDgramCore *core, const char *payload, size_t len) {
-    KlDgramLife *completing = g_recv_life;
+    KlCompLife *completing = g_recv_life;
     inbound_fill(core, payload, len);
     kl_dgram_core_recv_on_complete(core, len, 1);   /* deliver (or hold, if paused) + maybe re-arm */
-    kl_dgram_life_release(completing);              /* the completed op's ref */
+    kl_comp_life_release(completing);              /* the completed op's ref */
 }
 
 /* close_transport: the physical fd close: must run EXACTLY ONCE with the adopted fd. */
@@ -371,7 +371,7 @@ UTEST(dgram_core, quarantined_send_releases_pool_but_pins_rx) {
     ASSERT_EQ(g_submit_tos, 0x28);
     /* ...but the life-owned rx storage stays PINNED by the abandoned send token ref. */
     ASSERT_TRUE(g_live > 0);
-    kl_dgram_life_release(g_send_life);              /* reclaim the abandoned ref → on_final runs */
+    kl_comp_life_release(g_send_life);              /* reclaim the abandoned ref → on_final runs */
     ASSERT_EQ(g_live, 0);
     (void)slot_ptr;
 }
@@ -425,7 +425,7 @@ UTEST(dgram_core, quarantined_recv_pins_inbound_storage) {
 
     /* Reclaim the intentionally-abandoned op ref (test-only): on_final now runs, freeing inbound + rx +
      * the token. No production ref is touched and detachment already fired exactly once. */
-    kl_dgram_life_release(g_recv_life);
+    kl_comp_life_release(g_recv_life);
     ASSERT_EQ(g_live, 0);                              /* fully reclaimed: LSan-clean */
 }
 

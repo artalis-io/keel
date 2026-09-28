@@ -4,8 +4,8 @@
  * A named pipe is not a socket, so it cannot use the KlStream post_recv/post_send seam in
  * completion.h (that one treats KlStream.fd as a SOCKET and routes through the HTTP server's hook).
  * This seam carries a KlPipeHandle instead and routes each completion by its owner's
- * KlDgramLife token, the transport-neutral liveness + refcount token the datagram path already uses
- * (datagram_life.h). There is no second completion-lifetime model:
+ * KlCompLife token, the transport-neutral liveness + refcount token the datagram path already uses
+ * (completion_life.h). There is no second completion-lifetime model:
  *
  *   - the caller retains one life ref per post and TRANSFERS it into the op only on success; on a
  *     failed post the backend took nothing and the caller releases it (datagram rule, §2.5.1);
@@ -28,7 +28,7 @@
 
 #include <stddef.h>
 #include "platform_pipe.h"   /* KlPipeHandle */
-#include "datagram_life.h"   /* KlDgramLife: the neutral completion-lifetime token */
+#include "completion_life.h"   /* KlCompLife: the neutral completion-lifetime token */
 
 struct KlEventCtx;
 
@@ -42,7 +42,7 @@ typedef struct {
     void               *buf;
     const void         *data;
     size_t              len;
-    struct KlDgramLife *life;
+    struct KlCompLife *life;
 } KlPipeIoOp;
 
 /* 1 iff `ctx` runs the compiled-in IOCP engine (no runtime-installed event provider), the only
@@ -59,6 +59,6 @@ int  kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *op);
 /* Request cancellation of `life`'s outstanding op of `kind`. Advisory and idempotent: the op still
  * completes exactly once (aborted, or with its real result if it won the race), and that completion
  * releases the ref. Never releases a ref itself. */
-void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life, KlPipeOpKind kind);
+void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlCompLife *life, KlPipeOpKind kind);
 
 #endif /* KEEL_SRC_COMPLETION_PIPE_H */

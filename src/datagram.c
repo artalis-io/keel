@@ -35,7 +35,7 @@
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
 #include "allocator_validate.h" /* kl_allocator_ops_valid: valid-allocator gate */
 #include "event_caps.h"         /* kl_event_caps */
-#include "datagram_life.h"      /* kl_dgram_life_retain/_release */
+#include "completion_life.h"      /* kl_comp_life_retain/_release */
 #include "datagram_open.h"      /* KlDatagramReclaimFn + kl_datagram_teardown */
 
 #include <string.h>
@@ -84,7 +84,7 @@ static void dg_reconcile_write(KlDatagram *dg) {
  * after dispatch. RECV fills the inbound slot's metadata from the event then retires+delivers; SEND
  * retires the single in-flight send. Never dereferences a dead/freed wrapper. */
 void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
-    KlDgramLife *life = ev->life;
+    KlCompLife *life = ev->life;
     KlDgramCore *core = (KlDgramCore *)target;
     switch (ev->kind) {
     case KL_COMP_DGRAM_RECV:
@@ -122,7 +122,7 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
      * backend op keeps it forever (fail-closed; the recv machine still retired above via ok=0). Honoured
      * uniformly, including the dead-owner (core==NULL) break above. */
     if (!ev->retain_life)
-        kl_dgram_life_release(life);
+        kl_comp_life_release(life);
 }
 
 /* ── completion-mode adapters ─────────────────────────────────────────────────────────────────── */
@@ -131,9 +131,9 @@ static KlDgramSubmitResult dg_comp_submit(void *ctx, const void *data, size_t le
     KlDatagram *dg = ctx;
     KlDgramSendOp op = { .fd = dg->fd, .data = data, .len = len, .dest = peer,
                          .src = local, .tos = tos, .life = kl_dgram_core_life(dg->core) };
-    kl_dgram_life_retain(op.life);   /* transferred into the op on success */
+    kl_comp_life_retain(op.life);   /* transferred into the op on success */
     if (kl_comp_post_dgram_send(dg->ctx, &op) < 0) {
-        kl_dgram_life_release(op.life);   /* failure → caller releases; backend took nothing */
+        kl_comp_life_release(op.life);   /* failure → caller releases; backend took nothing */
         return KL_DGRAM_SUBMIT_ERROR;
     }
     return KL_DGRAM_SUBMIT_INFLIGHT;
@@ -150,9 +150,9 @@ static int dg_comp_arm(void *ctx) {
     if (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) capture |= KL_DGRAM_RX_TOS;
     KlDgramRecvOp op = { .fd = dg->fd, .buf = in ? in->data : NULL, .cap = in ? in->cap : 0,
                          .capture = capture, .life = kl_dgram_core_life(dg->core) };
-    kl_dgram_life_retain(op.life);
+    kl_comp_life_retain(op.life);
     if (kl_comp_post_dgram_recv(dg->ctx, &op) < 0) {
-        kl_dgram_life_release(op.life);
+        kl_comp_life_release(op.life);
         return -1;
     }
     return 0;

@@ -87,14 +87,14 @@ typedef struct KlCompletionEvent {
                                               * capture TOS leaves it 0; the dispatch gates on the
                                               * socket's accepted RX_TOS mask, so an uncaptured 0 is
                                               * never surfaced as a real TOS. */
-    /* DGRAM_RECV/_SEND stable-liveness token (transport-neutral; src/datagram_life.h). A datagram
-     * completion outlives the transport owner, so rather than dereferencing possibly-freed socket state,
+    /* DGRAM_RECV/_SEND and PIPE_READ/_WRITE stable-liveness token (transport-neutral;
+     * src/completion_life.h). A datagram or pipe completion outlives the transport owner, so rather than dereferencing possibly-freed socket state,
      * the dispatch adapter recovers the owner via this token and touches it only while live. The posting
      * op transferred its reference to this event; the adapter releases it after dispatch UNLESS
      * `retain_life` (below). ALL completion backends set this for datagram kinds
      * (pollcomp/io_uring/IOCP/lwIP-raw/EFI); a datagram completion with life == NULL yields a NULL owner
      * and is safely dropped; there is no `target`-deref fallback. */
-    struct KlDgramLife *life;
+    struct KlCompLife *life;
     /* A BORROWED life ref: the event routes/retires but its ref is NOT released after dispatch.
      * Set (==1) only by the EFI drain for a QUARANTINED recv terminal: the backend op keeps the ref
      * forever (fail-closed: the abandoned firmware op may still write the inbound storage). Default 0
@@ -152,16 +152,16 @@ typedef struct KlCompletionOps {
     int  (*post_sendfile)(KlStream *stream, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
-    /* Neutral datagram post seam: descriptors carry fd + payload/buffer + KlDgramLife, so the
+    /* Neutral datagram post seam: descriptors carry fd + payload/buffer + KlCompLife, so the
      * backend never dereferences a transport. See completion_io.h KlDgramSendOp/KlDgramRecvOp + ownership. */
     int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
     int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);
-    /* Datagram cancel/retire seam: key an op by its KlDgramLife token + kind (no transport
+    /* Datagram cancel/retire seam: key an op by its KlCompLife token + kind (no transport
      * deref). cancel_dgram requests cancellation (idempotent, no ref release: the terminal completion
      * releases); retire_dgram is a pure §4.3 classifier query (PENDING/RETIRED/QUARANTINED). The public
      * facade binds the KlDgramClose cancel/retire hooks to these. See completion_io.h kl_comp_cancel_dgram. */
-    int  (*cancel_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
-    KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life,
+    int  (*cancel_dgram)(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind);
+    KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlCompLife *life,
                                         KlDgramOpKind kind, int *transport_err);
     /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
      * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`

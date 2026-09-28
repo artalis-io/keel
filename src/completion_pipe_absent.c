@@ -23,6 +23,6 @@ int kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *op) {
     return -1;
 }
 
-void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life, KlPipeOpKind kind) {
+void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlCompLife *life, KlPipeOpKind kind) {
     (void)ctx; (void)life; (void)kind;
 }

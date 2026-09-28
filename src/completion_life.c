@@ -1,27 +1,27 @@
 /*
- * datagram_life.c: transport-neutral liveness + refcount token for datagram completion ops.
- * See datagram_life.h. Single-threaded (event-loop thread only); a plain-int refcount.
+ * completion_life.c: transport-neutral liveness + refcount token for completion ops.
+ * See completion_life.h. Single-threaded (event-loop thread only); a plain-int refcount.
  */
-#include "datagram_life.h"
+#include "completion_life.h"
 
 #include <string.h>
 
-struct KlDgramLife {
+struct KlCompLife {
     KlAllocator *alloc;                 /* event-ctx / backend allocator (outlives the transport) */
     int          refs;                  /* owner ref (1) + one per posted backend op */
     int          live;                  /* 1 = target valid; 0 = owner torn down */
     void        *target;                /* the owner (KlDgramCore), or NULL once dead */
     void       (*on_final)(void *ctx);  /* frees owner receive storage on the final release */
     void        *final_ctx;
-    KlDgramDispatchFn dispatch;         /* the owner's completion handler (routing identity) */
+    KlCompLifeDispatchFn dispatch;         /* the owner's completion handler (routing identity) */
 };
 
-KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
+KlCompLife *kl_comp_life_create(KlAllocator *alloc, void *target,
                                   void (*on_final)(void *final_ctx), void *final_ctx,
-                                  KlDgramDispatchFn dispatch) {
+                                  KlCompLifeDispatchFn dispatch) {
     if (!alloc)
         return NULL;
-    KlDgramLife *l = kl_malloc(alloc, sizeof(*l));
+    KlCompLife *l = kl_malloc(alloc, sizeof(*l));
     if (!l)
         return NULL;
     l->alloc     = alloc;
@@ -34,16 +34,16 @@ KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
     return l;
 }
 
-KlDgramDispatchFn kl_dgram_life_dispatch(const KlDgramLife *l) {
-    return l ? l->dispatch : (KlDgramDispatchFn)0;
+KlCompLifeDispatchFn kl_comp_life_dispatch(const KlCompLife *l) {
+    return l ? l->dispatch : (KlCompLifeDispatchFn)0;
 }
 
-void kl_dgram_life_retain(KlDgramLife *l) {
+void kl_comp_life_retain(KlCompLife *l) {
     if (l)
         l->refs++;
 }
 
-void kl_dgram_life_release(KlDgramLife *l) {
+void kl_comp_life_release(KlCompLife *l) {
     if (!l)
         return;
     if (--l->refs > 0)
@@ -55,13 +55,13 @@ void kl_dgram_life_release(KlDgramLife *l) {
     kl_free(l->alloc, l, sizeof(*l));
 }
 
-void kl_dgram_life_mark_dead(KlDgramLife *l) {
+void kl_comp_life_mark_dead(KlCompLife *l) {
     if (l) {
         l->live   = 0;
         l->target = NULL;
     }
 }
 
-void *kl_dgram_life_target(const KlDgramLife *l) {
+void *kl_comp_life_target(const KlCompLife *l) {
     return (l && l->live) ? l->target : NULL;
 }

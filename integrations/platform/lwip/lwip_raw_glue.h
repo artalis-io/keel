@@ -123,12 +123,12 @@ typedef enum {
 
 /* One finished UDP op. For UDP_RECV, `data` points into the udp slot's `staged` buffer and stays
  * valid until the NEXT kl_lwr_udp_drain on that ctx (the backend delivers it inline before then).
- * `life` is the stable-liveness token (KlDgramLife*) the op retained at post; the drain TRANSFERS it
+ * `life` is the stable-liveness token (KlCompLife*) the op retained at post; the drain TRANSFERS it
  * to the completion event (ev->life), so the backend recovers the owner through the token and never
- * dereferences the possibly-freed transport owner. See src/datagram_life.h + docs/contracts/datagram.md §6. */
+ * dereferences the possibly-freed transport owner. See src/completion_life.h + docs/contracts/datagram.md §5. */
 typedef struct {
     KlLwrUdpKind kind;
-    void        *life;        /* KlDgramLife*: token ref transferred op → event */
+    void        *life;        /* KlCompLife*: token ref transferred op → event */
     const void  *data;        /* UDP_RECV: datagram payload (in the slot's staged buffer) */
     size_t       len;         /* UDP_RECV: payload len / UDP_SEND: bytes sent */
     int          truncated;   /* UDP_RECV: 1 if the datagram was truncated to the buffer */
@@ -149,7 +149,7 @@ int   kl_lwr_udp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 uint16_t kl_lwr_udp_local_port(void *pcb);
 /* Arm ONE recv on a udp pcb (wires udp_recv on first call), taking a `life` token reference for the
  * posted op. The drain surfaces one queued datagram per armed slot as KL_LWR_DGRAM_RECV and transfers
- * the ref to it. `life` is the KlDgramLife* (opaque here). Returns 0, -1 if no slot. */
+ * the ref to it. `life` is the KlCompLife* (opaque here). Returns 0, -1 if no slot. */
 int   kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *life);
 /* Send one datagram out `pcb` to dest ip4:port (udp_sendto; ip4 NULL = ANY). Records a pending
  * KL_LWR_DGRAM_SEND (len bytes) the drain reports, taking a `life` token ref for it. Returns 0 / -1. */
@@ -160,7 +160,7 @@ void  kl_lwr_udp_close(void *lwrctx, void *pcb);
 /* Scan udp slots + emit up to `max` pending UDP_RECV/UDP_SEND records. Returns the count (>=0). */
 int   kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max);
 
-/* Cancel the armed recv for `life` (KlDgramLife*). Removes the arm (so a held datagram can no
+/* Cancel the armed recv for `life` (KlCompLife*). Removes the arm (so a held datagram can no
  * longer complete) and moves it to a CONTEXT-owned pending-terminal record that SURVIVES kl_lwr_udp_close;
  * the drain later emits ONE terminal KL_LWR_DGRAM_RECV (terminal=1) transferring the arm's token ref,
  * so a KlDatagram completion-close retires recv_inflight. No allocation. Idempotent (a second call, or a

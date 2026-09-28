@@ -9,7 +9,7 @@
  *
  *   - OBJECT-owned outbound send pool (KlDgramSlots) + the single-flight FIFO send machine (KlDgramSend);
  *   - LIFE-token-owned inbound slot (KlDgramInbound) + the serial receive machine (KlDgramRecv), held in
- *     a separately-allocated rx-holder freed by the B.6 KlDgramLife on_final (so it outlives any posted
+ *     a separately-allocated rx-holder freed by the B.6 KlCompLife on_final (so it outlives any posted
  *     op AND the caller-owned KlDgramCore);
  *   - the confirmed-detachment close coordinator (KlDgramClose) with the retirement classifier.
  *
@@ -28,7 +28,7 @@
 #include "datagram_send.h"
 #include "datagram_recv.h"
 #include "datagram_close.h"
-#include "datagram_life.h"
+#include "completion_life.h"
 
 /* Physically close the prepared fd (the provider's socket close). Invoked EXACTLY ONCE by the close
  * coordinator's backend-retirement step (after the outbound queue drains). The facade binds it to the
@@ -67,7 +67,7 @@ typedef struct {
      * handler (kl_datagram_comp_dispatch) here so the driver routes this token's completions via
      * life->dispatch(target=KlDgramCore, ev). NULL (the default / neutral-adapter tests) → the token
      * carries no dispatch and completions are driven directly (kl_dgram_core_{send,recv}_on_complete). */
-    KlDgramDispatchFn dispatch;
+    KlCompLifeDispatchFn dispatch;
     /* Final PRE-ADOPTION hook. Called ONCE, as the LAST fallible step, only after EVERY core
      * allocation has succeeded and immediately before the fd is adopted. Returns 0 to commit (fd
      * adopted) or non-0 to abort: the core then unwinds every prepared allocation and returns -1 WITHOUT
@@ -83,7 +83,7 @@ typedef struct {
  * recv op's storage outlives the (caller-owned) core. */
 typedef struct KlDgramCoreRx {
     KlAllocator   *alloc;
-    KlDgramLife   *life;       /* back-ref (the token that owns THIS holder) */
+    KlCompLife   *life;       /* back-ref (the token that owns THIS holder) */
     KlDgramInbound inbound;
     KlDgramRecv    recv;
 } KlDgramCoreRx;
@@ -100,7 +100,7 @@ typedef struct KlDgramCore {   /* tagged so <keel/datagram_detail.h> can forward
     KlDgramClose   close;
     /* life-owned rx holder (inbound + recv), pinned by `life` */
     KlDgramCoreRx *rx;
-    KlDgramLife   *life;
+    KlCompLife   *life;
     /* physical fd close, driven once by the coordinator's backend-retirement step */
     KlDgramCloseTransportFn close_transport; void *transport_ctx;
     int            fd_closed;
@@ -202,13 +202,13 @@ KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);
 
 /* The B.6 stable-liveness token. A completion backend adapter RETAINS one ref for EVERY posted
  * datagram op (recv AND send alike, uniform with pollcomp/io_uring/IOCP/EFI) and releases it at
- * that op's terminal completion (kl_dgram_life_retain/_release). The token carries operation-identity
+ * that op's terminal completion (kl_comp_life_retain/_release). The token carries operation-identity
  * / owner-lifetime for both directions; that a send's PAYLOAD lives in the object-owned outbound pool
  * (copy-before-accept) is a SEPARATE concern and does not exempt a send from the token. A QUARANTINED
  * op (recv or send) intentionally never releases its ref, so on_final (which frees the life-owned rx
  * storage) is deferred until that ref is reclaimed. Capture the pointer at POST time (it stays valid
  * via the refcount); it returns NULL once detached. */
-KlDgramLife *kl_dgram_core_life(KlDgramCore *core);
+KlCompLife *kl_dgram_core_life(KlDgramCore *core);
 
 /* Free the OBJECT-owned parts (outbound pool + send + close) and drop the owner life ref (its final
  * release runs on_final → frees the rx holder + inbound). REFUSED with -1 before CLOSED. */

@@ -509,6 +509,9 @@ jobs:
       - name: Named-pipe seam gate (pipe I/O overlapped + confined; never on the socket axis)
         run: make check-pipe-seam
 
+      - name: Stale-name gate (completion-lifetime token keeps its transport-neutral name)
+        run: make check-no-dgram-life
+
       - name: Documentation-reference gate (living-architecture doc links resolve)
         run: make check-doc-refs
 

@@ -18,7 +18,7 @@
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
 #include "completion.h"          /* the abstract axis this TU implements */
-#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
+#include "completion_life.h"       /* stable-liveness token for completion ops (neutral) */
 #include "completion_pipe.h"     /* named-pipe ReadFile/WriteFile seam (this TU implements it) */
 
 #include "sockcompat.h"
@@ -102,7 +102,7 @@ typedef struct KlIocpOp {
      * so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is in
      * flight). The recv buffer + capacity + pktinfo flag are COPIED at post (buf/buflen/dg_pktinfo) so
      * the completion touches only the op; op_sock already carries the socket (CancelIoEx / GetOverlappedResult). */
-    KlDgramLife  *life;
+    KlCompLife  *life;
     void         *buf;                         /* UDP_RECV: receive buffer (pinned by `life`) */
     size_t        buflen;                      /* UDP_RECV: capacity at post time */
     int           dg_pktinfo;                  /* UDP_RECV: capture pktinfo local addr */
@@ -412,7 +412,7 @@ static void iocp_op_free(KlIocpOp *op) {
      * branch cancel + free the op) releases it here. Its final release frees the receive storage. The
      * drain transfers the ref to the event and NULLs op->life first, so an emitted op does not
      * double-release. Non-datagram ops carry op->life == NULL. */
-    if (op->life) kl_dgram_life_release(op->life);
+    if (op->life) kl_comp_life_release(op->life);
     /* send_total is the sendbuf allocation size for WRITE/SENDFILE (the send total, or 1 when
      * total==0, the alloc is `total ? total : 1`). Fall back to 1 for a zero-length send so a
      * sized custom allocator frees the right bucket. Receives no longer own a buffer. */
@@ -721,7 +721,7 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
 /* Cancel the outstanding datagram op(s) of `kind` for `life`: CancelIoEx the matching
  * overlapped(s); the forced ERROR_OPERATION_ABORTED completion drains + releases the token ref (the
  * same mechanism the per-fd cancel relies on). Idempotent; NO ref release here. */
-static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgramOpKind kind) {
     KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;
     for (KlIocpOp *o = st->ops; o; o = o->g_next)
@@ -850,7 +850,7 @@ int kl_comp_pipe_post(struct KlEventCtx *ctx, const KlPipeIoOp *pop) {
     return 0;
 }
 
-void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life, KlPipeOpKind kind) {
+void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlCompLife *life, KlPipeOpKind kind) {
     if (!kl_comp_pipe_available(ctx) || !life) return;
     KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_PIPE_OP_WRITE) ? KL_IOCP_PIPE_WRITE : KL_IOCP_PIPE_READ;
@@ -866,7 +866,7 @@ void kl_comp_pipe_cancel(struct KlEventCtx *ctx, const struct KlDgramLife *life,
 /* Classify retirement (§4.3): a matching op still in the global registry is PENDING (its aborted
  * completion has not yet drained + released); none tracked means it physically retired. IOCP never
  * quarantines: a posted overlapped always yields a completion the drain reaps. */
-static KlDgramRetireResult iocp_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+static KlDgramRetireResult iocp_comp_retire_dgram(struct KlEventCtx *ctx, KlCompLife *life,
                                                   KlDgramOpKind kind, int *transport_err) {
     const KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;

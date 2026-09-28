@@ -19,7 +19,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx + kl_event_dispatch */
 #include <keel/timer.h>          /* kl_timer_fire: due timers on the completion tick */
 #include "completion.h"          /* the abstract completion axis (KlCompletionEvent) */
-#include "datagram_life.h"       /* KlDgramLife dispatch: type-safe datagram completion routing */
+#include "completion_life.h"       /* KlCompLife dispatch: type-safe token routing (datagram + pipe) */
 #include "completion_io.h"           /* kl_comp_run (the seam this TU defines) */
 
 #define KL_COMP_MAX_EVENTS 64
@@ -56,19 +56,19 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             break;
         /* Datagram completions → the owner named by the token: type-safe routing via the
          * token's own dispatch handler (KlDatagram's kl_datagram_comp_dispatch), NOT a ctx-global hook or an
-         * untyped downcast of kl_dgram_life_target(). A dead token yields a NULL target the handler
+         * untyped downcast of kl_comp_life_target(). A dead token yields a NULL target the handler
          * drops; a token with no handler (or ev->life NULL) still has its transferred ref released. */
         case KL_COMP_DGRAM_RECV:
         case KL_COMP_DGRAM_SEND:
         /* Named-pipe completions route the same way: the pipe stream's token names its handler. */
         case KL_COMP_PIPE_READ:
         case KL_COMP_PIPE_WRITE: {
-            KlDgramLife *life = ev[i].life;
-            KlDgramDispatchFn d = life ? kl_dgram_life_dispatch(life) : (KlDgramDispatchFn)0;
+            KlCompLife *life = ev[i].life;
+            KlCompLifeDispatchFn d = life ? kl_comp_life_dispatch(life) : (KlCompLifeDispatchFn)0;
             if (d)
-                d(kl_dgram_life_target(life), &ev[i]);   /* handler releases life after dispatch (iff !retain_life) */
+                d(kl_comp_life_target(life), &ev[i]);   /* handler releases life after dispatch (iff !retain_life) */
             else if (life && !ev[i].retain_life)
-                kl_dgram_life_release(life);              /* no handler → drop the transferred ref. A
+                kl_comp_life_release(life);              /* no handler → drop the transferred ref. A
                                                           * borrowed quarantine ref (retain_life=1) is NOT
                                                           * released here; same rule as the owner handlers. */
             break;
