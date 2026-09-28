@@ -115,7 +115,22 @@ typedef void (*KlListenerCloseFn)(void *ctx);
  * connection is NOT a socket (a Windows Named Pipe instance), the adapter that performed the accept
  * materializes its own connection object and hands THAT over instead: `conn` is that adapter's object,
  * opaque to the listener and typed by the adapter at both ends (it is never a native handle routed
- * through here). A listener uses exactly ONE family, fixed at init. */
+ * through here). A listener uses exactly ONE family, fixed at init.
+ *
+ * OWNERSHIP of a `conn` passed to kl_listener_on_accepted_obj (the fd family is identical, with fd for
+ * conn). From that call on, the listener owns it and releases it EXACTLY ONCE, by one of:
+ *   - on_accept_obj(ctx, conn, lease): the listener is LISTENING and this retires a posted accept.
+ *     Ownership of conn and the lease passes to the callback, unconditionally: there is no refusal
+ *     return, so an owner that does not want the connection releases it itself. The callback may
+ *     reentrantly close the listener; conn stays the owner's, and detachment waits until it returns.
+ *   - dispose_obj(ctx, conn): nothing was posted (a spurious accept), or the listener is CLOSING /
+ *     CLOSED. The accept's credit is returned first. The callback may reentrantly close the
+ *     listener; detachment waits until it returns.
+ * A conn handed to on_accept_obj is never disposed later, whatever happens next (a refill whose
+ * arm fails, a close, a teardown). A synchronous accept from inside arm_accept follows the same rules
+ * (the pump trampoline bounds the stack). The ONE exception: calling kl_listener_on_accepted_obj on a
+ * listener initialised with the FD family is a contract violation. The call retires as a failed
+ * accept and conn stays the caller's (neither callback runs). */
 
 /** An accepted connection object: ownership of `conn` and the lease transfer to the callback, with
  *  the same exactly-once rules as KlListenerAcceptFn. */

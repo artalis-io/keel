@@ -109,11 +109,20 @@ socket path pays nothing for it.
 
 ## 7. Verification record (2026-09-28, Windows 11, local)
 
-- **`KlListener` object family**, `tests/test_listener.c` (`listener_obj`, 6 new cases, 47 in the suite):
+- **`KlListener` object family**, `tests/test_listener.c` (`listener_obj`, 10 new cases, 51 in the suite):
   - init accepts exactly one complete family (neither, both, half and crossed halves are rejected);
   - handoff with lease; teardown disposal with the credit returned; spurious-accept disposal;
   - cross-family entry refused as a failed accept with no credit leak;
-  - a completion window of objects behaves identically to fds.
+  - a completion window of objects behaves identically to fds;
+  - the ownership edges, each run through the object hooks: a run of 40 synchronous inline accepts
+    (each handed off once); an owner closing the listener inside `on_accept_obj` (the object stays
+    the owner's; detachment waits for the callback to return); a refill whose arm fails after a
+    handoff (the handed-off object is never disposed, and every credit is accounted for); and a
+    close from inside `dispose_obj` (detachment deferred, then exactly once).
+
+  The ownership contract is stated in `listener.h` above `KlListenerAcceptObjFn`. After a
+  `kl_listener_on_accepted_obj`, the listener releases the object exactly once, through
+  `on_accept_obj` or `dispose_obj`, and a handed-off object is never disposed later.
 
   The 41 pre-existing fd-family cases are unchanged and pass.
 - **Named Pipe listener**, `tests/test_pipe_stream.c` (11 new cases, 32 in the suite; MinGW and MSVC on
@@ -132,11 +141,14 @@ socket path pays nothing for it.
 
   Every lifetime case checks allocator balance. The refusal on non-IOCP engines is asserted in the
   all-engines case.
-- **The tests can fail.** Five mutations, each reverted:
+- **The tests can fail.** Six mutations, each reverted:
   - the name not claimed → the in-use test failed;
   - `ERROR_PIPE_CONNECTED` not treated as success → the race test failed;
   - a failed accept leaking its instance → four balance and close tests failed;
   - `KlListener` handing off an object while closing → the object teardown test failed, and two
     pre-existing fd-family tests failed too (one shared path);
-  - the DACL also granting Everyone → the DACL test failed.
+  - the DACL also granting Everyone → the DACL test failed;
+  - no detachment deferral while a callback is on the stack → both reentrant-close ownership tests
+    failed. The accept-side test was first written with a second accept still posted, so it could not
+    detect this; it was strengthened to a single in-flight accept.
 - **`check-pipe-seam` R2** now also requires `ConnectNamedPipe` to be overlapped.
