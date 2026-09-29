@@ -608,6 +608,39 @@ UTEST_F(pipe_iocp, cancel_with_write_pending) {
     CloseHandle(srv);
 }
 
+/* Graceful close after a terminal write failure, over a named pipe (the completion path): a WriteFile
+ * is in flight against a tiny quota with more bytes queued behind it, the client begins a GRACEFUL
+ * close, and the server disconnects. The failed write makes the queue undeliverable, so the close
+ * must progress (exactly once) instead of waiting for bytes that can never go out. The socket
+ * (readiness) counterpart is test_stream_close_live.c. */
+UTEST_F(pipe_iocp, graceful_close_after_peer_disconnect_with_queue_detaches) {
+    NEED_IOCP();
+    char name[128]; pipe_name(name, sizeof name, "close-after-fail");
+    HANDLE srv = server_create(name, 1, 1024, NULL);   /* tiny quota, never read */
+    ASSERT_TRUE(srv != INVALID_HANDLE_VALUE);
+    mark_baseline();
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 0, 512 * 1024);
+    KlPipeStream *p = NULL;
+    ASSERT_EQ(kl_pipe_connect(&utest_fixture->ev, name, &cfg, &p), KL_PIPE_OK);
+    ASSERT_TRUE(server_accept(srv));
+    KlStream *st = kl_pipe_stream(p);
+    static char big[200 * 1024];
+    ASSERT_EQ(kl_stream_write(st, big, sizeof big), KL_STREAM_ACCEPTED);   /* in flight, stuck */
+    pump_for(&utest_fixture->ev, 50);
+    ASSERT_EQ(kl_stream_write(st, big, sizeof big), KL_STREAM_ACCEPTED);   /* queued behind it */
+    ASSERT_EQ(kl_stream_close_begin(st), 0);                              /* GRACEFUL */
+    pump_for(&utest_fixture->ev, 50);
+    ASSERT_EQ(r.closes, 0);                           /* still delivering (the peer is just slow) */
+    DisconnectNamedPipe(srv);                         /* the peer goes away: the write fails */
+    ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_closed, &r, 5000));
+    pump_for(&utest_fixture->ev, 50);
+    ASSERT_EQ(r.closes, 1);                           /* exactly once */
+    kl_pipe_free(p);
+    ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_balanced, NULL, 5000));
+    CloseHandle(srv);
+}
+
 /* Graceful close drains queued output, then waits for the outstanding read to retire (here: the
  * server reads everything and disconnects). on_close fires once; nothing is delivered after it. */
 UTEST_F(pipe_iocp, graceful_close_drains_output) {

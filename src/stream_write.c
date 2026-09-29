@@ -102,7 +102,11 @@ KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
     }
 
     /* Readiness mode: reserve + direct-send the prefix + buffer the remainder (atomic). */
-    return map_drain(kl_drain_reserve_write(&s->wq, data, len));
+    KlDrainWriteStatus ds = kl_drain_reserve_write(&s->wq, data, len);
+    /* A writer failure is terminal for the write side, exactly as a failed completion send is:
+     * record it so later writes report it and a graceful close does not wait on the queue. */
+    if (ds == KL_DRAIN_WERROR) s->wq_err = 1;
+    return map_drain(ds);
 }
 
 int kl_stream_flush(KlStream *s) {
@@ -113,8 +117,11 @@ int kl_stream_flush(KlStream *s) {
     if (s->submit_fn || !s->wq.write_fn) return -1;
     int r = kl_drain_flush(&s->wq);   /* 0 drained / 1 pending / -1 error */
     /* Readiness graceful close drains via successive writable flushes; a fully-drained queue means
-     * the write side is retired; notify so close can finalize (no-op unless closing). */
-    if (r == 0 && s->on_retire) s->on_retire(s);
+     * the write side is retired; notify so close can finalize (no-op unless closing). A writer
+     * failure is terminal: record it (sticky, like the completion path) and notify too, because
+     * the queue can no longer drain and must stop holding a graceful close. */
+    if (r < 0) s->wq_err = 1;
+    if (r != 1 && s->on_retire) s->on_retire(s);
     return r;
 }
 

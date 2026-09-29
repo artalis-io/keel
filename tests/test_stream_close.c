@@ -34,6 +34,7 @@ typedef struct {
     int  cancel_send_reentrant;  /* cancel_send reentrantly calls kl_stream_cancel(s) */
     int  closed_at_cancel;       /* snapshot of `closed` observed from inside a cancel hook */
     int  wblock;                 /* readiness writer: 1 = would-block (buffer), 0 = consume */
+    int  wfail;                  /* readiness writer: 1 = fatal error (-1): the peer is gone */
     size_t wsent;
 } LC;
 
@@ -47,7 +48,8 @@ static int  lc_submit(void *ctx, const char *d, size_t n) {
     (void)d; (void)n; LC *l = ctx; l->submit_calls++; return 0;   /* submitted; test drives completion */
 }
 static kl_ssize_t lc_write(const char *d, size_t n, void *ctx) {
-    (void)d; LC *l = ctx; if (l->wblock) return 0; l->wsent += n; return (kl_ssize_t)n;
+    (void)d; LC *l = ctx; if (l->wfail) return -1; if (l->wblock) return 0;
+    l->wsent += n; return (kl_ssize_t)n;
 }
 static int lc_cancel_recv(void *ctx) {
     LC *l = ctx; l->cancel_recv_calls++;
@@ -188,6 +190,117 @@ UTEST(stream_close, readiness_recv_disarmed_then_flush_retires_send) {
     l.wblock = 0;                                      /* socket writable now */
     ASSERT_EQ(kl_stream_flush(&s), 0);                 /* drains fully */
     ASSERT_EQ(l.closed, 1);                            /* write side retired → detached */
+    mk_free(&s, buf);
+}
+
+/* ── A terminal write failure must not strand a graceful close ──────────────────────────────
+ * Once the write side has failed terminally, queued-but-undelivered bytes can never go out, so they
+ * cannot hold a graceful close open. on_close still fires EXACTLY ONCE, and still only after every
+ * physically outstanding operation (a posted recv, an in-flight send) has retired. */
+
+UTEST(stream_close, completion_write_failure_with_queue_behind_detaches) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_submit(&s, lc_submit, &l, /*copying=*/0), 0);  /* referencing */
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    ASSERT_EQ((int)kl_stream_write(&s, "AAAA", 4), KL_STREAM_ACCEPTED);   /* batch1 in flight */
+    ASSERT_EQ((int)kl_stream_write(&s, "BBBB", 4), KL_STREAM_ACCEPTED);   /* batch2 queued behind */
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(l.closed, 0);                            /* the send is still physically out */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1); /* batch1 FAILS: the write side is dead */
+    ASSERT_EQ(l.submit_calls, 1);                      /* batch2 is never attempted */
+    ASSERT_EQ(l.closed, 1);                            /* undeliverable queue no longer blocks */
+    ASSERT_EQ(kl_stream_is_detached(&s), 1);
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, completion_copying_write_failure_with_queue_behind_detaches) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_submit(&s, lc_submit, &l, /*copying=*/1), 0);  /* backend copied batch1 */
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    ASSERT_EQ((int)kl_stream_write(&s, "AAAA", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)kl_stream_write(&s, "BBBB", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
+    ASSERT_EQ(l.closed, 1);
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, completion_write_failure_before_close_detaches_on_begin) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_submit(&s, lc_submit, &l, 0), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    ASSERT_EQ((int)kl_stream_write(&s, "AAAA", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)kl_stream_write(&s, "BBBB", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1); /* fails while still OPEN */
+    ASSERT_EQ((int)kl_stream_write(&s, "C", 1), KL_STREAM_ERROR);   /* sticky, as before */
+    ASSERT_EQ(l.closed, 0);                            /* nobody asked to close yet */
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(l.closed, 1);                            /* nothing retirable is left: detach now */
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, readiness_flush_failure_with_queue_detaches) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_writer(&s, lc_write, &l), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    l.wblock = 1;                                      /* bytes buffered */
+    ASSERT_EQ((int)kl_stream_write(&s, "queued", 6), KL_STREAM_ACCEPTED);
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(l.closed, 0);                            /* graceful: waiting to drain */
+    l.wblock = 0; l.wfail = 1;                         /* the peer is gone: the writer fails */
+    ASSERT_EQ(kl_stream_flush(&s), -1);
+    ASSERT_EQ(l.closed, 1);                            /* delivery impossible → close progresses */
+    ASSERT_EQ(kl_stream_flush(&s), -1);                /* later flushes stay failed ... */
+    ASSERT_EQ(l.closed, 1);                            /* ... and never re-fire on_close */
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, readiness_inline_write_failure_then_close_detaches) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_writer(&s, lc_write, &l), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    l.wblock = 1;
+    ASSERT_EQ((int)kl_stream_write(&s, "first", 5), KL_STREAM_ACCEPTED);   /* buffered */
+    l.wblock = 0; l.wfail = 1;
+    ASSERT_EQ(kl_stream_flush(&s), -1);                /* fails while OPEN */
+    ASSERT_EQ((int)kl_stream_write(&s, "x", 1), KL_STREAM_ERROR);   /* now sticky in readiness too */
+    ASSERT_EQ(l.closed, 0);
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(l.closed, 1);
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, write_failure_still_waits_for_posted_recv) {
+    /* The failure releases the QUEUE, not physical retirement: a posted recv still holds close. */
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_read_init(&s, /*completion=*/1, lc_deliver, lc_arm, NULL, &l), 0);
+    ASSERT_EQ(kl_stream_set_submit(&s, lc_submit, &l, 0), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    ASSERT_EQ(kl_stream_read_start(&s), 0);            /* recv posted */
+    ASSERT_EQ((int)kl_stream_write(&s, "AAAA", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)kl_stream_write(&s, "BBBB", 4), KL_STREAM_ACCEPTED);
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
+    ASSERT_EQ(l.closed, 0);                            /* the recv is still physically out */
+    kl_stream_on_recv(&s, 0, 0);                       /* it retires */
+    ASSERT_EQ(l.closed, 1);                            /* exactly once, only now */
+    mk_free(&s, buf);
+}
+
+UTEST(stream_close, healthy_graceful_close_still_drains) {
+    /* The correction must not weaken the normal case: no failure, so the queue is still drained. */
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_writer(&s, lc_write, &l), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    l.wblock = 1;
+    ASSERT_EQ((int)kl_stream_write(&s, "queued", 6), KL_STREAM_ACCEPTED);
+    ASSERT_EQ(kl_stream_close_begin(&s), 0);
+    ASSERT_EQ(kl_stream_flush(&s), 1);                 /* would-block: still pending */
+    ASSERT_EQ(l.closed, 0);                            /* NOT detached: delivery still possible */
+    l.wblock = 0;
+    ASSERT_EQ(kl_stream_flush(&s), 0);
+    ASSERT_EQ(l.wsent, (size_t)6);                     /* every byte went out first */
+    ASSERT_EQ(l.closed, 1);
     mk_free(&s, buf);
 }
 

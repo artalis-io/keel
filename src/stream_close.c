@@ -31,12 +31,16 @@ static void stream_detach(KlStream *s) {
 /* Are both operations physically retired? The receive is retired when no recv is armed/posted
  * (recv_inflight == 0); the send when no async send is in flight (send_inflight == 0). For a
  * GRACEFUL close we additionally require the write queue to have fully drained (nothing left to
- * send); an ABORTIVE close does not wait on the queue; queued-but-unsubmitted bytes are the
- * stream's own memory, freed by the owner at on_close. */
+ * send) WHILE DELIVERY IS STILL POSSIBLE. Once the write side has failed terminally (wq_err, sticky
+ * in both modes), the queued bytes can never go out, so they stop holding the close; that is the
+ * same outcome as an ABORTIVE close, which never waits on the queue. Either way queued-but-unsent
+ * bytes are the stream's own memory, freed by the owner after on_close. Physical retirement of any
+ * outstanding recv/send is still required first: a failure releases the queue, never an op. */
 static int stream_fully_retired(const KlStream *s) {
     if (s->recv_inflight) return 0;                    /* a receive op is still outstanding */
     if (s->send_inflight) return 0;                    /* a send op is still outstanding */
-    if (!s->close_abort && kl_stream_write_pending(s) > 0) return 0; /* graceful: drain first */
+    if (!s->close_abort && !s->wq_err && kl_stream_write_pending(s) > 0)
+        return 0;                                      /* graceful: drain first, while it can */
     return 1;
 }
 
