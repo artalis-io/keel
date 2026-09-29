@@ -38,7 +38,9 @@ one mechanism serve opposite semantics (see the `KlAsyncOp` doc in `async.h`).
    the owner has torn down.
 4. **No silent loss.** `kl_http_server_free()` cancels every still-pending op
    (`kl_async_cancel` on each), so `on_cancel` runs and the caller's async
-   context is always cleaned up.
+   context is always cleaned up. This guarantee is specific to `KlAsyncOp`, which the server
+   cancels explicitly **before** it frees its own loop. Freeing an event loop by itself delivers no
+   callbacks to anything still attached (see `kl_event_ctx_free` in `event_ctx.h`).
 5. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the
    same `KlAsyncOp` struct may back a fresh suspension after a prior terminal
    (e.g. a handler that yields repeatedly).

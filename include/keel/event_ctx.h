@@ -104,7 +104,37 @@ int  kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
                           const KlEventProvider *event_provider);
 
 /**
- * @brief Free all watchers and close the event loop.
+ * @brief Free all watchers and timers and close the event loop.
+ *
+ * DELIVERS NO FURTHER CALLBACK to anything attached to the loop:
+ *   - a pending timer is discarded without firing (even one already due);
+ *   - a registered watcher is removed without its callback (even if its handle is already ready);
+ *   - on a completion engine (IOCP / io_uring / pollcomp), every posted operation is cancelled and
+ *     reclaimed without a terminal event, so an object waiting on one never sees its on_data
+ *     terminal, on_close, done callback or detachment.
+ * Everything the loop itself allocated is freed. On the readiness engines, IOCP and pollcomp the free
+ * also leaves no registration or operation referencing an attached object's storage (each is removed,
+ * or cancelled and dequeued, before the call returns). What it cannot do is finish those objects'
+ * lifecycles, which is why the order below is the caller's job.
+ *
+ * ORDER, the caller's side of the contract:
+ *   1. Release every object built on this context first, each through its own close/free. For an
+ *      object with a confirmed-detachment close (KlDatagram, a KlStream-based transport such as a
+ *      KlPipeStream, KlListener and the pipe listener), drive the loop until its close callback
+ *      has fired, because detachment needs the loop.
+ *   2. Then call kl_event_ctx_free, and never from inside a callback the loop is dispatching (a
+ *      debug build asserts; otherwise the call is refused and does nothing).
+ *
+ * After the free, calling into an object that was attached to this context is UNDEFINED, with these
+ * exceptions:
+ *   - kl_timer_cancel returns -1 (nothing is pending);
+ *   - kl_watcher_del and kl_watcher_mod do nothing.
+ * In particular, on a completion engine, closing a KlDatagram, destroying the built-in DNS resolver,
+ * and cancelling or freeing an async HTTP client that is connecting or owns its resolver all reach the
+ * released loop. The ctx storage itself may be re-initialised with kl_event_ctx_init.
+ *
+ * KlAsyncOp is different only because kl_http_server_free cancels every suspended op (on_cancel runs)
+ * before it frees the server's own loop.
  */
 void kl_event_ctx_free(KlEventCtx *ctx);
 

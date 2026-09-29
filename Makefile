@@ -620,7 +620,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_ty
                    http_client_proxy http_client_stream http_connection http_cors http_integration \
                    http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
                    http_response http_router http_server_integration http_server_state http_server_stats \
-                   http_sse http_tls io_status kl_cstr kl_cstr_builtin listener peer_addr peer_cert pipe_stream \
+                   http_sse http_tls io_status kl_cstr kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream \
                    proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
                    socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_read stream_transport \
                    thread_pool timeout timer tls tls_integration tls_vtable transport_public \
@@ -660,7 +660,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free 
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
                         http_server_state http_server_stats http_sse http_tls io_status iocp_engine kl_cstr \
-                        kl_cstr_builtin listener peer_addr peer_cert pipe_stream proxy_protocol read_flow_control \
+                        kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream proxy_protocol read_flow_control \
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
                         stream_close stream_read stream_single_shot thread_pool timeout timer tls \
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
@@ -1031,7 +1031,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch completion_life datagram_live \
+IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch completion_life datagram_live loop_teardown \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
                           dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
@@ -1086,7 +1086,7 @@ COMPLETION_EXCLUDE ?=
 #   make print-pollcomp-suites
 # The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
-POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch completion_life \
+POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch completion_life loop_teardown \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \

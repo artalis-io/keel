@@ -348,6 +348,12 @@ removed UDP object's silent-discard free + the completion UAF window (audit §5)
 
 ---
 
+### Loop teardown
+
+Confirmed detachment needs the loop, so a `KlDatagram` is closed and driven to `on_close` before
+`kl_event_ctx_free`. On a completion engine, closing a datagram after its loop was freed reaches the
+released backend and is undefined. The general rule is on `kl_event_ctx_free` in `event_ctx.h`.
+
 ## 7. Connected vs unconnected (decision #8)
 
 - Unconnected is the baseline (the DNS resolver, and any unconnected datagram server, need
