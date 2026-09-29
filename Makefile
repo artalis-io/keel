@@ -609,7 +609,7 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op cross_module \
+WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free cloexec fd_type_convention compress compress_vtable connect_op cross_module \
                    datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
@@ -648,7 +648,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
-WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free fd_type_convention compress compress_vtable connect_op \
+WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free cloexec fd_type_convention compress compress_vtable connect_op \
                         cross_module datagram_batch completion_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
@@ -1031,7 +1031,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn async compress cross_module datagram_batch completion_life datagram_live loop_teardown \
+IOURING_TEST_SUITES = allocator alpn async cloexec compress cross_module datagram_batch completion_life datagram_live loop_teardown \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
                           dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
@@ -1086,7 +1086,7 @@ COMPLETION_EXCLUDE ?=
 #   make print-pollcomp-suites
 # The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
-POLLCOMP_ELIGIBLE ?= allocator alpn async compress cross_module datagram_batch completion_life loop_teardown \
+POLLCOMP_ELIGIBLE ?= allocator alpn async cloexec compress cross_module datagram_batch completion_life loop_teardown \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
@@ -1582,6 +1582,12 @@ check-pipe-seam:
 # names in code and living docs (docs/archive keeps them as history). Self-canaried.
 check-no-dgram-life:
 	@sh tools/check_no_dgram_life.sh
+
+# Close-on-exec gate: every descriptor Keel creates is close-on-exec, so an embedder that spawns
+# children never hands them Keel's own event-loop, wakeup or splice descriptors. Covers creation
+# sites tests/test_cloexec.c cannot reach at run time (lazy / rare paths). Self-canaried.
+check-cloexec:
+	@sh tools/check_cloexec.sh
 
 check-tier1-boundary:
 	@bad=0; \
@@ -2689,7 +2695,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-pipe-seam check-no-dgram-life check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-backend-isolation check-state-dispatch check-state-dispatch-selftest FORCE version-sync check-version-drift release check-release-artifacts check-release-artifacts-strict check-workflows rc-validate check-install check-installed-consumer check-public-headers check-public-coverage check-allocator-boundaries check-sockaddr-neutral check-tier1-boundary check-pipe-seam check-no-dgram-life check-cloexec check-doc-refs check-test-layout check-no-kludp check-no-httplegacy check-substrate-purity check-protocol-no-integration check-integration-seam check-protocol-home check-old-layout check-no-milestones check-no-em-dash check-no-eventloop-fd check-no-fsnode-in-protocols check-site freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench bench-build \
         smoke-completion-inject smoke-completion-inject-asan

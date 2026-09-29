@@ -7,6 +7,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
+  inherited by every child an embedder spawned:
+  - the epoll instance (`epoll_create1(0)`);
+  - the run-loop / thread-pool wakeup pipe (`pipe()`), both ends;
+  - io_uring's splice pipe (`pipe2(O_NONBLOCK)`);
+  - on Windows, the wakeup loopback socket pair (Winsock sockets are inheritable by default).
+
+  A leaked pipe end is more than clutter: it can keep a pipe open in a child that should see EOF.
+  All four are now close-on-exec (`EPOLL_CLOEXEC`, `FD_CLOEXEC`, `O_CLOEXEC`), or non-inheritable on
+  Windows. The kqueue descriptor, which `fork` never inherits, is marked too, so the rule has no
+  exceptions: every descriptor or handle Keel creates is close-on-exec. The new `test_cloexec` checks
+  it generically: every descriptor that appears across creating a loop, a wakeup, a thread pool and
+  a datagram socket must be close-on-exec, and on POSIX an exec'd shell must be unable to use any of
+  them. It runs on every engine set.
+
 - **A graceful close could hang forever after a write failure.** `kl_stream_close_begin` waited for
   the write queue to drain, but after a terminal write failure queued bytes can never go out. Two
   cases:

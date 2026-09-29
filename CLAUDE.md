@@ -496,6 +496,7 @@ make check-substrate-purity        # substrate never includes a protocol header 
 make check-protocol-no-integration # protocols never include an integration header (gate G2)
 make check-integration-seam        # integrations reach core only via include/keel/ or the frozen seam (gate G3)
 make check-sockaddr-neutral        # no compile-time socket/address ABI assumptions
+make check-cloexec                 # every descriptor Keel creates is close-on-exec (+ -selftest)
 make check-no-dgram-life           # the completion-lifetime token (KlCompLife) keeps its transport-neutral name
 make check-pipe-seam               # Windows Named Pipe I/O stays overlapped, in its 2 mechanics TUs, off the socket axis (+ -selftest)
 make check-readiness-identity      # readiness registrations use &conn->stream (+ -selftest)

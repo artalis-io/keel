@@ -20,6 +20,14 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
     if (pipe(fds) < 0)
         return -1;
 
+    /* Both ends close-on-exec: this pipe is Keel's own, and an embedder that spawns children must
+     * not hand it to them. pipe2(O_CLOEXEC) is not portable (macOS lacks it), so set the flag right
+     * after creation, as the socket provider does for sockets. */
+    for (int i = 0; i < 2; i++) {
+        int fdf = fcntl(fds[i], F_GETFD, 0);
+        if (fdf >= 0) (void)fcntl(fds[i], F_SETFD, fdf | FD_CLOEXEC);
+    }
+
     /* Read end non-blocking: the drain must never stall the event loop. */
     int flags = fcntl(fds[0], F_GETFL, 0);
     if (flags >= 0)

@@ -2,6 +2,7 @@
 #include "event_builtin.h"
 #include "event_caps.h"
 #include <sys/event.h>
+#include <fcntl.h>       /* FD_CLOEXEC on the kqueue descriptor */
 #include <unistd.h>
 
 #define KL_EVENT_BATCH 256  /* internal stack buffer for kernel events */
@@ -23,6 +24,10 @@ int kl_event_init_builtin(KlEventLoop *loop) {
         kl_free(loop->alloc, st, sizeof(*st));  /* kernel-object failure: unwind exactly once */
         return -1;
     }
+    /* A kqueue is not inherited across fork(), but mark it close-on-exec anyway so the invariant has
+     * no exceptions: every descriptor Keel creates is close-on-exec. */
+    int fdf = fcntl(st->fd, F_GETFD, 0);
+    if (fdf >= 0) (void)fcntl(st->fd, F_SETFD, fdf | FD_CLOEXEC);
     loop->_backend = st;
     return 0;
 }
