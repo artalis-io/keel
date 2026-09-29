@@ -478,6 +478,55 @@ UTEST_F(pipe_iocp, large_fragmented_transfer) {
     rec_free(&r);
 }
 
+/* The generic writable-again edge over the completion path: the producer writes only while it holds
+ * a go-ahead, and gets one back only from kl_stream_on_writable. With a copying backend the queue is
+ * consumed at submit, so this also proves in-flight bytes are what hold the edge back. */
+typedef struct { int ready; int edges; } Edge;
+static void edge_writable(void *ud) { Edge *e = ud; e->ready = 1; e->edges++; }
+
+UTEST_F(pipe_iocp, producer_resumes_only_on_the_writable_edge) {
+    NEED_IOCP();
+    const size_t total = 4u << 20;
+    char name[128]; pipe_name(name, sizeof name, "edge");
+    Srv s; memset(&s, 0, sizeof s);
+    s.h = server_create(name, 1, 4096, NULL); s.mode = SRV_ECHO;
+    ASSERT_TRUE(s.h != INVALID_HANDLE_VALUE);
+    srv_start(&s);
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 4096, 16 * 1024);
+    KlPipeStream *p = NULL;
+    ASSERT_EQ(kl_pipe_connect(&utest_fixture->ev, name, &cfg, &p), KL_PIPE_OK);
+    KlStream *st = kl_pipe_stream(p);
+    ASSERT_EQ(kl_stream_read_start(st), 0);
+    Edge e = { 1, 0 };
+    ASSERT_EQ(kl_stream_on_writable(st, edge_writable, &e), 0);
+
+    char *src = malloc(total);
+    for (size_t i = 0; i < total; i++) src[i] = (char)((i * 131u + (i >> 9)) & 0xFF);
+    size_t sent = 0; int would_block = 0;
+    ULONGLONG end = GetTickCount64() + 30000;
+    while ((sent < total || r.len < total) && GetTickCount64() < end) {
+        while (e.ready && sent < total) {
+            size_t n = total - sent < 6000 ? total - sent : 6000;
+            KlStreamWriteStatus ws = kl_stream_write(st, src + sent, n);
+            if (ws == KL_STREAM_WOULD_BLOCK) { would_block++; e.ready = 0; break; }
+            ASSERT_EQ(ws, KL_STREAM_ACCEPTED);
+            sent += n;
+        }
+        (void)kl_event_ctx_run(&utest_fixture->ev, 16, 5);
+    }
+    ASSERT_EQ(sent, total);
+    ASSERT_EQ(r.len, total);
+    ASSERT_EQ(memcmp(r.buf, src, total), 0);
+    ASSERT_GT(would_block, 10);
+    ASSERT_EQ(e.edges, would_block);      /* each block resumed by exactly one edge */
+    free(src);
+    kl_pipe_free(p);
+    pump_for(&utest_fixture->ev, 50);
+    srv_join(&s);
+    rec_free(&r);
+}
+
 UTEST_F(pipe_iocp, server_orderly_disconnect_delivers_data_then_eof) {
     NEED_IOCP();
     char name[128]; pipe_name(name, sizeof name, "orderly");

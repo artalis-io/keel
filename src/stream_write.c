@@ -33,6 +33,10 @@ int kl_stream_write_init(KlStream *s, KlAllocator *alloc, size_t capacity) {
     s->send_inflight    = 0;
     s->inflight_len     = 0;
     s->inflight_copying = 0;
+    s->wr_blocked       = 0;
+    s->in_writable      = 0;
+    s->on_writable      = NULL;
+    s->writable_ctx     = NULL;
     return 0;
 }
 
@@ -58,6 +62,34 @@ int kl_stream_set_submit(KlStream *s, KlStreamSubmitFn fn, void *ctx, int copyin
     s->submit_ctx     = ctx;
     s->submit_copying = copying ? 1 : 0;
     return 0;
+}
+
+int kl_stream_on_writable(KlStream *s, KlStreamWritableFn fn, void *ctx) {
+    if (!s || !s->wq_inited) return -1;
+    s->on_writable  = fn;
+    s->writable_ctx = ctx;
+    if (!fn) s->wr_blocked = 0;
+    return 0;
+}
+
+/* The writable edge, evaluated at a physical progress point AFTER all state is updated. Returns 1
+ * (and disarms) when the blocked producer must be told it may write again: the total pending count,
+ * in-flight bytes included, is below capacity, or the write side has failed so waiting is futile.
+ * Never while closing: the close owns the stream's end. */
+static int stream_writable_edge(KlStream *s) {
+    if (!s->wr_blocked || !s->on_writable || s->wq_closing) return 0;
+    if (!s->wq_err && kl_stream_write_pending(s) >= s->wq.max_size) return 0;
+    s->wr_blocked = 0;
+    return 1;
+}
+
+/* Run the edge callback with close finalization deferred (stream_close.c reads in_writable): a close
+ * begun from inside it must not detach the stream, and so let its owner free it, while this frame is
+ * still using it. The caller's trailing on_retire performs the deferred finalize. */
+static void stream_fire_writable(KlStream *s) {
+    s->in_writable++;
+    s->on_writable(s->writable_ctx);
+    s->in_writable--;
 }
 
 /* Completion pump: if no send is in flight and the queue has bytes, submit exactly one batch.
@@ -96,7 +128,9 @@ KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
         /* Completion mode: buffer the whole write atomically (no synchronous direct send;
          * output rides the async submit), then pump one send if none is in flight. */
         KlDrainWriteStatus ds = kl_drain_reserve_buffer(&s->wq, data, len);
+        if (ds == KL_DRAIN_WOULD_BLOCK) s->wr_blocked = 1;
         if (ds != KL_DRAIN_ACCEPTED) return map_drain(ds);
+        s->wr_blocked = 0;                         /* no longer blocked; before any inline completion */
         if (stream_pump_completion(s) < 0) return KL_STREAM_ERROR;  /* submit failed; bytes owned */
         return KL_STREAM_ACCEPTED;
     }
@@ -106,6 +140,8 @@ KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
     /* A writer failure is terminal for the write side, exactly as a failed completion send is:
      * record it so later writes report it and a graceful close does not wait on the queue. */
     if (ds == KL_DRAIN_WERROR) s->wq_err = 1;
+    if (ds == KL_DRAIN_WOULD_BLOCK) s->wr_blocked = 1;
+    if (ds == KL_DRAIN_ACCEPTED) s->wr_blocked = 0;
     return map_drain(ds);
 }
 
@@ -121,7 +157,15 @@ int kl_stream_flush(KlStream *s) {
      * failure is terminal: record it (sticky, like the completion path) and notify too, because
      * the queue can no longer drain and must stop holding a graceful close. */
     if (r < 0) s->wq_err = 1;
-    if (r != 1 && s->on_retire) s->on_retire(s);
+    int fired = stream_writable_edge(s);
+    if (fired) {
+        stream_fire_writable(s);
+        /* The callback may have refilled the queue: report it, so the adapter keeps write interest. */
+        if (r == 0 && kl_drain_buffered(&s->wq) > 0) r = 1;
+    }
+    /* Tail (may detach; on_close may free s). Also after the callback, which may have begun a close
+     * whose finalize it deferred. */
+    if ((r != 1 || fired) && s->on_retire) s->on_retire(s);
     return r;
 }
 
@@ -138,6 +182,7 @@ int kl_stream_on_write_complete(KlStream *s, int ok) {
         s->send_inflight = 0;
         s->inflight_len  = 0;
         s->wq_err        = 1;
+        if (stream_writable_edge(s)) stream_fire_writable(s);   /* wake a blocked producer */
         if (s->on_retire) s->on_retire(s);       /* send op physically retired; let close finalize */
         return -1;
     }
@@ -146,6 +191,7 @@ int kl_stream_on_write_complete(KlStream *s, int ok) {
     s->send_inflight = 0;
     s->inflight_len  = 0;
     int r = stream_pump_completion(s);           /* send the next queued batch, if any */
+    if (stream_writable_edge(s)) stream_fire_writable(s);
     /* This send op retired. If pump re-submitted, send_inflight is set again and finalize will
      * see the write side as still busy (graceful drain continues); once the queue is empty and
      * nothing is re-submitted, this notification is what detaches the stream. */
@@ -172,5 +218,8 @@ int kl_stream_write_free(KlStream *s) {
     s->wq_inited     = 0;
     s->inflight_len  = 0;
     s->wq_err        = 0;
+    s->wr_blocked    = 0;
+    s->on_writable   = NULL;
+    s->writable_ctx  = NULL;
     return 0;
 }

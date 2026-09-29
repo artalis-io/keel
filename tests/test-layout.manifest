@@ -115,6 +115,7 @@ tests/test_stream_close_live.c
 tests/test_stream_read.c
 tests/test_stream_single_shot.c
 tests/test_stream_transport.c
+tests/test_stream_writable.c
 tests/test_thread_pool.c
 tests/test_timer.c
 tests/test_tls.c

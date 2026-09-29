@@ -47,6 +47,10 @@ struct KlStream {
     int                send_inflight;    /**< a submit is outstanding */
     size_t             inflight_len;     /**< bytes handed to the in-flight submit */
     int                inflight_copying; /**< ownership policy CAPTURED for the in-flight op */
+    int                wr_blocked;       /**< writable edge armed: a write saw WOULD_BLOCK */
+    int                in_writable;      /**< DEPTH: inside on_writable; defer close finalize */
+    void             (*on_writable)(void *ctx);
+    void              *writable_ctx;
 
     /* ── Strict read pause/resume (contract: kl_stream_read_* in <keel/stream.h>) ─────────── */
     void             (*read_deliver)(void *ctx, const char *buf, size_t len, int ok);
