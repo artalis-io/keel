@@ -80,6 +80,14 @@ an **abortive** close (drop the queue, cancel outstanding ops). `kl_stream_close
 `OPEN`/`CLOSING`/`CLOSED`. `on_close` fires **exactly once**, only after both the receive and send
 ops are physically retired (`kl_stream_is_detached(s) == 1`); reuse/free is legal only then.
 
+A graceful close drains accepted output **while delivery remains possible**. A terminal write failure
+makes delivery impossible: a failed completion send, or a readiness writer returning -1 (which is now
+sticky in both modes, reported as `KL_STREAM_ERROR` by later writes). From then on the undeliverable
+queue no longer holds the close, which progresses as an abortive close would. The queued bytes stay
+the stream's own memory, released by the owner with `kl_stream_write_free` after `on_close`.
+Physical retirement is unaffected: a posted recv or an in-flight send must still retire first, and
+`on_close` still fires exactly once.
+
 ## KlListener: accept path
 
 `kl_listener_init(l, completion_mode, hooks, ctx)` installs the hooks; `kl_listener_start(l)` begins

@@ -5,6 +5,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Fixed
+
+- **A graceful close could hang forever after a write failure.** `kl_stream_close_begin` waited for
+  the write queue to drain, but after a terminal write failure queued bytes can never go out. Two
+  cases:
+  - readiness: the writer returned -1 and the queue kept its bytes;
+  - completion: a send failed with more bytes queued behind it.
+
+  In either case `on_close` never fired. This affected any `KlStream` (socket or named pipe), and a
+  peer that disconnects while output is still queued makes it the common case. Now a terminal write
+  failure makes the queue undeliverable, so it stops holding the close, which progresses exactly
+  once, and still only after any outstanding operation has physically retired. A readiness writer
+  failure is now sticky like a completion failure: later `kl_stream_write` calls report
+  `KL_STREAM_ERROR`. Regressions cover the mock state machine in both modes, a real loopback socket
+  whose peer resets, and a named pipe whose server disconnects under a pending write.
+
 ### Documentation
 
 - **The event-loop teardown rule is now stated** on `kl_event_ctx_free` (`<keel/event_ctx.h>`). Freeing

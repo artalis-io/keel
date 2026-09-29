@@ -110,6 +110,7 @@ tests/test_socket_runtime.c
 tests/test_socket_runtime_first_use.c
 tests/test_stream.c
 tests/test_stream_close.c
+tests/test_stream_close_live.c
 tests/test_stream_read.c
 tests/test_stream_single_shot.c
 tests/test_stream_transport.c
