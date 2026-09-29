@@ -6,7 +6,7 @@
  *   - only a WOULD_BLOCK arms it; bytes draining alone never fire it;
  *   - an ACCEPTED write disarms it;
  *   - it fires once per arming, from kl_stream_flush / kl_stream_on_write_complete only, never from
- *     inside kl_stream_write (even when the submit completes inline);
+ *     inside kl_stream_write;
  *   - "full" is the stream's TOTAL pending count: in-flight bytes a copying backend has already
  *     consumed from the queue still hold it back;
  *   - a terminal write failure wakes an armed producer once, and its retry reports ERROR; once
@@ -43,12 +43,11 @@ static kl_ssize_t rw_write(const char *data, size_t len, void *ctx) {
     return (kl_ssize_t)n;
 }
 
-/* Completion submitter. `inline_ok` completes the send synchronously, inside the submit. */
-typedef struct { KlStream *s; int submits; size_t last_len; int inline_ok; } CS;
+/* Completion submitter: records the batch; the test delivers the completion. */
+typedef struct { KlStream *s; int submits; size_t last_len; } CS;
 static int cs_submit(void *ctx, const char *data, size_t len) {
     CS *c = ctx; (void)data;
     c->submits++; c->last_len = len;
-    if (c->inline_ok) (void)kl_stream_on_write_complete(c->s, 1);
     return 0;
 }
 
@@ -124,7 +123,7 @@ UTEST(stream_writable, draining_alone_never_fires) {
     w.mode = 0;
     ASSERT_EQ(kl_stream_flush(&s), 0);                    /* fully drained ... */
     ASSERT_EQ(p.fired, 0);                                /* ... but nobody was blocked */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, readiness_fires_once_when_pending_drops_below_capacity) {
@@ -143,7 +142,7 @@ UTEST(stream_writable, readiness_fires_once_when_pending_drops_below_capacity) {
     ASSERT_EQ(kl_stream_flush(&s), 0);
     ASSERT_EQ(p.fired, 1);
     ASSERT_EQ(p.fired_in_write, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, accepted_write_disarms) {
@@ -155,7 +154,7 @@ UTEST(stream_writable, accepted_write_disarms) {
     w.mode = 0;
     ASSERT_EQ(kl_stream_flush(&s), 0);
     ASSERT_EQ(p.fired, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, rearms_on_each_would_block) {
@@ -174,7 +173,7 @@ UTEST(stream_writable, rearms_on_each_would_block) {
     ASSERT_EQ(kl_stream_flush(&s), 0);
     ASSERT_EQ((int)pw(&p, 30), (int)KL_STREAM_ACCEPTED);     /* the retry now fits */
     ASSERT_EQ(p.fired, 2);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, removing_the_callback_disarms) {
@@ -187,7 +186,7 @@ UTEST(stream_writable, removing_the_callback_disarms) {
     w.mode = 0;
     ASSERT_EQ(kl_stream_flush(&s), 0);
     ASSERT_EQ(p.fired, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* ── Completion: in-flight bytes count ──────────────────────────────────────────────────────── */
@@ -209,7 +208,7 @@ UTEST(stream_writable, copying_in_flight_bytes_hold_the_edge) {
     ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
     ASSERT_EQ(p.fired, 1);
     ASSERT_EQ(p.fired_in_write, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, referencing_backend_fires_on_completion) {
@@ -222,40 +221,41 @@ UTEST(stream_writable, referencing_backend_fires_on_completion) {
     ASSERT_EQ(p.fired, 1);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
     ASSERT_EQ(p.fired, 1);                                  /* once per arming */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* ── Never from inside kl_stream_write ──────────────────────────────────────────────────────── */
 
-UTEST(stream_writable, inline_completion_inside_write_does_not_fire) {
+UTEST(stream_writable, write_never_calls_back_the_producer) {
     KlStream s; CS c; Prod p; completion(&s, &c, &p, 64, /*copying=*/1);
     ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ((int)pw(&p, 8), (int)KL_STREAM_WOULD_BLOCK);  /* armed */
+    ASSERT_EQ((int)pw(&p, 8), (int)KL_STREAM_WOULD_BLOCK);  /* writes while armed: no callback */
+    ASSERT_EQ(p.fired, 0);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);      /* 64 still in flight: no edge yet */
     ASSERT_EQ(p.fired, 0);
-    /* From here every submit completes synchronously, inside the submit. A write the producer makes
-     * while blocked-but-not-yet-woken is accepted into the free queue space; its pump runs the
-     * outstanding completions inline. None of that may call back into the producer. */
-    c.inline_ok = 1;
-    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);      /* drains everything, inline chain */
-    ASSERT_EQ(p.fired, 1);                                  /* from the completion, not a write */
-    ASSERT_EQ((int)pw(&p, 8), (int)KL_STREAM_ACCEPTED);    /* inline completion inside the write */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);      /* the edge comes from the completion */
     ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ((int)pw(&p, 8), (int)KL_STREAM_ACCEPTED);    /* the accepted retry submits ... */
+    ASSERT_EQ(p.fired, 1);                                  /* ... without calling back */
     ASSERT_EQ(p.fired_in_write, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
-UTEST(stream_writable, accepted_write_with_inline_completion_while_armed) {
+UTEST(stream_writable, completion_accepted_write_while_armed_disarms) {
     KlStream s; CS c; Prod p; completion(&s, &c, &p, 64, /*copying=*/1);
     ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ((int)pw(&p, 60), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ((int)pw(&p, 8), (int)KL_STREAM_WOULD_BLOCK);  /* armed */
-    ASSERT_EQ((int)pw(&p, 4), (int)KL_STREAM_ACCEPTED);     /* fits: disarms before any pump */
-    c.inline_ok = 1;
+    ASSERT_EQ((int)pw(&p, 4), (int)KL_STREAM_ACCEPTED);     /* fits: the producer moved on */
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
     ASSERT_EQ(p.fired, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* ── The callback's own actions ─────────────────────────────────────────────────────────────── */
@@ -273,7 +273,7 @@ UTEST(stream_writable, callback_may_write_and_flush_reports_the_refill) {
     ASSERT_EQ(r, 0);                                       /* the refill went out inline */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
     ASSERT_EQ((int)w.len, 96);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, callback_refill_that_buffers_keeps_flush_pending) {
@@ -290,7 +290,7 @@ UTEST(stream_writable, callback_refill_that_buffers_keeps_flush_pending) {
     w.mode = 0;
     ASSERT_EQ(kl_stream_flush(&s), 0);
     ASSERT_EQ(p.fired, 1);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, completion_callback_write_is_submitted) {
@@ -307,7 +307,7 @@ UTEST(stream_writable, completion_callback_write_is_submitted) {
     ASSERT_EQ((int)c.last_len, 16);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
     ASSERT_EQ(p.fired, 1);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* ── Failure and close ──────────────────────────────────────────────────────────────────────── */
@@ -321,7 +321,7 @@ UTEST(stream_writable, terminal_failure_wakes_an_armed_producer_once) {
     ASSERT_EQ(p.fired, 1);                                  /* woken ... */
     ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_ERROR);        /* ... and the retry reports it */
     ASSERT_EQ(p.fired, 1);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, readiness_failure_wakes_an_armed_producer_once) {
@@ -335,7 +335,7 @@ UTEST(stream_writable, readiness_failure_wakes_an_armed_producer_once) {
     ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_ERROR);
     ASSERT_EQ(kl_stream_flush(&s), -1);
     ASSERT_EQ(p.fired, 1);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* "Wake once" is the stream's property, independent of what the consumer does with the wakeup. */
@@ -351,7 +351,7 @@ UTEST(stream_writable, failure_wake_without_retry_is_not_repeated) {
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), -1);
     ASSERT_EQ(kl_stream_flush(&s), -1);                    /* ... and a stray flush */
     ASSERT_EQ(p.fired, 1);                                 /* never a second wakeup */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, failure_wake_with_retry_reports_error_once) {
@@ -366,7 +366,7 @@ UTEST(stream_writable, failure_wake_with_retry_reports_error_once) {
     ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), -1);
     ASSERT_EQ(p.fired, 1);                                 /* ERROR did not re-arm it */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, readiness_failure_wake_with_and_without_retry_once) {
@@ -383,7 +383,7 @@ UTEST(stream_writable, readiness_failure_wake_with_and_without_retry_once) {
         ASSERT_EQ(kl_stream_flush(&s), -1);
         ASSERT_EQ(kl_stream_flush(&s), -1);
         ASSERT_EQ(p.fired, 1);
-        kl_stream_write_free(&s);
+        ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
     }
 }
 
@@ -392,7 +392,7 @@ UTEST(stream_writable, failure_without_a_blocked_producer_is_silent) {
     ASSERT_EQ((int)pw(&p, 10), (int)KL_STREAM_ACCEPTED);
     ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
     ASSERT_EQ(p.fired, 0);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, never_fires_once_closing) {
@@ -406,7 +406,7 @@ UTEST(stream_writable, never_fires_once_closing) {
     ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
     ASSERT_EQ(g_closes, 1);                                /* on_close is the terminal signal ... */
     ASSERT_EQ(p.fired, 0);                                 /* ... not the writable edge */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, close_from_callback_detaches_after_it_returns) {
@@ -422,7 +422,7 @@ UTEST(stream_writable, close_from_callback_detaches_after_it_returns) {
     ASSERT_EQ(p.closed_during_cb, 0);                      /* deferred past the callback ... */
     ASSERT_EQ(g_closes, 1);                                /* ... then detached, exactly once */
     ASSERT_EQ(kl_stream_is_detached(&s), 1);
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 UTEST(stream_writable, cancel_from_readiness_callback_detaches_after_it_returns) {
@@ -437,7 +437,7 @@ UTEST(stream_writable, cancel_from_readiness_callback_detaches_after_it_returns)
     ASSERT_EQ(p.fired, 1);
     ASSERT_EQ(p.closed_during_cb, 0);
     ASSERT_EQ(g_closes, 1);                                /* abortive: the queue does not hold it */
-    kl_stream_write_free(&s);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
 }
 
 /* ── Live: a producer driven only by the edge, over a real socket ───────────────────────────── */

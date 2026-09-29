@@ -72,7 +72,7 @@ WOULD_BLOCK ─► terminal write failure (capacity never useful) ─► fn ─�
   again (the write needs more room than has freed) re-arms it, and the next progress point fires it
   again; progress is guaranteed because a `WOULD_BLOCK` means bytes are pending. A retry that
   returns `KL_STREAM_ERROR` does not arm it.
-- It never fires from inside `kl_stream_write`, even when a submit completes inline.
+- It never fires from inside `kl_stream_write`.
 - In-flight bytes count toward "full". That is why the stream's internal `KlDrain` low-water callback
   is not the signal: with a copying backend the queue is emptied at submit, while those bytes are
   still unacknowledged.
