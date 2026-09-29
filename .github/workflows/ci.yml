@@ -512,6 +512,9 @@ jobs:
       - name: Stale-name gate (completion-lifetime token keeps its transport-neutral name)
         run: make check-no-dgram-life
 
+      - name: Close-on-exec gate (every descriptor Keel creates is close-on-exec)
+        run: make check-cloexec
+
       - name: Documentation-reference gate (living-architecture doc links resolve)
         run: make check-doc-refs
 

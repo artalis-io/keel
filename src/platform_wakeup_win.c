@@ -40,6 +40,10 @@ static int win_wakeup_pair(SOCKET sv[2])
     if (server == INVALID_SOCKET) goto fail;
 
     closesocket(listener);
+    /* Winsock sockets are inheritable by default; these two are Keel's own and must not leak into a
+     * child spawned with handle inheritance (the analog of FD_CLOEXEC; kl_sockdef_set_cloexec). */
+    (void)SetHandleInformation((HANDLE)server, HANDLE_FLAG_INHERIT, 0);
+    (void)SetHandleInformation((HANDLE)client, HANDLE_FLAG_INHERIT, 0);
     sv[0] = server;   /* read end  (event loop watches this) */
     sv[1] = client;   /* write end (workers signal this)     */
     return 0;

@@ -18,7 +18,7 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     if (!st) return -1;     /* allocator failure: nothing created, _backend stays NULL */
     /* -1 is the descriptor sentinel (epoll_create1 returns it on failure, and close() skips a
      * negative fd). The state is published only with a valid descriptor. */
-    st->fd = epoll_create1(0);
+    st->fd = epoll_create1(EPOLL_CLOEXEC);   /* never inherited by an embedder's children */
     if (st->fd < 0) {
         kl_free(loop->alloc, st, sizeof(*st));  /* kernel-object failure: unwind exactly once */
         return -1;

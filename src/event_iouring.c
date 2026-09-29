@@ -503,7 +503,7 @@ static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
 
 static int iou_open_pipe(KlIouOp *op) {
     int pfd[2];
-    if (pipe2(pfd, O_NONBLOCK) < 0) return -1;
+    if (pipe2(pfd, O_NONBLOCK | O_CLOEXEC) < 0) return -1;   /* never inherited by children */
     op->pipe_rd = pfd[0];
     op->pipe_wr = pfd[1];
     return 0;
