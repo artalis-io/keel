@@ -127,6 +127,13 @@ stream. Differences sit below the contract:
 
 Design: [windows_named_pipes.md](../architecture/windows_named_pipes.md).
 
+## Loop teardown
+
+Detachment needs the loop. Close a stream (or listener) and drive the loop until its close callback
+fires, then free the loop. Freeing the loop first delivers no further callback: a posted operation is
+reclaimed, but `on_close` never fires. The rule, and exactly which calls stay defined afterwards, is on
+`kl_event_ctx_free` in `event_ctx.h`.
+
 ## Cross-cutting guarantees
 
 - **Confirmed detachment.** All three objects fire their detach/close callback exactly once, only

@@ -5,6 +5,33 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Documentation
+
+- **The event-loop teardown rule is now stated** on `kl_event_ctx_free` (`<keel/event_ctx.h>`). Freeing
+  a loop delivers no further callback to anything still attached:
+  - pending timers are discarded, even one already due;
+  - watchers are removed, even one whose handle is already ready;
+  - on a completion engine, posted operations are cancelled and reclaimed without a terminal event.
+
+  Callers release every attached object first, and drive confirmed-close objects (`KlDatagram`,
+  `KlStream`-based transports, listeners) to their close callback, because detachment needs the loop.
+  After the free, only `kl_timer_cancel` (-1) and `kl_watcher_del` / `kl_watcher_mod` are defined.
+  On completion engines, several objects reach the released loop if the order is broken, and the new
+  documentation names them. Behaviour is unchanged. What changed is that the rule is written down,
+  based on a per-object audit. The stream, datagram and async-lifecycle contracts cross-reference it.
+  The last of these now says its "no silent loss" guarantee holds for `KlAsyncOp` only because
+  `kl_http_server_free` cancels those operations before freeing its loop.
+
+### Testing
+
+- `test_loop_teardown` pins the rule on every engine:
+  - pending and due timers are discarded;
+  - a ready watcher gets no callback;
+  - the context can be re-initialised;
+  - `kl_timer_cancel` and the watcher calls are inert after the free;
+  - a `KlDatagram` with a receive posted, closed to `on_close` before the loop is freed, leaves the
+    allocator balanced.
+
 ## [3.2.0]
 
 Minor release. No release date here (the tag and publish are a separately authorized step).

@@ -241,8 +241,11 @@ duplication. It was renamed to `KlCompLife` (`src/completion_life.{h,c}`) in its
   destruction delivers no further completion to anyone. `kl_http_server_free`'s teardown reap
   dispatches accepts only, and `kl_event_ctx_free`'s quiesce dispatches nothing. So a pipe still live
   at that point gets no terminal `on_data` and no `on_close`. Its outstanding ops are still cancelled
-  and their refs released (memory-safe), but a later `kl_pipe_free` would touch the freed ctx. The
-  header documents the order. This is the loop's existing rule, not a pipe behaviour (§8).
+  and their refs released (memory-safe). This is the loop's general rule, now stated on
+  `kl_event_ctx_free` (§8). The pre-implementation text here claimed that a later `kl_pipe_free` would
+  touch the freed ctx. The teardown audit found otherwise: the pipe seam refuses a released backend,
+  so that free reclaims cleanly. The public rule still requires freeing the pipe first, and a pipe
+  listener whose loop is freed first cannot detach and leaks.
 
 ### 3.4 Security
 
@@ -360,13 +363,11 @@ Type safety backs R3 at compile time: `KlPipeHandle *` does not convert implicit
 
 ## 8. Findings outside this change (recorded, not fixed here)
 
-1. **The generic loop-teardown rule is undocumented.** Destroying an event loop (`kl_event_ctx_free`,
-   or `kl_http_server_free` on the server's own loop) delivers no further completion. Every
-   transport still alive on it silently loses its terminal callbacks; memory stays safe through
-   quiesce and life tokens. `pipe.h` states this for pipes. Nothing in `event_ctx.h` or the stream
-   and datagram contracts states it as the general rule, and `async_lifecycle.md`'s "no silent loss"
-   covers only `KlAsyncOp`, which the server cancels explicitly. It is a documentation gap in the
-   generic completion contract and belongs in its own change.
+1. **Resolved:** the generic loop-teardown rule is now stated on `kl_event_ctx_free`
+   (`include/keel/event_ctx.h`) and cross-referenced from the stream, datagram and async-lifecycle
+   contracts. It rests on a per-object audit of what freeing the loop first actually does, and
+   `tests/test_loop_teardown.c` pins the behaviour. Recorded there, not fixed: on the completion
+   engines several objects dereference the released loop if the order is broken.
 2. **Resolved:** `KlListener`'s accepted-connection handoff was socket-typed (§5). It now has an
    object handoff family for transports that are not sockets, without widening `KlSocketHandle` into
    a universal handle ([listener_accept_handoff.md](listener_accept_handoff.md)).

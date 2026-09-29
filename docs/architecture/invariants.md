@@ -72,6 +72,10 @@ retired.
 
 - **Why:** on a completion engine a "cancelled" op can still complete later; freeing on the logical
   close is a use-after-free.
+- **Loop teardown is not retirement delivery.** Freeing the event loop reclaims posted operations
+  without dispatching them, so it ends lifecycles without completing them. Objects are released and
+  driven to detachment first; the rule is on `kl_event_ctx_free` in
+  [event_ctx.h](../../include/keel/event_ctx.h).
 - **Anchor:** the CLOSE facet in [stream.h](../../include/keel/stream.h) ("CONFIRMED DETACHMENT; on_close
   fires once, only after both the receive and send ops are physically retired") and lifetime #1 in
   [listener.h](../../include/keel/listener.h).

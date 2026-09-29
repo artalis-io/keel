@@ -94,10 +94,10 @@ KlStream *kl_pipe_stream(KlPipeStream *p);
  *  kl_event_ctx_free (or kl_http_server_free, when the pipe shares the server's loop), and at most
  *  once. NULL-safe.
  *
- *  Loop teardown: destroying the event loop delivers no further completions to anything on it, so a
- *  pipe still live at that point gets no on_data terminal and no on_close. Its outstanding operations
- *  are still cancelled and reclaimed memory-safely by the loop's close, but the object itself must
- *  already have been released with kl_pipe_free. */
+ *  Loop teardown follows the general rule on kl_event_ctx_free: destroying the loop delivers no further
+ *  completions, so a pipe still live at that point gets no on_data terminal and no on_close. Its
+ *  outstanding operations are still cancelled and reclaimed memory-safely by the loop's close, but
+ *  release the pipe with kl_pipe_free first. */
 void kl_pipe_free(KlPipeStream *p);
 
 /** Set (or replace) a stream's callbacks. This is how the owner of an ACCEPTED stream attaches its
@@ -138,7 +138,9 @@ KlPipeStatus kl_pipe_listen(struct KlEventCtx *ctx, const char *path, const KlPi
 int kl_pipe_listener_close(KlPipeListener *pl);
 
 /** Free a DETACHED listener (after on_close, including from inside it). Returns 0, or -1 (freeing
- *  nothing) if it has not detached yet. Drive the loop until on_close before kl_event_ctx_free. */
+ *  nothing) if it has not detached yet. Drive the loop until on_close before kl_event_ctx_free:
+ *  detachment waits for every waiting instance's connect to retire, which needs the loop, so a
+ *  listener whose loop is freed first can never detach and is leaked. */
 int kl_pipe_listener_free(KlPipeListener *pl);
 
 /** A short constant name for a status ("ok", "absent", ...). */

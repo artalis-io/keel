@@ -452,6 +452,10 @@ Test naming: `UTEST(suite, test_name)`, e.g. `UTEST(mp, boundary_spanning)`.
 
 - **Error handling**: Functions return `int`: negative on error, 0 or positive on success
 - **Resource cleanup**: Always pair `_init`/`_free`. Response has `_reset` for keep-alive reuse.
+- **Loop teardown**: `kl_event_ctx_free` delivers no further callback. Release every object built on a
+  ctx first, and drive confirmed-close objects (datagram, stream-based, listener) to `on_close`, then
+  free the ctx. Afterwards only `kl_timer_cancel` / `kl_watcher_del` / `kl_watcher_mod` are defined
+  (see `event_ctx.h`)
 - **Overflow guards**: Before `a + b`, check `a > SIZE_MAX/2 || b > SIZE_MAX/2`. Before `n * size`, check `n > SIZE_MAX / size`.
 - **Header access**: Use `kl_http_request_header(req, "Content-Type")`: case-insensitive, returns null-terminated value or NULL if missing
 - **Body access**: Cast `req->body_reader` to the concrete type (`KlHttpBufReader *`, `KlHttpMultipartReader *`)
