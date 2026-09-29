@@ -5,9 +5,55 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+## [3.2.0]
+
+Minor release. No release date here (the tag and publish are a separately authorized step).
+
+Headline: **Windows Named Pipes, client and listener, as first-class `KlStream` / `KlListener`
+transports over IOCP.** This is the first stream transport that is not a socket. A consumer connects
+or listens with a pipe-specific call, and from then on drives an ordinary `KlStream`: nothing above
+the stream is pipe-specific. The pipe `HANDLE` never becomes a `KlSocketHandle` or reaches
+`KlSocketProvider`. That makes Windows local IPC the counterpart of `AF_UNIX` on POSIX, and it
+tested the Tier-1 transport abstraction against something that is not a network socket. `KlStream`
+held unchanged. `KlListener` needed one append-only extension, because its accept handoff was typed
+as a socket.
+
+New public functions and an appended `KlListenerHooks` field pair are why this is a minor release.
+Everything is source-compatible. Code that fills `KlListenerHooks` with designated initializers needs
+no edit, only the recompile every 3.x update already requires (`docs/contracts/compatibility.md`).
+
 ### Added
 
-- **`KEEL_VENDOR_OPT`: an optimization level for the vendored TUs, separate from Keel's own.** The
+- **Windows Named Pipe client**: `kl_pipe_connect(ctx, "\\\\.\\pipe\\name", &cfg, &p)` in the new public header
+  `<keel/pipe.h>` returns a `KlPipeStream`; `kl_pipe_stream(p)` is its `KlStream`.
+  - **Connect never waits.** An absent server (`KL_PIPE_ABSENT`) and every instance busy
+    (`KL_PIPE_BUSY`) are reported at once, and retry policy is the caller's.
+  - **Local names only.** A remote `\\host\pipe\` name is refused (`KL_PIPE_INVALID`).
+  - **Identification only.** The client connects at identification level, so a server can learn who
+    connected but cannot impersonate them.
+  - **Free is legal at any time**, including from inside a callback. Memory and the handle are
+    reclaimed only after the last overlapped operation has physically retired. (#336)
+- **Windows Named Pipe listener**: `kl_pipe_listen(ctx, path, &cfg, &pl)`. Each connecting client
+  arrives as a `KlPipeStream`, the same object a client gets. The owner attaches its callbacks with
+  `kl_pipe_bind` and drives the `KlStream`. `kl_pipe_listener_close` / `kl_pipe_listener_free` follow
+  `KlListener`'s confirmed-detachment rules.
+  - **Security is fixed, not configurable.** Server instances carry a DACL for the current user and
+    LocalSystem only (the Windows default also grants Everyone read). Remote clients are rejected.
+  - **The name is claimed at listen time.** The first instance claims it, so a name another process
+    already created, whether a second server or a squatter, fails with the new `KL_PIPE_IN_USE`
+    instead of being shared.
+  - **Instances are never recycled.** Each one is closed only after its operation has retired. (#338)
+- **`KlListener` object handoff family**, for a transport whose accepted connection is not a socket.
+  - **API.** `KlListenerHooks` gains two trailing fields, `on_accept_obj` / `dispose_obj`, and the new
+    entry point is `kl_listener_on_accepted_obj(l, conn)`, where `conn` is the adapter's own
+    connection object, passed through untouched.
+  - **Exactly one family per listener,** checked at init. The listener state machine (window, credit,
+    cancel-once, detachment) is shared by both families.
+  - **Ownership is stated in `listener.h`.** Once an object is accepted, the listener releases it
+    exactly once, to the owner or to `dispose_obj`.
+  - **Unchanged:** the socket (fd) family and every existing listener user, including the HTTP server.
+    (#338)
+- **`KEEL_VENDOR_OPT`: an optimization level for the vendored TUs, separate from Keel's own.** The: an optimization level for the vendored TUs, separate from Keel's own.** The
   embedder hooks added in 3.1.0 made `KEEL_OPT` reach every TU at once, which is what an embedder
   wanting its own flags asked for. It had a consequence nobody asked for. The toolchain wedge that
   motivated the hook (cosmocc's GCC hanging indefinitely at `-O2` on Windows) is in the **vendored**
@@ -22,6 +68,45 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `KEEL_OPT=-O0`, `KEEL_OPT=-O0 CC=cosmocc`, `KEEL_OPT=-O1` and `KEEL_EXTRA_CFLAGS=-flto`. A build that
   needs the split now spells it `make KEEL_OPT=-O2 KEEL_VENDOR_OPT=-O0`, which recovers 72% of the
   `-O0` code-size regression (447 KB to 365 KB) and leaves every Keel TU optimized. (#328)
+
+### Engine support
+
+- **Named pipes run on the IOCP engine only** (`BACKEND=iocp`, MinGW and MSVC). On WSAPoll, the POSIX
+  engines, io_uring and pollcomp, and on any non-Windows platform, `kl_pipe_connect` and
+  `kl_pipe_listen` return `KL_PIPE_UNSUPPORTED` before touching the OS. There is no readiness
+  emulation: WSAPoll cannot watch a `HANDLE`, and nothing pretends it can.
+
+### Changed
+
+- **Internal: the completion-lifetime token is now `KlCompLife`** (`src/completion_life.{h,c}`, the
+  functions are now `kl_comp_life_*`). It was named for datagrams, and pipe streams became its second
+  owner under the same ownership rules. No behaviour changed, and nothing in `include/keel/` names it.
+  It does affect out-of-tree code that includes the internal completion seam: the lwIP and UEFI
+  integrations in this tree were updated. The new `make check-no-dgram-life` gate rejects the old
+  names outside `docs/archive/`. (#337)
+
+### Testing
+
+- `test_pipe_stream` runs the client and listener on IOCP under MinGW and MSVC, and asserts the refusal
+  on every other engine.
+  - **Connect outcomes:** absent, busy, a DACL-denied pipe, non-local names, and
+    identification-only impersonation.
+  - **Data:** a 1 MiB fragmented transfer with bounded-queue backpressure, orderly and abortive
+    disconnects, strict pause/resume, and a u32be-framed exchange written against `KlStream` only.
+  - **Close and free:** cancel with a read or a write pending, free with operations outstanding or
+    from inside a callback, and loop teardown.
+  - **Listener:** echo with Keel on both ends, sequential clients, eight concurrent clients through a
+    window of two, streams outliving their listener, `KL_PIPE_IN_USE` for a squatter, the exact
+    instance DACL, a deterministic `ERROR_PIPE_CONNECTED` race, and 200 client plus 100 listener
+    close races.
+
+  Every lifetime case checks allocator balance.
+- `test_listener` adds ten object-family cases: handoff, teardown disposal, cross-family refusal, a
+  completion window, and the ownership edges (synchronous inline accepts, an owner closing inside the
+  accept callback, a refill failure after a handoff, and a close inside dispose).
+- The new `make check-pipe-seam` gate keeps Win32 pipe I/O inside its two mechanics TUs and overlapped
+  only, keeps pipe symbols off the socket axis and out of protocol TUs, and keeps consumer-protocol
+  names out of the transport. The Tier-1 boundary gate now also covers the pipe seam headers.
 
 ## [3.1.1]
 
