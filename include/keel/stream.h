@@ -89,22 +89,28 @@ int kl_stream_on_write_complete(KlStream *s, int ok);
 /** Bytes currently queued (not yet fully sent / acknowledged). */
 size_t kl_stream_write_pending(const KlStream *s);
 
-/** Writable-again edge callback. See kl_stream_on_writable. */
+/** Writable-again edge callback: "retry the write you were refused". Carries no status; the retry's
+ *  own KlStreamWriteStatus is the single source of truth. See kl_stream_on_writable. */
 typedef void (*KlStreamWritableFn)(void *ctx);
-/** Install (or, with `fn` NULL, remove) the writable-again edge: a resume signal for a producer that
- *  was told KL_STREAM_WOULD_BLOCK. Requires kl_stream_write_init. Returns 0, or -1.
+/** Install (or, with `fn` NULL, remove) the writable-again edge. Requires kl_stream_write_init.
+ *  Returns 0, or -1.
  *
- *  ARMING: only a kl_stream_write that returns KL_STREAM_WOULD_BLOCK arms the edge; an ACCEPTED write
- *  disarms it (the producer is no longer blocked). Bytes draining alone never fire it.
- *  FIRING: at most once per arming, and only from a physical progress point: kl_stream_flush
- *  (readiness) or kl_stream_on_write_complete (completion), never from inside kl_stream_write. It
- *  fires once the stream's TOTAL pending bytes (kl_stream_write_pending: queued plus in flight) drop
- *  below the write capacity. It also fires, once, if the write side fails terminally while armed,
- *  so a blocked producer is woken and its next write reports KL_STREAM_ERROR. It never fires once a
- *  close has begun (on_close is the terminal signal).
- *  REENTRANCY: the callback may call kl_stream_write (a buffered remainder is flushed on the next
- *  progress point; kl_stream_flush returns 1 while bytes remain) and may begin a close; any detachment
- *  that close causes is deferred until the callback returns. It must not free the stream. */
+ *  MEANING: after kl_stream_write returns KL_STREAM_WOULD_BLOCK, `fn` fires at most once, when the
+ *  caller should retry because the blocked condition has ended. It ends one of two ways, and the
+ *  retry tells them apart:
+ *    - capacity: the stream's TOTAL pending bytes (kl_stream_write_pending, in-flight included)
+ *      dropped below the write capacity; the retry is normally ACCEPTED (or WOULD_BLOCK again, if it
+ *      needs more room than has freed, which re-arms);
+ *    - terminal failure: the write side failed and capacity will never be useful again; the retry
+ *      returns KL_STREAM_ERROR.
+ *  ARMING: only a WOULD_BLOCK arms it; an ACCEPTED write disarms it. Bytes draining alone never fire
+ *  it. It fires only from a later progress point (kl_stream_flush, kl_stream_on_write_complete),
+ *  never from inside kl_stream_write, and never once a close has begun (on_close is the terminal
+ *  signal). Firing disarms it whether or not the callback retries.
+ *  REENTRANCY: the callback may call kl_stream_write (a buffered remainder is flushed at the next
+ *  progress point; kl_stream_flush returns 1 while bytes remain) and may begin a close; any
+ *  detachment that close causes is deferred until the callback returns. It must not free the
+ *  stream. */
 int kl_stream_on_writable(KlStream *s, KlStreamWritableFn fn, void *ctx);
 /** Free the write queue (refuses while a send is in flight). Returns 0, or -1. */
 int kl_stream_write_free(KlStream *s);

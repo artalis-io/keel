@@ -53,33 +53,46 @@ submit hook (`kl_stream_set_submit`) and calls `kl_stream_on_write_complete(s, o
 WRITE completes (≤1 send in flight). `kl_stream_write_pending(s)` reports the pending byte count:
 queued bytes plus any a copying backend already took for the send in flight.
 
-**Writable-again edge.** `kl_stream_on_writable(s, fn, ctx)` gives a producer that was told
-`KL_STREAM_WOULD_BLOCK` its resume signal. It is an edge, not a progress notification:
+**Writable-again edge.** `kl_stream_on_writable(s, fn, ctx)` answers one question for a producer
+that was told `KL_STREAM_WOULD_BLOCK`: *when should I retry?* After a `WOULD_BLOCK`, `fn` fires at
+most once, when the blocked condition has ended. It ends one of two ways, and the retry's own status
+tells them apart, so the callback carries no status argument:
 
 ```text
-write returns WOULD_BLOCK      (arms the edge; an ACCEPTED write disarms it)
-        ↓
-physical progress: kl_stream_flush (readiness) / kl_stream_on_write_complete (completion)
-        ↓
-total pending (kl_stream_write_pending, in-flight bytes included) < write capacity
-        ↓
-fn(ctx), exactly once for that arming
+WOULD_BLOCK ─► physical progress ─► total pending < capacity ─► fn ─► retry → ACCEPTED
+WOULD_BLOCK ─► terminal write failure (capacity never useful) ─► fn ─► retry → KL_STREAM_ERROR
 ```
 
-- Bytes draining never fire it on their own; the producer must have observed the blocked state.
+"Physical progress" is `kl_stream_flush` (readiness) or `kl_stream_on_write_complete` (completion).
+"Total pending" is `kl_stream_write_pending`, in-flight bytes included.
+
+- Only `WOULD_BLOCK` arms it; an `ACCEPTED` write disarms it. Bytes draining never fire it on their
+  own: the producer must have observed the blocked state.
+- It fires once per arming, whether or not the callback retries. A retry that returns `WOULD_BLOCK`
+  again (the write needs more room than has freed) re-arms it, and the next progress point fires it
+  again; progress is guaranteed because a `WOULD_BLOCK` means bytes are pending. A retry that
+  returns `KL_STREAM_ERROR` does not arm it.
 - It never fires from inside `kl_stream_write`, even when a submit completes inline.
-- "Full" counts in-flight bytes, which is why the stream's internal `KlDrain` low-water callback is
-  not the signal: with a copying backend the queue is emptied at submit, while those bytes are still
-  unacknowledged.
-- A terminal write failure while armed fires it once, so a blocked producer is not stranded: its
-  retry returns `KL_STREAM_ERROR`.
+- In-flight bytes count toward "full". That is why the stream's internal `KlDrain` low-water callback
+  is not the signal: with a copying backend the queue is emptied at submit, while those bytes are
+  still unacknowledged.
 - It never fires once a close has begun; `on_close` is the terminal signal.
 - The callback may write (a buffered remainder is flushed at the next progress point, and
   `kl_stream_flush` returns 1 while bytes remain) and may begin a close; detachment is deferred
   until the callback returns. It must not free the stream.
-- A retry after the edge can still return `WOULD_BLOCK` if the write needs more room than has
-  freed; that re-arms, and the next progress point fires again. Progress is guaranteed because a
-  `WOULD_BLOCK` means bytes are pending.
+
+A producer's callback therefore needs no bookkeeping beyond the retry:
+
+```c
+static void on_writable(void *ctx) {
+    Producer *p = ctx;
+    switch (kl_stream_write(p->s, p->next, p->next_len)) {
+    case KL_STREAM_ACCEPTED:    /* advance; keep writing until WOULD_BLOCK */ break;
+    case KL_STREAM_WOULD_BLOCK: /* re-armed; wait for the next edge */       break;
+    default:                    /* terminal: stop producing, close */         break;
+    }
+}
+```
 
 ### Read (strict pause/resume)
 

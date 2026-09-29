@@ -9,7 +9,8 @@
  *     inside kl_stream_write (even when the submit completes inline);
  *   - "full" is the stream's TOTAL pending count: in-flight bytes a copying backend has already
  *     consumed from the queue still hold it back;
- *   - a terminal write failure wakes an armed producer once, and its retry reports ERROR;
+ *   - a terminal write failure wakes an armed producer once, and its retry reports ERROR; once
+ *     whether the callback retries or not;
  *   - it never fires once a close has begun;
  *   - the callback may write, and may begin a close whose detachment waits for it to return.
  * The last case drives a producer purely by the edge over a real loopback socket (the readiness
@@ -335,6 +336,55 @@ UTEST(stream_writable, readiness_failure_wakes_an_armed_producer_once) {
     ASSERT_EQ(kl_stream_flush(&s), -1);
     ASSERT_EQ(p.fired, 1);
     kl_stream_write_free(&s);
+}
+
+/* "Wake once" is the stream's property, independent of what the consumer does with the wakeup. */
+
+UTEST(stream_writable, failure_wake_without_retry_is_not_repeated) {
+    KlStream s; CS c; Prod p; completion(&s, &c, &p, 64, /*copying=*/1);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);     /* terminal; the callback does nothing */
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);     /* late / duplicate completions ... */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), -1);
+    ASSERT_EQ(kl_stream_flush(&s), -1);                    /* ... and a stray flush */
+    ASSERT_EQ(p.fired, 1);                                 /* never a second wakeup */
+    kl_stream_write_free(&s);
+}
+
+UTEST(stream_writable, failure_wake_with_retry_reports_error_once) {
+    KlStream s; CS c; Prod p; completion(&s, &c, &p, 64, /*copying=*/1);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    p.action = 1; p.wlen = 1;                              /* the callback retries */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ((int)p.wst, (int)KL_STREAM_ERROR);           /* the retry is the source of truth */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 0), -1);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), -1);
+    ASSERT_EQ(p.fired, 1);                                 /* ERROR did not re-arm it */
+    kl_stream_write_free(&s);
+}
+
+UTEST(stream_writable, readiness_failure_wake_with_and_without_retry_once) {
+    for (int retry = 0; retry <= 1; retry++) {
+        KlStream s; RW w; Prod p; readiness(&s, &w, &p, 64);
+        w.mode = 2;
+        ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+        ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+        if (retry) { p.action = 1; p.wlen = 1; }
+        w.mode = 3;
+        ASSERT_EQ(kl_stream_flush(&s), -1);
+        ASSERT_EQ(p.fired, 1);
+        if (retry) ASSERT_EQ((int)p.wst, (int)KL_STREAM_ERROR);
+        ASSERT_EQ(kl_stream_flush(&s), -1);
+        ASSERT_EQ(kl_stream_flush(&s), -1);
+        ASSERT_EQ(p.fired, 1);
+        kl_stream_write_free(&s);
+    }
 }
 
 UTEST(stream_writable, failure_without_a_blocked_producer_is_silent) {
