@@ -187,9 +187,19 @@ with `kl_anon_pipe_end_close`. The stream contract needs nothing new for this:
 - **Graceful close of a write-only stream** drains the queue and detaches without waiting for a read
   that was never posted. That close, then `kl_pipe_free`, is how the child sees end of input.
 - **Backpressure** on a write-only stream is `KL_STREAM_WOULD_BLOCK` plus the writable-again edge.
-- **Engine:** Windows IOCP (a private, single-instance, overlapped named pipe; see
-  [process_pipe_streams.md](../architecture/process_pipe_streams.md) §4). Every other engine and
-  platform returns `KL_PIPE_UNSUPPORTED`.
+- **Engines:** support follows the platform and what the loop can drive (see
+  [process_pipe_streams.md](../architecture/process_pipe_streams.md) §3, §4, §6):
+  - Windows IOCP: a private, single-instance, overlapped named pipe, in completion mode. WSAPoll
+    refuses.
+  - POSIX, every engine that watches native descriptors (epoll, kqueue, poll, and io_uring / pollcomp
+    through their watcher relay): an ordinary pipe in readiness mode, over the generic watcher
+    registration and never `KlSocketProvider`. A write whose reader has gone returns `KL_STREAM_ERROR`
+    without delivering SIGPIPE, and the process's signal disposition is never changed.
+  - Anything else returns `KL_PIPE_UNSUPPORTED`.
+- **A vanished peer wakes a blocked writer.** It may surface only as HUP / ERR (reported as READ by
+  epoll, poll and the io_uring relay), so the POSIX adapter attempts a pending write on any readiness;
+  `EPIPE` then fires the writable-again edge once, the retry returns `KL_STREAM_ERROR`, and a graceful
+  close still detaches.
 
 ## Loop teardown
 

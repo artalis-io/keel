@@ -1,6 +1,6 @@
 /*
- * pipe_stream.c: a KlStream over a Windows pipe end: a named-pipe client or accepted instance (see
- * <keel/pipe.h>), or the parent end of an anonymous pair (see <keel/anon_pipe.h>).
+ * pipe_stream.c: a KlStream over a pipe end: a Windows named-pipe client or accepted instance (see
+ * <keel/pipe.h>), or the parent end of an anonymous pair (see <keel/anon_pipe.h>) on Windows or POSIX.
  *
  * Generic substrate: it names no platform type and includes no platform header. It is the adapter
  * the KlStream contract expects: it installs the stream's completion-mode hooks (submit / arm /
@@ -34,14 +34,30 @@
  * DIRECTION. A named-pipe stream is duplex. An anonymous pair's parent end carries one direction, so
  * its stream is built with only that facet (the write queue, or the read hooks): the other one is
  * never installed, and the KlStream contract refuses it (KL_STREAM_ERROR / read_start -1).
+ *
+ * TWO MODELS. On Windows every stream is COMPLETION mode, as above. On POSIX an anonymous pair's parent
+ * end is a pollable descriptor, and its stream is READINESS mode over the generic watcher registration
+ * (kl_watcher_add / _mod / _del, the path KlWakeup's pipe already takes), never KlSocketProvider:
+ *   - one watcher per stream, its mask derived from two wants: `want_read` (the stream armed a receive)
+ *     and `want_write` (the writer left bytes queued). The watcher is added, modified or deleted only
+ *     when that derived mask changes (pipe_watch).
+ *   - ANY readiness is "try what is wanted". A vanished peer can surface as HUP or ERR, which epoll,
+ *     poll and the io_uring relay report as READ even to a WRITE-only watcher. So a pending write is
+ *     flushed on every event, and write() is what discovers EPIPE; a stream that waited for a WRITE bit
+ *     could wait forever. A read or write that finds EAGAIN is benign (some runtimes report readiness
+ *     spuriously) and simply stays wanted.
+ *   - The same KlCompLife token owns the memory. No operation is ever in flight, so it only has to
+ *     keep the stream alive across a watcher callback in which the consumer calls kl_pipe_free: the
+ *     callback holds a reference for its duration, and the descriptor is closed after the watcher is
+ *     removed.
  */
 #include <keel/pipe.h>
 #include <keel/anon_pipe.h>
-#include <keel/anon_pipe_native.h>
 #include <keel/stream_detail.h>   /* embed the KlStream */
 #include <keel/listener_detail.h> /* embed the KlListener */
-#include <keel/event_ctx.h>       /* KlEventCtx.alloc */
+#include <keel/event_ctx.h>       /* KlEventCtx.alloc, kl_watcher_* */
 #include <keel/allocator.h>
+#include "event_caps.h"           /* kl_event_caps: does the loop watch native descriptors? */
 #include "completion.h"           /* KlCompletionEvent, KL_COMP_PIPE_* */
 #include "completion_pipe.h"
 #include "platform_pipe.h"
@@ -62,6 +78,12 @@ struct KlPipeStream {
     void         *user_data;
     int           freed;              /* kl_pipe_free ran: no further consumer callbacks */
     int           terminal_delivered; /* the one ok=0 delivery has happened */
+    /* Readiness mode (POSIX anonymous pair) only. */
+    int            readiness;         /* 1 = watcher-driven readiness, 0 = completion */
+    KlSocketHandle pfd;               /* the registration value (kl_plat_pipe_pollable) */
+    int            want_read;         /* a receive is armed */
+    int            want_write;        /* the writer left bytes queued */
+    KlEventMask    watched;           /* the mask currently registered; 0 = no watcher */
     /* Listener instance only, while its ACCEPT op is outstanding: the listener waiting for it and
      * the links of that listener's pending set (for the batch cancel). NULL once it has retired. */
     struct KlPipeListener *pending;
@@ -153,6 +175,74 @@ static void pipe_on_close(void *vp) {
     if (!p->freed && p->on_close) p->on_close(p->user_data);
 }
 
+/* ── Readiness mode (POSIX anonymous pair) ─────────────────────────────────────────────────── */
+
+static void pipe_ready(KlSocketHandle fd, KlEventMask ready, void *vp);
+
+/* Make the registered watcher match the wants. Returns 0, or -1 if the loop refused the change. */
+static int pipe_watch(KlPipeStream *p) {
+    KlEventMask m = (KlEventMask)((p->want_read ? KL_EVENT_READ : 0) | (p->want_write ? KL_EVENT_WRITE : 0));
+    if (m == p->watched) return 0;
+    int r = 0;
+    if (!m)              kl_watcher_del(p->ctx, p->pfd);
+    else if (!p->watched) r = kl_watcher_add(p->ctx, p->pfd, m, pipe_ready, p);
+    else                 r = kl_watcher_mod(p->ctx, p->pfd, m);
+    if (r == 0) p->watched = m;
+    return r;
+}
+
+static int rd_arm(void *vp) {
+    KlPipeStream *p = vp;
+    p->want_read = 1;
+    if (pipe_watch(p) != 0) { p->want_read = 0; return -1; }
+    return 0;
+}
+
+static void rd_disarm(void *vp) {
+    KlPipeStream *p = vp;
+    p->want_read = 0;
+    (void)pipe_watch(p);
+}
+
+/* The stream's readiness writer: bytes written, 0 = nothing now, -1 = the write side has failed. A
+ * short write leaves bytes queued, so this is where interest in writability starts. */
+static kl_ssize_t rd_write(const char *data, size_t len, void *vp) {
+    KlPipeStream *p = vp;
+    int wb = 0;
+    kl_ssize_t n = kl_plat_pipe_write(p->h, data, len, &wb);
+    if (n < 0) {
+        if (!wb) return -1;          /* EPIPE or another error: terminal */
+        n = 0;
+    }
+    if ((size_t)n < len && !p->want_write) {
+        p->want_write = 1;
+        if (pipe_watch(p) != 0) { p->want_write = 0; return -1; }   /* could never be told to retry */
+    }
+    return n;
+}
+
+static void pipe_ready(KlSocketHandle fd, KlEventMask ready, void *vp) {
+    KlPipeStream *p = vp;
+    (void)fd; (void)ready;           /* any readiness means "try what is wanted" (see the banner) */
+    kl_comp_life_retain(p->life);    /* the consumer may kl_pipe_free from a callback below */
+    if (p->want_read && !p->freed) {
+        int wb = 0;
+        kl_ssize_t n = kl_plat_pipe_read(p->h, p->rbuf, p->rcap, &wb);
+        if (!(n < 0 && wb)) {        /* EAGAIN: nothing now; stay armed */
+            p->want_read = 0;        /* this receive retires; the stream re-arms if it wants more */
+            int ok = n > 0;
+            if (kl_stream_on_recv(&p->stream, ok ? (size_t)n : 0, ok) < 0)
+                pipe_deliver(p, p->rbuf, 0, 0);
+        }
+    }
+    if (p->want_write && !p->freed) {
+        /* Flush may fire the writable edge (the producer may write) and may finish a graceful close. */
+        if (kl_stream_flush(&p->stream) != 1) p->want_write = 0;
+    }
+    if (!p->freed) (void)pipe_watch(p);
+    kl_comp_life_release(p->life);   /* may be the final release */
+}
+
 /* ── Completion routing (the token's dispatch) ─────────────────────────────────────────────── */
 
 static void listener_accept_done(KlPipeStream *p, int ok);
@@ -200,7 +290,7 @@ static KlPipeStatus map_open(KlPipeOpenStatus s) {
  * `facets` asked for. Takes ownership of `h` in every case: on failure it is closed (directly, or by
  * the final release). */
 static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rcap, size_t wcap,
-                             int facets, KlPipeStream **out) {
+                             int facets, int readiness, KlPipeStream **out) {
     KlAllocator *alloc = ctx->alloc;
     if (!rcap) rcap = KL_PIPE_READ_CAP_DEFAULT;
     if (!wcap) wcap = KL_PIPE_WRITE_CAP_DEFAULT;
@@ -225,7 +315,10 @@ static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rca
     }
     /* From here every failure is one owner release: pipe_final undoes whatever was built. */
     p->h = h;
-    if (kl_comp_pipe_attach(ctx, p->h) != 0) { kl_comp_life_release(p->life); return KL_PIPE_ERROR; }
+    p->readiness = readiness;
+    p->pfd = KL_INVALID_SOCKET;
+    if (readiness) p->pfd = kl_plat_pipe_pollable(h);
+    else if (kl_comp_pipe_attach(ctx, p->h) != 0) { kl_comp_life_release(p->life); return KL_PIPE_ERROR; }
 
     p->stream.alloc = alloc;
     p->stream.ctx   = ctx;
@@ -234,15 +327,18 @@ static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rca
             kl_comp_life_release(p->life);
             return KL_PIPE_NOMEM;
         }
-        if (kl_stream_set_submit(&p->stream, pipe_submit, p, /*copying=*/1) != 0) {
+        if ((readiness ? kl_stream_set_writer(&p->stream, rd_write, p)
+                       : kl_stream_set_submit(&p->stream, pipe_submit, p, /*copying=*/1)) != 0) {
             kl_comp_life_release(p->life);
             return KL_PIPE_ERROR;
         }
     }
     if (((facets & PIPE_FACET_READ) &&
-         kl_stream_read_init(&p->stream, /*completion=*/1, pipe_deliver, pipe_arm, NULL, p) != 0) ||
+         (readiness ? kl_stream_read_init(&p->stream, /*completion=*/0, pipe_deliver, rd_arm, rd_disarm, p)
+                    : kl_stream_read_init(&p->stream, /*completion=*/1, pipe_deliver, pipe_arm, NULL, p)) != 0) ||
         kl_stream_close_init(&p->stream, pipe_on_close, p) != 0 ||
-        kl_stream_set_cancel(&p->stream, pipe_cancel_recv, pipe_cancel_send) != 0) {
+        /* Readiness has no operation in flight to cancel. */
+        (!readiness && kl_stream_set_cancel(&p->stream, pipe_cancel_recv, pipe_cancel_send) != 0)) {
         kl_comp_life_release(p->life);
         return KL_PIPE_ERROR;
     }
@@ -263,7 +359,7 @@ KlPipeStatus kl_pipe_connect(struct KlEventCtx *ctx, const char *path, const KlP
     KlPipeStatus st = map_open(kl_plat_pipe_open_client(path, &h));
     if (st != KL_PIPE_OK) return st;
     KlPipeStream *p = NULL;
-    st = pipe_new(ctx, h, cfg->read_capacity, cfg->write_capacity, PIPE_FACET_DUPLEX, &p);
+    st = pipe_new(ctx, h, cfg->read_capacity, cfg->write_capacity, PIPE_FACET_DUPLEX, 0, &p);
     if (st != KL_PIPE_OK) return st;
     p->on_data   = cfg->on_data;
     p->on_close  = cfg->on_close;
@@ -281,15 +377,24 @@ KlPipeStatus kl_anon_pipe_create(struct KlEventCtx *ctx, KlAnonPipeDir dir, cons
     if (!ctx || !cfg || !stream || !peer || !ctx->alloc) return KL_PIPE_INVALID;
     if (dir != KL_ANON_PIPE_READS && dir != KL_ANON_PIPE_WRITES) return KL_PIPE_INVALID;
     if (dir == KL_ANON_PIPE_READS && !cfg->on_data) return KL_PIPE_INVALID;
-    /* Decided before any OS call: only the native IOCP engine carries pipe ops. */
-    if (!kl_comp_pipe_available(ctx)) return KL_PIPE_UNSUPPORTED;
+    /* Decided before any OS call, by what the platform's pipes are and what the loop can drive:
+     *   completion: the engine carries pipe ops (Windows IOCP);
+     *   readiness:  the platform's pipe ends are pollable descriptors (POSIX) and the loop watches
+     *               native descriptors (epoll, kqueue, poll, and io_uring / pollcomp via their relay).
+     * Anything else (Windows WSAPoll, a runtime loop without native descriptors) is refused. */
+    int readiness = 0;
+    if (!kl_comp_pipe_available(ctx)) {
+        if (!kl_plat_pipe_readiness() || !(kl_event_caps(&ctx->loop) & KL_EVENT_CAP_NATIVE_FD))
+            return KL_PIPE_UNSUPPORTED;
+        readiness = 1;
+    }
 
     KlPipeHandle *parent = NULL, *child = NULL;
     KlPipeStatus st = map_open(kl_plat_pipe_create_pair(dir == KL_ANON_PIPE_READS, &parent, &child));
     if (st != KL_PIPE_OK) return st;
     KlPipeStream *p = NULL;
     st = pipe_new(ctx, parent, cfg->read_capacity, cfg->write_capacity,
-                  dir == KL_ANON_PIPE_READS ? PIPE_FACET_READ : PIPE_FACET_WRITE, &p);
+                  dir == KL_ANON_PIPE_READS ? PIPE_FACET_READ : PIPE_FACET_WRITE, readiness, &p);
     if (st != KL_PIPE_OK) {            /* pipe_new already closed the parent end */
         kl_plat_pipe_close(child);
         return st;
@@ -298,26 +403,13 @@ KlPipeStatus kl_anon_pipe_create(struct KlEventCtx *ctx, KlAnonPipeDir dir, cons
     p->on_close  = cfg->on_close;
     p->user_data = cfg->user_data;
     *stream = p;
-    peer->_handle = child;
+    kl_plat_pipe_end_adopt(peer, child);
     return KL_PIPE_OK;
 }
 
 void kl_anon_pipe_end_close(KlAnonPipeEnd *peer) {
-    if (!peer) return;
-    if (peer->_handle) kl_plat_pipe_close((KlPipeHandle *)peer->_handle);
-    peer->_handle = NULL;
-    peer->_fd1    = 0;   /* no POSIX end is ever filled here: kl_anon_pipe_create is unsupported there */
+    if (peer) kl_plat_pipe_end_release(peer);
 }
-
-#if defined(_WIN32)
-void *kl_anon_pipe_end_handle(const KlAnonPipeEnd *peer) {
-    return peer ? peer->_handle : NULL;
-}
-#else
-int kl_anon_pipe_end_fd(const KlAnonPipeEnd *peer) {
-    return (peer && peer->_fd1 > 0) ? peer->_fd1 - 1 : -1;
-}
-#endif
 
 KlStream *kl_pipe_stream(KlPipeStream *p) {
     return p ? &p->stream : NULL;
@@ -335,6 +427,10 @@ void kl_pipe_free(KlPipeStream *p) {
     if (!p || p->freed) return;
     p->freed = 1;                       /* before the cancel: its on_close must not reach the consumer */
     (void)kl_stream_cancel(&p->stream); /* CancelIoEx whatever is outstanding; each still completes */
+    if (p->readiness) {                 /* no op in flight: just stop watching, before the fd closes */
+        p->want_read = p->want_write = 0;
+        (void)pipe_watch(p);
+    }
     kl_comp_life_release(p->life);      /* the owner ref; final once the last op has retired */
 }
 
@@ -366,7 +462,7 @@ static int listener_arm(void *vp) {
     pl->first_h = NULL;
     if (!h && kl_plat_pipe_create_instance(pl->path, /*first=*/0, &h) != KL_PIPE_OPEN_OK) return -1;
     KlPipeStream *p = NULL;
-    if (pipe_new(pl->ctx, h, pl->rcap, pl->wcap, PIPE_FACET_DUPLEX, &p) != KL_PIPE_OK)
+    if (pipe_new(pl->ctx, h, pl->rcap, pl->wcap, PIPE_FACET_DUPLEX, 0, &p) != KL_PIPE_OK)
         return -1;                                                  /* h consumed */
     pend_link(pl, p);
     if (pipe_post(p, KL_PIPE_OP_ACCEPT, NULL, 0) != 0) {

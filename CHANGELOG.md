@@ -7,6 +7,33 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Added
 
+- **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that
+  watches native descriptors: epoll, kqueue, poll, and io_uring / pollcomp through their watcher relay.
+  - The pair is an ordinary pipe: `pipe2(O_CLOEXEC)`, or `pipe` + `FD_CLOEXEC` on macOS. Only the
+    parent end is non-blocking; the child's end (`kl_anon_pipe_end_fd`) stays blocking.
+  - The parent end is the same `KlPipeStream`, in readiness mode over the generic watcher
+    registration, never `KlSocketProvider`. The directional facets, lifetime and callbacks are
+    unchanged.
+  - **No SIGPIPE, no process-global change.** A write whose reader has gone returns
+    `KL_STREAM_ERROR`. Keel uses `F_SETNOSIGPIPE` where it exists; elsewhere it blocks SIGPIPE in the
+    writing thread and consumes only the signal its own write raised. An embedder's already-pending
+    SIGPIPE is left alone.
+  - **A vanished reader wakes a blocked writer.** Engines may report it only as HUP / ERR, delivered
+    as READ, so a pending write is attempted on any readiness. `EPIPE` then fires the writable-again
+    edge once, the retry returns `KL_STREAM_ERROR`, and a graceful close still detaches.
+  - **Known defect, tracked, not worked around:** Cosmopolitan on a Windows host reports a full pipe
+    as writable, so a blocked writer there busy-wakes instead of sleeping. There is no timer backoff
+    and no message-size rule; `test_anon_pipe` records it as a known defect that fails once fixed.
+  - `check-pipe-seam` adds three rules: POSIX pipe creation stays in its platform layer; no
+    process-global SIGPIPE disposition outside the HTTP server's existing site; and the pipe transport
+    never calls the socket seam.
+  - `test_anon_pipe` now asserts support by platform and engine capability instead of
+    completion-vs-readiness. It runs a POSIX section on every POSIX engine, io_uring and pollcomp
+    included: data both ways with EOF, the blocked-writer / vanished-reader path, no SIGPIPE under the
+    default disposition, an embedder's pending SIGPIPE left pending, pause, cancel, free from a
+    callback, 200 close-order races, and allocation failure at every point, each checked against the
+    allocator and the open descriptor count.
+
 - **Anonymous pipe pairs on Windows: `kl_anon_pipe_create`.** One call makes a one-directional pipe
   whose parent end is a `KlPipeStream` and whose child end is a `KlAnonPipeEnd` for the embedder's
   process spawner (`<keel/anon_pipe.h>`; the native `HANDLE` via `<keel/anon_pipe_native.h>`).
@@ -18,8 +45,7 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     clients rejected, and the connected client verified to be this process. The child end is
     synchronous, as a child's C runtime expects. Neither end is inheritable; the spawner opts the
     child end in.
-  - IOCP engine only. Every other engine and platform returns `KL_PIPE_UNSUPPORTED`; POSIX pairs
-    follow separately.
+  - Windows: IOCP only; WSAPoll returns `KL_PIPE_UNSUPPORTED`.
   - Keel still spawns nothing: `check-pipe-seam` now forbids process-management calls anywhere in the
     library, and stdio-role or protocol names in the pipe transport.
   - Tested by `test_anon_pipe` on IOCP: privacy, direction and inheritance, 1 MiB reads and 4 MiB

@@ -35,7 +35,9 @@ extern "C" {
  *  synchronous (not overlapped). */
 void *kl_anon_pipe_end_handle(const KlAnonPipeEnd *peer);
 #else
-/** The child end's file descriptor, or -1 if `peer` is empty. Created close-on-exec and blocking. */
+/** The child end's file descriptor, or -1 if `peer` is empty. Created close-on-exec and blocking.
+ *  macOS has no pipe2, so both ends are made close-on-exec just after creation; a concurrent fork in
+ *  another thread in that window inherits them, which the spawner closes with its own spawn lock. */
 int   kl_anon_pipe_end_fd(const KlAnonPipeEnd *peer);
 #endif
 
