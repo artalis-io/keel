@@ -70,7 +70,9 @@ typedef enum {
  *  transport provider or wrapper. */
 typedef kl_ssize_t (*KlStreamWriteFn)(const char *data, size_t len, void *ctx);
 /** Completion-mode submit hook: post one async send of [data,len]. 0 = submitted (a WRITE
- *  completion follows), non-zero = failed. Supplied by the transport provider or wrapper. */
+ *  completion follows), non-zero = failed (no completion follows). Supplied by the transport provider
+ *  or wrapper. The completion may be delivered inline, by calling kl_stream_on_write_complete before
+ *  the hook returns; the stream retires it once the hook has returned. */
 typedef int (*KlStreamSubmitFn)(void *ctx, const char *data, size_t len);
 
 /** Preallocate the write queue to `capacity` bytes (one alloc, init-time). Returns 0, or -1. */

@@ -47,6 +47,9 @@ struct KlStream {
     int                send_inflight;    /**< a submit is outstanding */
     size_t             inflight_len;     /**< bytes handed to the in-flight submit */
     int                inflight_copying; /**< ownership policy CAPTURED for the in-flight op */
+    int                submitting;       /**< inside submit_fn: a completion now is inline */
+    int                inline_done;      /**< the in-flight send completed inside submit_fn */
+    int                inline_ok;        /**< ...with this result (retired by the pump) */
     int                wr_blocked;       /**< writable edge armed: a write saw WOULD_BLOCK */
     int                in_writable;      /**< DEPTH: inside on_writable; defer close finalize */
     void             (*on_writable)(void *ctx);

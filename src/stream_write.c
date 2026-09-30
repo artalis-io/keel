@@ -92,25 +92,60 @@ static void stream_fire_writable(KlStream *s) {
     s->in_writable--;
 }
 
+/* Retire the in-flight send's bytes and state after a successful completion. */
+static void stream_send_retired(KlStream *s) {
+    if (!s->inflight_copying)                     /* referencing backend: safe to free NOW */
+        kl_drain_consume(&s->wq, s->inflight_len);
+    s->send_inflight = 0;
+    s->inflight_len  = 0;
+}
+
 /* Completion pump: if no send is in flight and the queue has bytes, submit exactly one batch.
  * Returns 0 = ok (submitted, or nothing to do, or blocked by an in-flight send), -1 = the
  * submission failed (bytes remain owned in the queue; sticky error set). Ordering: send_inflight
- * blocks a second submit until kl_stream_on_write_complete clears it. */
+ * blocks a second submit until kl_stream_on_write_complete clears it.
+ *
+ * Synchronous-completion safe (docs/contracts/stream.md): the op is recorded as in flight BEFORE
+ * submit_fn runs, so a kl_stream_on_write_complete from inside it is recognized, not dropped as
+ * spurious. That inline completion is only noted (the backend's frame is still on the stack); the
+ * pump retires it once submit_fn has returned and loops to submit the next batch, so a backend that
+ * always completes inline drains the queue iteratively, without recursion. The writable edge and the
+ * retire notification stay with the caller: kl_stream_on_write_complete fires both after pumping,
+ * and kl_stream_write needs neither (it cleared wr_blocked, and a closing stream refuses writes). */
 static int stream_pump_completion(KlStream *s) {
-    if (s->wq_err) return -1;
-    if (s->send_inflight) return 0;              /* one in flight; wait for its completion */
-    size_t len = kl_drain_buffered(&s->wq);
-    if (len == 0) return 0;
-    const char *data = kl_drain_data(&s->wq);
-    int r = s->submit_fn(s->submit_ctx, data, len);
-    if (r != 0) { s->wq_err = 1; return -1; }    /* 0 = submitted; anything else = failed. */
-    s->send_inflight    = 1;
-    s->send_cancel_requested = 0;                /* a genuinely new send op; not yet cancel-requested */
-    s->inflight_len     = len;
-    s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op */
-    if (s->inflight_copying)                     /* backend copied: free the queue now, but */
-        kl_drain_consume(&s->wq, len);           /* send_inflight still blocks the next submit */
-    return 0;
+    for (;;) {
+        if (s->wq_err) return -1;
+        if (s->send_inflight) return 0;          /* one in flight; wait for its completion */
+        size_t len = kl_drain_buffered(&s->wq);
+        if (len == 0) return 0;
+        const char *data = kl_drain_data(&s->wq);
+        s->send_inflight    = 1;
+        s->send_cancel_requested = 0;            /* a genuinely new send op; not yet cancel-requested */
+        s->inflight_len     = len;
+        s->inflight_copying = s->submit_copying; /* capture the policy WITH the op */
+        s->inline_done      = 0;
+        s->submitting       = 1;
+        int r = s->submit_fn(s->submit_ctx, data, len);
+        s->submitting       = 0;
+        if (r != 0) {                            /* 0 = submitted; anything else = failed, and no */
+            s->send_inflight = 0;                /* completion follows (one reported inline is */
+            s->inflight_len  = 0;                /* void: the submission itself failed) */
+            s->inline_done   = 0;
+            s->wq_err        = 1;
+            return -1;
+        }
+        if (s->inflight_copying)                 /* backend copied: free the queue now, but */
+            kl_drain_consume(&s->wq, len);       /* send_inflight still blocks the next submit */
+        if (!s->inline_done) return 0;           /* the usual case: the completion comes later */
+        s->inline_done = 0;                      /* completed inside submit_fn: retire it here */
+        if (!s->inline_ok) {                     /* delivery failed: as kl_stream_on_write_complete */
+            s->send_inflight = 0;
+            s->inflight_len  = 0;
+            s->wq_err        = 1;
+            return -1;
+        }
+        stream_send_retired(s);                  /* and pump the next batch */
+    }
 }
 
 KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
@@ -172,6 +207,11 @@ int kl_stream_flush(KlStream *s) {
 int kl_stream_on_write_complete(KlStream *s, int ok) {
     if (!s || !s->wq_inited) return -1;
     if (!s->send_inflight) return s->wq_err ? -1 : 0;   /* spurious/duplicate completion */
+    if (s->submitting) {                          /* inline, from inside submit_fn: the pump that */
+        s->inline_done = 1;                       /* called it retires the op once it returns */
+        s->inline_ok   = ok;
+        return 0;
+    }
 
     if (!ok) {
         /* Delivery failed. The completion has arrived, so the provider operation has RETIRED
@@ -186,10 +226,7 @@ int kl_stream_on_write_complete(KlStream *s, int ok) {
         if (s->on_retire) s->on_retire(s);       /* send op physically retired; let close finalize */
         return -1;
     }
-    if (!s->inflight_copying)                     /* referencing backend: safe to free NOW */
-        kl_drain_consume(&s->wq, s->inflight_len);
-    s->send_inflight = 0;
-    s->inflight_len  = 0;
+    stream_send_retired(s);
     int r = stream_pump_completion(s);           /* send the next queued batch, if any */
     if (stream_writable_edge(s)) stream_fire_writable(s);
     /* This send op retired. If pump re-submitted, send_inflight is set again and finalize will
