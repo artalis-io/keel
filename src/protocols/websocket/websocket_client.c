@@ -982,7 +982,10 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     memset(ws, 0, sizeof(*ws));
 
     ws->fd = fd;
-    ws->state = (rc == 0) ? WSC_WS_HANDSHAKE : WSC_CONNECTING;
+    /* A connect that completed at once may go straight to the upgrade only without TLS; with TLS it
+     * must take the CONNECTING path, which sets up the session (wsc_handle_connecting). Skipping it
+     * sent the upgrade, and every frame after it, in plaintext. */
+    ws->state = (rc == 0 && !(tls_cfg && tls_cfg->factory)) ? WSC_WS_HANDSHAKE : WSC_CONNECTING;
     ws->ev = ev;
     ws->alloc = alloc;
     ws->tls_cfg = tls_cfg;
