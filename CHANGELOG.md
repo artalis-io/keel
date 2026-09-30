@@ -121,6 +121,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A WebSocket message larger than one read broke.** Both the server and the client decided
+  "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
+  BINARY frame looked like the start of another message. The server closed the connection with 1002
+  (protocol error), so any client message larger than one read, or one that straddled a TCP read,
+  was rejected; the client kept only the tail of such a message. A control frame (ping, close) whose
+  payload arrived over several reads was acted on from its last chunk only, so a pong or close
+  reason carried a fragment. A new message now starts only at the first chunk of a non-continuation
+  frame, and control payloads are gathered (up to their 125-byte limit) until the frame completes.
+  The new `test_websocket_split_frames` round-trips a 60,000-byte message through a real server and
+  client, and sends a raw frame in pieces plus a ping whose payload is split across writes; without
+  the fix both cases fail.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);

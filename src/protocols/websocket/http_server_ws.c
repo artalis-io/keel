@@ -486,23 +486,31 @@ int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
 
             int opcode = ws->frame.opcode;
 
+            /* A frame's payload can arrive over several reads; only its first chunk (nothing of
+             * it consumed before this call) starts anything. */
+            int frame_start = (payload_before == 0);
+
             /* Control frames (can interleave with fragments) */
             if (opcode >= 0x8) {
+                /* Gather the payload across reads (the parser caps it at 125 bytes), and act
+                 * only once the frame is complete. */
+                if (frame_start) ws->ctrl_len = 0;
+                memcpy(ws->ctrl_buf + ws->ctrl_len, payload_data, payload_consumed);
+                ws->ctrl_len += payload_consumed;
                 if (rc == 1) {
                     /* Control frame complete */
                     if (opcode == KL_WS_OP_CLOSE) {
-                        int state = ws_handle_close(ws, payload_data,
-                                                     payload_consumed);
+                        int state = ws_handle_close(ws, ws->ctrl_buf, ws->ctrl_len);
                         return state;
                     } else if (opcode == KL_WS_OP_PING) {
-                        ws_handle_ping(ws, payload_data, payload_consumed);
+                        ws_handle_ping(ws, ws->ctrl_buf, ws->ctrl_len);
                     }
                     /* Pong: ignore (RFC 6455 Section 5.5.3) */
                 }
-                /* Control frames must fit in one parse since max 125 bytes */
             } else {
-                /* Data frame: reassemble */
-                int is_first = (opcode != KL_WS_OP_CONTINUATION);
+                /* Data frame: reassemble. A new message starts only at the first chunk of a
+                 * non-continuation frame; later chunks of the same frame just append. */
+                int is_first = frame_start && (opcode != KL_WS_OP_CONTINUATION);
 
                 if (is_first) {
                     /* Start of new message */
@@ -514,7 +522,7 @@ int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
                     ws->msg_opcode = opcode;
                     ws->msg_len = 0;
                     ws->utf8_state = KL_UTF8_ACCEPT;
-                } else if (ws->msg_opcode == 0) {
+                } else if (frame_start && ws->msg_opcode == 0) {
                     /* Continuation without a start frame */
                     kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
                     return KL_HTTP_CONN_CLOSED;

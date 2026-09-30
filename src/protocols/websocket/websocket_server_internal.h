@@ -22,6 +22,8 @@
 struct KlWsServerConn {
     KlWsServerConfig *config;    /* Points to route's config (not owned) */
     KlWsFrameParser frame;       /* Incremental frame parser */
+    uint8_t ctrl_buf[125];       /* current control frame's payload, gathered across reads */
+    size_t  ctrl_len;
     char *msg_buf;               /* Reassembly buffer (allocated) */
     size_t msg_len;              /* Current message length */
     size_t msg_cap;              /* Message buffer capacity */
