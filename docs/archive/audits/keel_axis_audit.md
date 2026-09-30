@@ -5,6 +5,189 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Fifteenth pass: the transport layer and pipe streams sit above the axes without bending them (2026-09-30)
+
+**Scope:** `d16956d..f0d9085` (18 commits, 95 files, +7991/-496) plus a whole-repo re-check. The
+range adds a transport layer above the axes and a second, non-socket kind of stream: the `KlStream`
+write/read/close facets (including the writable-again edge `kl_stream_on_writable` and the fix that
+stops a graceful close hanging after a terminal write failure), the `KlListener` object handoff
+family, Windows Named Pipes on IOCP, anonymous pipe pairs on Windows (completion) and POSIX
+(readiness), close-on-exec on Keel's own descriptors, and gates `check-pipe-seam` (R1-R8),
+`check-cloexec` and `check-no-dgram-life`.
+
+**Verdict: architecturally sound; two protocol-layer partial-I/O defects and two IOCP op-lifetime
+defects found.** The event, socket and protocol axes remain orthogonal and separately replaceable, and
+the pipe transport stays off the socket axis in both I/O models. The same-day C audit (fifteenth pass
+of `keel_audit.md`) found defects that fall under this audit's goals 6 and 7; they are summarised as
+A1-A5 below because they are axis-relevant, not because the separation is violated. A1 is Critical:
+HTTP/1 requests split across reads are rejected on **both** event models, identically, which is
+"consistent across models" in the worst sense. No fourteenth-pass finding has regressed.
+
+### 1. Architecture map (verified current)
+
+- **Event axis (shape unchanged).** `include/keel/event.h` + `src/event_caps.h` +
+  `src/completion.h` / `completion_core.c` / `completion_dispatch.c`. Readiness: `event_epoll.c`,
+  `event_kqueue.c`, `event_poll.c`, `event_wsapoll.c`. Completion: `event_iouring.c`, `event_iocp.c`,
+  `event_pollcomp.c`. `completion.h` gained `KL_COMP_PIPE_READ/_WRITE/_ACCEPT`, routed by life token
+  like the datagram kinds (`completion_core.c:61-75`).
+- **Socket axis (unchanged).** `src/socket.h` `KlSocketProvider` with `socket_posix.c` /
+  `socket_winsock.c`; the readiness server's accept is close-on-exec (`accept4(SOCK_CLOEXEC)`,
+  `kl_sockdef_set_cloexec`, `socket_posix.c:54,132-138`); see A5 for the creators that are not.
+- **Transport layer (new, above both axes).** `KlStream` (`stream.c`, `stream_write.c`,
+  `stream_read.c`, `stream_close.c`), `KlListener` (`listener.c`, fd or adapter-object handoff),
+  `KlConnectOp` (`connect_op.c`). An adapter installs model-specific hooks: readiness =
+  `kl_stream_set_writer` + `kl_stream_flush`, `kl_stream_read_init(completion=0, ..., disarm)`;
+  completion = `kl_stream_set_submit` + `kl_stream_on_write_complete`, `kl_stream_read_init(completion=1)`.
+  The stream machinery names no engine.
+- **Pipe transport (new).** `src/pipe_stream.c` is generic substrate (no platform header or type) over
+  two seams: `src/platform_pipe.h` (PAL create/open/close; POSIX readiness read/write;
+  `platform_pipe_win.c`, `platform_pipe_posix.c`) and `src/completion_pipe.h` (overlapped pipe ops,
+  implemented only in `event_iocp.c`; every other engine links `completion_pipe_absent.c` with
+  `kl_comp_pipe_available() == 0`). `KlPipeHandle` is an incomplete struct pointer
+  (`platform_pipe.h:41`), so it cannot convert implicitly to `KlSocketHandle` or `int`. Lifetime is
+  `KlCompLife` (`completion_life.{h,c}`, pinned by `check-no-dgram-life`).
+- **Protocol layer (unchanged).** `src/protocols/{http,http2,websocket,dns,proxy_protocol}/` reach I/O
+  only through `conn_read`/`conn_write` (`http_internal.h:45`) onto `kl_stream_recv`/`kl_stream_send`,
+  or through `KlTls`; `check-pipe-seam` R4 keeps pipe headers out of protocol TUs.
+
+### 2. Execution-path traces
+
+- **Readiness receive (epoll, HTTP).** Registration identity `&conn->stream`
+  (`check-readiness-identity`) → `kl_http_conn_on_readable` (`http_connection.c:819`) → `conn_read` →
+  `kl_stream_recv` (`:478`) → `parse(read_buf, read_len)` (`:886`) → on INCOMPLETE, state stays READING
+  and interest is re-armed. **The re-armed read appends and the parser is fed from byte 0 again: A1.**
+- **Completion receive (IOCP, named pipe).** `kl_stream_read_start` → `stream_arm` sets
+  `recv_inflight` before the hook → `pipe_arm` (`pipe_stream.c:147`) → `pipe_post(READ)` takes one
+  `kl_comp_life_retain` → `kl_comp_pipe_post` (`event_iocp.c:833`) allocates a `KlIocpOp` →
+  `iocp_pipe_issue` → `ReadFile(..., &op->ov)`; `ERROR_IO_PENDING` transfers the ref to the op, and a
+  synchronous failure is self-queued (`:765-769`), so each accepted post yields exactly one completion
+  → drain → `iocp_pipe_complete` (`:775`; zero-byte success re-issued, `ERROR_BROKEN_PIPE` → `ok = 0`)
+  → `completion_core.c:66-70` `kl_comp_life_dispatch` → `pipe_dispatch` (`pipe_stream.c:250`) →
+  `kl_stream_on_recv` → `pipe_deliver` → `kl_comp_life_release`. The stream re-arms unless paused
+  (then the completion is held).
+- **Accept, readiness (epoll/WSAPoll).** Listen event with NULL udata → `kl_listener_state ==
+  LISTENING` loop (`http_server.c:457`) → `kl_sock_accept` until EAGAIN → `kl_listener_on_accepted`
+  → `server_accept_on_accept` commits the pool credit → `kl_event_mod(listen_fd, READ)` unless PAUSED
+  (`:489-494`).
+- **Accept, completion (IOCP).** `comp_accept_listener_start` (`completion_http_server.c:709`) →
+  `comp_accept_arm` → `kl_comp_post_accept` → `comp_on_accept` (`:722`) →
+  `kl_listener_on_accept_failed` (credit returned) or `kl_listener_on_accepted` →
+  `comp_setup_accepted`. The named-pipe listener rides the same `KlListener` through the object family
+  (`listener_arm` posts `KL_PIPE_OP_ACCEPT` on a fresh `KlPipeStream`, `pipe_stream.c:459`;
+  `listener_accept_done` → `kl_listener_on_accepted_obj`).
+- **Send + backpressure larger than one op.** Completion (pipe): `kl_stream_write` reserves atomically
+  (`kl_drain_reserve_buffer`) → `stream_pump_completion` submits the queue (`stream_write.c:99`) →
+  `pipe_submit` copies (queue consumed at submit; in-flight bytes still count in
+  `kl_stream_write_pending`) → partial `WriteFile` re-issued in `iocp_pipe_complete` until
+  `send_done == send_total` → `kl_stream_on_write_complete` pumps the next batch and
+  `stream_writable_edge` wakes a producer that saw `WOULD_BLOCK`. Readiness:
+  `kl_drain_reserve_write` direct-sends the prefix and queues the rest; the adapter's writer turns a
+  short write into write interest; `kl_stream_flush` drains on writability and fires the edge.
+- **POSIX readiness pipe write, EPIPE from HUP/ERR delivered as READ (epoll).** `rd_write`
+  (`pipe_stream.c:209`) short-writes → `want_write` → `pipe_watch` → `kl_watcher_add(pfd, WRITE,
+  pipe_ready)`; the producer gets `WOULD_BLOCK` (edge armed). The child closes its end; epoll reports
+  `EPOLLERR`, mapped to `KL_EVENT_READ` (`event_epoll.c:70`) → `pipe_ready` ignores the mask
+  (`:226`) and, with `want_write` set, calls `kl_stream_flush` → `kl_plat_pipe_write` → `write_quiet`
+  (`platform_pipe_posix.c:124`) blocks SIGPIPE in this thread, gets `EPIPE`, consumes only a SIGPIPE
+  it raised → `-1` → sticky `wq_err`, `stream_writable_edge` fires once, the retry returns
+  `KL_STREAM_ERROR`, `on_retire` lets a graceful close detach (`stream_close.c:42`) → `pipe_watch`
+  deletes the watcher. poll, WSAPoll, the io_uring relay (`event_iouring.c:1021`) and pollcomp
+  (`event_pollcomp.c:734`) map HUP/ERR the same way; kqueue reports `EVFILT_WRITE`. Pinned by
+  `test_anon_pipe.c` `blocked_writer_peer_gone_wakes_once_errors_and_closes`.
+- **Close with outstanding work.** `kl_pipe_free` sets `freed` (silences the consumer) →
+  `kl_stream_cancel` → `pipe_cancel_recv/_send` → `CancelIoEx`; each op still completes once → owner
+  ref released; the handle closes and memory is freed only at the final release (`pipe_final`,
+  `pipe_stream.c:109`). Loop teardown: `iocp_pipe_complete` under `st->quiescing` frees the op without
+  an event and releases the ref; `pipe_final` clears `send_inflight` so the queue is not leaked.
+  Readiness mode has no op in flight: `pipe_ready` holds a ref across callbacks, `kl_pipe_free` deletes
+  the watcher before the fd closes, and `kl_watcher_del` defers the node free during a batch
+  (`event_ctx.c:243-265`).
+
+### 3. Findings
+
+**Axis-relevant defects (from the same-day C audit; see `keel_audit.md` fifteenth pass for detail):**
+
+| # | Severity | Files+symbols | Goal | Summary |
+|---|---|---|---|---|
+| A1 | Critical | `http_connection.c:886`; `completion_http_server.c:468`; `http1_parser_llhttp.c:161` | 7 (partial I/O) | A request whose request line or headers span two reads is re-fed from byte 0 to the stateful llhttp parser: rejected, or parsed as a different header set, or given an out-of-bounds path length. Reproduced on a real `KlHttpServer` over WSAPoll and IOCP. The two models are consistent with each other and both wrong: the partial-input contract was never pinned by a test that completes a split request. |
+| A2 | High | `http_server_ws.c:505-513`; `websocket_client.c:690-693` | 7 (partial I/O) | A WebSocket data frame spanning reads is treated as a new message per chunk (server closes 1002; client keeps only the tail). |
+| A3 | Medium | `event_iocp.c:259-279` `iocp_watch_reinterest` | 6 (op lifetime) | An interest change while a watcher op awaits re-arm (no kernel I/O) leaks that op until loop close; reached once per async client request. |
+| A4 | Medium | `event_iocp.c:1060-1066` `iocp_watch_rearm_dispatched` | 6 (op lifetime) | A failed re-arm leaves an op that neither the delete path nor the quiesce pre-pass frees, so `kl_event_close` waits forever. |
+| A5 | Medium | `socket_posix.c:102-104`; `event_iouring.c:662`; `event_pollcomp.c:497`; `event_iocp.c:481` | 13/cross-cutting (resource ownership) | Default-provider sockets and completion-engine accepted sockets are inheritable; #343 covered Keel's internal descriptors only. |
+
+**Architecture findings (this pass):**
+
+| # | Severity | Files+symbols | Principle | Why / failure scenario | Smallest fix |
+|---|---|---|---|---|---|
+| F1 | Low | `pipe_stream.c:386-390` `kl_anon_pipe_create`; `integrations/platform/lwip/event_lwip.c:184-187` `lwev_caps`; `event.h:79` | Goal 13: never silently select an incompatible combination | `kl_anon_pipe_create` reads `KL_EVENT_CAP_NATIVE_FD` as "watches OS descriptors". The runtime-installed lwIP BSD loop advertises `READINESS \| NATIVE_FD` but polls lwIP socket numbers via `lwip_poll` (its own wakeup comment: "The host self-pipe ... is invisible to lwip_poll"). On a hosted POSIX build with that loop, create returns `KL_PIPE_OK` for a pipe whose readiness is never reported, instead of `KL_PIPE_UNSUPPORTED`. The design doc lists only lwIP-raw and EFI as refused. Unusual combination, no memory-safety impact. | Refuse the readiness path on a runtime-installed loop (`ctx->loop.ops`), as `kl_comp_pipe_available` already does for IOCP; add a refusal test. Dropping `NATIVE_FD` from lwIP is not an option (`kl_event_ctx_sockets_compatible` needs it). |
+| F2 | Low | `docs/contracts/stream.md:216`; `stream_write.c:99-114` `stream_pump_completion`, `:172-174` | Contract and implementation must agree | The read side is inline-safe (`stream_arm` sets `recv_inflight` before the hook and tracks `completed_inline`); the write side is not: `send_inflight` is set after `submit_fn` returns, so an inline `kl_stream_on_write_complete` is dropped as spurious and the queue stalls permanently. No shipped backend completes inline (`iocp_pipe_issue` self-queues even synchronous results); the contract is public, and the failure is silent. | Choose: correct the contract to exclude `submit` (and say so on `KlStreamSubmitFn`), or make the pump mirror `stream_arm`. Pin the choice with an inline-completing mock submit. |
+| F3 | Informational | `listener.c` `kl_listener_on_accepted` / `_obj` wrong-family branches | Total descriptor ownership | Calling the wrong family's completion retires the accept as failed (credit correct) but neither hands over nor disposes the fd/object; only an adapter bug reaches it. | Document that in the refused case the value stays the caller's to dispose. |
+| F4 | Informational | `completion_life.c:13,54`; `completion_life.h:26-28` | Stale-name hygiene | Two comments still describe the token as datagram-specific, and "Owners today" omits the POSIX readiness pipe. | Comment edits. |
+
+**Judged sound (not findings):** the pipe transport stays off the socket axis (no `kl_sock_*` /
+`kl_sockdef_*` / provider call in any pipe TU; the one `KlSocketHandle` conversion is
+`kl_plat_pipe_pollable`, a watcher registration value; `KlStream.fd` stays `KL_INVALID_SOCKET`; only
+`platform_pipe_posix.c`, which owns the fd+1 encoding, is exempt from the no-cast rule). Readiness is
+honest (`pipe_ready` reports `kl_stream_on_recv` only after `read()` returned data, EOF or a terminal
+error; EAGAIN stays armed). Registration vs submission stays distinct (one persistent watcher per POSIX
+pipe stream, changed only when the derived mask changes; one submitted op per IOCP read/write/accept
+with its own buffer ownership). `KlCompLife` is balanced on every post, failed post, dispatch and
+quiesce. Support selection is decided before any OS call and observable as `KL_PIPE_UNSUPPORTED`
+(apart from F1): IOCP when the compiled-in engine has no runtime `loop.ops`, otherwise POSIX plus
+`NATIVE_FD`; Windows WSAPoll refused because `kl_plat_pipe_readiness()` is 0.
+
+### 4. Compatibility matrix
+
+| Combination | TCP / HTTP stack | Pipe transport | Evidence |
+|---|---|---|---|
+| Linux sockets + epoll | tested; **A1 affects production** | anon pair (readiness): tested | CI Linux epoll, musl, ASan+UBSan (PR #346 head `d8b7bb4`, tree identical to `f0d9085`) |
+| Linux sockets + io_uring | tested; A1 affects it | anon pair via watcher relay: tested | CI io_uring unit suite + sanitized io_uring |
+| Darwin sockets + kqueue | tested; A1 affects it | anon pair (readiness, `F_SETNOSIGPIPE`): tested | CI macOS kqueue, pollcomp on macOS |
+| Winsock + WSAPoll | tested; A1 **reproduced** | unsupported by design | CI WSAPoll archive, MinGW, MSVC; local A1 repro |
+| Winsock + IOCP | tested; A1 **reproduced**; A3/A4 | named pipe client + listener + anon pair: tested | CI Windows IOCP; local A1 repro |
+| pollcomp double | test instrument; tested | anon pair via relay: tested | CI sanitized pollcomp, pollcomp ubuntu + macOS |
+| poll fallback | tested | anon pair: tested | CI poll fallback, no-completion |
+| Cosmopolitan | builds; smoke only | known defect on Windows hosts (full pipe reported writable), not exercised in CI | CI library + smoke; `test_anon_pipe.c` tracked case |
+| runtime lwIP BSD loop | integration; tested | incorrectly accepted (F1) | static trace |
+
+Given A1, no HTTP/1 server combination should be called production-ready until it is fixed and pinned
+by a split-request test on both models.
+
+### 5. Mechanical evidence
+
+- **Protocol independence.** `src/protocols/**` grepped for `<sys/epoll.h>`, `<sys/event.h>`,
+  `io_uring`, `WSA`, `OVERLAPPED`, `epoll_`, `kevent`, `<winsock2.h>`, `<sys/socket.h>`: 21 hits in 9
+  files, 20 of them comments; the one include is `dns_sys_win.c:13 <winsock2.h>`, the sanctioned
+  platform-sibling TU behind `dns_sys.h`. No protocol core TU includes a platform networking header or
+  calls an engine.
+- **Pipe TUs vs the socket axis.** All 9 pipe TUs grepped for `kl_sock_`, `kl_sockdef_`,
+  `KlSocketProvider` calls, `sockets->`, `WSA`, `closesocket`: zero code hits.
+- **Gates.** `check-pipe-seam` R1-R8 and `check-cloexec` are self-canaried and green in CI Static
+  Analysis; `check-cloexec` does not cover socket creators (A5).
+
+### 6. Limits of this pass
+
+Read-only static tracing on a Windows host, plus the local A1 reproduction (parser probe and an
+end-to-end server run on WSAPoll and IOCP). io_uring and the Apple `container` VM were not available;
+Linux/macOS/io_uring/pollcomp execution evidence is CI's. The Cosmopolitan-on-Windows full-pipe defect
+was not reproduced here. F1 is inferred from code and the integration's own comment; no test drives the
+lwIP BSD provider with a pipe pair.
+
+### 7. Recommended roadmap
+
+1. **Immediate correctness:** A1 (parse only new bytes; completion grow path resets parser + request;
+   split-request test at many split points on both models), then A2, A3, A4.
+2. **Hygiene with security weight:** A5 (close-on-exec at every socket creator; extend `check-cloexec`).
+3. **Contract clarity:** F2 (pick one rule, pin it), F1 (refuse runtime loops for readiness pairs),
+   F3/F4 comment edits.
+4. **Test-coverage lesson:** both A1 and A2 are partial-input defects that loopback tests never split.
+   A small helper that delivers a byte stream in configurable fragments, used by the HTTP/1 and
+   WebSocket suites on both event models, would have caught both.
+
+### 8. Changes made
+
+None (read-only pass).
+
 ## Fourteenth pass: post-MSVC-coverage-campaign whole-repo re-audit; three-axis separation holds (2026-09-15)
 
 **Verdict: architecturally sound.** The event / socket / protocol axes remain genuinely orthogonal and
