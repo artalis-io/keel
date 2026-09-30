@@ -21,9 +21,16 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Pin a socket buffer: a fixed size also turns off the platform's automatic growth (macOS grows a
+ * send buffer on demand, which let the kernel absorb the whole queue before the reset surfaced). */
+static void pin_buf(KlSocketHandle fd, int opt, int bytes) {
+    (void)setsockopt(fd, SOL_SOCKET, opt, (const char *)&bytes, sizeof bytes);
+}
+
 static int make_pair(KlSocketHandle *end, KlSocketHandle *peer) {
     KlSocketHandle lis = kl_sockdef_socket(AF_INET, SOCK_STREAM, 0);
     if (!kl_handle_valid(lis)) return -1;
+    pin_buf(lis, SO_RCVBUF, 64 * 1024);   /* inherited by the accepted peer */
     uint8_t lo[4] = { 127, 0, 0, 1 };
     KlSockAddr addr; kl_sockaddr_from_ipv4(&addr, lo, 0);
     KlSockAddr bound;
@@ -32,6 +39,7 @@ static int make_pair(KlSocketHandle *end, KlSocketHandle *peer) {
     if (kl_sockdef_get_local_addr(lis, &bound) < 0) goto fail;
     cli = kl_sockdef_socket(AF_INET, SOCK_STREAM, 0);
     if (!kl_handle_valid(cli)) goto fail;
+    pin_buf(cli, SO_SNDBUF, 64 * 1024);
     if (kl_sockdef_connect(cli, &bound) < 0) goto fail;
     srv = kl_sockdef_accept(lis, NULL);
     if (!kl_handle_valid(srv)) goto fail;
@@ -69,12 +77,13 @@ UTEST(stream_close_live, socket_peer_reset_with_queue_behind_detaches) {
     g_closes = 0;
     ASSERT_EQ(kl_stream_close_init(&s, on_close, NULL), 0);
 
-    /* The peer never reads: write until the kernel refuses and bytes stay queued in the stream. */
+    /* The peer never reads: write until MUCH more is queued in the stream than the pinned kernel
+     * buffers (64 KiB each side) can ever take, so the queue cannot drain before the reset lands. */
     static char chunk[64 * 1024];
     memset(chunk, 'k', sizeof chunk);
-    for (int i = 0; i < 200 && kl_stream_write_pending(&s) == 0; i++)
+    for (int i = 0; i < 400 && kl_stream_write_pending(&s) < (4u << 20); i++)
         ASSERT_EQ((int)kl_stream_write(&s, chunk, sizeof chunk), (int)KL_STREAM_ACCEPTED);
-    ASSERT_GT((int)(kl_stream_write_pending(&s) > 0), 0);
+    ASSERT_GE((int)kl_stream_write_pending(&s), (int)(4u << 20));
 
     ASSERT_EQ(kl_stream_close_begin(&s), 0);          /* GRACEFUL: wants to drain the queue */
     ASSERT_EQ(g_closes, 0);

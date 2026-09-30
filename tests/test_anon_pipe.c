@@ -214,6 +214,7 @@ typedef struct {
     int          eof;       /* read: saw end of stream */
     int          bad;       /* read: bytes that did not match the pattern */
     DWORD        err;       /* last failing Win32 error */
+    volatile int go;        /* read mode: wait for this before the first read (see the tests) */
     KlPlatThread t;
 } Child;
 
@@ -228,6 +229,7 @@ static void child_main(void *arg) {
             c->done += k;
         }
     } else {
+        while (!c->go) Sleep(1);
         char b[5000];
         for (;;) {
             DWORD k = 0;
@@ -435,14 +437,14 @@ UTEST_F(anon_iocp, writes_edge_driven_transfer_then_child_sees_eof) {
             size_t n = total - sent < sizeof chunk ? total - sent : sizeof chunk;
             for (size_t i = 0; i < n; i++) chunk[i] = (char)pat(sent + i);
             KlStreamWriteStatus ws = kl_stream_write(st, chunk, n);
-            if (ws == KL_STREAM_WOULD_BLOCK) { would_block++; g.ready = 0; break; }
+            if (ws == KL_STREAM_WOULD_BLOCK) { would_block++; g.ready = 0; c.go = 1; break; }
             ASSERT_EQ((int)ws, (int)KL_STREAM_ACCEPTED);
             sent += n;
         }
         (void)kl_event_ctx_run(&utest_fixture->ev, 16, 5);
     }
     ASSERT_EQ(sent, total);
-    ASSERT_GT(would_block, 10);
+    ASSERT_GT(would_block, 0);                               /* gated reader: at least one block */
     ASSERT_EQ(g.edges, would_block);                          /* each block resumed by one edge */
 
     /* Stdin EOF for the child: a graceful close drains, detaches, and kl_pipe_free closes A. */
@@ -686,6 +688,7 @@ typedef struct {
     int          mode;      /* 0 = write `total` pattern bytes then stop; 1 = read to EOF */
     size_t       total, done;
     int          eof, bad, err;
+    volatile int go;        /* read mode: wait for this before the first read (see the tests) */
     KlPlatThread t;
 } Child;
 
@@ -701,6 +704,7 @@ static void child_main(void *arg) {
             c->done += (size_t)k;
         }
     } else {
+        while (!c->go) { struct timespec ts = { 0, 1000000 }; nanosleep(&ts, NULL); }
         char b[5000];
         for (;;) {
             ssize_t k = read(c->fd, b, sizeof b);
@@ -830,7 +834,7 @@ UTEST_F(anon_px, writes_edge_driven_transfer_then_child_sees_eof) {
             size_t n = total - sent < sizeof chunk ? total - sent : sizeof chunk;
             for (size_t i = 0; i < n; i++) chunk[i] = (char)pat(sent + i);
             KlStreamWriteStatus ws = kl_stream_write(st, chunk, n);
-            if (ws == KL_STREAM_WOULD_BLOCK) { would_block++; g.ready = 0; break; }
+            if (ws == KL_STREAM_WOULD_BLOCK) { would_block++; g.ready = 0; c.go = 1; break; }
             ASSERT_EQ((int)ws, (int)KL_STREAM_ACCEPTED);
             sent += n;
         }
