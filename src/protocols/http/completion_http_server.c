@@ -464,15 +464,15 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
         }
     }
 
-    size_t consumed = 0;
-    KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req,
-                                        c->stream.read_buf, c->stream.read_len, &consumed);
+    /* Only the bytes the parser has not seen yet: it holds its place across reads. */
+    const char *rest = NULL;
+    size_t rest_len = 0;
+    KlHttp1ParseResult pr = kl_http_conn_parse_headers(c, &rest, &rest_len);
     if (pr == KL_HTTP1_PARSE_INCOMPLETE) return 1;
     if (pr == KL_HTTP1_PARSE_ERROR) { kl_comp_close(s, c); return 0; }
 
     KlHttpConnState st = (pr == KL_HTTP1_PARSE_HEADERS_OK)
-        ? kl_http_conn_dispatch_request(c, &s->router,
-                                   c->stream.read_buf + consumed, c->stream.read_len - consumed)
+        ? kl_http_conn_dispatch_request(c, &s->router, rest, rest_len)
         : kl_http_conn_dispatch_request(c, &s->router, NULL, 0);
     comp_after_state(s, c, st);
     return 0;
@@ -506,6 +506,11 @@ static int comp_grow_headers_or_431(struct KlHttpServer *s, KlHttpConn *c) {
     }
     c->stream.read_buf = nb;
     c->stream.read_cap = new_cap;
+    /* The realloc may have moved read_buf, so every pointer the parser handed out is stale: start
+     * the header parse over on the whole (moved) buffer, as the readiness path does. */
+    c->parser->reset(c->parser);
+    memset(&c->req, 0, sizeof(c->req));
+    c->hdr_parsed = 0;
     return 1;
 }
 

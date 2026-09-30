@@ -31,6 +31,7 @@ tests/protocols/http/test_http_router.c
 tests/protocols/http/test_http_server_integration.c
 tests/protocols/http/test_http_server_state.c
 tests/protocols/http/test_http_server_stats.c
+tests/protocols/http/test_http_split_request.c
 tests/protocols/http/test_http_sse.c
 tests/protocols/http/test_http_tls.c
 tests/protocols/http/test_peer_addr.c
