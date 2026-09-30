@@ -129,6 +129,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->stream.fd = fd;
     c->state = KL_HTTP_CONN_READING;
     c->stream.read_len = 0;
+    c->hdr_parsed = 0;
     c->hdr_sent = 0;
     c->route = NULL;
     c->num_params = 0;
@@ -197,6 +198,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
     if (c->parser) {
         c->parser->reset(c->parser);
     }
+    c->hdr_parsed = 0;
     if (c->res.hdr_buf) {
         kl_http_response_free(&c->res);
     }
@@ -816,6 +818,33 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
     }
 }
 
+KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, size_t *rest_len) {
+    *rest = NULL;
+    *rest_len = 0;
+    /* A count larger than the buffer means read_buf was reset without the parser: never feed the
+     * parser from a stale offset, start the header parse over instead. */
+    if (c->hdr_parsed > c->stream.read_len) {
+        c->parser->reset(c->parser);
+        memset(&c->req, 0, sizeof(c->req));
+        c->hdr_parsed = 0;
+    }
+    const char *start = c->stream.read_buf + c->hdr_parsed;
+    size_t len = c->stream.read_len - c->hdr_parsed;
+    size_t consumed = 0;
+    KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req, start, len, &consumed);
+    if (consumed > len) consumed = len;           /* a parser over-report must not walk past the data */
+    if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
+        c->hdr_parsed += consumed;                /* the parser holds its place; feed only new bytes next */
+    } else {
+        c->hdr_parsed = 0;                        /* header phase over (dispatched, or the conn closes) */
+        if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
+            *rest = start + consumed;
+            *rest_len = len - consumed;
+        }
+    }
+    return pr;
+}
+
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
@@ -841,8 +870,11 @@ read_more_headers: ;
             }
             c->stream.read_buf = nb;
             c->stream.read_cap = new_cap;
+            /* The realloc may have moved read_buf, so every pointer the parser handed out is stale:
+             * start the header parse over on the whole (moved) buffer. */
             c->parser->reset(c->parser);
             memset(&c->req, 0, sizeof(c->req));
+            c->hdr_parsed = 0;
             space = c->stream.read_cap - c->stream.read_len;
         }
 
@@ -881,11 +913,10 @@ read_more_headers: ;
             }
         }
 
-        /* Try parsing */
-        size_t consumed = 0;
-        KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req,
-                                             c->stream.read_buf, c->stream.read_len,
-                                             &consumed);
+        /* Try parsing (only the bytes the parser has not seen yet) */
+        const char *rest = NULL;
+        size_t rest_len = 0;
+        KlHttp1ParseResult pr = kl_http_conn_parse_headers(c, &rest, &rest_len);
 
         if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
             /* TLS may buffer multiple records; drain before re-arming */
@@ -900,9 +931,7 @@ read_more_headers: ;
         }
 
         if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
-            return conn_dispatch_request(c, router,
-                                          c->stream.read_buf + consumed,
-                                          c->stream.read_len - consumed);
+            return conn_dispatch_request(c, router, rest, rest_len);
         }
 
         if (pr == KL_HTTP1_PARSE_OK) {
@@ -942,6 +971,7 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     kl_http_response_reset(&c->res);
     c->parser->reset(c->parser);
     memset(&c->req, 0, sizeof(c->req));
+    c->hdr_parsed = 0;
     c->stream.read_len = 0;
     if (c->stream.read_cap > KL_HTTP_CONN_READ_BUF_SIZE) {
         char *shrunk = kl_realloc(c->stream.alloc, c->stream.read_buf,

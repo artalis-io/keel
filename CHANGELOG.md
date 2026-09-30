@@ -5,6 +5,31 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Security
+
+- **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
+  or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
+  that simply writes in pieces), the server fed the whole accumulated buffer to the request parser
+  again from byte 0. The parser keeps its place between calls, so it parsed the start of the request
+  twice. Depending on where the split fell, that:
+  - rejected the request (the connection closed with no response);
+  - produced a different request (phantom headers built from the re-fed request line);
+  - or derived lengths from stale pointers into the buffer: the path length is computed by pointer
+    arithmetic against a pointer from the earlier feed, and the path is then scanned up to that
+    length, an out-of-bounds read. Split requests were observed
+    coming out with a Content-Length of 2^64 - 28.
+
+  Every event model was affected: readiness (epoll, kqueue, poll, WSAPoll) and completion (io_uring,
+  IOCP, pollcomp). Any remote client could trigger it. Loopback tests missed it because a small
+  request arrives in one segment. The parser is now given only the bytes it has not seen, through one
+  helper both models share, and a buffer that grows (and may move) restarts the header parse on the
+  completion path too, as it already did on the readiness path. The new `test_http_split_request`
+  suite sends requests split at every byte offset, one byte at a time, a header block larger than the
+  base read buffer, and a split request on a kept-alive connection, checking that the handler sees
+  exactly the request that was sent. Without the fix 4 of its 5 cases fail, and none of the 109
+  single split points yields the request that was sent: 64 get no response and 45 are parsed as a
+  different request (phantom headers, or that 2^64 - 28 Content-Length). With it, all pass.
+
 ### Added
 
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that

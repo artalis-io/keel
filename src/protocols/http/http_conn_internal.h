@@ -79,6 +79,10 @@ struct KlHttpConn {
     size_t max_header_size;     /* Max header size (from KlHttpServerConfig) */
 
     KlHttpRequest req;
+    /* Header bytes at the front of read_buf already fed to the (stateful) request parser in the
+     * current header phase. The parser keeps its place between calls, so each call is given only
+     * read_buf[hdr_parsed .. read_len). Zeroed wherever the parser is reset. */
+    size_t hdr_parsed;
     KlHttpResponse res;
     KlHttp1Parser *parser;
 
@@ -183,6 +187,12 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
 
 /* Headers fully parsed in read_buf: null-terminate, run pre-body path, set up the body reader, and
  * dispatch. `leftover`/`leftover_len` is any body-bytes tail in the same buffer. Returns the next state. */
+/* Parse the request headers accumulated in read_buf, feeding the parser only the bytes it has not
+ * seen (see hdr_parsed). Both event models call this after appending a read; it is the one place the
+ * header parser runs. On KL_HTTP1_PARSE_HEADERS_OK, *rest / *rest_len are the bytes after the header
+ * block (the start of the body, if any). */
+KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, size_t *rest_len);
+
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len);
 
