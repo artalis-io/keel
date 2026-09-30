@@ -812,7 +812,7 @@ UTEST(unix_socket, async_https_unix_engages_tls) {
     unlink(path);
 
     KlTlsConfig srv_tls = { .factory = mock_tls_create };
-    KlHttpServer srv;
+    static KlHttpServer srv;   /* outlives an ASSERT early return: the server thread uses it */
     KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
@@ -864,7 +864,7 @@ UTEST(unix_socket, wss_unix_engages_tls) {
     unlink(path);
 
     KlTlsConfig srv_tls = { .factory = mock_tls_create };
-    KlHttpServer srv;
+    static KlHttpServer srv;   /* outlives an ASSERT early return: the server thread uses it */
     KlHttpServerConfig cfg = {
         .unix_socket_path = path,
         .unix_socket_unlink = 1,
