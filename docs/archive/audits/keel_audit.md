@@ -5,6 +5,120 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Fifteenth pass: whole-tree re-audit after the transport and pipe work (2026-09-30)
+
+**Scope:** whole `src/` (103 `.c`, 33,411 lines) including `src/protocols/`, the internal and public
+headers, and the `Makefile`, at `main` `f0d9085`. Trigger: everything merged since the fourteenth pass
+(2026-08-26): the `KlStream` facets and writable-again edge, `KlListener`, Windows Named Pipes,
+anonymous pipe pairs (Windows IOCP and POSIX readiness), close-on-exec on Keel's own descriptors, and
+the MSVC/allocator-validation work. Five read-only reviewers swept the tree by subsystem (transport
+substrate + readiness core; completion engines + socket axis; datagram + DNS; HTTP server + parsers;
+clients + HTTP/2 + WebSocket); every Critical, High and Medium below was then re-traced against the
+code, and C1 was reproduced end to end.
+
+**Verdict: NOT CLEAN.** 1 Critical / 3 High / 9 Medium / 12 Low / 7 Informational. The Critical is
+a long-standing HTTP/1 server defect that the suite never exercised: a request whose request line or
+headers arrive in more than one read is rejected on both event models. None of the findings is in the
+new transport or pipe code; those modules came out clean.
+
+**Verification key:** **R** = re-traced in code by the auditor (and **E2E** = reproduced by running
+it); **C** = cited from a slice reviewer, read but not independently re-traced.
+
+### Mechanical scans (whole tree)
+
+| Category | Result |
+|---|---|
+| Unsafe str/format (`strcpy`/`strcat`/`sprintf`/`vsprintf`/`gets`) | none in `src/` |
+| Unsafe int parse (`atoi`/`atol`/`atof`) | none |
+| Direct `malloc`/`free` | only the PAL thread trampolines (`platform_thread_posix.c:17,24,28`, `platform_thread_win.c:28,35,39`), deliberate and commented (the trampoline state is the thread's own and freed by it); see I6 |
+| Dead code (`#if 0` / `if (0)`) | none |
+| VLAs / large stack arrays | none found |
+| Build hardening | `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=3`, PIE, `-z relro -z now -z noexecstack` in production flags; `make debug` = ASan+UBSan |
+| CI (PR #346 head `d8b7bb4`, tree identical to `f0d9085`) | 26/26 green incl. ASan+UBSan, sanitized io_uring and pollcomp, cppcheck, scan-build, all gates |
+
+### Critical
+
+| # | File:Line | Issue | Evidence | Fix |
+|---|---|---|---|---|
+| C1 | `src/protocols/http/http_connection.c:886` (readiness), `src/protocols/http/completion_http_server.c:468` (completion); parser `http1_parser_llhttp.c:161` | **A request split across reads is re-fed from byte 0 to a stateful parser.** After `KL_HTTP1_PARSE_INCOMPLETE` the connection returns to READING; the next read appends to `read_buf` and `parse()` is called again on `read_buf[0..read_len)`. `llhttp_execute` continues from where it stopped, so it parses the already-seen bytes a second time. The parser is reset only on keep-alive and when the header buffer grows. | **E2E, R.** Parser probe, request `GET /x HTTP/1.1\r\nHost: a\r\nX-Y: zz\r\n\r\n` split at every one of 36 points: re-feeding the whole buffer (as the connection does) is wrong at **36/36** (most `PARSE_ERROR`; splits 22-24 and 30-33 return `HEADERS_OK` with phantom headers; splits 5-6 leave `path_len = 4272` for a 2-byte path, an out-of-bounds length that `on_url_complete` then scans); feeding only the new bytes is correct at 36/36. A real `KlHttpServer` on loopback: the request in one write gets `200 OK`, the same request in two writes 200 ms apart is closed without a response at every split tried, on **WSAPoll and IOCP** alike. | Track a parsed offset per connection and pass only `read_buf + parsed_off .. read_len` to `parse`, advancing it by `consumed` on INCOMPLETE; reset it wherever the parser is reset. On the completion grow path also reset the parser and `c->req` (as readiness does), since a realloc moves `read_buf`. Add a split-request test at many split points on both event models. |
+
+Why it survived: loopback clients (the test suite's own client, curl) deliver a small request in one
+segment, and the existing partial-header tests (`test_timeout.c` `partial_headers`, the slowloris
+smokes) never complete the request. Real traffic splits: large cookies, slow links, TLS records.
+
+### High
+
+| # | File:Line | Issue | Evidence | Fix |
+|---|---|---|---|---|
+| H1 | `src/connect_op.c:81-84` `co_terminal`; `src/protocols/http/http_client_async.c:331-344` `cli_co_on_done`, `:1491` `kl_http_client_free` | **Use-after-free when the client is freed inside `on_done` after a DNS or connect failure.** `cli_co_on_done` calls `async_complete_error`, which runs the user's `on_done`; `kl_http_client_free` frees the client unconditionally, and the `KlConnectOp` embedded in it is still mid-dispatch (`co_request_cancels`, `in_dispatch--`, `co_finalize` follow). With an owned resolver, the resolver is also destroyed inside its own callback. The shipped `examples/async_client.c:39` frees in `on_done`; the redirect wrapper does the equivalent. | **R.** NXDOMAIN, or every address refusing, reaches it. Tests free after the loop returns, so ASan never saw it. | Complete the request from `cli_co_on_detach` (the point where freeing is legal) instead of from inside the terminal dispatch, and document on `KlHttpClientDoneFn` whether freeing inside it is allowed. |
+| H2 | `src/protocols/http/http_client_async.c:150` `start_connect`; same pattern `websocket_client.c:985`, `http2_client.c:570` | **TLS (and a proxy CONNECT tunnel) is skipped when a non-blocking connect completes at once.** `c->state = (rc == 0) ? KL_HTTP_CLIENT_SENDING : ...` bypasses `he_proceed_after_connect`, where the TLS session and the tunnel are set up. AF_UNIX connects complete at once on Linux, so `https+unix://` / `wss+unix://` send in plaintext with no certificate check: fails open. | **R.** `tests/test_unix_socket.c` uses a pass-through mock TLS and the sync client, so the plaintext send is invisible to it. | On `rc == 0`, go through `he_proceed_after_connect` (and the WebSocket/HTTP/2 equivalents) exactly as the asynchronous path does. |
+| H3 | `src/protocols/websocket/http_server_ws.c:505-513`; `src/protocols/websocket/websocket_client.c:690-693` | **A WebSocket data frame larger than one read breaks.** `is_first` is derived from the opcode alone, so the second payload chunk of the same TEXT/BINARY frame looks like a new message. Server: `msg_len > 0` closes with 1002, so any message over about one read buffer, or one straddling a TCP read, is rejected. Client: the earlier chunks are discarded and `on_message` sees only the tail. Control-frame payloads split across reads are handled from their tail only. | **R** (server path); client path **C**. | Treat a frame as the start of a message only when its payload offset (`payload_before`) is 0; same for control frames. Add a test that sends one frame in several writes. |
+
+### Medium
+
+| # | File:Line | Issue | Evidence | Fix |
+|---|---|---|---|---|
+| M1 | `src/protocols/dns/dns_resolver.c:1051-1066` `dns_tcp_on_event`, `:969-1007` `dns_tcp_deliver`, `:920-935` `dns_tcp_fail`; `:453-456` | **Use-after-free when the resolver is destroyed from `done()` during a DNS-over-TCP completion.** `dns_complete`'s tail runs `dns_teardown`, which frees `r` synchronously when no datagram frame is active; the TCP path runs from a plain watcher, so after `dns_leg_settle` the deliver loop (`t->rneed`, `t->rlen`), `dns_tcp_fail`'s rescan and `dns_tcp_arm_idle` use freed memory. A nameserver that answers TC=1 drives the path. | **R.** | Bracket `dns_tcp_on_event` with `r->in_done++ ... --` and run the deferred teardown at its tail; return early after any settle once `destroy_requested` is set. |
+| M2 | `src/resolver_cache.c:246-263` `cache_resolve`; `src/protocols/http/http_client_async.c:204-209` | **Every resolver-cache hit leaks the request handle under `KlHttpClient`.** A hit completes synchronously and returns a live `KlResCacheReq` that only `cache_cancel` frees; the client drops the handle whenever resolution completed inline. The resolver contract is also inconsistent: the DNS resolver frees its request inside `done`. | **R.** | Free the handle on synchronous completion and return NULL; state in `resolver.h` that a handle is dead once `done_fn` has run. |
+| M3 | `src/event_iocp.c:259-279` `iocp_watch_reinterest` | **Each IOCP watcher interest change made from a callback leaks an op until loop close.** Between a dispatched completion and its re-arm the op owns no kernel I/O (`watch_rearm = 1`); reinterest marks it removed and calls `CancelIoEx`, which cancels nothing. The delete path handles this state (`:304-309`), reinterest does not. The async HTTP and WebSocket clients do exactly this (WRITE to READ after connect), so it is at least one op per request. | **R.** | If `old->watch_rearm`, just update its mask and udata and return; the next drain re-posts it. |
+| M4 | `src/event_iocp.c:1060-1066` `iocp_watch_rearm_dispatched` | **A failed watcher re-arm leaves an op nothing frees, and `kl_event_close` then waits forever.** On failure `watch_rearm` is cleared and `watcher_removed` set; the delete path takes the `CancelIoEx` branch (nothing pending) and the quiesce pre-pass frees only `watch_rearm` ops, so the drain loop blocks with `INFINITE`. | **R.** | On failure keep `watch_rearm = 1` (with `watcher_removed = 1`) so both existing retirement paths free it. |
+| M5 | `src/socket_posix.c:102-104` `kl_sockdef_socket`; `src/event_iouring.c:662`; `src/event_pollcomp.c:497`; `src/event_iocp.c:481`; `socket_winsock.c` | **Sockets can leak into child processes.** The default POSIX/Winsock socket creators and the completion-engine accepts (io_uring flags 0, pollcomp plain `accept`, IOCP `WSASocketW` without `WSA_FLAG_NO_HANDLE_INHERIT`) create inheritable sockets; only the readiness server's accept and the listener set close-on-exec. `check-cloexec` does not list socket creators. An embedder that spawns children (Hull) hands them open client and accepted connections, so peers never see EOF. | **R.** | `SOCK_CLOEXEC` / `accept4` / `WSA_FLAG_NO_HANDLE_INHERIT` at each creator; extend `check-cloexec` to `socket(`, `accept(`, `WSASocketW`, `io_uring_prep_accept`. |
+| M6 | `src/platform_wakeup_posix.c:20-54`; `src/platform_wakeup_win.c:68-87`; `src/thread_pool.c:82,97` | **The wakeup write end is blocking and the drain reads 64 bytes, so a saturated pool can deadlock.** One byte per completed item; one 64-byte read per watcher callback. Under sustained completion rates above 64 per tick the pipe fills, workers block in `write`, and `kl_thread_pool_free` then joins a worker that nobody will unblock. `wakeup.h` promises that a full channel only loses a coalesced signal. | **R.** | Make the write end non-blocking and ignore EAGAIN; optionally drain until EAGAIN. |
+| M7 | `src/protocols/http/http_client_async.c:1611-1640` `kl_http_client_start_pooled` | **Pooled requests cancel timer id 0 and have no deadline.** After `memset` the timer ids stay 0 (timer ids start at 0) and `timeout_ms` is never copied, so every completion or cancel calls `kl_timer_cancel(ev, 0)`, killing whichever timer holds id 0, and a pooled request to a silent server never times out. | **R** (no `-1` init or `timeout_ms` copy on this path; `start_s` has both at `:1248-1250`). | Mirror `start_s`'s initialisation and arm the deadline on the pool-hit path. |
+| M8 | `src/protocols/http/http_redirect.c:103` `should_drop_header` | **Credentials follow a cross-origin redirect.** Only `Authorization` is stripped; caller-supplied `Cookie` and `Proxy-Authorization` go to whatever host a 3xx names. | **R.** | Also drop `Cookie` and `Proxy-Authorization` when `cross_origin`. |
+| M9 | `src/protocols/http/http_client_async.c:915`; `http_client_sync.c:526-532` | **A truncated response is reported as success.** `status` is set in `on_status` but headers and body move into `resp` only at message-complete, and `llhttp_finish` is never called; EOF partway through headers or a Content-Length body returns success with no headers. | **C.** | Add a `finish` step to the response-parser vtable; at EOF succeed only if the parser reports complete. |
+
+### Low
+
+| # | File:Line | Issue | Evidence |
+|---|---|---|---|
+| L1 | `dns_resolver.c:1136` `dns_on_recv` | A duplicated TC=1 UDP answer, arriving after TCP recovery started, falls through and settles the leg (usually empty), so the real TCP answer is dropped; a later TCP failure can re-settle the done leg. Fix: ignore UDP for a leg once `tcp_pending`. | R |
+| L2 | `http_conn_internal.h:100-103`, `http_connection.c` | `request_body_received`, `request_body_complete`, `drain_framing_usable` are never reset (only `c->req` is zeroed at `:142,845,944`), so a later request on the same pool slot can skip the #278 drain and RST. Fix: zero them on acquire and keep-alive reset. | R |
+| L3 | `event_iocp.c:1211` | A successful zero-length datagram send completes with `bytes == 0`, is reported `ok = 0`, and poisons the send path; io_uring/pollcomp report `res >= 0`. | C |
+| L4 | `event_iouring.c` re-prep paths (`iou_prep_send_tail`, `iou_prep_splice_*`), `iou_comp_cancel*` | Residual of the previous pass's stranded-op item: a re-prep or cancel that gets no SQE marks the op aborted with nothing queued, so it never completes. Only reachable if `io_uring_submit` cannot free a slot. | C |
+| L5 | `thread_pool.c:182,194,282` | After a partial worker start the thread array is freed with the started count, not the allocated count (wrong size to a sized `KlAllocator.free`). | C |
+| L6 | `platform_wakeup_win.c:32-39` | The loopback wakeup pair accepts whoever connects first; a local racer could take the `rd` end. Fix: verify the accepted peer against the client's local address. | C |
+| L7 | `pipe_stream.c:561-566` via `listener.c:150-154` | A `kl_pipe_listen` whose first arm fails fires the owner's `on_close` for a listener it never received, then returns an error. | C |
+| L8 | `http1_response_parser_llhttp.c`; `http_client_async.c:927` | Response framing: a 1xx completes as the final response; a HEAD response with Content-Length waits for a body; bytes after a complete response are dropped yet the connection is pooled. | C |
+| L9 | `http_client_async.c` pooled path | Pooled requests ignore `cfg->proxy` (always direct). | C |
+| L10 | `http_client_common.c:280-281`; `kl_http_client_remove_header`; `websocket_client.c` `wsc_build_upgrade` | Allocator size mismatches on three free paths. | C |
+| L11 | `http2_client.c:210,248` | No response-size cap on HTTP/2 client data; an `RST_STREAM` is delivered as a normal response. | C |
+| L12 | `websocket_client.c` | Masked server frames accepted; close code/reason unvalidated; handshake buffer uncapped; `on_close` runs before the connection is closed (freeing in it is a UAF). | C |
+
+### Informational
+
+- I1: pipelined HTTP/1 requests in the same read are discarded (`conn_keepalive_reset` sets `read_len = 0`); safe, but the client waits for the read timeout. Decide and document. (C)
+- I2: a `max_header_size` below the 8192-byte base read buffer is not enforced (the 431 check runs only when the buffer is full). (C)
+- I3: `event_iocp.c:766-769` treats `ERROR_MORE_DATA` as "no packet queued"; correct for byte read mode, which every Keel pipe uses, but a message-mode pipe would get two completions. Hardening only. (C)
+- I4: WSABUF lengths are cast to `ULONG` without a clamp (`event_iocp.c:468,1145`, `socket_winsock.c:250`); not reachable at 4 GiB from the response writer. (C)
+- I5: `pipe_stream.c` `rd_write` returns -1 after a short write when the watcher cannot be registered (ENOMEM); the stream is failed either way. (C)
+- I6: the PAL thread trampolines allocate with `malloc`/`free` directly, contrary to the fourteenth pass's "none outside the default-allocator seam"; deliberate and commented. (R)
+- I7: the fourteenth pass's L4 (`h2c_on_response` leak on a second call) is still open. (C)
+
+### Checked clean (highlights)
+
+- **New transport and pipe code:** `KlStream` facets (arm trampoline, `len > read_cap` fail-closed, writable edge with `in_writable` deferral, sticky `wq_err` releasing graceful close, exactly-once detach); `pipe_stream.c` `KlCompLife` retain/release on every post, failed post and dispatch, final release after every op, readiness mode holding a ref across callbacks and removing the watcher before the fd closes; `platform_pipe_posix.c` (`pipe2`/`FD_CLOEXEC`, non-blocking parent end only, per-thread SIGPIPE handling that leaves a pending SIGPIPE alone, fd+1 encoding); `platform_pipe_win.c` (bounded path conversion, length-checked SDDL, identification SQOS, anonymous pair client-PID check, every handle closed on failure); `listener.c`; `drain.c`; `event_ctx.c` watcher deletion during dispatch.
+- **Named-pipe ops on IOCP:** exactly one completion per issue, life-token transfer, quiesce frees without re-issue, byte counts clamped.
+- **DNS parser:** compression pointers skipped, never followed; label cap; `size_t` bounds on every field; exact 0x20 question echo; EDNS0/cookie option walk bounded; client-cookie mismatch rejected before learning; BADCOOKIE retries bounded; TCP framing capped at 65537 bytes.
+- **Datagram layer:** cmsg length checks, overflow-safe control buffers, GRO split clamps, batch unwind, teardown deferral.
+- **HTTP parsing limits:** `KL_MAX_HEADERS`, header-buffer growth capped with a `SIZE_MAX/2` guard, Content-Length zeroed under chunked, early 413, bounded drain; PROXY header peek bounded.
+- **Clients:** WebSocket frame length/opcode/control limits and unmask offset; CONNECT build and status parse; HTTP/2 server header storage and `max_body_size`; Happy Eyeballs loser/straggler teardown (apart from H1); pool stale-connection peek.
+
+### Coverage note
+
+Read-only static audit on a Windows host, plus two local reproductions for C1 (a parser-level probe
+and an end-to-end `KlHttpServer` run on WSAPoll and IOCP). Linux, macOS, io_uring and pollcomp
+execution evidence is CI's. Slices not re-derived in depth because they are unchanged since the
+fourteenth pass: `timer.c`, `connect_op.c` (apart from H1's path), `completion_core/dispatch.c`,
+`event_poll.c`, `event_wsapoll.c`, `sockaddr.c`, `unix_socket_node_*.c`. No code was changed.
+
+### Recommended order
+
+1. **C1** first: it breaks ordinary HTTP/1 traffic on every engine and carries an out-of-bounds length.
+2. **H1-H3**: a use-after-free reachable by following the shipped example, TLS failing open on an immediate connect, and WebSocket messages larger than one read.
+3. The Mediums, grouped: DNS/resolver lifetime (M1, M2), IOCP watcher lifecycle (M3, M4), close-on-exec for sockets (M5, which matters to Hull), wakeup back-pressure (M6), client request hygiene (M7-M9).
+4. Each fix with a test that fails first, per this repo's practice.
+
 ## Fourteenth pass: AF_UNIX node-cleanup security increment (#250/#251) + whole-tree re-audit (2026-08-26)
 
 **Scope:** whole `src/` (93 `.c`) + `src/protocols/` + `integrations/` (67 `.c`) + headers +
