@@ -659,7 +659,7 @@ static int iou_comp_post_accept(struct KlEventCtx *ctx) {
     op->peer_len = sizeof(op->peer);
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { iou_op_free(op); return -1; }
-    io_uring_prep_accept(sqe, op->fd, (struct sockaddr *)&op->peer, &op->peer_len, 0);
+    io_uring_prep_accept(sqe, op->fd, (struct sockaddr *)&op->peer, &op->peer_len, SOCK_CLOEXEC);
     io_uring_sqe_set_data(sqe, op);
     iou_op_push(st, op);
     st->accept_pending = 1;

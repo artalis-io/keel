@@ -947,6 +947,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         fd = kl_sock_socket(ev->sockets, AF_UNIX, SOCK_STREAM, 0);
         if (!kl_handle_valid(fd))
             return NULL;
+        kl_sock_set_cloexec(ev->sockets, fd);   /* never inherited by an embedder's children */
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
             kl_sock_close(ev->sockets, fd);
@@ -972,6 +973,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         if (!kl_handle_valid(fd))
             return NULL;
 
+        kl_sock_set_cloexec(ev->sockets, fd);   /* never inherited by an embedder's children */
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
             kl_sock_close(ev->sockets, fd);

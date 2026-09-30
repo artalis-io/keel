@@ -100,7 +100,16 @@ int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
 }
 
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
-    return (KlSocketHandle)socket(domain, type, protocol);
+    /* Close-on-exec at creation where the platform can (no window for a concurrent fork in another
+     * thread); otherwise right after. Callers also mark it through the provider-neutral
+     * kl_sock_set_cloexec, which is idempotent. */
+#if defined(SOCK_CLOEXEC)
+    return (KlSocketHandle)socket(domain, type | SOCK_CLOEXEC, protocol);
+#else
+    int fd = socket(domain, type, protocol);
+    if (fd >= 0) kl_sockdef_set_cloexec((KlSocketHandle)fd);
+    return (KlSocketHandle)fd;
+#endif
 }
 int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *a) {
     struct sockaddr_storage ss;

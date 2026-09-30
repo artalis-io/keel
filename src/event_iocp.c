@@ -487,8 +487,8 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
 static int iocp_comp_post_accept(struct KlEventCtx *ctx) {
     if (!ctx) return -1;
     KlIocpState *st = ctx->loop._backend;
-    SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
-                          NULL, 0, WSA_FLAG_OVERLAPPED);
+    /* Not inheritable (WSA_FLAG_NO_HANDLE_INHERIT): an embedder's children never get accepted sockets. */
+    SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
     if (a == INVALID_SOCKET) return -1;
 
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));

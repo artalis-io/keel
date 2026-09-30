@@ -62,6 +62,7 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
         if (out_err) *out_err = KL_ERR_SOCKET;
         return -1;
     }
+    kl_sock_set_cloexec(sockets, fd);   /* never inherited by an embedder's children */
 
     kl_sock_set_nosigpipe(sockets, fd);
 
@@ -119,6 +120,7 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
         if (out_err) *out_err = KL_ERR_SOCKET;
         return -1;
     }
+    kl_sock_set_cloexec(sockets, fd);   /* never inherited by an embedder's children */
 
     kl_sock_set_nosigpipe(sockets, fd);
 

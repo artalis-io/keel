@@ -134,6 +134,7 @@ KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     if (kl_plat_socket_runtime_init() != 0) return KL_INVALID_SOCKET;   /* PAL invariant */
     SOCKET s = socket(domain, type, protocol);
     if (s == INVALID_SOCKET) kl_wsa_set_errno();
+    else kl_sockdef_set_cloexec((KlSocketHandle)s);   /* not inherited (HANDLE_FLAG_INHERIT) */
     return (KlSocketHandle)s;
 }
 int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr) {

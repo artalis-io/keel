@@ -158,6 +158,23 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   re-arm is retired so both existing paths free it. New `test_iocp_engine` cases count allocations
   across 200 callback-driven interest changes and free a loop after a failed re-arm under a watchdog.
 
+- **Client sockets and completion-engine accepts leaked into child processes.** The sockets a
+  client creates, and the connections the completion engines accept, were inherited by every child
+  an embedder spawned.
+  - Affected clients: sync HTTP, async HTTP (including each Happy Eyeballs attempt), WebSocket and
+    HTTP/2, over both TCP and Unix sockets.
+  - Affected accepts: io_uring (`io_uring_prep_accept` with no flags), pollcomp (a bare `accept`)
+    and IOCP (`WSASocketW` with no `WSA_FLAG_NO_HANDLE_INHERIT`).
+  - Each client now marks its socket through the provider seam (`kl_sock_set_cloexec`), so a custom
+    provider's socket is covered too. Each engine accept is close-on-exec or non-inheritable at
+    creation.
+  - The built-in `socket` op now creates close-on-exec (`SOCK_CLOEXEC`) or non-inheritable
+    (Winsock), which also closes the window where a concurrent `fork` could inherit a new socket.
+  - `check-cloexec` now also flags `io_uring_prep_accept` / `WSASocketW` without the flag, a bare
+    `socket` / `accept` outside the provider TUs, and a `kl_sock_socket` caller that never calls
+    `kl_sock_set_cloexec`. `test_cloexec` adds a probe provider that hands out an inheritable socket
+    and checks it has been marked by connect time.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);
