@@ -495,6 +495,16 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
 
 /* ── Receive + parse response (sync, with optional streaming) ────── */
 
+/* End of stream before the parser reported a complete message: only a close-delimited body
+ * legitimately ends here. A parser with finish decides; without one, keep the older rule (a status
+ * line arrived). A truncated response is an error, never a success missing headers or body. */
+static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientResponse *resp)
+{
+    if (parser->finish)
+        return parser->finish(parser, resp) == KL_HTTP1_PARSE_OK;
+    return resp->status > 0;
+}
+
 static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlHttpClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
                                KlAllocator *alloc,
@@ -525,12 +535,12 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         if (nread < 0) {
             /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
              * finalize a close-delimited response rather than failing it. */
-            if (tls && tls->at_eof && tls->at_eof(tls) && resp->status > 0)
+            if (tls && tls->at_eof && tls->at_eof(tls) && response_complete_at_eof(parser, resp))
                 ret = 0;
             break;
         }
         if (nread == 0) {
-            if (resp->status > 0)
+            if (response_complete_at_eof(parser, resp))
                 ret = 0;
             break;
         }

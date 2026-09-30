@@ -268,4 +268,74 @@ UTEST(response_parser, empty_valued_header) {
     p->destroy(p);
 }
 
+/* ── finish: end of stream ───────────────────────────────────────── */
+
+/* Feed raw (expected INCOMPLETE), then signal EOF; return finish's result. */
+static KlHttp1ParseResult feed_then_finish(KlHttp1ResponseParser *p, KlHttpClientResponse *resp,
+                                           const char *raw) {
+    size_t consumed = 0;
+    KlHttp1ParseResult r = p->parse(p, resp, raw, strlen(raw), &consumed);
+    if (r != KL_HTTP1_PARSE_INCOMPLETE) return r;
+    return p->finish(p, resp);
+}
+
+UTEST(response_parser, finish_completes_close_delimited_body) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    ASSERT_TRUE(p->finish != NULL);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_then_finish(p, &resp, "HTTP/1.1 200 OK\r\nX-A: 1\r\n\r\nhello"),
+              KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(resp.body_len, (size_t)5);
+    ASSERT_EQ(memcmp(resp.body, "hello", 5), 0);
+    ASSERT_EQ(resp.num_headers, 1);
+    ASSERT_STREQ(resp.headers[0].name, "X-A");
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, finish_rejects_truncated_content_length_body) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_then_finish(p, &resp, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc"),
+              KL_HTTP1_PARSE_ERROR);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, finish_rejects_truncated_chunked_body) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_then_finish(p, &resp,
+                               "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab"),
+              KL_HTTP1_PARSE_ERROR);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, finish_rejects_truncated_headers) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_then_finish(p, &resp, "HTTP/1.1 200 OK\r\nContent-Le"), KL_HTTP1_PARSE_ERROR);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, finish_with_nothing_received_is_an_error) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(p->finish(p, &resp), KL_HTTP1_PARSE_ERROR);
+    p->destroy(p);
+}
+
 UTEST_MAIN();

@@ -119,6 +119,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   Contract in `docs/contracts/stream.md`; tested by `test_stream_writable` (every rule, plus a
   producer driven only by the edge over a real socket) and over a named pipe on IOCP.
 
+### Security
+
+- **Credentials followed a cross-origin redirect.** `KlHttpRedirect*` stripped only
+  `Authorization` when a 3xx pointed at another origin. The caller's `Cookie` and
+  `Proxy-Authorization` went to whatever host the redirect named. All three are now dropped
+  cross-origin, and all three are still kept on a same-origin redirect.
+  - `test_http_redirect` adds `sync_cross_origin_drops_all_credentials` and
+    `sync_same_origin_keeps_credentials`.
+
 ### Fixed
 
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
@@ -187,6 +196,32 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     burst of signals costs one wakeup instead of one per 64 bytes.
   - `test_wakeup` adds `signal_never_blocks_on_a_full_channel`: a thread floods 2^20 signals with
     nobody draining. Without the fix it blocked on the full channel.
+
+- **A truncated HTTP/1.1 response was reported as success, and a close-delimited one lost its
+  headers and body.** At end of stream the sync and async clients counted any response whose status
+  line had arrived as complete. The parser hands headers and body over only at message-complete, so:
+  - a close-delimited response (no `Content-Length`, not chunked) came back with no headers and no
+    body;
+  - a response cut off inside its headers or its `Content-Length` / chunked body succeeded as a
+    partial response.
+
+  `KlHttp1ResponseParser` gains an optional `finish` op, appended after `destroy` per the
+  append-only vtable contract. The llhttp parser implements it with `llhttp_finish`. At EOF the
+  clients now succeed only when `finish` reports a complete message; a truncated response fails with
+  `KL_ERR_PARSE`. A third-party parser without `finish` keeps the old rule.
+  - New suite `test_http_client_eof` covers close-delimited, truncated-body and truncated-header
+    responses over the sync and async clients.
+  - `test_http1_response_parser` adds five `finish` cases, and `fuzz_response_parser` now also
+    drives `finish`.
+- **Pooled async requests cancelled someone else's timer and never timed out.**
+  `kl_http_client_start_pooled` left the timer ids at 0 and never copied `timeout_ms`, so:
+  - every completion called `kl_timer_cancel(ev, 0)`, cancelling whichever timer held id 0;
+  - a pooled request to a silent server waited forever.
+
+  The pooled path now initializes the timers and timeout as `kl_http_client_start_s` does, and arms
+  the request deadline on a pool hit and on the direct-connect path.
+  - `test_http_client_eof` adds `pooled.completion_leaves_unrelated_timer_alone` and
+    `pooled.silent_server_times_out`.
 
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:

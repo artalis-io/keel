@@ -342,6 +342,22 @@ static KlHttp1ParseResult resp_parser_parse(KlHttp1ResponseParser *self,
     return KL_HTTP1_PARSE_INCOMPLETE;
 }
 
+/* End of stream. llhttp_finish completes a close-delimited body (firing on_message_complete) and
+ * reports any other mid-message EOF as an error, so only a complete message is handed over. */
+static KlHttp1ParseResult resp_parser_finish(KlHttp1ResponseParser *self,
+                                          KlHttpClientResponse *resp)
+{
+    RespLlhttpParser *p = (RespLlhttpParser *)self;
+    p->resp = resp;
+    if (p->error)
+        return KL_HTTP1_PARSE_ERROR;
+    if (!p->complete)
+        (void)llhttp_finish(&p->parser);   /* complete (close-delimited) or an EOF error */
+    if (p->error || !p->complete)
+        return KL_HTTP1_PARSE_ERROR;       /* truncated, or nothing arrived at all */
+    return transfer_to_response(p, resp);
+}
+
 static void resp_parser_reset(KlHttp1ResponseParser *self)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)self;
@@ -421,6 +437,7 @@ static KlHttp1ResponseParser *create_parser(size_t max_response_size,
     p->base.parse   = resp_parser_parse;
     p->base.reset   = resp_parser_reset;
     p->base.destroy = resp_parser_destroy;
+    p->base.finish  = resp_parser_finish;
 
     /* Configure llhttp callbacks */
     llhttp_settings_init(&p->settings);

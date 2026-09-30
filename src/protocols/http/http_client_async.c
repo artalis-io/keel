@@ -919,7 +919,13 @@ static void async_handle_receiving(KlHttpClient *c)
                 return;
             }
         eof:
-            if (c->resp.status > 0)
+            /* End of stream before the parser reported a complete message: only a close-delimited
+             * body legitimately ends here. A parser with finish decides; without one, keep the
+             * older rule (a status line arrived). A truncated response is an error, never a
+             * success missing its headers or part of its body. */
+            if (c->parser->finish
+                    ? c->parser->finish(c->parser, &c->resp) == KL_HTTP1_PARSE_OK
+                    : c->resp.status > 0)
                 async_complete_success(c);
             else {
                 c->error = KL_ERR_PARSE;
@@ -1671,6 +1677,17 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     c->user_data = user_data;
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
 
+    /* Happy Eyeballs / deadline timer state, as kl_http_client_start_s sets it (timer ids: -1 =
+     * unset). Left at the memset's 0, every completion cancelled whichever timer held id 0, and the
+     * request had no deadline at all. */
+    c->conn_delay_timer = -1;
+    c->deadline_timer = -1;
+    c->timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
+                                                 : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+    c->connect_delay_ms = (cfg && cfg->connect_attempt_delay_ms > 0)
+                              ? cfg->connect_attempt_delay_ms
+                              : KL_HTTP_CLIENT_CONNECT_ATTEMPT_DELAY_MS;
+
     /* Pool integration */
     c->pool = pool;
     c->pool_port = parsed.port;
@@ -1712,6 +1729,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
             kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
+        he_arm_deadline(c);   /* a reused connection to a silent server must still time out */
         return c;
     }
 
@@ -1766,5 +1784,6 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         return NULL;
     }
 
+    he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
     return c;
 }

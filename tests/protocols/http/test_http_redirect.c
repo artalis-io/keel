@@ -163,6 +163,36 @@ static void handle_auth_check(KlHttpRequest *req, KlHttpResponse *res, void *ctx
         kl_http_response_body_borrow(res, "none", 4);
 }
 
+/* Report which credential headers arrived: "A C P" for Authorization, Cookie, Proxy-Authorization,
+ * each '1' if present and '0' if not. */
+static char cred_body[2][8];
+static void handle_cred_check(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    char *b = cred_body[ctx ? 1 : 0];   /* one buffer per server thread */
+    snprintf(b, sizeof(cred_body[0]), "%d %d %d",
+             kl_http_request_header(req, "Authorization") != NULL,
+             kl_http_request_header(req, "Cookie") != NULL,
+             kl_http_request_header(req, "Proxy-Authorization") != NULL);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, b, strlen(b));
+}
+
+static void handle_cross_origin_creds(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 302);
+    char loc[128];
+    snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/cred_check", redir_port2);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "cross", 5);
+}
+
+static void handle_same_origin_creds(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 302);
+    kl_http_response_header(res, "Location", "/cred_check");
+    kl_http_response_body_borrow(res, "same", 4);
+}
+
 static void handle_301(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
@@ -271,6 +301,9 @@ static void ensure_servers(void) {
     kl_http_server_route(&redir_srv, "*", "/chain", handle_chain, NULL, NULL);
     kl_http_server_route(&redir_srv, "*", "/loop", handle_loop, NULL, NULL);
     kl_http_server_route(&redir_srv, "*", "/cross_origin", handle_cross_origin, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/cross_origin_creds", handle_cross_origin_creds, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/same_origin_creds", handle_same_origin_creds, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/cred_check", handle_cred_check, NULL, NULL);
 
     kl_plat_thread_create(&redir_tid, server_thread, &redir_srv);
     wait_for_bind(&redir_srv);
@@ -279,6 +312,7 @@ static void ensure_servers(void) {
     KlHttpServerConfig cfg2 = { .port = 0, .max_connections = 4 };
     kl_http_server_init(&redir_srv2, &cfg2);
     kl_http_server_route(&redir_srv2, "*", "/auth_check", handle_auth_check, NULL, NULL);
+    kl_http_server_route(&redir_srv2, "*", "/cred_check", handle_cred_check, (void *)1, NULL);
 
     kl_plat_thread_create(&redir_tid2, server_thread, &redir_srv2);
     wait_for_bind(&redir_srv2);
@@ -465,6 +499,41 @@ UTEST(redirect, sync_cross_origin_drops_auth) {
     ASSERT_EQ(resp.body_len, 4u);
     ASSERT_TRUE(memcmp(resp.body, "none", 4) == 0);
 
+    kl_http_client_response_free(&resp);
+}
+
+/* A cross-origin redirect strips every credential the caller meant for the original host: before the
+ * fix only Authorization was dropped, and the Cookie and Proxy-Authorization went to the new host. */
+static const KlHttpClientHeader cred_headers[] = {
+    { "Authorization", "Bearer secret123" },
+    { "Cookie", "session=secret456" },
+    { "Proxy-Authorization", "Basic c2VjcmV0" },
+};
+
+UTEST(redirect, sync_cross_origin_drops_all_credentials) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/cross_origin_creds"),
+                                       cred_headers, 3, NULL, 0, &resp), 0);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(resp.body_len, 5u);
+    ASSERT_TRUE(memcmp(resp.body, "0 0 0", 5) == 0);
+    kl_http_client_response_free(&resp);
+}
+
+/* Same origin: nothing is stripped (the filter is not simply dropping these headers always). */
+UTEST(redirect, sync_same_origin_keeps_credentials) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/same_origin_creds"),
+                                       cred_headers, 3, NULL, 0, &resp), 0);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(resp.body_len, 5u);
+    ASSERT_TRUE(memcmp(resp.body, "1 1 1", 5) == 0);
     kl_http_client_response_free(&resp);
 }
 
