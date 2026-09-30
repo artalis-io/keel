@@ -258,6 +258,15 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
  * and the drain keeps re-posting it. */
 static int iocp_watch_reinterest(KlIocpState *st, KlIocpWatch *w, KlEventMask mask, void *udata) {
     if (w->op->watch_mask == mask) return 0;
+    if (w->op->watch_rearm) {
+        /* Between a dispatched completion and its re-arm (the usual case: an interest change made
+         * from inside the watcher's own callback) the op owns NO kernel I/O, so there is nothing to
+         * cancel, and a cancelled-but-idle op would never complete to be freed. Retarget it in place:
+         * the next drain's re-arm posts the probe for the new mask. */
+        w->op->watch_mask = mask;
+        w->op->watcher_udata = udata;
+        return 0;
+    }
 
     KlIocpOp *old = w->op;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -1062,8 +1071,14 @@ static void iocp_watch_rearm_dispatched(KlIocpState *st) {
         KlIocpOp *op = w->op;
         if (!op || !op->watch_rearm || op->watcher_removed) continue;
         op->watch_rearm = 0;
-        if (iocp_watch_post(op) < 0)
-            op->watcher_removed = 1;   /* re-post failed: freed at kl_event_close */
+        if (iocp_watch_post(op) < 0) {
+            /* Re-post failed: the op owns no kernel I/O and never will. Leave it in the waiting-to-
+             * re-arm state, retired, so the paths that free exactly that state do: kl_event_del frees
+             * a watch_rearm op directly, and kl_event_close's quiesce pre-pass frees every one. (With
+             * watch_rearm cleared, del would CancelIoEx nothing and close would wait forever.) */
+            op->watch_rearm = 1;
+            op->watcher_removed = 1;
+        }
     }
 }
 
