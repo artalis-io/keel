@@ -89,6 +89,7 @@ fail:
     return KL_PIPE_OPEN_ERROR;
 }
 
+/* cppcheck-suppress constParameterPointer ; the seam's signature: close releases the handle it is given */
 void kl_plat_pipe_close(KlPipeHandle *h) {
     if (h) close(pipe_fd(h));
 }
@@ -103,7 +104,7 @@ KlSocketHandle kl_plat_pipe_pollable(const KlPipeHandle *h) {
 
 static int transient(int e) { return e == EAGAIN || e == EWOULDBLOCK; }
 
-kl_ssize_t kl_plat_pipe_read(KlPipeHandle *h, char *buf, size_t len, int *would_block) {
+kl_ssize_t kl_plat_pipe_read(const KlPipeHandle *h, char *buf, size_t len, int *would_block) {
     *would_block = 0;
     ssize_t n;
     do { n = read(pipe_fd(h), buf, len); } while (n < 0 && errno == EINTR);
@@ -139,7 +140,7 @@ static ssize_t write_quiet(int fd, const char *data, size_t len) {
 }
 #endif
 
-kl_ssize_t kl_plat_pipe_write(KlPipeHandle *h, const char *data, size_t len, int *would_block) {
+kl_ssize_t kl_plat_pipe_write(const KlPipeHandle *h, const char *data, size_t len, int *would_block) {
     *would_block = 0;
     ssize_t n = write_quiet(pipe_fd(h), data, len);
     if (n < 0 && transient(errno)) *would_block = 1;
@@ -148,6 +149,7 @@ kl_ssize_t kl_plat_pipe_write(KlPipeHandle *h, const char *data, size_t len, int
 
 /* ── The child's end ───────────────────────────────────────────────────────────────────────── */
 
+/* cppcheck-suppress constParameterPointer ; the seam's signature: the end takes ownership of `child` */
 void kl_plat_pipe_end_adopt(KlAnonPipeEnd *e, KlPipeHandle *child) {
     e->_handle = NULL;
     e->_fd1    = pipe_fd(child) + 1;

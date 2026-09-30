@@ -94,8 +94,8 @@ KlSocketHandle kl_plat_pipe_pollable(const KlPipeHandle *h);
  * (read: 0 is end of stream), or -1 with *would_block set to 1 (EAGAIN: nothing now, not an error) or
  * 0 (a terminal error, e.g. EPIPE on write). A write never delivers SIGPIPE to the process and never
  * changes the process's signal disposition. -1 / *would_block 0 where kl_plat_pipe_readiness() is 0. */
-kl_ssize_t kl_plat_pipe_read(KlPipeHandle *h, char *buf, size_t len, int *would_block);
-kl_ssize_t kl_plat_pipe_write(KlPipeHandle *h, const char *data, size_t len, int *would_block);
+kl_ssize_t kl_plat_pipe_read(const KlPipeHandle *h, char *buf, size_t len, int *would_block);
+kl_ssize_t kl_plat_pipe_write(const KlPipeHandle *h, const char *data, size_t len, int *would_block);
 
 /* ── The child's end of an anonymous pair ───────────────────────────────────────────────────── */
 

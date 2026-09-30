@@ -228,13 +228,13 @@ KlSocketHandle kl_plat_pipe_pollable(const KlPipeHandle *h) {
     return KL_INVALID_SOCKET;
 }
 
-kl_ssize_t kl_plat_pipe_read(KlPipeHandle *h, char *buf, size_t len, int *would_block) {
+kl_ssize_t kl_plat_pipe_read(const KlPipeHandle *h, char *buf, size_t len, int *would_block) {
     (void)h; (void)buf; (void)len;
     *would_block = 0;
     return -1;
 }
 
-kl_ssize_t kl_plat_pipe_write(KlPipeHandle *h, const char *data, size_t len, int *would_block) {
+kl_ssize_t kl_plat_pipe_write(const KlPipeHandle *h, const char *data, size_t len, int *would_block) {
     (void)h; (void)data; (void)len;
     *would_block = 0;
     return -1;

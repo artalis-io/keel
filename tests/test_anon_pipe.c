@@ -947,9 +947,8 @@ UTEST_F(anon_px, embedder_pending_sigpipe_is_left_alone) {
     ASSERT_EQ((int)kl_stream_write(kl_pipe_stream(p), "abc", 3), (int)KL_STREAM_ERROR);
     int still = sigpipe_pending();
 
-    const struct timespec zero = { 0, 0 };                    /* consume it; restore the mask */
-    while (sigtimedwait(&pipe_only, NULL, &zero) >= 0) { }
-    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    if (still) { int sig; sigwait(&pipe_only, &sig); }        /* consume it (pending: returns at once) */
+    pthread_sigmask(SIG_SETMASK, &old, NULL);                 /* restore the mask */
     ASSERT_TRUE(still);
     kl_pipe_free(p);
     rec_free(&r);
