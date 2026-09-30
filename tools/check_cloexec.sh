@@ -21,7 +21,7 @@ set -eu
 FLAGGED_RE='\b(pipe2|epoll_create1|eventfd|timerfd_create|signalfd|inotify_init1|memfd_create|accept4|dup3)[[:space:]]*\('
 CLOEXEC_RE='CLOEXEC'
 BARE_RE='\b(pipe|kqueue|dup|dup2|epoll_create)[[:space:]]*\('
-BARE_ALLOWED="src/platform_wakeup_posix.c src/event_kqueue.c"
+BARE_ALLOWED="src/platform_wakeup_posix.c src/event_kqueue.c src/platform_pipe_posix.c"
 
 # Blank C comments, keeping one newline per newline inside a block comment.
 STRIP='s{/\*(.*?)\*/}{ my $c = $1; " " . ("\n" x ($c =~ tr/\n//)) }gse; s{//[^\n]*}{}g;'

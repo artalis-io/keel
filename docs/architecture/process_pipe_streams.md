@@ -469,7 +469,11 @@ Each step is its own PR:
    without `ConnectNamedPipe` (§16) is verified by `test_anon_pipe`. `check-pipe-seam` gains the
    process-management rule (§14.3) and the stdio / protocol tokens (§14.5).
 6. **POSIX anonymous pairs.** Readiness adapter and PAL, local SIGPIPE handling, the F4 rule, and tests
-   on epoll, kqueue, poll, io_uring and pollcomp. Also the cosmocc Windows-runner probe as a tracked,
+   on epoll, kqueue, poll, io_uring and pollcomp. As implemented, the readiness adapter lives in
+   `pipe_stream.c` beside the completion one (same `KlPipeStream`, same `KlCompLife`), and the POSIX
+   pipe calls in `platform_pipe_posix.c`. The Cosmopolitan-on-Windows case is a tracked known defect
+   in `test_anon_pipe` (it passes as a labelled skip while the defect shows, and fails once it is
+   fixed); CI has no Windows-host Cosmopolitan run, so it is exercised only where one exists. Also the cosmocc Windows-runner probe as a tracked,
    expected-fail test. Gates and docs (stream contract on directional streams, capability matrix,
    platform support, CHANGELOG) land with the step that introduces each rule.
 7. **Hull-side spike, outside Keel.** Spawn a real MCP stdio echo server using the pair, to validate

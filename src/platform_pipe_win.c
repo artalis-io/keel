@@ -24,6 +24,7 @@
  *   - IT IS REALLY A PIPE. GetFileType must say FILE_TYPE_PIPE; the prefix check alone is textual.
  */
 #include "platform_pipe.h"
+#include <keel/anon_pipe_native.h>   /* kl_anon_pipe_end_handle */
 
 #include <windows.h>
 #include <bcrypt.h>    /* BCryptGenRandom: the anonymous pair's unguessable name */
@@ -216,4 +217,42 @@ fail:
 
 void kl_plat_pipe_close(KlPipeHandle *h) {
     if (h) CloseHandle((HANDLE)h);
+}
+
+/* ── Readiness I/O: not on Windows (pipes ride the completion engine) ─────────────────────── */
+
+int kl_plat_pipe_readiness(void) { return 0; }
+
+KlSocketHandle kl_plat_pipe_pollable(const KlPipeHandle *h) {
+    (void)h;
+    return KL_INVALID_SOCKET;
+}
+
+kl_ssize_t kl_plat_pipe_read(const KlPipeHandle *h, char *buf, size_t len, int *would_block) {
+    (void)h; (void)buf; (void)len;
+    *would_block = 0;
+    return -1;
+}
+
+kl_ssize_t kl_plat_pipe_write(const KlPipeHandle *h, const char *data, size_t len, int *would_block) {
+    (void)h; (void)data; (void)len;
+    *would_block = 0;
+    return -1;
+}
+
+/* ── The child's end ───────────────────────────────────────────────────────────────────────── */
+
+void kl_plat_pipe_end_adopt(KlAnonPipeEnd *e, KlPipeHandle *child) {
+    e->_handle = child;
+    e->_fd1    = 0;
+}
+
+void kl_plat_pipe_end_release(KlAnonPipeEnd *e) {
+    if (e->_handle) CloseHandle((HANDLE)e->_handle);
+    e->_handle = NULL;
+    e->_fd1    = 0;
+}
+
+void *kl_anon_pipe_end_handle(const KlAnonPipeEnd *peer) {
+    return peer ? peer->_handle : NULL;
 }

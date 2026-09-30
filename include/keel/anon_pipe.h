@@ -26,11 +26,23 @@
  * The native accessors in <keel/anon_pipe_native.h> BORROW B's value: reading it transfers no
  * ownership, and B is still released only by kl_anon_pipe_end_close. The full spawn sequence is there.
  *
- * PLATFORMS. Windows, IOCP engine: A is the overlapped server end of a private, single-instance named
- * pipe (random name, current-user + SYSTEM DACL, remote clients rejected, client process verified), and
- * B its synchronous client end, as a child's C runtime expects. Every other engine and platform returns
- * KL_PIPE_UNSUPPORTED before touching the OS. There is no emulation.
- */
+ * PLATFORMS. Support follows the platform and what the loop can drive; there is no emulation, and
+ * anything unsupported returns KL_PIPE_UNSUPPORTED before touching the OS.
+ *   - Windows, IOCP engine: A is the overlapped server end of a private, single-instance named pipe
+ *     (random name, current-user + SYSTEM DACL, remote clients rejected, client process verified), and
+ *     B its synchronous client end, as a child's C runtime expects. WSAPoll cannot watch a pipe HANDLE
+ *     and refuses.
+ *   - POSIX, any engine that watches native descriptors (epoll, kqueue, poll, and io_uring / pollcomp
+ *     through their watcher relay): an ordinary pipe (pipe2 with O_CLOEXEC). A is non-blocking and
+ *     driven by readiness through the generic watcher registration, never the socket provider; B is
+ *     blocking. A write to a pipe whose reader has gone reports KL_STREAM_ERROR and never delivers
+ *     SIGPIPE to the process; Keel does not change the process's signal disposition to achieve that.
+ *     A runtime loop that cannot watch native descriptors refuses.
+ *
+ * COSMOPOLITAN ON A WINDOWS HOST runs the POSIX path over its poll emulation, which (measured) reports
+ * a FULL pipe as writable. Reading is sound; a blocked WRITE-pair producer there busy-wakes instead of
+ * sleeping until the child reads. Keel does not paper over this (test_anon_pipe tracks it as a known
+ * defect). */
 #ifndef KEEL_ANON_PIPE_H
 #define KEEL_ANON_PIPE_H
 

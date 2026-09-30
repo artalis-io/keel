@@ -21,6 +21,17 @@
 #   R6  No process management in Keel: no fork / vfork / exec* / posix_spawn* / waitpid / CreateProcess* /
 #       TerminateProcess call anywhere under src/, include/ or integrations/ (comments are stripped first).
 #       An anonymous pipe pair is handed to the embedder's spawner; Keel never spawns.
+#   R7  POSIX pipe creation stays in its PAL: pipe( / pipe2( calls appear only in
+#       src/platform_pipe_posix.c, plus the pre-existing src/platform_wakeup_posix.c (KlWakeup) and
+#       src/event_iouring.c (the splice pipe). Comments stripped.
+#   R8  No process-global SIGPIPE disposition: signal(SIGPIPE, ...) / sigaction(SIGPIPE, ...) appear only in
+#       the one existing HTTP-server site (src/protocols/http/http_server_plat_posix.c). The pipe
+#       transport suppresses SIGPIPE per write, per thread, and never changes the disposition.
+#   R3 also forbids the pipe transport from calling the socket seam (kl_sock_* / kl_sockdef_*): a POSIX
+#       pipe end is a file descriptor, never a socket. Its one registration conversion to KlSocketHandle
+#       for the watcher API is kl_plat_pipe_pollable in platform_pipe_posix.c, which is also the one TU
+#       exempt from the no-integer-cast rule (on POSIX the native pipe handle IS a descriptor, encoded in
+#       the opaque pointer there and nowhere else).
 #
 # Calls are matched as `Name(` so an explanatory comment naming an API does not trip the gate.
 # Usage: tools/check_pipe_seam.sh [--selftest]
@@ -35,7 +46,13 @@ CAST_RE='\((KlSocketHandle|SOCKET|int|unsigned|long|intptr_t|uintptr_t)\)[[:spac
 INC_RE='#[[:space:]]*include[[:space:]]*[<"](keel/pipe|pipe|completion_pipe|platform_pipe)\.h[>"]'
 NEUTRAL_RE='ssh|agent|\b(stdin|stdout|stderr|mcp|jsonrpc)\b'
 PROC_RE='\b(fork|vfork|execl|execle|execlp|execv|execve|execvp|execvpe|posix_spawnp?|waitpid|CreateProcess(AsUser)?[AW]?|TerminateProcess)[[:space:]]*\('
-# Blank C comments (keeping newlines, so line numbers stay exact) before the R6 scan.
+PIPE_RE='\b(pipe|pipe2)[[:space:]]*\('
+PIPE_ALLOWED="src/platform_pipe_posix.c src/platform_wakeup_posix.c src/event_iouring.c"
+SIGPIPE_RE='\b(signal|sigaction)[[:space:]]*\([[:space:]]*SIGPIPE\b'
+SIGPIPE_ALLOWED="src/protocols/http/http_server_plat_posix.c"
+SOCKSEAM_RE='\bkl_sock(def)?_[a-z_]+[[:space:]]*\('
+CAST_EXEMPT="src/platform_pipe_posix.c"
+# Blank C comments (keeping newlines, so line numbers stay exact) before the R6 / R7 / R8 scans.
 STRIP='s{/\*(.*?)\*/}{ my $c = $1; " " . ("\n" x ($c =~ tr/\n//)) }gse; s{//[^\n]*}{}g;'
 
 MECH="src/event_iocp.c src/platform_pipe_win.c"
@@ -68,6 +85,15 @@ selftest() {
     chk "$PROC_RE" "" 'ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);' 1
     chk "$PROC_RE" "" 'if (posix_spawnp(&pid, argv[0], NULL, NULL, argv, envp) != 0)' 1
     chk "$PROC_RE" "" 'kl_platform_forkless_init();' 0
+    chk "$PIPE_RE" "" 'if (pipe2(fds, O_CLOEXEC) < 0)' 1
+    chk "$PIPE_RE" "" 'if (pipe(fds) < 0)' 1
+    chk "$PIPE_RE" "" 'kl_plat_pipe_close(h);' 0
+    chk "$SIGPIPE_RE" "" 'signal(SIGPIPE, SIG_IGN);' 1
+    chk "$SIGPIPE_RE" "" 'sigaction(SIGPIPE, &sa, NULL);' 1
+    chk "$SIGPIPE_RE" "" 'sigaddset(&pipe_only, SIGPIPE);' 0
+    chk "$SOCKSEAM_RE" "" 'n = kl_sockdef_send(fd, b, n);' 1
+    chk "$SOCKSEAM_RE" "" 'n = kl_sock_recv(prov, fd, b, n);' 1
+    chk "$SOCKSEAM_RE" "" 'n = kl_plat_pipe_write(p->h, d, n, &wb);' 0
     t=$(printf '/* not inherited across fork(), mark it */\nx = 1; // exec(\ny = waitpid(p, &s, 0);\n' | perl -0pe "$STRIP")
     printf '%s\n' "$t" | grep -nE "$PROC_RE" | grep -q '^3:' || { echo "check-pipe-seam: SELF-TEST FAILED: stripper lost a real call or shifted lines"; fail=1; }
     [ "$(printf '%s\n' "$t" | grep -cE "$PROC_RE")" = 1 ] || { echo "check-pipe-seam: SELF-TEST FAILED: stripper kept a commented call"; fail=1; }
@@ -105,7 +131,14 @@ for f in $(git ls-files 'src/socket*.c' 'src/socket*.h' 'src/platform_socket*' '
 done | grep . && bad=1
 for f in $PIPE_TUS src/event_iocp.c; do
     [ -f "$f" ] || continue
+    case " $CAST_EXEMPT " in *" $f "*) continue ;; esac
     grep -nE "$CAST_RE" "$f" | while IFS= read -r l; do echo "PIPE-SEAM VIOLATION (R3 pipe handle cast to a socket/integer type): $f:$l"; done
+done | grep . && bad=1
+for f in $PIPE_TUS; do
+    [ -f "$f" ] || continue
+    perl -0pe "$STRIP" "$f" | grep -nE "$SOCKSEAM_RE" | while IFS= read -r l; do
+        echo "PIPE-SEAM VIOLATION (R3 pipe transport calls the socket seam): $f:$l"
+    done
 done | grep . && bad=1
 
 # R4: protocol TUs do not reach the pipe transport.
@@ -117,6 +150,20 @@ done | grep . && bad=1
 for f in $PIPE_TUS; do
     [ -f "$f" ] || continue
     grep -niE "$NEUTRAL_RE" "$f" | while IFS= read -r l; do echo "PIPE-SEAM VIOLATION (R5 consumer-specific token in the pipe transport): $f:$l"; done
+done | grep . && bad=1
+
+# R7 / R8: POSIX pipe creation and SIGPIPE disposition stay where they belong.
+for f in $(git ls-files 'src/*.c' 'src/*.h' 'include/*.h' 'integrations/*.c' 'integrations/*.h'); do
+    [ -f "$f" ] || continue
+    src=$(perl -0pe "$STRIP" "$f")
+    case " $PIPE_ALLOWED " in
+    *" $f "*) ;;
+    *) printf '%s\n' "$src" | grep -nE "$PIPE_RE" | while IFS= read -r l; do echo "PIPE-SEAM VIOLATION (R7 pipe creation outside the pipe PAL): $f:$l"; done ;;
+    esac
+    case " $SIGPIPE_ALLOWED " in
+    *" $f "*) ;;
+    *) printf '%s\n' "$src" | grep -nE "$SIGPIPE_RE" | while IFS= read -r l; do echo "PIPE-SEAM VIOLATION (R8 process-global SIGPIPE disposition): $f:$l"; done ;;
+    esac
 done | grep . && bad=1
 
 # R6: Keel never manages processes.
@@ -131,4 +178,4 @@ if [ $bad -ne 0 ]; then
     echo "check-pipe-seam: FAILED (see docs/architecture/windows_named_pipes.md §6)"
     exit 1
 fi
-echo "check-pipe-seam: OK (pipe I/O confined to event_iocp.c + platform_pipe_win.c, overlapped only; no pipe symbol on the socket axis; no protocol reaches it; consumer-neutral; no process management; self-canary green)"
+echo "check-pipe-seam: OK (pipe I/O confined to event_iocp.c + platform_pipe_win.c, overlapped only; no pipe symbol on the socket axis; no protocol reaches it; consumer-neutral; no process management; POSIX pipe creation in its PAL; no SIGPIPE disposition change; self-canary green)"
