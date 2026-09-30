@@ -796,6 +796,133 @@ UTEST(unix_socket, tls_over_https_unix) {
     kl_http_server_free(&srv);
 }
 
+/* An AF_UNIX connect usually completes at once. The async clients used to treat that as "connected,
+ * go send", skipping the post-connect path, so an https+unix / wss+unix request went out in
+ * PLAINTEXT with no TLS session at all. The mock TLS is a passthrough, so the server's reply looks the
+ * same either way; the proof is whether the client created a TLS session. */
+static int g_cli_tls_sessions;
+static KlTls *counting_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
+    g_cli_tls_sessions++;
+    return mock_tls_create(ctx, alloc);
+}
+
+UTEST(unix_socket, async_https_unix_engages_tls) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "atlsunix");
+    unlink(path);
+
+    KlTlsConfig srv_tls = { .factory = mock_tls_create };
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+        .tls = &srv_tls,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "https+unix://%s/hello", enc);
+
+    KlTlsConfig cli_tls = { .factory = counting_tls_create };
+    KlHttpClientConfig ccfg;
+    memset(&ccfg, 0, sizeof(ccfg));
+    ccfg.tls = &cli_tls;
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+
+    g_cli_tls_sessions = 0;
+    UnixAsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &ccfg, "GET", url,
+                                  NULL, 0, NULL, 0, unix_async_done, &actx);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, unix_run_until_done(&ev, &actx, 3000));
+    ASSERT_EQ(0, actx.error);
+    ASSERT_EQ(200, actx.status);
+    ASSERT_EQ(1, g_cli_tls_sessions);          /* the request went through a TLS session */
+    kl_http_client_free(c);
+
+    kl_event_ctx_free(&ev);
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+}
+
+UTEST(unix_socket, wss_unix_engages_tls) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "wssunix");
+    unlink(path);
+
+    KlTlsConfig srv_tls = { .factory = mock_tls_create };
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+        .tls = &srv_tls,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    KlWsServerConfig ws_cfg;
+    kl_ws_server_config_init(&ws_cfg);
+    ws_cfg.callbacks.on_open = ws_srv_on_open;
+    ws_cfg.callbacks.on_message = ws_srv_on_message;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&srv, "/ws", &ws_cfg));
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "wss+unix://%s/ws", enc);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlTlsConfig cli_tls = { .factory = counting_tls_create };
+    KlWsClientConfig wcfg;
+    memset(&wcfg, 0, sizeof(wcfg));
+    wcfg.tls = &cli_tls;
+
+    g_cli_tls_sessions = 0;
+    WsCliCtx wc;
+    memset(&wc, 0, sizeof(wc));
+    KlWsClientCallbacks cbs = {
+        .on_open = ws_cli_on_open,
+        .on_message = ws_cli_on_message,
+        .on_close = ws_cli_on_close,
+    };
+    KlWsClientConn *ws = kl_ws_client_connect(&ev, &a, &wcfg, url, &cbs, &wc);
+    ASSERT_TRUE(ws != NULL);
+    int elapsed = 0;
+    while (!wc.got_msg && elapsed < 3000) {
+        if (kl_event_ctx_run(&ev, 16, 50) < 0) break;
+        elapsed += 50;
+    }
+    ASSERT_TRUE(wc.open);
+    ASSERT_TRUE(wc.got_msg);
+    ASSERT_STREQ(wc.msg, "ping");
+    ASSERT_EQ(1, g_cli_tls_sessions);          /* the upgrade and frames went through TLS */
+
+    kl_ws_client_free(ws);
+    kl_event_ctx_free(&ev);
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+}
+
 UTEST(unix_socket, socket_group_is_applied) {
     struct group *g = getgrgid(getgid());
     if (!g || !g->gr_name)

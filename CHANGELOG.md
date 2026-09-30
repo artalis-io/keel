@@ -45,6 +45,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   asynchronous one, a refused connect and a TLS setup failure, using an allocator that poisons and
   quarantines freed blocks so any later read or write is caught; without the fix it crashes.
 
+- **TLS was skipped when a client's connect completed at once.** The async HTTP, WebSocket and
+  HTTP/2 clients treated a non-blocking connect that succeeded immediately as "connected, start
+  talking" and bypassed the post-connect path that sets up TLS (and, for HTTP, a proxy CONNECT
+  tunnel). An AF_UNIX connect usually completes at once, so `https+unix://` and `wss+unix://`
+  requests went out in plaintext, with no certificate check, including headers such as
+  `Authorization`; `h2` over a TLS-configured unix socket spoke plaintext too. The HTTP client now
+  always takes the connecting path (the writable event arrives immediately); the WebSocket and
+  HTTP/2 clients keep their immediate start only when no TLS is configured (so plaintext `h2c`
+  can still issue a request right after connect). New `test_unix_socket` cases drive async
+  `https+unix` and `wss+unix` against a TLS server and require that the client created a TLS
+  session.
+
 ### Added
 
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that

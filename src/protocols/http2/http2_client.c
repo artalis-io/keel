@@ -567,7 +567,11 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     memset(c, 0, sizeof(*c));
 
     c->fd = fd;
-    c->state = (rc == 0) ? H2C_H2_INIT : H2C_CONNECTING;
+    /* Plaintext (h2c) may start the session at once when the connect completed immediately, so a
+     * request can be issued right after connect; with TLS it must take the CONNECTING path, which
+     * sets up the session and the handshake (h2c_handle_connecting). Skipping it spoke h2 in
+     * plaintext on a TLS-configured connection. */
+    c->state = (rc == 0 && !(cfg->tls && cfg->tls->factory)) ? H2C_H2_INIT : H2C_CONNECTING;
     c->ev = ev;
     c->alloc = alloc;
     c->cfg = *cfg;

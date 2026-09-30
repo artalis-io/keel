@@ -147,7 +147,12 @@ static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
     }
 
     c->fd = fd;
-    c->state = (rc == 0) ? KL_HTTP_CLIENT_SENDING : KL_HTTP_CLIENT_CONNECTING;
+    /* Always CONNECTING, even when the connect completed at once (an AF_UNIX connect usually does):
+     * the writable event arrives immediately, and async_handle_connecting then takes the same
+     * post-connect path as a racing winner (proxy CONNECT tunnel, then TLS, then send). Jumping
+     * straight to SENDING skipped both, sending an https request in plaintext. */
+    (void)rc;
+    c->state = KL_HTTP_CLIENT_CONNECTING;
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
