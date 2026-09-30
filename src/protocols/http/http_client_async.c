@@ -1007,7 +1007,7 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
  * rule there instead. */
 static void client_note_head(KlHttpClient *c, const char *method)
 {
-    if (strcmp(method, "HEAD") != 0)
+    if (strlen(method) != 4 || memcmp(method, "HEAD", 4) != 0)   /* freestanding: mem* + strlen */
         return;
     if (c->parser->expect_no_body)
         c->parser->expect_no_body(c->parser);
