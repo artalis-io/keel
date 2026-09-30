@@ -338,4 +338,37 @@ UTEST(response_parser, finish_with_nothing_received_is_an_error) {
     p->destroy(p);
 }
 
+/* ── expect_no_body: the response to a HEAD request ─────────────── */
+
+UTEST(response_parser, expect_no_body_completes_at_end_of_headers) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    ASSERT_TRUE(p->expect_no_body != NULL);
+    p->expect_no_body(p);
+    const char *raw = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n";
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t consumed = 0;
+    ASSERT_EQ(p->parse(p, &resp, raw, strlen(raw), &consumed), KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(resp.body_len, (size_t)0);
+    ASSERT_EQ(resp.num_headers, 1);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, expect_no_body_is_cleared_by_reset) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    p->expect_no_body(p);
+    p->reset(p);
+    const char *raw = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n";
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t consumed = 0;
+    ASSERT_EQ(p->parse(p, &resp, raw, strlen(raw), &consumed), KL_HTTP1_PARSE_INCOMPLETE);
+    ASSERT_EQ(p->finish(p, &resp), KL_HTTP1_PARSE_ERROR);   /* a GET's body really is missing */
+    p->destroy(p);
+}
+
 UTEST_MAIN();

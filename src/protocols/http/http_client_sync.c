@@ -498,9 +498,10 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
 /* End of stream before the parser reported a complete message: only a close-delimited body
  * legitimately ends here. A parser with finish decides; without one, keep the older rule (a status
  * line arrived). A truncated response is an error, never a success missing headers or body. */
-static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientResponse *resp)
+static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientResponse *resp,
+                                    int status_only)
 {
-    if (parser->finish)
+    if (parser->finish && !status_only)
         return parser->finish(parser, resp) == KL_HTTP1_PARSE_OK;
     return resp->status > 0;
 }
@@ -508,7 +509,7 @@ static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientR
 static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlHttpClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
                                KlAllocator *alloc,
-                               const KlHttpClientStreamCfg *stream)
+                               const KlHttpClientStreamCfg *stream, int is_head)
 {
     KlHttp1ResponseParser *parser;
     if (stream && stream->on_body) {
@@ -523,6 +524,17 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
     if (!parser)
         return -1;
 
+    /* A HEAD response has no body whatever its framing headers say. Tell the parser; one that
+     * cannot be told would take the missing body for a truncation at end of stream, so fall back to
+     * the status rule there instead. */
+    int status_only = 0;
+    if (is_head) {
+        if (parser->expect_no_body)
+            parser->expect_no_body(parser);
+        else
+            status_only = 1;
+    }
+
     char buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
     int ret = -1;
 
@@ -535,12 +547,12 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         if (nread < 0) {
             /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
              * finalize a close-delimited response rather than failing it. */
-            if (tls && tls->at_eof && tls->at_eof(tls) && response_complete_at_eof(parser, resp))
+            if (tls && tls->at_eof && tls->at_eof(tls) && response_complete_at_eof(parser, resp, status_only))
                 ret = 0;
             break;
         }
         if (nread == 0) {
-            if (response_complete_at_eof(parser, resp))
+            if (response_complete_at_eof(parser, resp, status_only))
                 ret = 0;
             break;
         }
@@ -761,7 +773,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     }
 
     if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
-                            actual_stream) != 0) {
+                            actual_stream, strcmp(method, "HEAD") == 0) != 0) {
         if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
     }
@@ -929,7 +941,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     }
 
     if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
-                            NULL) != 0) {
+                            NULL, strcmp(method, "HEAD") == 0) != 0) {
         if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
     }

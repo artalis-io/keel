@@ -209,6 +209,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   append-only vtable contract. The llhttp parser implements it with `llhttp_finish`. At EOF the
   clients now succeed only when `finish` reports a complete message; a truncated response fails with
   `KL_ERR_PARSE`. A third-party parser without `finish` keeps the old rule.
+  - **HEAD.** A second optional op, `expect_no_body`, tells the parser that the request was `HEAD`,
+    so the response has no body whatever its `Content-Length` says (RFC 9110 9.3.2).
+    - The clients call it for every HEAD request, and the response is complete at the end of its
+      headers.
+    - Previously a HEAD response carrying `Content-Length` waited for a body that never came: on a
+      kept-alive connection until the request timed out, and on a closed one it "succeeded" with no
+      headers.
+    - With a parser that has `finish` but not `expect_no_body`, the clients use the old status rule
+      at end of stream for HEAD, so a HEAD response is never mistaken for a truncation.
   - New suite `test_http_client_eof` covers close-delimited, truncated-body and truncated-header
     responses over the sync and async clients.
   - `test_http1_response_parser` adds five `finish` cases, and `fuzz_response_parser` now also

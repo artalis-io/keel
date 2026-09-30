@@ -923,7 +923,7 @@ static void async_handle_receiving(KlHttpClient *c)
              * body legitimately ends here. A parser with finish decides; without one, keep the
              * older rule (a status line arrived). A truncated response is an error, never a
              * success missing its headers or part of its body. */
-            if (c->parser->finish
+            if (c->parser->finish && !c->eof_rule_status_only
                     ? c->parser->finish(c->parser, &c->resp) == KL_HTTP1_PARSE_OK
                     : c->resp.status > 0)
                 async_complete_success(c);
@@ -1001,6 +1001,19 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
 }
 
 /* ── Completion helpers ──────────────────────────────────────────── */
+
+/* A HEAD response has no body whatever its framing headers say. Tell the parser; one that cannot be
+ * told would take the missing body for a truncation at end of stream, so fall back to the status
+ * rule there instead. */
+static void client_note_head(KlHttpClient *c, const char *method)
+{
+    if (strcmp(method, "HEAD") != 0)
+        return;
+    if (c->parser->expect_no_body)
+        c->parser->expect_no_body(c->parser);
+    else
+        c->eof_rule_status_only = 1;
+}
 
 static void async_complete_success(KlHttpClient *c)
 {
@@ -1350,6 +1363,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
+    client_note_head(c, method);
 
     /* UNIX socket: connect directly, bypassing DNS resolution entirely. */
     if (parsed.is_unix) {
@@ -1703,6 +1717,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
+    client_note_head(c, method);
 
     /* Try pool acquire */
     KlHttpClientPoolConn pconn;

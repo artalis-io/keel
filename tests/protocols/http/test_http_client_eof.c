@@ -7,6 +7,11 @@
  * (they are handed over only at message-complete), and a truncated one (EOF inside the headers or a
  * Content-Length body) was reported as a successful, partial response. Sync and async are covered.
  *
+ * HEAD. A HEAD response has no body whatever its Content-Length says. The client tells the parser
+ * (expect_no_body), so the response is complete at the end of its headers: over a kept-alive
+ * connection it no longer waits for a body that never comes, and at end of stream it is not taken
+ * for a truncation.
+ *
  * Pooled requests. kl_http_client_start_pooled left the timer ids at the memset's 0 and never set a
  * timeout: every completion cancelled whichever timer held id 0 (someone else's), and a pooled
  * request to a silent server never timed out.
@@ -31,6 +36,7 @@ typedef struct {
     KlSocketHandle listen_fd;
     int            port;
     const char    *reply;   /* sent after the request headers; NULL = stay silent */
+    int            hold;    /* after the reply, keep the connection open until the client closes */
     KlPlatThread   tid;
 } Peer;
 
@@ -72,6 +78,8 @@ static void peer_thread(void *arg) {
     }
     if (p->reply) {
         (void)kl_test_sockwrite(c, p->reply, strlen(p->reply));
+        if (p->hold)
+            while (kl_test_poll1(c, 0, 5000) > 0 && kl_test_sockread(c, buf, sizeof(buf)) > 0) {}
     } else {
         /* Silent: hold the connection until the client gives up and closes it. */
         while (kl_test_poll1(c, 0, 5000) > 0 && kl_test_sockread(c, buf, sizeof(buf)) > 0) {}
@@ -104,18 +112,23 @@ static const char *find_header(const KlHttpClientResponse *r, const char *name) 
 
 /* ── Sync ────────────────────────────────────────────────────────── */
 
-static int sync_get(const char *reply, KlHttpClientResponse *resp) {
+static int sync_req(const char *method, const char *reply, int hold, KlHttpClientResponse *resp) {
     Peer p;
     if (peer_listen(&p, reply) != 0) return -2;
+    p.hold = hold;
     peer_start(&p);
     KlAllocator a = kl_allocator_default();
     KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.timeout_ms = 3000;
     memset(resp, 0, sizeof(*resp));
-    int rc = kl_http_client_request(&a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0, resp);
+    int rc = kl_http_client_request(&a, &cfg, method, url_for(&p), NULL, 0, NULL, 0, resp);
     peer_finish(&p);
     return rc;
+}
+
+static int sync_get(const char *reply, KlHttpClientResponse *resp) {
+    return sync_req("GET", reply, 0, resp);
 }
 
 UTEST(eof, sync_close_delimited_body_is_delivered) {
@@ -137,6 +150,34 @@ UTEST(eof, sync_truncated_body_fails) {
 UTEST(eof, sync_truncated_headers_fail) {
     KlHttpClientResponse r;
     ASSERT_EQ(sync_get(TRUNCATED_HEADER, &r), -1);
+    kl_http_client_response_free(&r);
+}
+
+#define HEAD_REPLY "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nX-Probe: yes\r\n\r\n"
+
+/* The server keeps the connection open: the response must complete at the end of its headers. */
+UTEST(head, sync_completes_at_end_of_headers) {
+    KlHttpClientResponse r;
+    ASSERT_EQ(sync_req("HEAD", HEAD_REPLY, 1, &r), 0);   /* was: waited for 10 bytes, timed out */
+    ASSERT_EQ(r.status, 200);
+    ASSERT_EQ(r.body_len, (size_t)0);
+    ASSERT_TRUE(find_header(&r, "X-Probe") != NULL);
+    kl_http_client_response_free(&r);
+}
+
+/* The server closes right after the headers: not a truncation. */
+UTEST(head, sync_close_after_headers_is_not_a_truncation) {
+    KlHttpClientResponse r;
+    ASSERT_EQ(sync_req("HEAD", HEAD_REPLY, 0, &r), 0);
+    ASSERT_EQ(r.status, 200);
+    ASSERT_TRUE(find_header(&r, "X-Probe") != NULL);
+    kl_http_client_response_free(&r);
+}
+
+/* The same bytes answering a GET are a truncation (the hint is per request, not sticky). */
+UTEST(head, sync_same_reply_to_get_is_truncated) {
+    KlHttpClientResponse r;
+    ASSERT_EQ(sync_req("GET", HEAD_REPLY, 0, &r), -1);
     kl_http_client_response_free(&r);
 }
 
@@ -166,10 +207,11 @@ static void async_done(KlHttpClient *c, void *ud) {
     }
 }
 
-static void async_get(const char *reply, AsyncResult *res) {
+static void async_req(const char *method, const char *reply, int hold, AsyncResult *res) {
     memset(res, 0, sizeof(*res));
     Peer p;
     if (peer_listen(&p, reply) != 0) { res->err = -2; return; }
+    p.hold = hold;
     peer_start(&p);
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
@@ -177,13 +219,15 @@ static void async_get(const char *reply, AsyncResult *res) {
     KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.timeout_ms = 3000;
-    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0,
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, method, url_for(&p), NULL, 0, NULL, 0,
                                            async_done, res);
     for (int i = 0; i < 400 && c && !res->done; i++) (void)kl_event_ctx_run(&ev, 16, 10);
     if (c) kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     peer_finish(&p);
 }
+
+static void async_get(const char *reply, AsyncResult *res) { async_req("GET", reply, 0, res); }
 
 UTEST(eof, async_close_delimited_body_is_delivered) {
     AsyncResult r;
@@ -208,6 +252,24 @@ UTEST(eof, async_truncated_headers_fail) {
     async_get(TRUNCATED_HEADER, &r);
     ASSERT_EQ(r.done, 1);
     ASSERT_NE(r.err, 0);
+}
+
+UTEST(head, async_completes_at_end_of_headers) {
+    AsyncResult r;
+    async_req("HEAD", HEAD_REPLY, 1, &r);
+    ASSERT_EQ(r.done, 1);
+    ASSERT_EQ(r.err, 0);   /* was: waited for 10 bytes until the deadline */
+    ASSERT_EQ(r.status, 200);
+    ASSERT_EQ(r.has_probe, 1);
+}
+
+UTEST(head, async_close_after_headers_is_not_a_truncation) {
+    AsyncResult r;
+    async_req("HEAD", HEAD_REPLY, 0, &r);
+    ASSERT_EQ(r.done, 1);
+    ASSERT_EQ(r.err, 0);
+    ASSERT_EQ(r.status, 200);
+    ASSERT_EQ(r.has_probe, 1);
 }
 
 /* ── Pooled requests: their own timers only, and a deadline ──────── */

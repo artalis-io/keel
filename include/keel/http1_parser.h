@@ -64,6 +64,12 @@ struct KlHttp1ResponseParser {
      *  message was truncated (EOF inside the headers, or inside a Content-Length or chunked body).
      *  NULL keeps the older behavior: a response whose status line arrived counts as complete. */
     KlHttp1ParseResult (*finish)(KlHttp1ResponseParser *self, KlHttpClientResponse *resp);
+    /** Optional: the request was HEAD, so the next response has no body whatever its
+     *  Content-Length or Transfer-Encoding say (RFC 9110 9.3.2): it is complete at the end of its
+     *  headers. Lasts until reset. A parser without it cannot tell a HEAD response from a truncated
+     *  one, so for a HEAD request the client does not call finish (a response whose status line
+     *  arrived counts as complete at end of stream). */
+    void (*expect_no_body)(KlHttp1ResponseParser *self);
 };
 
 /** @brief Factory function for creating response parsers.
