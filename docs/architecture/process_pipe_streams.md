@@ -144,9 +144,11 @@ consumer has to discover it dynamically.
   engines it is in fact "a pollable descriptor". This is the one place a pipe fd passes through that
   type. It is registration only, never a socket op, and the gate forbids pipe code from calling
   provider ops. Renaming the registration type is a separate, larger decision (§12).
-- **Engines.** Anything with `KL_EVENT_CAP_NATIVE_FD` works: epoll, kqueue and poll natively, and
-  io_uring and pollcomp through their watcher relay (poll-add). A runtime-installed provider without
-  `NATIVE_FD` (lwIP-raw, EFI) gets `KL_PIPE_UNSUPPORTED`.
+- **Engines.** The compiled-in engines with `KL_EVENT_CAP_NATIVE_FD` work: epoll, kqueue and poll
+  natively, and io_uring and pollcomp through their watcher relay (poll-add). Every runtime-installed
+  provider gets `KL_PIPE_UNSUPPORTED`: lwIP-raw and EFI lack `NATIVE_FD`, and the lwIP BSD loop,
+  which advertises it, polls lwIP socket numbers rather than host descriptors, so a host pipe's
+  readiness would never be reported.
 - **Read adapter.**
   - `arm` adds READ interest; `disarm` removes it.
   - On readiness, one `read()` into the stream buffer. `> 0` delivers; `0` is EOF (`ok=0`); `EAGAIN` is
@@ -253,7 +255,7 @@ Creation stays separate from I/O semantics, as it already is for named pipes.
 | Cosmopolitan, Windows host | as poll | read supported; write readiness defective (§4.4) |
 | Windows IOCP (MinGW, MSVC) | overlapped pair + completion seam | supported |
 | Windows WSAPoll | none (cannot watch a `HANDLE`) | `KL_PIPE_UNSUPPORTED` |
-| runtime provider without `NATIVE_FD` (lwIP-raw, EFI) | none | `KL_PIPE_UNSUPPORTED` |
+| any runtime-installed provider (lwIP BSD, lwIP-raw, EFI) | none | `KL_PIPE_UNSUPPORTED` |
 
 No combination is emulated. The readiness adapter is used only where the engine natively watches
 descriptors.
