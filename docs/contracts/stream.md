@@ -50,10 +50,49 @@ reports `ACCEPTED`); a partial write is never caller-visible.
 Draining is driven by the adapter, per model: readiness installs a writer
 (`kl_stream_set_writer`) and calls `kl_stream_flush(s)` on a writable signal; completion installs a
 submit hook (`kl_stream_set_submit`) and calls `kl_stream_on_write_complete(s, ok)` when a posted
-WRITE completes (≤1 send in flight). `kl_stream_write_pending(s)` reports the queued byte count.
-**`KlStream` exposes no low-water "writable" callback**; backpressure surfaces as
-`KL_STREAM_WOULD_BLOCK`, and a caller that wants an explicit drained-notification composes `KlDrain`
-(see `drain.h`) or polls `kl_stream_write_pending`.
+WRITE completes (≤1 send in flight). `kl_stream_write_pending(s)` reports the pending byte count:
+queued bytes plus any a copying backend already took for the send in flight.
+
+**Writable-again edge.** `kl_stream_on_writable(s, fn, ctx)` answers one question for a producer
+that was told `KL_STREAM_WOULD_BLOCK`: *when should I retry?* After a `WOULD_BLOCK`, `fn` fires at
+most once, when the blocked condition has ended. It ends one of two ways, and the retry's own status
+tells them apart, so the callback carries no status argument:
+
+```text
+WOULD_BLOCK ─► physical progress ─► total pending < capacity ─► fn ─► retry → ACCEPTED
+WOULD_BLOCK ─► terminal write failure (capacity never useful) ─► fn ─► retry → KL_STREAM_ERROR
+```
+
+"Physical progress" is `kl_stream_flush` (readiness) or `kl_stream_on_write_complete` (completion).
+"Total pending" is `kl_stream_write_pending`, in-flight bytes included.
+
+- Only `WOULD_BLOCK` arms it; an `ACCEPTED` write disarms it. Bytes draining never fire it on their
+  own: the producer must have observed the blocked state.
+- It fires once per arming, whether or not the callback retries. A retry that returns `WOULD_BLOCK`
+  again (the write needs more room than has freed) re-arms it, and the next progress point fires it
+  again; progress is guaranteed because a `WOULD_BLOCK` means bytes are pending. A retry that
+  returns `KL_STREAM_ERROR` does not arm it.
+- It never fires from inside `kl_stream_write`.
+- In-flight bytes count toward "full". That is why the stream's internal `KlDrain` low-water callback
+  is not the signal: with a copying backend the queue is emptied at submit, while those bytes are
+  still unacknowledged.
+- It never fires once a close has begun; `on_close` is the terminal signal.
+- The callback may write (a buffered remainder is flushed at the next progress point, and
+  `kl_stream_flush` returns 1 while bytes remain) and may begin a close; detachment is deferred
+  until the callback returns. It must not free the stream.
+
+A producer's callback therefore needs no bookkeeping beyond the retry:
+
+```c
+static void on_writable(void *ctx) {
+    Producer *p = ctx;
+    switch (kl_stream_write(p->s, p->next, p->next_len)) {
+    case KL_STREAM_ACCEPTED:    /* advance; keep writing until WOULD_BLOCK */ break;
+    case KL_STREAM_WOULD_BLOCK: /* re-armed; wait for the next edge */       break;
+    default:                    /* terminal: stop producing, close */         break;
+    }
+}
+```
 
 ### Read (strict pause/resume)
 
@@ -177,6 +216,7 @@ set) and the `pollcomp` double (`make smoke-pollcomp-asan`), plus IOCP on the Wi
 | Area | Suites |
 |---|---|
 | Stream write/read/close | `tests/test_stream.c`, `test_stream_read.c`, `test_stream_close.c`, `test_stream_single_shot.c` |
+| Writable-again edge | `tests/test_stream_writable.c` (rules, plus a live socket producer); `test_pipe_stream.c` (`producer_resumes_only_on_the_writable_edge`, IOCP) |
 | Public transport surface | `tests/test_stream_transport.c`, `test_transport_public.c` |
 | Listener | `tests/test_listener.c` |
 | Connect op | `tests/test_connect_op.c` |

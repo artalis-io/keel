@@ -175,6 +175,7 @@ KlStreamReadArmFn	callback	stream.h
 KlStreamReadDeliverFn	callback	stream.h
 KlStreamReadDisarmFn	callback	stream.h
 KlStreamSubmitFn	callback	stream.h
+KlStreamWritableFn	callback	stream.h
 KlStreamWriteFn	callback	stream.h
 KlStreamWriteStatus	enum	stream.h
 KlThreadPool	opaque	thread_pool.h

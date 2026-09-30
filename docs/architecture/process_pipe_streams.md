@@ -91,7 +91,8 @@ read that was never installed? **Yes.** The only way it can hang is F2, which is
   per full→non-full transition, only from `kl_stream_on_write_complete` (completion) or
   `kl_stream_flush` (readiness), never from inside `kl_stream_write`. It is an append-only STABLE
   addition. An owner-level `on_drained` in the pipe config was the first draft and is rejected: it
-  would fix a generic limitation one layer too low.
+  would fix a generic limitation one layer too low. Implemented as `kl_stream_on_writable` (see
+  `docs/contracts/stream.md`).
 
 ### Engine findings
 

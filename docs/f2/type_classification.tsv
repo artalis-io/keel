@@ -204,3 +204,4 @@ listener.h	KlListenerDisposeObjFn	callback	api-signature	-
 pipe.h	KlPipeAcceptFn	callback	api-signature	-
 pipe.h	KlPipeListenConfig	struct	caller-constructed	caller-built; F2-C append-only
 pipe.h	KlPipeListener	opaque	opaque	private handle; layout in src/pipe_stream.c, embeds a KlListener (object handoff family)
+stream.h	KlStreamWritableFn	callback	api-signature	-

@@ -5,6 +5,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Added
+
+- **`kl_stream_on_writable`: a writable-again edge on `KlStream`.** Before, a producer told
+  `KL_STREAM_WOULD_BLOCK` had no way to learn when to retry. After a `WOULD_BLOCK`, the callback
+  fires at most once, when the producer should retry because the blocked condition has ended:
+  - capacity came back: the stream's total pending bytes, in-flight bytes included, dropped below
+    its write capacity. The retry is accepted.
+  - the write side failed terminally, so capacity never will. The retry returns `KL_STREAM_ERROR`.
+
+  The retry's status is the single source of truth; the callback carries none. An accepted write
+  disarms it, drain progress alone never fires it, it fires only from `kl_stream_flush` or
+  `kl_stream_on_write_complete` (never from inside `kl_stream_write`), and a close in progress
+  suppresses it. It is generic, so sockets, named pipes and future pipe transports share it.
+  Contract in `docs/contracts/stream.md`; tested by `test_stream_writable` (every rule, plus a
+  producer driven only by the edge over a real socket) and over a named pipe on IOCP.
+
 ### Fixed
 
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were

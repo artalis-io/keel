@@ -50,6 +50,7 @@ static int stream_fully_retired(const KlStream *s) {
 static void stream_close_finalize(KlStream *s) {
     if (s->close_state != KL_STREAM_STATE_CLOSING) return;   /* not closing, or already detached */
     if (s->in_close_cancel) return;                    /* defer past the (possibly nested) cancel window */
+    if (s->in_writable) return;                        /* defer past on_writable; its caller retries */
     if (!stream_fully_retired(s)) return;              /* an op is still physically outstanding */
     stream_detach(s);
 }

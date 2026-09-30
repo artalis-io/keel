@@ -262,6 +262,7 @@ kl_stream_flush	stream.h
 kl_stream_init	stream.h
 kl_stream_is_detached	stream.h
 kl_stream_on_recv	stream.h
+kl_stream_on_writable	stream.h
 kl_stream_on_write_complete	stream.h
 kl_stream_pause	stream.h
 kl_stream_read_close	stream.h

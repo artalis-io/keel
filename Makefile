@@ -622,7 +622,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free cloex
                    http_response http_router http_server_integration http_server_state http_server_stats \
                    http_sse http_tls io_status kl_cstr kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream \
                    proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
-                   socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_close_live stream_read stream_transport \
+                   socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_close_live stream_read stream_transport stream_writable \
                    thread_pool timeout timer tls tls_integration tls_vtable transport_public \
                    unix_socket_node_win url version wakeup watcher_aba websocket websocket_client \
                    websocket_client_hostname_fail websocket_overflow ws_server_close
@@ -662,7 +662,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn async atomic_lock_free 
                         http_server_state http_server_stats http_sse http_tls io_status iocp_engine kl_cstr \
                         kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream proxy_protocol read_flow_control \
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
-                        stream_close stream_close_live stream_read stream_single_shot thread_pool timeout timer tls \
+                        stream_close stream_close_live stream_read stream_single_shot stream_writable thread_pool timeout timer tls \
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
                         websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
