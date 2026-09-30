@@ -278,7 +278,7 @@ static int g_unrelated_fired;
 static void unrelated_timer(void *ud) { (void)ud; g_unrelated_fired = 1; }
 
 UTEST(pooled, completion_leaves_unrelated_timer_alone) {
-    Peer p;
+    static Peer p;   /* outlives an ASSERT early return: the peer thread uses it */
     ASSERT_EQ(peer_listen(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"), 0);
     peer_start(&p);
     KlAllocator a = kl_allocator_default();
@@ -304,7 +304,7 @@ UTEST(pooled, completion_leaves_unrelated_timer_alone) {
 }
 
 UTEST(pooled, silent_server_times_out) {
-    Peer p;
+    static Peer p;   /* outlives an ASSERT early return: the peer thread uses it */
     ASSERT_EQ(peer_listen(&p, NULL), 0);   /* accepts, reads the request, never answers */
     peer_start(&p);
     KlAllocator a = kl_allocator_default();
