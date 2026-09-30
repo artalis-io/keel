@@ -30,6 +30,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   single split points yields the request that was sent: 64 get no response and 45 are parsed as a
   different request (phantom headers, or that 2^64 - 28 Content-Length). With it, all pass.
 
+- **Freeing the async HTTP client inside `on_done` after a connect-phase failure was a
+  use-after-free.** A DNS failure, a refused connect, or a TLS setup failure called `on_done` from
+  inside the connect op's terminal dispatch. Freeing the client there, as `examples/async_client.c`
+  does, freed the `KlConnectOp` embedded in it while that frame was still running, which then read
+  and wrote freed memory; an owned resolver was also destroyed inside its own callback. Such a
+  completion is now deferred to the next loop tick. `on_done` may free the client on every path, and
+  is never called from inside `kl_http_client_start` (now documented on `KlHttpClientDoneFn`).
+  **Behavior change:** a failure found while starting (for example a resolver that fails
+  synchronously) used to call `on_done` before `kl_http_client_start` returned; it now arrives on
+  the next loop tick. A consumer that freed the client in that callback was handed a dangling
+  pointer by `start`. The
+  new `test_http_client_free_in_done` frees inside `on_done` for an inline DNS failure, an
+  asynchronous one, a refused connect and a TLS setup failure, using an allocator that poisons and
+  quarantines freed blocks so any later read or write is caught; without the fix it crashes.
+
 ### Added
 
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that

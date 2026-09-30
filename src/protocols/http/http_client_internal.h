@@ -122,6 +122,8 @@ struct KlHttpClient {
     int                conn_racing;     /* 1 = HE attempts in conn_attempts[] */
     int64_t            conn_delay_timer;/* Connection Attempt Delay timer (KlConnectOp-armed) (-1) */
     int64_t            deadline_timer;  /* overall request deadline timer (-1) */
+    int64_t            done_timer;      /* error completion deferred out of the connect op (-1) */
+    int                done_deferred;   /* the deferred completion is running: do not defer again */
     int                timeout_ms;      /* overall deadline (0 = none) */
     int                connect_delay_ms;/* Connection Attempt Delay */
     KlError            conn_last_err;   /* last connect error, for the all-fail case */

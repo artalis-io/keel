@@ -219,7 +219,9 @@ UTEST(client, async_dns_with_resolver_error) {
 /* Regression (audit H1): a resolver that completes synchronously AND returns
  * NULL (both contract-permitted). The client must NOT treat the NULL as a start
  * failure and free itself out from under on_done: it must return a live handle
- * that the caller frees. */
+ * that the caller frees. And on_done is never called from inside
+ * kl_http_client_start: the failure is reported on the next loop tick, so a
+ * consumer that frees the client in on_done cannot be handed a dangling pointer. */
 static KlResolveReq mock_req_syncnull;
 static int          syncnull_done_fired;
 
@@ -255,8 +257,11 @@ UTEST(client, async_resolver_sync_complete_null_return) {
     KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://example.com",
                                     NULL, 0, NULL, 0, syncnull_done, NULL);
 
-    ASSERT_TRUE(syncnull_done_fired);      /* on_done fired synchronously */
     ASSERT_TRUE(c != NULL);                /* handle kept alive (not freed under us) */
+    ASSERT_FALSE(syncnull_done_fired);     /* never inside kl_http_client_start ... */
+    for (int i = 0; i < 10 && !syncnull_done_fired; i++)
+        kl_event_ctx_run(&ev, 16, 5);
+    ASSERT_TRUE(syncnull_done_fired);      /* ... but on the next loop tick */
     ASSERT_EQ(kl_http_client_error(c), -1);     /* completed with the resolver error */
     kl_http_client_free(c);                     /* caller owns it: no double-free/UAF */
 

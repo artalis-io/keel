@@ -457,9 +457,11 @@ UTEST(he_detach, resolve_failed_during_dns) {
 
     ASSERT_TRUE(g_res_done != NULL);
     g_res_done(&g_mock_req, NULL, -1, g_res_ud);   /* resolver reports failure */
-    ASSERT_TRUE(x.done);
-    ASSERT_EQ(KL_ERR_DNS, x.err);
     ASSERT_TRUE(he_fully_detached(c));         /* resolve retired → terminal FAILED → detached */
+    ASSERT_FALSE(x.done);                      /* on_done is not run inside the connect op ... */
+    pump(&ev, &x.done, 5);
+    ASSERT_TRUE(x.done);                       /* ... it arrives on the next loop tick */
+    ASSERT_EQ(KL_ERR_DNS, x.err);
 
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);

@@ -224,6 +224,10 @@ typedef struct KlHttpClient KlHttpClient;
  *
  * Called on the event loop thread. Check kl_http_client_error() for status,
  * then kl_http_client_response() for the response data.
+ *
+ * The callback may free the client (kl_http_client_free), on success and on every failure. It is
+ * never called from inside kl_http_client_start: a failure found while starting (for example a
+ * resolver that fails synchronously) is reported on a later loop tick.
  */
 typedef void (*KlHttpClientDoneFn)(KlHttpClient *client, void *user_data);
 

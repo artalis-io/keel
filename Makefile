@@ -616,7 +616,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_
                    event_provider event_provider_vtable file_io http1_chunked http1_parser \
                    http1_parser_vtable http1_response_parser http2 http2_client http2_client_hostname_fail \
                    http2_client_vtable http2_overflow http_async http_body_reader http_body_reader_vtable \
-                   http_client http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
+                   http_client http_client_free_in_done http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
                    http_client_proxy http_client_stream http_connection http_cors http_integration \
                    http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
                    http_response http_router http_server_integration http_server_state http_server_stats \
@@ -655,7 +655,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_
                         event_provider event_provider_vtable file_io http1_chunked http1_parser \
                         http1_parser_vtable http1_response_parser http2 http2_client \
                         http2_client_hostname_fail http2_client_vtable http2_overflow http_async \
-                        http_body_reader http_body_reader_vtable http_client http_client_happy_eyeballs \
+                        http_body_reader http_body_reader_vtable http_client http_client_free_in_done http_client_happy_eyeballs \
                         http_client_hostname_fail http_client_pool http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
@@ -1035,7 +1035,7 @@ IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec compress cross_modu
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
                           dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
-                          http2_overflow http_async http_body_reader http_client http_client_happy_eyeballs \
+                          http2_overflow http_async http_body_reader http_client http_client_free_in_done http_client_happy_eyeballs \
                           http_client_pool http_client_proxy http_client_stream http_connection http_cors \
                           http_integration http_multipart_stream http_overflow http_redirect http_request \
                           http_response http_router http_server_integration http_server_stats http_split_request http_sse http_tls \
@@ -1091,7 +1091,7 @@ POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec compress cross_modul
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
                         http2_client http2_overflow http_async http_body_reader http_client \
-                        http_client_happy_eyeballs http_client_pool http_client_proxy http_client_stream \
+                        http_client_free_in_done http_client_happy_eyeballs http_client_pool http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_redirect \
                         http_request http_response http_router http_server_integration http_server_stats \
                         http_split_request http_sse http_tls peer_addr peer_cert proxy_protocol read_flow_control \
