@@ -254,13 +254,12 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
         done_fn(&cr->base, cached, 0, user_data);
         cr->in_user_done = 0;
         cr->in_resolve = 0;
-        if (cr->cancel_deferred) {
-            /* User cancelled inside the synchronous callback.  Inner
-             * never ran; just free. */
-            kl_free(c->alloc, cr, sizeof(*cr));
-            return NULL;
-        }
-        return &cr->base;
+        /* Completed synchronously: the handle is dead once done_fn has run (resolver.h), whether or
+         * not the user cancelled inside it. Free it here and return NULL; nothing is left to cancel.
+         * (Returning it live leaked it for every caller that, like KlHttpClient, drops the handle of
+         * a request that already completed.) */
+        kl_free(c->alloc, cr, sizeof(*cr));
+        return NULL;
     }
 
     /* Cache miss: delegate to inner resolver.
@@ -271,27 +270,16 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
                                               inner_done_fn, cr);
     cr->in_resolve = 0;
 
-    if (!inner) {
-        /* inner_done_fn may have already run (sync completion) and called
-         * done_fn before we return NULL.  Free cr regardless; the
-         * inner_done_fn sync path is contracted to NOT free on its own. */
+    if (!inner || cr->completed) {
+        /* Either the inner resolver could not start, or it completed synchronously: inner_done_fn
+         * already ran done_fn, and on the sync path it leaves cr to us. A completed request's handle
+         * is dead (resolver.h), cancelled inside done_fn or not, so free it and return NULL. The
+         * inner handle, if any, belongs to a request that has also completed. */
         kl_free(c->alloc, cr, sizeof(*cr));
         return NULL;
     }
 
     cr->inner_req = inner;
-
-    if (cr->cancel_deferred) {
-        /* User called cache_cancel() from inside the synchronous
-         * done_fn that fired during inner->resolve().  cr is alive
-         * because inner_done_fn's sync branch deferred the free to
-         * us.  Honor the cancel now: inner has already completed
-         * (we're past inner->resolve), so skip inner->cancel; just
-         * free cr and return NULL; the user has no need for a
-         * handle to an already-dead request. */
-        kl_free(c->alloc, cr, sizeof(*cr));
-        return NULL;
-    }
     return &cr->base;
 }
 
