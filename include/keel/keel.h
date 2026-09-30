@@ -111,5 +111,8 @@ int kl_version_number(void);
 #include <keel/connect_op.h>
 /* Windows Named Pipe client: an endpoint path that yields a KlStream (IOCP engine only). */
 #include <keel/pipe.h>
+/* Anonymous pipe pair: one end a KlStream, the other a native end for a child process. The native
+ * accessor header (<keel/anon_pipe_native.h>) is platform-specific and deliberately not included. */
+#include <keel/anon_pipe.h>
 
 #endif

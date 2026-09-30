@@ -2,7 +2,8 @@
  * platform_pipe.h: INTERNAL platform-services interface for Windows Named Pipes, part of the PAL.
  * No ABI commitment.
  *
- * One concern: opening and closing the NATIVE handle of a local named-pipe endpoint. The byte
+ * One concern: creating, opening and closing the NATIVE handle of a local pipe endpoint (a named-pipe
+ * client or server instance, or the two ends of an anonymous pair). The byte
  * I/O on that handle is not here; it rides the completion engine (completion_pipe.h), because on
  * Windows it is overlapped ReadFile/WriteFile on the IOCP port.
  *
@@ -15,7 +16,8 @@
  * WHY A SEPARATE PAL HEADER: the same reason platform_socket.h and platform_thread.h are separate. It
  * is a per-concern seam with its own per-OS TU pair:
  *
- *   platform_pipe_win.c     CreateFileW on \\.\pipe\..., byte read mode, identification-only SQOS
+ *   platform_pipe_win.c     CreateFileW on \\.\pipe\..., byte read mode, identification-only SQOS;
+ *                           the anonymous pair as a private single-instance named pipe
  *   platform_pipe_posix.c   KL_PIPE_OPEN_UNSUPPORTED (POSIX local IPC is AF_UNIX, not this)
  *
  * HANDLE, SECURITY_ATTRIBUTES and every Win32 call stay confined to the Windows TU; this header pulls
@@ -54,7 +56,16 @@ KlPipeOpenStatus kl_plat_pipe_open_client(const char *path, KlPipeHandle **out);
  * LocalSystem only (the default pipe DACL would also grant Everyone read). */
 KlPipeOpenStatus kl_plat_pipe_create_instance(const char *path, int first, KlPipeHandle **out);
 
-/* Close a handle from kl_plat_pipe_open_client or kl_plat_pipe_create_instance. Precondition: no overlapped op on it is outstanding
+/* Create an anonymous, one-directional pipe pair. `*parent` is overlapped (for the completion engine)
+ * and `*child` synchronous (for a child process's C runtime); neither is inheritable. `parent_reads` =
+ * 1: the parent end reads and the child end writes; 0: the reverse. Each end has access for its own
+ * direction only. On KL_PIPE_OPEN_OK both are set; on any other status neither is, and nothing is
+ * left open. Windows builds the pair as a private named pipe: a random name, a single instance, the
+ * current-user + LocalSystem DACL, remote clients rejected, and the connected client verified to be
+ * this process. */
+KlPipeOpenStatus kl_plat_pipe_create_pair(int parent_reads, KlPipeHandle **parent, KlPipeHandle **child);
+
+/* Close a handle from kl_plat_pipe_open_client, kl_plat_pipe_create_instance or kl_plat_pipe_create_pair. Precondition: no overlapped op on it is outstanding
  * (every op physically retired), so no completion can target it after this returns. NULL-safe. */
 void kl_plat_pipe_close(KlPipeHandle *h);
 

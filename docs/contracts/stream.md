@@ -174,6 +174,23 @@ stream. Differences sit below the contract:
 
 Design: [windows_named_pipes.md](../architecture/windows_named_pipes.md).
 
+### Directional streams: anonymous pipe pairs
+
+`kl_anon_pipe_create(ctx, dir, &cfg, &p, &peer)` (`anon_pipe.h`) makes a one-directional pipe. Endpoint
+A is the same `KlPipeStream`, carrying **only one facet**: a `KL_ANON_PIPE_READS` pair's stream is
+read-only and a `KL_ANON_PIPE_WRITES` pair's is write-only. Endpoint B, the child's end, is a
+`KlAnonPipeEnd` the embedder hands to its spawner (native value via `anon_pipe_native.h`) and closes
+with `kl_anon_pipe_end_close`. The stream contract needs nothing new for this:
+
+- **The missing facet is refused**, not emulated: a write on a read-only stream returns
+  `KL_STREAM_ERROR`, and `kl_stream_read_start` on a write-only stream returns -1.
+- **Graceful close of a write-only stream** drains the queue and detaches without waiting for a read
+  that was never posted. That close, then `kl_pipe_free`, is how the child sees end of input.
+- **Backpressure** on a write-only stream is `KL_STREAM_WOULD_BLOCK` plus the writable-again edge.
+- **Engine:** Windows IOCP (a private, single-instance, overlapped named pipe; see
+  [process_pipe_streams.md](../architecture/process_pipe_streams.md) §4). Every other engine and
+  platform returns `KL_PIPE_UNSUPPORTED`.
+
 ## Loop teardown
 
 Detachment needs the loop. Close a stream (or listener) and drive the loop until its close callback

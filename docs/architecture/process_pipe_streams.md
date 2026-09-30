@@ -354,6 +354,10 @@ int   kl_anon_pipe_end_fd(const KlAnonPipeEnd *peer);
 #endif
 ```
 
+- **`KlAnonPipeEnd`'s shape, as implemented.** `{ void *_handle; int _fd1; }` rather than
+  `{ intptr_t _native; }`: a Windows `HANDLE` never becomes an integer (the pipe-seam gate forbids that
+  narrowing, since `KlSocketHandle` is `intptr_t`), and the descriptor is stored plus one, so a
+  zero-initialized end is empty on both platforms and can never alias fd 0.
 - **Naming.** "Pipe" already has a public meaning in `kl_pipe_connect` / `kl_pipe_listen`: a
   connection-oriented Windows Named Pipe. So pair creation gets its own literal prefix,
   **`kl_anon_pipe_*`**. `process` was considered and rejected because it reads as process management,
@@ -461,7 +465,9 @@ Each step is its own PR:
    pipes. If implementation shows it does not belong in `KlStream` after all, the reason is recorded
    here before anything pipe-specific is added.
 5. **Windows anonymous pairs.** `kl_plat_pipe_create_pair`, direction in `pipe_new`,
-   `kl_anon_pipe_create`, `KlAnonPipeEnd`, and tests (IOCP; MinGW and MSVC).
+   `kl_anon_pipe_create`, `KlAnonPipeEnd`, and tests (IOCP; MinGW and MSVC). The pair construction
+   without `ConnectNamedPipe` (§16) is verified by `test_anon_pipe`. `check-pipe-seam` gains the
+   process-management rule (§14.3) and the stdio / protocol tokens (§14.5).
 6. **POSIX anonymous pairs.** Readiness adapter and PAL, local SIGPIPE handling, the F4 rule, and tests
    on epoll, kqueue, poll, io_uring and pollcomp. Also the cosmocc Windows-runner probe as a tracked,
    expected-fail test. Gates and docs (stream contract on directional streams, capability matrix,

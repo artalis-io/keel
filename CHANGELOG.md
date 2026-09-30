@@ -7,6 +7,26 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Added
 
+- **Anonymous pipe pairs on Windows: `kl_anon_pipe_create`.** One call makes a one-directional pipe
+  whose parent end is a `KlPipeStream` and whose child end is a `KlAnonPipeEnd` for the embedder's
+  process spawner (`<keel/anon_pipe.h>`; the native `HANDLE` via `<keel/anon_pipe_native.h>`).
+  - The stream is directional: a `KL_ANON_PIPE_READS` pair's stream is read-only and a
+    `KL_ANON_PIPE_WRITES` pair's is write-only. The other facet is never installed, so the stream
+    contract refuses it.
+  - It is the named-pipe transport reused: the parent end is the overlapped server end of a private
+    named pipe, with a random 128-bit name, one instance, a current-user + SYSTEM DACL, remote
+    clients rejected, and the connected client verified to be this process. The child end is
+    synchronous, as a child's C runtime expects. Neither end is inheritable; the spawner opts the
+    child end in.
+  - IOCP engine only. Every other engine and platform returns `KL_PIPE_UNSUPPORTED`; POSIX pairs
+    follow separately.
+  - Keel still spawns nothing: `check-pipe-seam` now forbids process-management calls anywhere in the
+    library, and stdio-role or protocol names in the pipe transport.
+  - Tested by `test_anon_pipe` on IOCP: privacy, direction and inheritance, 1 MiB reads and 4 MiB
+    edge-driven writes with EOF both ways, broken pipe, pause, cancel, free from a callback, 200
+    close-order races, and allocation failure at every point, each checked against both the
+    allocator and the process handle count.
+
 - **`kl_stream_on_writable`: a writable-again edge on `KlStream`.** Before, a producer told
   `KL_STREAM_WOULD_BLOCK` had no way to learn when to retry. After a `WOULD_BLOCK`, the callback
   fires at most once, when the producer should retry because the blocked condition has ended:

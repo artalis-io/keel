@@ -31,6 +31,9 @@
  * each is closed only after its operation has physically retired, never recycled. Server instances
  * reject remote clients and carry a DACL for the current user and LocalSystem only. The first
  * instance claims the name, so a name another process already created fails with KL_PIPE_IN_USE.
+ *
+ * ANONYMOUS PAIRS. KlPipeStream is also the parent end of an anonymous pipe pair
+ * (<keel/anon_pipe.h>): the same object with the same lifetime, carrying one direction only.
  */
 #ifndef KEEL_PIPE_H
 #define KEEL_PIPE_H

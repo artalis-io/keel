@@ -68,6 +68,7 @@ tests/smoke_pollcomp_client.c
 tests/smoke_pollcomp_tls.c
 tests/test_allocator.c
 tests/test_allocator_validate.c
+tests/test_anon_pipe.c
 tests/test_atomic_lock_free.c
 tests/test_async.c
 tests/test_cloexec.c

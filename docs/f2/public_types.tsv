@@ -1,5 +1,7 @@
 KlAddrFamily	enum	sockaddr.h
 KlAllocator	struct	allocator.h
+KlAnonPipeDir	enum	anon_pipe.h
+KlAnonPipeEnd	struct	anon_pipe.h
 KlAsyncFn	callback	async.h
 KlAsyncOp	struct	async.h
 KlCidr	struct	proxy_protocol.h

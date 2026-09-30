@@ -1,4 +1,8 @@
 kl_allocator_default	allocator.h
+kl_anon_pipe_create	anon_pipe.h
+kl_anon_pipe_end_close	anon_pipe.h
+kl_anon_pipe_end_fd	anon_pipe_native.h
+kl_anon_pipe_end_handle	anon_pipe_native.h
 kl_ascii_strncasecmp	http_request.h
 kl_async_cancel	async.h
 kl_async_complete	async.h
