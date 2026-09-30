@@ -317,3 +317,7 @@ kl_pipe_listen	pipe.h	direct-assertion	tests/test_pipe_stream.c:930 ASSERT_EQ(kl
 kl_pipe_listener_close	pipe.h	direct-assertion	tests/test_pipe_stream.c:1110 (idempotent close; on_close once after pending instances retire)
 kl_pipe_listener_free	pipe.h	direct-assertion	tests/test_pipe_stream.c:946 ASSERT_EQ(kl_pipe_listener_free(...), -1) before detach, 0 after
 kl_stream_on_writable	stream.h	direct-assertion	tests/test_stream_writable.c:115 ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, NULL), -1); edge asserted throughout
+kl_anon_pipe_create	anon_pipe.h	direct-assertion	tests/test_anon_pipe.c:107 ASSERT_EQ(kl_anon_pipe_create(NULL, ...), KL_PIPE_INVALID); OK/UNSUPPORTED/NOMEM asserted throughout
+kl_anon_pipe_end_close	anon_pipe.h	direct-assertion	tests/test_anon_pipe.c:329 end handle NULL after close; handle count back to baseline
+kl_anon_pipe_end_fd	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:129 ASSERT_EQ(kl_anon_pipe_end_fd(&e), -1) (POSIX)
+kl_anon_pipe_end_handle	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:285 the child HANDLE is a non-inheritable pipe (Windows)

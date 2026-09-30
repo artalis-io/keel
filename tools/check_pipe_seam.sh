@@ -15,7 +15,12 @@
 #       cast of a pipe handle to a socket or integer type in the pipe TUs.
 #   R4  Protocol code does not open pipes: nothing under src/protocols/ includes <keel/pipe.h> or a
 #       pipe seam header. (The Tier-1 gate separately forbids completion_pipe.h / platform_pipe.h.)
-#   R5  The transport stays consumer-neutral: no ssh / agent token in the pipe transport TUs.
+#   R5  The transport stays consumer-neutral: no ssh / agent token, and no stdio-role or protocol token
+#       (stdin / stdout / stderr / mcp / jsonrpc), in the pipe transport TUs. Keel makes pipe pairs; which
+#       standard stream a pair becomes, and what runs over it, is the embedder's.
+#   R6  No process management in Keel: no fork / vfork / exec* / posix_spawn* / waitpid / CreateProcess* /
+#       TerminateProcess call anywhere under src/, include/ or integrations/ (comments are stripped first).
+#       An anonymous pipe pair is handed to the embedder's spawner; Keel never spawns.
 #
 # Calls are matched as `Name(` so an explanatory comment naming an API does not trip the gate.
 # Usage: tools/check_pipe_seam.sh [--selftest]
@@ -28,10 +33,13 @@ OVL_RE='&op->ov'
 SYM_RE='KlPipeHandle|kl_plat_pipe_|kl_comp_pipe_|KL_COMP_PIPE_|KL_IOCP_PIPE_'
 CAST_RE='\((KlSocketHandle|SOCKET|int|unsigned|long|intptr_t|uintptr_t)\)[[:space:]]*(p->h|h|op->op_handle|pop->h)\b'
 INC_RE='#[[:space:]]*include[[:space:]]*[<"](keel/pipe|pipe|completion_pipe|platform_pipe)\.h[>"]'
-NEUTRAL_RE='ssh|agent'
+NEUTRAL_RE='ssh|agent|\b(stdin|stdout|stderr|mcp|jsonrpc)\b'
+PROC_RE='\b(fork|vfork|execl|execle|execlp|execv|execve|execvp|execvpe|posix_spawnp?|waitpid|CreateProcess(AsUser)?[AW]?|TerminateProcess)[[:space:]]*\('
+# Blank C comments (keeping newlines, so line numbers stay exact) before the R6 scan.
+STRIP='s{/\*(.*?)\*/}{ my $c = $1; " " . ("\n" x ($c =~ tr/\n//)) }gse; s{//[^\n]*}{}g;'
 
 MECH="src/event_iocp.c src/platform_pipe_win.c"
-PIPE_TUS="src/pipe_stream.c src/platform_pipe.h src/platform_pipe_win.c src/platform_pipe_posix.c src/completion_pipe.h src/completion_pipe_absent.c include/keel/pipe.h"
+PIPE_TUS="src/pipe_stream.c src/platform_pipe.h src/platform_pipe_win.c src/platform_pipe_posix.c src/completion_pipe.h src/completion_pipe_absent.c include/keel/pipe.h include/keel/anon_pipe.h include/keel/anon_pipe_native.h"
 
 selftest() {
     fail=0
@@ -53,6 +61,16 @@ selftest() {
     chk "$INC_RE" "" '#include "completion_pipe.h"' 1
     chk "$INC_RE" "" '#include <keel/stream.h>' 0
     chk "$NEUTRAL_RE" "-i" '/* SSH_AUTH_SOCK */' 1
+    chk "$NEUTRAL_RE" "-i" '/* hand B to the child as its STDIN */' 1
+    chk "$NEUTRAL_RE" "-i" 'an MCP server over the pair' 1
+    chk "$NEUTRAL_RE" "-i" 'kl_comp_pipe_post(ctx, &op);' 0
+    chk "$PROC_RE" "" 'pid_t pid = fork();' 1
+    chk "$PROC_RE" "" 'ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);' 1
+    chk "$PROC_RE" "" 'if (posix_spawnp(&pid, argv[0], NULL, NULL, argv, envp) != 0)' 1
+    chk "$PROC_RE" "" 'kl_platform_forkless_init();' 0
+    t=$(printf '/* not inherited across fork(), mark it */\nx = 1; // exec(\ny = waitpid(p, &s, 0);\n' | perl -0pe "$STRIP")
+    printf '%s\n' "$t" | grep -nE "$PROC_RE" | grep -q '^3:' || { echo "check-pipe-seam: SELF-TEST FAILED: stripper lost a real call or shifted lines"; fail=1; }
+    [ "$(printf '%s\n' "$t" | grep -cE "$PROC_RE")" = 1 ] || { echo "check-pipe-seam: SELF-TEST FAILED: stripper kept a commented call"; fail=1; }
     [ $fail -eq 0 ] || exit 1
 }
 
@@ -101,8 +119,16 @@ for f in $PIPE_TUS; do
     grep -niE "$NEUTRAL_RE" "$f" | while IFS= read -r l; do echo "PIPE-SEAM VIOLATION (R5 consumer-specific token in the pipe transport): $f:$l"; done
 done | grep . && bad=1
 
+# R6: Keel never manages processes.
+for f in $(git ls-files 'src/*.c' 'src/*.h' 'include/*.h' 'integrations/*.c' 'integrations/*.h'); do
+    [ -f "$f" ] || continue
+    perl -0pe "$STRIP" "$f" | grep -nE "$PROC_RE" | while IFS= read -r l; do
+        echo "PIPE-SEAM VIOLATION (R6 process management in Keel): $f:$l"
+    done
+done | grep . && bad=1
+
 if [ $bad -ne 0 ]; then
     echo "check-pipe-seam: FAILED (see docs/architecture/windows_named_pipes.md §6)"
     exit 1
 fi
-echo "check-pipe-seam: OK (pipe I/O confined to event_iocp.c + platform_pipe_win.c, overlapped only; no pipe symbol on the socket axis; no protocol reaches it; consumer-neutral; self-canary green)"
+echo "check-pipe-seam: OK (pipe I/O confined to event_iocp.c + platform_pipe_win.c, overlapped only; no pipe symbol on the socket axis; no protocol reaches it; consumer-neutral; no process management; self-canary green)"

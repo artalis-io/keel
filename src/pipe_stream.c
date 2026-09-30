@@ -1,5 +1,6 @@
 /*
- * pipe_stream.c: a KlStream over a Windows Named Pipe (see <keel/pipe.h>).
+ * pipe_stream.c: a KlStream over a Windows pipe end: a named-pipe client or accepted instance (see
+ * <keel/pipe.h>), or the parent end of an anonymous pair (see <keel/anon_pipe.h>).
  *
  * Generic substrate: it names no platform type and includes no platform header. It is the adapter
  * the KlStream contract expects: it installs the stream's completion-mode hooks (submit / arm /
@@ -29,8 +30,14 @@
  * stream's token). A connected instance is handed to the owner as that stream. A failed or cancelled
  * one is freed like any stream, so its handle closes only after the op has physically retired, and
  * instances are never recycled. The listener itself owns no handle.
+ *
+ * DIRECTION. A named-pipe stream is duplex. An anonymous pair's parent end carries one direction, so
+ * its stream is built with only that facet (the write queue, or the read hooks): the other one is
+ * never installed, and the KlStream contract refuses it (KL_STREAM_ERROR / read_start -1).
  */
 #include <keel/pipe.h>
+#include <keel/anon_pipe.h>
+#include <keel/anon_pipe_native.h>
 #include <keel/stream_detail.h>   /* embed the KlStream */
 #include <keel/listener_detail.h> /* embed the KlListener */
 #include <keel/event_ctx.h>       /* KlEventCtx.alloc */
@@ -184,13 +191,20 @@ static KlPipeStatus map_open(KlPipeOpenStatus s) {
     }
 }
 
-/* Build a stream around the already-open handle `h` and attach it to the port. Takes ownership of
- * `h` in every case: on failure it is closed (directly, or by the final release). */
+/* The facets a stream carries. */
+#define PIPE_FACET_READ   1
+#define PIPE_FACET_WRITE  2
+#define PIPE_FACET_DUPLEX (PIPE_FACET_READ | PIPE_FACET_WRITE)
+
+/* Build a stream around the already-open handle `h` and attach it to the port, installing only the
+ * `facets` asked for. Takes ownership of `h` in every case: on failure it is closed (directly, or by
+ * the final release). */
 static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rcap, size_t wcap,
-                             KlPipeStream **out) {
+                             int facets, KlPipeStream **out) {
     KlAllocator *alloc = ctx->alloc;
     if (!rcap) rcap = KL_PIPE_READ_CAP_DEFAULT;
     if (!wcap) wcap = KL_PIPE_WRITE_CAP_DEFAULT;
+    if (!(facets & PIPE_FACET_READ)) rcap = 1;   /* the base init needs a buffer; nothing reads into it */
 
     KlPipeStream *p = kl_malloc(alloc, sizeof(*p));
     if (!p) { kl_plat_pipe_close(h); return KL_PIPE_NOMEM; }
@@ -215,12 +229,18 @@ static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rca
 
     p->stream.alloc = alloc;
     p->stream.ctx   = ctx;
-    if (kl_stream_write_init(&p->stream, alloc, wcap) != 0) {
-        kl_comp_life_release(p->life);
-        return KL_PIPE_NOMEM;
+    if (facets & PIPE_FACET_WRITE) {
+        if (kl_stream_write_init(&p->stream, alloc, wcap) != 0) {
+            kl_comp_life_release(p->life);
+            return KL_PIPE_NOMEM;
+        }
+        if (kl_stream_set_submit(&p->stream, pipe_submit, p, /*copying=*/1) != 0) {
+            kl_comp_life_release(p->life);
+            return KL_PIPE_ERROR;
+        }
     }
-    if (kl_stream_set_submit(&p->stream, pipe_submit, p, /*copying=*/1) != 0 ||
-        kl_stream_read_init(&p->stream, /*completion=*/1, pipe_deliver, pipe_arm, NULL, p) != 0 ||
+    if (((facets & PIPE_FACET_READ) &&
+         kl_stream_read_init(&p->stream, /*completion=*/1, pipe_deliver, pipe_arm, NULL, p) != 0) ||
         kl_stream_close_init(&p->stream, pipe_on_close, p) != 0 ||
         kl_stream_set_cancel(&p->stream, pipe_cancel_recv, pipe_cancel_send) != 0) {
         kl_comp_life_release(p->life);
@@ -243,7 +263,7 @@ KlPipeStatus kl_pipe_connect(struct KlEventCtx *ctx, const char *path, const KlP
     KlPipeStatus st = map_open(kl_plat_pipe_open_client(path, &h));
     if (st != KL_PIPE_OK) return st;
     KlPipeStream *p = NULL;
-    st = pipe_new(ctx, h, cfg->read_capacity, cfg->write_capacity, &p);
+    st = pipe_new(ctx, h, cfg->read_capacity, cfg->write_capacity, PIPE_FACET_DUPLEX, &p);
     if (st != KL_PIPE_OK) return st;
     p->on_data   = cfg->on_data;
     p->on_close  = cfg->on_close;
@@ -251,6 +271,53 @@ KlPipeStatus kl_pipe_connect(struct KlEventCtx *ctx, const char *path, const KlP
     *out = p;
     return KL_PIPE_OK;
 }
+
+/* ── Anonymous pair ────────────────────────────────────────────────────────────────────────── */
+
+KlPipeStatus kl_anon_pipe_create(struct KlEventCtx *ctx, KlAnonPipeDir dir, const KlPipeConfig *cfg,
+                                 KlPipeStream **stream, KlAnonPipeEnd *peer) {
+    if (stream) *stream = NULL;
+    if (peer) memset(peer, 0, sizeof(*peer));
+    if (!ctx || !cfg || !stream || !peer || !ctx->alloc) return KL_PIPE_INVALID;
+    if (dir != KL_ANON_PIPE_READS && dir != KL_ANON_PIPE_WRITES) return KL_PIPE_INVALID;
+    if (dir == KL_ANON_PIPE_READS && !cfg->on_data) return KL_PIPE_INVALID;
+    /* Decided before any OS call: only the native IOCP engine carries pipe ops. */
+    if (!kl_comp_pipe_available(ctx)) return KL_PIPE_UNSUPPORTED;
+
+    KlPipeHandle *parent = NULL, *child = NULL;
+    KlPipeStatus st = map_open(kl_plat_pipe_create_pair(dir == KL_ANON_PIPE_READS, &parent, &child));
+    if (st != KL_PIPE_OK) return st;
+    KlPipeStream *p = NULL;
+    st = pipe_new(ctx, parent, cfg->read_capacity, cfg->write_capacity,
+                  dir == KL_ANON_PIPE_READS ? PIPE_FACET_READ : PIPE_FACET_WRITE, &p);
+    if (st != KL_PIPE_OK) {            /* pipe_new already closed the parent end */
+        kl_plat_pipe_close(child);
+        return st;
+    }
+    p->on_data   = cfg->on_data;
+    p->on_close  = cfg->on_close;
+    p->user_data = cfg->user_data;
+    *stream = p;
+    peer->_handle = child;
+    return KL_PIPE_OK;
+}
+
+void kl_anon_pipe_end_close(KlAnonPipeEnd *peer) {
+    if (!peer) return;
+    if (peer->_handle) kl_plat_pipe_close((KlPipeHandle *)peer->_handle);
+    peer->_handle = NULL;
+    peer->_fd1    = 0;   /* no POSIX end is ever filled here: kl_anon_pipe_create is unsupported there */
+}
+
+#if defined(_WIN32)
+void *kl_anon_pipe_end_handle(const KlAnonPipeEnd *peer) {
+    return peer ? peer->_handle : NULL;
+}
+#else
+int kl_anon_pipe_end_fd(const KlAnonPipeEnd *peer) {
+    return (peer && peer->_fd1 > 0) ? peer->_fd1 - 1 : -1;
+}
+#endif
 
 KlStream *kl_pipe_stream(KlPipeStream *p) {
     return p ? &p->stream : NULL;
@@ -299,7 +366,8 @@ static int listener_arm(void *vp) {
     pl->first_h = NULL;
     if (!h && kl_plat_pipe_create_instance(pl->path, /*first=*/0, &h) != KL_PIPE_OPEN_OK) return -1;
     KlPipeStream *p = NULL;
-    if (pipe_new(pl->ctx, h, pl->rcap, pl->wcap, &p) != KL_PIPE_OK) return -1;   /* h consumed */
+    if (pipe_new(pl->ctx, h, pl->rcap, pl->wcap, PIPE_FACET_DUPLEX, &p) != KL_PIPE_OK)
+        return -1;                                                  /* h consumed */
     pend_link(pl, p);
     if (pipe_post(p, KL_PIPE_OP_ACCEPT, NULL, 0) != 0) {
         pend_unlink(p);

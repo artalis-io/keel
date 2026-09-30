@@ -1,4 +1,6 @@
 allocator.h
+anon_pipe.h
+anon_pipe_native.h
 async.h
 clock.h
 compress.h

@@ -205,3 +205,5 @@ pipe.h	KlPipeAcceptFn	callback	api-signature	-
 pipe.h	KlPipeListenConfig	struct	caller-constructed	caller-built; F2-C append-only
 pipe.h	KlPipeListener	opaque	opaque	private handle; layout in src/pipe_stream.c, embeds a KlListener (object handoff family)
 stream.h	KlStreamWritableFn	callback	api-signature	-
+anon_pipe.h	KlAnonPipeDir	enum	enum-constants	-
+anon_pipe.h	KlAnonPipeEnd	struct	caller-owned-value	caller-owned value; zero = empty; filled by kl_anon_pipe_create, read via anon_pipe_native.h

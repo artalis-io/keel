@@ -1,7 +1,8 @@
 /*
  * platform_pipe_win.c: the Windows implementation of the named-pipe PAL seam (platform_pipe.h).
  *
- * Opens the CLIENT end of a local named pipe, and creates SERVER instances for the pipe listener.
+ * Opens the CLIENT end of a local named pipe, creates SERVER instances for the pipe listener, and
+ * creates anonymous pairs (kl_plat_pipe_create_pair).
  * Everything Win32 about either stays in this TU: UTF-8 to UTF-16, CreateFileW / CreateNamedPipeW, the
  * security descriptor, the security-quality-of-service flags, the read mode, and CloseHandle.
  *
@@ -25,7 +26,9 @@
 #include "platform_pipe.h"
 
 #include <windows.h>
+#include <bcrypt.h>    /* BCryptGenRandom: the anonymous pair's unguessable name */
 #include <sddl.h>      /* ConvertSidToStringSidW / ConvertStringSecurityDescriptorToSecurityDescriptorW */
+#include <stdio.h>
 #include <string.h>
 
 /* A pipe name is at most 256 characters; the \\.\pipe\ prefix is 9 more. Generous, bounded. */
@@ -138,6 +141,77 @@ KlPipeOpenStatus kl_plat_pipe_create_instance(const char *path, int first, KlPip
     }
     *out = (KlPipeHandle *)h;
     return KL_PIPE_OPEN_OK;
+}
+
+/* ── Anonymous pair ──────────────────────────────────────────────────────────────────────────
+ *
+ * CreatePipe handles are never overlapped, so they cannot ride the IOCP port. The pair is instead a
+ * private named pipe whose server end is the parent's (overlapped) and whose client end is the
+ * child's (synchronous). Private because:
+ *   - the name carries 128 bits from BCryptGenRandom (plus pid and a counter for uniqueness), and no
+ *     random bits means no pair: the name is never guessable;
+ *   - FILE_FLAG_FIRST_PIPE_INSTANCE and one instance: nobody can pre-create or share the name, and once
+ *     the child end connects no one else can;
+ *   - the current-user + LocalSystem DACL and PIPE_REJECT_REMOTE_CLIENTS, as for listener instances;
+ *   - the connected client is verified to be this process (GetNamedPipeClientProcessId).
+ * Each end gets the access CreatePipe would give it: data in its own direction, plus attribute access
+ * so the child's runtime can query or set the pipe state. Neither end is inheritable. ConnectNamedPipe
+ * is not needed: the client open connects the single instance. */
+
+static volatile LONG g_anon_seq;
+
+KlPipeOpenStatus kl_plat_pipe_create_pair(int parent_reads, KlPipeHandle **parent, KlPipeHandle **child) {
+    if (!parent || !child) return KL_PIPE_OPEN_INVALID;
+    unsigned char rnd[16];
+    if (BCryptGenRandom(NULL, rnd, (ULONG)sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        return KL_PIPE_OPEN_ERROR;
+    static const char hexd[] = "0123456789abcdef";
+    char hex[2 * sizeof(rnd) + 1];
+    for (size_t i = 0; i < sizeof(rnd); i++) {
+        hex[2 * i]     = hexd[rnd[i] >> 4];
+        hex[2 * i + 1] = hexd[rnd[i] & 0xF];
+    }
+    hex[2 * sizeof(rnd)] = '\0';
+    char name[128];
+    snprintf(name, sizeof(name), "\\\\.\\pipe\\keel-anon-%lu-%ld-%s",
+             (unsigned long)GetCurrentProcessId(), (long)InterlockedIncrement(&g_anon_seq), hex);
+    wchar_t wpath[KL_PIPE_WPATH_MAX];
+    if (pipe_wpath(name, wpath) != 0) return KL_PIPE_OPEN_ERROR;
+
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (pipe_server_sd(&sd) != 0) return KL_PIPE_OPEN_ERROR;
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+    HANDLE ph = CreateNamedPipeW(wpath,
+                                 (parent_reads ? PIPE_ACCESS_INBOUND : PIPE_ACCESS_OUTBOUND) |
+                                     FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+                                     PIPE_REJECT_REMOTE_CLIENTS,
+                                 1, 64 * 1024, 64 * 1024, 0, &sa);
+    LocalFree(sd);
+    if (ph == INVALID_HANDLE_VALUE) return KL_PIPE_OPEN_ERROR;
+
+    /* From here the parent end exists, and every failure leaves through `fail`, the one place that
+     * closes whatever was created. */
+    ULONG pid = 0;
+    /* NULL security attributes: not inheritable. No FILE_FLAG_OVERLAPPED: the child does plain I/O. */
+    HANDLE ch = CreateFileW(wpath,
+                            parent_reads ? (GENERIC_WRITE | FILE_READ_ATTRIBUTES)
+                                         : (GENERIC_READ | FILE_WRITE_ATTRIBUTES),
+                            0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                            NULL);
+    if (ch == INVALID_HANDLE_VALUE) goto fail;
+    if (!GetNamedPipeClientProcessId(ph, &pid) || pid != GetCurrentProcessId()) goto fail;
+    *parent = (KlPipeHandle *)ph;
+    *child  = (KlPipeHandle *)ch;
+    return KL_PIPE_OPEN_OK;
+
+fail:
+    if (ch != INVALID_HANDLE_VALUE) CloseHandle(ch);
+    CloseHandle(ph);
+    return KL_PIPE_OPEN_ERROR;
 }
 
 void kl_plat_pipe_close(KlPipeHandle *h) {
