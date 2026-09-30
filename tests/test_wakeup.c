@@ -137,4 +137,52 @@ UTEST(wakeup, null_channel_is_rejected_not_crashed) {
     kl_wakeup_close(NULL);
 }
 
+/* A flood of signals with nobody draining must never block the signaller: once the channel is full
+ * a wakeup is already pending, so the extra bytes are not needed. Before the fix the write end was
+ * blocking and the flooding thread hung on the full pipe / socket pair. The main thread waits with a
+ * deadline, then drains until the thread returns, so a regression fails the test instead of hanging. */
+typedef struct { KlWakeup *w; volatile int finished; } FloodCtx;
+
+#define FLOOD_SIGNALS (1 << 20)   /* well past a pipe (64 KiB) or a loopback pair's buffers */
+
+static void flood_thread(void *arg) {
+    FloodCtx *f = arg;
+    for (int i = 0; i < FLOOD_SIGNALS; i++) kl_wakeup_signal(f->w);
+    f->finished = 1;
+}
+
+UTEST(wakeup, signal_never_blocks_on_a_full_channel) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    KlWakeup w;
+    ASSERT_EQ(kl_wakeup_open(&w), 0);
+
+    FloodCtx f = {.w = &w, .finished = 0};
+    KlPlatThread t;
+    ASSERT_EQ(kl_plat_thread_create(&t, flood_thread, &f), 0);
+    for (int i = 0; i < 600 && !f.finished; i++)   /* up to ~30 s, driving the loop meanwhile */
+        (void)kl_event_ctx_run(&ev, 8, 50);
+    int finished_undrained = f.finished;
+    while (!f.finished) kl_wakeup_drain(&w);          /* unstick a blocked signaller before joining */
+    kl_plat_thread_join(&t);
+    ASSERT_EQ(finished_undrained, 1);
+
+    /* One drain empties the flooded channel: the burst costs a single wakeup. */
+    SignalCtx ctx = {.wakeup = &w};
+    ASSERT_EQ(kl_watcher_add(&ev, w.rd, KL_EVENT_READ, wakeup_cb, &ctx), 0);
+    pump_until_called(&ev, &ctx);
+    for (int i = 0; i < 3; i++) (void)kl_event_ctx_run(&ev, 8, 10);
+    ASSERT_EQ(ctx.called, 1);
+
+    /* And the channel still works afterwards. */
+    kl_wakeup_signal(&w);
+    for (int i = 0; i < 40 && ctx.called < 2; i++) (void)kl_event_ctx_run(&ev, 8, 50);
+    ASSERT_EQ(ctx.called, 2);
+
+    kl_watcher_del(&ev, w.rd);
+    kl_wakeup_close(&w);
+    kl_event_ctx_free(&ev);
+}
+
 UTEST_MAIN();
