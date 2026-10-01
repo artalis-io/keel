@@ -684,6 +684,108 @@ UTEST(h2, cb_on_data_forwards) {
     test_teardown();
 }
 
+/* A stream Keel has already answered and destroyed (here: pre-body middleware rejected a POST) keeps
+ * receiving the client's DATA and END_STREAM. Those must be ignored: a -1 is fatal to the whole
+ * session in the nghttp2 adapter, which aborted every other multiplexed stream. */
+UTEST(h2, data_for_a_finished_stream_is_ignored) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    middleware_return = 1;                        /* short-circuit with 403 */
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http_router_use(&test_router, "*", "/*", test_middleware, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    const char *hn[] = {"content-length"}; const char *hv[] = {"5"};
+    size_t hnl[] = {14}; size_t hvl[] = {1};
+    mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                              NULL, 0, hn, hv, hnl, hvl, 1);
+    ASSERT_EQ(mock.last_status, 403);
+    int rd = mock.callbacks.on_data(mock.cb_user_data, 1, "hello", 5);
+    int re = mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rd, 0);
+    ASSERT_EQ(re, 0);
+}
+
+/* With the stream table full, a new stream is refused with a 503 on that stream, and the call
+ * succeeds: a -1 there was fatal to the connection, and its streams with it. */
+UTEST(h2, stream_table_full_refuses_the_new_stream_only) {
+    test_setup();
+    test_h2_cfg.max_concurrent_streams = 1;
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    const char *hn[] = {"content-length"}; const char *hv[] = {"5"};
+    size_t hnl[] = {14}; size_t hvl[] = {1};
+    int r1 = mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                                       NULL, 0, hn, hv, hnl, hvl, 1);   /* stays open: body due */
+    int r3 = mock.callbacks.on_request(mock.cb_user_data, 3, "POST", 4, "/data", 5,
+                                       NULL, 0, hn, hv, hnl, hvl, 1);
+    uint32_t sid = mock.last_stream_id;
+    int status = mock.last_status;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r1, 0);
+    ASSERT_EQ(r3, 0);
+    ASSERT_EQ(sid, 3u);
+    ASSERT_EQ(status, 503);
+}
+
+/* HTTP/2 frames a body by END_STREAM; content-length is optional. A body sent without one must
+ * still reach the route's body reader (it had none, and the bytes were dropped). */
+UTEST(h2, body_without_content_length_reaches_the_reader) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    memset(&g_test_br, 0, sizeof g_test_br);
+
+    mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                              NULL, 0, NULL, NULL, NULL, NULL, 0);
+    int rd = mock.callbacks.on_data(mock.cb_user_data, 1, "hello", 5);
+    size_t got = g_test_br.data_len;
+    int same = got == 5 && memcmp(g_test_br.data, "hello", 5) == 0;
+    int re = mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rd, 0);
+    ASSERT_EQ(got, (size_t)5);
+    ASSERT_TRUE(same);
+    ASSERT_EQ(re, 0);
+    ASSERT_EQ(handler_called, 1);
+}
+
+/* An HTTP/2 config without a session factory would be called on the first HTTP/2 connection:
+ * reject it at server init, as a TLS config without a factory is. */
+UTEST(h2, server_init_rejects_h2_without_factory) {
+    KlHttp2ServerConfig h2 = {0};
+    KlHttpServerConfig cfg = { .port = 0, .h2 = &h2 };
+    static KlHttpServer srv;
+    int rc = kl_http_server_init(&srv, &cfg);
+    if (rc == 0) kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+}
+
 UTEST(h2, cb_on_data_reject) {
     test_setup();
     MockH2Session mock;
