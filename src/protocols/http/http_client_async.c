@@ -186,6 +186,16 @@ static void he_cancel_timers(KlHttpClient *c)
     }
 }
 
+/* Drop a pending deferred error completion (async_complete_error). Every path that completes the
+ * request, cancels it or frees the client calls this, so the deferred one can never fire after. */
+static void cli_cancel_done_timer(KlHttpClient *c)
+{
+    if (c->done_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->done_timer);
+        c->done_timer = -1;
+    }
+}
+
 /* Map a racing fd back to its address index (the client owns the idx->fd map). -1 if not found. */
 static int he_idx_of_fd(const KlHttpClient *c, KlSocketHandle fd)
 {
@@ -1023,6 +1033,7 @@ static void client_note_head(KlHttpClient *c, const char *method)
 static void async_complete_success(KlHttpClient *c)
 {
     he_cancel_timers(c);
+    cli_cancel_done_timer(c);
     kl_watcher_del(c->ev_ctx, c->fd);
 
     if (c->pool) {
@@ -1074,6 +1085,7 @@ static void async_deferred_error(void *user_data)
 {
     KlHttpClient *c = user_data;
     c->done_timer = -1;
+    if (c->state == KL_HTTP_CLIENT_DONE) return;   /* already completed: exactly one on_done */
     c->done_deferred = 1;
     async_complete_error(c);   /* the loop tick, not the connect op, is now on the stack */
 }
@@ -1089,11 +1101,16 @@ static void async_complete_error(KlHttpClient *c)
         kl_connect_op_state(&c->connect_op) == KL_CONNECT_OP_STATE_DONE) {
         if (c->done_timer < 0)
             c->done_timer = kl_timer_add(c->ev_ctx, 0, async_deferred_error, c);
-        if (c->done_timer >= 0)
+        if (c->done_timer >= 0) {
+            /* The request has failed: its deadline must not complete it a second time first
+             * (both can be due in the same timer pass when the loop runs late). */
+            he_cancel_timers(c);
             return;
+        }
         /* No timer (allocation failure): complete inline, as before. */
     }
     he_cancel_timers(c);
+    cli_cancel_done_timer(c);
     if (kl_handle_valid(c->fd))
         kl_watcher_del(c->ev_ctx, c->fd);
 
@@ -1514,10 +1531,7 @@ void kl_http_client_cancel(KlHttpClient *client)
     /* The overall request deadline is client-owned (not a connect-op timer); cancel it here. */
     he_cancel_timers(client);
     /* A deferred error completion must not fire into a cancelled (or freed) client. */
-    if (client->done_timer >= 0) {
-        kl_timer_cancel(client->ev_ctx, client->done_timer);
-        client->done_timer = -1;
-    }
+    cli_cancel_done_timer(client);
 
     if (kl_handle_valid(client->fd)) {
         /* Single-fd completion connect still in flight: drop its pending connect op before the
@@ -1557,6 +1571,7 @@ void kl_http_client_free(KlHttpClient *client)
     /* Cancel if still in-flight (cancels any pending resolve_req first). */
     if (client->state != KL_HTTP_CLIENT_DONE)
         kl_http_client_cancel(client);
+    cli_cancel_done_timer(client);   /* never fire into the freed client, whatever the state */
 
     /* Destroy the auto-created resolver (after any resolve_req was cancelled). */
     if (client->owns_resolver && client->resolver) {
