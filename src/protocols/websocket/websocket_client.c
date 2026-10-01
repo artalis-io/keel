@@ -97,6 +97,8 @@ struct KlWsClientConn {
     /* Callbacks may free the connection (kl_ws_client_free). While the event handler is on the
      * stack the free is deferred: the connection is closed at once, and the memory is released
      * when the handler unwinds, so nothing after a callback touches freed memory. */
+    char             req_protocol[128]; /* Sec-WebSocket-Protocol requested ("" = too long to keep) */
+    int              protocol_requested;
     int              in_event;          /* depth: inside wsc_on_event */
     int              free_requested;    /* kl_ws_client_free was called from a callback */
 };
@@ -235,6 +237,9 @@ static int wsc_build_upgrade(KlWsClientConn *ws, const KlUrl *url,
     }
 
     if (protocol) {
+        size_t pl = strlen(protocol);
+        if (pl < sizeof(ws->req_protocol)) memcpy(ws->req_protocol, protocol, pl + 1);
+        ws->protocol_requested = 1;
         int n = snprintf(ws->upgrade_buf + off, cap - (size_t)off,
                          "Sec-WebSocket-Protocol: %s\r\n", protocol);
         if (n < 0 || (size_t)(off + n) >= cap) {
@@ -292,26 +297,62 @@ static int wsc_parse_handshake_response(const KlWsClientConn *ws)
     if (strncmp(ws->handshake_buf, "HTTP/1.1 101", 12) != 0)
         return -1;
 
-    /* Find Sec-WebSocket-Accept header */
+    /* Find Sec-WebSocket-Accept, and check the rest of the handshake (RFC 6455 4.1): an upgrade to
+     * "websocket", over a Connection that carries the upgrade token, with no extension (none was
+     * offered) and no subprotocol other than one requested. */
     const char *p = ws->handshake_buf;
     const char *accept_val = NULL;
     size_t accept_len = 0;
+    int upgrade_ok = 0, connection_ok = 0;
 
     while (p < end) {
         const char *line_end = strstr(p, "\r\n");
         if (!line_end) break;
         if (line_end == p) break;  /* empty line = end of headers */
 
-        if (kl_ascii_strncasecmp(p, "Sec-WebSocket-Accept:", 21) == 0) {
-            const char *val = p + 21;
-            while (val < line_end && *val == ' ') val++;
-            accept_val = val;
-            accept_len = (size_t)(line_end - val);
+        const char *colon = memchr(p, ':', (size_t)(line_end - p));
+        if (colon) {
+            size_t nlen = (size_t)(colon - p);
+            const char *val = colon + 1;
+            const char *vend = line_end;
+            while (val < vend && (*val == ' ' || *val == '\t')) val++;
+            while (vend > val && (vend[-1] == ' ' || vend[-1] == '\t')) vend--;
+            size_t vlen = (size_t)(vend - val);
+            if (nlen == 20 && kl_ascii_strncasecmp(p, "Sec-WebSocket-Accept", 20) == 0) {
+                accept_val = val;
+                accept_len = vlen;
+            } else if (nlen == 7 && kl_ascii_strncasecmp(p, "Upgrade", 7) == 0) {
+                upgrade_ok = vlen == 9 && kl_ascii_strncasecmp(val, "websocket", 9) == 0;
+            } else if (nlen == 10 && kl_ascii_strncasecmp(p, "Connection", 10) == 0) {
+                for (const char *t = val; t < vend; ) {   /* a token list: find "upgrade" */
+                    while (t < vend && (*t == ',' || *t == ' ' || *t == '\t')) t++;
+                    const char *te = t;
+                    while (te < vend && *te != ',' && *te != ' ' && *te != '\t') te++;
+                    if (te - t == 7 && kl_ascii_strncasecmp(t, "upgrade", 7) == 0) connection_ok = 1;
+                    t = te;
+                }
+            } else if (nlen == 24 && kl_ascii_strncasecmp(p, "Sec-WebSocket-Extensions", 24) == 0) {
+                if (vlen > 0) return -1;                  /* none was offered */
+            } else if (nlen == 22 && kl_ascii_strncasecmp(p, "Sec-WebSocket-Protocol", 22) == 0) {
+                if (!ws->protocol_requested) return -1;    /* none was requested */
+                if (ws->req_protocol[0]) {                 /* must be one of those requested */
+                    int found = 0;
+                    const char *r = ws->req_protocol;
+                    while (*r && !found) {
+                        while (*r == ',' || *r == ' ') r++;
+                        const char *re = r;
+                        while (*re && *re != ',' && *re != ' ') re++;
+                        if ((size_t)(re - r) == vlen && memcmp(r, val, vlen) == 0) found = 1;
+                        r = re;
+                    }
+                    if (!found) return -1;
+                }
+            }
         }
         p = line_end + 2;
     }
 
-    if (!accept_val)
+    if (!accept_val || !upgrade_ok || !connection_ok)
         return -1;
     if (wsc_validate_accept(ws, accept_val, accept_len) != 0)
         return -1;
@@ -611,8 +652,13 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     char *leftover = NULL;
     if (leftover_len > 0) {
         leftover = kl_malloc(ws->alloc, leftover_len);
-        if (leftover)
-            memcpy(leftover, ws->handshake_buf + http_end_offset, leftover_len);
+        if (!leftover) {
+            /* Frames that arrived with the 101 would be lost and the parser would start
+             * mid-stream: fail instead. */
+            wsc_error(ws, "out of memory");
+            return;
+        }
+        memcpy(leftover, ws->handshake_buf + http_end_offset, leftover_len);
     }
 
     /* Handshake complete: free handshake buffers */
@@ -738,6 +784,10 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                  * non-continuation frame; later chunks of the same frame just append. */
                 int is_first = frame_start && (opcode != KL_WS_OP_CONTINUATION);
                 if (is_first) {
+                    if (ws->msg_opcode != 0) {           /* a message is already open */
+                        wsc_fail(ws, KL_WS_PROTOCOL_ERROR, "new message inside a fragmented one");
+                        return -1;
+                    }
                     wsc_msg_reset(ws);
                     ws->msg_opcode = opcode;
                 } else if (frame_start && ws->msg_opcode == 0) {
@@ -789,12 +839,28 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                 return -1;
             } else if (opcode == KL_WS_OP_PING) {
                 wsc_send_frame(ws, KL_WS_OP_PONG, NULL, 0);
-            } else if (opcode < 0x8 && ws->fp.fin) {
-                /* Empty message */
-                if (opcode != KL_WS_OP_CONTINUATION) {
-                    ws->msg_opcode = opcode;
-                    ws->msg_len = 0;
-                    ws->utf8_state = KL_UTF8_ACCEPT;
+            } else if (opcode < 0x8 && (ws->fp.payload_len == 0 || ws->msg_opcode != 0)) {
+                /* An empty data frame opens, continues or ends a message like any other; a final
+                 * frame whose payload came in earlier reads ends its message. */
+                if (ws->fp.payload_len == 0) {
+                    if (opcode != KL_WS_OP_CONTINUATION) {
+                        if (ws->msg_opcode != 0) {
+                            wsc_fail(ws, KL_WS_PROTOCOL_ERROR, "new message inside a fragmented one");
+                            return -1;
+                        }
+                        ws->msg_opcode = opcode;
+                        ws->msg_len = 0;
+                        ws->utf8_state = KL_UTF8_ACCEPT;
+                    } else if (ws->msg_opcode == 0) {
+                        wsc_fail(ws, KL_WS_PROTOCOL_ERROR, "continuation without start");
+                        return -1;
+                    }
+                }
+                if (!ws->fp.fin)
+                    goto next_frame;
+                if (ws->msg_opcode == KL_WS_OP_TEXT && ws->utf8_state != KL_UTF8_ACCEPT) {
+                    wsc_fail(ws, 1007, "invalid UTF-8");
+                    return -1;
                 }
                 if (ws->cbs.on_message)
                     ws->cbs.on_message(ws, ws->msg_buf ? ws->msg_buf : "",
@@ -807,6 +873,7 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
             }
         }
 
+    next_frame:
         pos += consumed;
 
         /* Reset frame parser for next frame */
@@ -1120,7 +1187,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     /* Register watcher: connect in progress, wait for writable */
     if (kl_watcher_add(ev, fd, KL_EVENT_WRITE, wsc_on_event, ws) != 0) {
         if (ws->upgrade_buf)
-            kl_free(alloc, ws->upgrade_buf, ws->upgrade_len);
+            kl_free(alloc, ws->upgrade_buf, ws->upgrade_cap);
         kl_sock_close(ev->sockets, fd);
         kl_free(alloc, ws, sizeof(KlWsClientConn));
         return NULL;

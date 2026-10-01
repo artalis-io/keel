@@ -367,6 +367,23 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - A failure to copy the response headers no longer leaks the body.
   - A streaming response parser reused after `reset` no longer counts the previous response against
     its size limit.
+- **WebSocket fixes.**
+  - Fragmented messages (RFC 6455 5.4), server and client:
+    - An empty first fragment was not recorded as the start of a message, so its continuation was
+      refused.
+    - A final continuation with no message open was delivered as a message.
+    - A new data frame inside a fragmented message silently replaced it.
+
+    The first now starts the message and the other two fail the connection with 1002.
+  - The client accepted any 101 with a correct accept value. It now also requires an upgrade to
+    `websocket` over a `Connection` that carries `upgrade`, refuses an extension it never offered, and
+    refuses a subprotocol other than one it requested.
+  - When the client could not allocate room for frames that arrived with the 101, it dropped them
+    and parsed the stream from mid-frame. It now fails the connection.
+  - A second `kl_ws_server_enable_drain` no longer drops and leaks queued frames; it only updates the
+    cap.
+  - The client's upgrade buffer is freed at the size it was allocated with, even when an earlier
+    shrink did not happen.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
