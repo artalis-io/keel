@@ -24,6 +24,29 @@ UTEST(cpool, init_defaults) {
     kl_http_client_pool_free(&pool);
 }
 
+/* The pooled path must refuse an https request whose TLS config has no factory too: going ahead
+ * would send it in plaintext and file the plain connection in the pool as a TLS one. */
+UTEST(cpool, pooled_https_tls_without_factory) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, &ev), 0);
+    KlTlsConfig tls = { .ctx = NULL, .factory = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.tls = &tls;
+
+    KlHttpClient *c = kl_http_client_start_pooled(&pool, &ev, &a, &cfg, "GET",
+                                                  "https://127.0.0.1:1/", NULL, 0, NULL, 0,
+                                                  NULL, NULL);
+    int refused = (c == NULL);
+    kl_http_client_free(c);
+    kl_http_client_pool_free(&pool);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(refused);
+}
+
 UTEST(cpool, init_custom) {
     KlAllocator a = kl_allocator_default();
     KlHttpClientPool pool;

@@ -234,6 +234,23 @@ UTEST(h2c_api, connect_https_no_tls) {
     }
 }
 
+/* A TLS config without a factory cannot secure the connection: refuse https:// rather than speak
+ * HTTP/2 in plaintext. */
+UTEST(h2c_api, connect_https_tls_without_factory) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    KlTlsConfig tls = { .ctx = NULL, .factory = NULL };
+    KlHttp2ClientConfig cfg = { .session = mock_factory, .tls = &tls };
+
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &alloc, &cfg, "https://127.0.0.1:1",
+                                                   NULL, NULL);
+    int refused = (c == NULL);
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(refused);
+}
+
 UTEST(h2c_api, request_null_conn) {
     int32_t id = kl_http2_client_request(NULL, "GET", "/", NULL, 0,
                                        NULL, 0, NULL, NULL);

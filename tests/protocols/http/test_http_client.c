@@ -135,6 +135,25 @@ UTEST(client, async_https_no_tls) {
     kl_event_ctx_free(&ev);
 }
 
+/* A TLS config without a factory cannot secure the connection: refuse the https request rather
+ * than send it in plaintext. */
+UTEST(client, async_https_tls_without_factory) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlTlsConfig tls = { .ctx = NULL, .factory = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.tls = &tls;
+
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "https://127.0.0.1:1/",
+                                           NULL, 0, NULL, 0, NULL, NULL);
+    int refused = (c == NULL);
+    kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(refused);
+}
+
 /* ── kl_http_client_error/response on NULL ────────────────────────────── */
 
 UTEST(client, error_null) {
