@@ -848,8 +848,7 @@ int main(void) {
     if (!hdr431_ok) { fprintf(stderr, "smoke-pollcomp: oversized-header 431 parity FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
     if (!bigstream_ok) { fprintf(stderr, "smoke-pollcomp: bigstream overlapped flush / HOL FAILED\n"); return 1; }
-    if (!bigbody_ok) { fprintf(stderr, "smoke-pollcomp: bigbody to a stalled reader blocked the loop (HOL) FAILED
-"); return 1; }
+    if (!bigbody_ok) { fprintf(stderr, "smoke-pollcomp: bigbody to a stalled reader blocked the loop (HOL) FAILED\n"); return 1; }
     if (!proxy_ok) { fprintf(stderr, "smoke-pollcomp: PROXY-over-completion roundtrip FAILED\n"); return 1; }
     if (!backlog_ok) { fprintf(stderr, "smoke-pollcomp: backlog exhaustion (queue-not-drop) FAILED\n"); return 1; }
 
