@@ -281,6 +281,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   with 1002. The server now applies the client's close validation (one shared check), echoes an empty
   close empty, and finishes every message, validating text as UTF-8, whether or not `on_message` is
   set.
+- **An HTTP/1.1 `Upgrade: h2c` request was never answered.** The server sent 101 Switching Protocols
+  and started a fresh HTTP/2 session, but the request that asked for the upgrade, which RFC 7540
+  answers on stream 1, was dropped, so `curl --http2` and other upgrading clients waited forever.
+  The upgrade is now done properly. `KlHttp2ServerSession` gains an optional `upgrade` op, appended
+  per the compatibility contract, and the nghttp2 adapter implements it with
+  `nghttp2_session_upgrade2`. The op applies the client's `HTTP2-Settings` and opens stream 1, and
+  the request is then answered on stream 1 through the same route, middleware and handler path as any
+  HTTP/2 request. When an upgrade cannot be done properly, the request is answered over HTTP/1.1,
+  which RFC 9113 allows: a request with a body, a missing or repeated `HTTP2-Settings`, or a session
+  without `upgrade`. Prior-knowledge h2c and ALPN `h2` are unchanged.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
