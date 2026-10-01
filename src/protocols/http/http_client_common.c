@@ -223,8 +223,9 @@ void kl_http_client_remove_header(KlHttpClientResponse *resp, const char *name)
                     strlen(resp->headers[i].name) + 1);
             kl_free(&resp->alloc, (char *)resp->headers[i].value,
                     strlen(resp->headers[i].value) + 1);
-            for (int j = 0, k = 0; j < resp->num_headers; j++)
-                if (j != i) nh[k++] = resp->headers[j];
+            if (nh)                                     /* NULL only when no header survives */
+                for (int j = 0, k = 0; j < resp->num_headers; j++)
+                    if (j != i) nh[k++] = resp->headers[j];
             kl_free(&resp->alloc, resp->headers,
                     (size_t)resp->num_headers * sizeof(KlHttpClientHeader));
             resp->headers = nh;
