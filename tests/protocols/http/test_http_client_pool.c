@@ -179,6 +179,34 @@ UTEST(cpool, acquire_wrong_tls) {
     kl_test_closesock(fds[1]);
 }
 
+/* A TLS connection is reused only under the config it was made with (ctx + factory); the legacy
+ * acquire, which carries no config, does not match it either. */
+static int g_unit_ctx_a, g_unit_ctx_b;
+static KlTls *unit_factory(KlTlsCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return NULL; }
+UTEST(cpool, acquire_tls_matches_only_its_config) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    KlTlsConfig ta = { .ctx = (KlTlsCtx *)&g_unit_ctx_a, .factory = unit_factory };
+    KlTlsConfig tb = { .ctx = (KlTlsCtx *)&g_unit_ctx_b, .factory = unit_factory };
+
+    int fds[2];
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    KlHttpClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
+    ASSERT_EQ(kl_http_client_pool_release_tls(&pool, &conn, "example.com", 443, &ta, NULL, 0), 0);
+
+    KlHttpClientPoolConn acq;
+    ASSERT_EQ(kl_http_client_pool_acquire_tls(&pool, "example.com", 443, &tb, NULL, 0, &acq), 1);
+    ASSERT_EQ(kl_http_client_pool_acquire(&pool, "example.com", 443, 1, NULL, 0, &acq), 1);
+    ASSERT_EQ(kl_http_client_pool_host_count(&pool, "example.com", 443, 1, NULL, 0), 1);
+    ASSERT_EQ(kl_http_client_pool_acquire_tls(&pool, "example.com", 443, &ta, NULL, 0, &acq), 0);
+    ASSERT_EQ((int)acq.fd, fds[0]);
+
+    kl_test_closesock(fds[0]);
+    kl_http_client_pool_free(&pool);
+    kl_test_closesock(fds[1]);
+}
+
 UTEST(cpool, max_per_host_evicts_oldest) {
     KlAllocator a = kl_allocator_default();
     KlHttpClientPool pool;
