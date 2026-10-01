@@ -129,4 +129,42 @@ UTEST(alloc_sizes, decompressed_body_is_freed_with_its_size_and_terminated) {
     ASSERT_EQ(live_blocks(), 0);
 }
 
+/* An interim response with headers, then a final response with none: the header array the
+ * interim response grew must still be freed at its own size (it was handed over and freed at 0). */
+UTEST(alloc_sizes, interim_headers_then_none_frees_the_array_at_its_size) {
+    reset_tracking();
+    KlHttpClientResponse r;
+    ASSERT_EQ(parse("HTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n"
+                    "HTTP/1.1 204 No Content\r\n\r\n", &r), 0);
+    ASSERT_EQ(r.status, 204);
+    ASSERT_EQ(r.num_headers, 0);
+    kl_http_client_response_free(&r);
+    ASSERT_EQ(g_bad_frees, 0);
+    ASSERT_EQ(g_unknown_frees, 0);
+    ASSERT_EQ(live_blocks(), 0);
+}
+
+/* A streaming parser's size limit counts one response: reset must start the count again, or a
+ * reused parser rejects a later response for bytes it never carried. */
+static int count_body(const char *d, size_t n, void *ud) { (void)d; *(size_t *)ud += n; return 0; }
+UTEST(alloc_sizes, reset_streaming_parser_starts_the_size_count_again) {
+    size_t got = 0;
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(10, &g_sa, count_body, NULL, NULL, &got);
+    ASSERT_TRUE(p != NULL);
+    const char *raw = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n12345678";
+    KlHttpClientResponse r;
+    size_t consumed = 0;
+    memset(&r, 0, sizeof r);
+    KlHttp1ParseResult r1 = p->parse(p, &r, raw, strlen(raw), &consumed);
+    kl_http_client_response_free(&r);
+    p->reset(p);
+    memset(&r, 0, sizeof r);
+    KlHttp1ParseResult r2 = p->parse(p, &r, raw, strlen(raw), &consumed);
+    kl_http_client_response_free(&r);
+    p->destroy(p);
+    ASSERT_EQ((int)r1, (int)KL_HTTP1_PARSE_OK);
+    ASSERT_EQ((int)r2, (int)KL_HTTP1_PARSE_OK);  /* was ERROR: 8 + 8 counted against 10 */
+    ASSERT_EQ(got, (size_t)16);
+}
+
 UTEST_MAIN();
