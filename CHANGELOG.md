@@ -7,6 +7,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **A redirect could take the client anywhere its caller would not have connected.** A caller that
+  limits which hosts it talks to could check only the first URL: `kl_http_redirect_*` then followed
+  every `Location` with no way to ask, so an allowed host could send the client to a cloud metadata
+  endpoint or an internal service. `KlHttpRedirectConfig` gains `on_redirect` / `on_redirect_data`
+  (appended; zero keeps today's behaviour). Keel calls it with each hop's resolved absolute URL
+  before requesting it, in the sync, async and pooled paths; a non-zero return ends the request with
+  the new `KL_ERR_REDIRECT_REFUSED` (appended to `KlError`) and no response.
+
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
   that simply writes in pieces), the server fed the whole accumulated buffer to the request parser

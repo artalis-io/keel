@@ -34,6 +34,20 @@ extern "C" {
  * its zero/NULL value selects the built-in default. New members are appended
  * after max_redirects.
  */
+/**
+ * @brief Per-hop redirect policy check.
+ *
+ * Called with the resolved, absolute URL of each redirect hop BEFORE it is
+ * requested (never for the initial URL, which the caller already holds).
+ * Return 0 to follow it; any other value refuses it, and the request ends
+ * with @ref KL_ERR_REDIRECT_REFUSED and no response.
+ *
+ * This is where a caller that restricts the hosts it talks to re-applies
+ * that restriction: without it, an allowed host can redirect the client to
+ * any other address (a cloud metadata endpoint, an internal service).
+ */
+typedef int (*KlHttpRedirectCheckFn)(const char *next_url, void *user_data);
+
 typedef struct {
     /**
      * Maximum number of redirect HOPS to follow.  `max_redirects = N`
@@ -42,6 +56,10 @@ typedef struct {
      * Matches curl / fetch / most HTTP clients.  0 = use default 10.
      */
     int max_redirects;
+    /** Optional per-hop check (NULL = follow every hop). */
+    KlHttpRedirectCheckFn on_redirect;
+    /** Passed to @ref on_redirect. */
+    void *on_redirect_data;
 } KlHttpRedirectConfig;
 
 /* ── Sync API ─────────────────────────────────────────────────────── */

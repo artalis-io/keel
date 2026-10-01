@@ -29,6 +29,8 @@ struct KlHttpRedirectClient {
 
     /* Redirect state */
     int                max_redirects;
+    KlHttpRedirectCheckFn on_redirect;    /* per-hop policy (NULL = none) */
+    void              *on_redirect_data;
     int                redirects_done;
     char               original_url[KL_URL_MAX]; /* for cross-origin checks */
     char               current_url[KL_URL_MAX];
@@ -206,6 +208,15 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
             return -1;
         }
 
+        /* The caller's per-hop policy, before anything is sent there. */
+        if (redir && redir->on_redirect &&
+            redir->on_redirect(next_url, redir->on_redirect_data) != 0) {
+            kl_http_client_response_free(resp);
+            memset(resp, 0, sizeof(*resp));
+            resp->error = KL_ERR_REDIRECT_REFUSED;
+            return -1;
+        }
+
         /* Method transformation */
         if (method_changes_to_get(resp->status, cur_method)) {
             memcpy(cur_method, "GET", 4);
@@ -293,6 +304,8 @@ static KlHttpRedirectClient *alloc_redirect_client(KlAllocator *alloc,
     rc->max_redirects = (redir && redir->max_redirects > 0)
                             ? redir->max_redirects
                             : KL_HTTP_REDIRECT_DEFAULT_MAX;
+    rc->on_redirect      = redir ? redir->on_redirect : NULL;
+    rc->on_redirect_data = redir ? redir->on_redirect_data : NULL;
 
     /* Copy method */
     size_t mlen = strlen(method);
@@ -465,6 +478,17 @@ static void internal_on_done(KlHttpClient *client, void *user_data)
     char next_url[KL_URL_MAX];
     if (kl_url_resolve(rc->current_url, location, next_url, sizeof(next_url)) != 0) {
         rc->error = KL_ERR_URL;
+        if (rc->on_done)
+            rc->on_done(rc, rc->user_data);
+        return;
+    }
+
+    /* The caller's per-hop policy, before anything is sent there. The 3xx
+     * stays on the inner client but is not the final response: the request
+     * ends refused (kl_http_redirect_response returns NULL on error). */
+    if (rc->on_redirect &&
+        rc->on_redirect(next_url, rc->on_redirect_data) != 0) {
+        rc->error = KL_ERR_REDIRECT_REFUSED;
         if (rc->on_done)
             rc->on_done(rc, rc->user_data);
         return;

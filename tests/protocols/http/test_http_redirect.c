@@ -764,6 +764,129 @@ UTEST(redirect, async_null_args) {
                                    NULL, NULL) == NULL);
 }
 
+/* ── on_redirect: the caller's per-hop policy ──────────────────────── */
+
+typedef struct {
+    int  calls;
+    int  verdict;          /* returned to Keel: 0 follow, else refuse */
+    char seen[256];        /* the last URL the hook was shown */
+} HookCtx;
+
+static int hook_check(const char *next_url, void *user_data)
+{
+    HookCtx *h = user_data;
+    h->calls++;
+    snprintf(h->seen, sizeof(h->seen), "%s", next_url);
+    return h->verdict;
+}
+
+UTEST(redirect, sync_hook_sees_each_hop_and_can_allow) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    HookCtx h = { 0 };
+    KlHttpRedirectConfig redir = { .on_redirect = hook_check, .on_redirect_data = &h };
+    KlHttpClientResponse resp;
+
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, &redir, "GET", test_url("/redir301"),
+                                       NULL, 0, NULL, 0, &resp), 0);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(h.calls, 1);
+    char want[128];
+    snprintf(want, sizeof(want), "http://127.0.0.1:%d/dest", redir_port);
+    ASSERT_STREQ(h.seen, want);
+    kl_http_client_response_free(&resp);
+}
+
+UTEST(redirect, sync_hook_refusal_ends_the_request) {
+    /* An allowed first host must not be able to send the client anywhere:
+     * a refused hop is never requested, and no 3xx comes back as if final. */
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    HookCtx h = { .verdict = 1 };
+    KlHttpRedirectConfig redir = { .on_redirect = hook_check, .on_redirect_data = &h };
+    KlHttpClientResponse resp;
+
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, &redir, "GET", test_url("/redir302"),
+                                       NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_REDIRECT_REFUSED);
+    ASSERT_EQ(resp.status, 0);
+    ASSERT_TRUE(resp.body == NULL);
+    ASSERT_EQ(h.calls, 1);
+    ASSERT_STREQ(kl_strerror(KL_ERR_REDIRECT_REFUSED), "redirect refused");
+}
+
+UTEST(redirect, sync_pooled_hook_refusal) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    HookCtx h = { .verdict = 1 };
+    KlHttpRedirectConfig redir = { .on_redirect = hook_check, .on_redirect_data = &h };
+    KlHttpClientResponse resp;
+
+    ASSERT_EQ(kl_http_redirect_request_pooled(&pool, &a, &cfg, &redir, "GET",
+                                              test_url("/chain"), NULL, 0, NULL, 0,
+                                              &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_REDIRECT_REFUSED);
+    ASSERT_EQ(h.calls, 1);   /* stopped at the FIRST hop of the chain */
+    kl_http_client_pool_free(&pool);
+}
+
+UTEST(redirect, async_hook_refusal_ends_the_request) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    HookCtx h = { .verdict = 1 };
+    KlHttpRedirectConfig redir = { .on_redirect = hook_check, .on_redirect_data = &h };
+
+    AsyncRedirCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, &redir,
+                                                      "GET", test_url("/redir301"),
+                                                      NULL, 0, NULL, 0,
+                                                      async_redir_done, &ctx);
+    ASSERT_TRUE(rc != NULL);
+    ASSERT_EQ(run_until_done(&ev, &ctx, TEST_TIMEOUT_MS), 0);
+    ASSERT_TRUE(ctx.done);
+    ASSERT_NE(ctx.error, 0);
+    ASSERT_EQ(ctx.last_error, KL_ERR_REDIRECT_REFUSED);
+    ASSERT_TRUE(kl_http_redirect_response(rc) == NULL);
+    ASSERT_EQ(h.calls, 1);
+
+    kl_http_redirect_free(rc);
+    kl_event_ctx_free(&ev);
+}
+
+UTEST(redirect, async_hook_allows_a_chain) {
+    ensure_servers();
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    HookCtx h = { 0 };
+    KlHttpRedirectConfig redir = { .on_redirect = hook_check, .on_redirect_data = &h };
+
+    AsyncRedirCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, &redir,
+                                                      "GET", test_url("/chain"),
+                                                      NULL, 0, NULL, 0,
+                                                      async_redir_done, &ctx);
+    ASSERT_TRUE(rc != NULL);
+    ASSERT_EQ(run_until_done(&ev, &ctx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(ctx.error, 0);
+    ASSERT_EQ(ctx.status, 200);
+    ASSERT_GE(h.calls, 2);   /* every hop of the chain was shown */
+
+    kl_http_redirect_free(rc);
+    kl_event_ctx_free(&ev);
+}
+
 UTEST(redirect, free_null) {
     kl_http_redirect_free(NULL);
     ASSERT_TRUE(1);
