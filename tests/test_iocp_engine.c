@@ -169,4 +169,39 @@ UTEST(iocp, failed_watcher_rearm_does_not_hang_close) {
     ASSERT_EQ(g_blocks, 0);                       /* the failed op was freed, not leaked */
 }
 
+/* A probe re-arm that fails because the peer reset the connection used to retire the watcher
+ * silently: no further callback, ever, so its owner never learned the socket was dead. A readiness
+ * backend keeps reporting such a socket (level-triggered) until its owner deletes the watcher, and
+ * IOCP must do the same. */
+typedef struct { int calls; } RCtx;
+static void on_ready_count(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)fd; (void)ready;
+    ((RCtx *)ud)->calls++;
+}
+
+UTEST(iocp, failed_watcher_rearm_keeps_reporting) {
+    KlAllocator a = { ca_malloc, ca_realloc, ca_free, NULL };
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlSocketHandle x, y;
+    ASSERT_EQ(tcp_pair(&x, &y), 0);
+    RCtx r = { 0 };
+    ASSERT_EQ(kl_watcher_add(&ev, x, KL_EVENT_READ, on_ready_count, &r), 0);
+    ASSERT_EQ(send((SOCKET)y, "z", 1, 0), 1);
+    for (int i = 0; i < 20 && r.calls < 1; i++) kl_event_ctx_run(&ev, 16, 20);
+    ASSERT_GE(r.calls, 1);
+    struct linger lg = { 1, 0 };                  /* abortive close: the peer sends RST */
+    setsockopt((SOCKET)y, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg);
+    kl_sockdef_close(y);
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ev, 16, 20);   /* the reset lands */
+    int before = r.calls;
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ev, 16, 20);
+    int after = r.calls;
+    kl_watcher_del(&ev, x);
+    kl_sockdef_close(x);
+    kl_event_ctx_free(&ev);
+    ASSERT_EQ(g_blocks, 0);
+    ASSERT_GE(after - before, 5);                 /* was: silence after the reset */
+}
+
 UTEST_MAIN();

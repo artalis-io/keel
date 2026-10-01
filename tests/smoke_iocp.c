@@ -79,6 +79,58 @@ static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
+/* GET /zerofile: a zero-length file response over a NON-empty file. TransmitFile reads a byte count
+ * of 0 as "the whole file", so the body bytes went out after a Content-Length: 0 head. */
+static void handle_zerofile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = _open(SMOKE_FILE_PATH, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, 0);
+}
+
+/* GET /shortfile: a file response that claims more bytes than the file holds (it shrank after the
+ * handler sized it). TransmitFile stops at end of file, yet the write was reported complete, so the
+ * connection stayed open with the body short of its Content-Length and the client waited forever.
+ * The server must close the connection instead. */
+static void handle_shortfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = _open(SMOKE_FILE_PATH, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, (off_t)(sizeof(SMOKE_FILE) - 1 + 100));
+}
+
+/* Send a keep-alive GET on a raw socket and read until the server closes or `wait_ms` passes.
+ * Returns the bytes read (or -1), with *closed set when the server closed the connection. */
+static int raw_get(const char *path, char *buf, int cap, int wait_ms, int *closed) {
+    *closed = 0;
+    SOCKET cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs == INVALID_SOCKET) return -1;
+    DWORD tmo = (DWORD)wait_ms;
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, (char *)&tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(cs, (struct sockaddr *)&to, sizeof(to)) != 0) { closesocket(cs); return -1; }
+    char req[128];
+    int rl = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", path);
+    if (send(cs, req, rl, 0) != rl) { closesocket(cs); return -1; }
+    int got = 0;
+    for (;;) {
+        int n = recv(cs, buf + got, cap - 1 - got, 0);
+        if (n == 0) { *closed = 1; break; }
+        if (n < 0) { if (WSAGetLastError() != WSAETIMEDOUT) *closed = 1; break; }
+        got += n;
+        if (got >= cap - 1) break;
+    }
+    buf[got] = '\0';
+    closesocket(cs);
+    return got;
+}
+
 /* GET /stream: a synchronous chunked stream produced during the handler
  * (KL_HTTP_BODY_STREAM over IOCP). */
 static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -296,6 +348,8 @@ int main(void) {
     kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/zerofile", handle_zerofile, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/shortfile", handle_shortfile, NULL, NULL);
 
     /* Write the file the /file route serves. */
     int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
@@ -481,6 +535,29 @@ int main(void) {
         }
     }
 
+    /* A zero-length file response sends the head only: after the blank line, nothing. The next
+     * read times out with the connection still open (keep-alive). */
+    int zerofile_ok = 0;
+    {
+        static char zb[1024];
+        int closed = 0;
+        int n = raw_get("/zerofile", zb, (int)sizeof zb, 1500, &closed);
+        const char *eoh = n > 0 ? strstr(zb, "\r\n\r\n") : NULL;
+        zerofile_ok = eoh && strstr(zb, "Content-Length: 0\r\n") && eoh + 4 == zb + n;
+        if (!zerofile_ok) fprintf(stderr, "smoke-iocp: /zerofile got %d bytes:\n%s\n", n, zb);
+    }
+
+    /* A file shorter than its declared size: the server must close the connection rather than
+     * leave the client waiting for bytes that will never come. */
+    int shortfile_ok = 0;
+    {
+        static char sb[1024];
+        int closed = 0;
+        int n = raw_get("/shortfile", sb, (int)sizeof sb, 3000, &closed);
+        shortfile_ok = n > 0 && closed;
+        if (!shortfile_ok) fprintf(stderr, "smoke-iocp: /shortfile: %d bytes, closed=%d\n", n, closed);
+    }
+
     kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now: safe to pump the public close */
@@ -528,6 +605,14 @@ int main(void) {
     }
     if (!proxy_ok) {
         fprintf(stderr, "smoke-iocp: PROXY-over-IOCP roundtrip FAILED\n");
+        return 1;
+    }
+    if (!zerofile_ok) {
+        fprintf(stderr, "smoke-iocp: GET/zerofile (zero-length TransmitFile) sent body bytes FAILED\n");
+        return 1;
+    }
+    if (!shortfile_ok) {
+        fprintf(stderr, "smoke-iocp: GET/shortfile (file shorter than its length) left the connection open FAILED\n");
         return 1;
     }
     printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + bigfile-chunked + stream + bigstream + proxy + UDP + udp-local)\n");

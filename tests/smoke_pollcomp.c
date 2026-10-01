@@ -105,6 +105,18 @@ static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_response_end_stream(res);
 }
 
+/* GET /bigbody: one buffered body far larger than the socket buffers on both ends. An accepted
+ * socket used to be put in BLOCKING mode, so the single send of this body to a client that stopped
+ * reading blocked inside the loop, and every other connection stalled with it. */
+#define SMOKE_BB_LEN (16 * 1024 * 1024)
+static void handle_bigbody(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    static char *body;
+    if (!body) { body = malloc(SMOKE_BB_LEN); if (!body) { kl_http_response_error(res, 500, "oom"); return; } memset(body, 'B', SMOKE_BB_LEN); }
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, body, SMOKE_BB_LEN);
+}
+
 static KlDatagram g_udp;
 static void udp_echo(void *ud, const void *data, size_t len,
                      const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
@@ -379,6 +391,43 @@ static int bigstream_no_hol_ok(void) {
     return b_ok && a_ok;
 }
 
+/* Conn A asks for /bigbody and never reads; conn B's request must still be answered. */
+static int bigbody_no_hol_ok(void) {
+    int a = socket(AF_INET, SOCK_STREAM, 0);
+    if (a < 0) return 0;
+    int rcv = 2048;
+    setsockopt(a, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(a, (struct sockaddr *)&to, sizeof(to)) < 0) { close(a); return 0; }
+    const char *reqa = "GET /bigbody HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    if (write(a, reqa, strlen(reqa)) < 0) { close(a); return 0; }
+    nap_ms(150);                                     /* the server is now sending A's body */
+
+    int b = connect_client();                        /* 2 s receive timeout */
+    int b_ok = 0;
+    if (b >= 0) {
+        const char *reqb = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        if (write(b, reqb, strlen(reqb)) >= 0) {
+            char bb[1024]; size_t got = 0;
+            while (got < sizeof(bb) - 1) {
+                ssize_t r = read(b, bb + got, sizeof(bb) - 1 - got);
+                if (r <= 0) break;
+                got += (size_t)r; bb[got] = 0;
+                if (strstr(bb, SMOKE_BODY)) { b_ok = 1; break; }
+            }
+        }
+        close(b);
+    }
+    struct linger lg = { 1, 0 };                     /* drop A abortively: unblocks a stuck send */
+    setsockopt(a, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+    close(a);
+    return b_ok;
+}
+
 static KlHttpServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -624,6 +673,7 @@ int main(void) {
     kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigbody", handle_bigbody, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -772,6 +822,8 @@ int main(void) {
     /* Overlapped streaming flush; a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = big_ok ? bigstream_no_hol_ok() : 0;
+    /* One buffered body a stalled reader cannot take must not block the loop either. */
+    int bigbody_ok = bigstream_ok ? bigbody_no_hol_ok() : 0;
 
     kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
@@ -796,9 +848,11 @@ int main(void) {
     if (!hdr431_ok) { fprintf(stderr, "smoke-pollcomp: oversized-header 431 parity FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
     if (!bigstream_ok) { fprintf(stderr, "smoke-pollcomp: bigstream overlapped flush / HOL FAILED\n"); return 1; }
+    if (!bigbody_ok) { fprintf(stderr, "smoke-pollcomp: bigbody to a stalled reader blocked the loop (HOL) FAILED
+"); return 1; }
     if (!proxy_ok) { fprintf(stderr, "smoke-pollcomp: PROXY-over-completion roundtrip FAILED\n"); return 1; }
     if (!backlog_ok) { fprintf(stderr, "smoke-pollcomp: backlog exhaustion (queue-not-drop) FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + proxy + backlog)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + bigbody + proxy + backlog)\n");
     return 0;
 }
