@@ -314,6 +314,15 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
 
+    /* A NULL HTTP/2 session factory would be called on the first HTTP/2 connection: reject it up
+     * front, as a TLS config without a factory is. */
+    if (s->config.h2 && !s->config.h2->factory) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        kl_http_conn_pool_free(&s->pool);
+        kl_http_router_free(&s->router);
+        return -1;
+    }
+
     /* Pre-allocate TLS sessions (one per connection slot) */
     if (s->config.tls) {
         /* A NULL factory would crash on the first call below; reject it up front (no

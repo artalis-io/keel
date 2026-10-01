@@ -467,11 +467,13 @@ UTEST(h2, stream_max_limit) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(conn.h2->num_streams, 2);
 
-    /* Stream 5 should fail: at max */
+    /* Stream 5 is over the limit: refused with 503 on that stream; the connection carries on */
     rc = mock.callbacks.on_request(mock.cb_user_data, 5,
                                    "POST", 4, "/data", 5,
                                    NULL, 0, hn, hv, hnl, hvl, 1);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(mock.last_stream_id, 5u);
+    ASSERT_EQ(mock.last_status, 503);
     ASSERT_EQ(conn.h2->num_streams, 2);
 
     kl_http2_server_cleanup(&conn);

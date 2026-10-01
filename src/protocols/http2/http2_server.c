@@ -205,7 +205,18 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     KlHttp2ServerConn *h2c = ud;
 
     KlHttp2ServerStream *stream = h2_stream_create(h2c, stream_id);
-    if (!stream) return -1;
+    if (!stream) {
+        /* Stream table full: refuse this stream, not the connection (a -1 here is fatal to every
+         * stream on it). Its DATA, if any, is then ignored as for any finished stream. */
+        static const char *const busy_names[] = { "content-type" };
+        static const char *const busy_values[] = { "text/plain" };
+        static const char busy_body[] = "Service Unavailable";
+        if (h2c->session->submit_response(h2c->session, stream_id, 503,
+                                          (const char **)busy_names, (const char **)busy_values,
+                                          1, busy_body, sizeof(busy_body) - 1) != 0)
+            return -1;
+        return 0;
+    }
 
     /* Clamp to max headers (vtable may provide unchecked value) */
     if (num_headers > KL_MAX_HEADERS)
@@ -287,6 +298,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     /* Headers */
     int hdr_count = 0;
     size_t content_length = 0;
+    int cl_present = 0;
     for (int i = 0; i < num_headers && hdr_count < KL_MAX_HEADERS; i++) {
         memcpy(p, hdr_names[i], hdr_name_lens[i]);
         p[hdr_name_lens[i]] = '\0';
@@ -302,6 +314,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
         if (hdr_name_lens[i] == 14 &&
             kl_ascii_strncasecmp(req->headers[hdr_count].name, "content-length", 14) == 0) {
+            cl_present = 1;
             content_length = 0;
             int cl_valid = (hdr_value_lens[i] > 0) ? 1 : 0;
             for (size_t j = 0; j < hdr_value_lens[i]; j++) {
@@ -371,8 +384,11 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         return rc < 0 ? -1 : 0;
     }
 
-    /* Create body reader if needed */
-    int has_body = (req->content_length > 0);
+    /* Create body reader if needed. HTTP/2 frames a body by END_STREAM, so content-length is
+     * optional: without one, a route that reads bodies gets its reader, and an empty body simply
+     * completes it. */
+    int has_body = (req->content_length > 0) ||
+                   (!cl_present && stream->route && stream->route->body_reader);
     if (has_body && stream->route && stream->route->body_reader) {
         KlHttpBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);
@@ -401,7 +417,9 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
                           const char *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
-    if (!stream) return -1;
+    /* A stream already answered (a rejected request, a refused stream) still receives the client's
+     * DATA: ignore it. A -1 is fatal to the whole session, and every other stream on it. */
+    if (!stream) return 0;
 
     /* Enforce body size limit (mirrors HTTP/1.1 path in http_connection.c) */
     size_t max = h2c->conn->max_body_size;
@@ -420,7 +438,7 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
 static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     KlHttp2ServerConn *h2c = ud;
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
-    if (!stream) return -1;
+    if (!stream) return 0;                     /* already answered: see h2_cb_on_data */
 
     stream->body_done = 1;
 
