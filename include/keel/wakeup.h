@@ -46,9 +46,10 @@ int kl_wakeup_open(KlWakeup *w);
 /**
  * @brief Signal the channel: wake the event loop.
  *
- * Safe to call from any thread, and the only part of this API that is. Writes
- * are coalescing, so a signal lost to a full channel only costs a wakeup that a
- * concurrent signal already delivered; failures are deliberately not reported.
+ * Safe to call from any thread, and the only part of this API that is. Never
+ * blocks: the write end is non-blocking. Writes are coalescing, so a signal lost
+ * to a full channel only costs a wakeup that a pending signal already delivers;
+ * failures are deliberately not reported.
  *
  * Signalling is all a foreign thread may do. The work it is reporting must be
  * handed to the loop thread through memory the watcher callback reads, and any
@@ -64,7 +65,8 @@ void kl_wakeup_signal(const KlWakeup *w);
  *
  * Call this first thing in the watcher callback: a readiness backend reports
  * the read end ready for as long as a byte sits unread, so an undrained channel
- * spins the loop.
+ * spins the loop. Consumes every pending byte (bounded), so a burst of signals
+ * costs one wakeup.
  *
  * @param w Open channel.
  */

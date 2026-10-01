@@ -64,8 +64,12 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
     if (win_wakeup_pair(sv) != 0)
         return -1;
 
+    /* Both ends non-blocking: the read end so the drain never stalls the loop, the write end so a
+     * signal never blocks its caller once the pair's buffers are full (a full pair already holds a
+     * pending wakeup; wakeup.h: signals coalesce). */
     u_long nonblocking = 1;
-    (void)ioctlsocket(sv[0], FIONBIO, &nonblocking);   /* read end non-blocking */
+    (void)ioctlsocket(sv[0], FIONBIO, &nonblocking);
+    (void)ioctlsocket(sv[1], FIONBIO, &nonblocking);
 
     w->rd = (KlSocketHandle)sv[0];
     w->wr = (KlSocketHandle)sv[1];
@@ -78,13 +82,17 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
 void kl_plat_wakeup_signal(const KlPlatWakeup *w)
 {
     char c = 1;
-    (void)send((SOCKET)w->wr, &c, 1, 0);
+    (void)send((SOCKET)w->wr, &c, 1, 0);   /* WSAEWOULDBLOCK = full = a wakeup is already pending */
 }
 
 void kl_plat_wakeup_drain(KlSocketHandle rd)
 {
-    char buf[64];
-    (void)recv((SOCKET)rd, buf, (int)sizeof(buf), 0);
+    /* Empty the channel (bounded), as the POSIX drain does: a burst coalesces into one wakeup. */
+    char buf[4096];
+    for (int i = 0; i < 1024; i++) {
+        int rc = recv((SOCKET)rd, buf, (int)sizeof(buf), 0);
+        if (rc < (int)sizeof(buf)) break;
+    }
 }
 
 void kl_plat_wakeup_close(KlPlatWakeup *w)

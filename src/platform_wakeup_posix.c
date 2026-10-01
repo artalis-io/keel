@@ -28,10 +28,15 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
         if (fdf >= 0) (void)fcntl(fds[i], F_SETFD, fdf | FD_CLOEXEC);
     }
 
-    /* Read end non-blocking: the drain must never stall the event loop. */
-    int flags = fcntl(fds[0], F_GETFL, 0);
-    if (flags >= 0)
-        (void)fcntl(fds[0], F_SETFL, flags | O_NONBLOCK);
+    /* Both ends non-blocking. The read end so the drain never stalls the event loop; the write end so
+     * a signal never blocks its caller on a full pipe (a worker, or the loop thread itself when it
+     * signals its own channel). A full pipe already holds a pending wakeup, so the byte that would
+     * not fit is not needed (wakeup.h: signals coalesce). */
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(fds[i], F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fds[i], F_SETFL, flags | O_NONBLOCK);
+    }
 
     w->rd = fds[0];
     w->wr = fds[1];
@@ -41,18 +46,20 @@ int kl_plat_wakeup_open(KlPlatWakeup *w)
 void kl_plat_wakeup_signal(const KlPlatWakeup *w)
 {
     char c = 1;
-    kl_ssize_t wr = write((int)w->wr, &c, 1);
+    kl_ssize_t wr = write((int)w->wr, &c, 1);   /* EAGAIN = full = a wakeup is already pending */
     (void)wr;
 }
 
 void kl_plat_wakeup_drain(KlSocketHandle rd)
 {
-    /* Single non-blocking read is enough: the done queue is drained under the
-     * mutex regardless of how many bytes we consume here, and any residue
-     * re-fires the level-triggered watcher harmlessly. */
-    char buf[64];
-    kl_ssize_t rc = read((int)rd, buf, sizeof(buf));
-    (void)rc;
+    /* Empty the pipe: a burst of signals coalesces into one wakeup instead of re-firing the watcher
+     * once per read. Stops at the first short read (or EAGAIN); the bound (4 MiB) only keeps a
+     * producer signalling as fast as we read from holding the loop here. */
+    char buf[4096];
+    for (int i = 0; i < 1024; i++) {
+        kl_ssize_t rc = read((int)rd, buf, sizeof(buf));
+        if (rc < (kl_ssize_t)sizeof(buf)) break;
+    }
 }
 
 void kl_plat_wakeup_close(KlPlatWakeup *w)

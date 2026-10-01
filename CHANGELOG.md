@@ -175,6 +175,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     `kl_sock_set_cloexec`. `test_cloexec` adds a probe provider that hands out an inheritable socket
     and checks it has been marked by connect time.
 
+- **`kl_wakeup_signal` could block its caller.** The wakeup channel's write end was blocking, so
+  once enough signals went undrained to fill the pipe (POSIX) or loopback pair (Windows), the next
+  signal blocked. That stalled a worker thread, or deadlocked the loop thread when it signalled its
+  own channel.
+  - The same channel carries `kl_http_server_stop`'s wakeup, which is documented as safe from a
+    signal handler.
+  - Both ends are now non-blocking. A full channel already holds a pending wakeup, so the dropped
+    byte is not needed, as `wakeup.h` already promised ("a signal lost to a full channel").
+  - `kl_wakeup_drain` now empties the channel (bounded at 4 MiB) instead of reading 64 bytes, so a
+    burst of signals costs one wakeup instead of one per 64 bytes.
+  - `test_wakeup` adds `signal_never_blocks_on_a_full_channel`: a thread floods 2^20 signals with
+    nobody draining. Without the fix it blocked on the full channel.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);
