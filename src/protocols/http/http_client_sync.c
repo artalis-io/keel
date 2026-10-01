@@ -506,11 +506,15 @@ static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientR
     return resp->status > 0;
 }
 
+/* *reusable (if non-NULL) is set to 1 only when the response ended exactly at the end of a read,
+ * with nothing after it on the socket or in TLS, and not at end of stream: the only case in which a
+ * pool may keep the connection. */
 static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlHttpClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
                                KlAllocator *alloc,
-                               const KlHttpClientStreamCfg *stream, int is_head)
+                               const KlHttpClientStreamCfg *stream, int is_head, int *reusable)
 {
+    if (reusable) *reusable = 0;
     KlHttp1ResponseParser *parser;
     if (stream && stream->on_body) {
         parser = kl_http1_response_parser_llhttp_s(max_response_size, alloc,
@@ -562,6 +566,9 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
                                             buf, (size_t)nread, &consumed);
         if (pr2 == KL_HTTP1_PARSE_OK) {
             ret = 0;
+            if (reusable)
+                *reusable = consumed == (size_t)nread &&
+                            !(tls && tls->pending && tls->pending(tls) > 0);
             break;
         }
         if (pr2 == KL_HTTP1_PARSE_ERROR)
@@ -773,7 +780,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     }
 
     if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
-                            actual_stream, strcmp(method, "HEAD") == 0) != 0) {
+                            actual_stream, strcmp(method, "HEAD") == 0, NULL) != 0) {
         if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
     }
@@ -868,7 +875,9 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     }
     /* UNIX sockets have no host:port to key the pool on, so bypass the pool
      * and connect directly (local-socket connect is cheap). */
-    if (parsed.is_unix) {
+    /* A proxied request is not pooled either: the pool is keyed by the target and connects to it
+     * directly, which would silently bypass cfg->proxy. The non-pooled path honours the proxy. */
+    if (parsed.is_unix || (cfg && cfg->proxy)) {
         return kl_http_client_request_s(alloc, cfg, method, url_str,
                                    headers, num_headers, body, body_len,
                                    NULL, resp);
@@ -902,6 +911,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     KlSocketHandle fd;
     KlTls *tls = NULL;
     int ret = -1;
+    int reusable = 0;
 
     if (acq == 0) {
         /* Pool hit: reuse connection */
@@ -932,7 +942,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
         pconn.reused = 0;
     }
 
-    /* Send with keep-alive (pooled = no proxy support in v1, pass NULL) */
+    /* Send with keep-alive (direct only: a proxied request took the non-pooled path above) */
     if (send_request_sync(sockets, fd, tls, method, &parsed,
                            headers, num_headers, body, body_len,
                            timeout_ms, 1, NULL) != 0) {
@@ -941,7 +951,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     }
 
     if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
-                            NULL, strcmp(method, "HEAD") == 0) != 0) {
+                            NULL, strcmp(method, "HEAD") == 0, &reusable) != 0) {
         if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
     }
@@ -961,7 +971,8 @@ cleanup:
     if (ret != 0) {
         kl_http_client_pool_discard(pool, &pconn);
         kl_http_client_response_free(resp);
-    } else if (kl_http_client_server_wants_close(resp)) {
+    } else if (!reusable || kl_http_client_server_wants_close(resp)) {
+        /* Not reusable: bytes followed the response, or it ended at end of stream. */
         kl_http_client_pool_discard(pool, &pconn);
     } else {
         kl_http_client_pool_release(pool, &pconn, host_buf, parsed.port, is_tls,

@@ -118,6 +118,17 @@ void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
     if (pool->free_credits < pool->capacity) pool->free_credits++;   /* release-once safety net */
 }
 
+/* Per-request body accounting starts over with each request. The rejection drain (#278) reads these
+ * to decide whether body input is still outstanding: left over from an earlier request (a reused
+ * pool slot, or the previous request on a kept-alive connection), request_body_complete made the
+ * drain think the new request's body was already consumed, so it closed with the body unread and
+ * the reset destroyed the early response. */
+static void conn_request_body_reset(KlHttpConn *c) {
+    c->request_body_received = 0;
+    c->request_body_complete = 0;
+    c->drain_framing_usable  = 0;
+}
+
 KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     if (!pool->free_list) return NULL;
 
@@ -141,6 +152,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->suspend_start_ms = 0;
     c->file_io_phase = FILE_IO_IDLE;
     memset(&c->req, 0, sizeof(c->req));
+    conn_request_body_reset(c);
 
     return c;
 }
@@ -971,6 +983,7 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     kl_http_response_reset(&c->res);
     c->parser->reset(c->parser);
     memset(&c->req, 0, sizeof(c->req));
+    conn_request_body_reset(c);
     c->hdr_parsed = 0;
     c->stream.read_len = 0;
     if (c->stream.read_cap > KL_HTTP_CONN_READ_BUF_SIZE) {

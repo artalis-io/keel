@@ -378,8 +378,15 @@ UTEST(reject_drain, successful_keepalive_is_unaffected) {
 
 /* The body accounting is per request (audit L2). Request 1 on a kept-alive connection reads its whole
  * body, which set request_body_complete; that flag was never reset, so when request 2 was rejected
- * early the drain believed request 2's body was already consumed, closed with ~96 KiB unread, and
- * the reset destroyed the 413. */
+ * early the drain believed request 2's body was already consumed and closed with ~24 KiB of it
+ * unread (an abortive close).
+ *
+ * This case does NOT fail before the fix on any platform tried (MinGW WSAPoll/IOCP, and every POSIX
+ * job in CI): on loopback the 413 is already delivered when the reset fires, so the response
+ * survives. The evidence is the recorded trace (build with -DKEEL_INTERNAL_TRACE): before the fix
+ * request 2's drain shows `skip-complete` with request_body_received 73733 (request 1's 5 stale bytes
+ * plus 73728) and the complete flag set; after it, the drain `enter`s. As with
+ * over_send_past_declared_length_is_drained, do not read a pass here as proof the defect is absent. */
 UTEST(reject_drain, early_reject_after_a_complete_keepalive_request) {
     ASSERT_EQ(0, rd_start(0, 0));
     int fd = rd_connect();

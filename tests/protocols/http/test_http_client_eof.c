@@ -365,4 +365,193 @@ UTEST(pooled, silent_server_times_out) {
     peer_finish(&p);
 }
 
+/* ── A pooled connection is kept only if the response ended cleanly (audit L8) ──────────────────
+ * Bytes after a complete response used to be dropped and the connection pooled anyway, so the next
+ * request on it read them as the start of its own response; a response that ended at end of stream
+ * (close-delimited) pooled a connection the server had already closed. This peer answers ONE request
+ * per connection and counts connections: a second pooled request must get a fresh one. */
+
+typedef struct {
+    KlSocketHandle listen_fd;
+    int            port;
+    const char    *reply;
+    int            hold;       /* keep each connection open after replying, until the client closes */
+    int            accepts;
+    char           first_line[256];   /* the first request line received */
+    KlPlatThread   tid;
+} MultiPeer;
+
+static void multi_peer_thread(void *arg) {
+    MultiPeer *p = arg;
+    for (int n = 0; n < 2; n++) {
+        if (kl_test_poll1(p->listen_fd, 0, 3000) <= 0) return;
+        KlSocketHandle c = (KlSocketHandle)accept((int)p->listen_fd, NULL, NULL);
+        if (!kl_handle_valid(c)) return;
+        p->accepts++;
+        char buf[2048];
+        size_t got = 0;
+        while (got < sizeof(buf) - 1 && kl_test_poll1(c, 0, 3000) > 0) {
+            long r = kl_test_sockread(c, buf + got, sizeof(buf) - 1 - got);
+            if (r <= 0) break;
+            got += (size_t)r;
+            buf[got] = '\0';
+            if (strstr(buf, "\r\n\r\n")) break;
+        }
+        if (n == 0) {
+            const char *e = strstr(buf, "\r\n");
+            size_t l = e ? (size_t)(e - buf) : 0;
+            if (l >= sizeof(p->first_line)) l = sizeof(p->first_line) - 1;
+            memcpy(p->first_line, buf, l);
+            p->first_line[l] = '\0';
+        }
+        (void)kl_test_sockwrite(c, p->reply, strlen(p->reply));
+        if (p->hold)   /* answers one request only; a second request on this connection gets nothing */
+            while (kl_test_poll1(c, 0, 1500) > 0 && kl_test_sockread(c, buf, sizeof(buf)) > 0) {}
+        kl_test_closesock(c);
+    }
+}
+
+static int multi_peer_start(MultiPeer *p, const char *reply, int hold) {
+    Peer tmp;
+    if (peer_listen(&tmp, NULL) != 0) return -1;
+    memset(p, 0, sizeof(*p));
+    p->listen_fd = tmp.listen_fd;
+    p->port = tmp.port;
+    p->reply = reply;
+    p->hold = hold;
+    return kl_plat_thread_create(&p->tid, multi_peer_thread, p);
+}
+
+static void multi_peer_finish(MultiPeer *p) {
+    kl_plat_thread_join(&p->tid);
+    kl_test_closesock(p->listen_fd);
+}
+
+/* Two sync pooled GETs to the same peer; returns how many succeeded (0, 1 or 2). */
+static int two_pooled_gets(MultiPeer *p) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    if (kl_http_client_pool_init(&pool, NULL, &a, NULL) != 0) return -1;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 1000;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", p->port);
+    int ok = 0;
+    for (int i = 0; i < 2; i++) {
+        KlHttpClientResponse r;
+        memset(&r, 0, sizeof r);
+        if (kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &r) == 0 &&
+            r.status == 200)
+            ok++;
+        kl_http_client_response_free(&r);
+    }
+    kl_http_client_pool_free(&pool);
+    return ok;
+}
+
+UTEST(pooled, bytes_after_the_response_are_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOKextra", 1), 0);
+    int ok = two_pooled_gets(&p);
+    multi_peer_finish(&p);
+    ASSERT_EQ(ok, 2);            /* was: 1, the second request reused the tainted connection */
+    ASSERT_EQ(p.accepts, 2);     /* a fresh connection for the second request */
+}
+
+/* The async pooled client, same property. */
+UTEST(pooled, async_bytes_after_the_response_are_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOKextra", 1), 0);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, &ev), 0);
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 1000;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", p.port);
+    int ok = 0;
+    for (int i = 0; i < 2; i++) {
+        AsyncResult r;
+        memset(&r, 0, sizeof(r));
+        KlHttpClient *c = kl_http_client_start_pooled(&pool, &ev, &a, &cfg, "GET", url,
+                                                      NULL, 0, NULL, 0, async_done, &r);
+        for (int k = 0; k < 300 && c && !r.done; k++) (void)kl_event_ctx_run(&ev, 16, 10);
+        if (r.done && r.err == 0 && r.status == 200) ok++;
+        if (c) kl_http_client_free(c);
+    }
+    kl_http_client_pool_free(&pool);
+    kl_event_ctx_free(&ev);
+    multi_peer_finish(&p);
+    ASSERT_EQ(ok, 2);            /* was: 1 */
+    ASSERT_EQ(p.accepts, 2);
+}
+
+/* A pooled request with a proxy configured goes through the proxy (audit L9). The pool is keyed by
+ * the target and connected to it directly, so the proxy used to be silently bypassed. The target here
+ * is a closed port: reaching it directly fails, reaching it through the proxy succeeds. */
+UTEST(pooled, a_proxied_request_goes_through_the_proxy) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                               0), 0);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)p.port, .auth = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 1000;
+    cfg.proxy = &proxy;
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    int rc = kl_http_client_request_pooled(&pool, &a, &cfg, "GET", "http://127.0.0.1:9/target",
+                                           NULL, 0, NULL, 0, &r);
+    int status = r.status;
+    kl_http_client_response_free(&r);
+    kl_http_client_pool_free(&pool);
+    kl_test_closesock(p.listen_fd);   /* no second connection is coming: release the peer's accept */
+    kl_plat_thread_join(&p.tid);
+    ASSERT_EQ(rc, 0);                 /* was: a direct connect to the closed port, refused */
+    ASSERT_EQ(status, 200);
+    ASSERT_EQ(p.accepts, 1);
+    ASSERT_TRUE(strstr(p.first_line, "GET http://127.0.0.1:9/target HTTP/1.1") != NULL);
+}
+
+/* A response ended at end of stream: the pool already notices a connection the server closed before
+ * reusing it, so this passed before the fix too; it guards that the clients now also decline to pool
+ * such a connection in the first place. */
+UTEST(pooled, a_response_ended_at_eof_is_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\n\r\nhello", 0), 0);   /* close-delimited */
+    int ok = two_pooled_gets(&p);
+    multi_peer_finish(&p);
+    ASSERT_EQ(ok, 2);
+    ASSERT_EQ(p.accepts, 2);
+}
+
+UTEST(pooled, a_clean_response_is_still_reused) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK", 1), 0);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 1000;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", p.port);
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    int rc = kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &r);
+    kl_http_client_response_free(&r);
+    int idle = kl_http_client_pool_idle_count(&pool);
+    kl_http_client_pool_free(&pool);   /* closes the pooled connection: the peer moves on */
+    multi_peer_finish(&p);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(idle, 1);          /* the guard: a clean keep-alive response is pooled as before */
+}
+
 UTEST_MAIN();

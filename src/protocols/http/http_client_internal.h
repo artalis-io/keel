@@ -106,6 +106,9 @@ struct KlHttpClient {
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
     const char        *resolve_host;    /* host to resolve (borrowed; valid through the request); 6C */
     int                resolve_port;    /* port for the resolve (6C) */
+    int                conn_reusable;   /* the response ended exactly at the end of a read, with no
+                                         * bytes after it (socket or TLS) and not at end of stream:
+                                         * only then may the pool keep the connection */
     int                eof_rule_status_only; /* end of stream: a status line means complete (a HEAD
                                                * request whose parser cannot be told), not finish */
     int                connect_start_failed; /* 6C: resolver->resolve() could not start; the setup
