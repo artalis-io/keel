@@ -43,6 +43,9 @@ static size_t mock_tls_split_record = 0;
 /* Bytes served normally before the split record starts (so a test can aim the split at a request
  * body rather than its headers). The first read past this point gathers the record. */
 static size_t mock_tls_split_after = 0;
+/* The next mock_tls_write_want socket-mode writes return 0 (WANT_WRITE) without sending, as a real
+ * engine does when the socket's send buffer is full. Static-per-TU, default 0. */
+static int mock_tls_write_want = 0;
 
 static int mock_tls_grow(KlAllocator *a, unsigned char **buf, size_t *cap, size_t need) {
     if (need <= *cap) return 0;
@@ -108,6 +111,7 @@ static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf
         m->out_len += len;
         return (ssize_t)len;
     }
+    if (mock_tls_write_want > 0) { mock_tls_write_want--; return 0; }   /* simulated WANT_WRITE */
     kl_ssize_t r = kl_sockdef_send(fd, buf, len);
     if (r >= 0) return r;
     return kl_sockdef_io_status() == KL_IO_WOULD_BLOCK ? 0 : -1;   /* WANT_WRITE is 0, not -1 */
