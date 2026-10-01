@@ -57,6 +57,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `https+unix` and `wss+unix` against a TLS server and require that the client created a TLS
   session.
 
+- **Credentials followed a cross-origin redirect.** `KlHttpRedirect*` stripped only
+  `Authorization` when a 3xx pointed at another origin. The caller's `Cookie` and
+  `Proxy-Authorization` went to whatever host the redirect named. All three are now dropped
+  cross-origin, and all three are still kept on a same-origin redirect.
+  - `test_http_redirect` adds `sync_cross_origin_drops_all_credentials` and
+    `sync_same_origin_keeps_credentials`.
+
 ### Added
 
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that
@@ -118,15 +125,6 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   suppresses it. It is generic, so sockets, named pipes and future pipe transports share it.
   Contract in `docs/contracts/stream.md`; tested by `test_stream_writable` (every rule, plus a
   producer driven only by the edge over a real socket) and over a named pipe on IOCP.
-
-### Security
-
-- **Credentials followed a cross-origin redirect.** `KlHttpRedirect*` stripped only
-  `Authorization` when a 3xx pointed at another origin. The caller's `Cookie` and
-  `Proxy-Authorization` went to whatever host the redirect named. All three are now dropped
-  cross-origin, and all three are still kept on a same-origin redirect.
-  - `test_http_redirect` adds `sync_cross_origin_drops_all_credentials` and
-    `sync_same_origin_keeps_credentials`.
 
 ### Fixed
 
