@@ -539,4 +539,57 @@ UTEST(proxy, pool_direct_no_match) {
     kl_http_client_pool_free(&pool);
 }
 
+/* ── Proxy credentials ─────────────────────────────────────────────────── */
+
+/* proxy->auth was written into the request as is: a CR or LF in it injected header lines. */
+UTEST(proxy, auth_with_line_break_is_refused) {
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = 1,
+                                .auth = "Basic x\r\nX-Injected: 1" };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.proxy = &proxy;
+    cfg.timeout_ms = 500;
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof resp);
+    int rc = kl_http_client_request(&alloc, &cfg, "GET", "http://example.com/", NULL, 0, NULL, 0, &resp);
+    KlError err = resp.error;
+    kl_http_client_response_free(&resp);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ((int)err, (int)KL_ERR_INVALID_ARG);   /* refused before connecting */
+}
+
+/* A plain-HTTP request through an authenticating forward proxy must carry Proxy-Authorization; only
+ * the CONNECT tunnel (https) sent it, so such a proxy refused every http:// request. */
+UTEST(proxy, http_request_carries_proxy_authorization) {
+    int proxy_port;
+    int listen_fd = make_listener(&proxy_port);
+    ASSERT_GE(listen_fd, 0);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port,
+                                .auth = "Basic dXNlcjpwYXNz" };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.proxy = &proxy;
+    cfg.timeout_ms = 2000;
+    ProxyReqCtx rctx = { .alloc = &alloc, .cfg = &cfg, .done = 0, .status = 0,
+                         .err = KL_ERR_NONE, .url = "http://example.com/hello", .method = "GET" };
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, proxy_request_thread, &rctx);
+    int client_fd = accept_with_timeout(listen_fd, 3000);
+    static char buf[2048];
+    buf[0] = '\0';
+    if (client_fd >= 0) {
+        (void)read_until(client_fd, buf, sizeof(buf), "\r\n\r\n", 2000);
+        const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+        kl_test_sockwrite(client_fd, resp, strlen(resp));
+        kl_test_closesock(client_fd);
+    }
+    kl_plat_thread_join(&tid);
+    kl_test_closesock(listen_fd);
+    ASSERT_GE(client_fd, 0);
+    ASSERT_TRUE(strstr(buf, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != NULL);
+    ASSERT_EQ(rctx.status, 200);
+}
+
 UTEST_MAIN();
