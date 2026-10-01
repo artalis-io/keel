@@ -28,6 +28,8 @@ extern "C" {
 #define KL_HTTP2_CLIENT_DEFAULT_TIMEOUT_MS  30000
 /** @brief Receive buffer size (bytes). */
 #define KL_HTTP2_CLIENT_RECV_BUF_SIZE       16384
+/** @brief Default per-stream response body cap (bytes): KlHttp2ClientConfig.max_response_size = 0. */
+#define KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE ((size_t)16 * 1024 * 1024)
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -49,6 +51,10 @@ typedef struct {
     char             *body;       /**< Response body (allocator-owned). */
     size_t           body_len;    /**< Length of response body in bytes. */
     size_t           body_cap;    /**< Allocated capacity of body buffer. */
+    int              error;       /**< KL_ERR_NONE (0) = the stream completed. Otherwise a KlError:
+                                   *   KL_ERR_IO (the peer reset the stream), KL_ERR_TOO_LARGE
+                                   *   (the body passed max_response_size) or KL_ERR_ALLOC; status,
+                                   *   headers and body then hold only what arrived. */
 } KlHttp2ClientResponse;
 
 /* ── Session callbacks (session -> KEEL) ─────────────────────────── */
@@ -113,6 +119,8 @@ typedef struct {
     int                       max_concurrent_streams;  /**< 0 = KL_HTTP2_DEFAULT_MAX_STREAMS */
     KlTlsConfig              *tls;
     KlHttp2ClientSessionFactory  session;                 /**< required */
+    size_t                    max_response_size;       /**< per-stream body cap; 0 =
+                                                        *   KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE */
 } KlHttp2ClientConfig;
 
 /* ── Callbacks ───────────────────────────────────────────────────── */

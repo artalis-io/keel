@@ -134,8 +134,10 @@ static void peer_thread(void *arg) {
     memcpy(out + ol, p->after, p->after_len);
     ol += p->after_len;
     (void)kl_test_sockwrite(c, out, ol);
-    /* Record what the client sends back (its close frame), until it closes. */
-    while (kl_test_poll1(c, 0, 3000) > 0) {
+    /* Record what the client sends back (its close frame), until it closes. In a handshake case
+     * hold the connection longer than the client waits, so only the client's own limit can end
+     * the handshake, not this peer's close. */
+    while (kl_test_poll1(c, 0, p->raw_reply ? 8000 : 3000) > 0) {
         long n = kl_test_sockread(c, p->got + p->got_len, sizeof(p->got) - p->got_len);
         if (n <= 0) break;
         p->got_len += (size_t)n;

@@ -64,6 +64,24 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - `test_http_redirect` adds `sync_cross_origin_drops_all_credentials` and
     `sync_same_origin_keeps_credentials`.
 
+- **Freeing the WebSocket client from a callback was a use-after-free.** `on_close` ran before the
+  connection was closed, then the client closed it; the frame loop kept using the connection after
+  `on_message`; and code after `on_open` read it too. Calling `kl_ws_client_free` from any of
+  these, the natural pattern, touched freed memory.
+  - A free from inside a callback is now deferred: the connection is closed at once, and the memory
+    is released when the event handler unwinds. The frame loop stops after a callback that freed or
+    closed the connection.
+  - `on_close` now fires after the connection is closed, as the last callback.
+  - The WebSocket client also now:
+    - fails the connection with close code 1002 on a masked server frame (RFC 6455 5.1);
+    - fails on a close frame whose status may not appear on the wire (1002) or whose reason is
+      not UTF-8 (1007), instead of echoing and reporting it;
+    - caps the upgrade response at 16 KiB instead of growing the buffer without bound;
+    - frees the upgrade request buffer with the size it was allocated with.
+  - New suite `test_websocket_client_peer` uses a raw peer and a poisoning allocator. Without the
+    fix, the three free-in-callback cases crash, and the masked-frame, two close-validation and
+    handshake-cap cases fail.
+
 ### Added
 
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that
@@ -142,6 +160,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     interim and final in separate reads, interim then EOF, 101 still final, streaming `on_headers`
     once). `test_http_client_eof` adds three client cases over a real peer. Without the fix five
     parser cases and all three client cases fail.
+
+- **The HTTP/2 client reported a reset stream as a complete response, and its bodies were
+  unbounded.**
+  - A stream the peer reset (`RST_STREAM`) was handed to `on_resp` like a finished one.
+  - Body data grew without limit, and an allocation failure silently dropped data.
+  - `KlHttp2ClientResponse` gains a trailing `error` field: `KL_ERR_IO` (reset), `KL_ERR_TOO_LARGE`
+    or `KL_ERR_ALLOC`, with 0 meaning the stream completed.
+  - `KlHttp2ClientConfig` gains a trailing `max_response_size` (0 = 16 MiB,
+    `KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE`). Both are additive, zero-default trailing fields.
+  - `test_http2_client` adds three cases on a live connection driven through the mock session.
+    Without the fix, the reset and over-cap cases fail.
 
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
   "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
