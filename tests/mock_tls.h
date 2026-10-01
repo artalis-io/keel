@@ -26,7 +26,23 @@ typedef struct {
     int           comp_mode;   /* set once feed_input is called (completion transport) */
     unsigned char *in;  size_t in_len, in_pos, in_cap;  /* received bytes ring */
     unsigned char *out; size_t out_len, out_cap;         /* outgoing bytes ring */
+    int           eof;         /* socket mode: the peer closed (read returned -1, at_eof says 1) */
+    int           split_done;  /* socket mode: the one simulated split record has been served */
+    size_t        served;      /* socket mode: plaintext bytes returned so far */
 } MockTls;
+
+/* Socket mode follows the KlTls read contract exactly: bytes (>0), 0 for WANT_READ (nothing
+ * decryptable yet), -1 for error or a closed peer (at_eof tells which). A caller that reads a 0 as
+ * end of stream is wrong under every real backend, and this mock now catches it.
+ *
+ * mock_tls_split_record > 0 simulates ONE TLS record split across TCP reads, the normal case on a
+ * real network: the first read takes whatever the socket has into the engine's buffer and returns
+ * 0 (WANT_READ) until it holds mock_tls_split_record bytes, then plaintext comes out of the buffer
+ * (pending() reports what is still buffered). Static-per-TU, default 0 (off). */
+static size_t mock_tls_split_record = 0;
+/* Bytes served normally before the split record starts (so a test can aim the split at a request
+ * body rather than its headers). The first read past this point gathers the record. */
+static size_t mock_tls_split_after = 0;
 
 static int mock_tls_grow(KlAllocator *a, unsigned char **buf, size_t *cap, size_t need) {
     if (need <= *cap) return 0;
@@ -55,7 +71,33 @@ static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_
         if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;   /* drained; reset ring */
         return (ssize_t)n;
     }
-    return kl_sockdef_recv(fd, buf, len);
+    if (mock_tls_split_record && !m->split_done && m->served >= mock_tls_split_after) {
+        /* Gather the record: take what the socket has, report WANT_READ until it is complete. */
+        while (m->in_len < mock_tls_split_record) {
+            if (mock_tls_grow(m->alloc, &m->in, &m->in_cap, mock_tls_split_record) < 0) return -1;
+            kl_ssize_t r = kl_sockdef_recv(fd, m->in + m->in_len, mock_tls_split_record - m->in_len);
+            if (r > 0) { m->in_len += (size_t)r; continue; }
+            if (r == 0) { m->eof = 1; return -1; }
+            return kl_sockdef_io_status() == KL_IO_WOULD_BLOCK ? 0 : -1;
+        }
+        m->split_done = 1;
+    }
+    if (m->in_pos < m->in_len) {                 /* serve the gathered record first */
+        size_t avail = m->in_len - m->in_pos;
+        size_t n = avail < len ? avail : len;
+        memcpy(buf, m->in + m->in_pos, n);
+        m->in_pos += n;
+        if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;
+        m->served += n;
+        return (kl_ssize_t)n;
+    }
+    if (mock_tls_split_record && !m->split_done && m->served < mock_tls_split_after &&
+        len > mock_tls_split_after - m->served)
+        len = mock_tls_split_after - m->served;  /* stop at the split point */
+    kl_ssize_t r = kl_sockdef_recv(fd, buf, len);
+    if (r > 0) { m->served += (size_t)r; return r; }
+    if (r == 0) { m->eof = 1; return -1; }       /* clean close: -1, and at_eof() says so */
+    return kl_sockdef_io_status() == KL_IO_WOULD_BLOCK ? 0 : -1;   /* WANT_READ is 0, not -1 */
 }
 
 static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
@@ -66,7 +108,9 @@ static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf
         m->out_len += len;
         return (ssize_t)len;
     }
-    return kl_sockdef_send(fd, buf, len);
+    kl_ssize_t r = kl_sockdef_send(fd, buf, len);
+    if (r >= 0) return r;
+    return kl_sockdef_io_status() == KL_IO_WOULD_BLOCK ? 0 : -1;   /* WANT_WRITE is 0, not -1 */
 }
 
 static int mock_tls_feed_input(KlTls *self, const void *cipher, size_t len) {
@@ -99,8 +143,11 @@ static KlTlsResult mock_tls_shutdown(KlTls *self, KlSocketHandle fd) {
 }
 static size_t mock_tls_pending(KlTls *self) {
     MockTls *m = (MockTls *)self;
-    return m->comp_mode ? (m->in_len - m->in_pos) : 0;
+    if (!m->comp_mode && mock_tls_split_record && !m->split_done &&
+        m->served >= mock_tls_split_after) return 0;                          /* record incomplete */
+    return m->in_len - m->in_pos;
 }
+static int mock_tls_at_eof(KlTls *self) { return ((MockTls *)self)->eof; }
 static void mock_tls_reset(KlTls *self) {   /* keep-alive: clear buffers, keep comp_mode */
     MockTls *m = (MockTls *)self;
     m->in_len = m->in_pos = m->out_len = 0;
@@ -155,6 +202,7 @@ static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     m->base.peer_cert     = mock_tls_peer_cert_fn;
     m->base.feed_input    = mock_tls_feed_input;
     m->base.drain_output  = mock_tls_drain_output;
+    m->base.at_eof        = mock_tls_at_eof;
     return &m->base;
 }
 

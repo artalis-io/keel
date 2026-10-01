@@ -208,4 +208,95 @@ UTEST(tls_integration, concurrent) {
     kl_http_server_free(&srv);
 }
 
+/* ── A TLS record split across reads ────────────────────────────────────
+ * On a real network a TLS record often spans several TCP segments, so a readable event can arrive
+ * with only part of a record: the engine takes the bytes and read() returns 0, WANT_READ. That is
+ * not end of stream (the KlTls contract: 0 = WANT_READ, -1 = error or closed). The server must
+ * wait for the rest, in the header phase and in the body phase. mock_tls_split_record simulates
+ * the split (socket mode only, so this exercises the readiness transport). */
+
+static void handle_echo_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
+    kl_http_response_status(res, 200);
+    if (br && br->len > 0)
+        (void)kl_http_response_body_copy(res, br->data, br->len);
+}
+
+static KlHttpServer split_srv;
+
+/* Send `req` in two writes split at `cut`, with the server told the record ends at the end of
+ * the request; returns the response. */
+static void split_round_trip(int port, const char *req, size_t cut, char *buf, size_t cap) {
+    buf[0] = '\0';
+    int fd = connect_to(port);
+    if (fd < 0) return;
+    (void)kl_test_sockwrite(fd, req, cut);
+    kl_test_sleep_ms(150);                    /* the server sees the first part on its own */
+    (void)kl_test_sockwrite(fd, req + cut, strlen(req) - cut);
+    read_response(fd, buf, cap, 3000);
+    kl_test_closesock(fd);
+}
+
+UTEST(tls_integration, record_split_in_headers_waits_for_the_rest) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg };
+    ASSERT_EQ(0, kl_http_server_init(&split_srv, &cfg));
+    kl_http_server_route(&split_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &split_srv);
+    wait_for_bind(&split_srv);
+
+    static char buf[2048];
+    const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    mock_tls_split_after = 0;
+    mock_tls_split_record = strlen(req);
+    split_round_trip(split_srv.bound_port, req, 20, buf, sizeof buf);
+    mock_tls_split_record = 0;
+
+    kl_http_server_stop(&split_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&split_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+}
+
+UTEST(tls_integration, record_split_in_body_waits_for_the_rest) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg };
+    ASSERT_EQ(0, kl_http_server_init(&split_srv, &cfg));
+    kl_http_server_route(&split_srv, "POST", "/echo", handle_echo_body,
+                         (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &split_srv);
+    wait_for_bind(&split_srv);
+
+    static char buf[2048];
+    const char *hdrs = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n"
+                       "Connection: close\r\n\r\n";
+    static char req[256];
+    snprintf(req, sizeof req, "%s0123456789", hdrs);
+    mock_tls_split_after = strlen(hdrs);       /* the headers arrive whole; the body record splits */
+    mock_tls_split_record = 10;
+    /* headers alone first, then half the body, then the rest */
+    int fd = connect_to(split_srv.bound_port);
+    buf[0] = '\0';
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, req, strlen(hdrs));
+        kl_test_sleep_ms(150);
+        (void)kl_test_sockwrite(fd, req + strlen(hdrs), 4);
+        kl_test_sleep_ms(150);
+        (void)kl_test_sockwrite(fd, req + strlen(hdrs) + 4, 6);
+        read_response(fd, buf, sizeof buf, 3000);
+        kl_test_closesock(fd);
+    }
+    mock_tls_split_record = 0;
+    mock_tls_split_after = 0;
+
+    kl_http_server_stop(&split_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&split_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "0123456789") != NULL);
+}
+
 UTEST_MAIN();
