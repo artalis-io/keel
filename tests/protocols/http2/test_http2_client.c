@@ -1,6 +1,10 @@
 #include "utest.h"
+#include <keel/keel.h>
 #include <keel/http2_client.h>
 #include <keel/allocator.h>
+#include "net_compat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: this TU calls socket() */
+#include <stdio.h>
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -303,6 +307,129 @@ UTEST(h2c_callbacks, on_data_grows_body) {
 
     kl_http2_client_response_free(&resp, &alloc);
     ASSERT_TRUE(resp.body == NULL);
+}
+
+/* ── A live connection driven through the mock session (audit L11) ──────────────────────────
+ * The client is connected to a loopback listener (prior-knowledge h2, so the mock session is
+ * created once TCP connects), a request is submitted, and the test then plays the session: it calls
+ * the KEEL-managed callbacks exactly as a real session would. Before the fix a stream the peer reset
+ * was handed over as a normal response, and a body grew without bound. */
+
+static KlHttp2ClientSession *g_live_session;
+static KlHttp2ClientSession *capturing_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    return g_live_session;
+}
+
+typedef struct { int calls; int error; int status; size_t body_len; } LiveResp;
+static void live_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r,
+                         void *ud) {
+    (void)c; (void)id;
+    LiveResp *lr = ud;
+    lr->calls++;
+    lr->error = r->error;
+    lr->status = r->status;
+    lr->body_len = r->body_len;
+}
+
+typedef struct { KlSocketHandle fd; int port; } Listener;
+static int live_listen(Listener *l) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;
+    l->fd = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);
+    if (!kl_handle_valid(l->fd)) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof(a);
+    if (bind((int)l->fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen((int)l->fd, 4) != 0 ||
+        getsockname((int)l->fd, (struct sockaddr *)&a, &al) != 0) return -1;
+    l->port = ntohs(a.sin_port);
+    return 0;
+}
+
+/* Connect, wait for the session, submit one GET. Returns the stream id, or -1. */
+static int32_t live_request(KlEventCtx *ev, KlAllocator *a, const Listener *l, size_t max_resp,
+                            KlHttp2ClientConn **out, LiveResp *lr) {
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = capturing_factory;
+    cfg.max_response_size = max_resp;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l->port);
+    g_live_session = NULL;
+    *out = kl_http2_client_connect(ev, a, &cfg, url, NULL, NULL);
+    if (!*out) return -1;
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(ev, 16, 10);
+    if (!g_live_session) return -1;
+    return kl_http2_client_request(*out, "GET", "/", NULL, 0, NULL, 0, live_on_resp, lr);
+}
+
+UTEST(h2c_live, reset_stream_is_reported_as_an_error) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConn *c = NULL;
+    LiveResp lr; memset(&lr, 0, sizeof lr);
+    int32_t id = live_request(&ev, &a, &l, 0, &c, &lr);
+    ASSERT_GT(id, 0);
+    KlHttp2ClientSession *s = g_live_session;
+    s->keel_cbs.on_response(s, id, 200, NULL, 0);
+    s->keel_cbs.on_data(s, id, "par", 3);
+    s->keel_cbs.on_stream_close(s, id, 8 /* CANCEL */);
+    ASSERT_EQ(lr.calls, 1);
+    ASSERT_EQ(lr.error, (int)KL_ERR_IO);                /* was: 0, a "complete" partial response */
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
+}
+
+UTEST(h2c_live, body_over_max_response_size_fails_the_stream) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConn *c = NULL;
+    LiveResp lr; memset(&lr, 0, sizeof lr);
+    int32_t id = live_request(&ev, &a, &l, 10, &c, &lr);
+    ASSERT_GT(id, 0);
+    KlHttp2ClientSession *s = g_live_session;
+    s->keel_cbs.on_response(s, id, 200, NULL, 0);
+    s->keel_cbs.on_data(s, id, "12345678", 8);
+    s->keel_cbs.on_data(s, id, "12345678", 8);          /* 16 > 10 */
+    s->keel_cbs.on_stream_close(s, id, 0);
+    ASSERT_EQ(lr.calls, 1);
+    ASSERT_EQ(lr.error, (int)KL_ERR_TOO_LARGE);         /* was: 0, with all 16 bytes kept */
+    ASSERT_EQ(lr.body_len, (size_t)8);
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
+}
+
+UTEST(h2c_live, complete_stream_has_no_error) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConn *c = NULL;
+    LiveResp lr; memset(&lr, 0, sizeof lr);
+    int32_t id = live_request(&ev, &a, &l, 0, &c, &lr);
+    ASSERT_GT(id, 0);
+    KlHttp2ClientSession *s = g_live_session;
+    s->keel_cbs.on_response(s, id, 200, NULL, 0);
+    s->keel_cbs.on_data(s, id, "hello", 5);
+    s->keel_cbs.on_stream_close(s, id, 0);
+    ASSERT_EQ(lr.calls, 1);
+    ASSERT_EQ(lr.error, 0);
+    ASSERT_EQ(lr.status, 200);
+    ASSERT_EQ(lr.body_len, (size_t)5);
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
 }
 
 UTEST_MAIN();

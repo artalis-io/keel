@@ -63,6 +63,7 @@ struct KlWsClientConn {
     char             ws_key_b64[KL_WS_CLIENT_KEY_B64_SIZE];
     char            *upgrade_buf;      /* send buffer for HTTP upgrade request */
     size_t           upgrade_len;
+    size_t           upgrade_cap;      /* allocated size of upgrade_buf (what kl_free is given) */
     size_t           upgrade_sent;
     char            *handshake_buf;    /* receive buffer for HTTP response */
     size_t           handshake_len;
@@ -91,7 +92,17 @@ struct KlWsClientConn {
      * on non-blocking sockets / TLS WANT_WRITE. */
     KlDrain          out_drain;
     int              out_drain_ready;   /* drain initialized */
+
+    /* Callbacks may free the connection (kl_ws_client_free). While the event handler is on the
+     * stack the free is deferred: the connection is closed at once, and the memory is released
+     * when the handler unwinds, so nothing after a callback touches freed memory. */
+    int              in_event;          /* depth: inside wsc_on_event */
+    int              free_requested;    /* kl_ws_client_free was called from a callback */
 };
+
+/* Largest upgrade response accepted. A server that never ends its headers otherwise grows the
+ * buffer without bound. */
+#define KL_WS_CLIENT_HANDSHAKE_MAX ((size_t)16 * 1024)
 
 /* Hard cap on buffered outbound bytes.  A peer that never reads would
  * otherwise let the buffer grow without bound; exceeding this aborts the
@@ -105,6 +116,10 @@ static void wsc_error(KlWsClientConn *ws, const char *msg);
 static void wsc_close_connection(KlWsClientConn *ws);
 static int  wsc_process_frames(KlWsClientConn *ws, const uint8_t *data, size_t len);
 static void wsc_ping_timer(void *user_data);
+static void wsc_free_now(KlWsClientConn *ws);
+static void wsc_finish_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t len);
+static void wsc_fail(KlWsClientConn *ws, uint16_t code, const char *msg);
+static int  wsc_close_payload_invalid(const uint8_t *p, size_t len);
 
 /* ── I/O abstraction (plain or TLS) ────────────────────────────── */
 
@@ -239,6 +254,7 @@ static int wsc_build_upgrade(KlWsClientConn *ws, const KlUrl *url,
     off += n;
 
     ws->upgrade_len = (size_t)off;
+    ws->upgrade_cap = cap;                       /* until a shrink succeeds below */
     ws->upgrade_sent = 0;
 
     /* Shrink to actual size */
@@ -248,6 +264,7 @@ static int wsc_build_upgrade(KlWsClientConn *ws, const KlUrl *url,
             memcpy(shrunk, ws->upgrade_buf, (size_t)off);
             kl_free(ws->alloc, ws->upgrade_buf, cap);
             ws->upgrade_buf = shrunk;
+            ws->upgrade_cap = (size_t)off;
         }
         /* else: keep oversized buffer, not an error */
     }
@@ -526,7 +543,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
      * the str*-based handshake parser (strstr/strncmp/strncasecmp) cannot
      * over-read past the end of the buffer (L4). */
     if (ws->handshake_len + 1 >= ws->handshake_cap) {
-        if (ws->handshake_cap > SIZE_MAX / 2) {
+        if (ws->handshake_cap >= KL_WS_CLIENT_HANDSHAKE_MAX) {
             wsc_error(ws, "handshake response too large");
             return;
         }
@@ -591,7 +608,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
 
     /* Handshake complete: free handshake buffers */
     if (ws->upgrade_buf) {
-        kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_len);
+        kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_cap);
         ws->upgrade_buf = NULL;
     }
     if (ws->handshake_buf) {
@@ -615,7 +632,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
 
     /* Feed leftover bytes into frame parser (data that arrived with the
      * HTTP upgrade response in the same TCP segment) */
-    if (leftover && leftover_len > 0 && ws->state == WSC_OPEN) {
+    if (leftover && leftover_len > 0 && ws->state == WSC_OPEN && !ws->free_requested) {
         wsc_process_frames(ws, (const uint8_t *)leftover, leftover_len);
         kl_free(ws->alloc, leftover, leftover_len);
     } else if (leftover) {
@@ -638,6 +655,12 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
 
         if (rc < 0) {
             wsc_error(ws, "frame parse error");
+            return -1;
+        }
+
+        /* RFC 6455 5.1: a client MUST close the connection on a masked frame from the server. */
+        if (ws->fp.state != KL_WS_FRAME_HEADER && ws->fp.masked) {
+            wsc_fail(ws, KL_WS_PROTOCOL_ERROR, "masked frame from server");
             return -1;
         }
 
@@ -670,9 +693,15 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                 payload_consumed = ws->ctrl_len;
                 if (rc == 1) {
                     if (opcode == KL_WS_OP_CLOSE) {
-                        uint16_t code = 0;
+                        uint16_t code = 1005;            /* No Status Received */
                         const char *reason = NULL;
                         size_t reason_len = 0;
+                        int bad = wsc_close_payload_invalid((const uint8_t *)payload_data,
+                                                            payload_consumed);
+                        if (bad) {                       /* RFC 6455 7.4 / 8.1 */
+                            wsc_fail(ws, (uint16_t)bad, "invalid close frame");
+                            return -1;
+                        }
                         if (payload_consumed >= 2) {
                             code = (uint16_t)(((uint8_t)payload_data[0] << 8) |
                                               (uint8_t)payload_data[1]);
@@ -685,11 +714,9 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                             wsc_send_frame(ws, KL_WS_OP_CLOSE,
                                            payload_data, payload_consumed);
                         }
-                        if (ws->cbs.on_close)
-                            ws->cbs.on_close(ws, code, reason, reason_len,
-                                             ws->user_data);
-                        ws->state = WSC_CLOSED;
-                        wsc_close_connection(ws);
+                        /* Close first, then notify: on_close is the last word on this
+                         * connection, and it may free it. */
+                        wsc_finish_close(ws, code, reason, reason_len);
                         return -1;
                     } else if (opcode == KL_WS_OP_PING) {
                         wsc_send_frame(ws, KL_WS_OP_PONG,
@@ -735,6 +762,8 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                         ws->cbs.on_message(ws, ws->msg_buf, ws->msg_len,
                                            ws->msg_opcode == KL_WS_OP_BINARY,
                                            ws->user_data);
+                    if (ws->free_requested || ws->state == WSC_CLOSED)
+                        return -1;                       /* freed or closed in the callback */
                     wsc_msg_reset(ws);
                 }
             }
@@ -747,10 +776,7 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                     ws->close_sent = 1;
                     wsc_send_frame(ws, KL_WS_OP_CLOSE, NULL, 0);
                 }
-                if (ws->cbs.on_close)
-                    ws->cbs.on_close(ws, 1005, NULL, 0, ws->user_data);
-                ws->state = WSC_CLOSED;
-                wsc_close_connection(ws);
+                wsc_finish_close(ws, 1005, NULL, 0);
                 return -1;
             } else if (opcode == KL_WS_OP_PING) {
                 wsc_send_frame(ws, KL_WS_OP_PONG, NULL, 0);
@@ -766,6 +792,8 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                                        ws->msg_len,
                                        ws->msg_opcode == KL_WS_OP_BINARY,
                                        ws->user_data);
+                if (ws->free_requested || ws->state == WSC_CLOSED)
+                    return -1;                           /* freed or closed in the callback */
                 wsc_msg_reset(ws);
             }
         }
@@ -804,13 +832,12 @@ static void wsc_handle_open(KlWsClientConn *ws)
     }
     if (nread == 0) {
         /* Server closed connection */
-        if (!ws->close_received) {
-            if (ws->cbs.on_close)
-                ws->cbs.on_close(ws, KL_WS_GOING_AWAY, NULL, 0,
-                                 ws->user_data);
+        if (!ws->close_received)
+            wsc_finish_close(ws, KL_WS_GOING_AWAY, NULL, 0);
+        else {
+            ws->state = WSC_CLOSED;
+            wsc_close_connection(ws);
         }
-        ws->state = WSC_CLOSED;
-        wsc_close_connection(ws);
         return;
     }
 
@@ -842,11 +869,22 @@ static void wsc_handle_writable(KlWsClientConn *ws)
 
 /* ── Event callback ─────────────────────────────────────────────── */
 
+static void wsc_on_event_body(KlWsClientConn *ws, KlEventMask ready);
+
+/* Every user callback fires from inside this handler. A kl_ws_client_free from one of them is
+ * deferred to here, after the handler has stopped touching the connection. */
 static void wsc_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlWsClientConn *ws = user_data;
     (void)fd;
+    ws->in_event++;
+    wsc_on_event_body(ws, ready);
+    if (--ws->in_event == 0 && ws->free_requested)
+        wsc_free_now(ws);                     /* destructive tail: no ws access after this */
+}
 
+static void wsc_on_event_body(KlWsClientConn *ws, KlEventMask ready)
+{
     switch (ws->state) {
     case WSC_CONNECTING:
         wsc_handle_connecting(ws);
@@ -890,6 +928,45 @@ static void wsc_close_connection(KlWsClientConn *ws)
         kl_sock_close(ws->ev->sockets, ws->fd);
         ws->fd = KL_INVALID_SOCKET;
     }
+}
+
+/* The connection is over: close it, then tell the user. on_close is the last callback, and the
+ * user may free the connection in it (deferred by wsc_on_event). */
+static void wsc_finish_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t len)
+{
+    ws->state = WSC_CLOSED;
+    wsc_close_connection(ws);
+    if (ws->cbs.on_close)
+        ws->cbs.on_close(ws, code, reason, len, ws->user_data);
+}
+
+/* Fail the connection for a protocol violation (RFC 6455 7.1.7): send a close frame with `code`,
+ * then close and report the error. */
+static void wsc_fail(KlWsClientConn *ws, uint16_t code, const char *msg)
+{
+    if (!ws->close_sent) {
+        uint8_t b[2] = { (uint8_t)(code >> 8), (uint8_t)code };
+        ws->close_sent = 1;
+        (void)wsc_send_frame(ws, KL_WS_OP_CLOSE, (const char *)b, sizeof b);
+        (void)kl_drain_flush(&ws->out_drain);   /* best effort before the socket closes */
+    }
+    wsc_error(ws, msg);
+}
+
+/* A received close payload is invalid if it is one byte long, carries a status code that may not
+ * appear on the wire (RFC 6455 7.4.1/7.4.2: below 1000, 1004-1006, 1015, unassigned 1016-2999,
+ * 5000 and up), or a reason that is not UTF-8. Returns the close code to fail with, or 0 if valid. */
+static int wsc_close_payload_invalid(const uint8_t *p, size_t len)
+{
+    if (len == 0) return 0;
+    if (len == 1) return KL_WS_PROTOCOL_ERROR;
+    unsigned code = ((unsigned)p[0] << 8) | p[1];
+    int ok = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) ||
+             (code >= 3000 && code <= 4999);
+    if (!ok) return KL_WS_PROTOCOL_ERROR;
+    uint32_t st = KL_UTF8_ACCEPT;
+    kl_utf8_validate(&st, p + 2, len - 2);
+    return st == KL_UTF8_ACCEPT ? 0 : 1007;   /* 1007 Invalid frame payload data */
 }
 
 static void wsc_error(KlWsClientConn *ws, const char *msg)
@@ -1086,11 +1163,21 @@ void kl_ws_client_close(KlWsClientConn *ws, uint16_t code, const char *reason,
 void kl_ws_client_free(KlWsClientConn *ws)
 {
     if (!ws) return;
+    if (ws->in_event) {                       /* called from a callback: finish it on unwind */
+        ws->free_requested = 1;
+        ws->state = WSC_CLOSED;
+        wsc_close_connection(ws);
+        return;
+    }
+    wsc_free_now(ws);
+}
 
+static void wsc_free_now(KlWsClientConn *ws)
+{
     wsc_close_connection(ws);
 
     if (ws->upgrade_buf) {
-        kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_len);
+        kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_cap);
         ws->upgrade_buf = NULL;
     }
     if (ws->handshake_buf) {

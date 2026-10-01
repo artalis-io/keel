@@ -212,18 +212,23 @@ static void h2c_on_data(KlHttp2ClientSession *s, int32_t stream_id,
 {
     KlHttp2ClientConn *c = s->keel_ctx;
     KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
-    if (!st || len == 0) return;
+    if (!st || len == 0 || st->resp.error) return;   /* a failed stream keeps nothing more */
 
-    /* Grow body buffer */
-    if (len > SIZE_MAX - st->resp.body_len) return;
+    /* Bounded body: past the cap the stream is failed, not silently truncated or unbounded. */
+    size_t cap = c->cfg.max_response_size ? c->cfg.max_response_size
+                                          : KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE;
+    if (len > cap || st->resp.body_len > cap - len) {
+        st->resp.error = KL_ERR_TOO_LARGE;
+        return;
+    }
     size_t needed = st->resp.body_len + len;
-    if (needed > SIZE_MAX / 2) return;
 
     if (needed > st->resp.body_cap) {
         size_t new_cap = st->resp.body_cap ? st->resp.body_cap * 2 : 4096;
         if (new_cap < needed) new_cap = needed;
+        if (new_cap > cap) new_cap = cap;
         char *new_body = kl_malloc(c->alloc, new_cap);
-        if (!new_body) return;
+        if (!new_body) { st->resp.error = KL_ERR_ALLOC; return; }
         if (st->resp.body) {
             memcpy(new_body, st->resp.body, st->resp.body_len);
             kl_free(c->alloc, st->resp.body, st->resp.body_cap);
@@ -243,11 +248,12 @@ static void h2c_on_stream_close(KlHttp2ClientSession *s, int32_t stream_id,
     KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
     if (!st) return;
 
-    /* Deliver response */
-    if (st->on_resp) {
-        (void)err;
+    /* Deliver response. A stream the peer reset (err != 0) did not complete: say so, rather than
+     * hand over a partial response as if it were whole. */
+    if (err && !st->resp.error)
+        st->resp.error = KL_ERR_IO;
+    if (st->on_resp)
         st->on_resp(c, stream_id, &st->resp, st->user_data);
-    }
 
     h2c_stream_remove(c, stream_id);
 }
