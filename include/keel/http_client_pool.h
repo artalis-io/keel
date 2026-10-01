@@ -127,6 +127,23 @@ int  kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *c
                       const char *proxy_host, int proxy_port);
 
 /**
+ * @brief TLS-config-keyed acquire/release (what the pooled clients use).
+ *
+ * As kl_http_client_pool_acquire / _release, with the TLS config in place of `is_tls` (NULL for
+ * plaintext). A TLS connection is reused only under the config it was made with, compared by its
+ * `ctx` and `factory`: a request whose config verifies strictly, or presents no client
+ * certificate, never gets a connection made under one that does not, or under another client
+ * identity. The plain acquire/release carry no config, and match only connections released
+ * through them.
+ */
+int  kl_http_client_pool_acquire_tls(KlHttpClientPool *pool, const char *host, int port,
+                                     const KlTlsConfig *tls, const char *proxy_host,
+                                     int proxy_port, KlHttpClientPoolConn *conn);
+int  kl_http_client_pool_release_tls(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
+                                     const char *host, int port, const KlTlsConfig *tls,
+                                     const char *proxy_host, int proxy_port);
+
+/**
  * @brief Close and discard a connection (not returned to pool).
  */
 void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *conn);

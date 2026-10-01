@@ -1055,9 +1055,9 @@ static void async_complete_success(KlHttpClient *c)
         if (!c->conn_reusable || kl_http_client_server_wants_close(&c->resp)) {
             kl_http_client_pool_discard(c->pool, &c->pool_conn);
         } else {
-            kl_http_client_pool_release(c->pool, &c->pool_conn,
-                              c->host_buf, c->pool_port, c->pool_is_tls,
-                              NULL, 0);
+            kl_http_client_pool_release_tls(c->pool, &c->pool_conn,
+                                            c->host_buf, c->pool_port,
+                                            c->pool_is_tls ? c->tls_cfg : NULL, NULL, 0);
         }
         c->tls = NULL;
         c->fd = KL_INVALID_SOCKET;
@@ -1758,8 +1758,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     KlHttpClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_http_client_pool_acquire(pool, host_buf, parsed.port, is_tls,
-                                NULL, 0, &pconn);
+    int acq = kl_http_client_pool_acquire_tls(pool, host_buf, parsed.port, tls_cfg,
+                                              NULL, 0, &pconn);
 
     if (acq == 0) {
         /* Pool hit: skip connect + TLS, go straight to sending */

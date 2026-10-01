@@ -77,6 +77,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   WebSocket client got the same protection in this release. `kl_http2_client_free` from a callback now
   closes the connection and finishes the free when the read handler unwinds, and no further `on_resp`
   is delivered after it.
+- **A pooled TLS connection could be reused under a different TLS config.** The client pool keyed
+  connections by host, port and "is TLS" only. A request whose config verified the server strictly,
+  or presented no client certificate, could therefore get an idle connection made under a config with
+  verification off, or under another client identity. The pool now keys a TLS connection by the
+  config it was made with, compared by `ctx` and `factory`, and the pooled async and sync clients use
+  it. New `kl_http_client_pool_acquire_tls` / `kl_http_client_pool_release_tls` take the config. The
+  existing `kl_http_client_pool_acquire` / `_release` keep their signatures and match only connections
+  released through them.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
