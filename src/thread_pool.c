@@ -154,12 +154,14 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     pool->alloc = alloc;
     pool->wakeup.rd = KL_INVALID_SOCKET;
     pool->wakeup.wr = KL_INVALID_SOCKET;
-    pool->work_cap = queue_cap;
+    /* Admission bounds items in flight at done_cap (queue_cap + num_workers), and before the
+     * workers wake to dequeue, all of them can be in the work queue at once: size it to match. */
+    pool->work_cap = done_cap;
     pool->done_cap = done_cap;
     pool->num_workers = num_workers;
 
     /* Allocate queues */
-    pool->work_queue = kl_malloc(alloc, (size_t)queue_cap * sizeof(KlWorkItem));
+    pool->work_queue = kl_malloc(alloc, (size_t)done_cap * sizeof(KlWorkItem));
     if (!pool->work_queue) { ctx->last_error = KL_ERR_ALLOC; goto fail_pool; }
 
     pool->done_queue = kl_malloc(alloc, (size_t)done_cap * sizeof(KlWorkItem));
@@ -210,7 +212,7 @@ fail_pipe:
 fail_done:
     kl_free(alloc, pool->done_queue, (size_t)done_cap * sizeof(KlWorkItem));
 fail_work:
-    kl_free(alloc, pool->work_queue, (size_t)queue_cap * sizeof(KlWorkItem));
+    kl_free(alloc, pool->work_queue, (size_t)done_cap * sizeof(KlWorkItem));
 fail_pool:
     kl_free(alloc, pool, sizeof(KlThreadPool));
     return NULL;

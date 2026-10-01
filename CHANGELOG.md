@@ -31,6 +31,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   per router, returning -1, because the match is recorded in a 64-bit set. The handler-side limit is
   unchanged and documented: header pointers, including `req->method` and `req->path`, may be
   overwritten once body reading starts, for post-body middleware as for handlers.
+- **`KlThreadPool` could lose work items and run others twice.** Submission admits up to
+  `queue_capacity + num_workers` items in flight, but the work queue held only `queue_capacity`. When
+  more items than that were submitted before idle workers woke to take them, the queue wrapped over
+  items not yet taken. Those were lost, never running and never getting `done_fn` or `cancel_fn`, so a
+  connection suspended on one hung. The items that overwrote them ran twice, with `done_fn` called
+  twice: a double `kl_async_complete`, or a double free of the work context. The work queue now holds
+  every item admission allows. The backpressure limit is unchanged, and the `queue_capacity` doc now
+  states it. A new test submits bursts of items with distinct contexts before 8 workers wake, over 200
+  rounds, and checks each one runs once. Without the fix it fails in the first rounds.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
