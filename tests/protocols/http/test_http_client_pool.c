@@ -6,6 +6,7 @@
 #include <string.h>
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "mock_tls.h"
 #include <errno.h>
 
 /* ── Unit tests: pool init/free ──────────────────────────────────── */
@@ -524,6 +525,101 @@ UTEST(cpool, async_pooled_reuse) {
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
+}
+
+/* ── Pooled TLS: the connection is keyed by the TLS config ────────────────
+ * A TLS connection was pooled under (host, port, is_tls) only, so a request made under one TLS
+ * config could reuse a connection made under another: one with verification off, or another mTLS
+ * identity. Two configs here share the identity mock factory but not their ctx (the context that
+ * would hold the trust store and client identity). Request A, then B, then A again: B must open its
+ * own connection, and the second A must reuse A's, leaving two idle connections. */
+static int g_ctx_a, g_ctx_b;   /* distinct addresses stand in for two real TLS contexts */
+static KlTlsConfig g_tls_a = { .ctx = (KlTlsCtx *)&g_ctx_a, .factory = mock_tls_create };
+static KlTlsConfig g_tls_b = { .ctx = (KlTlsCtx *)&g_ctx_b, .factory = mock_tls_create };
+static KlTlsConfig g_tls_srv = { .ctx = NULL, .factory = mock_tls_create };
+static KlHttpServer g_tls_pool_srv;
+static KlPlatThread g_tls_pool_tid;
+
+static int tls_pool_server_start(void) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8, .tls = &g_tls_srv };
+    if (kl_http_server_init(&g_tls_pool_srv, &cfg) != 0) return -1;
+    kl_http_server_route(&g_tls_pool_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_plat_thread_create(&g_tls_pool_tid, server_thread_fn, &g_tls_pool_srv);
+    wait_for_bind(&g_tls_pool_srv);
+    return g_tls_pool_srv.bound_port > 0 ? 0 : -1;
+}
+static void tls_pool_server_stop(void) {
+    kl_http_server_stop(&g_tls_pool_srv);
+    kl_plat_thread_join(&g_tls_pool_tid);
+    kl_http_server_free(&g_tls_pool_srv);
+}
+
+UTEST(cpool, sync_pooled_tls_keyed_by_config) {
+    ASSERT_EQ(tls_pool_server_start(), 0);
+    char url[128];
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", g_tls_pool_srv.bound_port);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    int ok = kl_http_client_pool_init(&pool, NULL, &a, NULL) == 0;
+    KlHttpClientConfig ca = { .tls = &g_tls_a, .timeout_ms = 2000 };
+    KlHttpClientConfig cb = { .tls = &g_tls_b, .timeout_ms = 2000 };
+    int st[3] = { 0, 0, 0 };
+    int idle_after_b = -1, idle_after_a2 = -1;
+    const KlHttpClientConfig *seq[3] = { &ca, &cb, &ca };
+    for (int i = 0; ok && i < 3; i++) {
+        KlHttpClientResponse r;
+        memset(&r, 0, sizeof r);
+        if (kl_http_client_request_pooled(&pool, &a, seq[i], "GET", url, NULL, 0, NULL, 0, &r) == 0)
+            st[i] = r.status;
+        kl_http_client_response_free(&r);
+        if (i == 1) idle_after_b = kl_http_client_pool_idle_count(&pool);
+        if (i == 2) idle_after_a2 = kl_http_client_pool_idle_count(&pool);
+    }
+    if (ok) kl_http_client_pool_free(&pool);
+    tls_pool_server_stop();
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(st[0], 200);
+    ASSERT_EQ(st[1], 200);
+    ASSERT_EQ(st[2], 200);
+    ASSERT_EQ(idle_after_b, 2);    /* was 1: B reused A's connection */
+    ASSERT_EQ(idle_after_a2, 2);   /* A's connection reused by A */
+}
+
+UTEST(cpool, async_pooled_tls_keyed_by_config) {
+    ASSERT_EQ(tls_pool_server_start(), 0);
+    char url[128];
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", g_tls_pool_srv.bound_port);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    int ok = kl_event_ctx_init(&ev, &a) == 0;
+    KlHttpClientPool pool;
+    if (ok) ok = kl_http_client_pool_init(&pool, NULL, &a, &ev) == 0;
+    KlHttpClientConfig ca = { .tls = &g_tls_a, .timeout_ms = 2000 };
+    KlHttpClientConfig cb = { .tls = &g_tls_b, .timeout_ms = 2000 };
+    const KlHttpClientConfig *seq[3] = { &ca, &cb, &ca };
+    int st[3] = { 0, 0, 0 };
+    int idle_after_b = -1, idle_after_a2 = -1;
+    for (int i = 0; ok && i < 3; i++) {
+        AsyncPoolCtx x = { 0, 0 };
+        KlHttpClient *c = kl_http_client_start_pooled(&pool, &ev, &a, seq[i], "GET", url,
+                                                      NULL, 0, NULL, 0, async_pool_done, &x);
+        for (int k = 0; c && k < 300 && !x.done; k++) kl_event_ctx_run(&ev, 16, 10);
+        st[i] = x.status;
+        kl_http_client_free(c);
+        if (i == 1) idle_after_b = kl_http_client_pool_idle_count(&pool);
+        if (i == 2) idle_after_a2 = kl_http_client_pool_idle_count(&pool);
+    }
+    if (ok) {
+        kl_http_client_pool_free(&pool);
+        kl_event_ctx_free(&ev);
+    }
+    tls_pool_server_stop();
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(st[0], 200);
+    ASSERT_EQ(st[1], 200);
+    ASSERT_EQ(st[2], 200);
+    ASSERT_EQ(idle_after_b, 2);
+    ASSERT_EQ(idle_after_a2, 2);
 }
 
 /* ── Pooled sync: input validation ───────────────────────────────── */
