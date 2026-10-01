@@ -116,6 +116,7 @@ KlHttpMultipartPartMeta	struct	http_body_reader_multipart.h
 KlHttpMultipartReader	opaque	http_body_reader_multipart.h
 KlHttpParam	struct	http_request.h
 KlHttpProxyConfig	struct	http_client.h
+KlHttpRedirectCheckFn	callback	http_redirect.h
 KlHttpRedirectClient	opaque	http_redirect.h
 KlHttpRedirectConfig	struct	http_redirect.h
 KlHttpRedirectDoneFn	callback	http_redirect.h

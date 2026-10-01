@@ -107,6 +107,7 @@ http_client_pool.h	KlHttpClientPoolEntry	opaque	opaque	F2-B1 opaque in v3; KlHtt
 http_compress.h	KlHttpCompressStream	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal
 http_connection.h	KlHttpConnPool	struct	caller-owned-value	F2-B1 caller-owned value; embedded in caller-owned KlHttpServer; visible to permit enclosing layout
 http_cors.h	KlHttpCorsConfig	struct	caller-constructed	caller-built; F2-C append-only
+http_redirect.h	KlHttpRedirectCheckFn	callback	api-signature	-
 http_redirect.h	KlHttpRedirectClient	opaque	opaque	private handle
 http_redirect.h	KlHttpRedirectConfig	struct	caller-constructed	caller-built; F2-C append-only
 http_redirect.h	KlHttpRedirectDoneFn	callback	api-signature	-
