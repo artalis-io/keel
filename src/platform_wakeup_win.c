@@ -36,8 +36,25 @@ static int win_wakeup_pair(SOCKET sv[2])
     if (client == INVALID_SOCKET) goto fail;
     if (connect(client, (struct sockaddr *)&addr, addrlen) != 0) goto fail;
 
-    server = accept(listener, NULL, NULL);
-    if (server == INVALID_SOCKET) goto fail;
+    /* Accept OUR client, not whoever connected first: a local process could race a connect into the
+     * listener's backlog and take the read end of the pair. Compare the accepted peer with the
+     * client's own local address; close anything else and keep accepting (bounded). */
+    {
+        struct sockaddr_in mine;
+        int mlen = (int)sizeof(mine);
+        if (getsockname(client, (struct sockaddr *)&mine, &mlen) != 0) goto fail;
+        for (int tries = 0; ; tries++) {
+            struct sockaddr_in peer;
+            int plen = (int)sizeof(peer);
+            server = accept(listener, (struct sockaddr *)&peer, &plen);
+            if (server == INVALID_SOCKET) goto fail;
+            if (peer.sin_port == mine.sin_port && peer.sin_addr.s_addr == mine.sin_addr.s_addr)
+                break;                                  /* our own client */
+            closesocket(server);                        /* an intruder: drop it */
+            server = INVALID_SOCKET;
+            if (tries >= 8) goto fail;
+        }
+    }
 
     closesocket(listener);
     /* Winsock sockets are inheritable by default; these two are Keel's own and must not leak into a

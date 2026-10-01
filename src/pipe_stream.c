@@ -102,6 +102,7 @@ struct KlPipeListener {
     KlPipeCloseFn      on_close;
     void              *user_data;
     KlPipeStream      *pending;       /* instances with a ConnectNamedPipe outstanding */
+    int                starting;      /* inside kl_pipe_listen's start: the owner has no listener */
 };
 
 /* ── Final release: every op has retired and the owner has let go ─────────────────────────── */
@@ -499,6 +500,10 @@ static void listener_dispose_obj(void *vp, void *conn) {
 
 static void listener_on_close(void *vp) {
     KlPipeListener *pl = vp;
+    /* A close while kl_pipe_listen is still starting (the first arm failed with nothing posted) is
+     * for a listener the owner never received: kl_pipe_listen reports the failure and frees it, and
+     * no on_close fires for it. */
+    if (pl->starting) return;
     if (pl->on_close) pl->on_close(pl->user_data);   /* may free pl: touch nothing after */
 }
 
@@ -563,7 +568,9 @@ KlPipeStatus kl_pipe_listen(struct KlEventCtx *ctx, const char *path, const KlPi
     }
     /* Start: posts up to `window` instances. A hard arm failure closes the listener, and with nothing
      * posted it detaches at once; report that as a failed listen rather than hand back a dead one. */
+    pl->starting = 1;
     (void)kl_listener_start(&pl->l);
+    pl->starting = 0;
     if (kl_listener_state(&pl->l) != KL_LISTENER_STATE_LISTENING) {
         if (kl_listener_is_detached(&pl->l)) {
             kl_plat_pipe_close(pl->first_h);   /* NULL unless the first arm never ran */

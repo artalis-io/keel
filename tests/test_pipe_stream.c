@@ -34,8 +34,10 @@
 typedef struct { long live_blocks; long long live_bytes; } Counts;
 static Counts g_counts;
 
+static int g_fail_at;   /* > 0: the g_fail_at-th allocation from now fails (allocation failure sweep) */
 static void *ca_malloc(void *c, size_t n) {
     (void)c;
+    if (g_fail_at > 0 && --g_fail_at == 0) return NULL;
     void *p = malloc(n ? n : 1);
     if (p) { g_counts.live_blocks++; g_counts.live_bytes += (long long)n; }
     return p;
@@ -1232,6 +1234,38 @@ UTEST_F(pipe_iocp, listen_refuses_a_name_already_in_use) {
     ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_listener_closed, &s, 5000));
     ASSERT_EQ(kl_pipe_listener_free(s.pl), 0);
     ASSERT_STREQ(kl_pipe_status_str(KL_PIPE_IN_USE), "in_use");
+}
+
+/* A listen whose first arm fails reports the failure and fires no on_close (audit L7). The listener
+ * closed and detached inside kl_listener_start, and its close hook called the owner's on_close for a
+ * listener kl_pipe_listen was about to free and never hand out. Sweep an allocation failure through
+ * every allocation kl_pipe_listen makes, including the first arm's instance. */
+UTEST_F(pipe_iocp, listen_that_fails_to_arm_calls_no_on_close) {
+    NEED_IOCP();
+    int failures = 0;
+    for (int n = 1; n <= 16; n++) {
+        char name[128]; pipe_name(name, sizeof name, "listen-armfail");
+        static Srv2 s;
+        memset(&s, 0, sizeof s);
+        KlPipeListenConfig lc = srv2_cfg(&s, 1);
+        KlPipeListener *pl = NULL;
+        long before = g_counts.live_blocks;
+        g_fail_at = n;
+        KlPipeStatus st = kl_pipe_listen(&utest_fixture->ev, name, &lc, &pl);
+        g_fail_at = 0;
+        if (st == KL_PIPE_OK) {                    /* past the last allocation: listen works */
+            s.pl = pl;
+            kl_pipe_listener_close(pl);
+            ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_listener_closed, &s, 5000));
+            ASSERT_EQ(kl_pipe_listener_free(pl), 0);
+            break;
+        }
+        failures++;
+        ASSERT_TRUE(pl == NULL);
+        ASSERT_EQ(s.closes, 0);                    /* was: on_close for a listener never handed out */
+        ASSERT_EQ(g_counts.live_blocks, before);   /* nothing leaked on the failure path */
+    }
+    ASSERT_GT(failures, 2);                        /* the sweep did reach past the struct allocations */
 }
 
 /* White-box, at the PAL: a server instance's DACL grants the current user and SYSTEM only. */

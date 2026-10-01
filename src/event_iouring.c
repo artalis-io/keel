@@ -130,6 +130,8 @@ typedef struct KlIouOp {
         void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
     };
     int            aborted;               /* cancelled (idle timeout): deliver as error */
+    int            cancel_unsent;         /* aborted, but no SQE was free for its ASYNC_CANCEL:
+                                           * re-posted at the next drain (iou_post_unsent_cancels) */
 } KlIouOp;
 
 /* A registered readiness watch. Armed as a single-shot POLL_ADD; re-armed on each
@@ -487,9 +489,9 @@ static int iou_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
 /* Prepare a send SQE for the unsent tail of a WRITE op. A registered send buffer
  * (reg_idx >= 0) goes out via WRITE_FIXED (kernel-pinned, zero per-op mapping); a malloc'd
  * buffer via plain SEND. Both handle partial sends by re-prep from send_done. */
-static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
+static int iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { op->aborted = 1; return; }   /* no slot: surface as error next drain */
+    if (!sqe) { op->aborted = 1; return -1; }   /* no slot: nothing queued for this op */
     void *p = op->sendbuf + op->send_done;
     size_t n = op->send_total - op->send_done;
     if (op->reg_idx >= 0)
@@ -497,6 +499,7 @@ static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     else
         io_uring_prep_send(sqe, op->fd, p, n, 0);
     io_uring_sqe_set_data(sqe, op);
+    return 0;
 }
 
 /* ── zero-copy sendfile via splice (file → pipe → socket) ────────── */
@@ -511,25 +514,27 @@ static int iou_open_pipe(KlIouOp *op) {
 
 /* Splice-in: file_fd (at file_off) → pipe_wr, up to one pipe-capacity chunk. flags=0
  * so io_uring waits asynchronously if the pipe is momentarily full (no busy error). */
-static void iou_prep_splice_in(KlIouState *st, KlIouOp *op) {
+static int iou_prep_splice_in(KlIouState *st, KlIouOp *op) {
     uint64_t chunk = op->file_count - op->file_off;
     if (chunk > KL_IOU_SPLICE_CHUNK) chunk = KL_IOU_SPLICE_CHUNK;
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { op->aborted = 1; return; }
+    if (!sqe) { op->aborted = 1; return -1; }
     io_uring_prep_splice(sqe, op->file_fd, (int64_t)op->file_off, op->pipe_wr, -1,
                          (unsigned)chunk, 0);
     io_uring_sqe_set_data(sqe, op);
     op->sf_stage = 1;
+    return 0;
 }
 
 /* Splice-out: pipe_rd → socket, up to the bytes currently buffered in the pipe.
  * flags=0 so io_uring waits for socket writability instead of returning EAGAIN. */
-static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
+static int iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { op->aborted = 1; return; }
+    if (!sqe) { op->aborted = 1; return -1; }
     io_uring_prep_splice(sqe, op->pipe_rd, -1, op->fd, -1, (unsigned)op->pipe_len, 0);
     io_uring_sqe_set_data(sqe, op);
     op->sf_stage = 2;
+    return 0;
 }
 
 /* Undo a just-posted send/sendfile op whose INITIAL submission could not obtain an SQE
@@ -569,7 +574,7 @@ static int iou_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
         off += iov[i].len;
     }
     iou_op_push(st, op);
-    iou_prep_send_tail(st, op);
+    (void)iou_prep_send_tail(st, op);
     if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
@@ -603,7 +608,7 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
     }
     op->send_total = head_total + got;
     iou_op_push(st, op);
-    iou_prep_send_tail(st, op);
+    (void)iou_prep_send_tail(st, op);
     if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
@@ -643,7 +648,7 @@ static int iou_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int
         off += head_iov[i].len;
     }
     iou_op_push(st, op);
-    iou_prep_send_tail(st, op);                      /* stage 0: send the head */
+    (void)iou_prep_send_tail(st, op);                /* stage 0: send the head */
     if (op->aborted) { iou_post_undo(st, op); return -1; }   /* SQ exhausted: fail the post */
     return 0;
 }
@@ -759,6 +764,8 @@ static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDgr
             if (sqe) {
                 io_uring_prep_cancel(sqe, o, 0);
                 io_uring_sqe_set_data(sqe, NULL);   /* sentinel: ignore the cancel CQE */
+            } else {
+                o->cancel_unsent = 1;               /* no SQE: re-posted at the next drain */
             }
         }
     return 0;
@@ -826,6 +833,8 @@ static void iou_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
             if (sqe) {
                 io_uring_prep_cancel(sqe, o, 0);
                 io_uring_sqe_set_data(sqe, NULL);   /* sentinel: ignore the cancel CQE */
+            } else {
+                o->cancel_unsent = 1;               /* no SQE: re-posted at the next drain */
             }
         }
 }
@@ -870,8 +879,13 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         op->send_done += (size_t)res;
         if (op->send_done < op->send_total) {         /* short write: send the tail */
-            iou_prep_send_tail(st, op);
-            return 0;                                 /* still in flight, no event */
+            if (iou_prep_send_tail(st, op) == 0)
+                return 0;                             /* still in flight, no event */
+            /* No SQE for the tail: nothing is queued for this op, so it would never complete.
+             * Fail it now (the driver closes the connection) rather than strand it. */
+            iou_send_release(st, op);
+            ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
+            return 1;
         }
         iou_send_release(st, op);                     /* return the registered buffer */
         ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
@@ -886,7 +900,10 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         if (op->sf_stage == 0) {                      /* head SEND (partial-capable) */
             op->send_done += (size_t)res;
-            if (op->send_done < op->send_total) { iou_prep_send_tail(st, op); return 0; }
+            if (op->send_done < op->send_total) {
+                if (iou_prep_send_tail(st, op) == 0) return 0;
+                goto sendfile_reprep_failed;          /* no SQE: fail now, never strand */
+            }
             op->sent_total = op->send_total;          /* head bytes accounted */
             iou_send_release(st, op);                 /* head done: release its buffer */
             if (op->file_off >= op->file_count) {     /* empty body: response complete */
@@ -896,8 +913,8 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             if (iou_open_pipe(op) < 0) {              /* splice pipe */
                 ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0; return 1;
             }
-            iou_prep_splice_in(st, op);               /* → stage 1 */
-            return 0;
+            if (iou_prep_splice_in(st, op) == 0) return 0;   /* → stage 1 */
+            goto sendfile_reprep_failed;
         }
         if (op->sf_stage == 1) {                      /* file → pipe (res = bytes buffered) */
             if (res == 0) {                           /* short/empty file: done */
@@ -906,8 +923,8 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             }
             op->file_off += (uint64_t)res;
             op->pipe_len = (size_t)res;
-            iou_prep_splice_out(st, op);              /* → stage 2 */
-            return 0;
+            if (iou_prep_splice_out(st, op) == 0) return 0;  /* → stage 2 */
+            goto sendfile_reprep_failed;
         }
         /* sf_stage == 2: pipe → socket (res = bytes delivered to the socket) */
         if (res == 0) {                               /* socket closed mid-transfer: stop */
@@ -916,10 +933,22 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         op->pipe_len -= (size_t)res;
         op->sent_total += (size_t)res;
-        if (op->pipe_len > 0) { iou_prep_splice_out(st, op); return 0; }  /* drain the pipe */
-        if (op->file_off < op->file_count) { iou_prep_splice_in(st, op); return 0; }  /* next chunk */
+        if (op->pipe_len > 0) {                       /* drain the pipe */
+            if (iou_prep_splice_out(st, op) == 0) return 0;
+            goto sendfile_reprep_failed;
+        }
+        if (op->file_off < op->file_count) {          /* next chunk */
+            if (iou_prep_splice_in(st, op) == 0) return 0;
+            goto sendfile_reprep_failed;
+        }
         ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;     /* file fully sent */
         ev->bytes = op->sent_total;
+        return 1;
+    sendfile_reprep_failed:
+        /* A continuation found no SQE: nothing is queued for this op, so it would never complete.
+         * Fail the response now (the driver closes the connection) rather than strand it. */
+        iou_send_release(st, op);
+        ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
         return 1;
 
     case IOU_DGRAM_RECV:
@@ -978,8 +1007,23 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     return 0;
 }
 
+/* A cancel that found no free SQE was recorded rather than dropped: without it the op it targets
+ * (a recv on a quiet socket, say) would never complete and the connection or datagram would never
+ * retire. Post those cancels now; any still without an SQE wait for the next drain. */
+static void iou_post_unsent_cancels(KlIouState *st) {
+    for (KlIouOp *o = st->ops; o; o = o->next) {
+        if (!o->cancel_unsent) continue;
+        struct io_uring_sqe *sqe = iou_sqe(st);
+        if (!sqe) return;
+        io_uring_prep_cancel(sqe, o, 0);
+        io_uring_sqe_set_data(sqe, NULL);           /* sentinel: ignore the cancel CQE */
+        o->cancel_unsent = 0;
+    }
+}
+
 static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIouState *st = ctx->loop._backend;
+    iou_post_unsent_cancels(st);
 
     struct __kernel_timespec ts, *tsp = NULL;
     if (timeout_ms >= 0) {
