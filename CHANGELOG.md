@@ -336,6 +336,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     server held the connection until the drain deadline (500 ms by default) instead of closing.
   - The CORS middleware now sends `Vary: Origin` when it echoes a specific origin, so a shared cache
     cannot serve one origin's `Access-Control-Allow-Origin` to another.
+- **HTTP client response-handling fixes.**
+  - `max_response_size` now bounds the decompressed body, buffered or streamed, not only the bytes on
+    the wire. A small compressed response could inflate to the decompressor's own cap.
+  - The async client no longer ignores a failed decompression. It used to deliver the still-encoded
+    body as a success; the sync client already failed.
+  - A streaming response whose decompression fails at the final flush (a truncated stream) now fails
+    the request.
+  - `Connection` is now read as a token list, so `Connection: keep-alive, close` is not pooled.
+  - A 101 Switching Protocols response is not pooled either.
+  - After an interim 1xx with headers, a final response without any no longer frees the header
+    array with size 0.
+  - A failure to copy the response headers no longer leaks the body.
+  - A streaming response parser reused after `reset` no longer counts the previous response against
+    its size limit.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

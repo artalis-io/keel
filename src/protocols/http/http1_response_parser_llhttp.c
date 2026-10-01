@@ -297,6 +297,10 @@ static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
                                             KlHttpClientResponse *resp)
 {
     /* Streaming mode: body was forwarded via callback, skip body transfer */
+    /* The allocator first: if a later step fails, kl_http_client_response_free can still free
+     * what was already handed over (the body). */
+    resp->alloc = *p->alloc;
+
     if (p->on_body_cb) {
         resp->body = NULL;
         resp->body_len = 0;
@@ -317,6 +321,13 @@ static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
         p->body = NULL;
         p->body_len = 0;
         p->body_cap = 0;
+    }
+
+    /* No headers (an interim response may have grown the array): free it at its own size. */
+    if (p->headers && p->num_headers == 0) {
+        kl_free(p->alloc, p->headers, (size_t)p->headers_cap * sizeof(KlHttpClientHeader));
+        p->headers = NULL;
+        p->headers_cap = 0;
     }
 
     /* Make exact-sized copy of headers array */
@@ -407,6 +418,7 @@ static void resp_parser_reset(KlHttp1ResponseParser *self)
     p->complete = 0;
     p->error = 0;
     p->no_body = 0;
+    p->body_streamed = 0;        /* the size limit counts one response */
 
     kl_free(p->alloc, p->hdr_name, p->hdr_name_cap);
     kl_free(p->alloc, p->hdr_value, p->hdr_value_cap);

@@ -961,7 +961,8 @@ static void async_handle_receiving(KlHttpClient *c)
             /* Bytes after the response (in this read, or still buffered in TLS) belong to nothing we
              * asked for; a pooled connection carrying them would hand them to the next request as
              * the start of its response. Such a connection is not reused. */
-            c->conn_reusable = consumed == (size_t)nread &&
+            c->conn_reusable = c->resp.status != 101 &&   /* the connection now speaks another protocol */
+                               consumed == (size_t)nread &&
                                !(c->tls && c->tls->pending && c->tls->pending(c->tls) > 0);
             async_complete_success(c);
             return;
@@ -1080,13 +1081,19 @@ static void async_complete_success(KlHttpClient *c)
         c->parser = NULL;
     }
 
-    /* Decompress buffered response body if applicable */
+    /* Decompress buffered response body if applicable. A failure fails the request: never a
+     * "success" carrying a body still encoded, or larger than max_response_size. */
+    KlError derr = KL_ERR_NONE;
     if (!c->decomp_wrap) {
-        kl_http_client_decompress_response_body(&c->resp, c->decompress_cfg);
+        int drc = kl_http_client_decompress_response_body(&c->resp, c->decompress_cfg, c->max_resp);
+        if (drc == -2) derr = KL_ERR_TOO_LARGE;
+        else if (drc < 0) derr = KL_ERR_COMPRESS;
+    } else if (c->decomp_wrap->failed) {
+        derr = KL_ERR_COMPRESS;
     }
 
     c->state = KL_HTTP_CLIENT_DONE;
-    c->error = KL_ERR_NONE;
+    c->error = derr;
     if (c->on_done)
         c->on_done(c, c->user_data);
 }
@@ -1349,6 +1356,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     /* Response decompression config */
     KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
     c->decompress_cfg = dcfg;
+    c->max_resp = max_resp;
 
     /* Request streaming */
     if (stream && stream->body_read) {
@@ -1372,6 +1380,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             w->user_on_complete = stream->on_complete;
             w->user_data = stream->user_data;
             w->dcfg = dcfg;
+            w->max = max_resp;
             w->ds.alloc = alloc;
             c->decomp_wrap = w;
 
@@ -1744,6 +1753,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     /* Response decompression config */
     c->decompress_cfg = cfg ? cfg->decompress : NULL;
+    c->max_resp = max_resp;
 
     /* Create response parser */
     c->parser = kl_http1_response_parser_llhttp(max_resp, alloc);
