@@ -248,6 +248,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     inside the hook, an asynchronous completion whose re-submit completes inline, and an inline
     failure. All five fail without the fix.
 
+- **`kl_anon_pipe_create` accepted a runtime loop that cannot watch host pipes.** On POSIX the
+  readiness path took `KL_EVENT_CAP_NATIVE_FD` to mean "watches OS descriptors". The lwIP BSD loop,
+  installed at run time, advertises that bit (the socket-provider pairing needs it) but polls lwIP
+  socket numbers, so create returned `KL_PIPE_OK` for a pipe whose readiness would never be reported.
+  - Every runtime-installed loop is now refused with `KL_PIPE_UNSUPPORTED`, as the IOCP completion
+    path already refuses one.
+  - `docs/architecture/process_pipe_streams.md` lists the lwIP BSD loop among the refused engines.
+  - `test_anon_pipe` adds `runtime_loop_is_refused_even_with_native_fd`, with a stub provider that
+    advertises `READINESS | NATIVE_FD`.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);

@@ -171,6 +171,40 @@ UTEST(anon_pipe, support_follows_platform_and_engine) {
     kl_event_ctx_free(&ev);
 }
 
+/* A runtime-installed loop is refused even when it advertises KL_EVENT_CAP_NATIVE_FD. That bit means
+ * "polls the handles its socket provider hands out"; the lwIP BSD loop advertises it and polls lwIP
+ * socket numbers, so a host pipe's readiness would never be reported. Before the fix create returned
+ * KL_PIPE_OK there, for a pipe that never delivers. This stub loop stands in for it: the refusal
+ * happens before any OS call, so none of its ops beyond init/close/caps is ever reached. */
+static int  rt_init(KlEventLoop *l) { (void)l; return 0; }
+static int  rt_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l; (void)fd; (void)m; (void)u; return 0; }
+static int  rt_mod(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l; (void)fd; (void)m; (void)u; return 0; }
+static int  rt_del(KlEventLoop *l, KlSocketHandle fd) { (void)l; (void)fd; return 0; }
+static int  rt_wait(KlEventLoop *l, KlEvent *o, int max, int t) { (void)l; (void)o; (void)max; (void)t; return 0; }
+static void rt_close(KlEventLoop *l) { (void)l; }
+static unsigned rt_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD; }
+static const KlEventOps RT_OPS = { .init = rt_init, .add = rt_add, .mod = rt_mod, .del = rt_del,
+                                   .wait = rt_wait, .close = rt_close, .caps = rt_caps };
+static const KlEventProvider RT_PROVIDER = { &RT_OPS, "runtime-native-fd-stub" };
+
+UTEST(anon_pipe, runtime_loop_is_refused_even_with_native_fd) {
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init_ex(&ev, &g_alloc, &RT_PROVIDER), 0);
+    long before = g_counts.live_blocks;
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 0, 0);
+    for (int d = KL_ANON_PIPE_READS; d <= KL_ANON_PIPE_WRITES; d++) {
+        KlPipeStream *p = (KlPipeStream *)1;
+        KlAnonPipeEnd e; memset(&e, 0x5A, sizeof e);
+        ASSERT_EQ((int)kl_anon_pipe_create(&ev, (KlAnonPipeDir)d, &cfg, &p, &e),
+                  (int)KL_PIPE_UNSUPPORTED);                /* was: KL_PIPE_OK on POSIX */
+        ASSERT_TRUE(p == NULL);
+        ASSERT_TRUE(e._handle == NULL && e._fd1 == 0);
+    }
+    ASSERT_EQ(g_counts.live_blocks, before);                 /* nothing opened, nothing allocated */
+    kl_event_ctx_free(&ev);
+}
+
 #if defined(_WIN32)
 #include <windows.h>
 #include "../src/platform_thread.h"   /* the PAL thread seam, for the child-side helper */
