@@ -1916,6 +1916,118 @@ UTEST(integration, empty_header_value_keeps_the_next_header) {
     ASSERT_TRUE(strstr(buf[1], "empty=blank after=yes") != NULL);   /* whitespace only */
 }
 
+/* ── A paused body whose client goes away ─────────────────────────────── */
+
+/* A route whose body reader pauses the body on its first bytes and never resumes it. Its client
+ * then disconnects. The connection must be reclaimed at the body deadline (on a completion loop
+ * nothing is posted while paused, so there is no op to cancel), and the next connection given the
+ * same pool slot must not inherit the pause. */
+typedef struct { KlHttpBodyReader base; KlAllocator *alloc; const KlHttpRequest *req; } PauseReader;
+
+static int  pause_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    (void)data; (void)len;
+    kl_http_request_pause_body(((PauseReader *)self)->req);
+    return 0;
+}
+static void pause_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void pause_on_error(KlHttpBodyReader *self)    { (void)self; }
+static void pause_destroy(KlHttpBodyReader *self) {
+    PauseReader *r = (PauseReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+static KlHttpBodyReader *pause_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)ud;
+    PauseReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data = pause_on_data;
+    r->base.on_complete = pause_on_complete;
+    r->base.on_error = pause_on_error;
+    r->base.destroy = pause_destroy;
+    r->alloc = alloc;
+    r->req = req;
+    return &r->base;
+}
+static void handle_pause(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, "unreachable", 11);
+}
+
+static void set_recv_timeout(int fd, int ms) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)ms;
+#else
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+#endif
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+}
+
+static void handle_post_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx);
+static KlHttpServer pause_slot_server;
+
+static void pause_slot_server_thread(void *arg) {
+    (void)arg;
+    kl_http_server_run(&pause_slot_server);
+}
+
+UTEST(integration, paused_body_client_gone_frees_a_clean_slot) {
+    KlHttpServerConfig cfg = {.port = 0, .max_connections = 1,
+                              .read_timeout_ms = 300, .body_timeout_ms = 300};
+    kl_http_server_init(&pause_slot_server, &cfg);
+    kl_http_server_route(&pause_slot_server, "POST", "/pause", handle_pause, NULL, pause_factory);
+    kl_http_server_route(&pause_slot_server, "POST", "/echo", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, pause_slot_server_thread, NULL);
+    wait_for_bind(&pause_slot_server);
+    int port = pause_slot_server.bound_port;
+
+    /* 1: start a body, get it paused, go away. */
+    int fd = connect_to(port);
+    const char *h1 = "POST /pause HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n";
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, h1, strlen(h1));
+        kl_test_sleep_ms(100);
+        (void)kl_test_sockwrite(fd, "0123456789", 10);
+        kl_test_sleep_ms(100);
+        kl_test_closesock(fd);
+    }
+
+    /* The body deadline must reclaim that slot. */
+    int active = -1;
+    for (int i = 0; i < 40; i++) {
+        KlHttpServerStats st;
+        kl_http_server_stats(&pause_slot_server, &st);
+        active = st.active_connections;
+        if (active == 0) break;
+        kl_test_sleep_ms(100);
+    }
+
+    /* 2: an ordinary upload on the same (only) slot, its body in a later read. */
+    static char buf[4096];
+    buf[0] = '\0';
+    fd = connect_to(port);
+    const char *h2 = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+    if (fd >= 0) {
+        set_recv_timeout(fd, 3000);
+        (void)kl_test_sockwrite(fd, h2, strlen(h2));
+        kl_test_sleep_ms(100);
+        (void)kl_test_sockwrite(fd, "hello", 5);
+        read_response(fd, buf, sizeof(buf));
+        kl_test_closesock(fd);
+    }
+
+    kl_http_server_stop(&pause_slot_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&pause_slot_server);
+
+    ASSERT_EQ(active, 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "hello") != NULL);
+}
+
 /* ── Post-body middleware integration tests ──────────────────────────── */
 
 static int post_mw_check_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
