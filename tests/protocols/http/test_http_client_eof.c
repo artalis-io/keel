@@ -12,6 +12,9 @@
  * connection it no longer waits for a body that never comes, and at end of stream it is not taken
  * for a truncation.
  *
+ * Interim responses. A 1xx other than 101 (103 Early Hints, 100 Continue) is followed by the final
+ * response on the same connection; the client must report the final one, not the interim one.
+ *
  * Pooled requests. kl_http_client_start_pooled left the timer ids at the memset's 0 and never set a
  * timeout: every completion cancelled whichever timer held id 0 (someone else's), and a pooled
  * request to a silent server never timed out.
@@ -261,6 +264,39 @@ UTEST(head, async_completes_at_end_of_headers) {
     ASSERT_EQ(r.err, 0);   /* was: waited for 10 bytes until the deadline */
     ASSERT_EQ(r.status, 200);
     ASSERT_EQ(r.has_probe, 1);
+}
+
+#define EARLY_HINTS_THEN_FINAL \
+    "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" \
+    "HTTP/1.1 200 OK\r\nX-Probe: yes\r\nContent-Length: 5\r\n\r\nhello"
+
+UTEST(interim, sync_reports_the_final_response) {
+    KlHttpClientResponse r;
+    ASSERT_EQ(sync_req("GET", EARLY_HINTS_THEN_FINAL, 1, &r), 0);
+    ASSERT_EQ(r.status, 200);                            /* was: 103, with no body */
+    ASSERT_EQ(r.body_len, (size_t)5);
+    ASSERT_TRUE(r.body && memcmp(r.body, "hello", 5) == 0);
+    ASSERT_TRUE(find_header(&r, "X-Probe") != NULL);
+    ASSERT_TRUE(find_header(&r, "Link") == NULL);        /* the interim headers are not merged in */
+    kl_http_client_response_free(&r);
+}
+
+UTEST(interim, async_reports_the_final_response) {
+    AsyncResult r;
+    async_req("GET", EARLY_HINTS_THEN_FINAL, 1, &r);
+    ASSERT_EQ(r.done, 1);
+    ASSERT_EQ(r.err, 0);
+    ASSERT_EQ(r.status, 200);
+    ASSERT_EQ(r.body_len, (size_t)5);
+    ASSERT_EQ(memcmp(r.body, "hello", 5), 0);
+    ASSERT_EQ(r.has_probe, 1);
+}
+
+/* Only an interim response, then the server closes: there is no response, so it is an error. */
+UTEST(interim, sync_interim_then_close_fails) {
+    KlHttpClientResponse r;
+    ASSERT_EQ(sync_req("GET", "HTTP/1.1 100 Continue\r\n\r\n", 0, &r), -1);
+    kl_http_client_response_free(&r);
 }
 
 UTEST(head, async_close_after_headers_is_not_a_truncation) {
