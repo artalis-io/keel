@@ -118,7 +118,7 @@ UTEST(alloc_sizes, decompressed_body_is_freed_with_its_size_and_terminated) {
     KlDecompressConfig dc;
     memset(&dc, 0, sizeof dc);
     dc.factory = md_factory;
-    ASSERT_EQ(kl_http_client_decompress_response_body(&r, &dc), 0);
+    ASSERT_EQ(kl_http_client_decompress_response_body(&r, &dc, 0), 0);
     ASSERT_EQ(r.body_len, (size_t)6);
     ASSERT_EQ(memcmp(r.body, "aabbcc", 6), 0);
     ASSERT_EQ(r.body[6], '\0');                                /* terminated like every body */
