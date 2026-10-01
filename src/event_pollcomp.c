@@ -495,6 +495,10 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
         int a = accept(op->fd, (struct sockaddr *)&ss, &slen);
+        if (a >= 0) {                        /* close-on-exec, portably (accept4 is not everywhere) */
+            int fdf = fcntl(a, F_GETFD, 0);
+            if (fdf >= 0) (void)fcntl(a, F_SETFD, fdf | FD_CLOEXEC);
+        }
         if (a < 0) return 0;                 /* EAGAIN/spurious: keep the accept op */
         pc_set_blocking(a);
         ev->kind = KL_COMP_ACCEPT;

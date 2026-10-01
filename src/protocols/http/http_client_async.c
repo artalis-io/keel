@@ -122,6 +122,7 @@ static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
     if (!kl_handle_valid(fd))
         return -1;
 
+    kl_sock_set_cloexec(c->ev_ctx->sockets, fd);   /* never inherited by an embedder's children */
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
@@ -239,6 +240,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam,
                                        c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
     if (!kl_handle_valid(fd)) { *out_err = KL_ERR_CONNECT; return -1; }
+    kl_sock_set_cloexec(c->ev_ctx->sockets, fd);   /* never inherited by an embedder's children */
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
