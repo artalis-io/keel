@@ -186,7 +186,9 @@ int  kl_http_router_match(KlHttpRouter *r, const char *method, size_t method_len
  * @brief Register pre-body middleware that runs before body reading.
  * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern: exact match or prefix with trailing slash-star.
+ * @param pattern URL pattern: prefix with trailing slash-star, or exact: matched as a route
+ *                pattern is (`:name` segments, a trailing slash tolerated either way), so the
+ *                middleware covers every path a route with the same pattern serves.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure.
@@ -202,7 +204,9 @@ int  kl_http_router_use(KlHttpRouter *r, const char *method, const char *pattern
  *
  * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
- * @param pattern URL pattern: exact match or prefix with trailing slash-star.
+ * @param pattern URL pattern: prefix with trailing slash-star, or exact: matched as a route
+ *                pattern is (`:name` segments, a trailing slash tolerated either way), so the
+ *                middleware covers every path a route with the same pattern serves.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure or when

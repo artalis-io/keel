@@ -62,6 +62,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   body went out unencrypted, and the pooled client filed the plain connection as a TLS one, so later
   TLS requests could reuse it. The sync client already failed closed. Each of the four entry points
   now refuses a secure URL unless the TLS config has a factory.
+- **Middleware on an exact path did not run for that path with a trailing slash.** Route matching
+  tolerates one trailing slash on either side: the route `/admin` serves `GET /admin/`, and the route
+  `/admin/` serves `GET /admin`. Exact middleware patterns were compared byte for byte, so an auth
+  middleware registered on `/admin` did not run for `GET /admin/`, which the `/admin` handler then
+  served. Pre-body and post-body middleware, HTTP/1 and HTTP/2 alike. An exact middleware pattern is
+  now matched by the route matcher itself, so it covers every path a route with that pattern serves.
+  **Behavior change:** this includes `:name` segments, which now match any value in an exact
+  middleware pattern, as they do in a route.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
