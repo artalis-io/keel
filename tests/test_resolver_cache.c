@@ -3,6 +3,7 @@
 #include <keel/resolver_cache.h>
 
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include "net_compat.h"
 
@@ -128,12 +129,11 @@ UTEST(rescache, cache_miss) {
 
     KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
                                          test_done_fn, NULL);
-    ASSERT_TRUE(req != NULL);
+    ASSERT_TRUE(req == NULL);            /* completed synchronously: no live handle to cancel */
     ASSERT_EQ(mock_resolve_count, 1);
     ASSERT_EQ(done_called, 1);
     ASSERT_EQ(done_error, 0);
 
-    cache->cancel(req);
     cache->destroy(cache);
 }
 
@@ -155,13 +155,10 @@ UTEST(rescache, cache_hit) {
     reset_done();
     KlResolveReq *req2 = cache->resolve(cache, NULL, "example.com", 80,
                                           test_done_fn, NULL);
-    ASSERT_TRUE(req2 != NULL);
+    ASSERT_TRUE(req2 == NULL);         /* a hit completes synchronously: no live handle */
     ASSERT_EQ(mock_resolve_count, 1);  /* still 1: no new inner call */
     ASSERT_EQ(done_called, 1);
     ASSERT_EQ(done_error, 0);
-
-    /* Cancel on cache hit should not call inner cancel */
-    cache->cancel(req2);
     ASSERT_EQ(mock_cancel_count, 0);
 
     cache->destroy(cache);
@@ -302,11 +299,11 @@ UTEST(rescache, cancel_cache_hit) {
     /* Populate */
     resolve_fire(cache, "example.com", 80);
 
-    /* Hit: then cancel */
+    /* A hit completes inside resolve(): the handle is already dead, so none is returned and there
+     * is nothing to cancel (resolver.h); the inner resolver is never asked to cancel. */
     KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
                                          test_done_fn, NULL);
-    ASSERT_TRUE(req != NULL);
-    cache->cancel(req);
+    ASSERT_TRUE(req == NULL);
     ASSERT_EQ(mock_cancel_count, 0);  /* no inner cancel for cache hit */
 
     cache->destroy(cache);
@@ -461,12 +458,11 @@ UTEST(rescache, reentrant_cancel_in_sync_done_fn_cache_hit) {
     ASSERT_TRUE(cache != NULL);
     reentrant_cache_under_test = cache;
 
-    /* Warm the cache with a no-cancel call. */
+    /* Warm the cache with a no-cancel call (synchronous: no live handle comes back). */
     reentrant_cancel_inside_done = 0;
     KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
                                          reentrant_done_fn, NULL);
-    ASSERT_TRUE(req != NULL);
-    cache->cancel(req);
+    ASSERT_TRUE(req == NULL);
 
     /* Now resolve the SAME host: cache hit → sync done_fn → user cancels. */
     reentrant_cancel_inside_done = 1;
@@ -534,6 +530,35 @@ UTEST(rescache, reentrant_cancel_in_async_done_fn) {
     ASSERT_EQ(done_called, 1);
 
     cache->destroy(cache);
+}
+
+/* ── A synchronous completion leaves nothing allocated (no cancel needed) ── */
+static long g_live_blocks;
+static void *cnt_malloc(void *c, size_t n) { (void)c; void *p = malloc(n ? n : 1); if (p) g_live_blocks++; return p; }
+static void *cnt_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)c; (void)o; void *q = realloc(p, n ? n : 1); if (q && !p) g_live_blocks++; return q;
+}
+static void cnt_free(void *c, void *p, size_t n) { (void)c; (void)n; if (p) { g_live_blocks--; free(p); } }
+
+UTEST(rescache, sync_completion_leaves_nothing_allocated) {
+    reset_mocks();
+    reset_done();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mock_resolve, .cancel = mock_cancel,
+                          .destroy = mock_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+    (void)cache->resolve(cache, NULL, "example.com", 80, test_done_fn, NULL);   /* miss, sync */
+    long after_miss = g_live_blocks;
+    for (int i = 0; i < 5; i++)                                                  /* hits, sync */
+        (void)cache->resolve(cache, NULL, "example.com", 80, test_done_fn, NULL);
+    ASSERT_EQ(done_called, 6);
+    /* The caller keeps no handle (like KlHttpClient after an inline completion): every hit must
+     * release its request itself. Before the fix each hit leaked one. */
+    ASSERT_EQ(g_live_blocks, after_miss);
+    cache->destroy(cache);
+    ASSERT_EQ(g_live_blocks, 0);
 }
 
 UTEST_MAIN();

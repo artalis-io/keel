@@ -69,6 +69,11 @@ struct KlResolver {
      * inner->resolve() returns.  Use an in_resolve/completed sentinel
      * to detect sync completion and defer freeing the per-request handle.
      * See resolver_cache.c for the canonical implementation of this pattern.
+     *
+     * Handle lifetime: the returned handle is valid only until done_fn has run. After that (and in
+     * particular after a synchronous completion, when resolve() may return NULL) it must not be
+     * passed to cancel(); the resolver has already released it. A caller keeps a handle only for a
+     * request still in flight.
      */
     KlResolveReq *(*resolve)(KlResolver *self, KlEventCtx *ctx,
                               const char *host, int port,

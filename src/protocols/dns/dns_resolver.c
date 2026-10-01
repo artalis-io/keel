@@ -934,7 +934,7 @@ static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
                 }
             /* dns_leg_settle may have freed q; break BEFORE q = q->next runs on
              * freed memory, then rescan from the (updated) inflight head. */
-            if (settled) { again = 1; break; }
+            if (settled) { again = !r->destroy_requested; break; }
         }
     }
 }
@@ -1001,8 +1001,10 @@ static void dns_tcp_deliver(KlDnsResolver *r, KlDnsTcp *t) {
         t->rlen -= 2 + mlen;
         t->rneed = 0;
 
-        if (q)
+        if (q) {
             dns_leg_settle(r, q, leg);
+            if (r->destroy_requested) return;        /* done() destroyed the resolver: stop */
+        }
     }
 }
 
@@ -1019,10 +1021,23 @@ static void dns_tcp_flush(KlDnsResolver *r, KlDnsTcp *t) {
     dns_tcp_update_interest(r, t);
 }
 
+static void dns_tcp_on_event_body(KlDnsResolver *r, KlDnsTcp *t, KlEventMask mask);
+
+/* The TCP watcher runs outside any datagram frame, so nothing else defers a teardown requested from a
+ * done() it triggers (the user may destroy the resolver there, which the contract allows). Hold the
+ * resolver-level in_done sentinel for the whole event, as dns_complete does for one completion, and
+ * run a requested teardown only once the body has stopped touching `r` and `t` (inside `r`). */
 static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
     (void)fd;
     KlDnsTcp *t = ud;
     KlDnsResolver *r = t->r;
+    r->in_done++;
+    dns_tcp_on_event_body(r, t, mask);
+    if (--r->in_done == 0 && r->destroy_requested)
+        dns_teardown(r);                             /* destructive tail: no `r` access after this */
+}
+
+static void dns_tcp_on_event_body(KlDnsResolver *r, KlDnsTcp *t, KlEventMask mask) {
 
     if (t->state == DNS_TCP_CONNECTING) {
         int err = 0;
@@ -1051,7 +1066,7 @@ static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
             if (n > 0) {
                 t->rlen += (size_t)n;
                 dns_tcp_deliver(r, t);
-                if (!kl_handle_valid(t->fd)) return;
+                if (r->destroy_requested || !kl_handle_valid(t->fd)) return;
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))

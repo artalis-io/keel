@@ -133,6 +133,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   client, and sends a raw frame in pieces plus a ping whose payload is split across writes; without
   the fix both cases fail.
 
+- **Destroying the DNS resolver from `done()` during a TCP fallback was a use-after-free.** When
+  the completing answer (or a connection failure) came through the TCP fallback, `done()` ran from
+  the TCP watcher, outside any datagram frame; a `destroy()` there (which the resolver contract
+  allows) freed the resolver while the TCP handler was still reading its state. The TCP handler now
+  holds the resolver's deferred-destroy sentinel for the whole event and stops once a destroy was
+  requested. New `test_dns_resolver` cases destroy from `done()` after a TCP answer and after a TCP
+  drop.
+- **Every resolver-cache hit leaked a request under `KlHttpClient`.** A synchronous completion (a
+  hit, or an inner resolver that answered inline) returned a live handle that only `cancel()`
+  freed, and the client drops the handle of a request that already completed. It now frees the
+  handle and returns NULL; `resolver.h` states that a handle is dead once `done_fn` has run.
+  **Behavior change:** `resolve()` on the cache returns NULL after a synchronous completion, and
+  such a handle must not be cancelled (the built-in DNS resolver already behaved this way).
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);

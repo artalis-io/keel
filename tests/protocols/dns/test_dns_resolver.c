@@ -1410,6 +1410,61 @@ UTEST(dns, tcp_fallback) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Destroy from done() when the request completes inside the TCP watcher (the answer arrived over the
+ * TCP fallback). That watcher runs outside any datagram frame, so the teardown must be deferred until
+ * the TCP handler stops touching the resolver: before the fix it freed the resolver and then kept
+ * reading its TCP state (ASan: heap-use-after-free). Both families go over TCP, so the completing leg
+ * is delivered by the TCP handler. */
+UTEST(dns, tcp_answer_destroy_from_done) {
+    reset_dns();
+    g_answer_a = 1; g_answer_aaaa = 1;
+    g_truncate = 1;                       /* every UDP reply sets TC: both legs recover over TCP */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
+    g_reentrant_resolver = r;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done_destroy, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_TRUE(tcp.accepts >= 1);        /* the completion really came through the TCP path */
+    pump(&ctx, &g_done, 5);               /* let any stale event for the dead resolver run */
+    /* r was destroyed from done(); do NOT touch it. */
+    mock_tcp_stop(&tcp);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* Same, when the TCP connection drops and dns_tcp_fail settles the legs (the done() fires from the
+ * failure path's rescan loop). */
+UTEST(dns, tcp_drop_destroy_from_done) {
+    reset_dns();
+    g_answer_a = 1;
+    g_truncate = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
+    tcp.drop_on_accept = 1;
+    g_reentrant_resolver = r;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done_destroy, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    pump(&ctx, &g_done, 5);
+    mock_tcp_stop(&tcp);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+}
+
 /* The per-nameserver TCP connection is persistent: a second resolve reuses the
  * connection cached from the first (single accept), and both A+AAAA legs of a
  * single resolve pipeline over it. */
