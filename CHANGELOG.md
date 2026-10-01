@@ -147,6 +147,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   **Behavior change:** `resolve()` on the cache returns NULL after a synchronous completion, and
   such a handle must not be cancelled (the built-in DNS resolver already behaved this way).
 
+- **IOCP: a watcher interest change from a callback leaked an operation, and a failed re-arm could
+  hang shutdown.** Between a dispatched watcher completion and its re-arm the probe owns no kernel
+  I/O. An interest change in that window (the usual case: `kl_watcher_mod` from inside the watcher's
+  own callback, which the async HTTP and WebSocket clients do on every request) allocated a new
+  probe and "cancelled" the idle one, which could never complete, so one operation leaked per change
+  until the loop closed. A re-arm that failed (for example on a socket closed from the callback) left
+  its operation in a state neither `kl_watcher_del` nor the loop's close freed, and
+  `kl_event_ctx_free` then waited forever. An idle probe is now retargeted in place, and a failed
+  re-arm is retired so both existing paths free it. New `test_iocp_engine` cases count allocations
+  across 200 callback-driven interest changes and free a loop after a failed re-arm under a watchdog.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);
