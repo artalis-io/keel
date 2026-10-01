@@ -52,7 +52,8 @@ void *kl_realloc(KlAllocator *a, void *ptr, size_t old_size, size_t new_size);
 /**
  * @brief Free memory through the given allocator.
  * @param a    Allocator to use.
- * @param ptr  Pointer to free.
+ * @param ptr  Pointer to free. NULL is a no-op: the allocator's free hook is never called with NULL,
+ *             so a sized or tracking allocator never has to handle it.
  * @param size Size of the allocation being freed.
  */
 void  kl_free(KlAllocator *a, void *ptr, size_t size);

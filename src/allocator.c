@@ -24,5 +24,6 @@ void *kl_realloc(KlAllocator *a, void *ptr, size_t old_size, size_t new_size) {
 }
 
 void kl_free(KlAllocator *a, void *ptr, size_t size) {
+    if (!ptr) return;   /* a free hook never sees NULL (see allocator.h) */
     a->free(a->ctx, ptr, size);
 }
