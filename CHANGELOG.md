@@ -232,6 +232,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - `test_http_client_eof` adds `pooled.completion_leaves_unrelated_timer_alone` and
     `pooled.silent_server_times_out`.
 
+- **A completion-mode `KlStream` stalled if its submit hook completed inline.** The stream contract
+  (`docs/contracts/stream.md`) lets a submit hook complete synchronously, and the read side honours
+  that. The write pump, however, marked the send as in flight only after the hook returned, so an
+  inline `kl_stream_on_write_complete` was dropped as spurious. The send never retired, and the
+  queue stalled with no error.
+  - The pump now records the send before calling the hook. It notes an inline completion and
+    retires it after the hook returns, then loops to submit the next batch, so a backend that
+    always completes inline drains the queue without recursion.
+  - An inline delivery failure is the same sticky error as an asynchronous one. `KlStreamSubmitFn`
+    now documents inline delivery.
+  - No shipped backend completes inline (the IOCP pipe path self-queues even synchronous results),
+    so this matters to custom providers and wrappers.
+  - `test_stream` adds five cases: referencing and copying backends, a backend that writes more from
+    inside the hook, an asynchronous completion whose re-submit completes inline, and an inline
+    failure. All five fail without the fix.
+
 - **Keel's own descriptors leaked into an embedder's child processes.** Four descriptors were
   inherited by every child an embedder spawned:
   - the epoll instance (`epoll_create1(0)`);

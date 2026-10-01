@@ -138,6 +138,120 @@ UTEST(stream_write, completion_copying_consumes_at_submit_but_blocks_next) {
     kl_stream_write_free(&s);
 }
 
+/* ── Synchronous (inline) completion of a submit ─────────────────────────────
+ * docs/contracts/stream.md: the submit hook may complete inline. Before the fix the stream marked
+ * the send in flight only after submit returned, so an inline kl_stream_on_write_complete was
+ * dropped as spurious: the send never retired and the queue stalled for good. */
+typedef struct {
+    CS        cs;
+    KlStream *s;
+    int       inline_ok;      /* result delivered inline */
+    int       refill;         /* write this many one-byte "x" batches from inside submit */
+    int       inline_after;   /* complete inline only from this submit on (1-based); 0 = always */
+} IS;
+
+static int is_submit(void *ctx, const char *data, size_t len) {
+    IS *m = ctx;
+    if (cs_submit(&m->cs, data, len) != 0) return -1;
+    if (m->refill > 0) {                              /* the backend's own callback writes more */
+        m->refill--;
+        (void)kl_stream_write(m->s, "x", 1);          /* queued behind the in-flight send */
+    }
+    if (m->inline_after == 0 || m->cs.submits >= m->inline_after)
+        (void)kl_stream_on_write_complete(m->s, m->inline_ok);
+    return 0;
+}
+
+static void is_init(IS *m, KlStream *s) {
+    memset(m, 0, sizeof(*m));
+    m->s = s;
+    m->inline_ok = 1;
+}
+
+static void inline_completion_drains(int *utest_result, int copying) {
+    KlAllocator a = kl_allocator_default();
+    KlStream s; memset(&s, 0, sizeof(s));
+    IS m; is_init(&m, &s);
+    ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);
+    kl_stream_set_submit(&s, is_submit, &m, copying);
+
+    ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ(m.cs.submits, 1);
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);   /* retired inline: nothing in flight */
+    ASSERT_EQ((int)kl_stream_write(&s, "world", 5), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ(m.cs.submits, 2);                        /* was: 1, stalled behind the lost send */
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
+    ASSERT_EQ((int)m.cs.total, 10);
+    ASSERT_EQ(memcmp(m.cs.buf, "helloworld", 10), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* a stray completion is still ignored */
+    ASSERT_EQ(m.cs.submits, 2);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);            /* nothing in flight: free is allowed */
+}
+
+UTEST(stream_write, completion_inline_referencing_drains) {
+    inline_completion_drains(utest_result, /*copying=*/0);
+}
+
+UTEST(stream_write, completion_inline_copying_drains) {
+    inline_completion_drains(utest_result, /*copying=*/1);
+}
+
+/* A backend that writes more from inside submit and then completes inline: the pump must loop,
+ * submitting each newly queued batch in turn, in order, without recursing. */
+UTEST(stream_write, completion_inline_with_refill_loops_in_order) {
+    KlAllocator a = kl_allocator_default();
+    KlStream s; memset(&s, 0, sizeof(s));
+    IS m; is_init(&m, &s);
+    m.refill = 200;
+    ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);
+    kl_stream_set_submit(&s, is_submit, &m, /*copying=*/0);
+
+    ASSERT_EQ((int)kl_stream_write(&s, "go", 2), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ(m.refill, 0);
+    ASSERT_EQ(m.cs.submits, 201);                      /* "go", then each refilled "x" */
+    ASSERT_EQ((int)m.cs.total, 202);
+    ASSERT_EQ(memcmp(m.cs.buf, "go", 2), 0);
+    for (int i = 2; i < 202; i++) ASSERT_EQ(m.cs.buf[i], 'x');
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+}
+
+/* An asynchronous completion whose pump re-submits, and that next send completes inline. */
+UTEST(stream_write, completion_async_then_inline_chain) {
+    KlAllocator a = kl_allocator_default();
+    KlStream s; memset(&s, 0, sizeof(s));
+    IS m; is_init(&m, &s);
+    m.inline_after = 2;                                /* the first send completes later */
+    ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);
+    kl_stream_set_submit(&s, is_submit, &m, /*copying=*/0);
+
+    ASSERT_EQ((int)kl_stream_write(&s, "one", 3), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)kl_stream_write(&s, "two", 3), (int)KL_STREAM_ACCEPTED);  /* queued behind */
+    ASSERT_EQ(m.cs.submits, 1);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* async: pumps "two", which completes inline */
+    ASSERT_EQ(m.cs.submits, 2);
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
+    ASSERT_EQ(memcmp(m.cs.buf, "onetwo", 6), 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+}
+
+/* An inline delivery failure is the same terminal, sticky error as an asynchronous one. */
+UTEST(stream_write, completion_inline_failure_is_sticky) {
+    KlAllocator a = kl_allocator_default();
+    KlStream s; memset(&s, 0, sizeof(s));
+    IS m; is_init(&m, &s);
+    m.inline_ok = 0;
+    ASSERT_EQ(kl_stream_write_init(&s, &a, 64), 0);
+    kl_stream_set_submit(&s, is_submit, &m, /*copying=*/0);
+
+    ASSERT_EQ((int)kl_stream_write(&s, "hello", 5), (int)KL_STREAM_ERROR);
+    ASSERT_EQ(m.cs.submits, 1);
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 5);   /* referencing: bytes retained */
+    ASSERT_EQ((int)kl_stream_write(&s, "x", 1), (int)KL_STREAM_ERROR);   /* sticky */
+    ASSERT_EQ(m.cs.submits, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);           /* the send retired: free is allowed */
+}
+
 UTEST(stream_write, completion_submission_failure_keeps_bytes_and_errors) {
     KlAllocator a = kl_allocator_default();
     CS c; cs_init(&c); c.fail = 1;                  /* submit always fails */
