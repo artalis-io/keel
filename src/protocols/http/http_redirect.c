@@ -18,6 +18,11 @@ struct KlHttpRedirectClient {
     KlHttpClient          *inner;          /* current in-flight async client */
     KlAllocator       *alloc;
     KlEventCtx        *ev_ctx;
+    /* The caller's config, COPIED at start: every hop after the first starts
+     * from a later event-loop turn, when a config the caller kept on its stack
+     * is gone. (Members it points at - tls, decompress, proxy, sockets - are
+     * the caller's to keep alive, as for any client.) NULL when none given. */
+    KlHttpClientConfig     cfg_copy;
     const KlHttpClientConfig *cfg;
     KlHttpClientPool      *pool;           /* NULL if not pooled */
 
@@ -297,7 +302,12 @@ static KlHttpRedirectClient *alloc_redirect_client(KlAllocator *alloc,
 
     rc->alloc = alloc;
     rc->ev_ctx = ev_ctx;
-    rc->cfg = cfg;
+    if (cfg) {
+        rc->cfg_copy = *cfg;
+        rc->cfg = &rc->cfg_copy;
+    } else {
+        rc->cfg = NULL;
+    }
     rc->pool = pool;
     rc->on_done = on_done;
     rc->user_data = user_data;

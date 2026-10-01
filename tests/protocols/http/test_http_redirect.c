@@ -6,6 +6,7 @@
 #include "net_compat.h"
 #include <keel/keel.h>
 
+#include <stdlib.h>
 #include <string.h>
 #if !defined(_MSC_VER)
 #if !defined(_MSC_VER)
@@ -642,6 +643,40 @@ UTEST(redirect, async_301) {
     ASSERT_EQ(ctx.status, 200);
     ASSERT_EQ(ctx.body_len, 3u);
     ASSERT_TRUE(memcmp(ctx.body, "GET", 3) == 0);
+
+    kl_http_redirect_free(rc);
+    kl_event_ctx_free(&ev);
+}
+
+UTEST(redirect, async_chain_outlives_the_callers_config) {
+    /* The config is the caller's argument, not an object it must keep alive:
+     * hops after the first start on later loop turns, when a config kept on
+     * the caller's stack is gone. Scribble over it right after the start; the
+     * chain must still complete. */
+    ensure_servers();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientConfig *cfg = malloc(sizeof *cfg);
+    ASSERT_TRUE(cfg != NULL);
+    memset(cfg, 0, sizeof *cfg);
+    cfg->timeout_ms = TEST_TIMEOUT_MS;
+
+    AsyncRedirCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, cfg, NULL,
+                                                      "GET", test_url("/chain"),
+                                                      NULL, 0, NULL, 0,
+                                                      async_redir_done, &ctx);
+    ASSERT_TRUE(rc != NULL);
+    memset(cfg, 0xA5, sizeof *cfg);   /* the caller's copy is now garbage */
+    free(cfg);
+
+    ASSERT_EQ(run_until_done(&ev, &ctx, TEST_TIMEOUT_MS), 0);
+    ASSERT_TRUE(ctx.done);
+    ASSERT_EQ(ctx.error, 0);
+    ASSERT_EQ(ctx.status, 200);
 
     kl_http_redirect_free(rc);
     kl_event_ctx_free(&ev);
