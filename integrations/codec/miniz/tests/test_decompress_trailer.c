@@ -14,6 +14,7 @@
 #include "compress_miniz.h"     /* kl_compress_miniz_ctx_create/destroy */
 #include "decompress_miniz.h"   /* kl_decompress_miniz_create */
 #include <string.h>
+#include <stdlib.h>
 
 /* `printf 'hello world' | gzip -n -c` -- 31 bytes: 10 header, 13 deflate, 8 trailer.
  * Trailer is bytes [23..30]: CRC32 (LE) 85 11 4a 0d, ISIZE (LE) 0b 00 00 00 (= 11). */
@@ -127,6 +128,53 @@ UTEST(gz_trailer, split_trailer_across_feeds_ok) {
     ASSERT_EQ((size_t)11, s.len);
     ASSERT_EQ(0, memcmp(s.buf, "hello world", 11));
     done(d, ctx);
+}
+
+/* ── Compression output size (single shot) ─────────────────────────────────────────────────
+ * The caller frees the compressed buffer with *out_len (KlCompress contract; core does exactly
+ * that, and stores it as body_owned_size). The buffer must therefore be exactly that size, not the
+ * worst-case bound it was compressed into: a sized allocator would otherwise be handed the wrong
+ * size. A size-checking allocator records each block and counts frees whose size differs. */
+#define SZ_MAX_BLOCKS 64
+static struct { void *p; size_t n; } g_blk[SZ_MAX_BLOCKS];
+static int g_size_mismatch;
+static void sz_note(void *p, size_t n) {
+    for (int i = 0; i < SZ_MAX_BLOCKS; i++)
+        if (!g_blk[i].p) { g_blk[i].p = p; g_blk[i].n = n; return; }
+}
+static void sz_drop(void *p, size_t n) {
+    for (int i = 0; i < SZ_MAX_BLOCKS; i++)
+        if (g_blk[i].p == p) { if (g_blk[i].n != n) g_size_mismatch++; g_blk[i].p = NULL; return; }
+}
+static void *sz_malloc(void *c, size_t n) { (void)c; void *p = malloc(n ? n : 1); if (p) sz_note(p, n); return p; }
+static void *sz_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)c;
+    if (p) sz_drop(p, o);
+    void *q = realloc(p, n ? n : 1);
+    if (q) sz_note(q, n);
+    return q;
+}
+static void sz_free(void *c, void *p, size_t n) { (void)c; if (!p) return; sz_drop(p, n); free(p); }
+
+UTEST(gz_compress, output_is_freed_at_its_own_size) {
+    KlAllocator al = { sz_malloc, sz_realloc, sz_free, NULL };
+    memset(g_blk, 0, sizeof g_blk);
+    g_size_mismatch = 0;
+    KlCompressCtx *ctx = kl_compress_miniz_ctx_create(6, &al);
+    ASSERT_TRUE(ctx != NULL);
+    KlCompress *c = kl_compress_miniz_create(ctx, &al);
+    ASSERT_TRUE(c != NULL);
+    static char in[4096];
+    for (size_t i = 0; i < sizeof in; i++) in[i] = (char)('a' + (i % 7));   /* compressible */
+    char *out = NULL;
+    size_t out_len = 0;
+    int rc = c->compress(c, in, sizeof in, &out, &out_len, &al);
+    if (rc == 0) kl_free(&al, out, out_len);   /* exactly as the server frees it */
+    c->destroy(c);
+    kl_compress_miniz_ctx_destroy(ctx);
+    ASSERT_EQ(rc, 0);
+    ASSERT_LT(out_len, sizeof in);
+    ASSERT_EQ(g_size_mismatch, 0);
 }
 
 UTEST_MAIN()
