@@ -50,14 +50,26 @@ typedef struct KlHttp1ResponseParser KlHttp1ResponseParser;
 
 /*
  * Append-only vtable (see docs/contracts/compatibility.md): implementers
- * zero-initialize and recompile per major version. All three ops (parse, reset,
- * destroy) are required; core calls each. New ops are appended after destroy.
+ * zero-initialize and recompile per major version. parse, reset and destroy are
+ * required; core calls each. New ops are appended after destroy and are optional.
  */
 struct KlHttp1ResponseParser {
     KlHttp1ParseResult (*parse)(KlHttp1ResponseParser *self, KlHttpClientResponse *resp,
                            const char *buf, size_t len, size_t *consumed); /**< Parse response bytes */
     void (*reset)(KlHttp1ResponseParser *self);   /**< Reset for next response */
     void (*destroy)(KlHttp1ResponseParser *self); /**< Free parser resources */
+    /** Optional: the peer closed the connection (end of stream) before parse returned OK.
+     *  Return KL_HTTP1_PARSE_OK, with the response filled in as parse would, if the bytes seen
+     *  form a complete message (a close-delimited body ends here); KL_HTTP1_PARSE_ERROR if the
+     *  message was truncated (EOF inside the headers, or inside a Content-Length or chunked body).
+     *  NULL keeps the older behavior: a response whose status line arrived counts as complete. */
+    KlHttp1ParseResult (*finish)(KlHttp1ResponseParser *self, KlHttpClientResponse *resp);
+    /** Optional: the request was HEAD, so the next response has no body whatever its
+     *  Content-Length or Transfer-Encoding say (RFC 9110 9.3.2): it is complete at the end of its
+     *  headers. Lasts until reset. A parser without it cannot tell a HEAD response from a truncated
+     *  one, so for a HEAD request the client does not call finish (a response whose status line
+     *  arrived counts as complete at end of stream). */
+    void (*expect_no_body)(KlHttp1ResponseParser *self);
 };
 
 /** @brief Factory function for creating response parsers.

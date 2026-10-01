@@ -17,6 +17,7 @@ tests/protocols/http/test_http_client_free_in_done.c
 tests/protocols/http/test_http_client_happy_eyeballs.c
 tests/protocols/http/test_http_client_hostname_fail.c
 tests/protocols/http/test_http_client_pool.c
+tests/protocols/http/test_http_client_eof.c
 tests/protocols/http/test_http_client_proxy.c
 tests/protocols/http/test_http_client_stream.c
 tests/protocols/http/test_http_connection.c

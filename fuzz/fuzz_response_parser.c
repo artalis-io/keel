@@ -36,6 +36,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     pr = parser->parse(parser, &resp,
                         (const char *)data, size, &consumed);
 
+    /* The input then ends: end of stream, as the client signals it when the peer closes. */
+    if (pr == KL_HTTP1_PARSE_INCOMPLETE && parser->finish)
+        pr = parser->finish(parser, &resp);
+
     if (pr == KL_HTTP1_PARSE_OK)
         kl_http_client_response_free(&resp);
 

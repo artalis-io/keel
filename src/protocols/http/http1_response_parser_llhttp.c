@@ -32,6 +32,7 @@ typedef struct {
     size_t           max_body;
     int              complete;
     int              error;
+    int              no_body;   /* expect_no_body: the request was HEAD */
 
     /* Header accumulation */
     char            *hdr_name;
@@ -215,7 +216,9 @@ static int resp_on_headers_complete(llhttp_t *parser)
         }
     }
 
-    return 0;
+    /* 1 tells llhttp this message has no body (F_SKIPBODY), whatever its framing headers say: the
+     * response to a HEAD request. 1xx, 204 and 304 llhttp already knows from the status. */
+    return p->no_body ? 1 : 0;
 }
 
 static int resp_on_body(llhttp_t *parser, const char *at, size_t len)
@@ -342,12 +345,34 @@ static KlHttp1ParseResult resp_parser_parse(KlHttp1ResponseParser *self,
     return KL_HTTP1_PARSE_INCOMPLETE;
 }
 
+/* End of stream. llhttp_finish completes a close-delimited body (firing on_message_complete) and
+ * reports any other mid-message EOF as an error, so only a complete message is handed over. */
+static KlHttp1ParseResult resp_parser_finish(KlHttp1ResponseParser *self,
+                                          KlHttpClientResponse *resp)
+{
+    RespLlhttpParser *p = (RespLlhttpParser *)self;
+    p->resp = resp;
+    if (p->error)
+        return KL_HTTP1_PARSE_ERROR;
+    if (!p->complete)
+        (void)llhttp_finish(&p->parser);   /* complete (close-delimited) or an EOF error */
+    if (p->error || !p->complete)
+        return KL_HTTP1_PARSE_ERROR;       /* truncated, or nothing arrived at all */
+    return transfer_to_response(p, resp);
+}
+
+static void resp_parser_expect_no_body(KlHttp1ResponseParser *self)
+{
+    ((RespLlhttpParser *)self)->no_body = 1;
+}
+
 static void resp_parser_reset(KlHttp1ResponseParser *self)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)self;
     llhttp_reset(&p->parser);
     p->complete = 0;
     p->error = 0;
+    p->no_body = 0;
 
     kl_free(p->alloc, p->hdr_name, p->hdr_name_cap);
     kl_free(p->alloc, p->hdr_value, p->hdr_value_cap);
@@ -421,6 +446,8 @@ static KlHttp1ResponseParser *create_parser(size_t max_response_size,
     p->base.parse   = resp_parser_parse;
     p->base.reset   = resp_parser_reset;
     p->base.destroy = resp_parser_destroy;
+    p->base.finish  = resp_parser_finish;
+    p->base.expect_no_body = resp_parser_expect_no_body;
 
     /* Configure llhttp callbacks */
     llhttp_settings_init(&p->settings);
