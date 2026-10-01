@@ -26,6 +26,7 @@
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
+#include "ws_close.h"
 #include "socket.h"
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "platform.h"
@@ -119,7 +120,6 @@ static void wsc_ping_timer(void *user_data);
 static void wsc_free_now(KlWsClientConn *ws);
 static void wsc_finish_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t len);
 static void wsc_fail(KlWsClientConn *ws, uint16_t code, const char *msg);
-static int  wsc_close_payload_invalid(const uint8_t *p, size_t len);
 
 /* ── I/O abstraction (plain or TLS) ────────────────────────────── */
 
@@ -705,7 +705,7 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                         uint16_t code = 1005;            /* No Status Received */
                         const char *reason = NULL;
                         size_t reason_len = 0;
-                        int bad = wsc_close_payload_invalid((const uint8_t *)payload_data,
+                        int bad = kl_ws_close_payload_check((const uint8_t *)payload_data,
                                                             payload_consumed);
                         if (bad) {                       /* RFC 6455 7.4 / 8.1 */
                             wsc_fail(ws, (uint16_t)bad, "invalid close frame");
@@ -981,19 +981,6 @@ static void wsc_fail(KlWsClientConn *ws, uint16_t code, const char *msg)
 /* A received close payload is invalid if it is one byte long, carries a status code that may not
  * appear on the wire (RFC 6455 7.4.1/7.4.2: below 1000, 1004-1006, 1015, unassigned 1016-2999,
  * 5000 and up), or a reason that is not UTF-8. Returns the close code to fail with, or 0 if valid. */
-static int wsc_close_payload_invalid(const uint8_t *p, size_t len)
-{
-    if (len == 0) return 0;
-    if (len == 1) return KL_WS_PROTOCOL_ERROR;
-    unsigned code = ((unsigned)p[0] << 8) | p[1];
-    int ok = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) ||
-             (code >= 3000 && code <= 4999);
-    if (!ok) return KL_WS_PROTOCOL_ERROR;
-    uint32_t st = KL_UTF8_ACCEPT;
-    kl_utf8_validate(&st, p + 2, len - 2);
-    return st == KL_UTF8_ACCEPT ? 0 : 1007;   /* 1007 Invalid frame payload data */
-}
-
 static void wsc_error(KlWsClientConn *ws, const char *msg)
 {
     ws->state = WSC_CLOSED;
