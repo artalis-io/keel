@@ -209,15 +209,27 @@ void kl_http_client_remove_header(KlHttpClientResponse *resp, const char *name)
 {
     for (int i = 0; i < resp->num_headers; i++) {
         if (kl_ascii_strcasecmp(resp->headers[i].name, name) == 0) {
-            /* Free the header strings */
+            /* The array is allocated at exactly num_headers entries, and kl_http_client_response_free
+             * frees it at that size. Shrinking the count alone would free it with the wrong size, so
+             * move the survivors into an array of the new size. If that allocation fails, keep the
+             * header: a stale header is harmless, a wrong-size free is not. */
+            int n = resp->num_headers - 1;
+            KlHttpClientHeader *nh = NULL;
+            if (n > 0) {
+                nh = kl_malloc(&resp->alloc, (size_t)n * sizeof(KlHttpClientHeader));
+                if (!nh) return;
+            }
             kl_free(&resp->alloc, (char *)resp->headers[i].name,
                     strlen(resp->headers[i].name) + 1);
             kl_free(&resp->alloc, (char *)resp->headers[i].value,
                     strlen(resp->headers[i].value) + 1);
-            /* Shift remaining headers down */
-            for (int j = i; j < resp->num_headers - 1; j++)
-                resp->headers[j] = resp->headers[j + 1];
-            resp->num_headers--;
+            if (nh)                                     /* NULL only when no header survives */
+                for (int j = 0, k = 0; j < resp->num_headers; j++)
+                    if (j != i) nh[k++] = resp->headers[j];
+            kl_free(&resp->alloc, resp->headers,
+                    (size_t)resp->num_headers * sizeof(KlHttpClientHeader));
+            resp->headers = nh;
+            resp->num_headers = n;
             return;
         }
     }
@@ -276,9 +288,25 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
     if (rc < 0)
         return -1;
 
+    /* The decompressor's buffer is out_len bytes (KlDecompress contract: free with out_len), while a
+     * response body is NUL-terminated and freed at body_len + 1. Move it into a body-shaped buffer
+     * so every later free uses the size the block was allocated with. */
+    if (out_len > SIZE_MAX - 1) {
+        kl_free(&resp->alloc, out, out_len);
+        return -1;
+    }
+    char *body = kl_malloc(&resp->alloc, out_len + 1);
+    if (!body) {
+        kl_free(&resp->alloc, out, out_len);
+        return -1;
+    }
+    if (out_len) memcpy(body, out, out_len);
+    body[out_len] = '\0';
+    if (out) kl_free(&resp->alloc, out, out_len);
+
     /* Replace body */
     kl_free(&resp->alloc, resp->body, resp->body_len + 1);
-    resp->body = out;
+    resp->body = body;
     resp->body_len = out_len;
 
     /* Remove Content-Encoding header */

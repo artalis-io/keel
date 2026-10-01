@@ -172,6 +172,31 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - `test_http2_client` adds three cases on a live connection driven through the mock session.
     Without the fix, the reset and over-cap cases fail.
 
+- **HTTP server and client hygiene** (fifteenth-audit Lows L2, L8, L9, L10).
+  - **Stale body accounting skipped the rejection drain (L2).** `request_body_received`,
+    `request_body_complete` and `drain_framing_usable` were never reset between requests. After a
+    request whose body was read in full on a kept-alive connection, an early rejection of the next
+    request found the stale "complete" flag, skipped the drain, and closed with the body unread: the
+    abortive close #278 exists to prevent. They are now reset on acquire and on keep-alive. The new
+    `test_reject_drain` case passes before the fix on every platform tried (loopback delivers the 413
+    first); the recorded trace shows the skipped drain.
+  - **A connection with bytes after the response was pooled (L8).** The sync and async pooled
+    clients dropped bytes that followed a complete response and returned the connection to the
+    pool, so the next request read them as the start of its own response. Such a connection, and
+    one whose response ended at end of stream, is now discarded instead.
+  - **Pooled requests bypassed the proxy (L9).** `kl_http_client_request_pooled` and
+    `kl_http_client_start_pooled` keyed and connected by the target and ignored `cfg->proxy`, so
+    traffic meant for the proxy went direct. A proxied request now takes the non-pooled path, which
+    honours the proxy.
+  - **Wrong-size frees (L10).** `kl_http_client_remove_header` shrank the header count without
+    resizing the array, which was later freed at the smaller size. A decompressed body was adopted
+    as is: allocated at `out_len`, freed at `body_len + 1`, and not NUL-terminated. The miniz
+    decompressor returned an untrimmed buffer when its trim allocation failed. All three now free
+    each block with the size it was allocated with.
+  - New tests: four pooled cases and a proxy case in `test_http_client_eof`, and a new
+    `test_http_client_alloc_sizes` suite using a size-checking allocator. Without the fixes, both
+    bytes-after-response cases, the proxy case and both size cases fail.
+
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
   "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
   BINARY frame looked like the start of another message. The server closed the connection with 1002

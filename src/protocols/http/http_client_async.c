@@ -938,6 +938,11 @@ static void async_handle_receiving(KlHttpClient *c)
         KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->resp,
                                               buf, (size_t)nread, &consumed);
         if (pr == KL_HTTP1_PARSE_OK) {
+            /* Bytes after the response (in this read, or still buffered in TLS) belong to nothing we
+             * asked for; a pooled connection carrying them would hand them to the next request as
+             * the start of its response. Such a connection is not reused. */
+            c->conn_reusable = consumed == (size_t)nread &&
+                               !(c->tls && c->tls->pending && c->tls->pending(c->tls) > 0);
             async_complete_success(c);
             return;
         }
@@ -1024,7 +1029,9 @@ static void async_complete_success(KlHttpClient *c)
         /* Pool-aware: release or discard based on Connection header */
         c->pool_conn.fd = c->fd;
         c->pool_conn.tls = c->tls;
-        if (kl_http_client_server_wants_close(&c->resp)) {
+        /* Not reusable: bytes followed the response, or it ended at end of stream (the server
+         * closed, so the connection is dead whatever its headers said). */
+        if (!c->conn_reusable || kl_http_client_server_wants_close(&c->resp)) {
             kl_http_client_pool_discard(c->pool, &c->pool_conn);
         } else {
             kl_http_client_pool_release(c->pool, &c->pool_conn,
@@ -1621,9 +1628,10 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0)
         return NULL;
-    /* UNIX sockets are not pooled (no host:port key); bypass the pool and
-     * start a normal non-pooled async request. */
-    if (parsed.is_unix) {
+    /* UNIX sockets are not pooled (no host:port key), and neither are proxied requests (the pool is
+     * keyed by the target and connects to it directly, which would silently bypass the proxy):
+     * start a normal non-pooled async request, which honours cfg->proxy. */
+    if (parsed.is_unix || (cfg && cfg->proxy)) {
         return kl_http_client_start_s(ev_ctx, alloc, cfg, method, url_str,
                                  headers, num_headers, body, body_len,
                                  NULL, on_done, user_data);

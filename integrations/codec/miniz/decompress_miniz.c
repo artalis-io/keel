@@ -226,15 +226,21 @@ static int miniz_decompress_fn(KlDecompress *self,
         return -1;
     }
 
-    /* Trim buffer if significantly oversized */
-    if (out_pos > 0 && out_pos < buf_size) {
+    /* Trim to exactly out_pos: the caller frees *out with *out_len (KlDecompress contract), so an
+     * untrimmed buffer would be freed with the wrong size. If the trim cannot be allocated, fail
+     * rather than hand back a block whose size the caller cannot know. */
+    if (out_pos == 0) {                          /* empty output: no block to hand back */
+        kl_free(alloc, buf, buf_size);
+        buf = NULL;
+    } else if (out_pos < buf_size) {
         char *trimmed = kl_malloc(alloc, out_pos);
-        if (trimmed) {
-            memcpy(trimmed, buf, out_pos);
+        if (!trimmed) {
             kl_free(alloc, buf, buf_size);
-            buf = trimmed;
+            return -1;
         }
-        /* else: keep oversized buffer; not an error */
+        memcpy(trimmed, buf, out_pos);
+        kl_free(alloc, buf, buf_size);
+        buf = trimmed;
     }
 
     *out = buf;

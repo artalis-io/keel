@@ -376,6 +376,48 @@ UTEST(reject_drain, successful_keepalive_is_unaffected) {
 }
 
 
+/* The body accounting is per request (audit L2). Request 1 on a kept-alive connection reads its whole
+ * body, which set request_body_complete; that flag was never reset, so when request 2 was rejected
+ * early the drain believed request 2's body was already consumed and closed with ~24 KiB of it
+ * unread (an abortive close).
+ *
+ * This case does NOT fail before the fix on any platform tried (MinGW WSAPoll/IOCP, and every POSIX
+ * job in CI): on loopback the 413 is already delivered when the reset fires, so the response
+ * survives. The evidence is the recorded trace (build with -DKEEL_INTERNAL_TRACE): before the fix
+ * request 2's drain shows `skip-complete` with request_body_received 73733 (request 1's 5 stale bytes
+ * plus 73728) and the complete flag set; after it, the drain `enter`s. As with
+ * over_send_past_declared_length_is_drained, do not read a pass here as proof the defect is absent. */
+UTEST(reject_drain, early_reject_after_a_complete_keepalive_request) {
+    ASSERT_EQ(0, rd_start(0, 0));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    /* Request 1's body in its own write, so it is read on the body path (the one that accounts it
+     * and marks the framing complete), not swallowed with the headers. */
+    const char *r1 = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n";
+    ASSERT_TRUE(kl_test_sockwrite(fd, r1, strlen(r1)) > 0);
+    kl_test_sleep_ms(50);
+    ASSERT_TRUE(kl_test_sockwrite(fd, "hello", 5) > 0);
+    char buf[2048];
+    long n = (long)kl_test_sockread(fd, buf, sizeof(buf) - 1);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    const char *r2 = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 400000\r\n"
+                     "Connection: close\r\n\r\n";
+    ASSERT_TRUE(kl_test_sockwrite(fd, r2, strlen(r2)) > 0);
+    char chunk[8192];
+    memset(chunk, 'A', sizeof(chunk));
+    for (int i = 0; i < 12; i++)   /* 96 KiB, past the 64 KiB route cap */
+        if (kl_test_sockwrite(fd, chunk, sizeof(chunk)) < 0) break;
+    char buf2[4096];
+    (void)rd_read_all(fd, buf2, sizeof(buf2));
+    kl_test_closesock(fd);
+    ASSERT_TRUE(strstr(buf2, "413") != NULL);   /* was: reset away by the skipped drain */
+    rd_stop();
+}
+
 /* The framing oracle, specifically. A WELL-FORMED chunked upload rejected on size, where the client
  * then sends a proper terminal chunk. The drain must end because the decoder reached the terminal
  * chunk, NOT because the 500 ms deadline expired, so the test also bounds the elapsed time: a drain
