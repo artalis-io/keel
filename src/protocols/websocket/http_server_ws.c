@@ -597,13 +597,22 @@ int kl_ws_server_on_readable(KlHttpConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
     uint8_t buf[KL_HTTP_CONN_READ_BUF_SIZE];
+    int drains = 0;
+read_more: ;
     kl_ssize_t nr = conn_read(c, buf, sizeof(buf));
+    if (nr == 0 && c->tls)
+        return KL_HTTP_CONN_WEBSOCKET;   /* TLS WANT_READ: part of a record arrived; wait for it */
     if (nr <= 0) {
         /* Connection closed or error */
         return KL_HTTP_CONN_CLOSED;
     }
 
-    return kl_ws_server_on_readable_data(c, buf, (size_t)nr);
+    int st = kl_ws_server_on_readable_data(c, buf, (size_t)nr);
+    /* The socket will not signal readable again for plaintext the TLS engine already holds (a
+     * record larger than this buffer, or several records in one read): drain it now, bounded. */
+    if (st == KL_HTTP_CONN_WEBSOCKET && c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
+        goto read_more;
+    return st;
 }
 
 /* ── Write-readiness (drain flush) ────────────────────────────────── */

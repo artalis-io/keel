@@ -622,6 +622,8 @@ int kl_http2_server_on_readable(KlHttpConn *c) {
 read_more:
     ;
     kl_ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
+    if (nr == 0 && c->tls)
+        return KL_HTTP_CONN_HTTP2;   /* TLS WANT_READ: part of a record arrived; wait for it */
     if (nr <= 0) return KL_HTTP_CONN_CLOSED;
 
     KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)nr);

@@ -898,6 +898,8 @@ read_more_headers: ;
         }
 
         kl_ssize_t nr = conn_read(c, c->stream.read_buf + c->stream.read_len, space);
+        if (nr == 0 && c->tls)
+            return c->state;   /* TLS WANT_READ: part of a record arrived; wait for the rest */
         if (nr <= 0) {
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
@@ -967,6 +969,8 @@ read_more_body: ;
          * the model-blind body core. On TLS, drain buffered records before
          * re-arming (the socket won't signal readable again). */
         kl_ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
+        if (nr == 0 && c->tls)
+            return c->state;   /* TLS WANT_READ: part of a record arrived; wait for the rest */
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);

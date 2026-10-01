@@ -503,8 +503,13 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
 
         kl_ssize_t w = wsc_write(ws, ws->upgrade_buf + ws->upgrade_sent,
                                ws->upgrade_len - ws->upgrade_sent);
+        if (w == 0 && ws->tls) {             /* TLS WANT_WRITE: wait for writable */
+            kl_watcher_rearm(ws->ev, ws->fd);
+            return;
+        }
         if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* A TLS -1 is an error or a close (WANT_WRITE is 0): never consult a stale errno. */
+            if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 kl_watcher_rearm(ws->ev, ws->fd);
                 return;
             }
@@ -562,8 +567,12 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     /* Reserve the last byte for the NUL terminator written below. */
     kl_ssize_t nread = wsc_read(ws, ws->handshake_buf + ws->handshake_len,
                               ws->handshake_cap - ws->handshake_len - 1);
+    if (nread == 0 && ws->tls) {             /* TLS WANT_READ: part of a record arrived */
+        kl_watcher_rearm(ws->ev, ws->fd);
+        return;
+    }
     if (nread < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             kl_watcher_rearm(ws->ev, ws->fd);
             return;
         }
@@ -820,15 +829,25 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
 static void wsc_handle_open(KlWsClientConn *ws)
 {
     uint8_t buf[KL_WS_CLIENT_RECV_BUF_SIZE];
+    int drains = 0;
 
+read_more: ;
     kl_ssize_t nread = wsc_read(ws, buf, sizeof(buf));
+    if (nread == 0 && ws->tls) {             /* TLS WANT_READ: part of a record arrived */
+        kl_watcher_rearm(ws->ev, ws->fd);
+        return;
+    }
     if (nread < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             kl_watcher_rearm(ws->ev, ws->fd);
             return;
         }
-        wsc_error(ws, "read error");
-        return;
+        /* A clean TLS close is -1 with at_eof: the same as a socket's end of stream. */
+        if (!(ws->tls && ws->tls->at_eof && ws->tls->at_eof(ws->tls))) {
+            wsc_error(ws, "read error");
+            return;
+        }
+        nread = 0;
     }
     if (nread == 0) {
         /* Server closed connection */
@@ -841,8 +860,14 @@ static void wsc_handle_open(KlWsClientConn *ws)
         return;
     }
 
-    if (wsc_process_frames(ws, buf, (size_t)nread) == 0)
-        kl_watcher_rearm(ws->ev, ws->fd);
+    if (wsc_process_frames(ws, buf, (size_t)nread) != 0)
+        return;
+    /* The socket will not signal readable again for plaintext the TLS engine already holds (a
+     * record larger than this buffer): drain it now, bounded. */
+    if (ws->tls && ws->tls->pending(ws->tls) > 0 && ws->state == WSC_OPEN && !ws->free_requested &&
+        ++drains < 256)
+        goto read_more;
+    kl_watcher_rearm(ws->ev, ws->fd);
 }
 
 /* ── Auto-ping timer callback ───────────────────────────────────── */
