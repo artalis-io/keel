@@ -1,4 +1,5 @@
 #include "utest.h"
+#include <stdlib.h>
 #include <keel/allocator.h>
 
 UTEST(allocator, default_malloc_free) {
@@ -82,6 +83,21 @@ UTEST(allocator, realloc_tracking) {
 
     kl_free(&a, p, 256);
     ASSERT_EQ(track.total_allocated, (size_t)0);
+}
+
+/* kl_free of NULL is a no-op: a custom allocator's free never sees NULL. The contract does not ask a
+ * free hook to accept NULL, and a tracking or arena allocator that subtracts `size` would corrupt its
+ * accounting (several unwind paths free members that were never allocated). */
+static int g_null_frees;
+static void nullcount_free(void *ctx, void *ptr, size_t size) { (void)ctx; (void)size; if (!ptr) g_null_frees++; else free(ptr); }
+static void *plain_malloc(void *ctx, size_t n) { (void)ctx; return malloc(n ? n : 1); }
+static void *plain_realloc(void *ctx, void *p, size_t o, size_t n) { (void)ctx; (void)o; return realloc(p, n ? n : 1); }
+
+UTEST(allocator, free_of_null_never_reaches_the_hook) {
+    KlAllocator a = { plain_malloc, plain_realloc, nullcount_free, NULL };
+    g_null_frees = 0;
+    kl_free(&a, NULL, 64);
+    ASSERT_EQ(g_null_frees, 0);                  /* was 1 */
 }
 
 UTEST_MAIN();
