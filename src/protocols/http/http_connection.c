@@ -128,6 +128,7 @@ static void conn_request_body_reset(KlHttpConn *c) {
     c->request_body_received = 0;
     c->request_body_complete = 0;
     c->drain_framing_usable  = 0;
+    c->stream.read_paused    = 0;   /* a pause belongs to the request that asked for it */
 }
 
 KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
@@ -152,6 +153,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->async_op = NULL;
     c->suspend_start_ms = 0;
     c->file_io_phase = FILE_IO_IDLE;
+    c->comp_recv_posted = 0;
     memset(&c->req, 0, sizeof(c->req));
     conn_request_body_reset(c);
 

@@ -102,7 +102,8 @@ struct KlHttpConn {
      * when the request is actually finished (terminal chunk, trailers, or a malformed chunk). The
      * byte figures are an optimization for Content-Length, where remaining is knowable, so the drain
      * does not sit out its deadline waiting for bytes the client already finished sending. */
-    int      request_body_complete;    /* framing reached its terminal state */
+    int      request_body_complete;
+    int      comp_recv_posted;          /* completion: a recv is posted (a paused body read has none) */    /* framing reached its terminal state */
     int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
                                         * cleared on decoder error, after which only the bounds apply */
     uint64_t request_body_received;    /* body bytes accounted so far */

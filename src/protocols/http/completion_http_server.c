@@ -73,7 +73,7 @@ static inline KlHttpConn *conn_of_stream(KlStream *st) {
  *   - TLS phase          → the per-conn ciphertext scratch (preallocated at server init, stable until
  *                          the recv completes; comp_on_read feeds it to the engine);
  *   - ordinary plaintext → the read_buf sliding window. */
-int kl_comp_post_recv(KlHttpConn *c) {
+static int comp_post_recv_buf(KlHttpConn *c) {
     if (c->tls && c->state != KL_HTTP_CONN_PROXY_HEADER) {
         /* comp_cipher is preallocated at server init for TLS+completion slots (kl_http_server_init);
          * a NULL here is a misconfiguration, not a runtime allocation; fail the recv. */
@@ -83,6 +83,12 @@ int kl_comp_post_recv(KlHttpConn *c) {
     size_t space = c->stream.read_cap - c->stream.read_len;
     if (space == 0) return -1;   /* headers overflowed */
     return kl_comp_post_recv_raw(&c->stream, c->stream.read_buf + c->stream.read_len, space);
+}
+
+int kl_comp_post_recv(KlHttpConn *c) {
+    int r = comp_post_recv_buf(c);
+    if (r == 0) c->comp_recv_posted = 1;   /* the timeout sweep needs to know whether one is posted */
+    return r;
 }
 
 int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
@@ -803,6 +809,7 @@ static void comp_drive_proxy(struct KlHttpServer *s, KlHttpConn *c) {
 
 static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
+    c->comp_recv_posted = 0;
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
