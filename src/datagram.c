@@ -560,9 +560,15 @@ KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m
      * connect; enforced uniformly in the core send machine's admission (send_validate), so the single,
      * batch, and GSO paths share the one rule (KL_DATAGRAM_UNSUPPORTED covers both "not granted"
      * and "not connected"). No separate facade gate here. */
-    KlDatagramSendStatus st = kl_dgram_core_send(dg->core, m);
+    /* Hold ONE busy frame across the send AND the reconcile after it, as the batch and GSO paths do:
+     * the send may fire on_drain, which may tear the datagram down, and the core's final release would
+     * otherwise run that teardown (freeing dg->core) before dg_reconcile_write touches it. */
+    KlDgramCore *core = dg->core;
+    kl_dgram_core_dispatch_begin(core);
+    KlDatagramSendStatus st = kl_dgram_core_send(core, m);
     dg_reconcile_write(dg);   /* a queued (would-block) readiness send needs WRITE interest */
-    return st;
+    kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core: may run the deferred teardown/free */
+    return st;                          /* a local: safe even if dg/core were just freed */
 }
 
 /* ── batch send ─────────────────────────────────────────────────────────────────────────── */

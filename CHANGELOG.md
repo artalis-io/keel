@@ -218,6 +218,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   op, there was none, and the slot, socket and accept credit were never released. A client could
   exhaust the pool one slot at a time. The pause is now cleared with the rest of the per-request
   state, and the sweep releases a timed-out completion connection that has nothing posted directly.
+- **`kl_datagram_send` used freed memory after a teardown from `on_drain`.** On a readiness loop, a
+  send that flushes queued datagrams can empty the queue, which fires `on_drain` inside the call. A
+  teardown (or a close whose `on_close` frees the datagram) requested there ran when the send core let
+  go, and the facade then updated the datagram's WRITE interest through the freed core. The batch and
+  GSO sends already held the datagram across the whole call; the single send now does too, so the
+  teardown runs after it, once.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
