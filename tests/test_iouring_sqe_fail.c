@@ -28,18 +28,21 @@
 #include "../src/socket.h"
 #include "../src/completion.h"
 #include "../src/event_caps.h"
+#include "../src/completion_io.h"   /* kl_comp_cancel: the idle-sweep cancel */
 #include "net_compat.h"
 #include <string.h>
 
 /* Defined in the -DKEEL_IOURING_TEST_HOOKS copy of event_iouring.c linked with this test. */
 void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count);
 
-static int       g_writes;
+static int       g_writes, g_write_fails, g_reads, g_read_fails;
 static KlStream *g_target;
 static void count_dispatch(struct KlEventCtx *ctx, const void *evp) {
     (void)ctx;
     const KlCompletionEvent *ev = evp;
-    if (ev->target == g_target && ev->kind == KL_COMP_WRITE) g_writes++;
+    if (ev->target != g_target) return;
+    if (ev->kind == KL_COMP_WRITE) { g_writes++; if (!ev->ok) g_write_fails++; }
+    if (ev->kind == KL_COMP_READ)  { g_reads++;  if (!ev->ok) g_read_fails++; }
 }
 
 static int make_pair(KlSocketHandle *end, KlSocketHandle *peer) {
@@ -145,6 +148,80 @@ UTEST(iouring_sqe_fail, malloc_buffer_initial_post_fails_cleanly) {
     ASSERT_EQ(kl_comp_post_send_raw(&st, &iov, 1, sizeof(big)), -1);   /* post fails, sendbuf freed once */
     for (int i = 0; i < 8; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 15) >= 0);
     ASSERT_EQ(g_writes, 0);                                            /* no completion awaited */
+
+    kl_event_del(&ctx.loop, st.fd);
+    kl_sockdef_close(end); kl_sockdef_close(peer);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A cancel that finds no SQE is retried at the next drain, not lost (audit L4). The idle sweep's
+ * kl_comp_cancel marks the op aborted and posts an ASYNC_CANCEL; when no SQE was free the cancel was
+ * simply skipped, so a recv on a quiet socket never completed and its connection never retired. */
+UTEST(iouring_sqe_fail, cancel_without_an_sqe_is_retried) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }
+    ctx.comp_conn_dispatch = count_dispatch;
+    g_reads = g_read_fails = 0;
+
+    KlSocketHandle end, peer;
+    ASSERT_EQ(make_pair(&end, &peer), 0);
+    ASSERT_EQ(kl_sockdef_set_nonblocking(end), 0);
+    ASSERT_EQ(kl_sockdef_set_nonblocking(peer), 0);
+    KlStream st; memset(&st, 0, sizeof(st));
+    st.fd = end; st.ctx = &ctx; st.alloc = &a;
+    g_target = &st;
+    ASSERT_EQ(kl_event_add(&ctx.loop, st.fd, KL_EVENT_READ, &st), 0);
+
+    static char rbuf[256];
+    ASSERT_EQ(kl_comp_post_recv_raw(&st, rbuf, sizeof(rbuf)), 0);   /* the peer never writes */
+    for (int i = 0; i < 4; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 5) >= 0);   /* submitted */
+    ASSERT_EQ(g_reads, 0);
+
+    kl_iou_test_fail_next_sqe(&ctx, 1);                  /* the cancel finds no SQE */
+    kl_comp_cancel(&ctx, st.fd);
+    for (int i = 0; i < 40 && g_reads == 0; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 25) >= 0);
+    ASSERT_EQ(g_reads, 1);                               /* was: 0, the recv never completed */
+    ASSERT_EQ(g_read_fails, 1);                          /* delivered as the cancelled error */
+
+    kl_event_del(&ctx.loop, st.fd);
+    kl_sockdef_close(end); kl_sockdef_close(peer);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A short send whose tail re-prep finds no SQE fails the write now instead of stranding it (L4). The
+ * peer does not read and its receive buffer is small, so a large send completes short; the forced
+ * SQE failure then hits the tail's re-prep. Before the fix the op was marked aborted with nothing
+ * queued, so no WRITE completion ever arrived and the connection hung. */
+UTEST(iouring_sqe_fail, short_send_tail_without_an_sqe_fails_the_write) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }
+    ctx.comp_conn_dispatch = count_dispatch;
+    g_writes = g_write_fails = 0;
+
+    KlSocketHandle end, peer;
+    ASSERT_EQ(make_pair(&end, &peer), 0);
+    ASSERT_EQ(kl_sockdef_set_nonblocking(end), 0);
+    ASSERT_EQ(kl_sockdef_set_nonblocking(peer), 0);
+    int small = 4096;
+    (void)setsockopt((int)peer, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    (void)setsockopt((int)end, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    KlStream st; memset(&st, 0, sizeof(st));
+    st.fd = end; st.ctx = &ctx; st.alloc = &a;
+    g_target = &st;
+    ASSERT_EQ(kl_event_add(&ctx.loop, st.fd, KL_EVENT_READ, &st), 0);
+
+    static char big[4 * 1024 * 1024];
+    memset(big, 'y', sizeof(big));
+    KlIoVec iov = { .base = big, .len = sizeof(big) };
+    ASSERT_EQ(kl_comp_post_send_raw(&st, &iov, 1, sizeof(big)), 0);   /* consumes its own SQE */
+    kl_iou_test_fail_next_sqe(&ctx, 1);                   /* the tail's re-prep finds none */
+    for (int i = 0; i < 60 && g_writes == 0; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 25) >= 0);
+    ASSERT_EQ(g_writes, 1);                               /* was: 0, stranded */
+    ASSERT_EQ(g_write_fails, 1);
 
     kl_event_del(&ctx.loop, st.fd);
     kl_sockdef_close(end); kl_sockdef_close(peer);
