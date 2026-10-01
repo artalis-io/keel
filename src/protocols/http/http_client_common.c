@@ -130,6 +130,29 @@ char *kl_http_client_build_request(KlAllocator *alloc,
     return req;
 }
 
+/* headers + "Proxy-Authorization: <auth>" in a new array (*owned, *out_n entries; the caller frees it
+ * at *out_n * sizeof). NULL on allocation failure. */
+const KlHttpClientHeader *kl_http_client_with_proxy_auth(KlAllocator *alloc,
+                                                         const KlHttpClientHeader *headers,
+                                                         int num_headers, const char *auth,
+                                                         KlHttpClientHeader **owned, int *out_n)
+{
+    *owned = NULL;
+    if (num_headers < 0 || num_headers > INT_MAX - 1 ||
+        (size_t)num_headers + 1 > SIZE_MAX / sizeof(KlHttpClientHeader))
+        return NULL;
+    KlHttpClientHeader *h = kl_malloc(alloc, ((size_t)num_headers + 1) * sizeof(KlHttpClientHeader));
+    if (!h)
+        return NULL;
+    if (num_headers > 0)
+        memcpy(h, headers, (size_t)num_headers * sizeof(KlHttpClientHeader));
+    h[num_headers].name = "Proxy-Authorization";
+    h[num_headers].value = auth;
+    *owned = h;
+    *out_n = num_headers + 1;
+    return h;
+}
+
 /* ── Build headers-only request into heap buffer (chunked TE) ────── */
 
 char *kl_http_client_build_request_headers_only(KlAllocator *alloc,

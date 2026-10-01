@@ -469,9 +469,10 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     c->conn_racing = 1;
     c->state = KL_HTTP_CLIENT_CONNECTING;
 
-    /* Arm the whole-request deadline (client-owned; bounds racing + post-connect), then hand the
-     * address count to the connect op, which drives the racing via the adapter hooks. */
-    he_arm_deadline(c);
+    /* The whole-request deadline (client-owned) is normally armed before resolution started; arm it
+     * here only if not, then hand the address count to the connect op, which drives the racing. */
+    if (c->deadline_timer < 0)
+        he_arm_deadline(c);
     kl_connect_op_on_resolved(&c->connect_op, c->conn_addrs.naddrs);
 }
 
@@ -557,8 +558,8 @@ static void he_proceed_after_connect(KlHttpClient *c)
         /* FAIL CLOSED on set_hostname failure: without hostname verification a
          * cert for the wrong host would verify against the CA chain alone.
          * async_complete_error owns c->tls teardown (incl. the pool-discard path). */
-        if (c->tls->set_hostname && c->host_buf[0] &&
-            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+        if (c->host_buf[0] &&
+            (!c->tls->set_hostname || c->tls->set_hostname(c->tls, c->host_buf) != 0)) {
             c->error = KL_ERR_TLS_INIT;
             async_complete_error(c);
             return;
@@ -688,8 +689,8 @@ static void async_handle_proxy_handshake(KlHttpClient *c)
             c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
         /* FAIL CLOSED on set_hostname failure (see the direct-connect path);
          * async_complete_error owns c->tls teardown. */
-        if (c->tls->set_hostname && c->host_buf[0] &&
-            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+        if (c->host_buf[0] &&
+            (!c->tls->set_hostname || c->tls->set_hostname(c->tls, c->host_buf) != 0)) {
             c->error = KL_ERR_TLS_INIT;
             async_complete_error(c);
             return;
@@ -775,7 +776,7 @@ static void async_handle_sending_stream(KlHttpClient *c)
             /* Read next chunk from body_read */
             kl_ssize_t nr = c->body_read(c->chunk_buf, sizeof(c->chunk_buf),
                                        c->stream_user_data);
-            if (nr < 0) {
+            if (nr < 0 || (size_t)nr > sizeof(c->chunk_buf)) {   /* never send past the buffer */
                 async_complete_error(c);
                 return;
             }
@@ -1181,13 +1182,13 @@ static void async_complete_error(KlHttpClient *c)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
-/* True iff a caller-supplied resolver is usable. Only `resolve` is called
- * unconditionally on the async path; `cancel` is NULL-checked before use (optional)
- * and a caller-supplied (borrowed) resolver's `destroy` is never called by Keel, so
- * neither is required. A malformed table is rejected at acceptance as bad input,
+/* True iff a caller-supplied resolver is usable: `resolve` and `cancel` (resolver.h requires both).
+ * Without cancel, a request that times out, or is cancelled or freed, while resolving cannot stop
+ * the resolution, and the resolver's later callback reaches a freed client. A borrowed resolver's
+ * `destroy` is never called by Keel. A malformed table is rejected at acceptance as bad input,
  * rather than being presented later as a DNS lookup failure. */
 static int client_resolver_valid(const KlResolver *r) {
-    return r && r->resolve;
+    return r && r->resolve && r->cancel;
 }
 
 KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
@@ -1239,6 +1240,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     /* Proxy routing */
     const KlHttpProxyConfig *proxy = cfg ? cfg->proxy : NULL;
     int is_proxied = (proxy && proxy->host);
+    if (is_proxied && proxy->auth && kl_http_client_has_crlf(proxy->auth, strlen(proxy->auth)))
+        return NULL;   /* credentials with a line break would inject header lines */
     int is_tunnel = is_proxied && parsed.is_https;
 
     /* For HTTPS through proxy: tls_cfg stays set (used after CONNECT),
@@ -1278,15 +1281,28 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     /* Build request buffer: headers-only for streaming, full for buffered */
     size_t req_len = 0;
     char *req_buf;
+    /* A plain-HTTP request through a proxy carries the proxy credentials itself (a CONNECT tunnel
+     * carries them on the CONNECT instead). */
+    KlHttpClientHeader *hdrs_owned = NULL;
+    int nh = num_headers;
+    const KlHttpClientHeader *hdrs = headers;
+    if (absolute_url && proxy->auth) {
+        hdrs = kl_http_client_with_proxy_auth(alloc, headers, num_headers, proxy->auth,
+                                              &hdrs_owned, &nh);
+        if (!hdrs)
+            return NULL;
+    }
     if (stream && stream->body_read) {
         req_buf = kl_http_client_build_request_headers_only(alloc, method, &parsed,
-                                               headers, num_headers, &req_len, 0,
+                                               hdrs, nh, &req_len, 0,
                                                absolute_url);
     } else {
         req_buf = kl_http_client_build_request(alloc, method, &parsed,
-                                 headers, num_headers, body, body_len,
+                                 hdrs, nh, body, body_len,
                                  &req_len, 0, absolute_url);
     }
+    if (hdrs_owned)
+        kl_free(alloc, hdrs_owned, (size_t)nh * sizeof(KlHttpClientHeader));
     if (!req_buf)
         return NULL;
 
@@ -1443,9 +1459,11 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). kl_connect_op_start runs start_resolve
          * synchronously (which kicks resolver->resolve); a sync-completion-capable resolver may drive
          * the whole request to terminal inline. init/start are infallible (valid static hook table). */
+        he_arm_deadline(c);   /* the request deadline covers name resolution too */
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
         if (c->connect_start_failed) {
+            he_cancel_timers(c);   /* the client is freed below: no timer may fire into it */
             /* resolver->resolve() could not start: the op retired terminal + detached with no user
              * callback. Free the client and report the start failure as a NULL return (contract). */
             if (res_owned)
@@ -1805,9 +1823,11 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C), same as the non-streaming path:
          * kl_connect_op_start runs start_resolve (kicks resolver->resolve) synchronously; a
          * start failure retires cleanly + returns NULL, an inline completion advances the op. */
+        he_arm_deadline(c);   /* the request deadline covers name resolution too */
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
         if (c->connect_start_failed) {
+            he_cancel_timers(c);   /* the client is freed below: no timer may fire into it */
             if (res_owned)
                 resolver->destroy(resolver);
             c->resolver = NULL;

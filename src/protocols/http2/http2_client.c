@@ -338,8 +338,8 @@ static void h2c_handle_connecting(KlHttp2ClientConn *c)
         /* FAIL CLOSED on set_hostname failure: without hostname verification a
          * cert for the wrong host would verify against the CA chain alone.
          * h2c_error -> h2c_close_connection destroys c->tls and the fd. */
-        if (c->tls->set_hostname && c->host_buf[0] &&
-            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+        if (c->host_buf[0] &&
+            (!c->tls->set_hostname || c->tls->set_hostname(c->tls, c->host_buf) != 0)) {
             h2c_error(c, "TLS set_hostname failed");
             return;
         }

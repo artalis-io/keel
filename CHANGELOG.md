@@ -85,6 +85,23 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   it. New `kl_http_client_pool_acquire_tls` / `kl_http_client_pool_release_tls` take the config. The
   existing `kl_http_client_pool_acquire` / `_release` keep their signatures and match only connections
   released through them.
+- **HTTP client request-side fixes.**
+  - A TLS backend that leaves `set_hostname` NULL used to be accepted, and hostname verification was
+    silently skipped. The async, sync, WebSocket and HTTP/2 clients now fail closed instead.
+  - Proxy credentials containing CR or LF were written into the request, injecting header lines. They
+    are now refused with `KL_ERR_INVALID_ARG`. Separately, a plain-HTTP request through an
+    authenticating forward proxy now carries `Proxy-Authorization`; only the CONNECT tunnel sent it
+    before.
+  - An idle pooled connection with unsolicited bytes waiting is no longer reused, since the next
+    request would read those bytes as its own response. Examples are a stray response, or a 408 sent
+    before the server closed.
+  - A streaming request whose `body_read` returned more than its buffer made the client send past the
+    buffer. That now fails the request.
+  - The request deadline now also covers name resolution. A resolver that never answered left the
+    request pending forever.
+  - **Behavior change:** a caller-supplied `KlResolver` must provide `cancel`, as `resolver.h`
+    already states. Without it, a request freed or timed out while resolving could be called back
+    after it was freed.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client

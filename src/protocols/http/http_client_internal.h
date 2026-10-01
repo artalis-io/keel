@@ -195,6 +195,13 @@ char *kl_http_client_build_request(KlAllocator *alloc,
                               const char *body, size_t body_len,
                               size_t *out_len, int keep_alive,
                               const char *absolute_url);
+/* headers + "Proxy-Authorization: <auth>" for a plain-HTTP request through a proxy; see
+ * http_client_common.c. */
+const KlHttpClientHeader *kl_http_client_with_proxy_auth(KlAllocator *alloc,
+                                                         const KlHttpClientHeader *headers,
+                                                         int num_headers, const char *auth,
+                                                         KlHttpClientHeader **owned, int *out_n);
+
 char *kl_http_client_build_request_headers_only(KlAllocator *alloc,
                                            const char *method, const KlUrl *url,
                                            const KlHttpClientHeader *headers,

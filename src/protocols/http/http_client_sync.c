@@ -180,7 +180,11 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
     /* Set SNI hostname via vtable (backend-agnostic). FAIL CLOSED: if the host
      * does not fit the buffer, or set_hostname() reports failure, abort; a
      * missing hostname check would let a cert for the wrong host verify. */
-    if (tls->set_hostname) {
+    if (!tls->set_hostname) {   /* no way to verify the host name: never proceed without it */
+        tls->destroy(tls);
+        return NULL;
+    }
+    {
         char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
         if (host_len >= sizeof(host_buf)) {
             tls->destroy(tls);
@@ -476,6 +480,8 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
 
     for (;;) {
         kl_ssize_t nread = body_read(data_buf, sizeof(data_buf), user_data);
+        if (nread > (kl_ssize_t)sizeof(data_buf))
+            return -1;   /* more than the buffer holds: never send past it */
         if (nread < 0)
             return -1;
 
@@ -650,6 +656,10 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     /* Proxy routing: connect to proxy host instead of target */
     const KlHttpProxyConfig *proxy = cfg ? cfg->proxy : NULL;
     int is_proxied = (proxy && proxy->host);
+    if (is_proxied && proxy->auth && kl_http_client_has_crlf(proxy->auth, strlen(proxy->auth))) {
+        resp->error = KL_ERR_INVALID_ARG;   /* a line break would inject header lines */
+        return -1;
+    }
 
     /* UNIX socket target: no host/port. Normalize the Host header to
      * "localhost" so all downstream request building works unchanged; the
@@ -682,6 +692,8 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     KlTls *tls = NULL;
     int ret = -1;
     int decomp_installed = 0;   /* streaming decompressor wrapper active */
+    KlHttpClientHeader *hdrs_owned = NULL;   /* headers + Proxy-Authorization, when built */
+    int hdrs_owned_n = 0;
 
     if (is_proxied && parsed.is_https) {
         /* CONNECT tunnel through proxy, then TLS handshake */
@@ -772,10 +784,24 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
         decomp_installed = 1;
     }
 
+    /* A plain-HTTP request through a proxy carries the proxy credentials itself (a CONNECT tunnel
+     * carries them on the CONNECT instead). */
+    const KlHttpClientHeader *hdrs = headers;
+    int nh = num_headers;
+    if (absolute_url && proxy->auth) {
+        hdrs = kl_http_client_with_proxy_auth(alloc, headers, num_headers, proxy->auth,
+                                              &hdrs_owned, &nh);
+        if (!hdrs) {
+            resp->error = KL_ERR_ALLOC;
+            goto cleanup;
+        }
+        hdrs_owned_n = nh;
+    }
+
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(sockets, fd, tls, method, &parsed,
-                                headers, num_headers, timeout_ms, 0,
+                                hdrs, nh, timeout_ms, 0,
                                 absolute_url) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
@@ -787,7 +813,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
         }
     } else {
         if (send_request_sync(sockets, fd, tls, method, &parsed,
-                               headers, num_headers, body, body_len,
+                               hdrs, nh, body, body_len,
                                timeout_ms, 0, absolute_url) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
@@ -816,6 +842,8 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     ret = 0;
 
 cleanup:
+    if (hdrs_owned)
+        kl_free(alloc, hdrs_owned, (size_t)hdrs_owned_n * sizeof(KlHttpClientHeader));
     /* Free the streaming decompressor session if it was installed.  It is
      * otherwise freed only by kl_http_client_decomp_on_complete (fired on parser
      * message-complete), so error paths and EOF-terminated success would
