@@ -181,13 +181,29 @@ static void h2c_on_response(KlHttp2ClientSession *s, int32_t stream_id,
 
     st->resp.status = status;
 
+    /* A stream may carry more than one response HEADERS (an interim 1xx, then the final response):
+     * the latest replaces what an earlier one left, whose strings are freed here. */
+    for (int i = 0; i < st->resp.num_headers; i++) {
+        kl_free(c->alloc, (char *)st->resp.headers[i].name, strlen(st->resp.headers[i].name) + 1);
+        kl_free(c->alloc, (char *)st->resp.headers[i].value, strlen(st->resp.headers[i].value) + 1);
+        st->resp.headers[i].name = NULL;
+        st->resp.headers[i].value = NULL;
+    }
+    st->resp.num_headers = 0;
+
     /* Copy headers */
     if (n > 0 && hdrs) {
         if (n > st->resp.headers_cap) {
-            if ((size_t)n > SIZE_MAX / sizeof(KlHttp2ClientHeader)) return;
+            if ((size_t)n > SIZE_MAX / sizeof(KlHttp2ClientHeader)) {
+                st->resp.error = KL_ERR_ALLOC;
+                return;
+            }
             size_t sz = (size_t)n * sizeof(KlHttp2ClientHeader);
             KlHttp2ClientHeader *new_hdrs = kl_malloc(c->alloc, sz);
-            if (!new_hdrs) return;
+            if (!new_hdrs) {
+                st->resp.error = KL_ERR_ALLOC;   /* never a "complete" response missing headers */
+                return;
+            }
             if (st->resp.headers)
                 kl_free(c->alloc, st->resp.headers,
                         (size_t)st->resp.headers_cap * sizeof(KlHttp2ClientHeader));
@@ -205,6 +221,7 @@ static void h2c_on_response(KlHttp2ClientSession *s, int32_t stream_id,
                 if (name) kl_free(c->alloc, name, nlen);
                 if (value) kl_free(c->alloc, value, vlen);
                 st->resp.num_headers = copied;
+                st->resp.error = KL_ERR_ALLOC;   /* never a "complete" response missing headers */
                 return;
             }
             memcpy(name, hdrs[i].name, nlen);
@@ -655,8 +672,10 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         c->state = H2C_ACTIVE;
     }
 
-    if (kl_watcher_add(ev, fd, KL_EVENT_READ | KL_EVENT_WRITE,
-                       h2c_on_event, c) != 0) {
+    /* Connecting: wait for writable. Already active (an immediate connect, e.g. AF_UNIX): READ only,
+     * as the connecting path leaves it; an idle socket is always writable, so WRITE would spin. */
+    KlEventMask mask = c->state == H2C_ACTIVE ? KL_EVENT_READ : (KL_EVENT_READ | KL_EVENT_WRITE);
+    if (kl_watcher_add(ev, fd, mask, h2c_on_event, c) != 0) {
         if (c->session) c->session->destroy(c->session);
         kl_sock_close(ev->sockets, fd);
         kl_free(alloc, c, sizeof(KlHttp2ClientConn));
@@ -677,15 +696,20 @@ int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
     if (!method || !path)
         return -1;
 
+    /* Make the client's stream record first: if that fails (the stream limit, or memory), nothing
+     * has been submitted, so a refused request is never sent. Its id is known once submitted. */
+    KlHttp2ClientStream *st = h2c_stream_create(c, 0, on_resp, ud);
+    if (!st)
+        return -1;
+
     int32_t stream_id = c->session->submit_request(
         c->session, method, path, c->authority, hdrs, n, body, body_len);
 
-    if (stream_id < 0)
+    if (stream_id < 0) {
+        h2c_stream_remove(c, 0);
         return -1;
-
-    const KlHttp2ClientStream *st = h2c_stream_create(c, stream_id, on_resp, ud);
-    if (!st)
-        return -1;
+    }
+    st->stream_id = stream_id;
 
     /* Flush to send the request */
     c->session->flush(c->session);

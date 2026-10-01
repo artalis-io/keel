@@ -313,6 +313,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     body reader.
   - An HTTP/2 config with no session factory is now rejected by `kl_http_server_init`, rather than
     crashing on the first HTTP/2 connection.
+- **HTTP/2 client fixes.**
+  - After a connect that completed at once (a local AF_UNIX socket), the client kept write interest
+    on an idle connection, which is always writable, so it spun the event loop at full CPU.
+  - A request refused by the client's own stream limit returned -1 but had already been submitted, so
+    the server ran a request the caller was told had failed.
+  - A second response HEADERS on a stream (an interim 1xx, then the final response) leaked the first
+    set of header strings.
+  - A header copy that could not be allocated produced a response delivered as complete but missing
+    headers. It now fails the stream with `KL_ERR_ALLOC`.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
