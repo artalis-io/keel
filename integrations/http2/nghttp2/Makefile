@@ -65,8 +65,9 @@ e2e: $(LIB)
 	./tests/e2e_socket
 	@echo "integrations/http2/nghttp2: e2e (real socket) OK"
 
-# Third-party interop: run the KEEL nghttp2 server (h2c prior-knowledge) and hit
-# it with curl's HTTP/2 client. Requires a curl built with HTTP2 (curl -V).
+# Third-party interop: run the KEEL nghttp2 server (h2c) and hit it with curl's HTTP/2 client,
+# twice: with prior knowledge, and through the HTTP/1.1 Upgrade: h2c path (RFC 7540 3.2), where the
+# upgrading request must be answered on stream 1 over HTTP/2. Requires a curl built with HTTP2.
 interop-curl: $(LIB)
 	@command -v curl >/dev/null || { echo "curl not found"; exit 1; }
 	@curl -V | grep -q HTTP2 || { echo "curl lacks HTTP2 support"; exit 1; }
@@ -74,11 +75,17 @@ interop-curl: $(LIB)
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/interop_server & echo $$! > /tmp/keel_h2_interop.pid; sleep 1; \
 	  out=$$(curl -s --http2-prior-knowledge http://127.0.0.1:18478/hello); rc=$$?; \
+	  up=$$(curl -s -m 5 --http2 -w '\nhttp_version=%{http_version}' http://127.0.0.1:18478/hello); urc=$$?; \
 	  kill $$(cat /tmp/keel_h2_interop.pid) 2>/dev/null; rm -f /tmp/keel_h2_interop.pid; \
 	  echo "curl body: $$out"; \
 	  test $$rc -eq 0 || { echo "curl failed rc=$$rc"; exit 1; }; \
 	  echo "$$out" | grep -q "hello h2 e2e" || { echo "body mismatch"; exit 1; }; \
-	  echo "integrations/http2/nghttp2: curl --http2-prior-knowledge interop OK"
+	  echo "integrations/http2/nghttp2: curl --http2-prior-knowledge interop OK"; \
+	  echo "curl upgrade: $$up"; \
+	  test $$urc -eq 0 || { echo "curl --http2 (h2c Upgrade) failed rc=$$urc"; exit 1; }; \
+	  echo "$$up" | grep -q "hello h2 e2e" || { echo "h2c Upgrade: body mismatch"; exit 1; }; \
+	  echo "$$up" | grep -q "http_version=2" || { echo "h2c Upgrade: not answered over HTTP/2"; exit 1; }; \
+	  echo "integrations/http2/nghttp2: curl --http2 (h2c Upgrade) interop OK"
 
 # HTTP/2 protocol conformance: run h2spec (https://github.com/summerwind/h2spec)
 # against the KEEL nghttp2 server (h2c). Reports pass/fail; informational; the
