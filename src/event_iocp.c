@@ -1223,7 +1223,14 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].kind = KL_COMP_DGRAM_SEND;
             out[count].life = op->life; op->life = NULL;
             out[count].bytes = op->send_total;
-            out[count].ok = (bytes > 0);
+            /* Success is the operation's own result, not a byte count: a zero-length datagram is a
+             * real, successful send with bytes == 0, which "bytes > 0" reported as a failure and so
+             * poisoned the send path. A datagram goes whole or not at all. */
+            {
+                DWORD xfer = 0, sflags = 0;
+                BOOL sok = WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &sflags);
+                out[count].ok = sok && (size_t)xfer == op->send_total;
+            }
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_PIPE_READ || op->type == KL_IOCP_PIPE_WRITE ||

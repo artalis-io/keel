@@ -207,6 +207,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - `test_dns_resolver` adds `duplicate_truncated_reply_does_not_preempt_the_tcp_answer`, with the
     UDP mock sending every reply twice.
 
+- **Engine and platform hygiene** (fifteenth-audit Lows L3 to L7).
+  - **IOCP: a zero-length datagram poisoned the send path (L3).** The send completion reported
+    success as `bytes > 0`, so a successful empty datagram counted as failed and later sends were
+    refused. Success is now the operation's own result. `test_datagram_socket` adds
+    `zero_length_datagram_then_normal_send`, which fails on IOCP without the fix.
+  - **io_uring: an op could be stranded when no SQE was free (L4).**
+    - A continuation (a short send's tail, a splice step) that found no SQE marked the op aborted
+      with nothing queued, so it never completed. It now fails the write at once.
+    - A cancel that found no SQE was skipped. It is now recorded and re-posted at the next drain.
+    - `test_iouring_sqe_fail` adds both cases, using the forced-SQE-failure seam.
+  - **Thread pool: the wrong size was freed after a partial start (L5).** The thread array was
+    freed at the started count rather than the allocated one; the capacity is now kept.
+  - **Windows wakeup: the pair accepted whoever connected first (L6).** The loopback listener now
+    checks that the accepted peer is its own client and drops anything else.
+  - **Named pipes: a failed listen fired `on_close` (L7).** A `kl_pipe_listen` whose first arm
+    failed called the owner's `on_close` for a listener it never handed out. That callback is now
+    suppressed while the listen is starting. `test_pipe_stream` adds an allocation-failure sweep
+    through `kl_pipe_listen`, which fails without the fix.
+
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
   "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
   BINARY frame looked like the start of another message. The server closed the connection with 1002

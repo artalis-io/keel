@@ -114,6 +114,43 @@ UTEST(datagram_socket, init_bind_and_roundtrip) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Live: a zero-length datagram is a real send and a real receive, and the send path keeps working
+ * after it (audit L3). On IOCP the send completion was reported as failed because it moved 0 bytes
+ * ("bytes > 0"), which poisoned the datagram's send path, so the next send never arrived. */
+UTEST(datagram_socket, zero_length_datagram_then_normal_send) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&rx, &rc));
+    uint16_t port = kl_datagram_local_port(&rx);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc };
+    ASSERT_EQ(0, kl_datagram_socket_init(&tx, &tc));
+
+    g_recv_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv, NULL));
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", port);
+
+    KlDatagramMessage empty = { .data = "", .len = 0, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &empty));
+    pump_until(&ctx, &g_recv_calls, 1, 100);
+    ASSERT_EQ(1, g_recv_calls);
+    ASSERT_EQ((size_t)0, g_len);
+
+    const char *msg = "after";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));   /* was: refused */
+    pump_until(&ctx, &g_recv_calls, 2, 100);
+    ASSERT_EQ(2, g_recv_calls);
+    ASSERT_EQ(strlen(msg), g_len);
+    ASSERT_EQ(0, memcmp(g_buf, msg, strlen(msg)));
+
+    close_free(&ctx, &rx); close_free(&ctx, &tx);
+    kl_event_ctx_free(&ctx);
+}
+
 /* Live: connect then a PEERLESS send is delivered; the accepted-RX inspector reflects capture. */
 UTEST(datagram_socket, connect_then_peerless_send) {
     g_alloc = kl_allocator_default();

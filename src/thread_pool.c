@@ -46,7 +46,8 @@ struct KlThreadPool {
 
     /* Workers */
     KlPlatThread *threads;
-    int num_workers;
+    int threads_cap;      /* entries allocated in `threads` (what kl_free is given) */
+    int num_workers;      /* workers actually started (<= threads_cap) */
 };
 
 /* ── Worker thread ────────────────────────────────────────────────── */
@@ -181,6 +182,7 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     /* Allocate thread array */
     pool->threads = kl_malloc(alloc, (size_t)num_workers * sizeof(KlPlatThread));
     if (!pool->threads) { ctx->last_error = KL_ERR_ALLOC; goto fail_watcher; }
+    pool->threads_cap = num_workers;
 
     /* Spawn worker threads */
     int started = 0;
@@ -279,7 +281,8 @@ void kl_thread_pool_free(KlThreadPool *pool)
 
     /* Free allocations */
     KlAllocator *alloc = pool->alloc;
-    kl_free(alloc, pool->threads, (size_t)pool->num_workers * sizeof(KlPlatThread));
+    /* threads_cap, not num_workers: after a partial start fewer workers run than were allocated. */
+    kl_free(alloc, pool->threads, (size_t)pool->threads_cap * sizeof(KlPlatThread));
     kl_free(alloc, pool->done_queue, (size_t)pool->done_cap * sizeof(KlWorkItem));
     kl_free(alloc, pool->work_queue, (size_t)pool->work_cap * sizeof(KlWorkItem));
     kl_free(alloc, pool, sizeof(KlThreadPool));
