@@ -5,6 +5,96 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Sixteenth pass: re-audit after the fifteenth-pass fixes (2026-10-01)
+
+**Scope:** the whole `src/` tree plus `include/keel/` at `main` `d686342`, after #348 to #364 closed
+every fifteenth-pass finding. Five parallel read-only reviews covered:
+- the HTTP/1 server;
+- the HTTP/1 client stack;
+- WebSocket and HTTP/2;
+- the transport substrate;
+- engines, sockets and DNS.
+
+The significant findings were then re-checked against the code by hand. Confidence: **C** means
+confirmed by reading the path end to end, and **C, run** means reproduced. **P** means plausible and
+needing a test.
+
+**Fifteenth-pass fixes:** all verified complete, apart from two follow-ons recorded below:
+- T1: the H1 deferral leaves the request deadline armed.
+- W-L: L12 missed one `upgrade_cap` free.
+
+I7 (`h2c_on_response` leaking on a second call for a stream) is still open.
+
+### Mechanical scans and gates
+
+| Category | Result |
+|---|---|
+| Unsafe str/format, `atoi`/`atol`/`atof` | none in `src/` |
+| Direct `malloc`/`free` | only the default-allocator seam and the PAL thread trampolines (I6, unchanged) |
+| Dead code, VLAs, stack arrays | none; every macro-sized stack buffer is at most 16 KiB |
+| Build hardening | unchanged (`-fstack-protector-strong`, `_FORTIFY_SOURCE=3`, PIE, RELRO/now, noexecstack) |
+| Local gates | all 18 pass |
+| `clang --analyze` (MinGW, Windows-branch view) | 87 TUs analyzed, 0 failed, 0 warnings |
+
+### High
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S1 | `http_connection.c:766,826,962`; `http_router.c:248-258`; completion twin in `completion_http_server.c` | **Post-body middleware is matched against overwritten bytes.** Body reads land at `read_buf[0]`, where `req->method`/`req->path` point. The documented limit covers handlers: header pointers die once body reading starts (`overview.md:222`). But Keel's own `kl_http_router_run_post_middleware` then matches on those pointers. A POST whose body arrives in a later read skips its post-body middleware, the documented home of CSRF checks, while the handler still runs. | C |
+| X3 | `thread_pool.c:225-232` (with `:140`, `:158-159`) | **Work-queue ring overflow.** The ring holds `queue_cap` items, but admission only checks `inflight < queue_cap + num_workers`. A burst of submits before idle workers dequeue wraps the tail over unconsumed items. Those items are lost, so a suspended connection hangs. The items that overwrote them run twice: a double `done_fn`, double `kl_async_complete` or double free. | C |
+
+### Medium
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S2 | `http1_parser_llhttp.c:85-101`; `http_connection.c:543-552` | llhttp reports an empty header value (`X:\r\n`) at the first byte of the NEXT line, with length 0. NUL-termination then blanks that header's name, so it vanishes from lookups. With `Content-Type` gone, for example, multipart returns 415. | C, run |
+| S3 | `http_server_core.c:729-740`; HTTP conns never re-run the read-facet init | `read_paused` survives release. A client that disconnects while its body is paused poisons the pool slot, and every later upload on that slot stalls (408 on readiness). | C |
+| S4 | `http_server_core.c:609-610,663-664` | On a completion loop, the sweep reclaims a timed-out connection only by cancelling an in-flight op. A connection with nothing in flight (a paused body read, S3) is never released, leaking the slot, fd and credit. | C (logic) |
+| S6 | `http_router.c:129-130` vs `:166-167` | Route matching tolerates a trailing `/`, but exact middleware matching does not. `GET /admin/` reaches the `/admin` handler and skips the `/admin` middleware (auth bypass). | C |
+| T1 | `http_client_async.c:1087-1093`, `:418-427`, `:1073-1078`, `:1558` | H1 follow-on: the deferred-error path leaves `deadline_timer` armed. If both timers are due in one pass, `he_on_deadline` completes inline (the connect op is now DETACHED), and `async_deferred_error` completes again because it has no DONE check. The result is a double `on_done`, or a UAF if the first call freed the client: free skips `done_timer` once the state is DONE. | C |
+| T2 | `http_client_async.c:536-561` | `https://` with `cfg->tls` set but `factory == NULL` falls to the plaintext branch (fail-open). The pooled client then files the plain connection under `is_tls=1`. The sync and tunnel paths fail closed. | C |
+| T3 | `http_client_async.c:733-737` and the other send sites; TLS backends return 0 for WANT_WRITE | A TLS write that hits backpressure is treated as a fatal I/O error. Async HTTPS uploads larger than the socket buffer fail with `KL_ERR_IO`. | C |
+| T4 | `http_client_pool.c:27-42` | Pooled connections are keyed by host/port/is_tls/proxy only, not by TLS config. A strict-verify request can reuse a connection made with verification off, or under another mTLS identity. The keying is documented, but it is a security hazard. | C |
+| T5 | `http_client_sync.c:546-550`; `http_client_pool.c:173` | Sync pooled HTTPS polls the socket while TLS holds buffered plaintext, stalling until `timeout_ms`. Reused connections also stay non-blocking, so TLS "retry" zeros are read as EOF. | C / P |
+| X1 | `stream_write.c:229-230`, `:123` | An abortive close (`kl_stream_cancel`) still pumps the next queued batch after a write completion, and never cancels it. A peer that stops reading then pins the stream, and `on_close` never fires. | C (path) |
+| X2 | `datagram.c:557-565` | `kl_datagram_send` has no `dispatch_begin/end` bracket, unlike the batch and GSO paths. `on_drain` can call `close_cancel`, whose `on_close` can call `kl_datagram_free` inside the send; `dg_reconcile_write` then touches freed state. | C |
+| W1 | `http2_client.c:255-258` | The HTTP/2 client has no free-from-callback protection. `kl_http2_client_free` in `on_resp` frees `c` and the session, then `h2c_stream_remove` and nghttp2 run on freed memory. The WebSocket client got this protection in #361. | C |
+| W2 | `http_server_ws.c:600-604`; `http2_server.c:624-625`; `websocket_client.c:563-576,833-841`; `http2_client.c:416-419` | The readiness WS and H2 paths treat a TLS `read() == 0` (WANT_READ) as EOF and `write() == 0` as fatal. A TLS record split across TCP segments drops the connection. The completion twins are correct. | C (code) / P (trigger) |
+| W3 | `http_server_ws.c:596-607`; `websocket_client.c:820-846` | The WS server and client read one 8 KiB buffer per event without draining `tls->pending()`. The rest of a 16 KiB record waits for the peer's next send. | P |
+| W4 | `http_server_ws.c:401-419` | The WS server does not validate close frames (the client does since #361), and echoes 1005 on the wire for an empty close. | C |
+| W5 | `http_server_ws.c:352-353` | With no `on_message` handler, `ws_deliver_message` returns before resetting message state, so the second message fails the connection with 1002. | C |
+| W6 | `http2_server.c:403-404` | DATA for a stream Keel already finished (a pre-body rejection) returns -1. The nghttp2 adapter maps that to a fatal session error, aborting every multiplexed stream. | P |
+| W7 | `http2_server.c:579-586` | h2c Upgrade sends 101 but never serves the upgrading request on stream 1 (RFC 7540 3.2), so `curl --http2` waits forever. | C |
+| W8 | `http2_client.c:596-617` | After an immediate connect, the watcher keeps WRITE interest and every rearm fires again: a busy loop on `http+unix`. | P |
+| S5 | `integrations/codec/miniz/compress_miniz.c:62-95`; `http_compress.c:48-68` | miniz allocates `10 + bound + 8` bytes but reports the smaller `total`, and core frees with the reported size. Every compressed response has an allocator size mismatch. | C |
+
+### Low
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S7 | `http_sse.c:26-48` | SSE field injection: a bare `\r` in `data`, or CR/LF in `event`/`id`, injects fields. Line `:46` also advances the pointer past `end + 1`. | C |
+| S8 | `completion_http_server.c:456-462` | h2c prior-knowledge on completion passes the preface without its magic, while readiness passes it whole. With h2 configured but no hooks, a `memcmp` over-reads the 25-byte preface array. | C / P |
+| S9 | `http_connection.c:687-754` | Body bytes that arrive with the headers are not counted. A rejected or `Connection: close` request lingers in DRAINING until EOF or 500 ms. | C |
+| S10 | `http1_chunked.c:74-80,157-166` | Chunk extensions and trailers accept bare LF and CTLs, with no length bound, outside `max_body_size`. | P |
+| S11 | `http_connection.c:462,476-478` | A partial PROXY header from a trusted peer busy-loops on level-triggered readiness. | P |
+| T6 | `http1_response_parser_llhttp.c:219,323`; `http_client_common.c:411` | After a 1xx with headers and then a final response with none, the 16-slot header array is freed with size 0. | C |
+| T7 | `http_client_async.c:1155-1157` | A user resolver without `cancel` is accepted, though the contract requires it. A timeout during RESOLVING then leads to a callback into freed memory. | C |
+| T8 | `http_client_common.c:254-316`; miniz 256 MB cap | `max_response_size` does not bound decompressed output, and the async client ignores a decompression failure. | C |
+| T9 | `http_client_async.c:432-464` | The request deadline starts after resolution, so a stuck resolver hangs the request. | C |
+| T10-T18 | client (see review notes) | <ul><li>Pool peek treats stray bytes as a healthy connection.</li><li>`set_hostname` is optional, so a backend without it skips the hostname check.</li><li>Proxy auth is not checked for CR/LF.</li><li>A 101 ending at a read boundary is pooled.</li><li>The final decompress flush result is ignored.</li><li>A `body_read` that returns too much is not rejected.</li><li>An OOM during transfer leaks the body.</li><li>`reset` keeps `body_streamed`.</li><li>`Connection: close, x` is pooled.</li></ul> | C / P |
+| W9-W18 | WS/H2 (see review notes) | <ul><li>A full stream table, or RST(NO_ERROR), leaks a slot.</li><li>The request is submitted before its stream is created.</li><li>The client `timeout_ms` is never used.</li><li>Fragmentation edge cases.</li><li>An OOM while copying leftover bytes drops them.</li><li>The handshake checks too few headers.</li><li>Calling `enable_drain` twice.</li><li>An H2 body without content-length gets no reader.</li><li>A NULL h2 factory is not rejected.</li><li>Swap-remove moves `req`.</li><li>W-L: `websocket_client.c:1110` still frees `upgrade_buf` with `upgrade_len`.</li></ul> | C / P |
+| X4-X8 | substrate | <ul><li>Datagram calls reuse a stale `dg->fd` after close.</li><li>Freeing the thread pool from `done_fn`.</li><li>A 0 ms timer re-armed in its own callback starves I/O.</li><li>`kl_free(NULL, size)` in a batch unwind.</li><li>A wrong-family accept leaks the accepted value.</li></ul> | C / P |
+| E1-E10 | engines/DNS | <ul><li>E1: a failed IOCP re-arm retires the watcher silently.</li><li>E2: io_uring `kl_event_del` drops POLL_REMOVE when there is no SQE.</li><li>E3: IOCP TransmitFile with count 0 sends the whole file.</li><li>E4: a truncated file is reported as fully sent.</li><li>E5: pollcomp makes accepted sockets blocking.</li><li>E6: DNS cookies are bypassed by omitting them.</li><li>E7: the UDP source port is fixed.</li><li>E8: the `/dev/urandom` fallback is constant.</li><li>E9: `open`/`fopen` are outside the cloexec gate.</li><li>E10: Windows hosts-path init is not thread-safe.</li></ul> | C / P |
+
+### Recommended order
+
+1. **The two Highs.**
+   - S1: match post-body middleware at header time (a per-request bitmask) rather than after the body.
+   - X3: bound admission on `work_count < work_cap`.
+2. **The client and server correctness Mediums:** T1, T2, S2, S3+S4, S6, X2, W1.
+3. **The TLS readiness group** (T3, T5, W2, W3) as one change, with a split-record test.
+4. **The rest**, grouped by family as in the fifteenth pass.
+
 ## Fifteenth pass: whole-tree re-audit after the transport and pipe work (2026-09-30)
 
 **Scope:** whole `src/` (103 `.c`, 33,411 lines) including `src/protocols/`, the internal and public
