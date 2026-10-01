@@ -261,6 +261,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `at_eof` telling which), the WebSocket and HTTP/2 clients drain plaintext the engine holds, and the
   sync client reads buffered plaintext before polling and returns a pooled connection to blocking
   mode.
+- **An abortive stream close could keep sending.** `kl_stream_cancel` drops the write queue and
+  cancels the in-flight send, but that send can still complete successfully, the cancel having lost
+  the race. On a completion loop the completion then submitted the next queued batch, a new send with
+  no cancel requested. With a peer that had stopped reading, that send never completed and the stream
+  never reached `on_close`; for a pipe stream the handle and memory stayed pinned. An abortive close
+  now submits nothing more.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
