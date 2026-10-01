@@ -474,4 +474,81 @@ UTEST(ws_server_close_recv, messages_without_on_message_are_finished) {
     ASSERT_EQ(close_code_of(reply, (int)got), 1000u);   /* our close echoed, not a 1002 */
 }
 
+/* ── Fragmentation edge cases at the server (RFC 6455 5.4) ─────────────────────────────────── */
+static KlSocketHandle frag_open(int port) {
+    KlSocketHandle fd = raw_connect(port);
+    if (!kl_handle_valid(fd)) return KL_INVALID_SOCKET;
+    char req[512];
+    int rn = snprintf(req, sizeof req,
+                      "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+                      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n", port);
+    char resp[1024]; size_t rl = 0;
+    if (send_all(fd, req, (size_t)rn) == 0) {
+        while (rl < sizeof resp - 1) {
+            int k = (int)recv(fd, resp + rl, 1, 0);
+            if (k <= 0) break;
+            rl++;
+            resp[rl] = '\0';
+            if (rl >= 4 && memcmp(resp + rl - 4, "\r\n\r\n", 4) == 0) break;
+        }
+        if (strncmp(resp, "HTTP/1.1 101", 12) == 0) return fd;
+    }
+    kl_test_closesock(fd);
+    return KL_INVALID_SOCKET;
+}
+
+/* A masked client frame with an explicit FIN bit. */
+static size_t frag_masked(unsigned char *out, int fin, int opcode, const void *pl, size_t len) {
+    static const unsigned char key[4] = { 0x11, 0x22, 0x33, 0x44 };
+    out[0] = (unsigned char)((fin ? 0x80 : 0) | opcode);
+    out[1] = (unsigned char)(0x80 | len);
+    memcpy(out + 2, key, 4);
+    for (size_t i = 0; i < len; i++) out[6 + i] = ((const unsigned char *)pl)[i] ^ key[i & 3];
+    return 6 + len;
+}
+
+/* Send frames, then read the server's reply frame. */
+static int frag_case(const unsigned char *frames, size_t n, int *opcode, unsigned char *pl, size_t *pl_len) {
+    static Srv s;
+    if (srv_start(&s) != 0) return -1;
+    KlSocketHandle fd = frag_open(s.port);
+    int r = -1;
+    if (kl_handle_valid(fd) && send_all(fd, frames, n) == 0)
+        r = read_frame(fd, opcode, pl, 125, pl_len);
+    if (kl_handle_valid(fd)) kl_test_closesock(fd);
+    srv_stop(&s);
+    return r;
+}
+
+/* An empty first fragment starts a message: it was not recorded, so the continuation was refused. */
+UTEST(ws_server_frag, empty_first_fragment_starts_the_message) {
+    unsigned char f[64]; size_t n = frag_masked(f, 0, 0x1, NULL, 0);
+    n += frag_masked(f + n, 1, 0x0, "hi", 2);
+    int op = -1; unsigned char pl[125]; size_t len = 0;
+    ASSERT_EQ(frag_case(f, n, &op, pl, &len), 0);
+    ASSERT_EQ(op, 0x1);                          /* was: a 1002 close */
+    ASSERT_EQ(len, (size_t)2);
+    ASSERT_EQ(memcmp(pl, "hi", 2), 0);
+}
+
+/* A final continuation with no message open is a protocol error (it was delivered as a message). */
+UTEST(ws_server_frag, continuation_without_a_message_fails_with_1002) {
+    unsigned char f[64]; size_t n = frag_masked(f, 1, 0x0, NULL, 0);
+    int op = -1; unsigned char pl[125]; size_t len = 0;
+    ASSERT_EQ(frag_case(f, n, &op, pl, &len), 0);
+    ASSERT_EQ(op, 0x8);
+    ASSERT_TRUE(len >= 2 && ((pl[0] << 8) | pl[1]) == 1002);
+}
+
+/* An empty new message while a fragmented one is open is a protocol error (it replaced it). */
+UTEST(ws_server_frag, empty_message_inside_a_fragmented_one_fails_with_1002) {
+    unsigned char f[64]; size_t n = frag_masked(f, 0, 0x1, "ab", 2);
+    n += frag_masked(f + n, 1, 0x1, NULL, 0);
+    int op = -1; unsigned char pl[125]; size_t len = 0;
+    ASSERT_EQ(frag_case(f, n, &op, pl, &len), 0);
+    ASSERT_EQ(op, 0x8);
+    ASSERT_TRUE(len >= 2 && ((pl[0] << 8) | pl[1]) == 1002);
+}
+
 UTEST_MAIN();
