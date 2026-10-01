@@ -492,6 +492,21 @@ UTEST(router, post_middleware_use) {
     kl_http_router_free(&r);
 }
 
+/* The HTTP/1 server records which post-body middleware match in a 64-bit set at header time, so
+ * registration stops at the cap instead of letting a later entry be silently skipped. */
+UTEST(router, post_middleware_registration_is_capped) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r;
+    kl_http_router_init(&r, &a);
+
+    for (int i = 0; i < KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE; i++)
+        ASSERT_EQ(kl_http_router_use_post(&r, "*", "/*", mw_noop, NULL), 0);
+    ASSERT_EQ(kl_http_router_use_post(&r, "*", "/*", mw_noop, NULL), -1);
+    ASSERT_EQ(r.post_mw_count, KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE);
+
+    kl_http_router_free(&r);
+}
+
 UTEST(router, post_middleware_run) {
     KlAllocator a = kl_allocator_default();
     KlHttpRouter r;

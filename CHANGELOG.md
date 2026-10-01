@@ -19,6 +19,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   on a later event-loop turn - by which time a config the caller had kept on its stack (the
   natural way to pass one) was dead memory, including its `tls` pointer. The client now copies
   the config when it starts.
+- **HTTP/1 post-body middleware was skipped when the body arrived in a later read.** A body read
+  reuses the connection's read buffer from offset 0, where `req->method` and `req->path` point, and
+  the server matched post-body middleware against them only after the body was in. Once the body
+  had overwritten the request line the match failed, so the middleware did not run, but the handler
+  still did. Post-body middleware is where a CSRF check on a form body belongs, so a client could
+  bypass it by sending the body after the headers. Every event model was affected. The server now
+  matches post-body middleware at header time, while the request line is intact, and runs the
+  matched set once the body is in. **Behavior change:** `kl_http_router_use_post` (and
+  `kl_http_server_use_post`) now refuse more than `KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE` (64) entries
+  per router, returning -1, because the match is recorded in a 64-bit set. The handler-side limit is
+  unchanged and documented: header pointers, including `req->method` and `req->path`, may be
+  overwritten once body reading starts, for post-body middleware as for handlers.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client

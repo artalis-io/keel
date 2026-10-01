@@ -216,6 +216,9 @@ int kl_http_router_run_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpRes
 int kl_http_router_use_post(KlHttpRouter *r, const char *method, const char *pattern,
                        KlHttpMiddleware fn, void *user_data) {
     if (!r || !method || !pattern || !fn) return -1;
+    /* The connection records which post-body middleware match in a 64-bit set (see
+     * kl_http_router_post_match), so refuse more rather than skip them silently later. */
+    if (r->post_mw_count >= KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE) return -1;
     if (r->post_mw_count >= r->post_mw_capacity) {
         int new_cap;
         if (r->post_mw_capacity == 0) {
@@ -245,18 +248,32 @@ int kl_http_router_use_post(KlHttpRouter *r, const char *method, const char *pat
     return 0;
 }
 
-int kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res) {
+uint64_t kl_http_router_post_match(const KlHttpRouter *r, const KlHttpRequest *req) {
+    uint64_t matched = 0;
     for (int i = 0; i < r->post_mw_count; i++) {
-        KlHttpMiddlewareEntry *mw = &r->post_middleware[i];
+        const KlHttpMiddlewareEntry *mw = &r->post_middleware[i];
         if (match_middleware_pattern(req->method, req->method_len,
                                     mw->method, mw->method_len,
                                     mw->pattern, mw->pattern_len,
-                                    req->path, req->path_len)) {
-            int rc = mw->fn(req, res, mw->user_data);
-            if (rc != 0) return rc;
-        }
+                                    req->path, req->path_len))
+            matched |= (uint64_t)1 << i;
+    }
+    return matched;
+}
+
+int kl_http_router_run_post_matched(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res,
+                                    uint64_t matched) {
+    for (int i = 0; i < r->post_mw_count; i++) {
+        if (!(matched & ((uint64_t)1 << i))) continue;
+        KlHttpMiddlewareEntry *mw = &r->post_middleware[i];
+        int rc = mw->fn(req, res, mw->user_data);
+        if (rc != 0) return rc;
     }
     return 0;
+}
+
+int kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res) {
+    return kl_http_router_run_post_matched(r, req, res, kl_http_router_post_match(r, req));
 }
 
 /* ── Synthetic request dispatch ─────────────────────────────────────── */

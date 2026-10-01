@@ -62,6 +62,9 @@ typedef struct {
  * pointer, so only this forward declaration is public. */
 typedef struct KlHttpMiddlewareEntry KlHttpMiddlewareEntry;
 
+/** Most post-body middleware one router accepts (kl_http_router_use_post refuses more). */
+#define KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE 64
+
 typedef struct KlHttpRouter {
     KlHttpRoute *routes;                   /**< Route table array */
     int count;                         /**< Number of registered routes */
@@ -202,7 +205,8 @@ int  kl_http_router_use(KlHttpRouter *r, const char *method, const char *pattern
  * @param pattern URL pattern: exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
  * @param user_data Passed to fn on each invocation.
- * @return 0 on success, -1 on allocation failure.
+ * @return 0 on success, -1 on allocation failure or when
+ *         KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE are already registered.
  */
 int  kl_http_router_use_post(KlHttpRouter *r, const char *method, const char *pattern,
                         KlHttpMiddleware fn, void *user_data);
@@ -215,6 +219,10 @@ int  kl_http_router_run_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpRe
 
 /**
  * @brief Run all matching post-body middleware in registration order.
+ *
+ * Matches on req->method and req->path, so call it while they are valid. The HTTP/1 server does
+ * not call this after the body: a body read may overwrite the request line, so the server matches
+ * at header time and runs the matched set once the body is in.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
 int  kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res);
