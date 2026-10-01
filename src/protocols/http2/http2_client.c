@@ -506,7 +506,8 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         parsed.host_len = 9;
     }
 
-    if (parsed.is_https && !cfg->tls)
+    /* Fail closed: a TLS config with no factory cannot secure the connection. */
+    if (parsed.is_https && (!cfg->tls || !cfg->tls->factory))
         return NULL;
 
     /* Host for the :authority pseudo-header (SNI too when TLS). */
