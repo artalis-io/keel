@@ -9,6 +9,7 @@
 #include <keel/http_body_reader.h>
 #include <string.h>
 #include "net_compat.h"
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
@@ -53,6 +54,10 @@ typedef struct {
     char upgrade_settings[64];
     int upgrade_head;
 
+    /* The first bytes fed to recv */
+    char first_recv[64];
+    size_t first_recv_len;
+
     /* KEEL's callbacks (stored by factory) */
     KlHttp2ServerCallbacks callbacks;
     void *cb_user_data;
@@ -60,8 +65,11 @@ typedef struct {
 
 static kl_ssize_t mock_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     MockH2Session *m = (MockH2Session *)self;
+    if (m->recv_count == 0 && data) {
+        m->first_recv_len = len < sizeof(m->first_recv) ? len : sizeof(m->first_recv);
+        memcpy(m->first_recv, data, m->first_recv_len);
+    }
     m->recv_count++;
-    (void)data;
     if (m->recv_return >= 0)
         return (kl_ssize_t)len;
     return m->recv_return;
@@ -1449,6 +1457,51 @@ UTEST(h2, upgrade_from_h1_malformed_rejected) {
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
+}
+
+/* ── Prior knowledge through a real server ─────────────────────────────────────────────────
+ * A client with prior knowledge opens with the 24-byte preface magic. Every entry path hands the
+ * session the whole preface, magic included, and the nghttp2 adapter lets nghttp2 consume it. The
+ * completion path (io_uring, IOCP, pollcomp) stripped the magic first, so nghttp2 saw SETTINGS where
+ * it expected the magic and rejected the connection. */
+static KlHttpServer g_pk_srv;
+static MockH2Session g_pk_mock;
+static void pk_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_pk_srv); }
+
+UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
+    test_setup();
+    mock_init(&g_pk_mock);
+    g_mock_session = &g_pk_mock;
+    KlHttpServerConfig cfg = { .port = 0, .h2 = &test_h2_cfg };
+    ASSERT_EQ(kl_http_server_init(&g_pk_srv, &cfg), 0);
+    KlPlatThread t;
+    kl_plat_thread_create(&t, pk_server_thread, NULL);
+    for (int i = 0; i < 200 && g_pk_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)g_pk_srv.bound_port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    int ok = fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0;
+    static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    static const char settings[9] = { 0, 0, 0, 4, 0, 0, 0, 0, 0 };   /* empty SETTINGS frame */
+    if (ok) {
+        (void)kl_test_sockwrite(fd, preface, 24);
+        (void)kl_test_sockwrite(fd, settings, sizeof settings);
+    }
+    for (int i = 0; ok && i < 200 && g_pk_mock.recv_count == 0; i++) kl_test_sleep_ms(10);
+    size_t got = g_pk_mock.first_recv_len;
+    int whole = got >= 24 && memcmp(g_pk_mock.first_recv, preface, 24) == 0;
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&g_pk_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_pk_srv);
+    test_teardown();
+    ASSERT_TRUE(ok);
+    ASSERT_GT(got, (size_t)0);
+    ASSERT_TRUE(whole);                          /* was: the session got SETTINGS, magic stripped */
 }
 
 UTEST_MAIN();

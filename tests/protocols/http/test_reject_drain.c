@@ -602,6 +602,40 @@ UTEST(reject_drain, over_sent_bytes_after_a_complete_body_do_not_reset_the_respo
     rd_stop();
 }
 
+/* Body bytes that arrived in the same read as the headers were never counted, so a request whose
+ * whole body came with its headers still looked unfinished when the connection was to close: the
+ * server half-closed and drained until the peer's EOF or the deadline, instead of closing at once. */
+static void body_with_headers_case(int *utest_result, const char *path) {
+    ASSERT_EQ(0, rd_start(1024 * 1024, 2000));      /* a long deadline, to make waiting on it plain */
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+    char req[256];
+    snprintf(req, sizeof req, "POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                              "Connection: close\r\n\r\nhello", path);
+    ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);   /* one write: body with headers */
+    char buf[4096];
+    (void)rd_read_all(fd, buf, sizeof(buf));        /* the response, then the server's half-close */
+    /* The client sees EOF at once either way (the drain half-closes); what differs is how long the
+     * server holds the connection. Keep the client's end open and time the server's release. */
+    uint64_t t0 = kl_monotonic_ms();
+    int active = -1;
+    for (int i = 0; i < 300; i++) {
+        KlHttpServerStats st;
+        kl_http_server_stats(&rd_server, &st);
+        active = st.active_connections;
+        if (active == 0) break;
+        kl_test_sleep_ms(10);
+    }
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+    kl_test_closesock(fd);
+    rd_stop();
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_EQ(active, 0);
+    ASSERT_LT(elapsed, (uint64_t)1000);              /* was ~2000: drained to the deadline */
+}
+UTEST(reject_drain, body_read_with_the_headers_counts_reader) { body_with_headers_case(utest_result, "/echo"); }
+UTEST(reject_drain, body_read_with_the_headers_counts_discard) { body_with_headers_case(utest_result, "/deny"); }
+
 /* ── Config normalisation (#293) ─────────────────────────────────────────────────────────────── */
 /* The documented way to disable the drain used to be the exact configuration that ENABLED it with
  * defaults, because init applied defaults only when BOTH numeric fields were zero. So zeroing both

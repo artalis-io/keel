@@ -155,6 +155,35 @@ UTEST(cors, middleware_specific_origin) {
     kl_http_response_free(&res);
 }
 
+/* Echoing the request's own Origin makes the response vary by Origin: without Vary, a shared cache
+ * could serve one origin's Allow-Origin to another. A wildcard does not vary, and adds nothing. */
+static int cors_has_vary_origin(int specific) {
+    KlHttpCorsConfig c;
+    kl_http_cors_init(&c);
+    if (specific) kl_http_cors_add_origin(&c, "https://allowed.com");
+    KlHttpRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/api"; req.path_len = 4;
+    req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
+    req.headers[0].value = "https://allowed.com"; req.headers[0].value_len = 19;
+    req.num_headers = 1;
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    (void)kl_http_cors_middleware(&req, &res, &c);
+    char hdrs[1024];
+    size_t n = res.hdr_len < sizeof hdrs - 1 ? res.hdr_len : sizeof hdrs - 1;
+    memcpy(hdrs, res.hdr_buf, n);
+    hdrs[n] = '\0';
+    kl_http_response_free(&res);
+    return strstr(hdrs, "Vary: Origin") != NULL;
+}
+
+UTEST(cors, echoed_origin_varies_by_origin) {
+    ASSERT_TRUE(cors_has_vary_origin(1));
+    ASSERT_FALSE(cors_has_vary_origin(0));
+}
+
 UTEST(cors, middleware_disallowed_origin) {
     KlHttpCorsConfig c;
     kl_http_cors_init(&c);
