@@ -91,6 +91,20 @@ static int miniz_compress(KlCompress *self, const char *in, size_t in_len,
     write_le32((unsigned char *)buf + 10 + out_bytes, crc);
     write_le32((unsigned char *)buf + 10 + out_bytes + 4, (uint32_t)in_len);
 
+    /* Trim to exactly total: the caller frees *out with *out_len (the server stores it as
+     * body_owned_size), so the worst-case bound must not be what was allocated. If the trim
+     * cannot be allocated, fail rather than hand back a block whose size the caller cannot know. */
+    if (total < buf_size) {
+        char *trimmed = kl_malloc(alloc, total);
+        if (!trimmed) {
+            kl_free(alloc, buf, buf_size);
+            return -1;
+        }
+        memcpy(trimmed, buf, total);
+        kl_free(alloc, buf, buf_size);
+        buf = trimmed;
+    }
+
     *out = buf;
     *out_len = total;
     return 0;
