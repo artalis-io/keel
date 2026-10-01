@@ -130,6 +130,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
+  `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
+  response parser stopped at that interim message, so the sync and async clients returned `103`
+  (or `100`) with no body and never read the real response. A streaming caller's `on_headers` fired
+  for the interim message too.
+  - The llhttp response parser now discards an interim response (status, headers and all) and keeps
+    parsing to the final one, in the same read or a later one. `101 Switching Protocols` stays
+    final.
+  - An interim response followed by end of stream has no final response, so it is an error, not a
+    success.
+  - `test_http1_response_parser` adds six cases (100, 103 then 102 then 200 with no header leak,
+    interim and final in separate reads, interim then EOF, 101 still final, streaming `on_headers`
+    once). `test_http_client_eof` adds three client cases over a real peer. Without the fix five
+    parser cases and all three client cases fail.
+
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
   "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
   BINARY frame looked like the start of another message. The server closed the connection with 1002

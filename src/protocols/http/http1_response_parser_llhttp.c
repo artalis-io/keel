@@ -155,11 +155,20 @@ static int flush_header(RespLlhttpParser *p)
 
 /* ── llhttp callbacks ────────────────────────────────────────────── */
 
+/* An interim (informational) response: 100 Continue, 102 Processing, 103 Early Hints, ... It is a
+ * complete message, but not THE response: the final one follows on the same connection (RFC 9110
+ * 15.2). 101 Switching Protocols is final (the connection changes protocol after it). */
+static int is_interim(unsigned status)
+{
+    return status >= 100 && status < 200 && status != 101;
+}
+
 static int resp_on_status(llhttp_t *parser, const char *at, size_t len)
 {
     (void)at; (void)len;
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
-    p->resp->status = (int)parser->status_code;
+    if (!is_interim(parser->status_code))     /* an interim status is never reported */
+        p->resp->status = (int)parser->status_code;
     return 0;
 }
 
@@ -196,6 +205,20 @@ static int resp_on_header_value_complete(llhttp_t *parser)
     return flush_header(p);
 }
 
+/* Drop everything an interim response accumulated, so the final response starts clean. */
+static void discard_message(RespLlhttpParser *p)
+{
+    kl_free(p->alloc, p->hdr_name, p->hdr_name_cap);
+    kl_free(p->alloc, p->hdr_value, p->hdr_value_cap);
+    p->hdr_name = NULL;  p->hdr_name_len = 0;  p->hdr_name_cap = 0;
+    p->hdr_value = NULL; p->hdr_value_len = 0; p->hdr_value_cap = 0;
+    for (int i = 0; i < p->num_headers; i++) {
+        kl_free(p->alloc, (char *)p->headers[i].name, strlen(p->headers[i].name) + 1);
+        kl_free(p->alloc, (char *)p->headers[i].value, strlen(p->headers[i].value) + 1);
+    }
+    p->num_headers = 0;   /* keep the array itself for the final response's headers */
+}
+
 static int resp_on_headers_complete(llhttp_t *parser)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
@@ -204,6 +227,11 @@ static int resp_on_headers_complete(llhttp_t *parser)
         if (flush_header(p) != 0)
             return -1;
     }
+
+    /* An interim response is not reported: no status, no on_headers. It has no body (llhttp knows
+     * from the status) and is discarded at its message-complete. */
+    if (is_interim(parser->status_code))
+        return 0;
 
     p->resp->status = (int)parser->status_code;
 
@@ -248,6 +276,12 @@ static int resp_on_body(llhttp_t *parser, const char *at, size_t len)
 static int resp_on_message_complete(llhttp_t *parser)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
+    if (is_interim(parser->status_code)) {
+        /* Not the response: forget it and keep parsing. Returning 0 (not PAUSED) lets llhttp go
+         * straight on to the final response, whether it is in this buffer or a later one. */
+        discard_message(p);
+        return 0;
+    }
     p->complete = 1;
 
     /* Streaming: invoke on_complete callback */

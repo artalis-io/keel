@@ -371,4 +371,113 @@ UTEST(response_parser, expect_no_body_is_cleared_by_reset) {
     p->destroy(p);
 }
 
+/* ── Interim (1xx) responses ─────────────────────────────────────────
+ * 100 Continue / 102 Processing / 103 Early Hints are complete messages but not the response: the
+ * final one follows (RFC 9110 15.2). Before the fix the parser stopped at the interim message and
+ * reported it, so the client returned "100" or "103" as the response and never read the real one. */
+
+static KlHttp1ParseResult feed_all(KlHttp1ResponseParser *p, KlHttpClientResponse *resp,
+                                   const char *raw) {
+    size_t consumed = 0;
+    return p->parse(p, resp, raw, strlen(raw), &consumed);
+}
+
+static const char *hdr(const KlHttpClientResponse *r, const char *name) {
+    for (int i = 0; i < r->num_headers; i++)
+        if (strcmp(r->headers[i].name, name) == 0) return r->headers[i].value;
+    return NULL;
+}
+
+UTEST(response_parser, interim_100_is_skipped_for_the_final_response) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 100 Continue\r\n\r\n"
+                                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"), KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 200);                     /* was: 100 */
+    ASSERT_EQ(resp.body_len, (size_t)2);
+    ASSERT_EQ(memcmp(resp.body, "ok", 2), 0);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, interim_103_headers_do_not_leak_into_the_final_response) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp,
+                       "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+                       "HTTP/1.1 102 Processing\r\n\r\n"
+                       "HTTP/1.1 200 OK\r\nX-Final: yes\r\nContent-Length: 5\r\n\r\nhello"),
+              KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_EQ(resp.num_headers, 2);                  /* X-Final + Content-Length only */
+    ASSERT_TRUE(hdr(&resp, "Link") == NULL);
+    ASSERT_STREQ(hdr(&resp, "X-Final"), "yes");
+    ASSERT_EQ(memcmp(resp.body, "hello", 5), 0);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, interim_then_final_across_reads) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 100 Continue\r\n\r\n"), KL_HTTP1_PARSE_INCOMPLETE);
+    ASSERT_EQ(resp.status, 0);                       /* nothing reported for the interim */
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 204 No Content\r\n\r\n"), KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 204);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+UTEST(response_parser, interim_then_end_of_stream_is_truncated) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n"),
+              KL_HTTP1_PARSE_INCOMPLETE);
+    ASSERT_EQ(p->finish(p, &resp), KL_HTTP1_PARSE_ERROR);   /* no final response arrived */
+    p->destroy(p);
+}
+
+UTEST(response_parser, status_101_is_final) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n"
+                                 "Connection: Upgrade\r\n\r\n"), KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(resp.status, 101);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
+static int g_hdr_calls, g_hdr_status;
+static int count_headers(int status, const KlHttpClientHeader *h, int n, void *ud) {
+    (void)h; (void)n; (void)ud;
+    g_hdr_calls++;
+    g_hdr_status = status;
+    return 0;
+}
+
+UTEST(response_parser, streaming_on_headers_fires_once_for_the_final_response) {
+    KlAllocator a = kl_allocator_default();
+    g_hdr_calls = 0; g_hdr_status = 0;
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a, NULL, count_headers,
+                                                                  NULL, NULL);
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    ASSERT_EQ(feed_all(p, &resp, "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n"
+                                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"), KL_HTTP1_PARSE_OK);
+    ASSERT_EQ(g_hdr_calls, 1);                       /* was: 2, the first with status 103 */
+    ASSERT_EQ(g_hdr_status, 200);
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
 UTEST_MAIN();
