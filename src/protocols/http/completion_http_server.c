@@ -459,14 +459,17 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
         const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         if (c->stream.read_len >= 24 && h2h && h2h->upgrade) {
             if (memcmp(c->stream.read_buf, h2_preface, 24) == 0) {
+                /* Hand the session the FULL preface, magic included, as the readiness path does:
+                 * the session's HTTP/2 engine consumes the connection preface itself. */
                 KlHttpConnState st = (KlHttpConnState)h2h->upgrade(
-                    c, &s->router, c->h2_config, c->stream.read_buf + 24, c->stream.read_len - 24);
+                    c, &s->router, c->h2_config, c->stream.read_buf, c->stream.read_len);
                 comp_after_state(s, c, st);
                 return 0;
             }
             /* not a preface: fall through to the HTTP/1.1 parser */
-        } else if (memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
-            return 1;   /* partial preface: need more bytes */
+        } else if (c->stream.read_len < 24 &&
+                   memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
+            return 1;   /* partial preface: need more bytes (never compares past the preface) */
         }
     }
 

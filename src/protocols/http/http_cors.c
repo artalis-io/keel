@@ -110,6 +110,10 @@ int kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_
 
     /* Add CORS headers */
     kl_http_response_header(res, "Access-Control-Allow-Origin", allow_origin);
+    /* An echoed origin makes the response depend on the request's Origin: say so, or a shared cache
+     * may serve this Allow-Origin to a different origin. */
+    if (config->origin_count > 0)
+        kl_http_response_header(res, "Vary", "Origin");
 
     if (config->allow_credentials && config->origin_count > 0)
         kl_http_response_header(res, "Access-Control-Allow-Credentials", "true");

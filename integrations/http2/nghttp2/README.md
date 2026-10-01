@@ -96,12 +96,11 @@ Three levels of coverage, all under [`tests/`](tests/):
    up the Keel nghttp2 server and hits it with `curl --http2-prior-knowledge`.
    Requires a curl built with HTTP2 (`curl -V`).
 
-> **Maintainer note: client connection preface.** The server session is created
-> with `nghttp2_option_set_no_recv_client_magic`: Keel's h2c prior-knowledge path
-> (`http_connection.c`) consumes the 24-byte `PRI * HTTP/2.0...` magic *before* feeding
-> the session, and the h2c-Upgrade / ALPN paths never send it. Without this the
-> session stalls waiting for the magic and resets the connection. `test_roundtrip`
-> mirrors this by stripping the leading 24 bytes on its first server feed.
+> **Maintainer note: client connection preface.** Keel hands the server session the
+> client's connection preface whole, the 24-byte `PRI * HTTP/2.0...` magic included, on
+> every entry path (h2c prior knowledge on readiness and completion loops, h2c Upgrade,
+> ALPN h2), and nghttp2 consumes it itself (its default; `no_recv_client_magic` is not
+> set).
 
 > **Client submit timing.** `kl_http2_client_request` returns `-1` until the async
 > connect reaches its ACTIVE state (no connection-ready callback is exposed), so
