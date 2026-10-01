@@ -600,11 +600,15 @@ static void dns_check_complete(KlDnsResolver *r, KlDnsReq *q) {
 /* Mark a leg settled (cancel its timeout OR send-admission guard) and re-evaluate completion. Clearing
  * send_pending here is what makes the writable scan skip a settled leg (reentrancy). */
 static void dns_leg_settle(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg) {
+    if (leg->done)
+        return;                                   /* settled once: a late path must not complete twice */
     if (leg->timer_id >= 0) {
         kl_timer_cancel(r->ctx, leg->timer_id);
         leg->timer_id = -1;
     }
     leg->send_pending = 0;
+    leg->tcp_pending = 0;                         /* a settled leg takes no TCP answer either */
+    leg->tcp_ns = -1;
     leg->done = 1;
     dns_check_complete(r, q);
 }
@@ -1147,9 +1151,15 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
         return;                                  /* stale or unknown id */
     KlDnsReq *q = leg->req;
 
+    /* Once the leg is recovering over TCP, its answer comes from TCP. A later UDP datagram for it (a
+     * duplicated or retransmitted truncated reply, or a spoof) must not settle it: that used to
+     * settle the leg from the truncated reply, usually empty, and drop the real TCP answer. */
+    if (leg->tcp_pending)
+        return;
+
     /* Truncation (TC bit): recover the answer over TCP (RFC 7766), but only when
      * the response genuinely echoes our question, so a spoofed TC can't force TCP. */
-    if ((pkt[2] & 0x02) && !leg->tcp_pending) {
+    if (pkt[2] & 0x02) {
         if (dns_question_matches(pkt, len, leg->question, leg->question_len)) {
 #ifndef KEEL_FREESTANDING
             dns_tcp_send_leg(r, leg, ns_idx);    /* recover over TCP (RFC 7766) */

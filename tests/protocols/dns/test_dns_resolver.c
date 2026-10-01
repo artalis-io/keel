@@ -76,6 +76,7 @@ static int g_answer_aaaa;   /* reply with an AAAA record for AAAA queries */
 static int g_rcode;         /* rcode to set (0 = NOERROR, 3 = NXDOMAIN) */
 static int g_silent;        /* drop queries (to exercise timeout)      */
 static int g_truncate;      /* reply with the TC bit set (force TCP fallback) */
+static int g_dup_reply;     /* send every UDP reply twice (a duplicated datagram) */
 /* DNS cookies (RFC 7873) */
 static int g_cookie;             /* mock supports cookies: echo client + add server */
 static int g_cookie_wrong_client;/* echo a corrupted client cookie (spoof test) */
@@ -304,6 +305,8 @@ static void mock_ns(void *ud, const void *data, size_t len,
     }
     KlDatagramMessage rm = { .data = resp, .len = (size_t)n, .peer = src, .tos = -1 };
     (void)kl_datagram_send(s, &rm);
+    if (g_dup_reply)
+        (void)kl_datagram_send(s, &rm);
 }
 
 /* ── Mock DNS-over-TCP server (event-loop driven, RFC 7766 framing) ─────── */
@@ -419,6 +422,7 @@ static void reset_dns(void) {
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
     g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0;
     g_truncate = 0;
+    g_dup_reply = 0;
     g_cookie = g_cookie_wrong_client = g_cookie_badcookie_once = g_cookie_bad_sent = 0;
     g_seen_client_ok = 0; g_seen_server_len = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
@@ -1435,6 +1439,39 @@ UTEST(dns, tcp_answer_destroy_from_done) {
     ASSERT_TRUE(tcp.accepts >= 1);        /* the completion really came through the TCP path */
     pump(&ctx, &g_done, 5);               /* let any stale event for the dead resolver run */
     /* r was destroyed from done(); do NOT touch it. */
+    mock_tcp_stop(&tcp);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A duplicated truncated UDP reply arrives after TCP recovery has started (audit L1). It used to fall
+ * through to the normal parse and settle the leg from the truncated reply (no answers), so the real
+ * TCP answer was dropped and the name resolved to nothing. Once TCP recovery is underway, UDP for that
+ * leg is ignored. */
+UTEST(dns, duplicate_truncated_reply_does_not_preempt_the_tcp_answer) {
+    reset_dns();
+    g_answer_a = 1;
+    g_truncate = 1;                       /* UDP replies are truncated, with no answer records */
+    g_dup_reply = 1;                      /* ... and each arrives twice */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    /* 0x20 case randomization off (a supported setting, for upstreams that normalize case). With
+     * it on, the TCP re-query gets a fresh random case and the old duplicate fails the question
+     * match, which hides the bug most of the time (all but 1 in 2^letters). */
+    KlDnsResolverConfig dc = { .timeout_ms = 2000, .attempts = 1, .disable_0x20 = 1 };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);                  /* was: no addresses, the TCP answer dropped */
+    ASSERT_GE(g_res.naddrs, 1);
+    ASSERT_TRUE(tcp.accepts >= 1);
+    r->destroy(r);
     mock_tcp_stop(&tcp);
     kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);

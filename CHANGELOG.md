@@ -197,6 +197,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     `test_http_client_alloc_sizes` suite using a size-checking allocator. Without the fixes, both
     bytes-after-response cases, the proxy case and both size cases fail.
 
+- **A duplicated truncated DNS reply dropped the TCP answer** (fifteenth-audit Low L1). Once a leg
+  started recovering over TCP (RFC 7766), a later UDP reply for it (a duplicated or retransmitted
+  truncated reply, or a spoof) fell through to the normal parse and settled the leg from the
+  truncated reply, usually with no addresses. The real TCP answer was then dropped, and a later TCP
+  failure could settle the same leg a second time.
+  - A leg recovering over TCP now ignores UDP.
+  - `dns_leg_settle` refuses an already-settled leg and clears the leg's TCP interest.
+  - `test_dns_resolver` adds `duplicate_truncated_reply_does_not_preempt_the_tcp_answer`, with the
+    UDP mock sending every reply twice.
+
 - **A WebSocket message larger than one read broke.** Both the server and the client decided
   "is this a new message?" from the frame's opcode alone, so the second chunk of the same TEXT or
   BINARY frame looked like the start of another message. The server closed the connection with 1002
