@@ -70,6 +70,8 @@ struct KlWsClientConn {
 
     /* Frame parser + message assembly */
     KlWsFrameParser  fp;
+    uint8_t          ctrl_buf[125];   /* current control frame payload, gathered across reads */
+    size_t           ctrl_len;
     char            *msg_buf;          /* assembled message data */
     size_t           msg_len;
     size_t           msg_cap;
@@ -653,9 +655,19 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
             }
 
             int opcode = ws->fp.opcode;
+            /* A frame's payload can arrive over several reads; only its first chunk starts
+             * anything. */
+            int frame_start = (payload_before == 0);
 
             /* Control frames */
             if (opcode >= 0x8) {
+                /* Gather the payload across reads (capped at 125 by the parser); act once the
+                 * frame is complete, on all of it. */
+                if (frame_start) ws->ctrl_len = 0;
+                memcpy(ws->ctrl_buf + ws->ctrl_len, payload_data, payload_consumed);
+                ws->ctrl_len += payload_consumed;
+                payload_data = (const char *)ws->ctrl_buf;
+                payload_consumed = ws->ctrl_len;
                 if (rc == 1) {
                     if (opcode == KL_WS_OP_CLOSE) {
                         uint16_t code = 0;
@@ -686,12 +698,13 @@ static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
                     /* Pong: ignore */
                 }
             } else {
-                /* Data frame: reassemble */
-                int is_first = (opcode != KL_WS_OP_CONTINUATION);
+                /* Data frame: reassemble. A new message starts only at the first chunk of a
+                 * non-continuation frame; later chunks of the same frame just append. */
+                int is_first = frame_start && (opcode != KL_WS_OP_CONTINUATION);
                 if (is_first) {
                     wsc_msg_reset(ws);
                     ws->msg_opcode = opcode;
-                } else if (ws->msg_opcode == 0) {
+                } else if (frame_start && ws->msg_opcode == 0) {
                     wsc_error(ws, "continuation without start");
                     return -1;
                 }

@@ -625,7 +625,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_
                    socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_close_live stream_read stream_transport stream_writable \
                    thread_pool timeout timer tls tls_integration tls_vtable transport_public \
                    unix_socket_node_win url version wakeup watcher_aba websocket websocket_client \
-                   websocket_client_hostname_fail websocket_overflow ws_server_close
+                   websocket_client_hostname_fail websocket_overflow websocket_split_frames ws_server_close
 WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # Windows IOCP backend (BACKEND=iocp) test subset. Mirrors the Completion (io_uring) unit-suite
@@ -664,7 +664,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
                         stream_close stream_close_live stream_read stream_single_shot stream_writable thread_pool timeout timer tls \
                         tls_integration tls_vtable transport_public url version wakeup watcher_aba websocket \
-                        websocket_client websocket_client_hostname_fail websocket_overflow ws_server_close
+                        websocket_client websocket_client_hostname_fail websocket_overflow websocket_split_frames ws_server_close
 WIN_IOCP_TEST_BIN = $(foreach s,$(WIN_IOCP_TEST_SUITES),$(call test_bin_for,$(s)))
 
 # The MSVC suite set is DERIVED from WIN_TEST_SUITES minus documented exclusions, not curated
@@ -1042,7 +1042,7 @@ IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec compress cross_modu
                           iouring_sqe_fail peer_addr peer_cert proxy_protocol read_flow_control reject_drain \
                           resolver_cache sockaddr stream_single_shot stream_transport thread_pool timeout timer tls \
                           tls_integration udp_cmsg unix_socket url version wakeup websocket websocket_client \
-                          websocket_overflow
+                          websocket_overflow websocket_split_frames
 IOURING_TEST_BIN = $(foreach s,$(IOURING_TEST_SUITES),$(call test_bin_for,$(s)))
 # Suites that need a FRESH PROCESS PER TEST rather than sharing one (#307).
 #
@@ -1097,7 +1097,7 @@ POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec compress cross_modul
                         http_split_request http_sse http_tls peer_addr peer_cert proxy_protocol read_flow_control \
                         reject_drain resolver_cache sockaddr stream_single_shot thread_pool timeout \
                         timer tls tls_integration url version wakeup websocket websocket_client \
-                        websocket_overflow
+                        websocket_overflow websocket_split_frames
 POLLCOMP_TEST_SUITES = $(filter-out $(COMPLETION_EXCLUDE),$(POLLCOMP_ELIGIBLE))
 POLLCOMP_TEST_BIN = $(foreach s,$(POLLCOMP_TEST_SUITES),$(call test_bin_for,$(s)))
 
