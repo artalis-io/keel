@@ -1861,6 +1861,61 @@ UTEST(integration, route_params) {
     stop_server();
 }
 
+/* ── Empty header values ─────────────────────────────────────────────── */
+
+/* llhttp reports an empty header value at the first byte of the NEXT line. Recorded as is, the
+ * server's NUL-termination of that value blanked the next header's name, so the header after an
+ * empty one vanished from lookups. Both must be visible: the empty one as "", the next intact. */
+static void handle_empty_hdr(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    const char *empty = kl_http_request_header(req, "X-Empty");
+    const char *after = kl_http_request_header(req, "X-After");
+    char body[96];
+    int n = snprintf(body, sizeof(body), "empty=%s after=%s",
+                     empty ? (empty[0] ? "nonempty" : "blank") : "missing",
+                     after ? after : "missing");
+    kl_http_response_status(res, 200);
+    (void)kl_http_response_body_copy(res, body, (size_t)n);
+}
+
+static KlHttpServer empty_hdr_server;
+
+static void empty_hdr_server_thread(void *arg) {
+    (void)arg;
+    kl_http_server_run(&empty_hdr_server);
+}
+
+UTEST(integration, empty_header_value_keeps_the_next_header) {
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&empty_hdr_server, &cfg);
+    kl_http_server_route(&empty_hdr_server, "GET", "/h", handle_empty_hdr, NULL, NULL);
+
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, empty_hdr_server_thread, NULL);
+    wait_for_bind(&empty_hdr_server);
+
+    static char buf[2][4096];
+    const char *reqs[2] = {
+        "GET /h HTTP/1.1\r\nHost: x\r\nX-Empty:\r\nX-After: yes\r\nConnection: close\r\n\r\n",
+        "GET /h HTTP/1.1\r\nHost: x\r\nX-Empty:   \r\nX-After: yes\r\nConnection: close\r\n\r\n",
+    };
+    for (int i = 0; i < 2; i++) {
+        buf[i][0] = '\0';
+        int fd = connect_to(empty_hdr_server.bound_port);
+        if (fd < 0) continue;
+        (void)kl_test_sockwrite(fd, reqs[i], strlen(reqs[i]));
+        read_response(fd, buf[i], sizeof(buf[i]));
+        kl_test_closesock(fd);
+    }
+
+    kl_http_server_stop(&empty_hdr_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&empty_hdr_server);
+
+    ASSERT_TRUE(strstr(buf[0], "empty=blank after=yes") != NULL);   /* no whitespace */
+    ASSERT_TRUE(strstr(buf[1], "empty=blank after=yes") != NULL);   /* whitespace only */
+}
+
 /* ── Post-body middleware integration tests ──────────────────────────── */
 
 static int post_mw_check_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
