@@ -314,10 +314,10 @@ static int wsc_parse_handshake_response(const KlWsClientConn *ws)
         if (colon) {
             size_t nlen = (size_t)(colon - p);
             const char *val = colon + 1;
-            const char *vend = line_end;
-            while (val < vend && (*val == ' ' || *val == '\t')) val++;
-            while (vend > val && (vend[-1] == ' ' || vend[-1] == '\t')) vend--;
-            size_t vlen = (size_t)(vend - val);
+            while (val < line_end && (*val == ' ' || *val == '\t')) val++;
+            size_t vlen = (size_t)(line_end - val);
+            while (vlen > 0 && (val[vlen - 1] == ' ' || val[vlen - 1] == '\t')) vlen--;
+            const char *vend = val + vlen;
             if (nlen == 20 && kl_ascii_strncasecmp(p, "Sec-WebSocket-Accept", 20) == 0) {
                 accept_val = val;
                 accept_len = vlen;
