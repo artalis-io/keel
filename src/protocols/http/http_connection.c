@@ -298,11 +298,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
         for (int i = 0; i < pool->capacity; i++) {
             if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
             if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
-            if (pool->conns[i].req.body_reader) {
-                pool->conns[i].req.body_reader->destroy(
-                    pool->conns[i].req.body_reader);
-                pool->conns[i].req.body_reader = NULL;
-            }
+            conn_cleanup_body_reader(&pool->conns[i]);   /* the reader and the head copy */
             if (pool->conns[i].tls && pool->conns[i].tls->shutdown &&
                 kl_handle_valid(pool->conns[i].stream.fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
