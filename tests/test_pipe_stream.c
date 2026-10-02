@@ -348,6 +348,21 @@ UTEST_F(pipe_iocp, connect_rejects_non_local_names) {
         ASSERT_EQ(kl_pipe_connect(&utest_fixture->ev, bad[i], &cfg, &p), KL_PIPE_INVALID);
 }
 
+/* Win32 collapses "." and ".." in a device path before the open, so a name that starts with the
+ * local prefix can still leave it: pipe\..\UNC\host\pipe\x becomes the REMOTE pipe UNC\host\pipe\x
+ * (localhost here, and a name nobody serves). Such names are refused before any OS call. */
+UTEST_F(pipe_iocp, connect_rejects_dot_segments) {
+    NEED_IOCP();
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 0, 0);
+    KlPipeStream *p = NULL;
+    const char *bad[] = { "\\\\.\\pipe\\..\\UNC\\localhost\\pipe\\keel-x14-absent",
+                          "\\\\.\\pipe\\a\\..\\..\\x", "\\\\.\\pipe\\.\\x",
+                          "\\\\.\\pipe/../x", "\\\\.\\pipe\\x\\.." };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        ASSERT_EQ(kl_pipe_connect(&utest_fixture->ev, bad[i], &cfg, &p), KL_PIPE_INVALID);
+}
+
 UTEST_F(pipe_iocp, connect_busy) {
     NEED_IOCP();
     char name[128]; pipe_name(name, sizeof name, "busy");

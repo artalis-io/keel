@@ -61,6 +61,13 @@ static int win_wakeup_pair(SOCKET sv[2])
      * child spawned with handle inheritance (the analog of FD_CLOEXEC; kl_sockdef_set_cloexec). */
     (void)SetHandleInformation((HANDLE)server, HANDLE_FLAG_INHERIT, 0);
     (void)SetHandleInformation((HANDLE)client, HANDLE_FLAG_INHERIT, 0);
+    /* Each signal is one byte: send it at once. With Nagle on, a signal sent while an earlier one is
+     * unacknowledged waits for the peer's delayed ACK (up to ~200 ms). */
+    {
+        BOOL nodelay = TRUE;
+        (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, (int)sizeof nodelay);
+        (void)setsockopt(server, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, (int)sizeof nodelay);
+    }
     sv[0] = server;   /* read end  (event loop watches this) */
     sv[1] = client;   /* write end (workers signal this)     */
     return 0;

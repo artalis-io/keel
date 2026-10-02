@@ -1,5 +1,7 @@
 #include "utest.h"
 #include <keel/sockaddr.h>
+#include "sockaddr_native.h"   /* kl_sockaddr_from_native */
+#include <stddef.h>
 #include <string.h>
 
 /* ── construct-from-wire + accessors ──────────────────────────────────────── */
@@ -275,5 +277,22 @@ UTEST(sockaddr, canonical_size) {
     /* stays a compact, fixed-layout value (<= the sockaddr_storage it replaces) */
     ASSERT_LE(sizeof(KlSockAddr), (size_t)128);
 }
+
+/* A peer path is bounded by the length the kernel returned, not by sun_path's size: bytes past it
+ * are whatever the buffer held before (a reused buffer, the previous peer's path). */
+#ifdef AF_UNIX
+UTEST(sockaddr, native_unix_path_stops_at_the_returned_length) {
+    struct sockaddr_un un;
+    memset(&un, 'Z', sizeof un);                 /* stale bytes from an earlier, longer path */
+    un.sun_family = AF_UNIX;
+    memcpy(un.sun_path, "/a", 2);                /* the kernel wrote "/a", no terminator */
+    socklen_t len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 2);
+    KlSockAddr a;
+    ASSERT_EQ(0, kl_sockaddr_from_native(&a, (const struct sockaddr *)&un, len));
+    ASSERT_EQ((int)KL_AF_UNIX, (int)kl_sockaddr_family(&a));
+    ASSERT_EQ(2, (int)a.addr_len);               /* was: "/a" plus the stale 'Z's */
+    ASSERT_STREQ("/a", a.u.path);
+}
+#endif
 
 UTEST_MAIN();

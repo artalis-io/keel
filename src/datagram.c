@@ -860,6 +860,9 @@ unsigned kl_datagram_accepted_rx_caps(const KlDatagram *dg) {
  * KL_ERR_INVALID_ARG (no provider call); provider/syscall failure → KL_ERR_IO. */
 static int dg_multicast(KlDatagram *dg, const char *group, unsigned iface_index, int join) {
     if (!dg || !dg->core || !group) { if (dg) dg->last_error = KL_ERR_INVALID_ARG; return -1; }
+    if (!kl_handle_valid(dg->fd)) {          /* closed: no descriptor to hand the provider */
+        dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
     const KlDatagramOps *ops = dg_ops(dg);
     if (!(dg->provider_caps & KL_DGRAM_CAP_MULTICAST) || !ops || !ops->mcast_membership) {
         dg->last_error = KL_ERR_UNSUPPORTED; return -1;

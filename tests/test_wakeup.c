@@ -185,4 +185,18 @@ UTEST(wakeup, signal_never_blocks_on_a_full_channel) {
     kl_event_ctx_free(&ev);
 }
 
+/* The Windows pair is a loopback TCP connection carrying 1-byte signals: with Nagle on, a signal
+ * sent while an earlier one is unacknowledged waits for the delayed ACK (up to ~200 ms). */
+#if defined(_WIN32) && !defined(__COSMOPOLITAN__)
+UTEST(wakeup, windows_pair_sends_each_signal_at_once) {
+    KlWakeup w;
+    ASSERT_EQ(kl_wakeup_open(&w), 0);
+    int v = 0, len = (int)sizeof v;
+    int r = getsockopt((SOCKET)w.wr, IPPROTO_TCP, TCP_NODELAY, (char *)&v, &len);
+    kl_wakeup_close(&w);
+    ASSERT_EQ(r, 0);
+    ASSERT_NE(v, 0);                             /* was 0: Nagle on */
+}
+#endif
+
 UTEST_MAIN();

@@ -1,6 +1,7 @@
 #include <keel/timer.h>
 #include <keel/clock.h>            /* kl_monotonic_ms */
 #include "event_ctx_internal.h"   /* KlTimerEntry layout (opaque on the public surface) */
+#include <stdint.h>
 
 /* ── Min-heap helpers ──────────────────────────────────────────────── */
 
@@ -65,7 +66,9 @@ int64_t kl_timer_add(KlEventCtx *ctx, uint64_t delay_ms,
 
     int64_t id = ctx->timer_next_id++;
     int idx = ctx->timer_count++;
-    ctx->timers[idx].deadline_ms = kl_monotonic_ms() + delay_ms;
+    /* Saturate: a delay meaning "never" must not wrap the deadline into the past. */
+    uint64_t now = kl_monotonic_ms();
+    ctx->timers[idx].deadline_ms = (delay_ms > UINT64_MAX - now) ? UINT64_MAX : now + delay_ms;
     ctx->timers[idx].cb = cb;
     ctx->timers[idx].user_data = user_data;
     ctx->timers[idx].id = id;
