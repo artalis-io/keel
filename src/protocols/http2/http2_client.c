@@ -66,6 +66,12 @@ struct KlHttp2ClientConn {
     /* Callbacks */
     KlHttp2ClientErrorFn      on_error;
     void                  *user_data;
+
+    /* Freeing from a callback: on_resp / on_error run inside h2c_on_event (on_resp inside
+     * session->recv), so kl_http2_client_free there only closes and marks; h2c_on_event frees on
+     * unwind, once nothing on the stack uses the connection or its session. */
+    int                    in_event;
+    int                    free_requested;
 };
 
 /* ── Forward declarations ───────────────────────────────────────── */
@@ -73,6 +79,7 @@ struct KlHttp2ClientConn {
 static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void h2c_error(KlHttp2ClientConn *c, const char *msg);
 static void h2c_close_connection(KlHttp2ClientConn *c);
+static void h2c_free_now(KlHttp2ClientConn *c);
 
 /* ── I/O abstraction ───────────────────────────────────────────── */
 
@@ -247,6 +254,10 @@ static void h2c_on_stream_close(KlHttp2ClientSession *s, int32_t stream_id,
     KlHttp2ClientConn *c = s->keel_ctx;
     KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
     if (!st) return;
+    if (c->free_requested) {                 /* the user freed the client: deliver nothing more */
+        h2c_stream_remove(c, stream_id);
+        return;
+    }
 
     /* Deliver response. A stream the peer reset (err != 0) did not complete: say so, rather than
      * hand over a partial response as if it were whole. */
@@ -420,9 +431,11 @@ static void h2c_handle_active(KlHttp2ClientConn *c)
 
     /* Feed data to session */
     if (c->session->recv(c->session, buf, (size_t)nread) < 0) {
-        h2c_error(c, "session recv error");
+        if (!c->free_requested) h2c_error(c, "session recv error");
         return;
     }
+    if (c->free_requested || c->state == H2C_CLOSED)
+        return;                              /* a callback freed or closed the client */
 
     /* Flush any pending output */
     if (c->session->flush(c->session) < 0) {
@@ -435,12 +448,21 @@ static void h2c_handle_active(KlHttp2ClientConn *c)
 
 /* ── Event callback ─────────────────────────────────────────────── */
 
+static void h2c_on_event_body(KlHttp2ClientConn *c);
+
 static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlHttp2ClientConn *c = user_data;
     (void)fd;
     (void)ready;
+    c->in_event++;
+    h2c_on_event_body(c);
+    if (--c->in_event == 0 && c->free_requested)
+        h2c_free_now(c);                     /* destructive tail: no c access after this */
+}
 
+static void h2c_on_event_body(KlHttp2ClientConn *c)
+{
     switch (c->state) {
     case H2C_CONNECTING:
         h2c_handle_connecting(c);
@@ -663,7 +685,16 @@ void kl_http2_client_close(KlHttp2ClientConn *c)
 void kl_http2_client_free(KlHttp2ClientConn *c)
 {
     if (!c) return;
+    if (c->in_event) {                       /* called from a callback: finish it on unwind */
+        c->free_requested = 1;
+        kl_http2_client_close(c);
+        return;
+    }
+    h2c_free_now(c);
+}
 
+static void h2c_free_now(KlHttp2ClientConn *c)
+{
     if (c->state != H2C_CLOSED)
         kl_http2_client_close(c);
 

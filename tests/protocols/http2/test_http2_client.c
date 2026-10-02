@@ -6,6 +6,7 @@
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: this TU calls socket() */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Unit tests for the HTTP/2 client module.
@@ -447,6 +448,94 @@ UTEST(h2c_live, complete_stream_has_no_error) {
     kl_http2_client_free(c);
     kl_event_ctx_free(&ev);
     kl_test_closesock(l.fd);
+}
+
+/* ── Freeing the client from its own response callback ──────────────────────────────────────
+ * on_resp runs inside session->recv, inside the client's read handler. A response handler that
+ * frees the client (the natural pattern when it was the last request) must be safe: the handler
+ * and the session must not touch the client after that. A use-after-free does not reliably crash,
+ * so the client's allocator poisons every freed block (0xDD) and keeps it: a later read sees a
+ * poisoned pointer (a crash), and a later write changes the poison (caught by the final check). */
+
+#define H2Q_MAX 256
+static struct { unsigned char *p; size_t n; } g_h2q[H2Q_MAX];
+static int g_h2nq;
+static void *h2q_malloc(void *c, size_t n) { (void)c; return malloc(n ? n : 1); }
+static void *h2q_realloc(void *c, void *p, size_t o, size_t n) { (void)c; (void)o; return realloc(p, n ? n : 1); }
+static void h2q_free(void *c, void *p, size_t n) {
+    (void)c;
+    if (!p) return;
+    memset(p, 0xDD, n);
+    if (g_h2nq < H2Q_MAX) { g_h2q[g_h2nq].p = p; g_h2q[g_h2nq].n = n; g_h2nq++; }
+}
+static KlAllocator g_h2qa = { h2q_malloc, h2q_realloc, h2q_free, NULL };
+static int h2q_check_and_release(void) {
+    int written = 0;
+    for (int i = 0; i < g_h2nq; i++) {
+        for (size_t k = 0; k < g_h2q[i].n; k++)
+            if (g_h2q[i].p[k] != 0xDD) { written++; break; }
+        free(g_h2q[i].p);
+    }
+    g_h2nq = 0;
+    return written;
+}
+
+static int32_t g_fr_id;          /* the stream the session completes on its next recv */
+static int g_fr_calls;
+static int fr_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
+    (void)data; (void)len;
+    if (g_fr_id > 0) {
+        int32_t id = g_fr_id;
+        g_fr_id = 0;
+        self->keel_cbs.on_response(self, id, 200, NULL, 0);
+        self->keel_cbs.on_stream_close(self, id, 0);   /* → on_resp, which frees the client */
+    }
+    return 0;
+}
+static KlHttp2ClientSession *fr_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) g_live_session->recv = fr_recv;
+    return g_live_session;
+}
+static void fr_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r, void *ud) {
+    (void)id; (void)r; (void)ud;
+    g_fr_calls++;
+    kl_http2_client_free(c);
+}
+
+UTEST(h2c_live, free_in_on_resp_is_safe) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = fr_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_fr_calls = 0;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &g_h2qa, &cfg, url, NULL, NULL);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    ASSERT_TRUE(g_live_session != NULL);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+    ASSERT_TRUE(kl_handle_valid(peer));
+
+    g_fr_id = kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, fr_on_resp, NULL);
+    ASSERT_GT(g_fr_id, 0);
+    (void)send((int)peer, "x", 1, 0);           /* readable: the client feeds it to session->recv */
+    for (int i = 0; i < 100 && g_fr_calls == 0; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    for (int i = 0; i < 10; i++) (void)kl_event_ctx_run(&ev, 16, 5);
+
+    int calls = g_fr_calls;
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(h2q_check_and_release(), 0);
 }
 
 UTEST_MAIN();

@@ -70,6 +70,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   now matched by the route matcher itself, so it covers every path a route with that pattern serves.
   **Behavior change:** this includes `:name` segments, which now match any value in an exact
   middleware pattern, as they do in a route.
+- **Freeing the HTTP/2 client from its response or error callback was a use-after-free.**
+  `on_resp` runs inside the session's receive, inside the client's read handler. If it called
+  `kl_http2_client_free`, the client and its session were freed while both frames were still running,
+  and the handler then removed the stream from, and flushed the session of, freed memory. The
+  WebSocket client got the same protection in this release. `kl_http2_client_free` from a callback now
+  closes the connection and finishes the free when the read handler unwinds, and no further `on_resp`
+  is delivered after it.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
