@@ -184,6 +184,44 @@ static int mw_track_a(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     return 0;
 }
 
+/* An exact middleware pattern must cover every path a route with the same pattern serves.
+ * Otherwise a request can reach the handler without its middleware: GET /admin/ is routed to
+ * /admin, and an auth middleware on "/admin" did not run for it. Checked for pre-body and post-body
+ * middleware, against the router's own match, in both slash directions. */
+static int mw_agrees_with_route(const char *pattern, const char *path) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r;
+    kl_http_router_init(&r, &a);
+    MwTracker pre = {.pos = 0}, post = {.pos = 0};
+    kl_http_router_add(&r, "GET", pattern, dummy_handler, NULL, NULL);
+    kl_http_router_use(&r, "GET", pattern, mw_track_a, &pre);
+    kl_http_router_use_post(&r, "GET", pattern, mw_track_a, &post);
+
+    KlHttpRoute *m = NULL;
+    KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS];
+    int np = 0;
+    int routed = kl_http_router_match(&r, "GET", 3, path, strlen(path), &m, params, &np) == 200;
+
+    KlHttpRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = path; req.path_len = strlen(path);
+    KlHttpResponse res = {0};
+    kl_http_router_run_middleware(&r, &req, &res);
+    kl_http_router_run_post_middleware(&r, &req, &res);
+    kl_http_router_free(&r);
+    return routed == (pre.pos == 1) && routed == (post.pos == 1);
+}
+
+UTEST(router, exact_middleware_matches_what_the_route_matches) {
+    ASSERT_TRUE(mw_agrees_with_route("/admin", "/admin"));
+    ASSERT_TRUE(mw_agrees_with_route("/admin", "/admin/"));    /* the route tolerates it */
+    ASSERT_TRUE(mw_agrees_with_route("/admin/", "/admin"));    /* and this direction */
+    ASSERT_TRUE(mw_agrees_with_route("/admin", "/admin//"));
+    ASSERT_TRUE(mw_agrees_with_route("/admin", "/administrator"));
+    ASSERT_TRUE(mw_agrees_with_route("/a/b", "/a/b/"));
+    ASSERT_TRUE(mw_agrees_with_route("/", "/"));
+}
+
 static int mw_track_b(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res;
     MwTracker *t = ctx;

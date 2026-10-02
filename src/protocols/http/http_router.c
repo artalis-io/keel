@@ -163,8 +163,12 @@ static int match_middleware_pattern(const char *method, size_t method_len,
         return (path_len == prefix_len || path[prefix_len] == '/');
     }
 
-    /* Exact match */
-    return (pat_len == path_len && memcmp(pattern, path, pat_len) == 0);
+    /* Exact pattern: match exactly the paths a route with this pattern serves (match_path, which
+     * tolerates a trailing slash on either side). A stricter test let GET /admin/ reach the /admin
+     * route without its /admin middleware. */
+    KlHttpParam scratch[KL_HTTP_ROUTER_MAX_PARAMS];
+    int nscratch = 0;
+    return match_path(pattern, pat_len, path, path_len, scratch, &nscratch);
 }
 
 int kl_http_router_use(KlHttpRouter *r, const char *method, const char *pattern,
