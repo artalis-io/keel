@@ -322,6 +322,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     set of header strings.
   - A header copy that could not be allocated produced a response delivered as complete but missing
     headers. It now fails the stream with `KL_ERR_ALLOC`.
+- **HTTP server fixes.**
+  - SSE: `kl_http_sse_event` split data only on LF, but an SSE parser also ends a line at a bare CR,
+    so `data` containing one could inject `event:` or `id:` fields. Data is now split on CR, LF and
+    CRLF. An event name or id containing a line break is refused, and a multi-line comment stays a
+    comment.
+  - HTTP/2 prior knowledge on a completion loop (io_uring, IOCP, pollcomp) handed the session the
+    connection preface with its magic stripped, so nghttp2 rejected the connection. It now receives
+    the whole preface, as on readiness loops. Also, when HTTP/2 was configured but its server hooks
+    were absent, the preface check compared past the end of its 25-byte constant.
+  - Body bytes that arrived in the same read as the headers were not counted. A request whose whole
+    body came with its headers looked unfinished when the connection was about to close, and the
+    server held the connection until the drain deadline (500 ms by default) instead of closing.
+  - The CORS middleware now sends `Vary: Origin` when it echoes a specific origin, so a shared cache
+    cannot serve one origin's `Access-Control-Allow-Origin` to another.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

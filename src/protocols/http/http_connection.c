@@ -569,6 +569,21 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
      * region (before any leftover body at read_buf + consumed). */
     conn_null_terminate_headers(c);
 
+    /* Body bytes that arrived with the headers belong to this request's body: account them, as the
+     * body phase does (kl_http_conn_ingest_body), so a drain that starts later knows how much is
+     * still outstanding. On a keep-alive connection a Content-Length body counts at most its declared
+     * length: what follows it is the next pipelined request, not an over-send. On a connection that
+     * will close, every byte read is this request's, and counting past the declared length is how
+     * kl_http_conn_begin_drain sees an over-send (and drains it rather than resetting it away).
+     * Chunked framing is the decoder's to finish (request_body_complete below). */
+    if (leftover_len > 0) {
+        if (c->req.chunked || !c->req.keep_alive)
+            c->request_body_received += (uint64_t)leftover_len;
+        else if (c->req.content_length > 0)
+            c->request_body_received += (uint64_t)leftover_len < (uint64_t)c->req.content_length
+                                        ? (uint64_t)leftover_len : (uint64_t)c->req.content_length;
+    }
+
     /* Route match */
     c->route_result = kl_http_router_match(router,
                                        c->req.method, c->req.method_len,
@@ -717,6 +732,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                     return c->state;
                 }
                 if (rc == 1) {
+                    c->request_body_complete = 1;   /* terminal chunk in the leftover */
                     c->req.body_reader->on_complete(c->req.body_reader);
                     if (c->route->streaming_handler) {
                         /* For streaming_async: handler was invoked
@@ -753,6 +769,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 return c->state;
             }
             if (bpr == KL_HTTP1_PARSE_OK) {
+                c->request_body_complete = 1;       /* the leftover held the whole body */
                 if (c->route->streaming_handler) {
                     if (c->route->streaming_async)
                         return c->state;
@@ -813,6 +830,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                     return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
                 }
                 if (rc == 1) {
+                    c->request_body_complete = 1;   /* terminal chunk in the leftover */
                     return conn_run_post_middleware_and_handle(c, router);
                 }
             }
@@ -829,6 +847,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 return c->state;
             }
             if (bpr == KL_HTTP1_PARSE_OK) {
+                c->request_body_complete = 1;       /* the leftover held the whole body */
                 return conn_run_post_middleware_and_handle(c, router);
             }
         }

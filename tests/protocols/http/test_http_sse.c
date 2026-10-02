@@ -166,4 +166,36 @@ UTEST(sse, end_null_is_invalid) {
     ASSERT_EQ(kl_http_sse_end(NULL), -1);
 }
 
+/* An SSE parser ends a line at CR, LF or CRLF, so a bare CR in data, or a CR or LF in an event name
+ * or id, would start a field the caller never wrote (field injection). Data is split on all three;
+ * an event name or id containing one is refused; a comment is written one line at a time. */
+UTEST(sse, bare_cr_in_data_cannot_start_a_field) {
+    KlHttpSse sse; MockCtx m; setup_mock_sse(&sse, &m);
+    const char *data = "x\revent: admin\rid: 9";
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, data, strlen(data), NULL), 0);
+    m.buf[m.len] = '\0';
+    ASSERT_STREQ(m.buf, "data: x\ndata: event: admin\ndata: id: 9\n\n");
+}
+
+UTEST(sse, crlf_in_data_is_one_line_break) {
+    KlHttpSse sse; MockCtx m; setup_mock_sse(&sse, &m);
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, "a\r\nb", 4, NULL), 0);
+    m.buf[m.len] = '\0';
+    ASSERT_STREQ(m.buf, "data: a\ndata: b\n\n");
+}
+
+UTEST(sse, line_break_in_event_or_id_is_refused) {
+    KlHttpSse sse; MockCtx m; setup_mock_sse(&sse, &m);
+    ASSERT_EQ(kl_http_sse_event(&sse, "a\nretry: 1", "d", 1, NULL), -1);
+    ASSERT_EQ(kl_http_sse_event(&sse, "ok", "d", 1, "1\r2"), -1);
+    ASSERT_EQ(m.len, (size_t)0);                 /* nothing written for a refused event */
+}
+
+UTEST(sse, multiline_comment_stays_a_comment) {
+    KlHttpSse sse; MockCtx m; setup_mock_sse(&sse, &m);
+    ASSERT_EQ(kl_http_sse_comment(&sse, "a\ndata: forged", 14), 0);
+    m.buf[m.len] = '\0';
+    ASSERT_STREQ(m.buf, ": a\n: data: forged\n");
+}
+
 UTEST_MAIN();
