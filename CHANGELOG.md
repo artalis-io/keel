@@ -276,6 +276,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   completion server gave up when the socket would block, so a streamed response larger than the
   socket buffers lost its tail when the client read slowly. The flush now waits for the socket to
   become writable (bounded) and carries on.
+- **A `wss://` handshake could hang on a large 101.** A 101 response larger than the first read but
+  inside one TLS record left the rest of it held in the TLS engine, and the client waited for socket
+  readiness that never came (there is no handshake timeout). The handshake now drains what TLS holds,
+  and frames that arrive in the same record as the 101 are processed at once.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

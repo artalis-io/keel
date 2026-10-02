@@ -118,6 +118,7 @@ static void wsc_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void wsc_error(KlWsClientConn *ws, const char *msg);
 static void wsc_close_connection(KlWsClientConn *ws);
 static int  wsc_process_frames(KlWsClientConn *ws, const uint8_t *data, size_t len);
+static void wsc_handle_open(KlWsClientConn *ws);
 static void wsc_ping_timer(void *user_data);
 static void wsc_free_now(KlWsClientConn *ws);
 static void wsc_finish_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t len);
@@ -585,6 +586,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         ws->handshake_len = 0;
     }
 
+hs_read_more:
     /* Grow if needed.  Always keep one spare byte for a NUL terminator so
      * the str*-based handshake parser (strstr/strncmp/strncasecmp) cannot
      * over-read past the end of the buffer (L4). */
@@ -633,7 +635,11 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         return;
     }
     if (rc == 0) {
-        /* Need more data */
+        /* Need more data. Over TLS it may already be decrypted and held by the engine (a record
+         * larger than the buffer): the socket will not signal for it, so read it now. The buffer
+         * cap (KL_WS_CLIENT_HANDSHAKE_MAX) bounds the loop. */
+        if (ws->tls && ws->tls->pending && ws->tls->pending(ws->tls) > 0)
+            goto hs_read_more;
         kl_watcher_rearm(ws->ev, ws->fd);
         return;
     }
@@ -688,11 +694,19 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     /* Feed leftover bytes into frame parser (data that arrived with the
      * HTTP upgrade response in the same TCP segment) */
     if (leftover && leftover_len > 0 && ws->state == WSC_OPEN && !ws->free_requested) {
-        wsc_process_frames(ws, (const uint8_t *)leftover, leftover_len);
-        kl_free(ws->alloc, leftover, leftover_len);
+        KlAllocator *alloc = ws->alloc;
+        int pr = wsc_process_frames(ws, (const uint8_t *)leftover, leftover_len);
+        kl_free(alloc, leftover, leftover_len);
+        if (pr != 0) return;                 /* closed or failed: ws must not be touched */
     } else if (leftover) {
         kl_free(ws->alloc, leftover, leftover_len);
     }
+
+    /* Frames already decrypted and held by the TLS engine (they came in the record that carried
+     * the 101) will not make the socket readable: read them now. */
+    if (ws->tls && ws->tls->pending && ws->state == WSC_OPEN && !ws->free_requested &&
+        ws->tls->pending(ws->tls) > 0)
+        wsc_handle_open(ws);
 }
 
 /* Process WS frame data. Called from wsc_handle_open (normal reads) and
