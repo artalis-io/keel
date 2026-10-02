@@ -200,8 +200,10 @@ static int ng_on_stream_close_cb(nghttp2_session *ng, int32_t stream_id,
                                  uint32_t error_code, void *user_data) {
     NgServerSession *s = user_data;
     NgServerStream *st = nghttp2_session_get_stream_user_data(ng, stream_id);
-    if (error_code != NGHTTP2_NO_ERROR)
-        s->cbs->on_stream_reset(s->ud, (uint32_t)stream_id, error_code);
+    /* Report every close: KEEL has already finished and forgotten a stream it answered (a no-op
+     * then), and one it still tracks was cut short, by a reset with any code, NO_ERROR included,
+     * so its slot must be released. */
+    s->cbs->on_stream_reset(s->ud, (uint32_t)stream_id, error_code);
     ng_sstream_free(st);
     return 0;
 }

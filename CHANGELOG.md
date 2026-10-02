@@ -299,6 +299,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   HTTP/2 request. When an upgrade cannot be done properly, the request is answered over HTTP/1.1,
   which RFC 9113 allows: a request with a body, a missing or repeated `HTTP2-Settings`, or a session
   without `upgrade`. Prior-knowledge h2c and ALPN `h2` are unchanged.
+- **One stream's problem could take down an HTTP/2 server connection.**
+  - DATA or END_STREAM for a stream the server had already answered was treated as an error, and
+    the nghttp2 adapter makes a callback error fatal to the session. A client still sending a body
+    the server had rejected early (for example a pre-body middleware's 401) aborted every other
+    stream on the connection. Such frames are now ignored.
+  - A stream over the configured `max_concurrent_streams` failed the same way. It is now refused on
+    its own with a 503, and the connection carries on.
+  - A client that reset a stream with NO_ERROR left its slot occupied, because the adapter reported
+    only resets with an error code. Enough of them stopped the connection serving requests. Every
+    close is now reported.
+  - A request body sent without `content-length`, which HTTP/2 permits, never reached the route's
+    body reader.
+  - An HTTP/2 config with no session factory is now rejected by `kl_http_server_init`, rather than
+    crashing on the first HTTP/2 connection.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
