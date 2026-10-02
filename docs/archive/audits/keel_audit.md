@@ -5,6 +5,120 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Seventeenth pass: re-audit after the sixteenth-pass fixes (2026-10-02)
+
+**Scope:** the whole `src/` tree, `include/keel/` and the nghttp2 and miniz integrations, at `main`
+`cf03091`. That is after #365 to #390 closed the sixteenth pass and #367 added the per-hop redirect
+check. Five parallel read-only reviews covered:
+- the HTTP/1 server;
+- the HTTP/1 client stack;
+- WebSocket and HTTP/2;
+- the transport substrate;
+- engines and DNS.
+
+Each review read the `d686342..cf03091` diff first, to look for regressions in the new fixes. Every
+High and Medium was then re-checked against the code by hand. Confidence: **C** means confirmed by
+reading the path end to end. **P** means plausible and needing a test.
+
+**Sixteenth-pass fixes:** each was traced and holds for what it targets. The new findings fall in
+three groups:
+- **Regressions caused by those fixes:**
+  - E12: E5 made pollcomp sockets non-blocking, which TLS flushes on that engine do not expect.
+  - S16: S9 caps the leftover count on keep-alive, and that hides an over-send on early rejections.
+- **Incomplete fixes:**
+  - T19: T8 checks the decompression limit only after full inflation.
+  - S15: S1 runs post-body middleware, but its header pointers are stale.
+  - W24: W1 covers only the event path.
+  - E13: E4 is fixed on IOCP only.
+  - X9: X4 missed `dg_multicast`.
+- **Older defects next to the fixes:** the rest.
+
+### Mechanical scans and gates
+
+| Category | Result |
+|---|---|
+| Unsafe str/format, `atoi`/`atol`/`atof`, `alloca` | none in `src/` |
+| Direct `malloc`/`free` | only the PAL thread trampolines (I6, unchanged) |
+| Local gates | all 21 pass (incl. `check-public-headers`, `check-no-fsnode-in-protocols`, `check-tier1-boundary`) |
+| `clang --analyze` (MinGW, Windows-branch view) | 0 warnings |
+| cppcheck | not available locally; runs in CI (green at `cf03091`'s PRs) |
+
+### High
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| W19 | `integrations/http2/nghttp2/http2_nghttp2_server.c:377-382` (`ng_server_destroy`); client twin `http2_nghttp2_client.c:243-248` | **Per-stream adapter records leak when a session is destroyed with streams open.** `NgServerStream` holds a copy of the response body of up to 16 MiB. It and `NgClientStream` are freed only in `ng_on_stream_close_cb`, and `nghttp2_session_del` frees its streams without calling that callback. A client that requests a large response and drops TCP leaks the copy. This is remote, unauthenticated and repeatable. | C (adapter); P (nghttp2's no-callback-on-delete, per upstream `free_streams`) |
+| W20 | `src/protocols/http2/http2_server.c:490-493` (`h2_out_conn_write`) via `ng_send_cb` | **Plaintext readiness HTTP/2 treats a would-block send as fatal.** `conn_write` returns -1 with EAGAIN on the non-blocking socket, and `ng_send_cb` maps -1 to `NGHTTP2_ERR_CALLBACK_FAILURE`. Any h2c response larger than the free send buffer (prior knowledge, or the new Upgrade stream 1) kills the connection and every stream on it. TLS (WANT_WRITE = 0) and completion (capture writer) are unaffected. | C |
+| E11 | `src/socket_posix.c:217-222` (`__APPLE__` `kl_sockdef_sendfile`); callers `http_response.c:587-593`, `event_pollcomp.c:555-563` | **macOS: a file response stops at the first full send buffer and is reported complete.** On a non-blocking socket `sendfile` returns -1/EAGAIN with `len == 0`. The wrapper returns 0 for EAGAIN, and both callers read 0 as end of file. A file larger than the send buffer is cut short with Content-Length unmet, and keep-alive desyncs. kqueue (the macOS default) has always had this; since E5 pollcomp on macOS has it too. | C (code); P (not run on macOS) |
+
+### Medium
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S13 | `completion_http_server.c:813-893` (`comp_on_read`/`comp_on_write`); sweep `http_server_core.c:647` | **On completion loops, active transfers time out.** `last_active_ms` is never refreshed by a completed receive or send; it is set only at accept, at the TLS handshake and at keep-alive reset. A download or upload still running `read_timeout_ms` after the last reset is cancelled mid-transfer on IOCP, io_uring and pollcomp. epoll refreshes the clock, so this breaks the documented "active transfers are never timed out" rule only on completion. | C |
+| S14 | `http_server_core.c:752-760` (`kl_http_request_resume_body`); `completion_http_server.c:942-945` | **Resuming a body read on completion can post a second receive.** The resume posts unconditionally, and `comp_recv_posted` is a single yes/no flag. Pausing then resuming in the same dispatch puts two receives into `read_buf`, and the body bytes overlap. Resuming while SENDING can leave a receive in flight when `conn_keepalive_reset` shrinks `read_buf`, so the kernel writes into freed heap. | C (path); P (app pattern) |
+| S15 | `http_connection.c:357-369`, `:287-296`, `:1041` | **S1 is only half fixed.** Post-body middleware now runs, but it and the `access_log` callback still get `method`, `path` and header pointers into a `read_buf` that the body read has overwritten from offset 0, with the NUL terminators gone. A CSRF check reads body bytes as `Cookie`/`Origin`. A body that fills `read_cap` with no NUL can make a `strlen` on a header value read out of bounds. Access-log lines can be forged. | C (stale pointers); P (exploit) |
+| T19 | `http_client_common.c:316-328`; `integrations/codec/miniz/decompress_miniz.c:132-190` | **T8 is incomplete for buffered bodies.** `max_response_size` is compared only after `decompress()` has inflated the whole body, up to miniz's 256 MB cap. A small gzip body still costs hundreds of MB, allocated synchronously on the loop thread, before `KL_ERR_TOO_LARGE`. The streaming path is bounded. | C |
+| E12 | `completion_http_server.c:226-243` (`kl_comp_tls_flush`) vs `event_pollcomp.c:486-506` | **Regression from E5.** `kl_comp_tls_flush` treats any send ≤ 0 as fatal, written for a blocking socket. Since pollcomp accepted sockets became non-blocking, a full send buffer drops TLS streaming responses, SSE, WebSocket-over-TLS and upgrade flushes on pollcomp. io_uring and IOCP sockets are still blocking. | C |
+| W21 | `integrations/http2/nghttp2/http2_nghttp2_client.c:114-135` | **HTTP/2 client: the final response after a 1xx is never reported.** nghttp2 delivers it as `HCAT_HEADERS`, and the adapter reports only `HCAT_RESPONSE` while appending headers across blocks. After a `103` then a `200`, the client reports status 103 with the 200's body. | C |
+| W22 | `src/protocols/websocket/websocket_client.c:609-639`, `:677-695` | **The WebSocket client handshake does not drain TLS-held plaintext.** A `wss://` 101 response over 511 bytes in one record is read partially, and the connection then waits for socket readiness that never comes. It hangs, and there is no handshake timeout (W11). | C (code); P (trigger) |
+| W23 | `src/protocols/http2/http2_client.c:161-169`, `:472-481`, `:714-715` | **The HTTP/2 client never asks for WRITE readiness.** A short `on_send` leaves output buffered in nghttp2 while only READ is armed. A request body larger than the send buffer can deadlock against a peer that sends nothing. TLS WANT_WRITE now reaches this. | P |
+| W24 | `src/protocols/http2/http2_client.c:714-715`, `:271-290` | **W1 covers only the event path.** `kl_http2_client_request` flushes outside `in_event`. A stream close emitted there runs `on_resp`, and a `kl_http2_client_free` from that callback destroys the session under `nghttp2_session_send`. | P |
+| W25 | `http2_server.c:425-433`; adapter `:195-196` | **One stream's body limit kills the whole HTTP/2 connection.** An over-limit body, or a reader returning -1, is mapped to a fatal session error. No 413 is sent, and every multiplexed stream dies (W6's sibling). | C |
+| W26 | `http_server_ws.c:156-160` with `http_internal.h:56-71` | **WebSocket server sends without the drain can leave a truncated frame on the wire.** `conn_write_all` gives up mid-frame on EAGAIN, or after the TLS spin limit, and the connection stays open. The next frame starts inside the old payload, and framing desyncs. | C |
+
+### Low
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S16 | `http_connection.c:579-585` | **Regression from S9:** the leftover count is capped at Content-Length on keep-alive. `kl_http_conn_begin_drain` runs only after keep-alive is cleared, typically on an early rejection (401/413/415 from pre-body middleware), and the cap hides an over-send there. The connection then closes on unread bytes and the response is reset. | C |
+| S17 | `http_connection.c:716-733`, `:751-770`, `:822-827` | A body-reader rejection or a malformed chunk inside the leftover bytes closes the connection with no 413 and no drain; the body-phase path sends a 413. | C |
+| S18 | `completion_http_server.c:580-597` | Completion with TLS ignores `read_paused`: `comp_tls_drive` always posts the next receive. | C |
+| S19 | `http_server_core.c:272-409` | `proxy_cidrs` leaks on every `kl_http_server_init` failure after it is allocated, including the new NULL-h2-factory path. | C |
+| S20 | `http_cors.c:92-116` | `Vary: Origin` is sent only when the origin is allowed; responses to a missing or disallowed Origin also vary by Origin. | C |
+| S21 | `http_response.c:719-730` | `kl_http_response_end_stream` returns for HEAD before setting `stream_ended`, so a HEAD stream that reaches SENDING never completes. | P |
+| S22 | `http_server_core.c:678-679`; `completion_http_server.c:205-206` | S4 covers READING_BODY only. A completion SENDING stream with nothing posted, waiting on a quiet producer, is never released by the sweep. | P |
+| T20 | `http_client_async.c:1118-1127` | The deferred-error window leaves the winning fd's watcher live. An inline deferral (sync resolver, immediate connect) can re-enter CONNECTING and call the TLS factory again, leaking the first `KlTls`. | P |
+| T21 | `http_client_common.c:273-281` | An HTTP/1.0 response without `keep-alive` is pooled (version not consulted). Was T18's HTTP/1.0 part, still open. | P |
+| T22 | `src/url.c:145-151`; request builders | IPv6 literal hosts lose their brackets in Host, absolute-form and CONNECT, and Host drops a non-default port. | C |
+| T23 | `http_redirect.c:428-453` | Async redirect: when `kl_timer_add` fails, the deferred error completes inline before `rc->inner` is assigned. If `on_done` frees `rc`, there is a use-after-free write (OOM only). | P |
+| W27 | adapter `http2_nghttp2_server.c:161-170` | `on_request` failure is ignored: the stream gets neither a response nor RST_STREAM. | C |
+| W28 | `http2_server.c:124-126` | The HTTP/2 server sends a DATA body for HEAD. | C |
+| W29 | `http_connection.c:604`, `http2_server.c:379` | On h2c Upgrade, pre-body middleware runs twice (HTTP/1 phase, then stream 1). | C |
+| W30 | `http_connection.c:631-639` | `Upgrade: h2c` is honoured on TLS connections, which is cleartext-only per RFC 7540 3.2. | C |
+| W31 | `http2_server.c:661-672` | A malformed `HTTP2-Settings` is detected only after the 101 has been sent. | C |
+| W32 | `http2_server.c:583-588`, `:521-527` | `h2_conn_abandon` frees the stream table without destroying live streams (prior-knowledge failure path). | C |
+| W33 | `websocket_client.c:934` | The TLS pending drain runs only in OPEN, so a close echo held by TLS in CLOSING waits for the next socket event. | C |
+| W34 | `websocket_client.c:934`, `http2_client.c:479` | Both clients call `tls->pending` without validating the factory's vtable; a backend without it crashes. | P |
+| W35 | `http2_server.c:390-402` | A reader is created even for bodiless requests (END_STREAM on HEADERS), so a factory that requires a body type answers 415. | C |
+| W36 | adapter `http2_nghttp2_client.c:122` | A header-copy failure in the client adapter is ignored (the client twin of I2). | C |
+| W37 | `http_server_ws.c:83-92` | `ws_drain_writer` reads errno after a TLS -1 (the stale-errno class). | C |
+| W38 | adapter `http2_nghttp2_client.c:219` | `:scheme` is hard-coded to `https`, including for h2c over `http://`. | C |
+| W39 | adapter `http2_nghttp2_server.c:80-98` | A partial `ng_sstream_grow` failure frees arrays at the wrong size (OOM only). | C |
+| X9 | `src/datagram.c:861-876` | X4 follow-on: `dg_multicast` does not check for a cleared fd. It passes `KL_INVALID_SOCKET` to the provider and reports `KL_ERR_IO`. | C |
+| X10 | `src/url.c:236-249`; `http_redirect.c:77-93` | A redirect between two `http+unix` sockets counts as same-origin (host and port are empty), so `Authorization` and `Cookie` follow it to another local socket. | C |
+| X11 | `src/platform_wakeup_win.c:130-187` | The Windows wakeup pair keeps Nagle on, so a 1-byte signal can wait up to the delayed-ACK timer (~200 ms). | C (code); P (latency) |
+| X12 | `src/sockaddr_native.h:93-96` | The AF_UNIX path length is bounded by `sizeof sun_path`, not the returned `len`, so stale bytes can appear in a peer path (in bounds). | P |
+| X13 | `src/datagram_recv.c:226-244` | No per-event receive budget: a UDP flood keeps one readable callback running and starves timers. | P |
+| X14 | `src/platform_pipe_win.c:39-56` | The pipe-name locality check is textual only. Whether `..` after `\\.\pipe\` can reach a remote pipe is untested. | P |
+| X15 | `src/timer.c:68` | `now + delay_ms` wraps for "never" values near `UINT64_MAX`, so the timer fires at once. | C |
+| E13 | `event_pollcomp.c:562`; `event_iouring.c:608-611`, `:925-928`; `http_response.c:593` | E4 is fixed on IOCP only. A file that shrinks after sizing is still reported fully sent on pollcomp, io_uring and readiness. | C |
+| E14 | `src/event_iocp.c:1082-1101` | Any watcher re-post failure, including a transient one, marks the watcher dead. A healthy socket is then reported every tick, and the loop spins. | P |
+| E15 | `dns_resolver.c:1189` | The cookie drop is permanent per nameserver. A mixed fleet behind one address (some members without cookies) loses valid answers to timeouts. | P |
+| E16 | `dns_resolver.c:1167-1181` | The TC branch runs before the cookie check, so a cookie-less spoofed TC answer can still force TCP fallback (no poisoning). | C |
+
+Already recorded and still open: E7, W11, W18, X5, X6, X8, S10, S11.
+
+### Recommended order
+
+1. **The three Highs:**
+   - W20: map a plaintext would-block to 0 in `h2_out_conn_write`.
+   - E11: return -1/EAGAIN from the Apple `sendfile` wrapper when nothing was sent.
+   - W19: track live per-stream records in each nghttp2 adapter and free them on destroy.
+2. **The two regressions from the sixteenth-pass fixes:** E12 and S16.
+3. **Completion server correctness:** S13, S14, S18 and S22, with S15 as its own change (keep the header region valid through the body read).
+4. **The rest of the Mediums** (T19, W21 to W26), then the Lows by area.
+
 ## Sixteenth pass: re-audit after the fifteenth-pass fixes (2026-10-01)
 
 **Scope:** the whole `src/` tree plus `include/keel/` at `main` `d686342`, after #348 to #364 closed
