@@ -22,6 +22,7 @@
 #include "mock_tls.h"
 #if !defined(_WIN32)
 #include <netinet/tcp.h>
+#include <signal.h>
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -549,6 +550,126 @@ UTEST(ws_server_frag, empty_message_inside_a_fragmented_one_fails_with_1002) {
     ASSERT_EQ(frag_case(f, n, &op, pl, &len), 0);
     ASSERT_EQ(op, 0x8);
     ASSERT_TRUE(len >= 2 && ((pl[0] << 8) | pl[1]) == 1002);
+}
+
+/* ── A frame the socket would not take whole (no drain) ───────────────────────────────────────
+ * Without kl_ws_server_enable_drain, a send writes the frame directly; when the socket buffer
+ * fills partway (the peer is not reading), the write gives up after part of the frame went out and
+ * the connection stayed open. A later send, once the peer has read and the socket has room again,
+ * then started a frame header in the middle of the old payload: the stream was desynced. Once a
+ * frame was cut short, no further frame may be sent. */
+static int g_sends_done, g_next_done;
+static void big_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
+    (void)data; (void)len; (void)is_binary; (void)ud;
+    if (!g_sends_done) {                            /* "go": fill the socket until a frame is cut */
+        static char big[1024 * 1024];
+        memset(big, 'B', sizeof big);
+        for (int i = 0; i < 16; i++)
+            if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) break;
+        g_sends_done = 1;
+        return;
+    }
+    for (int i = 0; i < 3; i++)                     /* "more", after the peer has read: none may */
+        (void)kl_ws_server_send_text(ws, "next", 4);    /* follow the cut frame */
+    g_next_done = 1;
+}
+
+/* Parse what the peer received: every frame header must be a valid unmasked server frame (FIN,
+ * no RSV, binary of 1 MiB or the text "next"). A cut-short last frame followed by EOF is fine; a
+ * header found inside a payload is the desync. Returns 1 if the stream is well formed. */
+static int stream_well_formed(const unsigned char *b, size_t n) {
+    size_t p = 0;
+    while (p < n) {
+        if (n - p < 2) return 1;                    /* cut inside a header, then EOF */
+        unsigned op = b[p] & 0x0F, len7 = b[p + 1] & 0x7F;
+        if ((b[p] & 0xF0) != 0x80 || (b[p + 1] & 0x80)) return 0;
+        size_t hl = 2, plen = len7;
+        if (len7 == 126) { if (n - p < 4) return 1; plen = ((size_t)b[p + 2] << 8) | b[p + 3]; hl = 4; }
+        else if (len7 == 127) {
+            if (n - p < 10) return 1;
+            plen = 0;
+            for (int k = 2; k < 10; k++) plen = (plen << 8) | b[p + k];
+            hl = 10;
+        }
+        if (op == 0x2 && plen != 1024 * 1024) return 0;
+        if (op == 0x1 && (plen != 4 || (n - p >= hl + 4 && memcmp(b + p + hl, "next", 4) != 0)))
+            return 0;
+        if (op != 0x1 && op != 0x2) return 0;
+        /* Every byte of a binary payload is 'B', up to the end of what arrived. A frame sent after
+         * a cut one lands INSIDE the cut frame's declared payload, and the stream may end before
+         * that payload would: so check each byte, not a sample, and check a cut payload too. */
+        if (op == 0x2) {
+            size_t have = (n - p - hl < plen) ? n - p - hl : plen;
+            for (size_t k = 0; k < have; k++)
+                if (b[p + hl + k] != 'B') return 0;
+        }
+        if (n - p < hl + plen) return 1;            /* cut inside a payload, then EOF */
+        p += hl + plen;
+    }
+    return 1;
+}
+
+/* The checker itself must be able to fail: a frame inside a cut payload (the desync) is rejected,
+ * and a clean stream, including one cut inside its last payload, is accepted. */
+UTEST(ws_server_send, stream_checker_sees_a_frame_inside_a_payload) {
+    static unsigned char s[4096];
+    size_t n = 0;
+    s[n++] = 0x82; s[n++] = 127;                    /* binary, 64-bit length = 1 MiB */
+    for (int k = 0; k < 8; k++) s[n++] = (unsigned char)(k == 5 ? 0x10 : 0);
+    memset(s + n, 'B', 1000); n += 1000;            /* the cut: 1000 of 1 MiB sent */
+    size_t clean = n;
+    s[n++] = 0x81; s[n++] = 4; memcpy(s + n, "next", 4); n += 4;   /* then a frame: the desync */
+    memset(s + n, 'B', 500); n += 500;
+    ASSERT_EQ(stream_well_formed(s, clean), 1);
+    ASSERT_EQ(stream_well_formed(s, n), 0);
+}
+
+UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
+    static Srv s;
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_http_server_init(&s.srv, &cfg), 0);
+    kl_ws_server_config_init(&s.ws_cfg);
+    s.ws_cfg.callbacks.on_message = big_on_message;
+    ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
+    ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
+    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s.port = s.srv.bound_port;
+
+#if !defined(_WIN32)
+    signal(SIGPIPE, SIG_IGN);                       /* the fixed server may close before "more" */
+#endif
+    g_sends_done = 0; g_next_done = 0;
+    static unsigned char rx[20 * 1024 * 1024];
+    size_t got = 0;
+    KlSocketHandle fd = ws_open_raw(s.port);
+    if (kl_handle_valid(fd)) {
+        unsigned char f[32];
+        size_t fl = build_masked(f, 0x1, (const unsigned char *)"go", 2);
+        (void)send_all(fd, f, fl);                  /* then read nothing while the server sends */
+        for (int i = 0; i < 100 && !g_sends_done; i++) kl_test_sleep_ms(20);
+        for (int round = 0; round < 2; round++) {
+            for (;;) {                              /* read what has been sent, to a lull */
+                if (kl_test_poll1(fd, 0, round == 0 ? 300 : 1000) <= 0) break;
+                long r = kl_test_sockread(fd, rx + got, sizeof rx - got);
+                if (r <= 0) break;
+                got += (size_t)r;
+                if (got == sizeof rx) break;
+            }
+            if (round == 0) {                       /* the socket has room again: ask for more */
+                fl = build_masked(f, 0x1, (const unsigned char *)"more", 4);
+                (void)send_all(fd, f, fl);
+                for (int i = 0; i < 100 && !g_next_done; i++) kl_test_sleep_ms(20);
+            }
+        }
+        kl_test_closesock(fd);
+    }
+    srv_stop(&s);
+    ASSERT_TRUE(g_sends_done);
+    ASSERT_TRUE(got > 0);
+    ASSERT_TRUE(stream_well_formed(rx, got));       /* was: a frame header inside a payload */
 }
 
 UTEST_MAIN();

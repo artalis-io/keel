@@ -153,9 +153,16 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
         return 0;
     }
 
-    /* Write header + payload with retry for short writes (TLS WANT_WRITE) */
-    if (conn_write_all(ws->conn, hdr, hdr_len) < 0) return -1;
-    if (len > 0 && conn_write_all(ws->conn, data, len) < 0) return -1;
+    /* Write header + payload with retry for short writes (TLS WANT_WRITE). If the socket stops
+     * taking the frame partway, part of it is already on the wire and the rest is lost: any later
+     * frame would begin inside this one's payload. Fail the connection instead: no further frame
+     * (close_sent), and a close deadline that has already passed, so the sweep closes it now. */
+    if (conn_write_all(ws->conn, hdr, hdr_len) < 0 ||
+        (len > 0 && conn_write_all(ws->conn, data, len) < 0)) {
+        ws->close_sent = 1;
+        ws->close_deadline_ms = kl_monotonic_ms();
+        return -1;
+    }
 
     return 0;
 }
