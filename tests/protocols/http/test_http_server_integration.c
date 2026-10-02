@@ -641,6 +641,59 @@ UTEST(server_integration, sendfile_fallback) {
     kl_http_server_free(&srv);
     unlink(g_file_path);
 }
+
+/* A file larger than the socket buffers, through the NATIVE sendfile, to a client that reads late.
+ * The server's send buffer fills, so sendfile reports would-block with nothing sent. On macOS the
+ * wrapper turned that into 0, which the callers read as end of file: the response was cut short
+ * and reported complete. The whole file must arrive. */
+UTEST(server_integration, sendfile_large_file_to_a_slow_reader) {
+    snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_sfl_%d.dat", (int)getpid());
+    int wf = open(g_file_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT_TRUE(wf >= 0);
+    const size_t FLEN = 8u * 1024 * 1024;
+    static char blk[64 * 1024];
+    for (size_t i = 0; i < sizeof blk; i++) blk[i] = (char)('a' + (i % 26));
+    for (size_t w = 0; w < FLEN; w += sizeof blk)
+        ASSERT_EQ(write(wf, blk, sizeof blk), (kl_ssize_t)sizeof blk);
+    close(wf);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/file", handle_file, NULL, NULL);   /* default provider */
+
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+
+    int fd = connect_to(srv.bound_port);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);
+    kl_test_sleep_ms(300);                          /* let the server fill its send buffer */
+
+    static char buf[64 * 1024];
+    size_t total = 0, hdr = 0;
+    for (;;) {
+        if (kl_test_poll1(fd, 0, 5000) <= 0) break;
+        long n = kl_test_sockread(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        if (!hdr) {                                 /* the head arrives first, in this read */
+            for (long k = 0; k + 3 < n && !hdr; k++)
+                if (memcmp(buf + k, "\r\n\r\n", 4) == 0) hdr = (size_t)k + 4;
+            if (hdr) { total += (size_t)n - hdr; continue; }
+        }
+        total += (size_t)n;
+    }
+    kl_test_closesock(fd);
+    kl_http_server_stop(&srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&srv);
+    unlink(g_file_path);
+    ASSERT_TRUE(hdr > 0);
+    ASSERT_EQ(total, FLEN);                         /* was (macOS): a fraction, then close */
+}
 #endif
 
 UTEST_MAIN();
