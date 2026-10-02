@@ -115,6 +115,7 @@ static void stream_send_retired(KlStream *s) {
 static int stream_pump_completion(KlStream *s) {
     for (;;) {
         if (s->wq_err) return -1;
+        if (s->close_abort) return 0;            /* abortive close drops the queue: send nothing more */
         if (s->send_inflight) return 0;          /* one in flight; wait for its completion */
         size_t len = kl_drain_buffered(&s->wq);
         if (len == 0) return 0;

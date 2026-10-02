@@ -375,6 +375,28 @@ UTEST(stream_close, abortive_does_not_wait_for_queued_bytes) {
     mk_free(&s, buf);
 }
 
+/* The cancel can lose the race: the in-flight send completes successfully after kl_stream_cancel.
+ * An abortive close drops the queue, so nothing more may be submitted; a new send would carry no
+ * cancel and, with a peer that has stopped reading, never complete, leaving the stream undetached. */
+UTEST(stream_close, abortive_send_completing_ok_submits_nothing_more) {
+    KlStream s; char *buf; LC l; mk(&s, &buf, &l);
+    ASSERT_EQ(kl_stream_set_submit(&s, lc_submit, &l, 0), 0);
+    ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
+    ASSERT_EQ(kl_stream_set_cancel(&s, NULL, lc_cancel_send), 0);
+    ASSERT_EQ((int)kl_stream_write(&s, "AAAA", 4), KL_STREAM_ACCEPTED);   /* batch1 in flight */
+    ASSERT_EQ((int)kl_stream_write(&s, "BBBB", 4), KL_STREAM_ACCEPTED);   /* batch2 queued */
+    ASSERT_EQ(l.submit_calls, 1);
+
+    ASSERT_EQ(kl_stream_cancel(&s), 0);              /* cancel requested; the op completes later */
+    ASSERT_EQ(l.cancel_send_calls, 1);
+    ASSERT_EQ(l.closed, 0);
+
+    (void)kl_stream_on_write_complete(&s, 1);        /* batch1 was delivered before the cancel */
+    ASSERT_EQ(l.submit_calls, 1);                    /* batch2 is not sent */
+    ASSERT_EQ(l.closed, 1);                          /* nothing outstanding: detached */
+    mk_free(&s, buf);
+}
+
 UTEST(stream_close, abortive_no_inflight_skips_cancel_hooks) {
     KlStream s; char *buf; LC l; mk(&s, &buf, &l);
     ASSERT_EQ(kl_stream_close_init(&s, lc_on_close, &l), 0);
