@@ -20,7 +20,7 @@
 #       provider's socket op need not be close-on-exec at creation, so the caller must ask.)
 #   R4  Files too: open / openat pass O_CLOEXEC on the same line, the Windows CRT _open passes
 #       _O_NOINHERIT, and stdio's fopen is not used at all (its mode cannot portably ask for it); read a
-#       file through kl_plat_fopen_read, which opens it close-on-exec.
+#       file through kl_dns_sys_fopen_read (or a helper like it), which opens it close-on-exec.
 #
 # Scope: src/ (library code). Comments are blanked first, with newlines kept so line numbers stay
 # exact, so prose naming an API ("self-pipe (hosted)", "pipe(2)") cannot trip the gate.
@@ -65,7 +65,7 @@ selftest() {
     chk "$OPEN_RE" '    FILE *f = fdopen(fd, "r");' 0
     chk "$WOPEN_RE" '    int fd = _open(path, _O_RDONLY | _O_NOINHERIT);' 1
     chk "$FOPEN_RE" '    FILE *f = fopen(path, "r");' 1
-    chk "$FOPEN_RE" '    FILE *f = kl_plat_fopen_read(path);' 0
+    chk "$FOPEN_RE" '    FILE *f = kl_dns_sys_fopen_read(path);' 0
     # The stripper: a commented call must vanish; a real call after a comment must survive; and a
     # multi-line comment must keep its line count.
     t=$(printf '/* self-pipe (hosted)\n spans */ x = kqueue();\n// pipe(2) here\ny = 1;\n' | perl -0pe "$STRIP")
@@ -101,7 +101,7 @@ for f in $(git ls-files 'src/*.c' 'src/*.h'); do
     fi
     hits=$(printf '%s\n' "$src" | grep -nE "$FOPEN_RE" || true)
     if [ -n "$hits" ]; then
-        printf '%s\n' "$hits" | sed "s|^|CLOEXEC VIOLATION (R4 fopen; use kl_plat_fopen_read): $f:|"; bad=1
+        printf '%s\n' "$hits" | sed "s|^|CLOEXEC VIOLATION (R4 fopen; open it close-on-exec and fdopen): $f:|"; bad=1
     fi
     [ "$f" = "src/socket.h" ] && continue                # defines the seam wrappers themselves
     n_sock=$(printf '%s\n' "$src" | grep -oE '\bkl_sock_socket[[:space:]]*\(' | wc -l)

@@ -27,15 +27,31 @@ uint64_t kl_monotonic_ms(void) {
     return sec * 1000 + (rem * 1000) / q;
 }
 
+void kl_plat_random_weak(void *buf, size_t len) {
+    LARGE_INTEGER ctr;
+    QueryPerformanceCounter(&ctr);
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t x = (uint64_t)ctr.QuadPart ^ ((uint64_t)ft.dwLowDateTime << 32) ^
+                 ((uint64_t)GetCurrentProcessId() << 16) ^ ((uint64_t)GetCurrentThreadId() << 40) ^
+                 (uint64_t)(uintptr_t)buf;
+    unsigned char *p = buf;
+    for (size_t i = 0; i < len; i++) {
+        x += 0x9E3779B97F4A7C15ull;                     /* splitmix64 */
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        p[i] = (unsigned char)(z ^ (z >> 31));
+    }
+}
+
 void kl_plat_random(void *buf, size_t len) {
     /* BCRYPT_USE_SYSTEM_PREFERRED_RNG: no algorithm handle needed. */
     if (BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)   /* STATUS_SUCCESS */
         return;
     /* Last resort: non-cryptographic, never leaves the buffer undefined. */
-    unsigned char *p = buf;
-    for (size_t i = 0; i < len; i++)
-        p[i] = (unsigned char)((uintptr_t)&p[i] ^ (i * 131u));
+    kl_plat_random_weak(buf, len);
 }
 
 /* kl_plat_wakeup_* live in platform_wakeup_win.c: an overridable seam mirroring

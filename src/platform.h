@@ -40,6 +40,12 @@
  * resistance (DNS txn-id / 0x20 / cookies), not as a hard security boundary. */
 void kl_plat_random(void *buf, size_t len);
 
+/* The last resort kl_plat_random falls back to when the OS RNG fails. Not cryptographic, but it
+ * mixes a high-resolution clock, the process id and the buffer address, so successive fills
+ * differ: the old fallback depended on the buffer address alone, which made a resolver's DNS
+ * transaction ids identical on every refill. Exposed for its test. */
+void kl_plat_random_weak(void *buf, size_t len);
+
 /* Cross-thread event-loop wakeup channel (a self-pipe). A worker thread writes a
  * byte to .wr to wake the event loop, which watches .rd. .rd is non-blocking and
  * is the handle to register with the event loop (kl_watcher_add); it coalesces:
