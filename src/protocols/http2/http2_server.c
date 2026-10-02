@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include "http_internal.h"
+#include "socket.h"        /* kl_sock_io_status: would-block classification */
 #include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 #include "http2_internal.h"       /* KlHttp2ServerConn / KlHttp2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
@@ -489,7 +490,15 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
  * path and whenever a completion driver has not installed a buffering writer. */
 static kl_ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ctx;
-    return conn_write(h2c->conn, data, len);
+    KlHttpConn *c = h2c->conn;
+    kl_ssize_t nw = conn_write(c, data, len);
+    /* A full send buffer on plaintext is "nothing sent yet", as TLS reports WANT_WRITE: the
+     * session keeps the tail and the want_write hook re-arms WRITE. -1 here is fatal to the
+     * whole session (every stream), so it is reserved for real errors. */
+    if (nw < 0 && !c->tls &&
+        kl_sock_io_status(c->stream.ctx ? c->stream.ctx->sockets : NULL) == KL_IO_WOULD_BLOCK)
+        return 0;
+    return nw;
 }
 
 /* The session emits produced frame bytes here; route them through the output seam
