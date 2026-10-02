@@ -25,6 +25,7 @@
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init */
 #include "sha1.h"
 #include "base64.h"
+#include "mock_tls.h"   /* identity TLS: a record held in the engine, served in pieces */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -380,6 +381,55 @@ UTEST(wsc_peer, empty_first_fragment_starts_the_message) {
     run_case(&p, &c);
     ASSERT_EQ(c.errors, 0);                                  /* was: "continuation without start" */
     ASSERT_EQ(c.messages, 1);
+    (void)quarantine_check_and_release();
+}
+
+/* ── A large 101 inside one TLS record ───────────────────────────────── */
+/* The handshake read takes at most the free handshake buffer (511 bytes at first). Over TLS the
+ * rest of a larger 101 stays inside the TLS engine, not the socket, and the client waited for the
+ * socket to become readable again: it never did, so the handshake hung. The identity mock TLS
+ * holds the whole 101 as one record and serves it in pieces, as a real TLS engine does. */
+UTEST(wsc_peer, large_101_in_one_tls_record_completes_the_handshake) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static char pad[700];
+    memset(pad, 'p', sizeof pad - 3);
+    memcpy(pad + sizeof pad - 3, "\r\n", 3);
+    static char extra[800];
+    snprintf(extra, sizeof extra, "X-Pad: %s", pad);          /* pushes the 101 past 511 bytes */
+    p.extra_headers = extra;
+    size_t len_101 = strlen("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                            "Connection: Upgrade\r\nSec-WebSocket-Accept: ") + 28 + 2 +
+                     strlen(extra) + 2;
+    mock_tls_split_after = 0;                                  /* the first record is the 101 */
+    mock_tls_split_record = len_101;
+
+    Cli c; memset(&c, 0, sizeof c);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    char url[64];
+    snprintf(url, sizeof url, "wss://127.0.0.1:%d/", p.port);
+    KlWsClientCallbacks cbs = { .on_open = c_open, .on_message = c_msg,
+                                .on_close = c_close, .on_error = c_err };
+    KlTlsConfig tls = { .ctx = NULL, .factory = mock_tls_create };
+    KlWsClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.tls = &tls;
+    kl_plat_thread_create(&p.tid, peer_thread, &p);
+    c.ws = kl_ws_client_connect(&ev, &g_qa, &cfg, url, &cbs, &c);
+    /* Well before the peer gives up (it holds the connection for seconds): a client stuck on the
+     * held bytes only gets going again when the peer closes, which is not completing a handshake. */
+    uint64_t t0 = kl_monotonic_ms();
+    while (kl_monotonic_ms() - t0 < 500 && c.ws && !c.opened && !c.closed && !c.errors)
+        (void)kl_event_ctx_run(&ev, 16, 10);
+    int opened = c.opened;
+    if (c.ws) kl_ws_client_free(c.ws);
+    for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 1);
+    kl_event_ctx_free(&ev);
+    peer_finish(&p);
+    mock_tls_split_after = 0;
+    mock_tls_split_record = 0;
+    ASSERT_EQ(opened, 1);                                      /* was 0: the handshake hung */
     (void)quarantine_check_and_release();
 }
 
