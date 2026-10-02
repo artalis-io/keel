@@ -140,12 +140,19 @@ typedef struct {
 
 static kl_ssize_t echo_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     EchoH2 *e = (EchoH2 *)self;
+    size_t total = len;
+    /* A real session consumes the client connection preface (KEEL hands it over whole, as
+     * nghttp2 expects); echo only what follows it. */
+    if (len >= 24 && memcmp(data, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) == 0) {
+        data = (const char *)data + 24;
+        len -= 24;
+    }
     if (len > 0) {
         size_t n = len < sizeof(e->pending) ? len : sizeof(e->pending);
         memcpy(e->pending, data, n);
         e->pending_len = n;
     }
-    return (ssize_t)len;
+    return (ssize_t)total;
 }
 static int echo_want_write(KlHttp2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
 static int echo_flush(KlHttp2ServerSession *self) {
