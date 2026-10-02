@@ -265,6 +265,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   or server session freed nghttp2's own session but not the per-stream state the adapter had
   allocated for streams that had not closed (a connection dropped mid-request, a queued response).
   Each adapter now tracks its live streams and frees them when the session is destroyed.
+- **pollcomp: a large TLS stream to a slow reader was cut short.** Flushing TLS output on the
+  completion server gave up when the socket would block, so a streamed response larger than the
+  socket buffers lost its tail when the client read slowly. The flush now waits for the socket to
+  become writable (bounded) and carries on.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

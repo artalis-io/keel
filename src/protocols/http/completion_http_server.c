@@ -224,11 +224,11 @@ static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 
 /* TLS-over-completion output. In completion mode the mbedTLS BIO writes outgoing
  * ciphertext into an in-memory ring (drain_output) rather than the socket; push that
- * ciphertext out with a synchronous send on the (blocking) accepted socket. Used for
- * bounded, latency-insensitive handshake records (the client is actively handshaking,
- * not slow-reading) so no overlapped send is warranted. Response bodies go out
- * overlapped (comp_tls_send_response) to avoid any head-of-line stall.
+ * ciphertext out with a synchronous send on the accepted socket. Used for handshake
+ * records, and by the synchronous TLS stream, h2 and ws paths (their head-of-line caveat).
+ * Buffered and file response bodies go out overlapped (comp_tls_send_response).
  * Exported (completion_internal.h): called by the h2/ws drives. */
+#define KL_COMP_TLS_FLUSH_WAIT_MS 30000   /* longest wait for one send to make progress */
 int kl_comp_tls_flush(KlHttpConn *c) {
     const KlSocketProvider *sp = c->stream.ctx ? c->stream.ctx->sockets : NULL;
     unsigned char buf[KL_TLS_FLUSH_CHUNK];
@@ -237,8 +237,14 @@ int kl_comp_tls_flush(KlHttpConn *c) {
         size_t off = 0;
         while (off < (size_t)n) {
             kl_ssize_t w = kl_sock_send(sp, c->stream.fd, buf + off, (size_t)n - off);
-            if (w <= 0) return -1;           /* seam retries EINTR; <=0 is fatal here */
-            off += (size_t)w;
+            if (w > 0) { off += (size_t)w; continue; }
+            /* A full send buffer: the accepted socket may be non-blocking (pollcomp), where it
+             * used to be blocking. Wait for room, as the blocking send did, but not forever: a
+             * peer that reads nothing for KL_COMP_TLS_FLUSH_WAIT_MS fails the connection. */
+            if (w < 0 && kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK &&
+                kl_plat_poll1(c->stream.fd, KL_POLL_OUT, KL_COMP_TLS_FLUSH_WAIT_MS) > 0)
+                continue;
+            return -1;                       /* the seam retries EINTR; anything else is fatal */
         }
     }
     return (n < 0) ? -1 : 0;
