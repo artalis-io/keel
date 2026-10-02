@@ -327,6 +327,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   past the headers only up to Content-Length, so a client that sent more than it declared was not
   seen to have done so: the connection then closed on unread bytes and the client could get a reset
   instead of the response. The bytes are now counted as they are, and the over-send is drained.
+- **Completion server body reads (seventeenth audit).**
+  - **A slow but steady upload was timed out.** On a completion loop a connection's activity time
+    was refreshed only when a request began, so an upload that kept sending, but took longer than the
+    idle timeout in all, was closed mid-body. Every completed read and write now counts as activity.
+  - **Pausing and resuming in `on_data` could corrupt the body.** A resume from inside the body
+    drive posted a second receive while the drive was still delivering the first, so bytes could
+    arrive out of order or twice. The drive now finishes what it holds before a new receive is posted,
+    and only one receive is ever in flight.
+  - **A paused TLS body did not stay paused.** The TLS body loop kept decrypting and delivering
+    records already held by the TLS engine after the reader paused. It now stops at the pause.
+  - **A finished plaintext stream on a completion loop could hold its slot.** The timeout sweep now
+    releases a sending, drain-enabled stream that has nothing left in flight.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

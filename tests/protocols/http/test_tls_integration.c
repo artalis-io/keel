@@ -299,4 +299,66 @@ UTEST(tls_integration, record_split_in_body_waits_for_the_rest) {
     ASSERT_TRUE(strstr(buf, "0123456789") != NULL);
 }
 
+/* A paused body stays paused over TLS. The completion TLS drive posted the next receive whatever the
+ * pause state, so kl_http_request_pause_body had no effect on HTTPS uploads on IOCP or io_uring:
+ * every later chunk still reached on_data. */
+typedef struct { KlHttpBodyReader base; KlAllocator *alloc; const KlHttpRequest *req; } TlsPauseReader;
+static int g_tls_pause_calls;
+static int tls_pause_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    (void)data; (void)len;
+    g_tls_pause_calls++;
+    kl_http_request_pause_body(((TlsPauseReader *)self)->req);
+    return 0;
+}
+static void tls_pause_noop(KlHttpBodyReader *self) { (void)self; }
+static void tls_pause_destroy(KlHttpBodyReader *self) {
+    TlsPauseReader *r = (TlsPauseReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+static KlHttpBodyReader *tls_pause_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)ud;
+    TlsPauseReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data = tls_pause_on_data;
+    r->base.on_complete = tls_pause_noop;
+    r->base.on_error = tls_pause_noop;
+    r->base.destroy = tls_pause_destroy;
+    r->alloc = alloc;
+    r->req = req;
+    return &r->base;
+}
+static void handle_never(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 200);
+}
+static KlHttpServer pause_tls_srv;
+
+UTEST(tls_integration, paused_body_stays_paused) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .body_timeout_ms = 10000 };
+    ASSERT_EQ(0, kl_http_server_init(&pause_tls_srv, &cfg));
+    kl_http_server_route(&pause_tls_srv, "POST", "/pause", handle_never, NULL, tls_pause_factory);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &pause_tls_srv);
+    wait_for_bind(&pause_tls_srv);
+
+    g_tls_pause_calls = 0;
+    const char *h = "POST /pause HTTP/1.1\r\nHost: localhost\r\nContent-Length: 30\r\n\r\n";
+    int fd = connect_to(pause_tls_srv.bound_port);
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, h, strlen(h));
+        for (int i = 0; i < 3; i++) {                      /* three separate chunks */
+            kl_test_sleep_ms(150);
+            (void)kl_test_sockwrite(fd, "0123456789", 10);
+        }
+        kl_test_sleep_ms(300);                             /* time for any wrongly read chunk */
+    }
+    kl_http_server_stop(&pause_tls_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&pause_tls_srv);
+    if (fd >= 0) kl_test_closesock(fd);
+    ASSERT_EQ(g_tls_pause_calls, 1);                       /* was (completion): 3, the pause ignored */
+}
+
 UTEST_MAIN();

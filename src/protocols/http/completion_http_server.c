@@ -133,6 +133,7 @@ static int comp_send_response(KlHttpConn *c) {
  * Read-side flow control (kl_http_request_pause_body): while paused, do NOT post the next recv;
  * the conn parks with no outstanding op until kl_http_request_resume_body re-posts it. */
 static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
+    if (c->comp_recv_posted) return;     /* one receive at a time: it lands at read_buf[0] */
     c->stream.read_len = 0;
     if (c->stream.read_paused) return;   /* paused: resume re-posts via kl_http_comp_post_read */
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -539,7 +540,12 @@ static void comp_drive_reading(struct KlHttpServer *s, KlHttpConn *c) {
 
 /* Feed a completed body read through the model-blind body core, then act. */
 static void comp_drive_body(struct KlHttpServer *s, KlHttpConn *c) {
-    comp_after_state(s, c, kl_http_conn_ingest_body(c, c->stream.read_len));
+    /* While the body core consumes read_buf, a resume from on_data must not post a receive into
+     * it; comp_after_state below posts the next one (the pause is already cleared). */
+    c->comp_in_body_drive = 1;
+    KlHttpConnState st = kl_http_conn_ingest_body(c, c->stream.read_len);
+    c->comp_in_body_drive = 0;
+    comp_after_state(s, c, st);
 }
 
 /* Drive a TLS connection after the backend has fed newly-received ciphertext to the
@@ -585,6 +591,10 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
 
     if (c->state == KL_HTTP_CONN_READING_BODY) {
         for (;;) {
+            /* Paused (kl_http_request_pause_body): stop here, with no receive posted and any
+             * decrypted-but-unread records left in the engine; the resume drives them. */
+            if (c->stream.read_paused) return;
+            if (c->comp_recv_posted) return;           /* one receive at a time */
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ: need the network */
@@ -592,8 +602,11 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
                 return;
             }
             c->stream.read_len = (size_t)p;
+            c->comp_in_body_drive = 1;
             KlHttpConnState st = kl_http_conn_ingest_body(c, c->stream.read_len);
+            c->comp_in_body_drive = 0;
             if (st != KL_HTTP_CONN_READING_BODY) { comp_after_state(s, c, st); return; }
+            if (c->stream.read_paused) return;         /* paused by on_data: post nothing */
             if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;                                /* more body needs the network */
@@ -820,6 +833,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     c->comp_recv_posted = 0;
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
+    c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
      * bounded recv was posted per completion, so this is the non-blocking drain progression. */
@@ -870,6 +884,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
 static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }
+    c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     /* h2 output send completed: the frames produced by the last feed are out;
      * read the next frames. Deferring the recv until here means at most one h2 send is
      * in flight, so overlapped output cannot reorder frames. */
@@ -946,8 +961,18 @@ void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
  * completion path. Mirrors comp_start_body_read's post (read_len was reset when the body read
  * started; the next recv appends into read_buf as usual). */
 void kl_http_comp_post_read(struct KlHttpConn *c) {
+    /* Only a body read that is waiting for its next receive takes one. Not while the body core is
+     * consuming read_buf (a resume from on_data: the drive posts once it is done), not when a
+     * receive is already posted, and not in any other state (a resume after the body completed). */
+    if (c->state != KL_HTTP_CONN_READING_BODY || c->comp_recv_posted || c->comp_in_body_drive)
+        return;
+    struct KlHttpServer *s = server_of_ctx(c->stream.ctx);
+    if (c->tls && c->tls->pending && c->tls->pending(c->tls) > 0) {
+        comp_tls_drive(s, c);                   /* decrypted records held while paused */
+        return;
+    }
     if (kl_comp_post_recv(c) < 0)
-        kl_comp_close(server_of_ctx(c->stream.ctx), c);
+        kl_comp_close(s, c);
 }
 
 /* The server's completion seam entry: install the conn-dispatch hook (idempotent, the single

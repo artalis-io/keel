@@ -638,11 +638,16 @@ UTEST(integration, post_413) {
                       "\r\n";
     (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
-    /* Send some data to trigger the body reader */
+    /* Send the declared body, and no more. (This used to send 15 x 8 KiB = 120 KiB against a
+     * Content-Length of 100000: the server drains what was declared and closes, and the bytes past
+     * it could reset the connection and destroy the 413 before it was read.) */
     char chunk[8192];
     memset(chunk, 'A', sizeof(chunk));
-    for (int i = 0; i < 15; i++)
-        (void)kl_test_sockwrite(fd, chunk, sizeof(chunk));
+    for (size_t sent = 0; sent < 100000; ) {
+        size_t n = 100000 - sent < sizeof(chunk) ? 100000 - sent : sizeof(chunk);
+        (void)kl_test_sockwrite(fd, chunk, n);
+        sent += n;
+    }
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
@@ -2026,6 +2031,130 @@ UTEST(integration, paused_body_client_gone_frees_a_clean_slot) {
     ASSERT_EQ(active, 0);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "hello") != NULL);
+}
+
+/* ── An active upload is not idle ──────────────────────────────────────── */
+
+/* On a completion loop the idle clock was refreshed only at accept and keep-alive reset, never by a
+ * completed receive, so a body still arriving read_timeout_ms after the request began was cut off
+ * mid-upload. A readiness loop refreshes it on every readable. A slow but steady upload, each byte
+ * well within read_timeout_ms of the last, must complete. */
+static KlHttpServer slow_up_server;
+static void slow_up_thread(void *arg) { (void)arg; kl_http_server_run(&slow_up_server); }
+
+UTEST(integration, a_slow_but_steady_upload_is_not_timed_out) {
+    KlHttpServerConfig cfg = {.port = 0, .read_timeout_ms = 500, .body_timeout_ms = 10000};
+    kl_http_server_init(&slow_up_server, &cfg);
+    kl_http_server_route(&slow_up_server, "POST", "/echo", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, slow_up_thread, NULL);
+    wait_for_bind(&slow_up_server);
+
+    static char buf[4096];
+    buf[0] = '\0';
+    int fd = connect_to(slow_up_server.bound_port);
+    const char *body = "abcdefghijklmnopqrst";              /* 20 bytes, one every 150 ms: 3 s */
+    if (fd >= 0) {
+        set_recv_timeout(fd, 3000);
+        const char *h = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, h, strlen(h));
+        for (int i = 0; i < 20; i++) {
+            kl_test_sleep_ms(150);
+            (void)kl_test_sockwrite(fd, body + i, 1);
+        }
+        read_response(fd, buf, sizeof(buf));
+        kl_test_closesock(fd);
+    }
+
+    kl_http_server_stop(&slow_up_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&slow_up_server);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (completion): closed at 500 ms */
+    ASSERT_TRUE(strstr(buf, body) != NULL);
+}
+
+/* ── Pause and resume in the same callback ───────────────────────────── */
+
+/* A body reader that pauses and at once resumes from on_data (a back-pressure check that finds
+ * room again). On a completion loop the resume posted a receive while the body phase posted
+ * another, so two receives wrote into read_buf at once: the body arrived corrupted or misaccounted.
+ * The reader keeps every byte; the handler echoes them, and they must match what was sent. */
+typedef struct { KlHttpBodyReader base; KlAllocator *alloc; const KlHttpRequest *req;
+                 char data[4096]; size_t len; } BounceReader;
+static int bounce_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    BounceReader *r = (BounceReader *)self;
+    if (len > sizeof(r->data) - r->len) return -1;
+    memcpy(r->data + r->len, data, len);
+    r->len += len;
+    kl_http_request_pause_body(r->req);
+    kl_http_request_resume_body(r->req);
+    return 0;
+}
+static void bounce_noop(KlHttpBodyReader *self) { (void)self; }
+static void bounce_destroy(KlHttpBodyReader *self) {
+    BounceReader *r = (BounceReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+static KlHttpBodyReader *bounce_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)ud;
+    BounceReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data = bounce_on_data;
+    r->base.on_complete = bounce_noop;
+    r->base.on_error = bounce_noop;
+    r->base.destroy = bounce_destroy;
+    r->alloc = alloc;
+    r->req = req;
+    return &r->base;
+}
+static void handle_bounce(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    BounceReader *r = (BounceReader *)req->body_reader;
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, r ? r->data : "", r ? r->len : 0);
+}
+static KlHttpServer bounce_server;
+static void bounce_thread(void *arg) { (void)arg; kl_http_server_run(&bounce_server); }
+
+UTEST(integration, pause_and_resume_in_on_data_keeps_the_body_intact) {
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&bounce_server, &cfg);
+    kl_http_server_route(&bounce_server, "POST", "/bounce", handle_bounce, NULL, bounce_factory);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, bounce_thread, NULL);
+    wait_for_bind(&bounce_server);
+
+    static char sent[3000];
+    for (size_t i = 0; i < sizeof sent; i++) sent[i] = (char)('A' + (i % 26));
+    static char buf[8192];
+    buf[0] = '\0';
+    kl_ssize_t got = 0;
+    int fd = connect_to(bounce_server.bound_port);
+    if (fd >= 0) {
+        set_recv_timeout(fd, 3000);
+        const char *h = "POST /bounce HTTP/1.1\r\nHost: x\r\nContent-Length: 3000\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, h, strlen(h));
+        for (int i = 0; i < 3; i++) {                       /* three reads' worth */
+            kl_test_sleep_ms(100);
+            (void)kl_test_sockwrite(fd, sent + i * 1000, 1000);
+        }
+        got = read_response(fd, buf, sizeof(buf));
+        kl_test_closesock(fd);
+    }
+
+    kl_http_server_stop(&bounce_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&bounce_server);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    const char *b = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(b != NULL);
+    b += 4;
+    ASSERT_EQ((kl_ssize_t)(buf + got - b), (kl_ssize_t)sizeof sent);
+    ASSERT_EQ(memcmp(b, sent, sizeof sent), 0);             /* was (completion): overlapped reads */
 }
 
 /* ── Post-body middleware integration tests ──────────────────────────── */
