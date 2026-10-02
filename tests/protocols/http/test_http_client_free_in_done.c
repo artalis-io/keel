@@ -209,4 +209,74 @@ UTEST(http_client_free_in_done, tls_setup_failure) {
     ASSERT_EQ(quarantine_check_and_release(), 0);
 }
 
+/* ── The deferred error and the request deadline due in the same tick ───────────────────────── */
+
+/* The TLS setup failure above is deferred to a 0 ms timer. If the loop runs late, the request
+ * deadline is overdue by then: one tick dispatches the connect (deferring the error), then fires both
+ * timers, the older deadline first. Exactly one completion may reach on_done. */
+static void count_done(KlHttpClient *client, void *ud) {
+    Done *d = ud;
+    d->calls++;
+    d->error = kl_http_client_error(client);
+}
+
+/* Resolves to 127.0.0.1:<port> inside resolve(), so the deadline is armed and the connect started
+ * inside kl_http_client_start, and a stall before the first loop tick leaves the deadline overdue. */
+typedef struct { KlResolver base; KlResolveReq req; int port; } NowResolver;
+
+static KlResolveReq *now_resolve(KlResolver *self, KlEventCtx *ctx, const char *host, int port,
+                                 KlResolveDoneFn done_fn, void *user_data) {
+    (void)ctx; (void)host; (void)port;
+    NowResolver *nr = (NowResolver *)self;
+    nr->req.resolver = self;
+    KlResolveResult res;
+    memset(&res, 0, sizeof res);
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    kl_sockaddr_from_ipv4(&res.addrs[0], lo, (uint16_t)nr->port);
+    res.naddrs = 1;
+    res.ai_socktype = SOCK_STREAM;
+    done_fn(&nr->req, &res, 0, user_data);
+    return NULL;                                              /* completed inline */
+}
+static void now_cancel(KlResolveReq *req) { (void)req; }
+static void now_destroy(KlResolver *self) { (void)self; }
+
+static void deadline_case(int *utest_result, int free_in_cb) {
+    static Listener l;                                        /* its thread outlives an early ASSERT return */
+    ASSERT_EQ(listener_start(&l), 0);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.timeout_ms = 50;
+    cfg.tls = &tls_cfg;
+    NowResolver nr;
+    memset(&nr, 0, sizeof nr);
+    nr.base.resolve = now_resolve; nr.base.cancel = now_cancel; nr.base.destroy = now_destroy;
+    nr.port = l.port;
+    cfg.resolver = &nr.base;
+    char url[128];
+    make_url(url, sizeof url, "https", l.port, "/");
+
+    Done d = { 0, 0 };
+    mock_tls_set_hostname_fail = 1;
+    KlHttpClient *c = kl_http_client_start(&ev, &g_qa, &cfg, "GET", url, NULL, 0, NULL, 0,
+                                           free_in_cb ? free_in_done : count_done, &d);
+    ASSERT_TRUE(c != NULL);
+    kl_test_sleep_ms(200);                                    /* the deadline lapses before the loop runs */
+    run_until(&ev, &d, 3000);
+    mock_tls_set_hostname_fail = 0;
+    int calls = d.calls;
+    if (!free_in_cb) kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    listener_stop(&l);
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(http_client_free_in_done, overdue_deadline_completes_once) { deadline_case(utest_result, 0); }
+UTEST(http_client_free_in_done, overdue_deadline_then_free_in_done) { deadline_case(utest_result, 1); }
+
 UTEST_MAIN();

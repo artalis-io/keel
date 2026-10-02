@@ -48,6 +48,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the multipart reader, and any header a proxy inserted after an empty one was lost. Every event model
   was affected. An empty value now points at its own header's name terminator, reads as `""`, and
   touches nothing outside its line.
+- **The async HTTP client could call `on_done` twice when the loop ran late.** A connect-phase failure
+  (DNS, a refused connect, or a TLS setup failure) is completed on the next loop tick, so that
+  `on_done` may free the client. That deferral left the request deadline armed. When the loop ran late
+  enough for both to be due in the same timer pass, the deadline fired first and completed the request,
+  and the deferred completion then ran again. `on_done` was called twice. If the first call freed the
+  client, as `examples/async_client.c` does, the second used freed memory. Deferring an error now
+  cancels the deadline. Every completion, cancel and free drops a pending deferred completion, and the
+  deferred completion does nothing once the request is done.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
