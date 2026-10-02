@@ -369,6 +369,31 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     redirect client recorded it; an `on_done` that freed the redirect client was followed by a write
     into it. The completion is now held until the hop is recorded. On the first hop the start fails
     instead (`NULL`, no callback), as `kl_http_client_start` does.
+- **WebSocket and HTTP/2 Lows (seventeenth audit).**
+  - **An HTTP/2 HEAD response carried a body.** The server sent the handler's body in DATA frames,
+    which a strict client treats as a protocol error. HEAD now sends the headers only, as HTTP/1.1
+    does.
+  - **An h2c Upgrade ran the pre-body middleware twice** (once for the HTTP/1.1 request, again for
+    its stream 1), so a rate limiter or audit log counted the request twice. Stream 1 of an upgrade
+    no longer runs it again.
+  - **An h2c Upgrade was honoured over TLS.** h2c is cleartext only (RFC 7540 3.2); over TLS the
+    `Upgrade` is now ignored and the request served as HTTP/1.1.
+  - **A malformed `HTTP2-Settings` was found only after the 101.** Its shape (base64url of whole
+    settings) is now checked first, so a bad one is declined over HTTP/1.1.
+  - **A bodiless HTTP/2 request met a body reader that needed a body.** With no content-length the
+    route's reader was made at HEADERS time even when the request ended there, and a reader that
+    needs a body (a multipart reader without a Content-Type) answered 415. Without a content-length
+    the reader is now made on the first DATA frame.
+  - **The HTTP/2 server leaked live streams when setting up a connection failed part way** (the
+    prior-knowledge path), and the nghttp2 server adapter left a stream it could not take with
+    neither a response nor a reset (it now resets it with INTERNAL_ERROR). A partial out-of-memory
+    failure growing its header arrays freed them at the wrong size.
+  - **The nghttp2 client adapter sent `:scheme https` on cleartext h2c**, and dropped a response
+    header it could not store without saying so (the stream is now reset). `KlHttp2ClientSession`
+    gains `keel_cleartext` (appended, Keel-managed) so an adapter can tell.
+  - **The WebSocket client left a close echo in TLS until the next socket event**, and both clients
+    called `tls->pending` without checking the backend provides it. The server's buffered WebSocket
+    writer read a stale `errno` after a TLS write error.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

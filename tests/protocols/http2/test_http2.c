@@ -1520,6 +1520,78 @@ UTEST(h2, upgrade_from_h1_declined_without_settings)   { declined_case(utest_res
 UTEST(h2, upgrade_from_h1_declined_with_a_body)        { declined_case(utest_result, "AAMAAABk", 5, 1); }
 UTEST(h2, upgrade_from_h1_declined_without_upgrade_op) { declined_case(utest_result, "AAMAAABk", 0, 0); }
 
+/* The upgrading request already went through the pre-body middleware in its HTTP/1.1 phase (the only
+ * caller of upgrade_from_h1 runs it first); stream 1 must not run it again, or a rate limiter or an
+ * audit log counts the request twice. */
+UTEST(h2, upgrade_does_not_run_pre_body_middleware_again) {
+    test_setup();
+    kl_http_router_add(&test_router, "GET", "/test", query_handler, NULL, NULL);
+    kl_http_router_use(&test_router, "*", "/*", test_middleware, NULL);
+    MockH2Session mock; mock_init(&mock); mock.with_upgrade = 1; g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAMAAABk", 0);
+    middleware_called = 0;
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int calls = middleware_called;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_EQ(calls, 0);                          /* was 1: a second run for stream 1 */
+}
+
+/* A HEAD response carries no body over HTTP/2 either (the HTTP/1.1 path drops it); a strict client
+ * resets a stream whose HEAD response has DATA. */
+UTEST(h2, head_response_has_no_body) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "HEAD", "/h", test_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    mock.callbacks.on_request(mock.cb_user_data, 1, "HEAD", 4, "/h", 2, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+    int status = mock.last_status;
+    size_t blen = mock.last_body_len;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(status, 200);
+    ASSERT_EQ(blen, (size_t)0);                   /* was: the handler's body */
+}
+
+/* A request that ends with its HEADERS (no body) is handled like a bodiless HTTP/1.1 request: no body
+ * reader is created for it. The reader factory ran anyway, and one that needs a body (a multipart
+ * reader without a Content-Type) answered 415. */
+static KlHttpBodyReader *refusing_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)alloc; (void)req; (void)ud;
+    return NULL;
+}
+UTEST(h2, bodiless_request_runs_its_handler_without_a_reader) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/form", test_handler, NULL, refusing_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    handler_called = 0;
+    mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/form", 5, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);   /* END_STREAM on the HEADERS */
+    int status = mock.last_status, calls = handler_called;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(calls, 1);                          /* was 0: 415 before the handler */
+    ASSERT_EQ(status, 200);
+}
+
 /* Malformed session vtable: the session is destroyed (ownership cleanup), nothing is written, and
  * conn.h2 is left NULL (no dangling connection state); the request stays on HTTP/1.1. */
 UTEST(h2, upgrade_from_h1_malformed_rejected) {

@@ -103,19 +103,32 @@ static void ng_sstream_free(NgServerStream *st) {
 static int ng_sstream_grow(NgServerStream *st) {
     if (st->n != st->cap) return 0;
     int ncap = st->cap ? st->cap * 2 : 8;
-    if ((size_t)ncap > SIZE_MAX / sizeof(char *)) return -1;
-    const char **nn = kl_realloc(st->alloc, st->names, (size_t)st->cap * sizeof(*nn), (size_t)ncap * sizeof(*nn));
-    if (!nn) return -1;
-    st->names = nn;
-    const char **nv = kl_realloc(st->alloc, st->values, (size_t)st->cap * sizeof(*nv), (size_t)ncap * sizeof(*nv));
-    if (!nv) return -1;
-    st->values = nv;
-    size_t *nl = kl_realloc(st->alloc, st->name_lens, (size_t)st->cap * sizeof(*nl), (size_t)ncap * sizeof(*nl));
-    if (!nl) return -1;
-    st->name_lens = nl;
-    size_t *vl = kl_realloc(st->alloc, st->value_lens, (size_t)st->cap * sizeof(*vl), (size_t)ncap * sizeof(*vl));
-    if (!vl) return -1;
-    st->value_lens = vl;
+    if ((size_t)ncap > SIZE_MAX / sizeof(size_t)) return -1;
+    /* All four arrays are made at the new size before any old one is let go, so a failure part way
+     * leaves every array at st->cap (the size the free path uses). */
+    size_t oc = (size_t)st->cap, nc = (size_t)ncap;
+    const char **nn = kl_malloc(st->alloc, nc * sizeof(*nn));
+    const char **nv = kl_malloc(st->alloc, nc * sizeof(*nv));
+    size_t *nl = kl_malloc(st->alloc, nc * sizeof(*nl));
+    size_t *vl = kl_malloc(st->alloc, nc * sizeof(*vl));
+    if (!nn || !nv || !nl || !vl) {
+        if (nn) kl_free(st->alloc, nn, nc * sizeof(*nn));
+        if (nv) kl_free(st->alloc, nv, nc * sizeof(*nv));
+        if (nl) kl_free(st->alloc, nl, nc * sizeof(*nl));
+        if (vl) kl_free(st->alloc, vl, nc * sizeof(*vl));
+        return -1;
+    }
+    if (oc > 0) {
+        memcpy(nn, st->names, oc * sizeof(*nn));
+        memcpy(nv, st->values, oc * sizeof(*nv));
+        memcpy(nl, st->name_lens, oc * sizeof(*nl));
+        memcpy(vl, st->value_lens, oc * sizeof(*vl));
+        kl_free(st->alloc, st->names, oc * sizeof(*nn));
+        kl_free(st->alloc, st->values, oc * sizeof(*nv));
+        kl_free(st->alloc, st->name_lens, oc * sizeof(*nl));
+        kl_free(st->alloc, st->value_lens, oc * sizeof(*vl));
+    }
+    st->names = nn; st->values = nv; st->name_lens = nl; st->value_lens = vl;
     st->cap = ncap;
     return 0;
 }
@@ -182,12 +195,16 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
 static void ng_deliver_request(NgServerSession *s, int32_t sid, NgServerStream *st) {
     if (st->delivered) return;
     st->delivered = 1;
-    s->cbs->on_request(s->ud, (uint32_t)sid,
+    int rc = s->cbs->on_request(s->ud, (uint32_t)sid,
                         st->method ? st->method : "", st->method_len,
                         st->path ? st->path : "", st->path_len,
                         st->authority ? st->authority : "", st->authority_len,
                         st->names, st->values, st->name_lens, st->value_lens,
                         st->n);
+    /* The server could not take the request (it answers a stream it refuses itself): reset the
+     * stream so the client is not left waiting for a response that never comes. */
+    if (rc < 0)
+        (void)nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE, sid, NGHTTP2_INTERNAL_ERROR);
 }
 
 static int ng_on_frame_recv_cb(nghttp2_session *ng, const nghttp2_frame *frame,

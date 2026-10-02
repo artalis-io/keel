@@ -99,6 +99,9 @@ struct KlHttp2ClientSession {
     KlHttp2ClientCallbacks keel_cbs;
     /** KEEL-managed: opaque pointer to KlHttp2ClientConn. */
     void *keel_ctx;
+    /** KEEL-managed: 1 when the connection is cleartext (prior-knowledge h2c), so requests carry
+     *  :scheme http; 0 (TLS) means https. */
+    int keel_cleartext;
 };
 
 /** @brief Factory for creating client-side HTTP/2 sessions.

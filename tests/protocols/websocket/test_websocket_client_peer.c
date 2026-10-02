@@ -136,7 +136,8 @@ static void peer_thread(void *arg) {
                               p->upgrade_value ? p->upgrade_value : "websocket", acc,
                               p->extra_headers ? p->extra_headers : "");
     }
-    memcpy(out + ol, p->after, p->after_len);
+    if (p->after_len)                     /* after may be NULL (memcpy's source must not be) */
+        memcpy(out + ol, p->after, p->after_len);
     ol += p->after_len;
     (void)kl_test_sockwrite(c, out, ol);
     /* Record what the client sends back (its close frame), until it closes. In a handshake case

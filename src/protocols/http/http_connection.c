@@ -685,8 +685,9 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         return c->state;
     }
 
-    /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
-    if (c->h2_config != NULL) {
+    /* HTTP/2 cleartext upgrade (Upgrade: h2c). Cleartext only (RFC 7540 3.2): over TLS, HTTP/2 is
+     * chosen by ALPN, and an h2c Upgrade is ignored (the request is served as HTTP/1.1). */
+    if (c->h2_config != NULL && !c->tls) {
         size_t ug_len;
         const char *ug = kl_http_request_header_len(
             &c->req, "Upgrade", &ug_len);
