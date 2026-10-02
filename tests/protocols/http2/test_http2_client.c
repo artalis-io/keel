@@ -823,4 +823,61 @@ UTEST(h2c_live, output_left_in_the_session_is_sent_when_the_socket_drains) {
     ASSERT_EQ(got, (size_t)OUT_TOTAL);           /* was: stuck at the first full send buffer */
 }
 
+/* kl_http2_client_request flushes the session. A send can close a stream (nghttp2 closes one once
+ * a queued RST_STREAM goes out), which runs on_resp from inside the flush; an on_resp that frees
+ * the client then destroyed the session while its flush was still running. This session completes
+ * stream 1 from its flush and then touches itself, as nghttp2 does after the callback returns. */
+static int g_rf_calls;
+static int rf_flush(KlHttp2ClientSession *self) {
+    MockH2Session *m = (MockH2Session *)self;
+    if (m->next_stream_id > 1 && !m->recv_called) {      /* a request was submitted */
+        m->recv_called = 1;
+        self->keel_cbs.on_response(self, 1, 200, NULL, 0);
+        self->keel_cbs.on_stream_close(self, 1, 0);       /* → on_resp, which frees the client */
+    }
+    m->flush_called++;                                    /* the session is still in use here */
+    return 0;
+}
+static KlHttp2ClientSession *rf_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) g_live_session->flush = rf_flush;
+    return g_live_session;
+}
+static void rf_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r, void *ud) {
+    (void)id; (void)r; (void)ud;
+    g_rf_calls++;
+    kl_http2_client_free(c);
+}
+
+UTEST(h2c_live, free_in_on_resp_during_request_is_safe) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = rf_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_rf_calls = 0;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &g_h2qa, &cfg, url, NULL, NULL);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    ASSERT_TRUE(g_live_session != NULL);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+    ASSERT_TRUE(kl_handle_valid(peer));
+
+    (void)kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, rf_on_resp, NULL);
+    for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 5);
+
+    int calls = g_rf_calls;
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(h2q_check_and_release(), 0);       /* was: the session written after it was freed */
+}
+
 UTEST_MAIN();
