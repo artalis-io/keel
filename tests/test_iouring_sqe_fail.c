@@ -31,6 +31,7 @@
 #include "../src/completion_io.h"   /* kl_comp_cancel: the idle-sweep cancel */
 #include "net_compat.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* Defined in the -DKEEL_IOURING_TEST_HOOKS copy of event_iouring.c linked with this test. */
 void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count);
@@ -226,6 +227,43 @@ UTEST(iouring_sqe_fail, short_send_tail_without_an_sqe_fails_the_write) {
     kl_event_del(&ctx.loop, st.fd);
     kl_sockdef_close(end); kl_sockdef_close(peer);
     kl_event_ctx_free(&ctx);
+}
+
+/* A watcher removed while no SQE is free: kl_event_del dropped the POLL_REMOVE, so the poll stayed
+ * in the kernel. It holds a reference to the socket's file, so closing the descriptor did not close
+ * the connection (the peer never saw EOF), and the watch stayed allocated until the loop closed. The
+ * remove is now retried at the next drain, like an unsent cancel. */
+static long g_live;
+static void *lc_malloc(void *c, size_t n) { (void)c; void *p = malloc(n ? n : 1); if (p) g_live++; return p; }
+static void *lc_realloc(void *c, void *p, size_t o, size_t n) { (void)c; (void)o; void *q = realloc(p, n ? n : 1); if (q && !p) g_live++; return q; }
+static void lc_free(void *c, void *p, size_t n) { (void)c; (void)n; if (p) { g_live--; free(p); } }
+static void never_ready(KlSocketHandle fd, KlEventMask ready, void *ud) { (void)fd; (void)ready; (void)ud; }
+
+UTEST(iouring_sqe_fail, watcher_remove_without_an_sqe_is_retried) {
+    KlAllocator a = { lc_malloc, lc_realloc, lc_free, NULL };
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }
+
+    KlSocketHandle end, peer;
+    ASSERT_EQ(make_pair(&end, &peer), 0);
+    ASSERT_EQ(kl_sockdef_set_nonblocking(peer), 0);
+    long base = g_live;
+    ASSERT_EQ(kl_watcher_add(&ctx, end, KL_EVENT_READ, never_ready, NULL), 0);   /* the peer never writes */
+    for (int i = 0; i < 4; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 5) >= 0);   /* the poll is armed */
+
+    kl_iou_test_fail_next_sqe(&ctx, 1);                  /* the POLL_REMOVE finds no SQE */
+    kl_watcher_del(&ctx, end);
+    kl_sockdef_close(end);
+    for (int i = 0; i < 10; i++) ASSERT_TRUE(kl_event_ctx_run(&ctx, 16, 10) >= 0);
+
+    char b[8];
+    long n = (long)recv((int)peer, b, sizeof b, 0);
+    long live = g_live;
+    kl_sockdef_close(peer);
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(n, 0L);                                    /* EOF; was: -1 (the file stayed open) */
+    ASSERT_EQ(live, base);                               /* the watch was freed */
 }
 
 UTEST_MAIN()

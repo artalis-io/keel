@@ -392,6 +392,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   returned the closed descriptor's number, and `kl_datagram_set_tos`, the multicast calls and
   `kl_datagram_local_port` used it, though by then it could belong to another socket. They now report
   a closed datagram.
+- **Event engine edge cases.**
+  - IOCP: a watcher whose probe could not be re-posted (typically after the peer reset the
+    connection) was retired silently, so its owner was never called again. It is now reported ready
+    on every tick until it is removed, as a readiness backend reports a dead socket.
+  - io_uring: `kl_event_del` on a watcher, with no submission entry free, dropped the poll removal.
+    The poll stayed in the kernel holding the socket's file, so closing the descriptor did not close
+    the connection. The removal is now retried at the next tick.
+  - IOCP: a zero-length file response (`kl_http_response_file` with size 0) sent the whole file
+    after its `Content-Length: 0` head, because TransmitFile reads a count of 0 as "the whole file".
+    Only the head is sent now.
+  - IOCP: a file that ended before its declared length (it shrank after the response was sized)
+    was reported as fully sent. The write now fails and the connection closes.
+  - pollcomp: accepted sockets were made blocking, so one large buffered body to a client that
+    stopped reading blocked the whole loop. They are non-blocking now.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

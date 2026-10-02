@@ -144,6 +144,7 @@ typedef struct KlIouWatch {
     void              *udata;             /* the tagged KlWatcher pointer */
     int                armed;             /* a POLL_ADD is outstanding for this watch */
     int                removed;           /* kl_event_del pending: free on its CQE */
+    int                remove_unsent;     /* the POLL_REMOVE found no SQE: posted at the next drain */
 } KlIouWatch;
 
 typedef struct {
@@ -336,6 +337,10 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
                 if (sqe) {
                     io_uring_prep_poll_remove(sqe, (__u64)(uintptr_t)w);
                     io_uring_sqe_set_data(sqe, NULL);   /* sentinel: ignore this CQE */
+                } else {
+                    /* No SQE: retried at the next drain. Dropping it left the poll in the kernel,
+                     * holding the socket's file open after its descriptor was closed. */
+                    w->remove_unsent = 1;
                 }
             } else {
                 /* No poll outstanding: unlink + free now. */
@@ -1018,6 +1023,15 @@ static void iou_post_unsent_cancels(KlIouState *st) {
         io_uring_prep_cancel(sqe, o, 0);
         io_uring_sqe_set_data(sqe, NULL);           /* sentinel: ignore the cancel CQE */
         o->cancel_unsent = 0;
+    }
+    for (KlIouWatch *w = st->watches; w; w = w->next) {
+        if (!w->remove_unsent) continue;
+        if (!w->armed) { w->remove_unsent = 0; continue; }   /* the poll already completed */
+        struct io_uring_sqe *sqe = iou_sqe(st);
+        if (!sqe) return;
+        io_uring_prep_poll_remove(sqe, (__u64)(uintptr_t)w);
+        io_uring_sqe_set_data(sqe, NULL);           /* sentinel: ignore the remove CQE */
+        w->remove_unsent = 0;
     }
 }
 
