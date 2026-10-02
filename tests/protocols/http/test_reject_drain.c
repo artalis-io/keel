@@ -85,6 +85,13 @@ static void rd_early_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 
 static void rd_thread(void *a) { (void)a; kl_http_server_run(&rd_server); return; }
 
+/* Pre-body middleware that refuses every request: an early rejection, keep-alive or not. */
+static int rd_deny_mw(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_error(res, 401, "denied");
+    return 1;
+}
+
 /* Defined below; rd_start() calls it to clean up after a test that returned early. */
 static void rd_stop(void);
 
@@ -112,6 +119,8 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
     kl_http_server_route(&rd_server, "POST", "/echo", rd_echo,
                          (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
     kl_http_server_route(&rd_server, "POST", "/deny", rd_echo, NULL, NULL);   /* no reader: discard path */
+    kl_http_server_route(&rd_server, "POST", "/auth", rd_echo, NULL, NULL);
+    kl_http_server_use(&rd_server, "POST", "/auth", rd_deny_mw, NULL);         /* pre-body 401 */
     kl_http_server_route_streaming(&rd_server, "POST", "/early", rd_early_handler, NULL,
                                    rd_early_factory);
     if (kl_plat_thread_create(&rd_tid, rd_thread, NULL) != 0) return -1;
@@ -600,6 +609,38 @@ UTEST(reject_drain, over_sent_bytes_after_a_complete_body_do_not_reset_the_respo
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_EQ(0L, last);   /* orderly FIN: the close must not be abortive */
     rd_stop();
+}
+
+/* The same over-send on a KEEP-ALIVE request that pre-body middleware rejects. Body bytes that came
+ * with the headers were counted only up to Content-Length on a keep-alive connection (past it is a
+ * pipelined request), but the rejection then turned keep-alive off: the drain saw a complete body,
+ * skipped, and the server closed on top of the rest of the upload, resetting the 401 away. */
+UTEST(reject_drain, early_reject_of_a_keepalive_over_send_is_drained) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+
+    static char req[256 + 40960];
+    int hl = snprintf(req, 256, "POST /auth HTTP/1.1" CRLF "Host: x" CRLF
+                                "Content-Length: 4096" CRLF CRLF);   /* keep-alive (HTTP/1.1) */
+    memset(req + hl, 'X', 40960);                    /* 4096 declared, 36864 bytes beyond it */
+    ASSERT_TRUE(kl_test_sockwrite(fd, req, (size_t)hl + 40960) > 0);   /* one write: body with headers */
+
+    char buf[2048];
+    size_t got = 0;
+    long last;
+    for (;;) {
+        last = kl_test_sockread(fd, buf + got, (sizeof(buf) - 1) - got);
+        if (last <= 0) break;
+        got += (size_t)last;
+        if (got >= sizeof(buf) - 1) break;
+    }
+    buf[got] = 0;
+    kl_test_closesock(fd);
+    rd_stop();
+
+    ASSERT_TRUE(strstr(buf, "401") != NULL);
+    ASSERT_EQ(0L, last);   /* orderly FIN, not a reset */
 }
 
 /* Body bytes that arrived in the same read as the headers were never counted, so a request whose
