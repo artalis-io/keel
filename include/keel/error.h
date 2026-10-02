@@ -65,6 +65,9 @@ typedef enum {
     /* Capability */
     KL_ERR_UNSUPPORTED,     /**< A requested capability is not supported by the provider */
 
+    /* Redirect (appended: enum values are append-only) */
+    KL_ERR_REDIRECT_REFUSED, /**< A redirect hop was refused by the caller's on_redirect hook */
+
     KL_ERR__COUNT           /**< Sentinel: not an error code */
 } KlError;
 
