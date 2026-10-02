@@ -44,6 +44,7 @@ tests/protocols/http/test_reject_drain.c
 tests/protocols/http/test_resolver_vtable.c
 tests/protocols/http/test_socket_provider_vtable.c
 tests/protocols/http/test_timeout.c
+tests/protocols/http/test_tls_client_split.c
 tests/protocols/http/test_tls_integration.c
 tests/protocols/http/test_tls_vtable.c
 tests/protocols/http2/test_http2.c

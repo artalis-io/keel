@@ -231,6 +231,36 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   go, and the facade then updated the datagram's WRITE interest through the freed core. The batch and
   GSO sends already held the datagram across the whole call; the single send now does too, so the
   teardown runs after it, once.
+- **HTTPS, WSS and HTTP/2-over-TLS servers dropped connections when a TLS record arrived in
+  pieces.** On a real network a TLS record often spans several TCP segments, so a readable event can
+  carry part of one. The TLS engine buffers it and `read()` returns 0, which the `KlTls` contract
+  defines as WANT_READ (-1 is error or close). On readiness loops (epoll, kqueue, poll, WSAPoll), the
+  HTTP/1 server's header and body reads, the WebSocket server and the HTTP/2 server read that 0 as end
+  of stream and closed the connection, mid-request or mid-message. Loopback tests rarely split a
+  record. A 0 on a TLS connection now means wait for the rest. The WebSocket server also drains
+  plaintext the engine already holds (`tls->pending()`), as the HTTP/1 and HTTP/2 servers do: a record
+  larger than its 8 KiB read buffer used to wait for the peer's next send. Completion loops take a
+  separate TLS path and were not affected.
+
+- **Keel's TLS clients failed or stalled when a record did not arrive, or leave, in one piece.**
+  The same `KlTls` contract (0 = WANT_READ / WANT_WRITE, -1 = error or close) was misread by the
+  clients.
+  - The async HTTP client failed a request with `KL_ERR_IO` when a write found the socket's send buffer
+    full, so a TLS upload larger than that buffer failed outright.
+  - The WebSocket client closed when part of a record arrived, during the handshake ("connection closed
+    during handshake") or after it.
+  - The HTTP/2 client did the same ("connection closed").
+  - The sync client polled the socket while the TLS engine still held plaintext, so a response record
+    larger than its 8 KiB read buffer waited until `timeout_ms` and failed. A connection it took from
+    the pool came back non-blocking, so a split record read as end of stream, failing or truncating
+    the response.
+  - On TLS, the WebSocket and HTTP/2 clients also checked a -1 against a stale `errno`, so a peer's
+    clean close could look like would-block and leave them waiting.
+
+  A 0 on TLS now means wait or poll again in every client, a TLS -1 is a close or an error (with
+  `at_eof` telling which), the WebSocket and HTTP/2 clients drain plaintext the engine holds, and the
+  sync client reads buffered plaintext before polling and returns a pooled connection to blocking
+  mode.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

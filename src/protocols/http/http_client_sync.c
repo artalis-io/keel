@@ -348,6 +348,8 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
             return -1;
 
         kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        if (w == 0 && tls)
+            continue;   /* TLS WANT_WRITE: poll for writable again */
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -362,6 +364,8 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
                 return -1;
 
             kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
+            if (w == 0 && tls)
+                continue;   /* TLS WANT_WRITE: poll for writable again */
             if (w <= 0)
                 return -1;
             sent += (size_t)w;
@@ -432,6 +436,8 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
             return -1;
 
         kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        if (w == 0 && tls)
+            continue;   /* TLS WANT_WRITE: poll for writable again */
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -452,6 +458,8 @@ static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlT
             return -1;
 
         kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
+        if (w == 0 && tls)
+            continue;   /* TLS WANT_WRITE: poll for writable again */
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -543,9 +551,12 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
     int ret = -1;
 
     for (;;) {
-        int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
-        if (pr <= 0)
-            break;
+        /* Plaintext the TLS engine already holds will not make the socket readable: read it first. */
+        if (!(tls && tls->pending && tls->pending(tls) > 0)) {
+            int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
+            if (pr <= 0)
+                break;
+        }
 
         kl_ssize_t nread = kl_http_client_io_read(sockets, fd, tls, buf, sizeof(buf));
         if (nread < 0) {
@@ -555,6 +566,8 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
                 ret = 0;
             break;
         }
+        if (nread == 0 && tls)
+            continue;   /* TLS WANT_READ: part of a record arrived; poll for the rest */
         if (nread == 0) {
             if (response_complete_at_eof(parser, resp, status_only))
                 ret = 0;
@@ -914,9 +927,11 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     int reusable = 0;
 
     if (acq == 0) {
-        /* Pool hit: reuse connection */
+        /* Pool hit: reuse connection. The pool's liveness peek leaves it non-blocking; this client
+         * polls then does blocking I/O, so put it back (a non-blocking TLS read returns WANT_READ). */
         fd = pconn.fd;
         tls = pconn.tls;
+        (void)kl_sock_set_blocking(sockets, fd);
     } else {
         /* Pool miss: connect fresh */
         KlError conn_err = KL_ERR_NONE;

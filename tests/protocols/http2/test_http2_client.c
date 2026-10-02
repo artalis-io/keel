@@ -4,6 +4,7 @@
 #include <keel/allocator.h>
 #include "net_compat.h"
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: this TU calls socket() */
+#include "mock_tls.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -536,6 +537,67 @@ UTEST(h2c_live, free_in_on_resp_is_safe) {
     kl_test_closesock(l.fd);
     ASSERT_EQ(calls, 1);
     ASSERT_EQ(h2q_check_and_release(), 0);
+}
+
+/* ── Over TLS: a record split across reads ──────────────────────────────────────────────────
+ * A read that gets part of a TLS record returns 0, WANT_READ (the KlTls contract; -1 is error or
+ * close). The client took it for "connection closed". The identity mock TLS simulates the split. */
+static size_t g_split_bytes;
+static int    g_split_errors;
+static int split_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
+    (void)self; (void)data;
+    g_split_bytes += len;
+    return 0;
+}
+static KlHttp2ClientSession *split_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) g_live_session->recv = split_recv;
+    return g_live_session;
+}
+static void split_on_error(KlHttp2ClientConn *c, const char *msg, void *ud) {
+    (void)c; (void)msg; (void)ud;
+    g_split_errors++;
+}
+
+UTEST(h2c_live, tls_record_split_across_reads_is_not_closed) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+
+    static KlTlsConfig tls = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = split_factory;
+    cfg.tls = &tls;
+    char url[64];
+    snprintf(url, sizeof url, "https://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_split_bytes = 0;
+    g_split_errors = 0;
+    mock_tls_alpn = "h2";
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &a, &cfg, url, split_on_error, NULL);
+    for (int i = 0; c && i < 200 && !g_live_session && !g_split_errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+
+    mock_tls_split_record = 10;                /* a 10-byte record, sent in two parts */
+    (void)send((int)peer, "0123", 4, 0);
+    for (int i = 0; i < 15; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    (void)send((int)peer, "456789", 6, 0);
+    for (int i = 0; i < 50 && g_split_bytes < 10 && !g_split_errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    mock_tls_split_record = 0;
+    mock_tls_alpn = NULL;
+
+    size_t got = g_split_bytes;
+    int errors = g_split_errors;
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    if (kl_handle_valid(peer)) kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(errors, 0);
+    ASSERT_EQ(got, (size_t)10);
 }
 
 UTEST_MAIN();

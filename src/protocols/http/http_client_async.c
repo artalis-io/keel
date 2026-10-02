@@ -731,8 +731,13 @@ static void async_handle_sending(KlHttpClient *c)
         kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                               c->request_buf + c->request_sent,
                               c->request_len - c->request_sent);
+        if (w == 0 && c->tls) {   /* TLS WANT_WRITE: the send buffer is full; wait for writable */
+            kl_watcher_rearm(c->ev_ctx, c->fd);
+            return;
+        }
         if (w < 0) {
-            if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+            /* A TLS -1 is an error or a close, never would-block (that is 0, above). */
+            if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
@@ -805,8 +810,9 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -825,8 +831,9 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_buf + c->chunk_sent,
                                       c->chunk_len - c->chunk_sent);
+                if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -850,8 +857,9 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -871,8 +879,9 @@ static void async_handle_sending_stream(KlHttpClient *c)
                 kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -903,7 +912,8 @@ static void async_handle_receiving(KlHttpClient *c)
     for (;;) {
         kl_ssize_t nread = kl_http_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
         if (nread < 0) {
-            if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+            /* A TLS -1 is an error or a close (WANT_READ is 0, below): never consult a stale errno. */
+            if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }

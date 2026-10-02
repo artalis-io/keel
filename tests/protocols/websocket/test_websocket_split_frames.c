@@ -19,6 +19,7 @@
 #include <keel/websocket_client.h>
 #include "net_compat.h"
 #include "platform_thread.h"
+#include "mock_tls.h"
 #if !defined(_WIN32)
 #include <netinet/tcp.h>
 #endif
@@ -246,6 +247,119 @@ UTEST(ws_split_frames, raw_frame_in_pieces_and_split_ping) {
 
     kl_test_closesock(fd);
     srv_stop(&s);
+}
+
+/* ── Over TLS: a record split across reads ──────────────────────────────────────────────────
+ * A readable event can carry part of a TLS record; the engine buffers it and read() returns 0,
+ * WANT_READ (the KlTls contract; -1 is error or close). The WebSocket server read that 0 as end of
+ * stream and dropped the connection. The mock TLS (identity, no crypto) simulates the split in
+ * socket mode, so this exercises the readiness transport; a completion loop takes its own TLS path. */
+static KlTlsConfig g_tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+
+static int srv_start_tls(Srv *s) {
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    cfg.tls = &g_tls_cfg;
+    if (kl_http_server_init(&s->srv, &cfg) != 0) return -1;
+    kl_ws_server_config_init(&s->ws_cfg);
+    s->ws_cfg.callbacks.on_message = srv_on_message;
+    if (kl_http_server_ws_upgrade(&s->srv, "/ws", &s->ws_cfg) != 0) return -1;
+    if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
+    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s->port = s->srv.bound_port;
+    return s->port > 0 ? 0 : -1;
+}
+
+UTEST(ws_split_frames, tls_record_split_across_reads_is_not_eof) {
+    static Srv s; ASSERT_EQ(srv_start_tls(&s), 0);
+    KlSocketHandle fd = raw_connect(s.port);
+    int ok = kl_handle_valid(fd);
+
+    static char req[512];
+    int rn = snprintf(req, sizeof req,
+                      "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+                      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n", s.port);
+    static unsigned char frame[64];
+    static const unsigned char msg[] = "hello over a split record";
+    size_t fl = build_masked(frame, 0x1, msg, sizeof msg - 1);
+    mock_tls_split_after = (size_t)rn;         /* the upgrade request passes whole */
+    mock_tls_split_record = fl;                /* the frame's record arrives in two parts */
+
+    if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
+    static char resp[1024]; size_t rl = 0;
+    while (ok && rl < sizeof resp - 1) {       /* read the 101 up to the blank line */
+        int k = (int)recv(fd, resp + rl, 1, 0);
+        if (k <= 0) { ok = 0; break; }
+        rl++;
+        resp[rl] = '\0';
+        if (rl >= 4 && memcmp(resp + rl - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    if (ok) ok = strncmp(resp, "HTTP/1.1 101", 12) == 0;
+    if (ok) ok = send_all(fd, frame, 5) == 0;
+    kl_test_sleep_ms(150);                     /* the server sees part of the record on its own */
+    if (ok) ok = send_all(fd, frame + 5, fl - 5) == 0;
+    int opcode = -1; static unsigned char echo[64]; size_t got = 0;
+    int echoed = ok && read_frame(fd, &opcode, echo, sizeof echo, &got) == 0;
+
+    mock_tls_split_record = 0;
+    mock_tls_split_after = 0;
+    if (kl_handle_valid(fd)) kl_test_closesock(fd);
+    srv_stop(&s);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(echoed);
+    ASSERT_EQ(opcode, 0x1);
+    ASSERT_EQ(got, sizeof msg - 1);
+    ASSERT_EQ(memcmp(echo, msg, got), 0);
+}
+
+/* A record larger than the server's 8 KiB read buffer: after the first read, the rest of the
+ * plaintext sits inside the TLS engine and the socket will not signal readable again for it. The
+ * server must drain tls->pending() itself, or the message waits for the peer's next send. */
+UTEST(ws_split_frames, tls_record_larger_than_the_read_buffer_is_drained) {
+    static Srv s; ASSERT_EQ(srv_start_tls(&s), 0);
+    KlSocketHandle fd = raw_connect(s.port);
+    int ok = kl_handle_valid(fd);
+
+    static char req[512];
+    int rn = snprintf(req, sizeof req,
+                      "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+                      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n", s.port);
+    enum { N = 12000 };
+    static unsigned char msg[N], frame[N + 16], echo[N];
+    for (size_t i = 0; i < N; i++) msg[i] = pat(i);
+    size_t fl = build_masked(frame, 0x2, msg, N);
+    mock_tls_split_after = (size_t)rn;
+    mock_tls_split_record = fl;                /* one record carrying the whole frame */
+
+    if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
+    static char resp[1024]; size_t rl = 0;
+    while (ok && rl < sizeof resp - 1) {
+        int k = (int)recv(fd, resp + rl, 1, 0);
+        if (k <= 0) { ok = 0; break; }
+        rl++;
+        resp[rl] = '\0';
+        if (rl >= 4 && memcmp(resp + rl - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    if (ok) ok = strncmp(resp, "HTTP/1.1 101", 12) == 0;
+    if (ok) ok = send_all(fd, frame, 100) == 0;
+    kl_test_sleep_ms(150);
+    if (ok) ok = send_all(fd, frame + 100, fl - 100) == 0;   /* the last bytes the peer sends */
+    int opcode = -1; size_t got = 0;
+    int echoed = ok && read_frame(fd, &opcode, echo, sizeof echo, &got) == 0;
+
+    mock_tls_split_record = 0;
+    mock_tls_split_after = 0;
+    if (kl_handle_valid(fd)) kl_test_closesock(fd);
+    srv_stop(&s);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(echoed);
+    ASSERT_EQ(opcode, 0x2);
+    ASSERT_EQ(got, (size_t)N);
+    ASSERT_EQ(memcmp(echo, msg, got), 0);
 }
 
 UTEST_MAIN();

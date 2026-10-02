@@ -158,8 +158,11 @@ static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
     size_t sent = 0;
     while (sent < len) {
         kl_ssize_t w = h2c_write(c, p + sent, len - sent);
+        if (w == 0 && c->tls)
+            return (int)sent;      /* TLS WANT_WRITE: partial send */
         if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            /* A TLS -1 is an error or a close (WANT_WRITE is 0): never consult a stale errno. */
+            if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK))
                 return (int)sent;  /* partial send */
             return -1;
         }
@@ -414,11 +417,23 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
 static void h2c_handle_active(KlHttp2ClientConn *c)
 {
     char buf[KL_HTTP2_CLIENT_RECV_BUF_SIZE];
+    int drains = 0;
+
+read_more: ;
     kl_ssize_t nread = h2c_read(c, buf, sizeof(buf));
 
+    if (nread == 0 && c->tls) {              /* TLS WANT_READ: part of a record arrived */
+        kl_watcher_rearm(c->ev, c->fd);
+        return;
+    }
     if (nread < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             kl_watcher_rearm(c->ev, c->fd);
+            return;
+        }
+        /* A clean TLS close is -1 with at_eof: report it as the socket's end of stream is. */
+        if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls)) {
+            h2c_error(c, "connection closed");
             return;
         }
         h2c_error(c, "read error");
@@ -443,6 +458,9 @@ static void h2c_handle_active(KlHttp2ClientConn *c)
         return;
     }
 
+    /* Plaintext the TLS engine already holds will not make the socket readable: drain it. */
+    if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
+        goto read_more;
     kl_watcher_rearm(c->ev, c->fd);
 }
 
