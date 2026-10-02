@@ -583,7 +583,7 @@ UTEST(pooled, switching_protocols_is_not_pooled) {
 /* ── Decompression ───────────────────────────────────────────────────────────────────────────── */
 
 /* A mock decompressor: doubles every byte; its streaming feed fails at the final flush when
- * g_md_fail_flush is set (a truncated stream), and its one-shot form fails when g_md_fail is set. */
+ * g_md_fail_flush is set (a truncated stream), and both forms fail when g_md_fail is set. */
 static int g_md_fail, g_md_fail_flush;
 static int md_decompress(KlDecompress *self, const char *in, size_t in_len, char **out,
                          size_t *out_len, KlAllocator *alloc) {
@@ -599,6 +599,7 @@ static int md_decompress(KlDecompress *self, const char *in, size_t in_len, char
 static int md_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
                     int (*emit)(void *, const char *, size_t), void *ctx) {
     (void)self;
+    if (g_md_fail) return -1;                    /* a failing decompressor fails in either form */
     for (size_t i = 0; i < n; i++) {
         char two[2] = { d[i], d[i] };
         if (emit(ctx, two, 2) != 0) return -1;
@@ -691,6 +692,87 @@ UTEST(decompress, sync_stream_final_flush_failure_fails_the_request) {
     peer_finish(&p);
     ASSERT_EQ(got, (size_t)16);
     ASSERT_EQ(rc, -1);                           /* was 0 */
+}
+
+/* A buffered body must be refused while inflating, not after. The limit was compared only once the
+ * whole body had been decompressed (up to the backend's own cap, 256 MB for miniz), so a small
+ * compressed body still cost its full inflated size first. This "bomb" inflates each input byte to
+ * 1 MiB: its one-shot form allocates all of it, its streaming form emits it in 64 KiB pieces from a
+ * static buffer. With a 64-byte limit the client's live memory must stay small. */
+static long g_peak, g_cur;
+static void *pk_malloc(void *c, size_t n) {
+    (void)c; void *p = malloc(n ? n + sizeof(size_t) : sizeof(size_t));
+    if (!p) return NULL;
+    *(size_t *)p = n; g_cur += (long)n; if (g_cur > g_peak) g_peak = g_cur;
+    return (char *)p + sizeof(size_t);
+}
+static void pk_free(void *c, void *p, size_t n) {
+    (void)c; (void)n;
+    if (!p) return;
+    char *b = (char *)p - sizeof(size_t);
+    g_cur -= (long)*(size_t *)b;
+    free(b);
+}
+static void *pk_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)o;
+    void *q = pk_malloc(c, n);
+    if (!q) return NULL;
+    if (p) {
+        size_t old = *(size_t *)((char *)p - sizeof(size_t));
+        memcpy(q, p, old < n ? old : n);
+        pk_free(c, p, old);
+    }
+    return q;
+}
+static int bomb_decompress(KlDecompress *self, const char *in, size_t in_len, char **out,
+                           size_t *out_len, KlAllocator *alloc) {
+    (void)self; (void)in;
+    size_t n = in_len * (1u << 20);
+    char *b = kl_malloc(alloc, n);
+    if (!b) return -1;
+    memset(b, 'b', n);
+    *out = b;
+    *out_len = n;
+    return 0;
+}
+static int bomb_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
+                      int (*emit)(void *, const char *, size_t), void *ctx) {
+    (void)self; (void)d; (void)flush;
+    static char piece[64 * 1024];
+    memset(piece, 'b', sizeof piece);
+    for (size_t i = 0; i < n; i++)
+        for (int k = 0; k < 16; k++)
+            if (emit(ctx, piece, sizeof piece) != 0) return -1;
+    return 0;
+}
+static const char *bomb_encoding(KlDecompress *self) { (void)self; return "x-bomb"; }
+static void bomb_reset(KlDecompress *self) { (void)self; }
+static void bomb_destroy(KlDecompress *self) { (void)self; }
+static KlDecompress g_bomb = { bomb_decompress, bomb_dfeed, bomb_encoding, bomb_reset, bomb_destroy };
+static KlDecompress *bomb_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_bomb; }
+static KlDecompressConfig g_bomb_cfg = { .ctx = NULL, .factory = bomb_factory };
+
+UTEST(decompress, buffered_limit_stops_inflation_early) {
+    Peer p;
+    ASSERT_EQ(peer_listen(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-bomb\r\nContent-Length: 32\r\n\r\n"
+                              "abcdefghabcdefghabcdefghabcdefgh"), 0);   /* 32 MiB once inflated */
+    peer_start(&p);
+    KlAllocator a = { pk_malloc, pk_realloc, pk_free, NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 3000;
+    cfg.max_response_size = 64;                  /* the 32 wire bytes fit; the inflated body cannot */
+    cfg.decompress = &g_bomb_cfg;
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    g_peak = g_cur = 0;
+    int rc = kl_http_client_request(&a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0, &r);
+    KlError err = r.error;
+    kl_http_client_response_free(&r);
+    peer_finish(&p);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ((int)err, (int)KL_ERR_TOO_LARGE);
+    ASSERT_LT(g_peak, (1L << 20));               /* was: 32 MiB inflated before the check */
 }
 
 UTEST_MAIN();
