@@ -580,7 +580,8 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         if (pr2 == KL_HTTP1_PARSE_OK) {
             ret = 0;
             if (reusable)
-                *reusable = consumed == (size_t)nread &&
+                *reusable = resp->status != 101 &&   /* the connection now speaks another protocol */
+                            consumed == (size_t)nread &&
                             !(tls && tls->pending && tls->pending(tls) > 0);
             break;
         }
@@ -759,6 +760,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
         decomp_wrap.user_on_complete = stream->on_complete;
         decomp_wrap.user_data = stream->user_data;
         decomp_wrap.dcfg = dcfg;
+        decomp_wrap.max = max_resp;
         decomp_wrap.ds.alloc = alloc;
 
         wrapped_stream.on_body = kl_http_client_decomp_on_body;
@@ -800,10 +802,15 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
 
     /* Decompress buffered response body if applicable */
     if (!stream || !stream->on_body) {
-        if (kl_http_client_decompress_response_body(resp, dcfg) < 0) {
-            if (!resp->error) resp->error = KL_ERR_COMPRESS;
+        int drc = kl_http_client_decompress_response_body(resp, dcfg, max_resp);
+        if (drc < 0) {
+            if (!resp->error) resp->error = drc == -2 ? KL_ERR_TOO_LARGE : KL_ERR_COMPRESS;
             goto cleanup;
         }
+    } else if (decomp_installed && decomp_wrap.failed) {
+        /* Streaming decompression failed, at the final flush included (a truncated stream). */
+        if (!resp->error) resp->error = KL_ERR_COMPRESS;
+        goto cleanup;
     }
 
     ret = 0;
@@ -974,8 +981,9 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     /* Decompress buffered response body if applicable */
     {
         KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
-        if (kl_http_client_decompress_response_body(resp, dcfg) < 0) {
-            if (!resp->error) resp->error = KL_ERR_COMPRESS;
+        int drc = kl_http_client_decompress_response_body(resp, dcfg, max_resp);
+        if (drc < 0) {
+            if (!resp->error) resp->error = drc == -2 ? KL_ERR_TOO_LARGE : KL_ERR_COMPRESS;
             goto cleanup;
         }
     }

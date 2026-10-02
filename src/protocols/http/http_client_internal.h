@@ -56,6 +56,9 @@ typedef struct {
     KlDecompressStream  ds;
     int                 active;  /* 1 if decompression is active */
     KlDecompressConfig *dcfg;
+    size_t              max;     /* bound on decompressed bytes delivered (0 = none) */
+    size_t              emitted; /* decompressed bytes delivered so far */
+    int                 failed;  /* decompression failed (incl. the final flush): fail the request */
 } DecompStreamWrap;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -157,6 +160,7 @@ struct KlHttpClient {
     /* Response decompression */
     KlDecompressConfig *decompress_cfg;
     DecompStreamWrap   *decomp_wrap;     /* heap-allocated for streaming */
+    size_t              max_resp;        /* max_response_size: also bounds a decompressed body */
 
     /* Proxy state */
     int             is_proxied;     /* connected via proxy */
@@ -203,13 +207,14 @@ const char *kl_http_client_find_header_value(const KlHttpClientResponse *resp,
                                         const char *name);
 void kl_http_client_remove_header(KlHttpClientResponse *resp, const char *name);
 
-/* 1 if the response carries "Connection: close". */
+/* 1 if the response's Connection header carries the "close" token. */
 int kl_http_client_server_wants_close(const KlHttpClientResponse *resp);
 
-/* Post-process a buffered response: inflate the body if Content-Encoding
- * matches the decompressor. Returns 0 on success / no-op, -1 on error. */
+/* Post-process a buffered response: inflate the body if Content-Encoding matches the decompressor.
+ * Returns 0 on success / no-op, -1 if decompression failed, -2 if the decompressed body exceeds
+ * max (0 = no bound). */
 int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
-                                       KlDecompressConfig *dcfg);
+                                            KlDecompressConfig *dcfg, size_t max);
 
 /* Streaming decompression wrapper callbacks (installed on the response parser
  * so a matching Content-Encoding is inflated transparently). */

@@ -235,11 +235,23 @@ void kl_http_client_remove_header(KlHttpClientResponse *resp, const char *name)
     }
 }
 
+/* Connection is a comma-separated token list (RFC 9110 7.6.1): "close" anywhere in it closes. */
+static int connection_has_close(const char *v)
+{
+    while (*v) {
+        while (*v == ' ' || *v == '\t' || *v == ',') v++;
+        const char *t = v;
+        while (*v && *v != ',' && *v != ' ' && *v != '\t') v++;
+        if (v - t == 5 && kl_ascii_strncasecmp(t, "close", 5) == 0) return 1;
+    }
+    return 0;
+}
+
 int kl_http_client_server_wants_close(const KlHttpClientResponse *resp)
 {
     for (int i = 0; i < resp->num_headers; i++) {
         if (kl_ascii_strcasecmp(resp->headers[i].name, "Connection") == 0 &&
-            kl_ascii_strcasecmp(resp->headers[i].value, "close") == 0)
+            connection_has_close(resp->headers[i].value))
             return 1;
     }
     return 0;
@@ -252,7 +264,7 @@ int kl_http_client_server_wants_close(const KlHttpClientResponse *resp)
  * matches the decompressor's encoding. Replaces body and removes header.
  */
 int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
-                                       KlDecompressConfig *dcfg)
+                                       KlDecompressConfig *dcfg, size_t max)
 {
     if (!dcfg || !dcfg->factory)
         return 0;  /* no decompression configured: not an error */
@@ -287,6 +299,10 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
 
     if (rc < 0)
         return -1;
+    if (max > 0 && out_len > max) {              /* the limit bounds what the caller receives */
+        kl_free(&resp->alloc, out, out_len);
+        return -2;
+    }
 
     /* The decompressor's buffer is out_len bytes (KlDecompress contract: free with out_len), while a
      * response body is NUL-terminated and freed at body_len + 1. Move it into a body-shaped buffer
@@ -320,6 +336,12 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
 static int decomp_emit_to_user(void *ctx, const char *data, size_t len)
 {
     DecompStreamWrap *w = ctx;
+    /* max_response_size bounds the decompressed bytes delivered, not only those on the wire. */
+    if (w->max > 0 && (len > w->max || w->emitted > w->max - len)) {
+        w->failed = 1;
+        return -1;
+    }
+    w->emitted += len;
     if (!w->user_on_body)
         return 0;
     return w->user_on_body(data, len, w->user_data);
@@ -365,8 +387,9 @@ int kl_http_client_decomp_on_body(const char *data, size_t len, void *user_data)
 {
     DecompStreamWrap *w = user_data;
     if (w->active) {
-        return kl_decompress_stream_feed(&w->ds, data, len, 0,
-                                          decomp_emit_to_user, w);
+        int r = kl_decompress_stream_feed(&w->ds, data, len, 0, decomp_emit_to_user, w);
+        if (r < 0) w->failed = 1;
+        return r;
     }
     /* Passthrough */
     if (w->user_on_body)
@@ -378,9 +401,10 @@ void kl_http_client_decomp_on_complete(void *user_data)
 {
     DecompStreamWrap *w = user_data;
     if (w->active) {
-        /* Final flush */
-        kl_decompress_stream_feed(&w->ds, NULL, 0, 1,
-                                   decomp_emit_to_user, w);
+        /* Final flush: a failure here (a truncated stream) fails the request; on_complete has no
+         * error channel, so the client checks `failed` once the response is parsed. */
+        if (kl_decompress_stream_feed(&w->ds, NULL, 0, 1, decomp_emit_to_user, w) < 0)
+            w->failed = 1;
         kl_decompress_stream_free(&w->ds);
         w->active = 0;
     }

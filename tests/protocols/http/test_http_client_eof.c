@@ -27,6 +27,7 @@
 #include <keel/http_client.h>
 #include <keel/http_client_pool.h>
 #include <keel/timer.h>
+#include <keel/decompress.h>
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init */
@@ -552,6 +553,144 @@ UTEST(pooled, a_clean_response_is_still_reused) {
     multi_peer_finish(&p);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(idle, 1);          /* the guard: a clean keep-alive response is pooled as before */
+}
+
+/* ── Connection reuse: what a response says about its connection ─────────────────────────── */
+
+/* Connection is a comma-separated token list (RFC 9110 7.6.1): "close" among other tokens still
+ * closes. Only an exact "Connection: close" was recognised, so the connection was pooled and the
+ * next request went to a peer that had finished with it. */
+UTEST(pooled, connection_close_among_other_tokens_is_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                   "Connection: Keep-Alive, close\r\n\r\nOK", 1), 0);
+    int ok = two_pooled_gets(&p);
+    multi_peer_finish(&p);
+    ASSERT_EQ(ok, 2);
+    ASSERT_EQ(p.accepts, 2);     /* was 1: the closing connection was reused */
+}
+
+/* A 101 hands the connection to another protocol: it is never reusable for HTTP. */
+UTEST(pooled, switching_protocols_is_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n"
+                                   "Connection: Upgrade\r\n\r\n", 1), 0);
+    (void)two_pooled_gets(&p);
+    multi_peer_finish(&p);
+    ASSERT_EQ(p.accepts, 2);     /* was 1: the second request was written into the switched protocol */
+}
+
+/* ── Decompression ───────────────────────────────────────────────────────────────────────────── */
+
+/* A mock decompressor: doubles every byte; its streaming feed fails at the final flush when
+ * g_md_fail_flush is set (a truncated stream), and its one-shot form fails when g_md_fail is set. */
+static int g_md_fail, g_md_fail_flush;
+static int md_decompress(KlDecompress *self, const char *in, size_t in_len, char **out,
+                         size_t *out_len, KlAllocator *alloc) {
+    (void)self;
+    if (g_md_fail) return -1;
+    char *b = kl_malloc(alloc, in_len * 2);
+    if (!b) return -1;
+    for (size_t i = 0; i < in_len; i++) { b[2 * i] = in[i]; b[2 * i + 1] = in[i]; }
+    *out = b;
+    *out_len = in_len * 2;
+    return 0;
+}
+static int md_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
+                    int (*emit)(void *, const char *, size_t), void *ctx) {
+    (void)self;
+    for (size_t i = 0; i < n; i++) {
+        char two[2] = { d[i], d[i] };
+        if (emit(ctx, two, 2) != 0) return -1;
+    }
+    if (flush && g_md_fail_flush) return -1;
+    return 0;
+}
+static const char *md_encoding(KlDecompress *self) { (void)self; return "x-double"; }
+static void md_reset(KlDecompress *self) { (void)self; }
+static void md_destroy(KlDecompress *self) { (void)self; }
+static KlDecompress g_md = { md_decompress, md_dfeed, md_encoding, md_reset, md_destroy };
+static KlDecompress *md_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_md; }
+static KlDecompressConfig g_md_cfg = { .ctx = NULL, .factory = md_factory };
+
+#define DOUBLED_8 "HTTP/1.1 200 OK\r\nContent-Encoding: x-double\r\nContent-Length: 8\r\n\r\nabcdefgh"
+
+/* max_response_size bounds what the caller receives: the decompressed body, not just the bytes on
+ * the wire (8 bytes inflate to 16 here, over a limit of 10). */
+UTEST(decompress, sync_decompressed_body_over_the_limit_fails) {
+    Peer p;
+    ASSERT_EQ(peer_listen(&p, DOUBLED_8), 0);
+    peer_start(&p);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 3000;
+    cfg.max_response_size = 10;
+    cfg.decompress = &g_md_cfg;
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    int rc = kl_http_client_request(&a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0, &r);
+    KlError err = r.error;
+    size_t len = r.body_len;
+    kl_http_client_response_free(&r);
+    peer_finish(&p);
+    ASSERT_EQ(rc, -1);                           /* was 0, with a 16-byte body */
+    ASSERT_EQ((int)err, (int)KL_ERR_TOO_LARGE);
+    (void)len;
+}
+
+/* The async client ignored a failed decompression and delivered the encoded body as a success. */
+UTEST(decompress, async_decompression_failure_fails_the_request) {
+    Peer p;
+    ASSERT_EQ(peer_listen(&p, DOUBLED_8), 0);
+    peer_start(&p);
+    AsyncResult res;
+    memset(&res, 0, sizeof res);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 3000;
+    cfg.decompress = &g_md_cfg;
+    g_md_fail = 1;
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0,
+                                           async_done, &res);
+    for (int i = 0; i < 400 && c && !res.done; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    g_md_fail = 0;
+    if (c) kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    peer_finish(&p);
+    ASSERT_TRUE(res.done);
+    ASSERT_NE(res.err, 0);                       /* was 0: success, with the body still encoded */
+}
+
+/* A streaming response whose decompression fails at the final flush (a truncated stream) must not
+ * end as a success; the flush result was ignored. */
+static int sink_body(const char *d, size_t n, void *ud) { (void)d; *(size_t *)ud += n; return 0; }
+UTEST(decompress, sync_stream_final_flush_failure_fails_the_request) {
+    Peer p;
+    ASSERT_EQ(peer_listen(&p, DOUBLED_8), 0);
+    peer_start(&p);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 3000;
+    cfg.decompress = &g_md_cfg;
+    size_t got = 0;
+    KlHttpClientStreamCfg st;
+    memset(&st, 0, sizeof st);
+    st.on_body = sink_body;
+    st.user_data = &got;
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    g_md_fail_flush = 1;
+    int rc = kl_http_client_request_s(&a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0, &st, &r);
+    g_md_fail_flush = 0;
+    kl_http_client_response_free(&r);
+    peer_finish(&p);
+    ASSERT_EQ(got, (size_t)16);
+    ASSERT_EQ(rc, -1);                           /* was 0 */
 }
 
 UTEST_MAIN();
