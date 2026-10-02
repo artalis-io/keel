@@ -54,6 +54,9 @@ test: $(LIB) e2e
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
 	./tests/test_roundtrip
 	@echo "integrations/http2/nghttp2: roundtrip OK"
+	$(CC) $(CFLAGS) -o tests/test_destroy_open_streams tests/test_destroy_open_streams.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
+	./tests/test_destroy_open_streams
 
 # End-to-end over a real loopback socket + KEEL event loop: KEEL nghttp2 client
 # (kl_http2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlHttpServerConfig.h2,
@@ -165,7 +168,7 @@ alpn-interop: $(LIB)
 
 clean:
 	rm -f $(LIB) $(OBJ) http2_nghttp2_client.d http2_nghttp2_server.d \
-	      tests/test_roundtrip tests/e2e_socket tests/interop_server tests/client_probe \
+	      tests/test_roundtrip tests/test_destroy_open_streams tests/e2e_socket tests/interop_server tests/client_probe \
 	      tests/alpn_server tests/alpn_client
 	rm -rf tests/*.dSYM
 

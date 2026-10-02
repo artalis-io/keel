@@ -261,6 +261,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   reads 0 as end of file: the response stopped part way and the connection carried on as if it had
   completed. A would-block with nothing sent is now reported as one, so the send resumes when the
   socket drains.
+- **The nghttp2 adapters leaked the state of streams still open at teardown.** Destroying a client
+  or server session freed nghttp2's own session but not the per-stream state the adapter had
+  allocated for streams that had not closed (a connection dropped mid-request, a queued response).
+  Each adapter now tracks its live streams and frees them when the session is destroyed.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

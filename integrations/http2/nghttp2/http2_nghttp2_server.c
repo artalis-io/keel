@@ -23,6 +23,8 @@
 
 /* ── Session + per-stream state ─────────────────────────────────────── */
 
+typedef struct NgServerStream NgServerStream;
+
 typedef struct {
     KlHttp2ServerSession    base;       /* must be first */
     KlAllocator         *alloc;
@@ -30,9 +32,12 @@ typedef struct {
     KlHttp2ServerCallbacks *cbs;        /* KEEL-provided (borrowed) */
     void                *ud;         /* KEEL user_data for cbs */
     int                  in_recv;    /* 1 while inside nghttp2_session_mem_recv */
+    NgServerStream      *live;       /* every stream record not yet freed (see ng_server_destroy) */
 } NgServerSession;
 
-typedef struct {
+struct NgServerStream {
+    NgServerStream *prev, *next;     /* the session's live list; unlinked on free */
+    NgServerSession *sess;           /* NULL until linked */
     KlAllocator  *alloc;
     /* Accumulated request pseudo-headers + regular headers (valid until the
      * on_request delivery; the driver copies out during that call). */
@@ -47,7 +52,7 @@ typedef struct {
     /* Response body copy (nghttp2 pulls DATA asynchronously). */
     char         *resp_body;
     size_t        resp_body_len, resp_body_off;
-} NgServerStream;
+};
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -59,8 +64,26 @@ static char *ng_dup(KlAllocator *a, const char *src, size_t len) {
     return p;
 }
 
+/* A new, zeroed stream record, linked into the session's live list. */
+static NgServerStream *ng_sstream_new(NgServerSession *s) {
+    NgServerStream *st = kl_malloc(s->alloc, sizeof(*st));
+    if (!st) return NULL;
+    memset(st, 0, sizeof(*st));
+    st->alloc = s->alloc;
+    st->sess = s;
+    st->next = s->live;
+    if (s->live) s->live->prev = st;
+    s->live = st;
+    return st;
+}
+
 static void ng_sstream_free(NgServerStream *st) {
     if (!st) return;
+    if (st->sess) {                                  /* unlink from the live list */
+        if (st->prev) st->prev->next = st->next;
+        else          st->sess->live = st->next;
+        if (st->next) st->next->prev = st->prev;
+    }
     KlAllocator *a = st->alloc;
     for (int i = 0; i < st->n; i++) {
         kl_free(a, (void *)st->names[i], st->name_lens[i] + 1);
@@ -115,10 +138,8 @@ static int ng_on_begin_headers_cb(nghttp2_session *ng, const nghttp2_frame *fram
     if (frame->hd.type != NGHTTP2_HEADERS ||
         frame->headers.cat != NGHTTP2_HCAT_REQUEST)
         return 0;
-    NgServerStream *st = kl_malloc(s->alloc, sizeof(*st));
+    NgServerStream *st = ng_sstream_new(s);
     if (!st) return NGHTTP2_ERR_CALLBACK_FAILURE;
-    memset(st, 0, sizeof(*st));
-    st->alloc = s->alloc;
     nghttp2_session_set_stream_user_data(ng, frame->hd.stream_id, st);
     return 0;
 }
@@ -356,11 +377,9 @@ static int ng_server_upgrade(KlHttp2ServerSession *self, const char *settings, s
     uint8_t payload[256];                    /* 6 bytes per setting; 42 settings is plenty */
     long n = ng_b64url_decode(settings, settings_len, payload, sizeof(payload));
     if (n < 0 || n % 6 != 0) return -1;
-    NgServerStream *st = kl_malloc(s->alloc, sizeof(*st));
+    NgServerStream *st = ng_sstream_new(s);
     if (!st) return -1;
-    memset(st, 0, sizeof(*st));
-    st->alloc = s->alloc;
-    st->delivered = 1;                       /* KEEL builds stream 1's request itself */
+    st->delivered = 1;                      /* KEEL builds stream 1's request itself */
     if (nghttp2_session_upgrade2(s->ng, payload, (size_t)n, head_request, st) != 0) {
         ng_sstream_free(st);
         return -1;
@@ -378,6 +397,10 @@ static void ng_server_destroy(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     if (!s) return;
     if (s->ng) nghttp2_session_del(s->ng);
+    /* nghttp2_session_del frees its streams without calling on_stream_close, which is where a
+     * record is normally freed: free the records of streams still open (a peer that dropped the
+     * connection mid-response would otherwise leak the response body copy). */
+    while (s->live) ng_sstream_free(s->live);
     kl_free(s->alloc, s, sizeof(*s));
 }
 

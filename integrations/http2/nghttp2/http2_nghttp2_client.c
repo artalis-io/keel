@@ -22,13 +22,18 @@
 
 /* ── Session + per-stream state ─────────────────────────────────────── */
 
+typedef struct NgClientStream NgClientStream;
+
 typedef struct {
     KlHttp2ClientSession base;      /* must be first: vtable the driver sees */
     KlAllocator      *alloc;
     nghttp2_session  *ng;
+    NgClientStream   *live;         /* every stream record not yet freed (see ng_client_destroy) */
 } NgClientSession;
 
-typedef struct {
+struct NgClientStream {
+    NgClientStream   *prev, *next;  /* the session's live list; unlinked on free */
+    NgClientSession  *sess;         /* NULL until linked */
     KlAllocator      *alloc;
     int               status;
     KlHttp2ClientHeader *hdrs;      /* accumulated response headers (dup'd) */
@@ -37,7 +42,7 @@ typedef struct {
     char             *body;      /* copy of the request body (or NULL) */
     size_t            body_len;
     size_t            body_off;
-} NgClientStream;
+};
 
 /* ── Small helpers ──────────────────────────────────────────────────── */
 
@@ -58,6 +63,11 @@ static int ng_parse_status(const uint8_t *v, size_t len) {
 
 static void ng_stream_free(NgClientStream *st) {
     if (!st) return;
+    if (st->sess) {                                  /* unlink from the live list */
+        if (st->prev) st->prev->next = st->next;
+        else          st->sess->live = st->next;
+        if (st->next) st->next->prev = st->prev;
+    }
     KlAllocator *a = st->alloc;
     for (int i = 0; i < st->n; i++) {
         kl_free(a, (void *)st->hdrs[i].name, strlen(st->hdrs[i].name) + 1);
@@ -195,9 +205,13 @@ static int32_t ng_client_submit(KlHttp2ClientSession *self,
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
     st->alloc = s->alloc;
+    st->sess = s;                                   /* link: freed on close, or on destroy */
+    st->next = s->live;
+    if (s->live) s->live->prev = st;
+    s->live = st;
     if (body && body_len) {
         st->body = kl_malloc(s->alloc, body_len);   /* copy: caller may free */
-        if (!st->body) { kl_free(s->alloc, st, sizeof(*st)); return -1; }
+        if (!st->body) { ng_stream_free(st); return -1; }
         memcpy(st->body, body, body_len);
         st->body_len = body_len;
     }
@@ -244,6 +258,9 @@ static void ng_client_destroy(KlHttp2ClientSession *self) {
     NgClientSession *s = (NgClientSession *)self;
     if (!s) return;
     if (s->ng) nghttp2_session_del(s->ng);
+    /* nghttp2_session_del frees its streams without calling on_stream_close, where a record is
+     * normally freed: free the records (request body copies) of streams still open. */
+    while (s->live) ng_stream_free(s->live);
     kl_free(s->alloc, s, sizeof(*s));
 }
 
