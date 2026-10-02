@@ -42,7 +42,9 @@ int kl_http_client_authority(const KlUrl *url, char *out, size_t cap)
 {
     if (!cap) return -1;
     size_t n = 0;
-    int v6 = memchr(url->host, ':', url->host_len) != NULL;   /* KlUrl strips the brackets */
+    int v6 = 0;                          /* KlUrl strips an IPv6 literal's brackets; a ':' marks it */
+    for (size_t i = 0; i < url->host_len && !v6; i++)   /* (no memchr: the freestanding client */
+        v6 = url->host[i] == ':';                        /* links without it) */
     int deflt = url->is_https ? 443 : 80;
     if ((v6 && kl_buf_append_n(out, cap, &n, "[", 1) != 0) ||
         kl_buf_append_n(out, cap, &n, url->host, url->host_len) != 0 ||
