@@ -121,6 +121,8 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
     kl_http_server_route(&rd_server, "POST", "/deny", rd_echo, NULL, NULL);   /* no reader: discard path */
     kl_http_server_route(&rd_server, "POST", "/auth", rd_echo, NULL, NULL);
     kl_http_server_use(&rd_server, "POST", "/auth", rd_deny_mw, NULL);         /* pre-body 401 */
+    kl_http_server_route(&rd_server, "POST", "/small", rd_echo,
+                         (void *)(size_t)1024, kl_http_body_reader_buffer);  /* a 1 KiB reader */
     kl_http_server_route_streaming(&rd_server, "POST", "/early", rd_early_handler, NULL,
                                    rd_early_factory);
     if (kl_plat_thread_create(&rd_tid, rd_thread, NULL) != 0) return -1;
@@ -759,6 +761,26 @@ UTEST(reject_drain, disable_flag_dominates_nonzero_bounds) {
     ASSERT_EQ((size_t)0, s.config.reject_drain_max_bytes);
     ASSERT_EQ((uint32_t)0, s.config.reject_drain_timeout_ms);
     kl_http_server_free(&s);
+}
+
+/* A body reader that refuses bytes arriving WITH the headers answers 413 and drains, as it does
+ * when the same bytes arrive in a later read. The leftover path closed the connection with no
+ * response, so what the client got depended on how TCP split the request. */
+UTEST(reject_drain, reader_rejection_in_the_leftover_answers_413) {
+    ASSERT_EQ(0, rd_start(64 * 1024, 500));
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+    static char req[256 + 4096];
+    int hl = snprintf(req, 256, "POST /small HTTP/1.1" CRLF "Host: x" CRLF
+                                "Content-Length: 4096" CRLF "Connection: close" CRLF CRLF);
+    memset(req + hl, 'Y', 4096);                    /* past the route's 1 KiB reader */
+    ASSERT_TRUE(kl_test_sockwrite(fd, req, (size_t)hl + 4096) > 0);   /* one write: with the headers */
+    char buf[2048];
+    long n = rd_read_all(fd, buf, sizeof buf);
+    kl_test_closesock(fd);
+    rd_stop();
+    ASSERT_TRUE(n > 0);                              /* was: closed with no response */
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
 }
 
 UTEST_MAIN();

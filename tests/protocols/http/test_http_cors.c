@@ -184,6 +184,39 @@ UTEST(cors, echoed_origin_varies_by_origin) {
     ASSERT_FALSE(cors_has_vary_origin(0));
 }
 
+/* With an origin allowlist every response depends on Origin, not only the ones that echo it: a
+ * response to no Origin, or to a refused one, carries no Allow-Origin, and a shared cache that
+ * stored it without Vary would serve that refusal to an allowed origin. */
+static int cors_vary_for(const char *origin) {
+    KlHttpCorsConfig c;
+    kl_http_cors_init(&c);
+    kl_http_cors_add_origin(&c, "https://allowed.com");
+    KlHttpRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/api"; req.path_len = 4;
+    if (origin) {
+        req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
+        req.headers[0].value = origin; req.headers[0].value_len = strlen(origin);
+        req.num_headers = 1;
+    }
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    (void)kl_http_cors_middleware(&req, &res, &c);
+    char hdrs[1024];
+    size_t n = res.hdr_len < sizeof hdrs - 1 ? res.hdr_len : sizeof hdrs - 1;
+    memcpy(hdrs, res.hdr_buf, n);
+    hdrs[n] = '\0';
+    kl_http_response_free(&res);
+    return strstr(hdrs, "Vary: Origin") != NULL;
+}
+
+UTEST(cors, allowlist_varies_by_origin_on_every_response) {
+    ASSERT_TRUE(cors_vary_for("https://allowed.com"));
+    ASSERT_TRUE(cors_vary_for("https://evil.com"));     /* was: no Vary */
+    ASSERT_TRUE(cors_vary_for(NULL));                   /* was: no Vary */
+}
+
 UTEST(cors, middleware_disallowed_origin) {
     KlHttpCorsConfig c;
     kl_http_cors_init(&c);
