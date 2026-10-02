@@ -20,6 +20,10 @@ uint64_t kl_monotonic_ms(void) {
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+int kl_plat_open_read(const char *path) {
+    return open(path, O_RDONLY | O_CLOEXEC);
+}
+
 void kl_plat_random_weak(void *buf, size_t len) {
     struct timespec ts = { 0, 0 };
     (void)clock_gettime(CLOCK_MONOTONIC, &ts);

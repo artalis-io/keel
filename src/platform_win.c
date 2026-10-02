@@ -11,7 +11,8 @@
 #include "sockcompat.h"   /* winsock2.h before windows.h (avoids winsock.h v1 clash) */
 #include <windows.h>
 #include <bcrypt.h>
-#include <io.h>        /* _read / _lseeki64 (CRT file descriptors) */
+#include <io.h>        /* _read / _lseeki64 / _open (CRT file descriptors) */
+#include <fcntl.h>     /* _O_RDONLY / _O_NOINHERIT: kl_plat_open_read */
 #include <limits.h>
 #include <string.h>
 
@@ -25,6 +26,10 @@ uint64_t kl_monotonic_ms(void) {
     uint64_t sec  = (uint64_t)ctr.QuadPart / q;
     uint64_t rem  = (uint64_t)ctr.QuadPart % q;
     return sec * 1000 + (rem * 1000) / q;
+}
+
+int kl_plat_open_read(const char *path) {
+    return _open(path, _O_RDONLY | _O_NOINHERIT);
 }
 
 void kl_plat_random_weak(void *buf, size_t len) {

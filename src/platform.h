@@ -46,6 +46,12 @@ void kl_plat_random(void *buf, size_t len);
  * transaction ids identical on every refill. Exposed for its test. */
 void kl_plat_random_weak(void *buf, size_t len);
 
+/* Open `path` read-only as a CRT file descriptor that a spawned child does not inherit (POSIX
+ * O_CLOEXEC, Windows _O_NOINHERIT). -1 on failure. Pathname opens live in the substrate, not
+ * under src/protocols/ (check-no-fsnode-in-protocols); a caller that wants stdio wraps the result
+ * with fdopen. */
+int kl_plat_open_read(const char *path);
+
 /* Cross-thread event-loop wakeup channel (a self-pipe). A worker thread writes a
  * byte to .wr to wake the event loop, which watches .rd. .rd is non-blocking and
  * is the handle to register with the event loop (kl_watcher_add); it coalesces:

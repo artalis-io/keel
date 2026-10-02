@@ -7,7 +7,7 @@
  */
 #include "dns_sys.h"
 
-#include <fcntl.h>      /* open + O_CLOEXEC: kl_dns_sys_fopen_read */
+#include "platform.h"   /* kl_plat_open_read: the close-on-exec open */
 #include <unistd.h>     /* close */
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +98,7 @@ void kl_dns_sys_default_hosts_path(char *out, size_t cap) {
 }
 
 FILE *kl_dns_sys_fopen_read(const char *path) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = kl_plat_open_read(path);
     if (fd < 0)
         return NULL;
     FILE *f = fdopen(fd, "r");

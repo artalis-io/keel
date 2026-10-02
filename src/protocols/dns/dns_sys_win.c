@@ -14,8 +14,8 @@
 #include <ws2tcpip.h>   /* inet_ntop */
 #include <iphlpapi.h>   /* GetAdaptersAddresses, IP_ADAPTER_* */
 #include <windows.h>
-#include <io.h>       /* _open: kl_dns_sys_fopen_read */
-#include <fcntl.h>    /* _O_RDONLY / _O_NOINHERIT */
+#include "platform.h" /* kl_plat_open_read: the non-inheritable open */
+#include <io.h>       /* _close */
 #include <stdio.h>    /* _fdopen / snprintf */
 #include <stdint.h>
 #include <string.h>
@@ -143,7 +143,7 @@ void kl_dns_sys_default_hosts_path(char *out, size_t cap) {
 }
 
 FILE *kl_dns_sys_fopen_read(const char *path) {
-    int fd = _open(path, _O_RDONLY | _O_NOINHERIT);
+    int fd = kl_plat_open_read(path);
     if (fd < 0)
         return NULL;
     FILE *f = _fdopen(fd, "r");
