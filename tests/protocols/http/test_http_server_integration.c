@@ -696,4 +696,57 @@ UTEST(server_integration, sendfile_large_file_to_a_slow_reader) {
 }
 #endif
 
+#if !defined(_WIN32)
+/* A file response that claims more bytes than the file holds (it shrank after the handler sized it).
+ * The send stopped at end of file but was reported complete, so the connection stayed open (keep-
+ * alive) with the body short of its Content-Length, and the client waited for bytes that never come.
+ * The server must close the connection instead (IOCP has done so since its own fix). */
+static void handle_shrunk_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = open(g_file_path, O_RDONLY);
+    if (fd < 0) { kl_http_response_json(res, 500, "{}", 2); return; }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); kl_http_response_json(res, 500, "{}", 2); return; }
+    kl_http_response_file(res, fd, st.st_size + 100);   /* 100 bytes the file no longer has */
+}
+
+UTEST(server_integration, file_shorter_than_its_length_closes_the_connection) {
+    snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_shrunk_%d.dat", (int)getpid());
+    int wf = open(g_file_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT_TRUE(wf >= 0);
+    ASSERT_EQ(write(wf, "0123456789", 10), (kl_ssize_t)10);
+    close(wf);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/shrunk", handle_shrunk_file, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+
+    int fd = connect_to(srv.bound_port);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /shrunk HTTP/1.1
+Host: localhost
+
+";   /* keep-alive */
+    ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);
+    char buf[1024];
+    int closed = 0;
+    for (;;) {
+        if (kl_test_poll1(fd, 0, 2000) <= 0) break;   /* nothing more within 2 s: still open */
+        long n = kl_test_sockread(fd, buf, sizeof buf);
+        if (n <= 0) { closed = 1; break; }
+    }
+    kl_test_closesock(fd);
+    kl_http_server_stop(&srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&srv);
+    unlink(g_file_path);
+    ASSERT_EQ(closed, 1);                          /* was 0: left open, short of Content-Length */
+}
+#endif
+
 UTEST_MAIN();
