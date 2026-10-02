@@ -638,11 +638,16 @@ UTEST(integration, post_413) {
                       "\r\n";
     (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
-    /* Send some data to trigger the body reader */
+    /* Send the declared body, and no more. (This used to send 15 x 8 KiB = 120 KiB against a
+     * Content-Length of 100000: the server drains what was declared and closes, and the bytes past
+     * it could reset the connection and destroy the 413 before it was read.) */
     char chunk[8192];
     memset(chunk, 'A', sizeof(chunk));
-    for (int i = 0; i < 15; i++)
-        (void)kl_test_sockwrite(fd, chunk, sizeof(chunk));
+    for (size_t sent = 0; sent < 100000; ) {
+        size_t n = 100000 - sent < sizeof(chunk) ? 100000 - sent : sizeof(chunk);
+        (void)kl_test_sockwrite(fd, chunk, n);
+        sent += n;
+    }
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
