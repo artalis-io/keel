@@ -977,6 +977,39 @@ UTEST(h2, cb_send_wraps_conn_write) {
     test_teardown();
 }
 
+/* A plaintext send that would block is "nothing sent yet" (0), never an error (-1). The session
+ * maps -1 to a fatal callback failure, so a response larger than the free send buffer killed the
+ * whole connection and every stream on it. TLS already reports WANT_WRITE as 0. */
+UTEST(h2, cb_send_would_block_is_not_an_error) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(kl_test_set_nonblock((KlSocketHandle)pfd[1]), 0);
+
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
+
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    static char chunk[64 * 1024];
+    memset(chunk, 'f', sizeof chunk);
+    kl_ssize_t r = 1;
+    for (int i = 0; i < 4096 && r > 0; i++)          /* nobody reads pfd[0]: the buffer fills */
+        r = mock.callbacks.send(mock.cb_user_data, chunk, sizeof chunk);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r, (kl_ssize_t)0);                     /* was: -1, fatal to the session */
+}
+
 UTEST(h2, preface_detection_full) {
     test_setup();
     MockH2Session mock;
