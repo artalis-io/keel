@@ -396,6 +396,7 @@ static void h2c_handle_connecting(KlHttp2ClientConn *c)
     c->session->keel_cbs.on_data = h2c_on_data;
     c->session->keel_cbs.on_stream_close = h2c_on_stream_close;
     c->session->keel_ctx = c;
+    c->session->keel_cleartext = (c->tls == NULL);
 
     c->state = H2C_ACTIVE;
     kl_watcher_mod(c->ev, c->fd, KL_EVENT_READ);
@@ -428,6 +429,7 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
         c->session->keel_cbs.on_data = h2c_on_data;
         c->session->keel_cbs.on_stream_close = h2c_on_stream_close;
         c->session->keel_ctx = c;
+        c->session->keel_cleartext = (c->tls == NULL);
         c->state = H2C_ACTIVE;
         kl_watcher_mod(c->ev, c->fd, KL_EVENT_READ);
     } else if (r == KL_TLS_WANT_READ) {
@@ -512,7 +514,7 @@ read_more: ;
         return;                              /* a send closed a stream, and on_resp freed us */
 
     /* Plaintext the TLS engine already holds will not make the socket readable: drain it. */
-    if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
+    if (c->tls && c->tls->pending && c->tls->pending(c->tls) > 0 && ++drains < 256)
         goto read_more;
     h2c_arm(c);
 }
@@ -704,6 +706,7 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         c->session->keel_cbs.on_data = h2c_on_data;
         c->session->keel_cbs.on_stream_close = h2c_on_stream_close;
         c->session->keel_ctx = c;
+        c->session->keel_cleartext = (c->tls == NULL);
         c->state = H2C_ACTIVE;
     }
 

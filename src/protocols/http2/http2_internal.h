@@ -50,6 +50,7 @@ struct KlHttp2ServerStream {
     int route_result;           /**< Route match result code. */
     int headers_done;           /**< Non-zero after HEADERS frame received. */
     int body_done;              /**< Non-zero after END_STREAM received. */
+    int reader_lazy;            /**< No content-length: make the body reader on the first DATA. */
     size_t body_received;       /**< Total body bytes received so far. */
     int response_submitted;     /**< Non-zero after response submitted. */
     char *hdr_storage;          /**< Contiguous header name/value storage. */
@@ -68,6 +69,8 @@ struct KlHttp2ServerConn {
     int num_streams;               /**< Number of active streams. */
     int max_streams;               /**< Maximum concurrent streams allowed. */
     int goaway_sent;               /**< Non-zero after GOAWAY sent. */
+    int upgrading;                 /**< h2c Upgrade: stream 1 is the HTTP/1.1 request, whose pre-body
+                                        middleware already ran */
     /* Output boundary seam. Produced frame bytes flow through out_write; the
      * default writes the socket (conn_write). A completion driver installs a buffering
      * writer (kl_http2_server_set_writer) to collect a feed's frames for one ordered

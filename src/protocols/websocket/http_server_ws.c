@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "http_internal.h"
+#include "socket.h"        /* kl_sock_io_status: would-block classification */
 #include "http_proto_hooks.h"   /* WS server upgrade seam: registered for the core */
 #include "sha1.h"
 #include "base64.h"
@@ -82,9 +83,13 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 
 static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
-    kl_ssize_t nw = conn_write(ws->conn, data, len);
+    KlHttpConn *c = ws->conn;
+    kl_ssize_t nw = conn_write(c, data, len);
+    /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS
+     * reports a full buffer as 0), and errno after it is whatever an earlier call left. */
     if (nw < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        if (!c->tls &&
+            kl_sock_io_status(c->stream.ctx ? c->stream.ctx->sockets : NULL) == KL_IO_WOULD_BLOCK)
             return 0;
         return -1;
     }

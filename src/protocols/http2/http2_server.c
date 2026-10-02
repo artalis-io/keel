@@ -162,6 +162,10 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
                                        err_body, strlen(err_body));
         return 0;
     }
+    if (res->head_request) {            /* HEAD: the headers only, as on HTTP/1.1 */
+        body = NULL;
+        body_len = 0;
+    }
 
     const char *names[H2_MAX_RESP_HEADERS];
     const char *values[H2_MAX_RESP_HEADERS];
@@ -376,8 +380,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     stream->res.head_request = (req->method_len == 4 &&
                                  memcmp(req->method, "HEAD", 4) == 0);
 
-    /* Run middleware */
-    if (kl_http_router_run_middleware(h2c->router, req, &stream->res) != 0) {
+    /* Run middleware, except for the upgrading request's stream 1: it ran in its HTTP/1.1 phase. */
+    if (!(h2c->upgrading && stream_id == 1) &&
+        kl_http_router_run_middleware(h2c->router, req, &stream->res) != 0) {
         int rc = h2_submit_response(h2c, stream);
         if (h2c->session->want_write(h2c->session))
             h2c->session->flush(h2c->session);
@@ -386,11 +391,14 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     }
 
     /* Create body reader if needed. HTTP/2 frames a body by END_STREAM, so content-length is
-     * optional: without one, a route that reads bodies gets its reader, and an empty body simply
-     * completes it. */
+     * optional: without one, the route's reader is made on the first DATA frame (h2_cb_on_data). A
+     * request that ends with its HEADERS then never gets one, and runs its handler as a bodiless
+     * HTTP/1.1 request does, rather than meeting a factory that needs a body. */
     int has_body = (req->content_length > 0) ||
                    (!cl_present && stream->route && stream->route->body_reader);
-    if (has_body && stream->route && stream->route->body_reader) {
+    if (!cl_present && stream->route && stream->route->body_reader)
+        stream->reader_lazy = 1;
+    else if (has_body && stream->route && stream->route->body_reader) {
         KlHttpBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);
         if (!br) {
@@ -421,6 +429,22 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
     /* A stream already answered (a rejected request, a refused stream) still receives the client's
      * DATA: ignore it. A -1 is fatal to the whole session, and every other stream on it. */
     if (!stream) return 0;
+
+    if (stream->reader_lazy && !stream->body_reader) {     /* the first DATA of a length-less body */
+        stream->reader_lazy = 0;
+        KlHttpBodyReader *br = stream->route->body_reader(h2c->alloc, &stream->req,
+                                                          stream->route->user_data);
+        if (!br) {                                          /* refused on this stream only */
+            kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
+            int rc = h2_submit_response(h2c, stream);
+            if (h2c->session->want_write(h2c->session))
+                h2c->session->flush(h2c->session);
+            h2_stream_destroy(h2c, stream);
+            return rc < 0 ? -1 : 0;
+        }
+        stream->body_reader = br;
+        stream->req.body_reader = br;
+    }
 
     /* Enforce body size limit (mirrors HTTP/1.1 path in http_connection.c). An over-limit body, or
      * a reader that refuses the data, is answered 413 on THIS stream and the stream is dropped; a
@@ -540,6 +564,8 @@ void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx) {
 /* Free an h2 connection object that never became c->h2 (session destroyed too). */
 static void h2_conn_abandon(KlHttp2ServerConn *h2c) {
     KlAllocator *alloc = h2c->alloc;
+    while (h2c->num_streams > 0)                /* streams a fed leftover created: their storage */
+        h2_stream_destroy(h2c, &h2c->streams[h2c->num_streams - 1]);
     if (h2c->session && h2c->session->destroy)
         h2c->session->destroy(h2c->session);
     kl_free(alloc, h2c->streams, sizeof(KlHttp2ServerStream) * (size_t)h2c->max_streams);
@@ -654,6 +680,20 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
     }
     if (n_settings != 1 || req->content_length > 0 || req->chunked || !req->method || !req->path)
         return KL_HTTP2_UPGRADE_DECLINED;
+    /* HTTP2-Settings is base64url of whole 6-byte settings (RFC 7540 3.2.1). Check its shape now,
+     * while a bad one can still be answered over HTTP/1.1, rather than after the 101. */
+    {
+        size_t len = settings_len;
+        while (len > 0 && settings[len - 1] == '=') len--;   /* padding is tolerated */
+        for (size_t i = 0; i < len; i++) {
+            char ch = settings[i];
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'))
+                return KL_HTTP2_UPGRADE_DECLINED;
+        }
+        if (len % 4 == 1 || ((len / 4) * 3 + (len % 4 ? len % 4 - 1 : 0)) % 6 != 0)
+            return KL_HTTP2_UPGRADE_DECLINED;
+    }
     if (req->path_len > SIZE_MAX / 4 || req->query_len > SIZE_MAX / 4)
         return KL_HTTP2_UPGRADE_DECLINED;
 
@@ -706,11 +746,13 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
         value_lens[nh] = req->headers[i].value_len;
         nh++;
     }
+    h2c->upgrading = 1;                          /* its pre-body middleware already ran */
     int rc = h2_cb_on_request(h2c, 1, req->method, req->method_len, target, target_len,
                               NULL, 0, names, values, name_lens, value_lens, nh);
     kl_free(h2c->alloc, target, target_len + 1);
     if (rc == 0 && h2_stream_find(h2c, 1))      /* not already answered by middleware */
         rc = h2_cb_on_stream_end(h2c, 1);
+    h2c->upgrading = 0;
     if (rc < 0) return KL_HTTP_CONN_CLOSED;     /* c->h2 is freed by the connection's cleanup */
 
     if (leftover && leftover_len > 0 &&

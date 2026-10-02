@@ -150,7 +150,10 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
         return 0;
     }
     if (namelen > 0 && name[0] == ':') return 0;   /* other pseudo-headers */
-    (void)ng_stream_add_header(st, name, namelen, value, valuelen);
+    /* A header that cannot be kept fails the stream (RST_STREAM) rather than reporting a response
+     * with it silently missing. */
+    if (ng_stream_add_header(st, name, namelen, value, valuelen) < 0)
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     return 0;
 }
 
@@ -256,7 +259,7 @@ static int32_t ng_client_submit(KlHttp2ClientSession *self,
         nva[nvlen].flags = NGHTTP2_NV_FLAG_NONE; nvlen++; \
     } while (0)
     NG_PUT(":method", method);
-    NG_PUT(":scheme", "https");
+    NG_PUT(":scheme", s->base.keel_cleartext ? "http" : "https");   /* h2c is http */
     NG_PUT(":authority", authority);
     NG_PUT(":path", path);
     for (int i = 0; i < n; i++) {

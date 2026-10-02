@@ -945,7 +945,8 @@ read_more: ;
         return;
     /* The socket will not signal readable again for plaintext the TLS engine already holds (a
      * record larger than this buffer): drain it now, bounded. */
-    if (ws->tls && ws->tls->pending(ws->tls) > 0 && ws->state == WSC_OPEN && !ws->free_requested &&
+    if (ws->tls && ws->tls->pending && ws->tls->pending(ws->tls) > 0 &&
+        (ws->state == WSC_OPEN || ws->state == WSC_CLOSING) && !ws->free_requested &&
         ++drains < 256)
         goto read_more;
     kl_watcher_rearm(ws->ev, ws->fd);
