@@ -219,6 +219,11 @@ kl_ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offse
     off_t len = (off_t)count;
     int r = sendfile(in_fd, (int)out_fd, soff, &len, NULL, 0);
     if (r < 0 && errno != EAGAIN) return -1;
+    /* EAGAIN with nothing sent is would-block, not end of file: return -1 with errno still EAGAIN,
+     * as Linux does. Returning the 0 bytes made every caller (which reads 0 as EOF) stop and report
+     * a file response complete at the first full send buffer. EAGAIN with a partial send returns
+     * the count, which the callers retry from. */
+    if (r < 0 && len == 0) return -1;
     *offset = (uint64_t)(soff + len);
     return (kl_ssize_t)len;
 #else
