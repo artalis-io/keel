@@ -280,6 +280,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   inside one TLS record left the rest of it held in the TLS engine, and the client waited for socket
   readiness that never came (there is no handshake timeout). The handshake now drains what TLS holds,
   and frames that arrive in the same record as the 101 are processed at once.
+- **A WebSocket server frame cut short by a full socket desynced the stream.** Without the drain
+  (`kl_ws_server_enable_drain`), a send that the socket took only part of returned an error but left
+  the connection open; the next send, once the client had read and the socket had room, started a
+  frame header inside the cut frame's payload, and the client parsed garbage. After a cut frame the
+  connection now only closes: further sends fail, and it is closed at once.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
