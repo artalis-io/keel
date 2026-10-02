@@ -292,6 +292,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the socket drains. Separately, `kl_http2_client_request` flushed outside the client's event guard,
   so an `on_resp` that called `kl_http2_client_free` during that flush destroyed the session under
   it; the free is now deferred until the flush returns.
+- **The HTTP/2 client reported a 1xx in place of the final response.** nghttp2 delivers the final
+  response that follows a `103 Early Hints` as a further HEADERS block, which the nghttp2 client
+  adapter did not report, while it kept appending headers across blocks: after `103` then `200`, the
+  client reported status 103 with the 200's body. The adapter now reports the first final (2xx and
+  up) response, with that response's headers only.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
