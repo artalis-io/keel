@@ -256,6 +256,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   callback as fatal, so a slow reader of a large response lost the whole connection (every stream on
   it). A would-block on plaintext is now reported as "nothing sent yet", as TLS already reports
   WANT_WRITE: the session keeps the bytes and WRITE interest sends them once the socket drains.
+- **macOS: a large file response was cut short and reported sent.** When the socket's send buffer was
+  full, the Darwin `sendfile` wrapper returned 0 for "nothing sent, would block", and every caller
+  reads 0 as end of file: the response stopped part way and the connection carried on as if it had
+  completed. A would-block with nothing sent is now reported as one, so the send resumes when the
+  socket drains.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
