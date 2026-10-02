@@ -728,10 +728,7 @@ UTEST(server_integration, file_shorter_than_its_length_closes_the_connection) {
 
     int fd = connect_to(srv.bound_port);
     ASSERT_TRUE(fd >= 0);
-    const char *req = "GET /shrunk HTTP/1.1
-Host: localhost
-
-";   /* keep-alive */
+    const char *req = "GET /shrunk HTTP/1.1\r\nHost: localhost\r\n\r\n";   /* keep-alive */
     ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);
     char buf[1024];
     int closed = 0;
