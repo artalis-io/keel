@@ -853,11 +853,14 @@ UTEST(h2, cb_on_data_reject) {
                                "POST", 4, "/data", 5,
                                NULL, 0, hn, hv, hnl, hvl, 1);
 
-    /* Overflow the test body reader's 4096-byte buffer */
+    /* Overflow the test body reader's 4096-byte buffer: the reader refuses the data, and the
+     * stream (not the session) is answered 413. */
     char big[5000];
     memset(big, 'A', sizeof(big));
     int rc = mock.callbacks.on_data(mock.cb_user_data, 1, big, sizeof(big));
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(mock.last_status, 413);
+    ASSERT_EQ(conn.h2->num_streams, 0);
 
     kl_http2_server_cleanup(&conn);
     kl_test_closesock(pfd[0]);
