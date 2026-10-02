@@ -200,7 +200,7 @@ jobs:
         if: always()
         timeout-minutes: 20
         run: |
-          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket" /tmp/p.out; }; done; echo "PROBE: $f of 60 runs failed"
+          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket" /tmp/p.out; }; grep -c "PROBE recv" /tmp/p.out >> /tmp/eintr.cnt || true; done; echo "PROBE: $f of 60 runs failed; interrupted receives logged (all runs): $(paste -sd+ /tmp/eintr.cnt | bc)"
 
   windows:
     name: Windows (MinGW, full core)
@@ -442,7 +442,7 @@ jobs:
         if: always()
         timeout-minutes: 20
         run: |
-          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket|SUMMARY" /tmp/p.out; }; done; echo "PROBE: $f of 60 runs failed"
+          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket|SUMMARY" /tmp/p.out; }; grep -c "PROBE recv" /tmp/p.out >> /tmp/eintr.cnt || true; done; echo "PROBE: $f of 60 runs failed; interrupted receives logged (all runs): $(paste -sd+ /tmp/eintr.cnt | bc)"
 
   fuzz:
     name: Fuzz Testing
