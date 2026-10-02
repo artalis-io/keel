@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/time.h>     /* struct timeval for SO_RCVTIMEO */
 #include <sys/socket.h>   /* raw slow-reader client: socket / connect / recv */
 #include <netinet/in.h>
 #include <arpa/inet.h>
