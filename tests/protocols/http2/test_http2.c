@@ -724,6 +724,36 @@ UTEST(h2, data_for_a_finished_stream_is_ignored) {
     ASSERT_EQ(re, 0);
 }
 
+/* A stream whose body passes max_body_size is answered 413 on that stream, and the call succeeds:
+ * the -1 it returned was fatal to the whole session, so one oversized upload aborted every other
+ * request multiplexed on the connection, and sent no 413. */
+UTEST(h2, over_limit_body_answers_413_on_its_stream_only) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    conn.max_body_size = 4;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                              NULL, 0, NULL, NULL, NULL, NULL, 0);   /* no content-length */
+    int rd = mock.callbacks.on_data(mock.cb_user_data, 1, "0123456789", 10);
+    int status = mock.last_status;
+    int streams = conn.h2->num_streams;
+    int rd2 = mock.callbacks.on_data(mock.cb_user_data, 1, "more", 4);   /* the client sends on */
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rd, 0);                             /* was -1: fatal to the session */
+    ASSERT_EQ(status, 413);
+    ASSERT_EQ(streams, 0);
+    ASSERT_EQ(rd2, 0);
+}
+
 /* With the stream table full, a new stream is refused with a 503 on that stream, and the call
  * succeeds: a -1 there was fatal to the connection, and its streams with it. */
 UTEST(h2, stream_table_full_refuses_the_new_stream_only) {
