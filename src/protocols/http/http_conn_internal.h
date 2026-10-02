@@ -105,7 +105,8 @@ struct KlHttpConn {
      * byte figures are an optimization for Content-Length, where remaining is knowable, so the drain
      * does not sit out its deadline waiting for bytes the client already finished sending. */
     int      request_body_complete;
-    int      comp_recv_posted;          /* completion: a recv is posted (a paused body read has none) */    /* framing reached its terminal state */
+    int      comp_recv_posted;          /* completion: a recv is posted (a paused body read has none) */
+    int      comp_in_body_drive;        /* completion: the body core is consuming read_buf right now */
     int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
                                         * cleared on decoder error, after which only the bounds apply */
     uint64_t request_body_received;    /* body bytes accounted so far */

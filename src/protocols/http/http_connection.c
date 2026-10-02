@@ -154,6 +154,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->suspend_start_ms = 0;
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
+    c->comp_in_body_drive = 0;
     memset(&c->req, 0, sizeof(c->req));
     conn_request_body_reset(c);
 
