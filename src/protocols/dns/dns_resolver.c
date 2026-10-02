@@ -1176,8 +1176,8 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
 
     /* DNS cookies (RFC 7873): verify the echoed client cookie (a strong off-path
      * anti-spoof layered on txn-id/0x20/source), learn the server cookie, and on
-     * BADCOOKIE re-issue once carrying it. A response without a cookie option
-     * (server doesn't support cookies) is accepted for backward compatibility. */
+     * BADCOOKIE re-issue once carrying it. A response without a cookie option is
+     * accepted only from a server that has never sent one (no cookie support). */
     if (!r->disable_cookies && !r->disable_edns) {
         /* Zero-init ck_client: dns_extract_opt fills it before setting have=1,
          * but that cross-function contract is opaque to gcc's -O2
@@ -1185,8 +1185,12 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
         uint8_t ext = 0, ck_client[DNS_COOKIE_CLIENT] = {0};
         uint8_t ck_server[DNS_COOKIE_SRV_MAX], ck_slen = 0;
         int have = 0;
-        if (dns_extract_opt(pkt, len, &ext, ck_client, ck_server, &ck_slen, &have) == 0 &&
-            have) {
+        int opt = dns_extract_opt(pkt, len, &ext, ck_client, ck_server, &ck_slen, &have);
+        if (!(opt == 0 && have) && r->cookie[ns_idx].server_len > 0)
+            return;   /* no cookie from a server known to send one (we learned its cookie): an
+                       * off-path spoofer, who cannot see our client cookie, just omits it
+                       * (RFC 7873 5.3). A server that never sent one is still accepted. */
+        if (opt == 0 && have) {
             KlDnsCookie *c = &r->cookie[ns_idx];
             if (c->have_client &&
                 memcmp(ck_client, c->client, DNS_COOKIE_CLIENT) != 0)
@@ -1277,7 +1281,7 @@ static int dns_hosts_lookup(const char *path, const char *host, int port,
     (void)path; (void)host; (void)port; (void)prefer_ipv6; (void)out;
     return 0;
 #else
-    FILE *f = fopen(path, "r");
+    FILE *f = kl_dns_sys_fopen_read(path);
     if (!f)
         return 0;
 
@@ -1629,9 +1633,10 @@ KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverCon
     r->disable_edns = cfg ? cfg->disable_edns : 0;
     r->disable_cookies = cfg ? cfg->disable_cookies : 0;
 #ifndef KEEL_FREESTANDING
-    snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
-             (cfg && cfg->hosts_path) ? cfg->hosts_path
-                                      : kl_dns_sys_default_hosts_path());
+    if (cfg && cfg->hosts_path)
+        snprintf(r->hosts_path, sizeof(r->hosts_path), "%s", cfg->hosts_path);
+    else
+        kl_dns_sys_default_hosts_path(r->hosts_path, sizeof(r->hosts_path));
 #else
     r->hosts_path[0] = '\0';            /* no hosts file in the freestanding build */
 #endif

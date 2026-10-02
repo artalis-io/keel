@@ -7,6 +7,8 @@
  */
 #include "dns_sys.h"
 
+#include "platform.h"   /* kl_plat_open_read: the close-on-exec open */
+#include <unistd.h>     /* close */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +26,7 @@ int kl_dns_sys_nameservers(KlAllocator *alloc, const char *resolv_conf_path,
                            char out[][KL_DNS_SYS_NS_STRMAX], int max) {
     (void)alloc;   /* POSIX reads a file: no transient OS-query buffer */
     const char *path = resolv_conf_path ? resolv_conf_path : "/etc/resolv.conf";
-    FILE *f = fopen(path, "r");
+    FILE *f = kl_dns_sys_fopen_read(path);
     if (!f)
         return 0;
     char line[256];
@@ -58,7 +60,7 @@ void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
     *nsearch = 0;
     *ndots = 1;
     const char *path = resolv_conf_path ? resolv_conf_path : "/etc/resolv.conf";
-    FILE *f = fopen(path, "r");
+    FILE *f = kl_dns_sys_fopen_read(path);
     if (!f)
         return;
     char line[512];
@@ -91,6 +93,16 @@ void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
     fclose(f);
 }
 
-const char *kl_dns_sys_default_hosts_path(void) {
-    return "/etc/hosts";
+void kl_dns_sys_default_hosts_path(char *out, size_t cap) {
+    if (cap) snprintf(out, cap, "%s", "/etc/hosts");
+}
+
+FILE *kl_dns_sys_fopen_read(const char *path) {
+    int fd = kl_plat_open_read(path);
+    if (fd < 0)
+        return NULL;
+    FILE *f = fdopen(fd, "r");
+    if (!f)
+        close(fd);
+    return f;
 }

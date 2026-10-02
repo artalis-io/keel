@@ -102,6 +102,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - **Behavior change:** a caller-supplied `KlResolver` must provide `cancel`, as `resolver.h`
     already states. Without it, a request freed or timed out while resolving could be called back
     after it was freed.
+- **DNS: a cookie-less answer is refused from a server known to send cookies.** Once the resolver
+  had learned a nameserver's server cookie, a later answer carrying no COOKIE option was still
+  accepted. An off-path spoofer, who cannot see the client cookie, could simply leave the option
+  out. Such answers are now dropped (RFC 7873 5.3); a server that has never sent a cookie is still
+  accepted.
+- **Last-resort entropy no longer repeats.** If the OS random source failed, `kl_plat_random` fell
+  back to a fill derived from the buffer's address alone. A resolver refilling its pool then drew
+  the same DNS transaction ids each time. The fallback now mixes a high-resolution clock, the
+  process id and the address.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
@@ -406,6 +415,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     was reported as fully sent. The write now fails and the connection closes.
   - pollcomp: accepted sockets were made blocking, so one large buffered body to a client that
     stopped reading blocked the whole loop. They are non-blocking now.
+- **Keel's file reads are close-on-exec.** The resolver's reads of the hosts file and
+  `resolv.conf`, and the POSIX `/dev/urandom` read, used descriptors a child process inherited. They
+  now open with `O_CLOEXEC` (`_O_NOINHERIT` on Windows), and `check-cloexec` covers file opens.
+- **Windows: the default hosts path is built per resolver.** A function-local static, filled on
+  first use, was a data race when resolvers were created on two threads at once.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

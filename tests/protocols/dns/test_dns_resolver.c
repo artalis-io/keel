@@ -1659,6 +1659,39 @@ UTEST(dns, cookie_client_mismatch_ignored) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Once a nameserver has shown it supports cookies (the resolver learned its server cookie), a response
+ * from it with NO cookie option is a spoof: an off-path attacker who cannot see the client cookie
+ * simply leaves the option out. It was accepted "for backward compatibility" (RFC 7873 5.3). */
+UTEST(dns, cookie_missing_after_learned_ignored) {
+    reset_dns();
+    g_answer_a = 1;
+    g_cookie = 1;                         /* first: a cookie-capable server */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 300, 1);  /* short timeout, single try */
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(1, g_res.naddrs);           /* the server cookie is now learned */
+
+    g_cookie = 0;                         /* now: answers that carry no cookie option */
+    g_done = 0;
+    memset(&g_res, 0, sizeof(g_res));
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);             /* wait past the per-leg timeout */
+    int naddrs = g_res.naddrs, done = g_done;
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(1, done);                   /* completes (via timeout) */
+    ASSERT_EQ(0, naddrs);                 /* was: the cookie-less answer was accepted */
+}
+
 /* ── DNS receive-machine conformance ──────────────────────────────────────────────────────────────
  * The built-in resolver rides the shared serial-receive machine (KlDgramRecv over the dedicated inbound
  * slot) via kl_datagram_recv_start(dns_on_recv); its UDP sends + synchronous teardown go through the same

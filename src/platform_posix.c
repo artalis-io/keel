@@ -20,11 +20,32 @@ uint64_t kl_monotonic_ms(void) {
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+int kl_plat_open_read(const char *path) {
+    return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+void kl_plat_random_weak(void *buf, size_t len) {
+    struct timespec ts = { 0, 0 };
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    struct timespec rt = { 0, 0 };
+    (void)clock_gettime(CLOCK_REALTIME, &rt);
+    uint64_t x = ((uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec) ^
+                 ((uint64_t)rt.tv_nsec << 32) ^ ((uint64_t)getpid() << 16) ^ (uint64_t)(uintptr_t)buf;
+    unsigned char *p = buf;
+    for (size_t i = 0; i < len; i++) {
+        x += 0x9E3779B97F4A7C15ull;                     /* splitmix64 */
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        p[i] = (unsigned char)(z ^ (z >> 31));
+    }
+}
+
 void kl_plat_random(void *buf, size_t len) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     arc4random_buf(buf, len);
 #else
-    int fd = open("/dev/urandom", O_RDONLY);
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
         unsigned char *p = buf;
         size_t total = 0;
@@ -36,11 +57,8 @@ void kl_plat_random(void *buf, size_t len) {
         close(fd);
         if (total == len) return;
     }
-    /* Last resort (effectively never on a real system): a non-cryptographic
-     * fill that still varies per byte, so the buffer is never left undefined. */
-    unsigned char *p = buf;
-    for (size_t i = 0; i < len; i++)
-        p[i] = (unsigned char)((uintptr_t)&p[i] ^ (i * 131u));
+    /* Last resort (effectively never on a real system). */
+    kl_plat_random_weak(buf, len);
 #endif
 }
 

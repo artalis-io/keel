@@ -14,6 +14,9 @@
 #include <ws2tcpip.h>   /* inet_ntop */
 #include <iphlpapi.h>   /* GetAdaptersAddresses, IP_ADAPTER_* */
 #include <windows.h>
+#include "platform.h" /* kl_plat_open_read: the non-inheritable open */
+#include <io.h>       /* _close */
+#include <stdio.h>    /* _fdopen / snprintf */
 #include <stdint.h>
 #include <string.h>
 
@@ -126,25 +129,25 @@ void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
     kl_free(alloc, list, size);
 }
 
-const char *kl_dns_sys_default_hosts_path(void) {
-    /* %SystemRoot%\System32\drivers\etc\hosts, built once. Single-threaded
-     * event-loop model → a function-local static is safe. */
-    static char path[MAX_PATH];
-    if (path[0] == '\0') {
-        UINT n = GetSystemDirectoryA(path, sizeof(path));  /* ...\System32 */
-        if (n == 0 || n >= sizeof(path)) {
-            memcpy(path, "C:\\Windows\\System32", sizeof("C:\\Windows\\System32"));
-            n = (UINT)strlen(path);
-        }
-        const char *tail = "\\drivers\\etc\\hosts";
-        if (n + strlen(tail) + 1 <= sizeof(path)) {
-            memcpy(path + n, tail, strlen(tail) + 1);
-        } else {
-            /* System dir too long to append the tail; use the full default
-             * rather than caching a truncated directory-only path. */
-            const char *full = "C:\\Windows\\System32\\drivers\\etc\\hosts";
-            memcpy(path, full, strlen(full) + 1);
-        }
-    }
-    return path;
+void kl_dns_sys_default_hosts_path(char *out, size_t cap) {
+    /* %SystemRoot%\System32\drivers\etc\hosts, built per call into the caller's buffer (two
+     * loops on two threads may create resolvers at once; a shared static was a race). */
+    if (!cap) return;
+    char path[MAX_PATH];
+    UINT n = GetSystemDirectoryA(path, sizeof(path));  /* ...\System32 */
+    const char *tail = "\\drivers\\etc\\hosts";
+    if (n == 0 || n >= sizeof(path) || n + strlen(tail) + 1 > sizeof(path))
+        snprintf(out, cap, "%s", "C:\\Windows\\System32\\drivers\\etc\\hosts");
+    else
+        snprintf(out, cap, "%s%s", path, tail);
+}
+
+FILE *kl_dns_sys_fopen_read(const char *path) {
+    int fd = kl_plat_open_read(path);
+    if (fd < 0)
+        return NULL;
+    FILE *f = _fdopen(fd, "r");
+    if (!f)
+        _close(fd);
+    return f;
 }

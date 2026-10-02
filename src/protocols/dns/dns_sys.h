@@ -12,6 +12,7 @@
 #ifndef KL_DNS_SYS_H
 #define KL_DNS_SYS_H
 
+#include <stdio.h>    /* FILE: kl_dns_sys_fopen_read */
 #include <keel/allocator.h>
 
 /* Max nameserver token, "IP" or "IP#port" (matches dns_resolver.c's nsbuf). */
@@ -37,8 +38,15 @@ void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
                                char search[][KL_DNS_SYS_NAME_MAX], int max_s,
                                int *nsearch, int *ndots);
 
-/* The platform's default hosts-file path (/etc/hosts, or the Windows
- * %SystemRoot%\System32\drivers\etc\hosts path). Returns a static string. */
-const char *kl_dns_sys_default_hosts_path(void);
+/* Write the platform's default hosts-file path (/etc/hosts, or the Windows
+ * %SystemRoot%\System32\drivers\etc\hosts path) into `out` (NUL-terminated, truncated to
+ * `cap`). Built per call: resolvers may be created on different threads (one loop per thread),
+ * and a shared static filled on first use was a data race. */
+void kl_dns_sys_default_hosts_path(char *out, size_t cap);
+
+/* fopen(path, "r"), but the descriptor is close-on-exec (POSIX O_CLOEXEC, Windows _O_NOINHERIT),
+ * so a child the embedder spawns does not inherit it. stdio's fopen cannot portably ask for that;
+ * check-cloexec (R4) keeps fopen out of src/. NULL if the file cannot be opened. */
+FILE *kl_dns_sys_fopen_read(const char *path);
 
 #endif /* KL_DNS_SYS_H */

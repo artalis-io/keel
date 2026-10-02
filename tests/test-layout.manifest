@@ -112,6 +112,7 @@ tests/test_kl_cstr_builtin.c
 tests/test_listener.c
 tests/test_loop_teardown.c
 tests/test_pipe_stream.c
+tests/test_platform_random.c
 tests/test_resolver_cache.c
 tests/test_sockaddr.c
 tests/test_socket_provider.c
