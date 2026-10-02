@@ -196,6 +196,11 @@ jobs:
       - name: Unit-test suites over io_uring completion
         timeout-minutes: 10
         run: make BACKEND=iouring test-iouring
+      - name: PROBE ws_split_frames x60
+        if: always()
+        timeout-minutes: 20
+        run: |
+          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket" /tmp/p.out; }; done; echo "PROBE: $f of 60 runs failed"
 
   windows:
     name: Windows (MinGW, full core)
@@ -433,6 +438,11 @@ jobs:
       # that guarantee should not depend on the runner kernel.
       - name: ASan + UBSan over io_uring
         run: make debug-iouring
+      - name: PROBE ws_split_frames x60 (sanitized)
+        if: always()
+        timeout-minutes: 20
+        run: |
+          f=0; for i in $(seq 1 60); do ./tests/protocols/websocket/test_websocket_split_frames > /tmp/p.out 2>&1 || { f=$((f+1)); echo "=== run $i failed"; grep -E "PROBE|FAILED|Failure|Expected|Actual|test_websocket|SUMMARY" /tmp/p.out; }; done; echo "PROBE: $f of 60 runs failed"
 
   fuzz:
     name: Fuzz Testing

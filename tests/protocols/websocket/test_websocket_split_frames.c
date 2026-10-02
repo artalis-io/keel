@@ -28,6 +28,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+/* PROBE (not for merge): log every failed raw receive with its wall-clock time, so a CI run can tell
+ * "the server closed" (0 / ECONNRESET, quickly) from "the server never answered" (EAGAIN after the
+ * 3 s receive timeout). */
+#if !defined(_WIN32)
+#include <errno.h>
+#include <time.h>
+static long probe_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+static int probe_recv(KlSocketHandle fd, void *b, int n, int line) {
+    long t0 = probe_ms();
+    int k = (int)recv(fd, b, (size_t)n, 0);
+    if (k <= 0) {
+        int e = errno;
+        fprintf(stderr, "PROBE recv line %d: k=%d errno=%d (%s) after %ld ms\n", line, k, k < 0 ? e : 0,
+                k < 0 ? strerror(e) : "eof", probe_ms() - t0);
+    }
+    return k;
+}
+#define recv(fd, b, n, f) probe_recv((fd), (b), (int)(n), __LINE__)
+#endif
+
 /* ── Echo server ────────────────────────────────────────────────────────────────────────────── */
 
 static void srv_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
