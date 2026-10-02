@@ -210,6 +210,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
+  set a flag on the connection that nothing cleared, so after that client left, the next connection
+  given the same pool slot started paused, and its upload stalled until the body timeout answered
+  408. On a completion loop (io_uring, IOCP, pollcomp) it was worse: nothing is posted while a body
+  read is paused, so when the timeout sweep tried to reclaim the connection by cancelling its pending
+  op, there was none, and the slot, socket and accept credit were never released. A client could
+  exhaust the pool one slot at a time. The pause is now cleared with the rest of the per-request
+  state, and the sweep releases a timed-out completion connection that has nothing posted directly.
+
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
   response parser stopped at that interim message, so the sync and async clients returned `103`

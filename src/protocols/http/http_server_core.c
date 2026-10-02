@@ -651,6 +651,12 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             if (tc->file_io_phase == 3)
                 continue;  /* FILE_IO_CANCELLING: still waiting */
+            /* Completion, body read paused: nothing is posted, so there is no op to cancel and no
+             * completion would ever release the slot (or carry a 408 out). Release it now. */
+            if (completion_loop && tc->state == KL_HTTP_CONN_READING_BODY && !tc->comp_recv_posted) {
+                kl_http_server_conn_release(s, tc);
+                continue;
+            }
             /* Best-effort 408 (skip for TLS handshake, no HTTP framing yet). */
             if (tc->state == KL_HTTP_CONN_READING ||
                 tc->state == KL_HTTP_CONN_READING_BODY) {
