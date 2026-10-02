@@ -590,7 +590,8 @@ int kl_http_response_send(KlHttpResponse *res) {
                 if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) return 1;
                 return -1;
             }
-            if (sent == 0) break;
+            if (sent == 0)      /* end of file before file_size: it shrank after sizing, so */
+                return -1;      /* the body cannot reach its length; close, never keep-alive */
             remaining = (size_t)(res->file_size - res->file_offset);
         }
         (void)kl_sock_set_cork(sp, res->conn_fd, 0);   /* uncork -> flush */

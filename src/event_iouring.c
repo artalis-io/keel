@@ -608,7 +608,9 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
         kl_ssize_t nr = kl_plat_file_pread(file_fd, op->sendbuf + head_total + got,
                                         (size_t)count - got, (long long)got);
         if (nr < 0) { if (errno == EINTR) continue; iou_op_free(op); return -1; }
-        if (nr == 0) break;                          /* short file: send what we have */
+        /* The file ended before `count`: it shrank after the response was sized. The body cannot
+         * reach its declared length, so fail the post and let the connection close. */
+        if (nr == 0) { iou_op_free(op); return -1; }
         got += (size_t)nr;
     }
     op->send_total = head_total + got;
@@ -922,9 +924,10 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             goto sendfile_reprep_failed;
         }
         if (op->sf_stage == 1) {                      /* file → pipe (res = bytes buffered) */
-            if (res == 0) {                           /* short/empty file: done */
-                ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
-                ev->bytes = op->sent_total; return 1;
+            if (res == 0) {                           /* end of file before file_count: */
+                ev->kind = KL_COMP_WRITE;             /* it shrank after sizing, so the body */
+                ev->target = op->stream;              /* falls short of its length: fail */
+                ev->ok = 0; return 1;
             }
             op->file_off += (uint64_t)res;
             op->pipe_len = (size_t)res;

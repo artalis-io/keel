@@ -131,6 +131,7 @@ typedef struct KlIocpOp {
                                                 * until kl_event_del, and never re-posted */
     int           watch_rearm;                 /* WATCHER: dispatched; re-post at the next drain, not
                                                 * before the callback has had a chance to consume */
+    int           watch_retries;               /* WATCHER: consecutive transient re-post failures */
     KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
     /* Global outstanding-op registry: EVERY posted op is linked here so teardown
      * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
@@ -201,7 +202,15 @@ static int iocp_watch_post(KlIocpOp *op) {
     int rc = (op->watch_mask & KL_EVENT_WRITE)
              ? WSASend(op->accept_sock, &b, 1, &n, 0, &op->ov, NULL)
              : WSARecv(op->accept_sock, &b, 1, &n, &flags, &op->ov, NULL);
-    return (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) ? -1 : 0;
+    if (rc != SOCKET_ERROR) return 0;
+    int err = WSAGetLastError();
+    if (err == WSA_IO_PENDING) return 0;
+    /* Out of buffers or memory for the moment: the socket itself is fine, so try again later
+     * rather than declaring it dead. Anything else (a reset, a closed socket) is permanent. */
+    if (err == WSAENOBUFS || err == WSA_NOT_ENOUGH_MEMORY || err == WSAEINTR ||
+        err == WSAEINPROGRESS || err == WSAEWOULDBLOCK || err == ERROR_NO_SYSTEM_RESOURCES)
+        return -2;
+    return -1;
 }
 
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
@@ -1073,7 +1082,12 @@ static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
  * repeating the one already handled. */
 /* Re-arm every watcher dispatched in the previous drain, and report the dead ones. Returns the
  * number of KL_COMP_WATCHER events written to `out` (at most `max`). */
-static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, int max) {
+/* Consecutive transient re-post failures before a watcher is treated as dead after all. */
+#define KL_IOCP_WATCH_RETRY_MAX 64
+
+static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, int max,
+                                       int *retry_pending) {
+    *retry_pending = 0;
     if (st->quiescing) return 0;
     int count = 0;
     for (KlIocpWatch *w = st->watches; w; w = w->next) {
@@ -1081,7 +1095,16 @@ static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, 
         if (!op || !op->watch_rearm || op->watcher_removed) continue;
         if (!op->watch_dead) {
             op->watch_rearm = 0;
-            if (iocp_watch_post(op) == 0) continue;
+            int pr = iocp_watch_post(op);
+            if (pr == 0) { op->watch_retries = 0; continue; }
+            if (pr == -2 && ++op->watch_retries < KL_IOCP_WATCH_RETRY_MAX) {
+                /* Transient: nothing is reported (the socket is healthy, so reporting it ready
+                 * every drain would spin the loop); the re-post is tried again next drain, which
+                 * comes soon because the caller shortens its wait. */
+                op->watch_rearm = 1;
+                *retry_pending = 1;
+                continue;
+            }
             /* Re-post failed (typically the peer reset the connection): the op owns no kernel I/O
              * and never will. It stays in the waiting-to-re-arm state, which kl_event_del and
              * kl_event_close's quiesce pre-pass free directly (with watch_rearm cleared, del would
@@ -1107,9 +1130,12 @@ static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, 
 static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
 
-    int count = iocp_watch_rearm_dispatched(st, out, max);
+    int retry_pending = 0;
+    int count = iocp_watch_rearm_dispatched(st, out, max, &retry_pending);
     if (count >= max) return count;
     if (count > 0) timeout_ms = 0;   /* events are already due: do not wait for more */
+    else if (retry_pending && (timeout_ms < 0 || timeout_ms > 10))
+        timeout_ms = 10;             /* a watcher re-post to retry: come back for it soon */
 
     OVERLAPPED_ENTRY entries[64];
     ULONG got = 0;

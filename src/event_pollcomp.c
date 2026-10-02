@@ -560,7 +560,11 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
                 return -1;
             }
-            if (n == 0) break;
+            if (n == 0) {                                  /* the file ended early (it shrank */
+                ev->kind = KL_COMP_WRITE;                  /* after sizing): the body cannot reach */
+                ev->target = op->stream; ev->ok = 0;       /* its length, so fail the write and */
+                return -1;                                 /* let the connection close */
+            }
             op->file_off = off;
         }
         ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
