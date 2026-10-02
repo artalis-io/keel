@@ -12,7 +12,7 @@ The audit files retain stable names within this archive (`docs/archive/audits/`)
 | Audit | Scope | Latest pass |
 |---|---|---|
 | [keel_axis_audit.md](keel_axis_audit.md) | Networking three-axis separation (Transport / Engine / Provider); protocol independence; operation lifetime; compatibility matrix | Twelfth pass, 2026-08-17 (datagram Phase B `KlDatagram` facade) |
-| [keel_audit.md](keel_audit.md) | C security/safety/quality (memory safety, overflow, resource management, build hardening) | Thirteenth pass, 2026-08-17 (datagram Phase B whole-tree) |
+| [keel_audit.md](keel_audit.md) | C security/safety/quality (memory safety, overflow, resource management, build hardening) | Seventeenth pass, 2026-10-02 (re-audit after the sixteenth-pass fixes) |
 
 ## How to read a pass
 
