@@ -147,6 +147,10 @@ static int echo_submit(KlHttp2ServerSession *self, uint32_t sid, int status,
     return 0;
 }
 static int echo_shutdown(KlHttp2ServerSession *self) { (void)self; return 0; }
+/* h2c Upgrade (RFC 7540 3.2): accept the settings; the upgrading request becomes stream 1. */
+static int echo_upgrade(KlHttp2ServerSession *self, const char *st, size_t sl, int head) {
+    (void)self; (void)st; (void)sl; (void)head; return 0;
+}
 static void echo_destroy(KlHttp2ServerSession *self) {
     EchoH2 *e = (EchoH2 *)self;
     kl_free(e->alloc, e, sizeof(*e));
@@ -161,6 +165,7 @@ static KlHttp2ServerSession *echo_factory(KlAllocator *alloc, KlHttp2ServerCallb
     e->base.flush = echo_flush;
     e->base.shutdown = echo_shutdown;
     e->base.destroy = echo_destroy;
+    e->base.upgrade = echo_upgrade;
     e->cb = *cb;
     e->cb_ud = ud;
     e->alloc = alloc;
@@ -393,7 +398,8 @@ static int h2c_roundtrip(void) {
     if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return 0; }
 
     const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                      "Upgrade: h2c\r\nConnection: Upgrade\r\n\r\n";
+                      "Upgrade: h2c\r\nConnection: Upgrade, HTTP2-Settings\r\n"
+                      "HTTP2-Settings: AAMAAABkAARAAP__\r\n\r\n";
     if (write(cs, req, strlen(req)) < 0) { close(cs); return 0; }
 
     /* Read the 101 Switching Protocols (headers only, ends at CRLFCRLF). */

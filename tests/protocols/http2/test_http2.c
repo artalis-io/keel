@@ -47,6 +47,12 @@ typedef struct {
     /* If set, factory skips setting vtable (for vtable validation tests) */
     int skip_vtable_init;
 
+    /* h2c Upgrade: 1 = the factory installs the upgrade op */
+    int with_upgrade;
+    int upgrade_count;
+    char upgrade_settings[64];
+    int upgrade_head;
+
     /* KEEL's callbacks (stored by factory) */
     KlHttp2ServerCallbacks callbacks;
     void *cb_user_data;
@@ -105,6 +111,16 @@ static int mock_shutdown(KlHttp2ServerSession *self) {
     return m->shutdown_return;
 }
 
+static int mock_upgrade(KlHttp2ServerSession *self, const char *settings, size_t len, int head) {
+    MockH2Session *m = (MockH2Session *)self;
+    m->upgrade_count++;
+    m->upgrade_head = head;
+    if (len >= sizeof(m->upgrade_settings)) len = sizeof(m->upgrade_settings) - 1;
+    memcpy(m->upgrade_settings, settings, len);
+    m->upgrade_settings[len] = '\0';
+    return 0;
+}
+
 static void mock_destroy(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->destroy_count++;
@@ -126,6 +142,7 @@ static KlHttp2ServerSession *mock_factory(KlAllocator *alloc,
         m->base.flush = mock_flush;
         m->base.shutdown = mock_shutdown;
         m->base.destroy = mock_destroy;
+        m->base.upgrade = m->with_upgrade ? mock_upgrade : NULL;
     }
 
     /* Store callbacks so tests can invoke them */
@@ -1208,21 +1225,63 @@ UTEST(h2, cleanup_null_is_noop) {
 }
 
 /* ── h2c upgrade from HTTP/1 (kl_http2_server_upgrade_from_h1) ──────────────── */
+/* RFC 7540 3.2: the upgrading request is answered on stream 1 of the new HTTP/2 connection. The
+ * server used to send 101 and start a fresh session, and the request was never answered. When an
+ * upgrade cannot be done properly it is declined (KL_HTTP2_UPGRADE_DECLINED) before anything is
+ * written, and the caller answers over HTTP/1.1 (RFC 9113 lets a server ignore the Upgrade). */
 
-/* Success: the 101 Switching Protocols response is emitted, then the session is wired. */
-UTEST(h2, upgrade_from_h1_success) {
+/* A GET /test carrying `Upgrade: h2c` (and HTTP2-Settings unless settings is NULL). */
+static void h2c_req(KlHttpConn *conn, const char *settings, size_t content_length) {
+    KlHttpRequest *r = &conn->req;
+    r->method = "GET"; r->method_len = 3;
+    r->path = "/test"; r->path_len = 5;
+    r->query = "a=1"; r->query_len = 3;
+    int n = 0;
+    r->headers[n].name = "Host"; r->headers[n].name_len = 4;
+    r->headers[n].value = "example"; r->headers[n].value_len = 7; n++;
+    r->headers[n].name = "Upgrade"; r->headers[n].name_len = 7;
+    r->headers[n].value = "h2c"; r->headers[n].value_len = 3; n++;
+    if (settings) {
+        r->headers[n].name = "HTTP2-Settings"; r->headers[n].name_len = 14;
+        r->headers[n].value = settings; r->headers[n].value_len = strlen(settings); n++;
+    }
+    r->num_headers = n;
+    r->content_length = content_length;
+}
+
+static int g_seen_query;
+static void query_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)ud;
+    handler_called++;
+    g_seen_query = req->query && req->query_len == 3 && memcmp(req->query, "a=1", 3) == 0 &&
+                   kl_http_request_header(req, "HTTP2-Settings") == NULL &&
+                   kl_http_request_header(req, "Upgrade") == NULL;
+    kl_http_response_json(res, handler_status, handler_body, handler_body_len);
+}
+
+/* The 101 goes out, the session takes the settings, and the request is answered on stream 1. */
+UTEST(h2, upgrade_from_h1_answers_the_request_on_stream_1) {
     test_setup();
-    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/test", query_handler, NULL, NULL);
+    MockH2Session mock; mock_init(&mock); mock.with_upgrade = 1; g_mock_session = &mock;
     int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
     KlHttpConn conn; memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAMAAABk", 0);
+    g_seen_query = 0;
 
     int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);
-    ASSERT_TRUE(conn.h2->session != NULL);
+    ASSERT_EQ(mock.upgrade_count, 1);
+    ASSERT_EQ(strcmp(mock.upgrade_settings, "AAMAAABk"), 0);
+    ASSERT_EQ(mock.upgrade_head, 0);
+    ASSERT_EQ(handler_called, 1);
+    ASSERT_EQ(g_seen_query, 1);                   /* query kept; hop-by-hop headers dropped */
+    ASSERT_EQ(mock.submit_count, 1);
+    ASSERT_EQ(mock.last_stream_id, 1u);           /* answered on stream 1 */
+    ASSERT_EQ(mock.last_status, 200);
 
-    /* The 101 was written to the peer before the upgrade. */
     char buf[128];
     ASSERT_GT(kl_test_poll1(pfd[0], 0, 1000), 0);
     long n = kl_test_sockread(pfd[0], buf, sizeof(buf) - 1);
@@ -1231,21 +1290,45 @@ UTEST(h2, upgrade_from_h1_success) {
     ASSERT_EQ(strncmp(buf, "HTTP/1.1 101 Switching Protocols", 32), 0);
 
     kl_http2_server_cleanup(&conn);
-    ASSERT_TRUE(conn.h2 == NULL);
     ASSERT_EQ(mock.destroy_count, 1);
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
-/* Malformed session vtable: the upgrade is rejected (CLOSED), the session is destroyed
- * (ownership cleanup), and conn.h2 is left NULL (no dangling connection state). */
+/* Declined before anything is written: no HTTP2-Settings, a request body, or a session that
+ * cannot take an upgrade. */
+static void declined_case(int *utest_result, const char *settings, size_t body, int with_upgrade) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); mock.with_upgrade = with_upgrade; g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, settings, body);
+
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    ASSERT_EQ(r, KL_HTTP2_UPGRADE_DECLINED);
+    ASSERT_TRUE(conn.h2 == NULL);
+    ASSERT_EQ(mock.upgrade_count, 0);
+    ASSERT_EQ(mock.submit_count, 0);
+    ASSERT_EQ(kl_test_poll1(pfd[0], 0, 50), 0);   /* no 101 on the wire */
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+UTEST(h2, upgrade_from_h1_declined_without_settings)   { declined_case(utest_result, NULL, 0, 1); }
+UTEST(h2, upgrade_from_h1_declined_with_a_body)        { declined_case(utest_result, "AAMAAABk", 5, 1); }
+UTEST(h2, upgrade_from_h1_declined_without_upgrade_op) { declined_case(utest_result, "AAMAAABk", 0, 0); }
+
+/* Malformed session vtable: the session is destroyed (ownership cleanup), nothing is written, and
+ * conn.h2 is left NULL (no dangling connection state); the request stays on HTTP/1.1. */
 UTEST(h2, upgrade_from_h1_malformed_rejected) {
     test_setup();
     MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
     int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
     KlHttpConn conn; memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAMAAABk", 0);
     mock.skip_vtable_init = 1;
     mock.base.recv = NULL;                       /* missing required op */
     mock.base.submit_response = mock_submit_response;
@@ -1253,9 +1336,10 @@ UTEST(h2, upgrade_from_h1_malformed_rejected) {
     mock.base.flush = mock_flush;
     mock.base.shutdown = mock_shutdown;
     mock.base.destroy = mock_destroy;
+    mock.base.upgrade = mock_upgrade;
 
     int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_HTTP_CONN_CLOSED);
+    ASSERT_EQ(r, KL_HTTP2_UPGRADE_DECLINED);
     ASSERT_EQ(mock.destroy_count, 1);            /* the rejected session was destroyed */
     ASSERT_TRUE(conn.h2 == NULL);                /* no dangling h2 connection */
     kl_test_closesock(pfd[0]);

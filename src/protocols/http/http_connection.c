@@ -620,10 +620,13 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         if (ug && ug_len == 3 &&
             kl_ascii_strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
-            c->state = (KlHttpConnState)h2h->upgrade_from_h1(
-                c, router, c->h2_config,
-                leftover_buf, leftover_len);
-            return c->state;
+            int st = h2h->upgrade_from_h1(c, router, c->h2_config,
+                                          leftover_buf, leftover_len);
+            if (st != KL_HTTP2_UPGRADE_DECLINED) {
+                c->state = (KlHttpConnState)st;
+                return c->state;
+            }
+            /* Declined: serve the request over HTTP/1.1, as if no Upgrade was asked for. */
         }
     }
 

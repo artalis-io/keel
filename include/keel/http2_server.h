@@ -69,8 +69,8 @@ struct KlHttp2ServerCallbacks {
  * Append-only vtable (see docs/contracts/compatibility.md): the adapter
  * zero-initializes and recompiles per major version. Required (the adapter fills
  * them; core calls them): recv, submit_response, want_write, flush, shutdown,
- * destroy. Optional (NULL = legacy behavior): want_read. New ops are appended
- * after want_read.
+ * destroy. Optional (NULL = legacy behavior): want_read, upgrade. New ops are
+ * appended after upgrade.
  */
 struct KlHttp2ServerSession {
     kl_ssize_t (*recv)(KlHttp2ServerSession *self, const void *data,
@@ -93,6 +93,19 @@ struct KlHttp2ServerSession {
      * closes (legacy behavior).
      */
     int (*want_read)(KlHttp2ServerSession *self);
+    /**
+     * Optional (may be NULL): take over an HTTP/1.1 connection that asked for
+     * `Upgrade: h2c` (RFC 7540 3.2). `settings` is the request's HTTP2-Settings
+     * header value as received (base64url, unpadded); the session decodes and
+     * applies it, and opens stream 1 half-closed (remote) for the upgrading
+     * request, which KEEL then answers on stream 1. `head_request` is non-zero for
+     * a HEAD request. Called before any client data is fed. Returns 0 on success,
+     * -1 on error (a malformed HTTP2-Settings included). A NULL upgrade makes KEEL
+     * decline h2c upgrades: the request is answered over HTTP/1.1, which RFC 9113
+     * allows (the Upgrade header may be ignored).
+     */
+    int (*upgrade)(KlHttp2ServerSession *self, const char *settings, size_t settings_len,
+                   int head_request);
 };
 
 /* ── Factory ─────────────────────────────────────────────────────── */
@@ -130,7 +143,12 @@ typedef struct KlHttp2ServerConfig {
 /** @brief Upgrade a connection to HTTP/2 (direct h2c). */
 int  kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
                            const char *leftover, size_t leftover_len);
-/** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 Upgrade request. */
+/** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 `Upgrade: h2c` request (c->req, before
+ *  its body is read), answering that request on stream 1. Returns the new connection state, or
+ *  KL_HTTP2_UPGRADE_DECLINED when the upgrade cannot be done (no single HTTP2-Settings header, a
+ *  request body, or a session without the upgrade op): the caller then serves the request over
+ *  HTTP/1.1 as if no Upgrade had been asked for. */
+#define KL_HTTP2_UPGRADE_DECLINED (-1)
 int  kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
                                    KlHttp2ServerConfig *cfg,
                                    const char *leftover, size_t leftover_len);

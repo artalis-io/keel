@@ -317,6 +317,61 @@ static int ng_server_shutdown(KlHttp2ServerSession *self) {
     return nghttp2_session_terminate_session(s->ng, NGHTTP2_NO_ERROR) == 0 ? 0 : -1;
 }
 
+/* HTTP2-Settings is a SETTINGS payload in base64url without padding (RFC 7540 3.2.1). Decodes
+ * into out (cap bytes); returns the decoded length, or -1 if malformed or too long. */
+static long ng_b64url_decode(const char *in, size_t len, uint8_t *out, size_t cap) {
+    while (len > 0 && in[len - 1] == '=') len--;   /* tolerate padding */
+    unsigned acc = 0;
+    int bits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        char ch = in[i];
+        int v;
+        if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') v = ch - 'a' + 26;
+        else if (ch >= '0' && ch <= '9') v = ch - '0' + 52;
+        else if (ch == '-') v = 62;
+        else if (ch == '_') v = 63;
+        else return -1;
+        acc = (acc << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o >= cap) return -1;
+            out[o++] = (uint8_t)(acc >> bits);
+            acc &= (1u << bits) - 1u;
+        }
+    }
+    return (long)o;
+}
+
+/* h2c Upgrade (RFC 7540 3.2): apply the client's HTTP2-Settings and open stream 1 half-closed
+ * (remote) for the upgrading request. Stream 1 gets the same per-stream record as any request
+ * stream, so the response KEEL submits on it carries its body. */
+static int ng_server_upgrade(KlHttp2ServerSession *self, const char *settings, size_t settings_len,
+                             int head_request) {
+    NgServerSession *s = (NgServerSession *)self;
+    uint8_t payload[256];                    /* 6 bytes per setting; 42 settings is plenty */
+    long n = ng_b64url_decode(settings, settings_len, payload, sizeof(payload));
+    if (n < 0 || n % 6 != 0) return -1;
+    NgServerStream *st = kl_malloc(s->alloc, sizeof(*st));
+    if (!st) return -1;
+    memset(st, 0, sizeof(*st));
+    st->alloc = s->alloc;
+    st->delivered = 1;                       /* KEEL builds stream 1's request itself */
+    if (nghttp2_session_upgrade2(s->ng, payload, (size_t)n, head_request, st) != 0) {
+        ng_sstream_free(st);
+        return -1;
+    }
+    /* upgrade2 does not attach stream_user_data on a server session: attach it explicitly, or the
+     * response submitted on stream 1 finds no record to carry its body. */
+    if (nghttp2_session_set_stream_user_data(s->ng, 1, st) != 0) {
+        ng_sstream_free(st);
+        return -1;
+    }
+    return 0;
+}
+
 static void ng_server_destroy(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     if (!s) return;
@@ -343,6 +398,7 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
     s->base.shutdown = ng_server_shutdown;
     s->base.destroy = ng_server_destroy;
     s->base.want_read = ng_server_want_read;
+    s->base.upgrade = ng_server_upgrade;
 
     nghttp2_session_callbacks *cbs = NULL;
     if (nghttp2_session_callbacks_new(&cbs) != 0) {

@@ -499,12 +499,23 @@ void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx) {
  * Connection lifecycle
  * ═══════════════════════════════════════════════════════════════════ */
 
-int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
-                          const char *leftover, size_t leftover_len) {
+/* Free an h2 connection object that never became c->h2 (session destroyed too). */
+static void h2_conn_abandon(KlHttp2ServerConn *h2c) {
+    KlAllocator *alloc = h2c->alloc;
+    if (h2c->session && h2c->session->destroy)
+        h2c->session->destroy(h2c->session);
+    kl_free(alloc, h2c->streams, sizeof(KlHttp2ServerStream) * (size_t)h2c->max_streams);
+    kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
+}
+
+/* Create the h2 connection object and its session, with no data fed. NULL on failure, with
+ * everything freed (a session the factory returned is destroyed). */
+static KlHttp2ServerConn *h2_conn_open(KlHttpConn *c, KlHttpRouter *router,
+                                       KlHttp2ServerConfig *cfg) {
     KlAllocator *alloc = c->stream.alloc;
 
     KlHttp2ServerConn *h2c = kl_malloc(alloc, sizeof(KlHttp2ServerConn));
-    if (!h2c) return KL_HTTP_CONN_CLOSED;
+    if (!h2c) return NULL;
     memset(h2c, 0, sizeof(*h2c));
 
     h2c->conn = c;
@@ -517,13 +528,13 @@ int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerCo
 
     if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlHttp2ServerStream)) {
         kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
-        return KL_HTTP_CONN_CLOSED;
+        return NULL;
     }
     size_t streams_size = sizeof(KlHttp2ServerStream) * (size_t)h2c->max_streams;
     h2c->streams = kl_malloc(alloc, streams_size);
     if (!h2c->streams) {
         kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
-        return KL_HTTP_CONN_CLOSED;
+        return NULL;
     }
     memset(h2c->streams, 0, streams_size);
 
@@ -536,28 +547,25 @@ int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerCo
     h2c->out_ctx = h2c;
 
     h2c->session = cfg->factory(alloc, &h2c->callbacks, h2c);
-    if (!h2c->session) {
-        kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
-        return KL_HTTP_CONN_CLOSED;
-    }
-
-    if (!h2c->session->recv || !h2c->session->submit_response ||
+    if (!h2c->session ||
+        !h2c->session->recv || !h2c->session->submit_response ||
         !h2c->session->want_write || !h2c->session->flush ||
         !h2c->session->shutdown || !h2c->session->destroy) {
-        if (h2c->session->destroy)
-            h2c->session->destroy(h2c->session);
-        kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
-        return KL_HTTP_CONN_CLOSED;
+        h2_conn_abandon(h2c);
+        return NULL;
     }
+    return h2c;
+}
+
+int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
+                          const char *leftover, size_t leftover_len) {
+    KlHttp2ServerConn *h2c = h2_conn_open(c, router, cfg);
+    if (!h2c) return KL_HTTP_CONN_CLOSED;
 
     if (leftover && leftover_len > 0) {
         kl_ssize_t r = h2c->session->recv(h2c->session, leftover, leftover_len);
         if (r < 0) {
-            h2c->session->destroy(h2c->session);
-            kl_free(alloc, h2c->streams, streams_size);
-            kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
+            h2_conn_abandon(h2c);
             return KL_HTTP_CONN_CLOSED;
         }
     }
@@ -576,13 +584,104 @@ static const char h2c_101_response[] =
     "Upgrade: h2c\r\n"
     "\r\n";
 
+/* Hop-by-hop request headers that do not carry over to the HTTP/2 stream (RFC 7540 8.1.2.2). */
+static int h2c_hop_by_hop(const char *name, size_t len) {
+    static const char *const hop[] = { "connection", "upgrade", "http2-settings", "keep-alive",
+                                       "proxy-connection", "transfer-encoding", "te" };
+    for (size_t i = 0; i < sizeof(hop) / sizeof(hop[0]); i++)
+        if (strlen(hop[i]) == len && kl_ascii_strncasecmp(name, hop[i], len) == 0) return 1;
+    return 0;
+}
+
+/* RFC 7540 3.2: answer the upgrading HTTP/1.1 request on stream 1 of the new HTTP/2 connection.
+ * The request (c->req) is still intact: this runs at header time, before any body is read. */
 int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
                                   KlHttp2ServerConfig *cfg,
                                   const char *leftover, size_t leftover_len) {
-    if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
+    const KlHttpRequest *req = &c->req;
+
+    /* Eligibility, decided before anything goes on the wire, so a decline can still be answered
+     * over HTTP/1.1: exactly one HTTP2-Settings header, and no request body (the body would have
+     * to be read in full before switching; RFC 9113 lets a server ignore the Upgrade instead). */
+    const char *settings = NULL;
+    size_t settings_len = 0;
+    int n_settings = 0;
+    for (int i = 0; i < req->num_headers; i++) {
+        if (req->headers[i].name_len == 14 &&
+            kl_ascii_strncasecmp(req->headers[i].name, "http2-settings", 14) == 0) {
+            settings = req->headers[i].value;
+            settings_len = req->headers[i].value_len;
+            n_settings++;
+        }
+    }
+    if (n_settings != 1 || req->content_length > 0 || req->chunked || !req->method || !req->path)
+        return KL_HTTP2_UPGRADE_DECLINED;
+    if (req->path_len > SIZE_MAX / 4 || req->query_len > SIZE_MAX / 4)
+        return KL_HTTP2_UPGRADE_DECLINED;
+
+    KlHttp2ServerConn *h2c = h2_conn_open(c, router, cfg);
+    if (!h2c) return KL_HTTP2_UPGRADE_DECLINED;
+    if (!h2c->session->upgrade) {               /* the session cannot take over: stay HTTP/1.1 */
+        h2_conn_abandon(h2c);
+        return KL_HTTP2_UPGRADE_DECLINED;
+    }
+
+    /* Rebuild the request target (the server NUL-terminated the path where its '?' was). */
+    size_t target_len = req->path_len + (req->query ? 1 + req->query_len : 0);
+    char *target = kl_malloc(h2c->alloc, target_len + 1);
+    if (!target) {
+        h2_conn_abandon(h2c);
+        return KL_HTTP2_UPGRADE_DECLINED;
+    }
+    memcpy(target, req->path, req->path_len);
+    if (req->query) {
+        target[req->path_len] = '?';
+        memcpy(target + req->path_len + 1, req->query, req->query_len);
+    }
+    target[target_len] = '\0';
+
+    if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0) {
+        kl_free(h2c->alloc, target, target_len + 1);
+        h2_conn_abandon(h2c);
+        return KL_HTTP_CONN_CLOSED;
+    }
+
+    int is_head = req->method_len == 4 && memcmp(req->method, "HEAD", 4) == 0;
+    if (h2c->session->upgrade(h2c->session, settings, settings_len, is_head) != 0) {
+        kl_free(h2c->alloc, target, target_len + 1);
+        h2_conn_abandon(h2c);
+        return KL_HTTP_CONN_CLOSED;             /* 101 already sent: nothing else to say */
+    }
+
+    c->h2 = h2c;
+    c->state = KL_HTTP_CONN_HTTP2;
+
+    /* Stream 1 is the upgrading request, through the same path as any HTTP/2 request. */
+    const char *names[KL_MAX_HEADERS], *values[KL_MAX_HEADERS];
+    size_t name_lens[KL_MAX_HEADERS], value_lens[KL_MAX_HEADERS];
+    int nh = 0;
+    for (int i = 0; i < req->num_headers && nh < KL_MAX_HEADERS; i++) {
+        if (h2c_hop_by_hop(req->headers[i].name, req->headers[i].name_len)) continue;
+        names[nh] = req->headers[i].name;
+        name_lens[nh] = req->headers[i].name_len;
+        values[nh] = req->headers[i].value;
+        value_lens[nh] = req->headers[i].value_len;
+        nh++;
+    }
+    int rc = h2_cb_on_request(h2c, 1, req->method, req->method_len, target, target_len,
+                              NULL, 0, names, values, name_lens, value_lens, nh);
+    kl_free(h2c->alloc, target, target_len + 1);
+    if (rc == 0 && h2_stream_find(h2c, 1))      /* not already answered by middleware */
+        rc = h2_cb_on_stream_end(h2c, 1);
+    if (rc < 0) return KL_HTTP_CONN_CLOSED;     /* c->h2 is freed by the connection's cleanup */
+
+    if (leftover && leftover_len > 0 &&
+        h2c->session->recv(h2c->session, leftover, leftover_len) < 0)
         return KL_HTTP_CONN_CLOSED;
 
-    return kl_http2_server_upgrade(c, router, cfg, leftover, leftover_len);
+    if (h2c->session->want_write(h2c->session))
+        h2c->session->flush(h2c->session);
+    return KL_HTTP_CONN_HTTP2;
 }
 
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
