@@ -10,6 +10,7 @@
 #include <keel/proxy_protocol.h>
 #include "http_conn_internal.h"
 #include "http_proto_hooks.h"        /* ws/h2 upgrade seam: core never names ws/h2 directly */
+#include "http_router_internal.h"     /* post-body middleware: match at header time, run after */
 #include <assert.h>
 #include <string.h>
 #include "internal_trace.h"
@@ -353,7 +354,7 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
  */
 static KlHttpConnState conn_run_post_middleware_and_handle(KlHttpConn *c,
                                                        KlHttpRouter *router) {
-    if (kl_http_router_run_post_middleware(router, &c->req, &c->res) != 0) {
+    if (kl_http_router_run_post_matched(router, &c->req, &c->res, c->post_mw_matched) != 0) {
         /* Body already consumed: keep_alive preserved */
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
@@ -595,6 +596,10 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         c->state = KL_HTTP_CONN_SENDING;
         return c->state;
     }
+
+    /* Match post-body middleware now, while req->method and req->path are intact: a body read
+     * reuses read_buf from offset 0 and overwrites the request line they point into. */
+    c->post_mw_matched = kl_http_router_post_match(router, &c->req);
 
     /* WebSocket upgrade: branch before body reading */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();

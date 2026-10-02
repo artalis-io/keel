@@ -92,6 +92,7 @@ struct KlHttpConn {
     KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS];
     int num_params;
     int route_result;
+    uint64_t post_mw_matched;   /* post-body middleware matched at header time (request line intact) */
 
     uint64_t last_active_ms;
     uint64_t request_start_ms;

@@ -1951,6 +1951,49 @@ UTEST(integration, post_middleware_body_access) {
     kl_http_server_free(&post_mw_server);
 }
 
+/* The body arrives in a later read than the headers. Body reads reuse read_buf from offset 0,
+ * where the request line was, so post-body middleware must be matched while the request line is
+ * still intact: matching after the body would compare "wrong" against "POST" and skip the check
+ * (the handler would then echo the body with 200). */
+static KlHttpServer post_mw_split_server;
+
+static void post_mw_split_server_thread(void *arg) {
+    (void)arg;
+    kl_http_server_run(&post_mw_split_server);
+}
+
+UTEST(integration, post_middleware_runs_when_body_arrives_later) {
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&post_mw_split_server, &cfg);
+    kl_http_server_use_post(&post_mw_split_server, "POST", "/*", post_mw_check_body, NULL);
+    kl_http_server_route(&post_mw_split_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, post_mw_split_server_thread, NULL);
+    wait_for_bind(&post_mw_split_server);
+
+    int fd = connect_to(post_mw_split_server.bound_port);
+    ASSERT_TRUE(fd >= 0);
+    const char *hdrs = "POST /submit HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Content-Length: 5\r\n"
+                       "Connection: close\r\n"
+                       "\r\n";
+    (void)kl_test_sockwrite(fd, hdrs, strlen(hdrs));
+    kl_test_sleep_ms(150);                     /* let the server read the headers on their own */
+    (void)kl_test_sockwrite(fd, "wrong", 5);
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    kl_test_closesock(fd);
+
+    kl_http_server_stop(&post_mw_split_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&post_mw_split_server);
+
+    ASSERT_TRUE(strstr(buf, "403") != NULL);
+}
+
 static KlHttpServer post_mw_ka_server;
 
 static void post_mw_ka_server_thread(void *arg) {
