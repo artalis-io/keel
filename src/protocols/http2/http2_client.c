@@ -72,6 +72,10 @@ struct KlHttp2ClientConn {
      * unwind, once nothing on the stack uses the connection or its session. */
     int                    in_event;
     int                    free_requested;
+
+    /* The socket took only part of the session's output: the rest waits in the session until the
+     * socket is writable again, so WRITE is watched while this is set (h2c_arm). */
+    int                    out_blocked;
 };
 
 /* ── Forward declarations ───────────────────────────────────────── */
@@ -158,12 +162,16 @@ static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
     size_t sent = 0;
     while (sent < len) {
         kl_ssize_t w = h2c_write(c, p + sent, len - sent);
-        if (w == 0 && c->tls)
-            return (int)sent;      /* TLS WANT_WRITE: partial send */
+        if (w == 0 && c->tls) {
+            c->out_blocked = 1;    /* TLS WANT_WRITE: partial send; the rest goes on writable */
+            return (int)sent;
+        }
         if (w < 0) {
             /* A TLS -1 is an error or a close (WANT_WRITE is 0): never consult a stale errno. */
-            if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK))
-                return (int)sent;  /* partial send */
+            if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                c->out_blocked = 1;   /* partial send; the rest goes on writable */
+                return (int)sent;
+            }
             return -1;
         }
         if (w == 0) return -1;
@@ -431,21 +439,47 @@ static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
     }
 }
 
-static void h2c_handle_active(KlHttp2ClientConn *c)
+/* Active interest: READ always, WRITE while the session holds output the socket would not take. */
+static void h2c_arm(KlHttp2ClientConn *c)
+{
+    kl_watcher_mod(c->ev, c->fd, c->out_blocked ? (KL_EVENT_READ | KL_EVENT_WRITE) : KL_EVENT_READ);
+}
+
+/* Hand the session's output to the socket; out_blocked records whether some of it had to wait. */
+static int h2c_flush(KlHttp2ClientConn *c)
+{
+    c->out_blocked = 0;
+    return c->session->flush(c->session);
+}
+
+static void h2c_handle_active(KlHttp2ClientConn *c, KlEventMask ready)
 {
     char buf[KL_HTTP2_CLIENT_RECV_BUF_SIZE];
     int drains = 0;
+
+    if (ready & KL_EVENT_WRITE) {                /* room again for output the session kept */
+        if (h2c_flush(c) < 0) {
+            h2c_error(c, "session flush error");
+            return;
+        }
+        if (c->free_requested || c->state == H2C_CLOSED)
+            return;
+    }
+    if (!(ready & KL_EVENT_READ)) {
+        h2c_arm(c);
+        return;
+    }
 
 read_more: ;
     kl_ssize_t nread = h2c_read(c, buf, sizeof(buf));
 
     if (nread == 0 && c->tls) {              /* TLS WANT_READ: part of a record arrived */
-        kl_watcher_rearm(c->ev, c->fd);
+        h2c_arm(c);
         return;
     }
     if (nread < 0) {
         if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            kl_watcher_rearm(c->ev, c->fd);
+            h2c_arm(c);
             return;
         }
         /* A clean TLS close is -1 with at_eof: report it as the socket's end of stream is. */
@@ -470,33 +504,34 @@ read_more: ;
         return;                              /* a callback freed or closed the client */
 
     /* Flush any pending output */
-    if (c->session->flush(c->session) < 0) {
+    if (h2c_flush(c) < 0) {
         h2c_error(c, "session flush error");
         return;
     }
+    if (c->free_requested || c->state == H2C_CLOSED)
+        return;                              /* a send closed a stream, and on_resp freed us */
 
     /* Plaintext the TLS engine already holds will not make the socket readable: drain it. */
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
         goto read_more;
-    kl_watcher_rearm(c->ev, c->fd);
+    h2c_arm(c);
 }
 
 /* ── Event callback ─────────────────────────────────────────────── */
 
-static void h2c_on_event_body(KlHttp2ClientConn *c);
+static void h2c_on_event_body(KlHttp2ClientConn *c, KlEventMask ready);
 
 static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlHttp2ClientConn *c = user_data;
     (void)fd;
-    (void)ready;
     c->in_event++;
-    h2c_on_event_body(c);
+    h2c_on_event_body(c, ready);
     if (--c->in_event == 0 && c->free_requested)
         h2c_free_now(c);                     /* destructive tail: no c access after this */
 }
 
-static void h2c_on_event_body(KlHttp2ClientConn *c)
+static void h2c_on_event_body(KlHttp2ClientConn *c, KlEventMask ready)
 {
     switch (c->state) {
     case H2C_CONNECTING:
@@ -510,7 +545,7 @@ static void h2c_on_event_body(KlHttp2ClientConn *c)
         h2c_error(c, "unexpected state");
         break;
     case H2C_ACTIVE:
-        h2c_handle_active(c);
+        h2c_handle_active(c, ready);
         break;
     case H2C_CLOSED:
         break;
@@ -711,8 +746,14 @@ int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
     }
     st->stream_id = stream_id;
 
-    /* Flush to send the request */
-    c->session->flush(c->session);
+    /* Flush to send the request. A send can close a stream (one whose RST_STREAM was waiting to
+     * go out), running on_resp here; a kl_http2_client_free from it must wait until the flush has
+     * unwound, as on the event path. And output the socket would not take yet needs WRITE. */
+    c->in_event++;
+    if (h2c_flush(c) == 0 && c->state == H2C_ACTIVE && !c->free_requested && c->out_blocked)
+        h2c_arm(c);
+    if (--c->in_event == 0 && c->free_requested)
+        h2c_free_now(c);                     /* destructive tail: no c access after this */
 
     return stream_id;
 }

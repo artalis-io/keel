@@ -285,6 +285,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the connection open; the next send, once the client had read and the socket had room, started a
   frame header inside the cut frame's payload, and the client parsed garbage. After a cut frame the
   connection now only closes: further sends fail, and it is closed at once.
+- **The HTTP/2 client could stall a large request body, and could be freed under its own flush.**
+  When the socket took only part of the session's output, the rest stayed buffered in the session
+  while the client watched only for READ, so a body larger than the send buffer could stall against
+  a peer that sends nothing. The client now asks for WRITE while output is held back and flushes when
+  the socket drains. Separately, `kl_http2_client_request` flushed outside the client's event guard,
+  so an `on_resp` that called `kl_http2_client_free` during that flush destroyed the session under
+  it; the free is now deferred until the flush returns.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
