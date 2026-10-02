@@ -267,6 +267,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   no cancel requested. With a peer that had stopped reading, that send never completed and the stream
   never reached `on_close`; for a pipe stream the handle and memory stayed pinned. An abortive close
   now submits nothing more.
+- **Every miniz-compressed response was freed with the wrong size.** The miniz backend's single-shot
+  `compress` allocated room for the worst case but reported the actual compressed length. The server
+  frees the buffer, and records it as `body_owned_size`, with that length, so a sized or tracking
+  allocator was given a size that did not match the allocation. The output is now trimmed to exactly
+  its reported length, as the decompressor's already was.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
