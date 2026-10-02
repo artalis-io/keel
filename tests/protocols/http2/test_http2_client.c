@@ -3,11 +3,13 @@
 #include <keel/http2_client.h>
 #include <keel/allocator.h>
 #include "net_compat.h"
+#include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: this TU calls socket() */
 #include "mock_tls.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Unit tests for the HTTP/2 client module.
@@ -598,6 +600,153 @@ UTEST(h2c_live, tls_record_split_across_reads_is_not_closed) {
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(errors, 0);
     ASSERT_EQ(got, (size_t)10);
+}
+
+/* ── Stream bookkeeping ─────────────────────────────────────────────────────────────────────
+ * kl_http2_client_request submitted the request to the session before making the client's own
+ * stream record; when that failed (the stream limit, or out of memory) it returned -1, yet the
+ * request still went out on the next flush: the caller was told it failed while the server ran it. */
+UTEST(h2c_live, refused_request_is_not_sent) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = capturing_factory;
+    cfg.max_concurrent_streams = 1;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &a, &cfg, url, NULL, NULL);
+    for (int i = 0; c && i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    LiveResp lr; memset(&lr, 0, sizeof lr);
+    int32_t id1 = g_live_session ? kl_http2_client_request(c, "GET", "/one", NULL, 0, NULL, 0,
+                                                           live_on_resp, &lr) : -1;
+    int32_t id2 = g_live_session ? kl_http2_client_request(c, "GET", "/two", NULL, 0, NULL, 0,
+                                                           live_on_resp, &lr) : 0;
+    int32_t next = g_live_session ? ((MockH2Session *)g_live_session)->next_stream_id : 0;
+    char last_path[128] = "";
+    if (g_live_session) memcpy(last_path, ((MockH2Session *)g_live_session)->path, sizeof last_path);
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
+    ASSERT_GT(id1, 0);
+    ASSERT_EQ(id2, -1);                         /* refused: the one stream is in use */
+    ASSERT_EQ(next, 2);                         /* was 3: /two was submitted anyway */
+    ASSERT_EQ(strcmp(last_path, "/one"), 0);
+}
+
+/* A stream can carry a second response HEADERS (an interim 1xx, then the final response). Each
+ * copy of the headers must replace the last without leaking it; and a header copy that cannot be
+ * allocated must fail the stream (it was delivered as complete, with headers missing). */
+static long g_live_blocks;                      /* outstanding allocations */
+static int  g_live_fail_next;                   /* fail the next allocation */
+static void *cnt_malloc(void *c, size_t n) {
+    (void)c;
+    if (g_live_fail_next) { g_live_fail_next = 0; return NULL; }
+    void *p = malloc(n ? n : 1);
+    if (p) g_live_blocks++;
+    return p;
+}
+static void *cnt_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)c; (void)o;
+    void *q = realloc(p, n ? n : 1);
+    if (q && !p) g_live_blocks++;
+    return q;
+}
+static void cnt_free(void *c, void *p, size_t n) { (void)c; (void)n; if (p) { g_live_blocks--; free(p); } }
+
+static void second_headers_case(int *utest_result, int fail_copy) {
+    static KlAllocator ca = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = capturing_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_live_blocks = 0;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &ca, &cfg, url, NULL, NULL);
+    for (int i = 0; c && i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    LiveResp lr; memset(&lr, 0, sizeof lr);
+    int32_t id = g_live_session ? kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0,
+                                                          live_on_resp, &lr) : -1;
+    if (id > 0) {
+        KlHttp2ClientSession *s = g_live_session;
+        KlHttp2ClientHeader h1[] = { { "link", "</a.css>" } };
+        KlHttp2ClientHeader h2[] = { { "content-type", "text/plain" }, { "x-a", "1" } };
+        s->keel_cbs.on_response(s, id, 103, h1, 1);
+        if (fail_copy) g_live_fail_next = 1;     /* the final response's header array */
+        s->keel_cbs.on_response(s, id, 200, h2, 2);
+        s->keel_cbs.on_stream_close(s, id, 0);
+    }
+    kl_http2_client_free(c);
+    long left = g_live_blocks;
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
+    ASSERT_GT(id, 0);
+    ASSERT_EQ(lr.calls, 1);
+    if (fail_copy) {
+        ASSERT_EQ(lr.error, (int)KL_ERR_ALLOC);  /* was 0: a "complete" response missing headers */
+    } else {
+        ASSERT_EQ(lr.error, 0);
+        ASSERT_EQ(lr.status, 200);
+    }
+    ASSERT_EQ(left, 0L);                         /* was > 0: the 103's header strings leaked */
+}
+UTEST(h2c_live, second_response_headers_replace_the_first) { second_headers_case(utest_result, 0); }
+UTEST(h2c_live, header_copy_failure_fails_the_stream)      { second_headers_case(utest_result, 1); }
+
+/* A connect that completes at once (a local AF_UNIX socket) must not leave WRITE interest armed:
+ * with nothing to send, the socket is always writable, and the loop spun. */
+static KlHttpServer g_unix_srv;
+static void unix_srv_thread(void *arg) { (void)arg; kl_http_server_run(&g_unix_srv); }
+
+UTEST(h2c_live, immediate_connect_does_not_spin) {
+    static const char *path = "keel_h2c_spin_test.sock";
+    KlHttpServerConfig scfg;
+    memset(&scfg, 0, sizeof scfg);
+    scfg.unix_socket_path = path;
+    scfg.unix_socket_unlink = 1;
+    if (kl_http_server_init(&g_unix_srv, &scfg) != 0) {
+        UTEST_SKIP("AF_UNIX listen unavailable");
+    }
+    KlPlatThread t;
+    kl_plat_thread_create(&t, unix_srv_thread, NULL);
+    kl_test_sleep_ms(100);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    int ok = kl_event_ctx_init(&ev, &a) == 0;
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = mock_factory;
+    char url[128];
+    snprintf(url, sizeof url, "http+unix://%s/", path);
+    KlHttp2ClientConn *c = NULL;
+    for (int i = 0; ok && !c && i < 50; i++) {   /* the server thread may not be listening yet */
+        c = kl_http2_client_connect(&ev, &a, &cfg, url, NULL, NULL);
+        if (!c) kl_test_sleep_ms(20);
+    }
+    for (int i = 0; c && i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 20);   /* settle */
+    int events = 0;
+    for (int i = 0; c && i < 5; i++) {
+        int n = kl_event_ctx_run(&ev, 16, 20);
+        if (n > 0) events += n;
+    }
+    kl_http2_client_free(c);
+    if (ok) kl_event_ctx_free(&ev);
+    kl_http_server_stop(&g_unix_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_unix_srv);
+    if (!c) { UTEST_SKIP("AF_UNIX connect unavailable on this host"); }
+    ASSERT_EQ(events, 0);                        /* idle: nothing to read, nothing to write */
 }
 
 UTEST_MAIN();
