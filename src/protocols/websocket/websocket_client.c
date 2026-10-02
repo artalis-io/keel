@@ -1001,7 +1001,8 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
-    if (parsed.is_https && !tls_cfg)
+    /* Fail closed: a TLS config with no factory cannot secure the connection. */
+    if (parsed.is_https && (!tls_cfg || !tls_cfg->factory))
         return NULL;
     if (!parsed.is_https)
         tls_cfg = NULL;

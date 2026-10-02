@@ -360,6 +360,25 @@ UTEST(wsc_standalone, wss_requires_tls) {
     }
 }
 
+/* A TLS config without a factory cannot secure the connection: refuse wss:// rather than speak
+ * the handshake in plaintext. */
+UTEST(wsc_standalone, wss_tls_without_factory) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    KlTlsConfig tls = { .ctx = NULL, .factory = NULL };
+    KlWsClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.tls = &tls;
+
+    KlWsClientConn *ws = kl_ws_client_connect(&ev, &alloc, &cfg, "wss://127.0.0.1:1/ws",
+                                              NULL, NULL);
+    int refused = (ws == NULL);
+    kl_ws_client_free(ws);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(refused);
+}
+
 /* ── Auto-ping config ────────────────────────────────────────────── */
 
 UTEST(wsc_config, auto_ping_default) {

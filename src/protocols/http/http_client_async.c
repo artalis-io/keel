@@ -1210,7 +1210,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
-    if (parsed.is_https && !tls_cfg)
+    /* Fail closed: a TLS config with no factory cannot secure the connection. */
+    if (parsed.is_https && (!tls_cfg || !tls_cfg->factory))
         return NULL;
     if (!parsed.is_https)
         tls_cfg = NULL;
@@ -1654,7 +1655,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
     int is_tls = parsed.is_https;
-    if (is_tls && !tls_cfg)
+    /* Fail closed: a TLS config with no factory cannot secure the connection. */
+    if (is_tls && (!tls_cfg || !tls_cfg->factory))
         return NULL;
     if (!is_tls)
         tls_cfg = NULL;

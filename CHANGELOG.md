@@ -56,6 +56,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   client, as `examples/async_client.c` does, the second used freed memory. Deferring an error now
   cancels the deadline. Every completion, cancel and free drops a pending deferred completion, and the
   deferred completion does nothing once the request is done.
+- **An `https://` or `wss://` request could be sent in plaintext.** The async, pooled, WebSocket and
+  HTTP/2 clients refused a secure URL only when no TLS config was set. A config whose `factory` was
+  NULL passed that check, and the connection then took the plaintext path. Headers, cookies and the
+  body went out unencrypted, and the pooled client filed the plain connection as a TLS one, so later
+  TLS requests could reuse it. The sync client already failed closed. Each of the four entry points
+  now refuses a secure URL unless the TLS config has a factory.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
