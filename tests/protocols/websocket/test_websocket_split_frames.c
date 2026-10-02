@@ -22,6 +22,7 @@
 #include "mock_tls.h"
 #if !defined(_WIN32)
 #include <netinet/tcp.h>
+#include <signal.h>
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -554,18 +555,23 @@ UTEST(ws_server_frag, empty_message_inside_a_fragmented_one_fails_with_1002) {
 /* ── A frame the socket would not take whole (no drain) ───────────────────────────────────────
  * Without kl_ws_server_enable_drain, a send writes the frame directly; when the socket buffer
  * fills partway (the peer is not reading), the write gives up after part of the frame went out and
- * the connection stayed open. The next send then started a frame header in the middle of the old
- * payload: the stream was desynced. Once a frame was cut short, no further frame may be sent. */
-static int g_sends_done;
+ * the connection stayed open. A later send, once the peer has read and the socket has room again,
+ * then started a frame header in the middle of the old payload: the stream was desynced. Once a
+ * frame was cut short, no further frame may be sent. */
+static int g_sends_done, g_next_done;
 static void big_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
     (void)data; (void)len; (void)is_binary; (void)ud;
-    static char big[1024 * 1024];
-    memset(big, 'B', sizeof big);
-    for (int i = 0; i < 16; i++)                    /* until the socket stops taking them */
-        if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) break;
-    for (int i = 0; i < 3; i++)                     /* then more frames: none may follow a cut one */
-        (void)kl_ws_server_send_text(ws, "next", 4);
-    g_sends_done = 1;
+    if (!g_sends_done) {                            /* "go": fill the socket until a frame is cut */
+        static char big[1024 * 1024];
+        memset(big, 'B', sizeof big);
+        for (int i = 0; i < 16; i++)
+            if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) break;
+        g_sends_done = 1;
+        return;
+    }
+    for (int i = 0; i < 3; i++)                     /* "more", after the peer has read: none may */
+        (void)kl_ws_server_send_text(ws, "next", 4);    /* follow the cut frame */
+    g_next_done = 1;
 }
 
 /* Parse what the peer received: every frame header must be a valid unmasked server frame (FIN,
@@ -613,7 +619,10 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
     for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     s.port = s.srv.bound_port;
 
-    g_sends_done = 0;
+#if !defined(_WIN32)
+    signal(SIGPIPE, SIG_IGN);                       /* the fixed server may close before "more" */
+#endif
+    g_sends_done = 0; g_next_done = 0;
     static unsigned char rx[20 * 1024 * 1024];
     size_t got = 0;
     KlSocketHandle fd = ws_open_raw(s.port);
@@ -622,12 +631,19 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
         size_t fl = build_masked(f, 0x1, (const unsigned char *)"go", 2);
         (void)send_all(fd, f, fl);                  /* then read nothing while the server sends */
         for (int i = 0; i < 100 && !g_sends_done; i++) kl_test_sleep_ms(20);
-        for (;;) {                                  /* now read everything that was sent */
-            if (kl_test_poll1(fd, 0, 1000) <= 0) break;
-            long r = kl_test_sockread(fd, rx + got, sizeof rx - got);
-            if (r <= 0) break;
-            got += (size_t)r;
-            if (got == sizeof rx) break;
+        for (int round = 0; round < 2; round++) {
+            for (;;) {                              /* read what has been sent, to a lull */
+                if (kl_test_poll1(fd, 0, round == 0 ? 300 : 1000) <= 0) break;
+                long r = kl_test_sockread(fd, rx + got, sizeof rx - got);
+                if (r <= 0) break;
+                got += (size_t)r;
+                if (got == sizeof rx) break;
+            }
+            if (round == 0) {                       /* the socket has room again: ask for more */
+                fl = build_masked(f, 0x1, (const unsigned char *)"more", 4);
+                (void)send_all(fd, f, fl);
+                for (int i = 0; i < 100 && !g_next_done; i++) kl_test_sleep_ms(20);
+            }
         }
         kl_test_closesock(fd);
     }
