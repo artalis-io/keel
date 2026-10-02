@@ -90,6 +90,10 @@ static int on_header_value(llhttp_t *p, const char *at, size_t len) {
     if (req->num_headers >= KL_MAX_HEADERS) return -1;  /* reject: too many headers */
 
     int idx = req->num_headers;
+    /* An empty value is reported as a zero-length span at the first byte of the NEXT line. Recording
+     * that pointer would make the server's NUL-termination blank the next header's name, so leave the
+     * value unset here; on_header_value_complete places an empty value safely. */
+    if (len == 0 && !req->headers[idx].value) return 0;
     if (req->headers[idx].value) {
         /* Continuation of existing value */
         req->headers[idx].value_len = (size_t)(at + len - req->headers[idx].value);
@@ -106,6 +110,16 @@ static int on_header_value_complete(llhttp_t *p) {
     LlhttpParser *lp = p->data;
     KlHttpRequest *req = lp->current_req;
 
+    if (req->num_headers >= KL_MAX_HEADERS) return -1;  /* reject: too many headers */
+    int idx = req->num_headers;
+    if (!req->headers[idx].value) {
+        /* Empty value: point it at the name's own terminator (the ':' the server overwrites with
+         * NUL), so it reads as "" and writes nothing outside this header's line. */
+        req->headers[idx].name = lp->hdr_field;
+        req->headers[idx].name_len = lp->hdr_field_len;
+        req->headers[idx].value = lp->hdr_field + lp->hdr_field_len;
+        req->headers[idx].value_len = 0;
+    }
     req->num_headers++;
     lp->hdr_field = NULL;
     lp->hdr_field_len = 0;

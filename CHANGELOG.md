@@ -40,6 +40,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   every item admission allows. The backpressure limit is unchanged, and the `queue_capacity` doc now
   states it. A new test submits bursts of items with distinct contexts before 8 workers wake, over 200
   rounds, and checks each one runs once. Without the fix it fails in the first rounds.
+- **An empty HTTP/1 request header hid the header after it.** llhttp reports an empty value
+  (`X-Empty:` with nothing, or only whitespace, before the line end) as a zero-length span at the
+  first byte of the next line. The server recorded that pointer, then NUL-terminated every value in
+  place, which blanked the first byte of the next header's name. That header became invisible to
+  `kl_http_request_header`. A request with `Content-Type` after an empty header was then rejected by
+  the multipart reader, and any header a proxy inserted after an empty one was lost. Every event model
+  was affected. An empty value now points at its own header's name terminator, reads as `""`, and
+  touches nothing outside its line.
 
 - **An HTTP/1 request split across reads was dropped or misparsed by the server.** When a request's line
   or headers arrived in more than one read (large headers, a slow link, TLS records, or a client
