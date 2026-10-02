@@ -23,6 +23,8 @@ int kl_proxy_build_connect(char *buf, size_t cap, size_t *out_len,
         kl_buf_append(buf, cap, &n, "\r\n") != 0)
         return -1;
     if (auth) {
+        for (const char *a = auth; *a; a++)
+            if (*a == '\r' || *a == '\n') return -1;   /* would inject header lines */
         if (kl_buf_append(buf, cap, &n, "Proxy-Authorization: ") != 0 ||
             kl_buf_append(buf, cap, &n, auth) != 0 ||
             kl_buf_append(buf, cap, &n, "\r\n") != 0)

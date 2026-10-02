@@ -1161,4 +1161,50 @@ UTEST(async_stream, request_stream_large_body) {
     stop_stream_server();
 }
 
+/* body_read may return at most buf_len; a larger count made the client send past the end of its
+ * chunk buffer (an over-read). It must fail the request instead. */
+static kl_ssize_t body_read_overclaims(char *buf, size_t buf_len, void *user_data)
+{
+    int *calls = user_data;
+    if ((*calls)++ > 0) return 0;
+    memset(buf, 'x', buf_len);
+    return (kl_ssize_t)buf_len + 16;
+}
+
+UTEST(sync_stream, request_stream_overclaim_fails) {
+    start_stream_server();
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof resp);
+    int calls = 0;
+    KlHttpClientStreamCfg stream = { .body_read = body_read_overclaims, .user_data = &calls };
+    int rc = kl_http_client_request_s(&a, &cfg, "POST", test_url("/echo"),
+                                      NULL, 0, NULL, 0, &stream, &resp);
+    kl_http_client_response_free(&resp);
+    stop_stream_server();
+    ASSERT_EQ(rc, -1);              /* was 0, after sending bytes past the buffer */
+}
+
+UTEST(async_stream, request_stream_overclaim_fails) {
+    start_stream_server();
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+    int calls = 0;
+    KlHttpClientStreamCfg stream = { .body_read = body_read_overclaims, .user_data = &calls };
+    KlHttpClient *c = kl_http_client_start_s(&ev, &a, &cfg, "POST", test_url("/echo"),
+                                             NULL, 0, NULL, 0, &stream, async_on_done, &actx);
+    if (c) (void)run_until_done(&ev, &actx, TEST_TIMEOUT_MS);
+    kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+    ASSERT_TRUE(c != NULL);
+    ASSERT_TRUE(actx.done);
+    ASSERT_EQ(actx.error, -1);
+}
+
 UTEST_MAIN();

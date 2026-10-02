@@ -140,4 +140,58 @@ UTEST(tls_hostname_fail, async_control_succeeds_when_hostname_ok)
     listener_stop(&l);
 }
 
+/* ── A TLS backend without set_hostname ───────────────────────────────── */
+/* set_hostname is what turns on hostname verification; a backend that leaves it NULL would verify
+ * the chain only, accepting a certificate for any host. With a hostname to verify, the clients must
+ * fail closed instead of silently skipping it. */
+static KlTls *no_hostname_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
+    KlTls *t = mock_tls_create(ctx, alloc);
+    if (t) t->set_hostname = NULL;
+    return t;
+}
+
+UTEST(tls_hostname_fail, sync_client_without_set_hostname_fails_closed)
+{
+    Listener l;
+    ASSERT_EQ(listener_start(&l), 0);
+    l.reply_http = 1;
+    KlAllocator a = kl_allocator_default();
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = no_hostname_tls_create };
+    KlHttpClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
+    char url[128];
+    make_url(url, sizeof(url), "https", l.port, "/");
+    KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    int rc = kl_http_client_request(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &resp);
+    int status = resp.status;
+    kl_http_client_response_free(&resp);
+    listener_stop(&l);
+    ASSERT_EQ(rc, -1);              /* was 0: a 200 with no hostname check */
+    ASSERT_NE(status, 200);
+}
+
+UTEST(tls_hostname_fail, async_client_without_set_hostname_fails_closed)
+{
+    Listener l;
+    ASSERT_EQ(listener_start(&l), 0);
+    l.reply_http = 1;
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = no_hostname_tls_create };
+    KlHttpClientConfig cfg = { .timeout_ms = 1000, .tls = &tls_cfg };
+    char url[128];
+    make_url(url, sizeof(url), "https", l.port, "/");
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
+                                           async_on_done, &actx);
+    for (int i = 0; c && i < 300 && !actx.done; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    listener_stop(&l);
+    ASSERT_TRUE(c == NULL || actx.done);
+    ASSERT_NE(actx.status, 200);    /* was 200 */
+}
+
 UTEST_MAIN();

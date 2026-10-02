@@ -679,4 +679,26 @@ UTEST(cpool, async_pooled_null_args) {
                                          NULL, NULL) == NULL);
 }
 
+/* An idle pooled connection that has unsolicited bytes waiting (a stray response, a 408 before the
+ * server closes) must not be reused: the next request would read them as its response. */
+UTEST(cpool, idle_connection_with_pending_bytes_is_not_reused) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    int fds[2];
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    KlHttpClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
+    ASSERT_EQ(kl_http_client_pool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
+    ASSERT_EQ(kl_test_sockwrite(fds[1], "HTTP/1.1 408", 12), 12);
+    kl_test_sleep_ms(20);
+    KlHttpClientPoolConn acq;
+    int r = kl_http_client_pool_acquire(&pool, "example.com", 80, 0, NULL, 0, &acq);
+    if (r == 0) kl_test_closesock((int)acq.fd);
+    int idle = kl_http_client_pool_idle_count(&pool);
+    kl_http_client_pool_free(&pool);
+    kl_test_closesock(fds[1]);
+    ASSERT_EQ(r, 1);               /* was 0: handed out with the stray bytes queued */
+    ASSERT_EQ(idle, 0);            /* and discarded, not left in the pool */
+}
+
 UTEST_MAIN();
