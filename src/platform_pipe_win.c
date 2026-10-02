@@ -35,7 +35,9 @@
 /* A pipe name is at most 256 characters; the \\.\pipe\ prefix is 9 more. Generous, bounded. */
 #define KL_PIPE_WPATH_MAX 512
 
-/* Is `p` exactly "\\.\pipe\" (case-insensitive on "pipe") followed by a non-empty name? */
+/* Is `p` exactly "\\.\pipe\" (case-insensitive on "pipe") followed by a non-empty name? The name
+ * may not contain '/' or a "." / ".." segment: Win32 collapses those in a \\.\ path before the open,
+ * so "\\.\pipe\..\UNC\host\pipe\x" would reach a REMOTE pipe. */
 static int pipe_path_is_local(const char *p) {
     static const char pre[] = "\\\\.\\pipe\\";
     size_t n = sizeof(pre) - 1;
@@ -45,7 +47,19 @@ static int pipe_path_is_local(const char *p) {
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         if (c != pre[i]) return 0;
     }
-    return p[n] != '\0';
+    if (p[n] == '\0') return 0;
+    const char *seg = p + n;                     /* each '\'-separated segment of the name */
+    for (const char *q = seg; ; q++) {
+        if (*q == '/') return 0;
+        if (*q == '\\' || *q == '\0') {
+            size_t len = (size_t)(q - seg);
+            if ((len == 1 && seg[0] == '.') || (len == 2 && seg[0] == '.' && seg[1] == '.'))
+                return 0;
+            if (*q == '\0') break;
+            seg = q + 1;
+        }
+    }
+    return 1;
 }
 
 /* Validate a local pipe name and convert it to UTF-16. 0, or -1 (invalid / too long / bad UTF-8). */

@@ -307,6 +307,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `max_body_size`, or a body reader refusing data, was reported to the session as a fatal error: no
   413 was sent, and every other stream multiplexed on the connection died with it. The stream is now
   answered 413 and closed on its own; the connection and its other streams carry on.
+- **Substrate Lows (seventeenth audit).**
+  - **A redirect from one AF_UNIX socket to another kept the caller's credentials.** Both URLs have
+    no host or port, which the origin check compared as equal; the socket path is now the origin, so
+    `Authorization` and `Cookie` are dropped between different sockets.
+  - **A timer delay near `UINT64_MAX` wrapped and fired at once.** The deadline now saturates.
+  - **Multicast calls on a closed datagram** handed the provider an invalid descriptor and reported
+    `KL_ERR_IO`; they now report `KL_ERR_INVALID_ARG` with no provider call, as the other calls do.
+  - **An AF_UNIX peer path could include stale bytes** past the length the kernel returned.
+  - **One readable datagram socket could hold the loop.** A readiness receive now delivers at most
+    64 datagrams per event and returns to the loop; the rest follow on the next ticks.
+  - **A Windows named-pipe name with `.` or `..` segments passed the locality check.** Win32
+    collapses them before the open, so `\.\pipe\..\UNC\host\pipe\x` reached a remote pipe. Such
+    names (and `/`) are now refused.
+  - **The Windows wakeup pair kept Nagle on**, so a signal could wait for a delayed ACK (up to
+    ~200 ms). It now sets `TCP_NODELAY`.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

@@ -78,6 +78,12 @@ static int is_cross_origin(const KlUrl *a, const KlUrl *b)
 {
     if (a->is_https != b->is_https)
         return 1;
+    /* An AF_UNIX URL has no host and no port: its socket path is its origin. Two different
+     * sockets are two different servers. */
+    if (a->is_unix != b->is_unix)
+        return 1;
+    if (a->is_unix)
+        return strcmp(a->unix_path, b->unix_path) != 0;
     if (a->port != b->port)
         return 1;
     if (a->host_len != b->host_len)

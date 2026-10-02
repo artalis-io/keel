@@ -211,6 +211,9 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     return ret;
 }
 
+/* Datagrams one readable event may deliver before returning to the loop. */
+#define KL_DGRAM_RECV_BUDGET 64
+
 int kl_dgram_recv_on_readable(KlDgramRecv *r) {
     if (!r || !r->inited || r->completion)
         return -1;                           /* readiness only */
@@ -224,8 +227,12 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
         return ret;
     }
     ret = 0;
-    /* Serial provider receives: one pull → one delivery, re-checking paused/stopped each iteration. */
-    while (!r->paused && !r->stopped && r->recv_inflight) {
+    /* Serial provider receives: one pull → one delivery, re-checking paused/stopped each iteration.
+     * Bounded per readable event, so a socket that never drains (a flood) cannot hold the loop away
+     * from timers and other sockets; the dispatcher re-arms READ after the callback, which reports
+     * the socket again (edge-triggered engines included) while datagrams remain. */
+    int budget = KL_DGRAM_RECV_BUDGET;
+    while (!r->paused && !r->stopped && r->recv_inflight && budget-- > 0) {
         recv_reset_inbound(r);               /* fresh metadata slot before the provider fills it */
         size_t len = 0;
         int pr = r->pull(r->hook_ctx, &len);

@@ -92,8 +92,11 @@ static inline int kl_sockaddr_from_native(KlSockAddr *out,
     case AF_UNIX: {
         const struct sockaddr_un *un = (const struct sockaddr_un *)sa;
         /* an unnamed/abstract peer (len at/below the header) has no path */
-        size_t plen = (len > (socklen_t)offsetof(struct sockaddr_un, sun_path))
-                      ? strnlen(un->sun_path, sizeof(un->sun_path)) : 0;
+        /* Bounded by the length the kernel returned: bytes past it are stale. */
+        size_t avail = (len > (socklen_t)offsetof(struct sockaddr_un, sun_path))
+                       ? (size_t)len - offsetof(struct sockaddr_un, sun_path) : 0;
+        if (avail > sizeof(un->sun_path)) avail = sizeof(un->sun_path);
+        size_t plen = avail ? strnlen(un->sun_path, avail) : 0;
         memset(out, 0, sizeof *out);
         out->family = KL_AF_UNIX;
         if (plen >= KL_UNIX_PATH_MAX) plen = KL_UNIX_PATH_MAX - 1;
