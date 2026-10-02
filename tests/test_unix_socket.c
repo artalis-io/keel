@@ -687,7 +687,7 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
 
 /* A redirect from one AF_UNIX socket to ANOTHER is cross-origin: they are different servers.
  * Both URLs have no host and no port, which the origin check used to compare as equal, so the
- * caller's Authorization followed the redirect to the second socket. */
+ * caller's Authorization followed a protocol-relative redirect to the second socket. */
 static char g_x10_location[300];
 static int  g_x10_saw_auth = -1;
 static void x10_handle_go(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -719,7 +719,9 @@ UTEST(unix_socket, redirect_to_another_socket_drops_credentials) {
     char ea[220], eb[220];
     pct_encode_path(pa, ea, sizeof(ea));
     pct_encode_path(pb, eb, sizeof(eb));
-    snprintf(g_x10_location, sizeof(g_x10_location), "http+unix://%s/creds", eb);
+    /* Protocol-relative: it keeps the base's http+unix scheme with the other socket's path (an
+     * absolute http+unix Location is not followed at all). */
+    snprintf(g_x10_location, sizeof(g_x10_location), "//%s/creds", eb);
     g_x10_saw_auth = -1;
 
     pthread_t ta, tb;
