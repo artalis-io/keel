@@ -20,6 +20,8 @@ struct KlHttpClientPoolEntry {
     char     host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /* NUL-terminated key */
     int      port;
     int      is_tls;
+    const KlTlsCtx *tls_ctx;      /* TLS identity: the config's context and factory. A connection */
+    KlTlsFactory    tls_factory;  /* is reused only under the config it was made with. */
     char     proxy_host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /* "" = direct connection */
     int      proxy_port;                          /* 0 = direct connection */
     KlSocketHandle fd;            /* -1 = free slot */

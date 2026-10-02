@@ -24,13 +24,26 @@ static inline const KlSocketProvider *cpool_sp(const KlHttpClientPool *pool) {
 
 /* ── Entry helpers ───────────────────────────────────────────────── */
 
+/* The TLS identity a connection is pooled under: the config's context (trust store, verification
+ * policy, client identity) and factory. {NULL, NULL} for plaintext, and for the legacy entry points,
+ * which carry no config: those match only each other. */
+typedef struct { const KlTlsCtx *ctx; KlTlsFactory factory; } PoolTlsKey;
+
+static PoolTlsKey pool_tls_key(const KlTlsConfig *tls) {
+    PoolTlsKey k = { NULL, NULL };
+    if (tls) { k.ctx = tls->ctx; k.factory = tls->factory; }
+    return k;
+}
+
 static int entry_matches(const KlHttpClientPoolEntry *e,
-                          const char *host, int port, int is_tls,
+                          const char *host, int port, int is_tls, PoolTlsKey tk,
                           const char *proxy_host, int proxy_port)
 {
     if (!kl_handle_valid(e->fd) || e->port != port || e->is_tls != is_tls ||
         !kl_streq(e->host, host))
         return 0;
+    if (e->tls_ctx != tk.ctx || e->tls_factory != tk.factory)
+        return 0;                       /* made under another TLS config */
 
     /* Proxy key comparison (host keys are exact/case-sensitive) */
     if (proxy_host)
@@ -153,16 +166,16 @@ void kl_http_client_pool_free(KlHttpClientPool *pool)
 
 /* ── Acquire (test-on-borrow) ────────────────────────────────────── */
 
-int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int port,
-                      int is_tls, const char *proxy_host, int proxy_port,
-                      KlHttpClientPoolConn *conn)
+static int pool_acquire(KlHttpClientPool *pool, const char *host, int port, int is_tls,
+                        PoolTlsKey tk, const char *proxy_host, int proxy_port,
+                        KlHttpClientPoolConn *conn)
 {
     if (!pool || !host || !conn)
         return -1;
 
     for (int i = 0; i < pool->capacity; i++) {
         KlHttpClientPoolEntry *e = &pool->entries[i];
-        if (!entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
+        if (!entry_matches(e, host, port, is_tls, tk, proxy_host, proxy_port))
             continue;
 
         /* Test-on-borrow: peek for a peer close. Ensure the fd is non-blocking
@@ -206,11 +219,26 @@ int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int po
     return 1;  /* miss */
 }
 
+int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int port,
+                      int is_tls, const char *proxy_host, int proxy_port,
+                      KlHttpClientPoolConn *conn)
+{
+    return pool_acquire(pool, host, port, is_tls, pool_tls_key(NULL), proxy_host, proxy_port, conn);
+}
+
+int kl_http_client_pool_acquire_tls(KlHttpClientPool *pool, const char *host, int port,
+                                    const KlTlsConfig *tls, const char *proxy_host,
+                                    int proxy_port, KlHttpClientPoolConn *conn)
+{
+    return pool_acquire(pool, host, port, tls != NULL, pool_tls_key(tls), proxy_host, proxy_port,
+                        conn);
+}
+
 /* ── Release ─────────────────────────────────────────────────────── */
 
-int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
-                      const char *host, int port, int is_tls,
-                      const char *proxy_host, int proxy_port)
+static int pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
+                        const char *host, int port, int is_tls, PoolTlsKey tk,
+                        const char *proxy_host, int proxy_port)
 {
     if (!pool || !conn || !host || !kl_handle_valid(conn->fd))
         return -1;
@@ -235,7 +263,7 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
 
     for (int i = 0; i < pool->capacity; i++) {
         const KlHttpClientPoolEntry *e = &pool->entries[i];
-        if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port)) {
+        if (entry_matches(e, host, port, is_tls, tk, proxy_host, proxy_port)) {
             host_count++;
             if (e->idle_since_ms < oldest_time) {
                 oldest_time = e->idle_since_ms;
@@ -296,6 +324,8 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
     memcpy(e->host, host, hlen + 1);
     e->port = port;
     e->is_tls = is_tls;
+    e->tls_ctx = tk.ctx;
+    e->tls_factory = tk.factory;
     if (proxy_host) {
         size_t plen = strlen(proxy_host);
         memcpy(e->proxy_host, proxy_host, plen + 1);
@@ -325,6 +355,21 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
     conn->_entry = NULL;
 
     return 0;
+}
+
+int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
+                      const char *host, int port, int is_tls,
+                      const char *proxy_host, int proxy_port)
+{
+    return pool_release(pool, conn, host, port, is_tls, pool_tls_key(NULL), proxy_host, proxy_port);
+}
+
+int kl_http_client_pool_release_tls(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
+                                    const char *host, int port, const KlTlsConfig *tls,
+                                    const char *proxy_host, int proxy_port)
+{
+    return pool_release(pool, conn, host, port, tls != NULL, pool_tls_key(tls), proxy_host,
+                        proxy_port);
 }
 
 /* ── Discard ─────────────────────────────────────────────────────── */
@@ -402,7 +447,8 @@ int kl_http_client_pool_host_count(const KlHttpClientPool *pool, const char *hos
     int count = 0;
     for (int i = 0; i < pool->capacity; i++) {
         const KlHttpClientPoolEntry *e = &pool->entries[i];
-        if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
+        PoolTlsKey own = { e->tls_ctx, e->tls_factory };   /* count every TLS config's entries */
+        if (entry_matches(e, host, port, is_tls, own, proxy_host, proxy_port))
             count++;
     }
     return count;

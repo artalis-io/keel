@@ -110,6 +110,7 @@ kl_http_client_error	http_client.h	direct-assertion	tests/protocols/http/test_ht
 kl_http_client_free	http_client.h	indirect-execution	tests/protocols/http/test_http_client.c (teardown; :153 NULL-guard direct)
 kl_http_client_last_error	http_client.h	direct-assertion	tests/protocols/http/test_http_client_happy_eyeballs.c:159 (err captured + asserted)
 kl_http_client_pool_acquire	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c (hit/miss: ASSERT_EQ acquire ==0/1)
+kl_http_client_pool_acquire_tls	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:163 (acquire_tls ==1 for another config, ==0 for its own)
 kl_http_client_pool_discard	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c (discard then idle_count asserted)
 kl_http_client_pool_evict_expired	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:289 (evicted count asserted)
 kl_http_client_pool_free	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:60 (free(NULL) no-crash) + teardown
@@ -117,6 +118,7 @@ kl_http_client_pool_host_count	http_client_pool.h	direct-assertion	tests/protoco
 kl_http_client_pool_idle_count	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:89 (ASSERT_EQ idle_count)
 kl_http_client_pool_init	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:44 (ASSERT_EQ init ==-1/0)
 kl_http_client_pool_release	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:88 (release ==0 then idle_count; :338 overflow -1)
+kl_http_client_pool_release_tls	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:163 (release_tls ==0 under config A)
 kl_http_client_request	http_client.h	direct-assertion	tests/protocols/http/test_http_client.c (bad-arg -1); tests/smoke_pollcomp.c (rc==0 + body over live server)
 kl_http_client_request_pooled	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:411 (rc + idle_count==1 after)
 kl_http_client_request_s	http_client.h	direct-assertion	tests/protocols/http/test_http_client_stream.c (sync_stream: rc + body content asserted)
