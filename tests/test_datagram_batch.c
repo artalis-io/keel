@@ -797,6 +797,41 @@ UTEST(dgram_batch, send_batch_teardown_from_drain_no_uaf) {
     kl_event_ctx_free(&ctx);
 }
 
+/* The single-send path has the same hazard as the batch path above, and needs the same bracket. A
+ * datagram held back by WOULD_BLOCK is queued; the next kl_datagram_send flushes both, the queue
+ * empties, and on_drain fires INSIDE the call. A teardown from that drain must be deferred to the end
+ * of the call, not run under the send's feet. Readiness-only (the gating provider is native-fd). */
+static KlDatagram g_ss_tx;
+UTEST(dgram_batch, single_send_teardown_from_drain_no_uaf) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+
+    const KlSocketProvider *sp = gating_provider();
+    g_block = 0;
+    KlSocketHandle txfd = prep_fd(sp);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+    memset(&g_ss_tx, 0, sizeof(g_ss_tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&g_ss_tx, &cfg, 0));
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", 9999);
+    KlDatagramMessage m = { .data = "z", .len = 1, .peer = &dest, .tos = -1 };
+    g_block = 2;               /* the direct send and the pump's retry both WOULD_BLOCK: it stays queued */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&g_ss_tx, &m));
+    ASSERT_TRUE(kl_dgram_send_queued(&g_ss_tx.core->send) > 0);
+
+    kl_datagram_on_drain(&g_ss_tx, batch_on_drain_teardown, &g_ss_tx);
+    g_torn = 0;
+    /* flushes both → the queue empties → on_drain (inside this call) → teardown */
+    KlDatagramSendStatus st = kl_datagram_send(&g_ss_tx, &m);
+    int torn = g_torn;
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    ASSERT_EQ(1, torn);                            /* reclaimed once, after the call let go of it */
+}
+
 /* ── GSO ──────────────────────────────────────────────────────────────────────────────────────── */
 
 /* send_gso delivers the whole payload: one send_gso syscall where supported, else the same segments
