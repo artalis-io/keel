@@ -99,6 +99,13 @@ int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out) {
 
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
     if (!ws) return -1;
+    if (ws->drain_enabled) {
+        /* Already on: re-initialising would drop (and leak) frames still queued. Only the cap
+         * may change. */
+        if (max_size > 0)
+            kl_drain_set_max_size(&ws->drain, max_size);
+        return 0;
+    }
     kl_drain_init(&ws->drain, ws_drain_writer, ws, ws->alloc);
     if (max_size > 0)
         kl_drain_set_max_size(&ws->drain, max_size);
@@ -522,7 +529,7 @@ int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
 
                 if (is_first) {
                     /* Start of new message */
-                    if (ws->msg_len > 0 && ws->msg_opcode != 0) {
+                    if (ws->msg_opcode != 0) {
                         /* Previous message not finished: protocol error */
                         kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
                         return KL_HTTP_CONN_CLOSED;
@@ -569,13 +576,24 @@ int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
                 return ws_handle_close(ws, NULL, 0);
             } else if (opcode == KL_WS_OP_PING) {
                 ws_handle_ping(ws, NULL, 0);
-            } else if (opcode < 0x8 && ws->frame.fin) {
-                /* Empty final frame or unfragmented empty message */
+            } else if (opcode < 0x8 && ws->frame.payload_len == 0) {
+                /* An empty data frame: it opens, continues or ends a message like any other. */
                 if (opcode != KL_WS_OP_CONTINUATION) {
+                    if (ws->msg_opcode != 0) {           /* a message is already open */
+                        kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+                        return KL_HTTP_CONN_CLOSED;
+                    }
                     ws->msg_opcode = opcode;
                     ws->msg_len = 0;
                     ws->utf8_state = KL_UTF8_ACCEPT;
+                } else if (ws->msg_opcode == 0) {        /* continuation with no message open */
+                    kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+                    return KL_HTTP_CONN_CLOSED;
                 }
+                if (ws->frame.fin && ws_deliver_message(ws) < 0)
+                    return KL_HTTP_CONN_CLOSED;
+            } else if (opcode < 0x8 && ws->frame.fin && ws->msg_opcode != 0) {
+                /* The final frame's payload arrived in earlier reads: deliver. */
                 if (ws_deliver_message(ws) < 0)
                     return KL_HTTP_CONN_CLOSED;
             }

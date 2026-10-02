@@ -65,6 +65,8 @@ typedef struct {
     const unsigned char *after;     /* bytes sent right after the 101, in the same write */
     size_t         after_len;
     int            raw_reply;       /* send `after` INSTEAD of a 101 (handshake cases) */
+    const char    *upgrade_value;   /* the 101's Upgrade value (NULL = "websocket") */
+    const char    *extra_headers;   /* extra 101 header lines, each ending in \r\n (NULL = none) */
     unsigned char  got[256];        /* what the client sent after the upgrade request */
     size_t         got_len;
     KlPlatThread   tid;
@@ -128,8 +130,10 @@ static void peer_thread(void *arg) {
         char acc[64];
         accept_value(req, acc);
         ol = (size_t)snprintf((char *)out, sizeof out,
-                              "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                              "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
+                              "HTTP/1.1 101 Switching Protocols\r\nUpgrade: %s\r\n"
+                              "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n%s\r\n",
+                              p->upgrade_value ? p->upgrade_value : "websocket", acc,
+                              p->extra_headers ? p->extra_headers : "");
     }
     memcpy(out + ol, p->after, p->after_len);
     ol += p->after_len;
@@ -314,6 +318,68 @@ UTEST(wsc_peer, endless_handshake_response_is_capped) {
     run_case(&p, &c);
     ASSERT_EQ(c.opened, 0);
     ASSERT_EQ(c.errors, 1);                                  /* was: kept reading and growing */
+    (void)quarantine_check_and_release();
+}
+
+/* ── The handshake is a WebSocket handshake ─────────────────────────────────────────────────── */
+/* A 101 with the right accept value was enough. It must also upgrade to "websocket", and must not
+ * negotiate an extension the client never offered (its frames would then carry RSV bits the client
+ * cannot read). */
+UTEST(wsc_peer, upgrade_to_another_protocol_is_refused) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    p.upgrade_value = "h2c";
+    Cli c; memset(&c, 0, sizeof c);
+    run_case(&p, &c);
+    ASSERT_EQ(c.opened, 0);                                  /* was: opened */
+    ASSERT_EQ(c.errors, 1);
+    (void)quarantine_check_and_release();
+}
+
+UTEST(wsc_peer, unoffered_extension_is_refused) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    p.extra_headers = "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+    Cli c; memset(&c, 0, sizeof c);
+    run_case(&p, &c);
+    ASSERT_EQ(c.opened, 0);                                  /* was: opened */
+    ASSERT_EQ(c.errors, 1);
+    (void)quarantine_check_and_release();
+}
+
+/* ── Fragmentation (RFC 6455 5.4) ───────────────────────────────────────────────────────────── */
+static size_t frag(unsigned char *o, int fin, int op, const void *pl, size_t n) {
+    o[0] = (unsigned char)((fin ? 0x80 : 0) | op);
+    o[1] = (unsigned char)n;
+    if (n) memcpy(o + 2, pl, n);
+    return 2 + n;
+}
+
+/* A new data frame while a fragmented message is open is a protocol error; it used to replace the
+ * open message silently. */
+UTEST(wsc_peer, new_message_inside_a_fragmented_one_fails_with_1002) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[32];
+    size_t n = frag(f, 0, KL_WS_OP_TEXT, "a", 1);
+    n += frag(f + n, 1, KL_WS_OP_TEXT, "b", 1);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    run_case(&p, &c);
+    ASSERT_EQ(c.messages, 0);                                /* was: "b" delivered */
+    ASSERT_EQ(c.errors, 1);
+    ASSERT_EQ(client_close_code(&p), 1002);
+    (void)quarantine_check_and_release();
+}
+
+/* An empty first fragment starts a message; its continuation completes it. */
+UTEST(wsc_peer, empty_first_fragment_starts_the_message) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[32];
+    size_t n = frag(f, 0, KL_WS_OP_TEXT, NULL, 0);
+    n += frag(f + n, 1, KL_WS_OP_CONTINUATION, "x", 1);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    run_case(&p, &c);
+    ASSERT_EQ(c.errors, 0);                                  /* was: "continuation without start" */
+    ASSERT_EQ(c.messages, 1);
     (void)quarantine_check_and_release();
 }
 
