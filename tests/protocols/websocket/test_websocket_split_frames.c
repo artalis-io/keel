@@ -159,10 +159,30 @@ static KlSocketHandle raw_connect(int port) {
     kl_test_set_rcvtimeo(fd, 3000);
     return fd;
 }
+/* recv / send, retried when interrupted (EINTR): a test thread that drove an io_uring loop (the
+ * client test, or kl_http_server_free reaping its accepts) can be interrupted by that ring's late
+ * task_work, and a socket with SO_RCVTIMEO then reports EINTR instead of restarting. */
+#if !defined(_WIN32)
+#include <errno.h>
+static int raw_recv(KlSocketHandle fd, void *b, int n) {
+    int k;
+    do k = (int)recv(fd, b, (size_t)n, 0); while (k < 0 && errno == EINTR);
+    return k;
+}
+static int raw_send(KlSocketHandle fd, const void *b, int n) {
+    int k;
+    do k = (int)send(fd, b, (size_t)n, 0); while (k < 0 && errno == EINTR);
+    return k;
+}
+#else
+static int raw_recv(KlSocketHandle fd, void *b, int n) { return (int)recv(fd, b, n, 0); }
+static int raw_send(KlSocketHandle fd, const void *b, int n) { return (int)send(fd, b, n, 0); }
+#endif
+
 static int send_all(KlSocketHandle fd, const void *p, size_t n) {
     const char *b = p;
     while (n > 0) {
-        int k = (int)send(fd, b, (int)n, 0);
+        int k = raw_send(fd, b, (int)n);
         if (k <= 0) return -1;
         b += k; n -= (size_t)k;
     }
@@ -171,7 +191,7 @@ static int send_all(KlSocketHandle fd, const void *p, size_t n) {
 static int recv_exact(KlSocketHandle fd, void *p, size_t n) {
     char *b = p;
     while (n > 0) {
-        int k = (int)recv(fd, b, (int)n, 0);
+        int k = raw_recv(fd, b, (int)n);
         if (k <= 0) return -1;
         b += k; n -= (size_t)k;
     }
@@ -226,7 +246,7 @@ UTEST(ws_split_frames, raw_frame_in_pieces_and_split_ping) {
     ASSERT_EQ(send_all(fd, req, (size_t)rn), 0);
     char resp[1024]; size_t rl = 0;
     while (rl < sizeof resp - 1) {                /* read the 101 up to the blank line */
-        int k = (int)recv(fd, resp + rl, 1, 0);
+        int k = raw_recv(fd, resp + rl, 1);
         ASSERT_GT(k, 0);
         rl++;
         resp[rl] = '\0';
@@ -313,7 +333,7 @@ UTEST(ws_split_frames, tls_record_split_across_reads_is_not_eof) {
     if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
     static char resp[1024]; size_t rl = 0;
     while (ok && rl < sizeof resp - 1) {       /* read the 101 up to the blank line */
-        int k = (int)recv(fd, resp + rl, 1, 0);
+        int k = raw_recv(fd, resp + rl, 1);
         if (k <= 0) { ok = 0; break; }
         rl++;
         resp[rl] = '\0';
@@ -360,7 +380,7 @@ UTEST(ws_split_frames, tls_record_larger_than_the_read_buffer_is_drained) {
     if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
     static char resp[1024]; size_t rl = 0;
     while (ok && rl < sizeof resp - 1) {
-        int k = (int)recv(fd, resp + rl, 1, 0);
+        int k = raw_recv(fd, resp + rl, 1);
         if (k <= 0) { ok = 0; break; }
         rl++;
         resp[rl] = '\0';
@@ -401,7 +421,7 @@ static KlSocketHandle ws_open_raw(int port) {
     char resp[1024]; size_t rl = 0;
     if (send_all(fd, req, (size_t)rn) != 0) goto fail;
     while (rl < sizeof resp - 1) {
-        int k = (int)recv(fd, resp + rl, 1, 0);
+        int k = raw_recv(fd, resp + rl, 1);
         if (k <= 0) goto fail;
         rl++;
         resp[rl] = '\0';
@@ -508,7 +528,7 @@ static KlSocketHandle frag_open(int port) {
     char resp[1024]; size_t rl = 0;
     if (send_all(fd, req, (size_t)rn) == 0) {
         while (rl < sizeof resp - 1) {
-            int k = (int)recv(fd, resp + rl, 1, 0);
+            int k = raw_recv(fd, resp + rl, 1);
             if (k <= 0) break;
             rl++;
             resp[rl] = '\0';
