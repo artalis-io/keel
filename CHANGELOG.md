@@ -7,6 +7,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **Post-body middleware and the access log read request headers the body had overwritten.** The
+  body read reuses the connection's read buffer from offset 0, where `method`, `path` and the header
+  pointers point. Post-body middleware (and the `access_log` callback) then saw body bytes in place of
+  the headers: a CSRF check could read attacker body bytes as `Cookie` or `Origin`, a header value
+  with no terminator left could be read out of bounds, and access-log lines could be forged. The
+  request head is now copied before the body is read, and the request's pointers are moved to the
+  copy; if the copy cannot be made, the request is answered 500.
 - **A redirect could take the client anywhere its caller would not have connected.** A caller that
   limits which hosts it talks to could check only the first URL: `kl_http_redirect_*` then followed
   every `Location` with no way to ask, so an allowed host could send the client to a cloud metadata

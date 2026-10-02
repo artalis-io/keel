@@ -91,6 +91,8 @@ struct KlHttpConn {
     KlHttpRoute *route;
     KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS];
     int num_params;
+    char    *head_copy;        /* the request line + headers, kept while the body reuses read_buf */
+    size_t   head_copy_len;
     int route_result;
     uint64_t post_mw_matched;   /* post-body middleware matched at header time (request line intact) */
 

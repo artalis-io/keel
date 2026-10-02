@@ -177,6 +177,71 @@ static void conn_cleanup_body_reader(KlHttpConn *c) {
         c->req.body_reader->destroy(c->req.body_reader);
         c->req.body_reader = NULL;
     }
+    if (c->head_copy) {                       /* the request's head goes with the request */
+        kl_free(c->stream.alloc, c->head_copy, c->head_copy_len);
+        c->head_copy = NULL;
+        c->head_copy_len = 0;
+    }
+}
+
+/* Before a body is read into read_buf from offset 0, keep the request line and headers it would
+ * overwrite: post-body middleware, the handler and the access log still read the method, path,
+ * query, headers and route params through pointers into read_buf. Copy the span those pointers
+ * cover (with the NUL terminators written after them) and move every pointer into the copy.
+ * Returns 0, or -1 when the copy cannot be allocated. */
+static int conn_preserve_head(KlHttpConn *c) {
+    const char *base = c->stream.read_buf;
+    const char *lim = base + c->stream.read_len;
+    size_t span = 0;
+#define HEAD_SPAN(p, n) do { const char *p_ = (p);                                           \
+        if (p_ && p_ >= base && p_ < lim) {                                                   \
+            size_t e_ = (size_t)(p_ - base) + (size_t)(n) + 1;                                \
+            if (e_ > span) span = e_;                                                         \
+        } } while (0)
+    HEAD_SPAN(c->req.method, c->req.method_len);
+    HEAD_SPAN(c->req.path, c->req.path_len);
+    HEAD_SPAN(c->req.query, c->req.query_len);
+    for (int i = 0; i < c->req.num_headers; i++) {
+        HEAD_SPAN(c->req.headers[i].name, c->req.headers[i].name_len);
+        HEAD_SPAN(c->req.headers[i].value, c->req.headers[i].value_len);
+    }
+    for (int i = 0; i < c->req.num_params; i++) {
+        HEAD_SPAN(c->req.params[i].name, c->req.params[i].name_len);
+        HEAD_SPAN(c->req.params[i].value, c->req.params[i].value_len);
+    }
+    for (int i = 0; i < c->num_params; i++) {
+        HEAD_SPAN(c->params[i].name, c->params[i].name_len);
+        HEAD_SPAN(c->params[i].value, c->params[i].value_len);
+    }
+#undef HEAD_SPAN
+    if (span > c->stream.read_len) span = c->stream.read_len;
+    if (span == 0) return 0;
+    char *copy = kl_malloc(c->stream.alloc, span);
+    if (!copy) return -1;
+    memcpy(copy, base, span);
+#define HEAD_MOVE(p) do {                                                                    \
+        if ((p) && (p) >= base && (p) < base + span) (p) = copy + ((p) - base);              \
+    } while (0)
+    HEAD_MOVE(c->req.method);
+    HEAD_MOVE(c->req.path);
+    HEAD_MOVE(c->req.query);
+    for (int i = 0; i < c->req.num_headers; i++) {
+        HEAD_MOVE(c->req.headers[i].name);
+        HEAD_MOVE(c->req.headers[i].value);
+    }
+    for (int i = 0; i < c->req.num_params; i++) {
+        HEAD_MOVE(c->req.params[i].name);
+        HEAD_MOVE(c->req.params[i].value);
+    }
+    for (int i = 0; i < c->num_params; i++) {
+        HEAD_MOVE(c->params[i].name);
+        HEAD_MOVE(c->params[i].value);
+    }
+#undef HEAD_MOVE
+    if (c->head_copy) kl_free(c->stream.alloc, c->head_copy, c->head_copy_len);
+    c->head_copy = copy;
+    c->head_copy_len = span;
+    return 0;
 }
 
 /* True iff every REQUIRED KlHttpBodyReader op is present. Core drives on_data,
@@ -791,6 +856,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 return s;
         }
 
+        if (conn_preserve_head(c) < 0)        /* the body is about to reuse read_buf */
+            return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
         c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
         c->state = KL_HTTP_CONN_READING_BODY;
@@ -852,6 +919,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
             }
         }
 
+        if (conn_preserve_head(c) < 0)        /* the body is about to reuse read_buf */
+            return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
         c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
         c->state = KL_HTTP_CONN_READING_BODY;
