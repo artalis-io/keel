@@ -1266,4 +1266,24 @@ UTEST(datagram_public, closed_datagram_does_not_use_its_old_fd) {
     ASSERT_EQ((int)port, 0);
 }
 
+/* The multicast calls follow the same rule after close: report the datagram closed (INVALID_ARG,
+ * like set_tos and connect) without handing the provider an invalid descriptor. */
+UTEST(datagram_public, closed_datagram_multicast_is_refused_without_a_provider_call) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_MULTICAST;
+    g_mcast_calls = 0; g_mcast_ret = 0;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_close_begin(&dg));
+    ASSERT_EQ((int)KL_DGRAM_CLOSE_CLOSED, (int)kl_datagram_close_state(&dg));
+    int rc = kl_datagram_multicast_join(&dg, "239.1.2.3", 0);
+    KlError err = kl_datagram_last_error(&dg);
+    int calls = g_mcast_calls;
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(calls, 0);                         /* was 1: the provider got KL_INVALID_SOCKET */
+    ASSERT_EQ((int)err, (int)KL_ERR_INVALID_ARG); /* was KL_ERR_IO */
+}
+
 UTEST_MAIN();

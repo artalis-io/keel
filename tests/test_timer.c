@@ -1,6 +1,7 @@
 #include "utest.h"
 #include "net_compat.h"
 #include <keel/keel.h>
+#include <stdint.h>
 #if !defined(_MSC_VER)
 #include <unistd.h>
 #endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
@@ -211,6 +212,21 @@ UTEST(timer, add_from_callback) {
     ASSERT_EQ(total, 3);
 
     kl_event_ctx_free(&ctx);
+}
+
+/* A delay meaning "effectively never" (near UINT64_MAX) must not wrap the deadline into the past:
+ * now + delay overflowed, and the timer fired on the next tick. */
+UTEST(timer, huge_delay_does_not_fire_at_once) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+    cb_called = 0;
+    ASSERT_TRUE(kl_timer_add(&ctx, UINT64_MAX, counting_cb, NULL) >= 0);
+    ASSERT_TRUE(kl_timer_add(&ctx, UINT64_MAX - 5, counting_cb, NULL) >= 0);
+    int fired = kl_timer_fire(&ctx);
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(fired, 0);                           /* was 2 */
+    ASSERT_EQ(cb_called, 0);
 }
 
 UTEST_MAIN();

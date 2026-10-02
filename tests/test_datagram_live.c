@@ -414,4 +414,52 @@ UTEST(datagram_live, recv_tos_capture_verifies) {
     kl_event_ctx_free(&ctx);
 }
 
+/* One readable event hands over a bounded batch, then returns to the loop: a socket that never
+ * drains (a flood) must not keep one callback running while timers and other sockets wait. The
+ * batch left over is delivered on the following ticks. */
+UTEST(datagram_live, one_readable_event_delivers_a_bounded_batch) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);
+    ASSERT_TRUE(kl_handle_valid(rxfd));
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    int port = (int)kl_sockaddr_port(&la);
+    KlSocketHandle txfd = prep_fd(sp, NULL, 0);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+
+    KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = rxfd,
+                            .send_slots = 4, .send_slot_cap = 64, .recv_cap = 64 };
+    KlDatagramConfig tc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = txfd,
+                            .send_slots = 128, .send_slot_cap = 64, .recv_cap = 64 };
+    ASSERT_EQ(0, kl_datagram_init(&rx, &rc));
+    ASSERT_EQ(0, kl_datagram_init(&tx, &tc));
+
+    /* Queue the burst in rx's socket before it starts receiving. */
+    enum { BURST = 120 };
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    for (int i = 0; i < BURST; i++) {
+        KlDatagramMessage m = { .data = "burst-dg", .len = 8, .peer = &dest, .tos = -1 };
+        ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));
+    }
+    for (int i = 0; i < 20; i++) kl_event_ctx_run(&ctx, 16, 10);   /* tx flushes; rx not started */
+
+    g_recv_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv, NULL));
+    int max_tick = 0;
+    for (int i = 0; i < 200 && g_recv_calls < BURST; i++) {
+        int before = g_recv_calls;
+        kl_event_ctx_run(&ctx, 16, 20);
+        if (g_recv_calls - before > max_tick) max_tick = g_recv_calls - before;
+    }
+    int total = g_recv_calls;
+
+    ASSERT_EQ(0, kl_datagram_close_begin(&rx)); pump_close(&ctx, &rx, 100); ASSERT_EQ(0, kl_datagram_free(&rx));
+    ASSERT_EQ(0, kl_datagram_close_begin(&tx)); pump_close(&ctx, &tx, 100); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(total, (int)BURST);                 /* every datagram still arrives */
+    ASSERT_LE(max_tick, 64);                      /* was: the whole burst in one callback */
+}
+
 UTEST_MAIN();

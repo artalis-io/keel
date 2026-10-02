@@ -685,6 +685,64 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
     kl_http_server_free(&srv);
 }
 
+/* A redirect from one AF_UNIX socket to ANOTHER is cross-origin: they are different servers.
+ * Both URLs have no host and no port, which the origin check used to compare as equal, so the
+ * caller's Authorization followed the redirect to the second socket. */
+static char g_x10_location[300];
+static int  g_x10_saw_auth = -1;
+static void x10_handle_go(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 302);
+    kl_http_response_header(res, "Location", g_x10_location);
+    kl_http_response_body_borrow(res, "moved", 5);
+}
+static void x10_handle_creds(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    g_x10_saw_auth = kl_http_request_header(req, "Authorization") != NULL;
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+UTEST(unix_socket, redirect_to_another_socket_drops_credentials) {
+    char pa[108], pb[108];
+    test_sock_path(pa, sizeof(pa), "x10a");
+    test_sock_path(pb, sizeof(pb), "x10b");
+    unlink(pa); unlink(pb);
+
+    KlHttpServer sa, sb;
+    KlHttpServerConfig ca = { .unix_socket_path = pa, .unix_socket_unlink = 1, .max_connections = 4 };
+    KlHttpServerConfig cb = { .unix_socket_path = pb, .unix_socket_unlink = 1, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&sa, &ca));
+    ASSERT_EQ(0, kl_http_server_init(&sb, &cb));
+    kl_http_server_route(&sa, "GET", "/go", x10_handle_go, NULL, NULL);
+    kl_http_server_route(&sb, "GET", "/creds", x10_handle_creds, NULL, NULL);
+
+    char ea[220], eb[220];
+    pct_encode_path(pa, ea, sizeof(ea));
+    pct_encode_path(pb, eb, sizeof(eb));
+    snprintf(g_x10_location, sizeof(g_x10_location), "http+unix://%s/creds", eb);
+    g_x10_saw_auth = -1;
+
+    pthread_t ta, tb;
+    ASSERT_EQ(0, pthread_create(&ta, NULL, unix_server_thread, &sa));
+    ASSERT_EQ(0, pthread_create(&tb, NULL, unix_server_thread, &sb));
+    int probe = connect_unix_retry(pa, 200); ASSERT_TRUE(probe >= 0); close(probe);
+    probe = connect_unix_retry(pb, 200);     ASSERT_TRUE(probe >= 0); close(probe);
+
+    char url[300];
+    snprintf(url, sizeof(url), "http+unix://%s/go", ea);
+    KlHttpClientHeader hdrs[] = { { "Authorization", "Bearer secret" } };
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientResponse resp;
+    int rc = kl_http_redirect_request(&a, NULL, NULL, "GET", url, hdrs, 1, NULL, 0, &resp);
+    if (rc == 0) kl_http_client_response_free(&resp);
+
+    kl_http_server_stop(&sa); kl_http_server_stop(&sb);
+    pthread_join(ta, NULL); pthread_join(tb, NULL);
+    kl_http_server_free(&sa); kl_http_server_free(&sb);
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(0, g_x10_saw_auth);                  /* was 1: the token reached the other socket */
+}
+
 UTEST(unix_socket, websocket_connects_over_ws_unix) {
     char path[108];
     test_sock_path(path, sizeof(path), "wsunix");
