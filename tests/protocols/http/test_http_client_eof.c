@@ -379,6 +379,7 @@ typedef struct {
     int            hold;       /* keep each connection open after replying, until the client closes */
     int            accepts;
     char           first_line[256];   /* the first request line received */
+    char           first_head[2048];  /* the first request's whole header block */
     KlPlatThread   tid;
 } MultiPeer;
 
@@ -404,6 +405,7 @@ static void multi_peer_thread(void *arg) {
             if (l >= sizeof(p->first_line)) l = sizeof(p->first_line) - 1;
             memcpy(p->first_line, buf, l);
             p->first_line[l] = '\0';
+            memcpy(p->first_head, buf, got < sizeof(p->first_head) - 1 ? got : sizeof(p->first_head) - 1);
         }
         (void)kl_test_sockwrite(c, p->reply, strlen(p->reply));
         if (p->hold)   /* answers one request only; a second request on this connection gets nothing */
@@ -568,6 +570,52 @@ UTEST(pooled, connection_close_among_other_tokens_is_not_pooled) {
     multi_peer_finish(&p);
     ASSERT_EQ(ok, 2);
     ASSERT_EQ(p.accepts, 2);     /* was 1: the closing connection was reused */
+}
+
+/* An HTTP/1.0 response closes its connection unless it says Connection: keep-alive. The version was
+ * not consulted, so such a connection was pooled and the next request sent to a closing peer. */
+UTEST(pooled, http10_response_without_keep_alive_is_not_pooled) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nOK", 1), 0);
+    int ok = two_pooled_gets(&p);
+    multi_peer_finish(&p);
+    ASSERT_EQ(ok, 2);
+    ASSERT_EQ(p.accepts, 2);     /* was 1: the HTTP/1.0 connection was reused */
+}
+
+/* ── The Host header ───────────────────────────────────────────────────────────────────────── */
+
+/* Host carries the port when it is not the scheme's default (RFC 9110 7.2): it was dropped, which
+ * breaks virtual hosting by port and a server's absolute redirects. */
+UTEST(host, non_default_port_is_in_the_host_header) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK", 0), 0);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 2000;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/x", p.port);
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    int rc = kl_http_client_request(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &r);
+    kl_http_client_response_free(&r);
+    /* the peer serves two connections: release it with a second, unused, connect */
+    KlSocketHandle s2 = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons((uint16_t)p.port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (kl_handle_valid(s2)) {
+        (void)connect((int)s2, (struct sockaddr *)&to, sizeof to);
+        kl_test_closesock(s2);
+    }
+    multi_peer_finish(&p);
+    char want[64];
+    snprintf(want, sizeof want, "\r\nHost: 127.0.0.1:%d\r\n", p.port);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(strstr(p.first_head, want) != NULL);   /* was "Host: 127.0.0.1" */
 }
 
 /* A 101 hands the connection to another protocol: it is never reusable for HTTP. */
