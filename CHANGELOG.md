@@ -272,6 +272,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   frees the buffer, and records it as `body_owned_size`, with that length, so a sized or tracking
   allocator was given a size that did not match the allocation. The output is now trimmed to exactly
   its reported length, as the decompressor's already was.
+- **The WebSocket server did not validate close frames, and a route without `on_message` failed its
+  second message.** The server echoed whatever close it received. An empty close was answered with
+  status 1005 on the wire, a code RFC 6455 forbids sending. A 1-byte payload, a code outside the
+  allowed ranges, or a reason that is not UTF-8 was accepted and passed to `on_close` instead of failing
+  the connection with 1002 or 1007, as the client already did. Separately, a route with no
+  `on_message` (send-only) never finished a received message, so the next one failed the connection
+  with 1002. The server now applies the client's close validation (one shared check), echoes an empty
+  close empty, and finishes every message, validating text as UTF-8, whether or not `on_message` is
+  set.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1

@@ -362,4 +362,116 @@ UTEST(ws_split_frames, tls_record_larger_than_the_read_buffer_is_drained) {
     ASSERT_EQ(memcmp(echo, msg, got), 0);
 }
 
+/* ── Close frames the server receives (RFC 6455 5.5.1, 7.4) ─────────────────────────────────
+ * A close frame's payload is empty, or a valid status code optionally followed by a UTF-8
+ * reason. The server echoed whatever arrived: an empty close was answered with status 1005 on
+ * the wire (a code that must never be sent), and invalid codes or reasons were accepted instead of
+ * failing the connection with 1002 / 1007, as the client does. */
+
+static KlSocketHandle ws_open_raw(int port) {
+    KlSocketHandle fd = raw_connect(port);
+    if (!kl_handle_valid(fd)) return KL_INVALID_SOCKET;
+    char req[512];
+    int rn = snprintf(req, sizeof req,
+                      "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+                      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n", port);
+    char resp[1024]; size_t rl = 0;
+    if (send_all(fd, req, (size_t)rn) != 0) goto fail;
+    while (rl < sizeof resp - 1) {
+        int k = (int)recv(fd, resp + rl, 1, 0);
+        if (k <= 0) goto fail;
+        rl++;
+        resp[rl] = '\0';
+        if (rl >= 4 && memcmp(resp + rl - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    if (strncmp(resp, "HTTP/1.1 101", 12) == 0) return fd;
+fail:
+    kl_test_closesock(fd);
+    return KL_INVALID_SOCKET;
+}
+
+/* Send a CLOSE carrying `pl` and read the server's reply frame. Returns its payload length, or -1. */
+static int close_round_trip(int port, const unsigned char *pl, size_t pl_len,
+                            int *opcode, unsigned char *reply, size_t cap) {
+    KlSocketHandle fd = ws_open_raw(port);
+    if (!kl_handle_valid(fd)) return -1;
+    unsigned char frame[160];
+    size_t fl = build_masked(frame, 0x8, pl, pl_len);
+    size_t got = 0;
+    int r = -1;
+    if (send_all(fd, frame, fl) == 0 && read_frame(fd, opcode, reply, cap, &got) == 0) r = (int)got;
+    kl_test_closesock(fd);
+    return r;
+}
+
+static unsigned close_code_of(const unsigned char *p, int n) {
+    return n >= 2 ? ((unsigned)p[0] << 8) | p[1] : 0;
+}
+
+UTEST(ws_server_close_recv, empty_close_is_echoed_empty) {
+    static Srv s; ASSERT_EQ(srv_start(&s), 0);
+    int op = -1; unsigned char reply[128];
+    int n = close_round_trip(s.port, NULL, 0, &op, reply, sizeof reply);
+    srv_stop(&s);
+    ASSERT_EQ(op, 0x8);
+    ASSERT_EQ(n, 0);                            /* was: 2 bytes, status 1005 on the wire */
+}
+
+UTEST(ws_server_close_recv, invalid_close_payloads_fail_the_connection) {
+    static Srv s; ASSERT_EQ(srv_start(&s), 0);
+    static const unsigned char one_byte[]  = { 0x03 };
+    static const unsigned char code_999[]  = { 0x03, 0xE7 };              /* below 1000 */
+    static const unsigned char code_1005[] = { 0x03, 0xED };              /* reserved, never sent */
+    static const unsigned char bad_utf8[]  = { 0x03, 0xE8, 0xC3, 0x28 };  /* 1000 + invalid UTF-8 */
+    static const unsigned char normal[]    = { 0x03, 0xE8, 'o', 'k' };    /* 1000 "ok" */
+    int op[5]; unsigned char rep[5][128]; int n[5];
+    n[0] = close_round_trip(s.port, one_byte,  sizeof one_byte,  &op[0], rep[0], sizeof rep[0]);
+    n[1] = close_round_trip(s.port, code_999,  sizeof code_999,  &op[1], rep[1], sizeof rep[1]);
+    n[2] = close_round_trip(s.port, code_1005, sizeof code_1005, &op[2], rep[2], sizeof rep[2]);
+    n[3] = close_round_trip(s.port, bad_utf8,  sizeof bad_utf8,  &op[3], rep[3], sizeof rep[3]);
+    n[4] = close_round_trip(s.port, normal,    sizeof normal,    &op[4], rep[4], sizeof rep[4]);
+    srv_stop(&s);
+    ASSERT_EQ(close_code_of(rep[0], n[0]), 1002u);
+    ASSERT_EQ(close_code_of(rep[1], n[1]), 1002u);
+    ASSERT_EQ(close_code_of(rep[2], n[2]), 1002u);
+    ASSERT_EQ(close_code_of(rep[3], n[3]), 1007u);
+    ASSERT_EQ(close_code_of(rep[4], n[4]), 1000u);   /* a valid close is still echoed */
+}
+
+/* A route with no on_message (send-only) must still finish each message it receives: the second
+ * message used to hit "previous message not finished" and close the connection with 1002. */
+static int srv_start_no_on_message(Srv *s) {
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    if (kl_http_server_init(&s->srv, &cfg) != 0) return -1;
+    kl_ws_server_config_init(&s->ws_cfg);           /* no callbacks at all */
+    if (kl_http_server_ws_upgrade(&s->srv, "/ws", &s->ws_cfg) != 0) return -1;
+    if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
+    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s->port = s->srv.bound_port;
+    return s->port > 0 ? 0 : -1;
+}
+
+UTEST(ws_server_close_recv, messages_without_on_message_are_finished) {
+    static Srv s; ASSERT_EQ(srv_start_no_on_message(&s), 0);
+    KlSocketHandle fd = ws_open_raw(s.port);
+    int ok = kl_handle_valid(fd);
+    static const unsigned char m1[] = "one", m2[] = "two";
+    static const unsigned char bye[] = { 0x03, 0xE8 };
+    unsigned char f[64]; size_t fl;
+    fl = build_masked(f, 0x1, m1, 3); if (ok) ok = send_all(fd, f, fl) == 0;
+    fl = build_masked(f, 0x1, m2, 3); if (ok) ok = send_all(fd, f, fl) == 0;
+    fl = build_masked(f, 0x8, bye, 2); if (ok) ok = send_all(fd, f, fl) == 0;
+    int op = -1; unsigned char reply[128]; size_t got = 0;
+    if (ok) ok = read_frame(fd, &op, reply, sizeof reply, &got) == 0;
+    if (kl_handle_valid(fd)) kl_test_closesock(fd);
+    srv_stop(&s);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(op, 0x8);
+    ASSERT_EQ(close_code_of(reply, (int)got), 1000u);   /* our close echoed, not a 1002 */
+}
+
 UTEST_MAIN();

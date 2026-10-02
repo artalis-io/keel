@@ -22,6 +22,7 @@
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
+#include "ws_close.h"
 
 /* ── Default limits ──────────────────────────────────────────────── */
 
@@ -350,8 +351,6 @@ int kl_ws_server_upgrade(KlHttpConn *c, const char *leftover,
 /* ── Message delivery ────────────────────────────────────────────── */
 
 static int ws_deliver_message(KlWsServerConn *ws) {
-    if (!ws->config->callbacks.on_message) return 0;
-
     int is_binary = (ws->msg_opcode == KL_WS_OP_BINARY);
 
     /* UTF-8 validation for text messages */
@@ -362,9 +361,12 @@ static int ws_deliver_message(KlWsServerConn *ws) {
         }
     }
 
-    ws->config->callbacks.on_message(
-        ws, ws->msg_buf ? ws->msg_buf : "",
-        ws->msg_len, is_binary, ws->config->user_data);
+    /* A route may have no on_message (send-only); the message is still finished here, or the next
+     * one would find this one "not finished" and fail the connection. */
+    if (ws->config->callbacks.on_message)
+        ws->config->callbacks.on_message(
+            ws, ws->msg_buf ? ws->msg_buf : "",
+            ws->msg_len, is_binary, ws->config->user_data);
 
     /* Reset reassembly buffer */
     ws->msg_len = 0;
@@ -401,21 +403,27 @@ static int ws_msg_grow(KlWsServerConn *ws, size_t additional) {
 static int ws_handle_close(KlWsServerConn *ws, const uint8_t *payload,
                             size_t len) {
     ws->close_received = 1;
-    uint16_t code = 1005;  /* No Status Received (default) */
+    uint16_t code = 1005;  /* No Status Received: reported to on_close, never sent */
     const char *reason = NULL;
     size_t reason_len = 0;
 
-    if (len >= 2) {
-        code = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
-        if (len > 2) {
-            reason = (const char *)(payload + 2);
-            reason_len = len - 2;
+    int bad = kl_ws_close_payload_check(payload, len);
+    if (bad) {
+        /* RFC 6455 7.4 / 8.1: an invalid code or a non-UTF-8 reason fails the connection. */
+        code = (uint16_t)bad;
+        kl_ws_server_close(ws, code, NULL, 0);
+    } else {
+        if (len >= 2) {
+            code = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
+            if (len > 2) {
+                reason = (const char *)(payload + 2);
+                reason_len = len - 2;
+            }
         }
-    }
-
-    if (!ws->close_sent) {
-        /* Echo close back */
-        kl_ws_server_close(ws, code, reason, reason_len);
+        /* Echo the close back: with its code, or empty for an empty close (code 0 sends no
+         * status; 1005 must never appear on the wire). */
+        if (!ws->close_sent)
+            kl_ws_server_close(ws, len >= 2 ? code : 0, reason, reason_len);
     }
 
     /* Notify user */
