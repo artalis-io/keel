@@ -80,7 +80,8 @@ int main(void) {
     g_ss = kl_http2_nghttp2_server_session(&alloc, &scb, NULL);
     if (!g_ss) { cs->destroy(cs); return fail("server session create"); }
 
-    static char req_body[128 * 1024];               /* the client adapter copies it */
+    static char req_body[1024];                     /* the client adapter copies it; small enough
+                                                     * to fit the window, so the request ends */
     memset(req_body, 'q', sizeof req_body);
     int32_t sid = cs->submit_request(cs, "POST", "/upload", "example.com", NULL, 0,
                                      req_body, sizeof req_body);
@@ -96,6 +97,7 @@ int main(void) {
     cs->destroy(cs);                                /* the client's stream is still open */
     g_ss->destroy(g_ss);                            /* so is the server's, with a queued response */
 
+    if (!g_answered) return fail("the server never answered (its response record was not exercised)");
     if (g_live != 0) {
         fprintf(stderr, "FAIL: %ld allocation(s) not freed after destroying sessions with open streams\n",
                 g_live);
