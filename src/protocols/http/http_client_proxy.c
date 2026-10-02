@@ -12,12 +12,20 @@
 int kl_proxy_build_connect(char *buf, size_t cap, size_t *out_len,
                            const char *host, uint16_t port, const char *auth) {
     size_t n = 0;
+    /* An IPv6 literal goes in brackets, or its colons run into the port (RFC 9110 7.2). */
+    const char *lb = "", *rb = "";
+    for (const char *h = host; *h; h++)
+        if (*h == ':') { lb = "["; rb = "]"; break; }
     if (kl_buf_append(buf, cap, &n, "CONNECT ") != 0 ||
+        kl_buf_append(buf, cap, &n, lb) != 0 ||
         kl_buf_append(buf, cap, &n, host) != 0 ||
+        kl_buf_append(buf, cap, &n, rb) != 0 ||
         kl_buf_append_n(buf, cap, &n, ":", 1) != 0 ||
         kl_buf_append_u64(buf, cap, &n, port) != 0 ||
         kl_buf_append(buf, cap, &n, " HTTP/1.1\r\nHost: ") != 0 ||
+        kl_buf_append(buf, cap, &n, lb) != 0 ||
         kl_buf_append(buf, cap, &n, host) != 0 ||
+        kl_buf_append(buf, cap, &n, rb) != 0 ||
         kl_buf_append_n(buf, cap, &n, ":", 1) != 0 ||
         kl_buf_append_u64(buf, cap, &n, port) != 0 ||
         kl_buf_append(buf, cap, &n, "\r\n") != 0)

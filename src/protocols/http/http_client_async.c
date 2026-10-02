@@ -983,6 +983,12 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
 {
     KlHttpClient *c = user_data;
 
+    /* An error is already waiting to be reported (the deferred completion, see done_timer): the
+     * request is over, so the socket's events are not acted on. Running the state machine again
+     * here could repeat a step (a second TLS session over the first) before the error lands. */
+    if (c->done_timer >= 0)
+        return;
+
     switch (c->state) {
     case KL_HTTP_CLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
@@ -1251,27 +1257,21 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     char abs_url_buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     const char *absolute_url = NULL;
     if (is_proxied && !parsed.is_https) {
-        char host_z[KL_HTTP_CLIENT_HOSTNAME_MAX];
-        if (parsed.host_len >= sizeof(host_z))
+        if (parsed.host_len >= KL_HTTP_CLIENT_HOSTNAME_MAX)
             return NULL;
-        memcpy(host_z, parsed.host, parsed.host_len);
-        host_z[parsed.host_len] = '\0';
 
         const char *path = (parsed.path_len > 0) ? parsed.path : "/";
         int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
 
-        /* "http://<host>[:<port>]<path>": byte-identical to the former
-         * snprintf, built with bounded, locale-free append helpers. */
+        /* "http://<authority><path>": the authority brackets an IPv6 literal and carries a
+         * non-default port, built with bounded, locale-free append helpers. */
+        char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+        int alen = kl_http_client_authority(&parsed, authority, sizeof authority);
         size_t n = 0;
-        if (kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, "http://") != 0 ||
-            kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, host_z) != 0)
+        if (alen < 0 ||
+            kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, "http://") != 0 ||
+            kl_buf_append_n(abs_url_buf, sizeof(abs_url_buf), &n, authority, (size_t)alen) != 0)
             return NULL;
-        if (parsed.port != 80) {
-            if (kl_buf_append_n(abs_url_buf, sizeof(abs_url_buf), &n, ":", 1) != 0 ||
-                kl_buf_append_u64(abs_url_buf, sizeof(abs_url_buf), &n,
-                                  (uint64_t)parsed.port) != 0)
-                return NULL;
-        }
         if (kl_buf_append_n(abs_url_buf, sizeof(abs_url_buf), &n, path,
                             (size_t)path_len) != 0)
             return NULL;

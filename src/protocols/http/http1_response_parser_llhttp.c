@@ -234,6 +234,8 @@ static int resp_on_headers_complete(llhttp_t *parser)
         return 0;
 
     p->resp->status = (int)parser->status_code;
+    /* HTTP/1.0 closes unless it says keep-alive, HTTP/1.1 unless it says close: llhttp knows. */
+    p->resp->closes = !llhttp_should_keep_alive(parser);
 
     /* Streaming: invoke on_headers callback */
     if (p->on_headers_cb) {

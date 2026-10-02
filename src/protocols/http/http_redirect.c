@@ -45,6 +45,12 @@ struct KlHttpRedirectClient {
     KlHttpRedirectDoneFn   on_done;
     void              *user_data;
     KlError            error;
+
+    /* A hop's client can complete inside its own start call (an error it could not defer). That
+     * completion is held until start_next_request has recorded the client in inner, so on_done
+     * never runs, and so never frees rc, under start_next_request's feet. */
+    int                starting;
+    int                done_pending;
 };
 
 /* ── Static helpers ──────────────────────────────────────────────── */
@@ -401,7 +407,7 @@ static KlHttpRedirectClient *alloc_redirect_client(KlAllocator *alloc,
 
 static void internal_on_done(KlHttpClient *client, void *user_data);
 
-static int start_next_request(KlHttpRedirectClient *rc)
+static int start_next_request(KlHttpRedirectClient *rc, int first)
 {
     /* Build filtered headers */
     KlHttpClientHeader filtered[KL_HTTP_CLIENT_MAX_REQ_HEADERS];
@@ -424,6 +430,8 @@ static int start_next_request(KlHttpRedirectClient *rc)
     }
 
     KlHttpClient *inner;
+    rc->starting = 1;
+    rc->done_pending = 0;
     if (rc->pool) {
         inner = kl_http_client_start_pooled(rc->pool, rc->ev_ctx, rc->alloc, rc->cfg,
                                        rc->current_method, rc->current_url,
@@ -438,10 +446,20 @@ static int start_next_request(KlHttpRedirectClient *rc)
                                 internal_on_done, rc);
     }
 
+    rc->starting = 0;
     if (!inner)
         return -1;
 
     rc->inner = inner;
+    if (rc->done_pending) {                  /* it completed inside its start */
+        rc->done_pending = 0;
+        if (first) {                         /* the caller has no handle yet: fail the start */
+            kl_http_client_free(inner);      /* (NULL, no callback), as the plain client does */
+            rc->inner = NULL;
+            return -1;
+        }
+        internal_on_done(inner, rc);         /* a later hop: report it; may free rc, so nothing */
+    }                                        /* touches rc after this */
     return 0;
 }
 
@@ -449,6 +467,10 @@ static void internal_on_done(KlHttpClient *client, void *user_data)
 {
     KlHttpRedirectClient *rc = user_data;
     (void)client;
+    if (rc->starting) {                      /* inside start_next_request: rc->inner not set yet */
+        rc->done_pending = 1;
+        return;
+    }
 
     /* Error from inner client */
     if (kl_http_client_error(rc->inner) != 0) {
@@ -538,7 +560,7 @@ static void internal_on_done(KlHttpClient *client, void *user_data)
     rc->redirects_done++;
 
     /* Start the next request */
-    if (start_next_request(rc) != 0) {
+    if (start_next_request(rc, 0) != 0) {
         rc->error = KL_ERR_IO;
         if (rc->on_done)
             rc->on_done(rc, rc->user_data);
@@ -564,7 +586,7 @@ KlHttpRedirectClient *kl_http_redirect_start(KlEventCtx *ev_ctx, KlAllocator *al
     if (!rc)
         return NULL;
 
-    if (start_next_request(rc) != 0) {
+    if (start_next_request(rc, 1) != 0) {
         kl_http_redirect_free(rc);
         return NULL;
     }
@@ -590,7 +612,7 @@ KlHttpRedirectClient *kl_http_redirect_start_pooled(KlHttpClientPool *pool,
     if (!rc)
         return NULL;
 
-    if (start_next_request(rc) != 0) {
+    if (start_next_request(rc, 1) != 0) {
         kl_http_redirect_free(rc);
         return NULL;
     }

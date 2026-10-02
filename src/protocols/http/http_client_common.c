@@ -36,6 +36,25 @@ int kl_http_client_has_crlf(const char *s, size_t len)
     return 0;
 }
 
+/* ── Authority (Host / absolute-form) ──────────────────────────────── */
+
+int kl_http_client_authority(const KlUrl *url, char *out, size_t cap)
+{
+    if (!cap) return -1;
+    size_t n = 0;
+    int v6 = memchr(url->host, ':', url->host_len) != NULL;   /* KlUrl strips the brackets */
+    int deflt = url->is_https ? 443 : 80;
+    if ((v6 && kl_buf_append_n(out, cap, &n, "[", 1) != 0) ||
+        kl_buf_append_n(out, cap, &n, url->host, url->host_len) != 0 ||
+        (v6 && kl_buf_append_n(out, cap, &n, "]", 1) != 0))
+        return -1;
+    if (url->port != deflt &&
+        (kl_buf_append_n(out, cap, &n, ":", 1) != 0 ||
+         kl_buf_append_u64(out, cap, &n, (uint64_t)url->port) != 0))
+        return -1;
+    return (int)n;
+}
+
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
 kl_ssize_t kl_http_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
@@ -81,13 +100,16 @@ char *kl_http_client_build_request(KlAllocator *alloc,
         target_len = 1;
     }
 
+    char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+    int alen = kl_http_client_authority(url, authority, sizeof authority);
+    if (alen < 0) return NULL;
     char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     size_t off = 0;
     if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, target, (size_t)target_len) != 0 ||
         kl_buf_append(buf, sizeof(buf), &off, " HTTP/1.1\r\nHost: ") != 0 ||
-        kl_buf_append_n(buf, sizeof(buf), &off, url->host, url->host_len) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, authority, (size_t)alen) != 0 ||
         kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
         return NULL;
 
@@ -180,13 +202,16 @@ char *kl_http_client_build_request_headers_only(KlAllocator *alloc,
         target_len = 1;
     }
 
+    char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+    int alen = kl_http_client_authority(url, authority, sizeof authority);
+    if (alen < 0) return NULL;
     char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     size_t off = 0;
     if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, target, (size_t)target_len) != 0 ||
         kl_buf_append(buf, sizeof(buf), &off, " HTTP/1.1\r\nHost: ") != 0 ||
-        kl_buf_append_n(buf, sizeof(buf), &off, url->host, url->host_len) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, authority, (size_t)alen) != 0 ||
         kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
         return NULL;
 
@@ -272,6 +297,8 @@ static int connection_has_close(const char *v)
 
 int kl_http_client_server_wants_close(const KlHttpClientResponse *resp)
 {
+    if (resp->closes)                   /* what the parser derived (HTTP/1.0 rules included) */
+        return 1;
     for (int i = 0; i < resp->num_headers; i++) {
         if (kl_ascii_strcasecmp(resp->headers[i].name, "Connection") == 0 &&
             connection_has_close(resp->headers[i].value))

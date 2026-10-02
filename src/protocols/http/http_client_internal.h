@@ -181,6 +181,11 @@ struct KlHttpClient {
 /* CRLF injection guard: 1 if s[0..len) contains CR or LF. */
 int kl_http_client_has_crlf(const char *s, size_t len);
 
+/* Write url's authority as a Host header value or absolute-form needs it (RFC 9110 7.2): the host,
+ * bracketed when it is an IPv6 literal, then ":port" unless the port is the scheme's default.
+ * Returns the length written (NUL-terminated), or -1 if it does not fit. */
+int kl_http_client_authority(const KlUrl *url, char *out, size_t cap);
+
 /* Plain-or-TLS I/O abstraction over the socket provider. Returns kl_ssize_t
  * (pointer-width, freestanding) so the async client's I/O locals stay errno-free. */
 kl_ssize_t kl_http_client_io_write(const KlSocketProvider *p, KlSocketHandle fd,

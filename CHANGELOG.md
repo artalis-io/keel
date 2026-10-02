@@ -350,6 +350,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     marking the stream ended, so a streamed HEAD response stayed in SENDING.
   - **`kl_http_server_init` leaked the PROXY-protocol trust list** on every failure after building
     it.
+- **HTTP client Lows (seventeenth audit).**
+  - **The Host header and request target lost the port and the IPv6 brackets.** A URL with a
+    non-default port sent `Host:` without it, and an IPv6 literal went out unbracketed in `Host`,
+    the absolute-form target sent to a proxy, and `CONNECT` (`[::1]:8080` became `::1`). All of them
+    now carry the authority as RFC 9110 7.2 writes it.
+  - **An HTTP/1.0 response without keep-alive was pooled.** The pool decided reuse from the
+    `Connection` header alone, so a 1.0 server that closes after each response had its closed
+    connection handed to the next request. `KlHttpClientResponse` gains `closes` (appended), set
+    when the server will close the connection after this response (llhttp's keep-alive verdict, which
+    covers the version), and the pool keeps no such connection.
+  - **An async request with an error already waiting kept acting on socket events.** Between an
+    error being recorded and its deferred report, the request's socket watcher stayed live, and an
+    event could run the state machine again (starting a second TLS session, leaking the first). The
+    watcher now ignores events while a completion is pending.
+  - **An async redirect hop that completed inside its own start wrote to a freed client.** When the
+    hop's client could not defer an error (no memory for its timer), it completed inline, before the
+    redirect client recorded it; an `on_done` that freed the redirect client was followed by a write
+    into it. The completion is now held until the hop is recorded. On the first hop the start fails
+    instead (`NULL`, no callback), as `kl_http_client_start` does.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
