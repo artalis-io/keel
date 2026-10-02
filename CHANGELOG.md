@@ -14,6 +14,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   with no terminator left could be read out of bounds, and access-log lines could be forged. The
   request head is now copied before the body is read, and the request's pointers are moved to the
   copy; if the copy cannot be made, the request is answered 500.
+- **A small compressed response could make the client inflate hundreds of megabytes.** For a buffered
+  (non-streaming) response, `max_response_size` was checked only after the whole body had been
+  decompressed, up to the decompressor's own 256 MB cap, synchronously on the loop thread, before the
+  request failed with `KL_ERR_TOO_LARGE`. The buffered path now inflates through the streaming
+  decompressor into a bounded buffer and stops as soon as the limit is passed, as the streaming path
+  already did.
 - **A redirect could take the client anywhere its caller would not have connected.** A caller that
   limits which hosts it talks to could check only the first URL: `kl_http_redirect_*` then followed
   every `Location` with no way to ask, so an allowed host could send the client to a cloud metadata

@@ -282,6 +282,34 @@ int kl_http_client_server_wants_close(const KlHttpClientResponse *resp)
 
 /* ── Response decompression (buffered) ────────────────────────────── */
 
+/* Accumulates a decompressed body for the bounded buffered path: grows a NUL-terminated buffer and
+ * refuses output past max as soon as it is produced, rather than after the whole body inflated. */
+typedef struct {
+    KlAllocator *alloc;
+    char        *buf;
+    size_t       len, cap;     /* cap bytes allocated; len + 1 <= cap once anything is held */
+    size_t       max;
+    int          too_large;
+} BoundedBody;
+
+static int bounded_body_emit(void *ctx, const char *data, size_t n)
+{
+    BoundedBody *b = ctx;
+    if (n > b->max || b->len > b->max - n) { b->too_large = 1; return -1; }
+    if (b->len + n + 1 > b->cap) {
+        size_t want = b->cap ? b->cap : 256;
+        while (want < b->len + n + 1) want *= 2;          /* len + n + 1 <= max + 1: no overflow */
+        if (want > b->max + 1) want = b->max + 1;
+        char *nb = kl_realloc(b->alloc, b->buf, b->cap, want);
+        if (!nb) return -1;
+        b->buf = nb;
+        b->cap = want;
+    }
+    memcpy(b->buf + b->len, data, n);
+    b->len += n;
+    return 0;
+}
+
 /**
  * Post-process a buffered response: decompress body if Content-Encoding
  * matches the decompressor's encoding. Replaces body and removes header.
@@ -313,7 +341,30 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
         return 0;  /* encoding mismatch: leave body as-is */
     }
 
-    /* Decompress */
+    if (max > 0 && max < SIZE_MAX - 1) {
+        /* Bounded: inflate through the streaming op and stop at the limit, so a small body that
+         * inflates past it costs at most max bytes, not the whole inflated size first. */
+        BoundedBody b = { &resp->alloc, NULL, 0, 0, max, 0 };
+        int frc = decomp->dfeed(decomp, resp->body, resp->body_len, 1, bounded_body_emit, &b);
+        decomp->destroy(decomp);
+        if (frc < 0 || b.too_large) {
+            if (b.buf) kl_free(&resp->alloc, b.buf, b.cap);
+            return b.too_large ? -2 : -1;
+        }
+        if (b.cap != b.len + 1) {                /* body-shaped: freed later at body_len + 1 */
+            char *nb = kl_realloc(&resp->alloc, b.buf, b.cap, b.len + 1);
+            if (!nb) { if (b.buf) kl_free(&resp->alloc, b.buf, b.cap); return -1; }
+            b.buf = nb;
+        }
+        b.buf[b.len] = '\0';
+        kl_free(&resp->alloc, resp->body, resp->body_len + 1);
+        resp->body = b.buf;
+        resp->body_len = b.len;
+        kl_http_client_remove_header(resp, "Content-Encoding");
+        return 0;
+    }
+
+    /* Unbounded: one shot. */
     char *out = NULL;
     size_t out_len = 0;
     int rc = decomp->decompress(decomp, resp->body, resp->body_len,
@@ -322,10 +373,6 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
 
     if (rc < 0)
         return -1;
-    if (max > 0 && out_len > max) {              /* the limit bounds what the caller receives */
-        kl_free(&resp->alloc, out, out_len);
-        return -2;
-    }
 
     /* The decompressor's buffer is out_len bytes (KlDecompress contract: free with out_len), while a
      * response body is NUL-terminated and freed at body_len + 1. Move it into a body-shaped buffer

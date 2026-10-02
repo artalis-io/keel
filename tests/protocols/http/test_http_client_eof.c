@@ -583,7 +583,7 @@ UTEST(pooled, switching_protocols_is_not_pooled) {
 /* ── Decompression ───────────────────────────────────────────────────────────────────────────── */
 
 /* A mock decompressor: doubles every byte; its streaming feed fails at the final flush when
- * g_md_fail_flush is set (a truncated stream), and its one-shot form fails when g_md_fail is set. */
+ * g_md_fail_flush is set (a truncated stream), and both forms fail when g_md_fail is set. */
 static int g_md_fail, g_md_fail_flush;
 static int md_decompress(KlDecompress *self, const char *in, size_t in_len, char **out,
                          size_t *out_len, KlAllocator *alloc) {
@@ -599,6 +599,7 @@ static int md_decompress(KlDecompress *self, const char *in, size_t in_len, char
 static int md_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
                     int (*emit)(void *, const char *, size_t), void *ctx) {
     (void)self;
+    if (g_md_fail) return -1;                    /* a failing decompressor fails in either form */
     for (size_t i = 0; i < n; i++) {
         char two[2] = { d[i], d[i] };
         if (emit(ctx, two, 2) != 0) return -1;
