@@ -2161,6 +2161,55 @@ UTEST(integration, post_middleware_runs_when_body_arrives_later) {
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 }
 
+/* Post-body middleware reads the request's headers, path and method (a CSRF check reads Cookie or a
+ * token header). When the body arrives in a later read it is read into read_buf from offset 0, where
+ * the request line and headers were, so those pointers then pointed at body bytes. The headers must
+ * still be the request's own once the body is in. */
+static char g_seen_token[64], g_seen_path[64], g_seen_method[16];
+static int post_mw_read_headers(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)res; (void)ctx;
+    const char *t = kl_http_request_header(req, "X-Token");
+    snprintf(g_seen_token, sizeof g_seen_token, "%s", t ? t : "(none)");
+    snprintf(g_seen_path, sizeof g_seen_path, "%.*s", (int)req->path_len, req->path);
+    snprintf(g_seen_method, sizeof g_seen_method, "%.*s", (int)req->method_len, req->method);
+    return 0;
+}
+static KlHttpServer post_mw_hdr_server;
+static void post_mw_hdr_server_thread(void *arg) { (void)arg; kl_http_server_run(&post_mw_hdr_server); }
+
+UTEST(integration, post_middleware_sees_the_request_headers_after_a_later_body) {
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&post_mw_hdr_server, &cfg);
+    kl_http_server_use_post(&post_mw_hdr_server, "POST", "/*", post_mw_read_headers, NULL);
+    kl_http_server_route(&post_mw_hdr_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, post_mw_hdr_server_thread, NULL);
+    wait_for_bind(&post_mw_hdr_server);
+
+    g_seen_token[0] = g_seen_path[0] = g_seen_method[0] = '\0';
+    char buf[4096];
+    buf[0] = '\0';
+    int fd = connect_to(post_mw_hdr_server.bound_port);
+    if (fd >= 0) {
+        const char *hdrs = "POST /submit HTTP/1.1\r\nHost: localhost\r\nX-Token: abc123\r\n"
+                           "Content-Length: 40\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, hdrs, strlen(hdrs));
+        kl_test_sleep_ms(150);                 /* the body comes in a later read */
+        (void)kl_test_sockwrite(fd, "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 40);
+        read_response(fd, buf, sizeof(buf));
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&post_mw_hdr_server);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&post_mw_hdr_server);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_STREQ(g_seen_token, "abc123");      /* was: body bytes, or no header at all */
+    ASSERT_STREQ(g_seen_path, "/submit");
+    ASSERT_STREQ(g_seen_method, "POST");
+}
+
 static KlHttpServer post_mw_ka_server;
 
 static void post_mw_ka_server_thread(void *arg) {
