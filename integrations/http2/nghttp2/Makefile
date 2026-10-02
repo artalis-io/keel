@@ -67,6 +67,9 @@ e2e: $(LIB)
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/e2e_socket
 	@echo "integrations/http2/nghttp2: e2e (real socket) OK"
+	$(CC) $(CFLAGS) -o tests/test_client_interim tests/test_client_interim.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
+	./tests/test_client_interim
 
 # Third-party interop: run the KEEL nghttp2 server (h2c) and hit it with curl's HTTP/2 client,
 # twice: with prior knowledge, and through the HTTP/1.1 Upgrade: h2c path (RFC 7540 3.2), where the
@@ -169,7 +172,7 @@ alpn-interop: $(LIB)
 clean:
 	rm -f $(LIB) $(OBJ) http2_nghttp2_client.d http2_nghttp2_server.d \
 	      tests/test_roundtrip tests/test_destroy_open_streams tests/e2e_socket tests/interop_server tests/client_probe \
-	      tests/alpn_server tests/alpn_client
+	      tests/alpn_server tests/alpn_client tests/test_client_interim
 	rm -rf tests/*.dSYM
 
 .PHONY: all test e2e interop-curl h2spec h2load interop-nghttpd alpn-interop clean

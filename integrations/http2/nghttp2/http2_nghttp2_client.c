@@ -42,6 +42,7 @@ struct NgClientStream {
     char             *body;      /* copy of the request body (or NULL) */
     size_t            body_len;
     size_t            body_off;
+    int               final_reported;   /* the final (non-1xx) response went to on_response */
 };
 
 /* ── Small helpers ──────────────────────────────────────────────────── */
@@ -76,6 +77,16 @@ static void ng_stream_free(NgClientStream *st) {
     if (st->hdrs) kl_free(a, st->hdrs, (size_t)st->cap * sizeof(*st->hdrs));
     if (st->body) kl_free(a, st->body, st->body_len);
     kl_free(a, st, sizeof(*st));
+}
+
+/* Forget the headers collected so far (an interim 1xx block's), keeping the array for reuse. */
+static void ng_stream_clear_headers(NgClientStream *st) {
+    for (int i = 0; i < st->n; i++) {
+        kl_free(st->alloc, (void *)st->hdrs[i].name, strlen(st->hdrs[i].name) + 1);
+        kl_free(st->alloc, (void *)st->hdrs[i].value, strlen(st->hdrs[i].value) + 1);
+    }
+    st->n = 0;
+    st->status = 0;
 }
 
 static int ng_stream_add_header(NgClientStream *st,
@@ -116,6 +127,16 @@ static ssize_t ng_send_cb(nghttp2_session *ng, const uint8_t *data,
     return (ssize_t)w;                       /* nghttp2 buffers any tail */
 }
 
+/* A new response header block starts. Until the final response is reported, each block replaces
+ * the previous one: an interim 1xx block's headers are not the final response's. */
+static int ng_on_begin_headers_cb(nghttp2_session *ng, const nghttp2_frame *frame, void *user_data) {
+    (void)user_data;
+    if (frame->hd.type != NGHTTP2_HEADERS) return 0;
+    NgClientStream *st = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+    if (st && !st->final_reported) ng_stream_clear_headers(st);
+    return 0;
+}
+
 static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
                            const uint8_t *name, size_t namelen,
                            const uint8_t *value, size_t valuelen,
@@ -123,7 +144,7 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
     (void)flags; (void)user_data;
     if (frame->hd.type != NGHTTP2_HEADERS) return 0;
     NgClientStream *st = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
-    if (!st) return 0;
+    if (!st || st->final_reported) return 0;       /* trailers after the final response: ignored */
     if (namelen == 7 && memcmp(name, ":status", 7) == 0) {
         st->status = ng_parse_status(value, valuelen);
         return 0;
@@ -136,12 +157,17 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
 static int ng_on_frame_recv_cb(nghttp2_session *ng, const nghttp2_frame *frame,
                                void *user_data) {
     NgClientSession *s = user_data;
+    /* The final response is the first header block with a status of 200 or more. nghttp2 files it
+     * as HCAT_RESPONSE, or as HCAT_HEADERS when an interim (1xx) response came first; interim
+     * blocks themselves are not reported. */
     if (frame->hd.type == NGHTTP2_HEADERS &&
-        frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
+        (frame->headers.cat == NGHTTP2_HCAT_RESPONSE || frame->headers.cat == NGHTTP2_HCAT_HEADERS)) {
         NgClientStream *st = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
-        if (st)
+        if (st && !st->final_reported && st->status >= 200) {
+            st->final_reported = 1;
             s->base.keel_cbs.on_response(&s->base, frame->hd.stream_id,
                                          st->status, st->hdrs, st->n);
+        }
     }
     return 0;
 }
@@ -282,6 +308,7 @@ KlHttp2ClientSession *kl_http2_nghttp2_client_session(KlAllocator *alloc) {
         return NULL;
     }
     nghttp2_session_callbacks_set_send_callback(cbs, ng_send_cb);
+    nghttp2_session_callbacks_set_on_begin_headers_callback(cbs, ng_on_begin_headers_cb);
     nghttp2_session_callbacks_set_on_header_callback(cbs, ng_on_header_cb);
     nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, ng_on_frame_recv_cb);
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, ng_on_data_chunk_cb);
