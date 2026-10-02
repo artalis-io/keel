@@ -309,6 +309,9 @@ static void dg_close_transport(void *ctx, KlSocketHandle fd) {
         dg->want_mask = 0;
     }
     (void)kl_sock_close(dg->sockets, fd);
+    /* The number may now be reused by another socket: forget it, so the fd, TOS, multicast and port
+     * calls report a closed datagram instead of acting on whatever holds that number next. */
+    dg->fd = KL_INVALID_SOCKET;
 }
 static void dg_deliver(void *ctx, const void *data, size_t len,
                        const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {

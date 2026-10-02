@@ -1246,4 +1246,24 @@ UTEST(datagram_public, kl_tos_macro_and_constants) {
     ASSERT_EQ(3, KL_ECN_CE);
 }
 
+/* After close, the datagram's descriptor is gone (the core closed it) and its number may already
+ * belong to another socket. The facade kept a copy: kl_datagram_fd returned it, and set_tos ran
+ * setsockopt on it. They must report the datagram closed instead. */
+UTEST(datagram_public, closed_datagram_does_not_use_its_old_fd) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_for(fd, 4, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_close_begin(&dg));
+    ASSERT_EQ((int)KL_DGRAM_CLOSE_CLOSED, (int)kl_datagram_close_state(&dg));
+    KlSocketHandle after = kl_datagram_fd(&dg);
+    int tos = kl_datagram_set_tos(&dg, 0x20);
+    uint16_t port = kl_datagram_local_port(&dg);
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+    ASSERT_FALSE(kl_handle_valid(after));        /* was: the old descriptor number */
+    ASSERT_EQ(tos, -1);
+    ASSERT_EQ((int)port, 0);
+}
+
 UTEST_MAIN();

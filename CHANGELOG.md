@@ -384,6 +384,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     cap.
   - The client's upgrade buffer is freed at the size it was allocated with, even when an earlier
     shrink did not happen.
+- **`kl_free(NULL, ...)` no longer reaches the allocator.** The contract never asked an allocator's
+  `free` hook to accept NULL, yet several unwind paths passed it NULL with a nonzero size; the
+  POSIX datagram batch teardown after a partial allocation failure is one. A tracking or arena
+  allocator then miscounted. `kl_free` now skips NULL.
+- **A closed datagram no longer acts on its old descriptor.** After close, `kl_datagram_fd`
+  returned the closed descriptor's number, and `kl_datagram_set_tos`, the multicast calls and
+  `kl_datagram_local_port` used it, though by then it could belong to another socket. They now report
+  a closed datagram.
 
 - **An interim 1xx response was reported as the response.** A server may send `100 Continue`,
   `102 Processing` or `103 Early Hints` before the final response (RFC 9110 15.2). The HTTP/1.1
