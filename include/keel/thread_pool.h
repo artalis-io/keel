@@ -38,7 +38,8 @@ typedef struct KlWorkItem {
  */
 typedef struct KlThreadPoolConfig {
     int num_workers;          /**< 0 = auto-detect via sysconf(_SC_NPROCESSORS_ONLN) */
-    int queue_capacity;       /**< Max items in work queue (0 = 64) */
+    int queue_capacity;       /**< Items that may wait beyond one per worker: submit refuses once
+                                   queue_capacity + num_workers are in flight (0 = 64) */
     KlAllocator *alloc;       /**< NULL = ctx's allocator */
 } KlThreadPoolConfig;
 

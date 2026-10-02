@@ -130,6 +130,65 @@ UTEST(thread_pool, submit_fills_queue) {
     cleanup_test_server(&s);
 }
 
+/* ── Test: a burst before the workers wake runs every item exactly once ── */
+
+/* Admission allows queue_capacity + num_workers items in flight. If the workers have not woken to
+ * dequeue yet, all of them sit in the work queue at once, so the queue must hold that many: a ring
+ * sized to queue_capacity alone wraps over items not yet taken, losing some and running others twice. */
+#define BURST_WORKERS 8
+#define BURST_QUEUE   1
+#define BURST_MAX     (BURST_WORKERS + BURST_QUEUE)
+#define BURST_ROUNDS  200
+
+static atomic_int burst_runs[BURST_MAX];
+static atomic_int burst_dones[BURST_MAX];
+static atomic_int burst_done_total;
+
+static void burst_work_fn(void *ud) { atomic_fetch_add(&burst_runs[(size_t)ud], 1); }
+static void burst_done_fn(void *ud) {
+    atomic_fetch_add(&burst_dones[(size_t)ud], 1);
+    atomic_fetch_add(&burst_done_total, 1);
+}
+
+UTEST(thread_pool, burst_before_workers_wake_runs_each_item_once) {
+    KlHttpServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+
+    KlThreadPoolConfig cfg = {.num_workers = BURST_WORKERS, .queue_capacity = BURST_QUEUE};
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
+    ASSERT_TRUE(pool != NULL);
+
+    int bad_rounds = 0;
+    for (int round = 0; round < BURST_ROUNDS; round++) {
+        for (int i = 0; i < BURST_MAX; i++) {
+            atomic_store(&burst_runs[i], 0);
+            atomic_store(&burst_dones[i], 0);
+        }
+        atomic_store(&burst_done_total, 0);
+
+        int accepted = 0;
+        for (size_t i = 0; i < BURST_MAX; i++) {
+            KlWorkItem item = {.work_fn = burst_work_fn, .done_fn = burst_done_fn,
+                               .user_data = (void *)i};
+            if (kl_thread_pool_submit(pool, &item) == 0) accepted++;
+        }
+        pump_until(&s, &burst_done_total, accepted, 2000);
+        kl_event_ctx_run(&s.ev, 16, 20);   /* let a doubled item show up as an extra completion */
+
+        for (int i = 0; i < accepted; i++)
+            if (atomic_load(&burst_runs[i]) != 1 || atomic_load(&burst_dones[i]) != 1) {
+                bad_rounds++;
+                break;
+            }
+        if (bad_rounds) break;
+    }
+
+    kl_thread_pool_free(pool);
+    cleanup_test_server(&s);
+    ASSERT_EQ(bad_rounds, 0);
+}
+
 /* ── Test: work_fn runs on different thread ───────────────────────── */
 
 static KlTestThreadId worker_tid;
