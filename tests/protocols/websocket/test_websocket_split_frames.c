@@ -43,6 +43,7 @@ static int probe_recv(KlSocketHandle fd, void *b, int n, int line) {
         int e = errno;
         fprintf(stderr, "PROBE recv line %d: k=%d errno=%d (%s) after %ld ms\n", line, k, k < 0 ? e : 0,
                 k < 0 ? strerror(e) : "eof", probe_ms() - t0);
+        errno = e;                                  /* the caller's EINTR retry needs it intact */
     }
     return k;
 }
