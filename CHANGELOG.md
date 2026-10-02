@@ -303,6 +303,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   adapter did not report, while it kept appending headers across blocks: after `103` then `200`, the
   client reported status 103 with the 200's body. The adapter now reports the first final (2xx and
   up) response, with that response's headers only.
+- **One HTTP/2 stream's body limit ended the whole connection.** A request body over
+  `max_body_size`, or a body reader refusing data, was reported to the session as a fatal error: no
+  413 was sent, and every other stream multiplexed on the connection died with it. The stream is now
+  answered 413 and closed on its own; the connection and its other streams carry on.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered

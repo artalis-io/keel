@@ -422,17 +422,28 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
      * DATA: ignore it. A -1 is fatal to the whole session, and every other stream on it. */
     if (!stream) return 0;
 
-    /* Enforce body size limit (mirrors HTTP/1.1 path in http_connection.c) */
+    /* Enforce body size limit (mirrors HTTP/1.1 path in http_connection.c). An over-limit body, or
+     * a reader that refuses the data, is answered 413 on THIS stream and the stream is dropped; a
+     * -1 here would fail the whole session, and every other stream multiplexed on it. Later DATA
+     * for the stream finds no stream and is ignored (above). */
     size_t max = h2c->conn->max_body_size;
+    int refuse = 0;
     if (max > 0) {
-        if (len > max - stream->body_received) return -1;
-        stream->body_received += len;
+        if (len > max - stream->body_received) refuse = 1;
+        else stream->body_received += len;
     }
-
-    if (stream->body_reader) {
-        return stream->body_reader->on_data(stream->body_reader, data, len);
+    if (!refuse && stream->body_reader &&
+        stream->body_reader->on_data(stream->body_reader, data, len) < 0)
+        refuse = 1;
+    if (refuse) {
+        if (stream->body_reader) stream->body_reader->on_error(stream->body_reader);
+        kl_http_response_error(&stream->res, 413, "Payload Too Large");
+        int rc = h2_submit_response(h2c, stream);
+        if (h2c->session->want_write(h2c->session))
+            h2c->session->flush(h2c->session);
+        h2_stream_destroy(h2c, stream);
+        return rc < 0 ? -1 : 0;
     }
-
     return 0;
 }
 
