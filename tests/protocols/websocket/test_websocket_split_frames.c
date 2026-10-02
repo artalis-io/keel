@@ -595,14 +595,33 @@ static int stream_well_formed(const unsigned char *b, size_t n) {
         if (op == 0x1 && (plen != 4 || (n - p >= hl + 4 && memcmp(b + p + hl, "next", 4) != 0)))
             return 0;
         if (op != 0x1 && op != 0x2) return 0;
-        if (n - p < hl + plen) return 1;            /* cut inside a payload, then EOF */
+        /* Every byte of a binary payload is 'B', up to the end of what arrived. A frame sent after
+         * a cut one lands INSIDE the cut frame's declared payload, and the stream may end before
+         * that payload would: so check each byte, not a sample, and check a cut payload too. */
         if (op == 0x2) {
-            for (size_t k = 0; k < plen; k += 4096)
+            size_t have = (n - p - hl < plen) ? n - p - hl : plen;
+            for (size_t k = 0; k < have; k++)
                 if (b[p + hl + k] != 'B') return 0;
         }
+        if (n - p < hl + plen) return 1;            /* cut inside a payload, then EOF */
         p += hl + plen;
     }
     return 1;
+}
+
+/* The checker itself must be able to fail: a frame inside a cut payload (the desync) is rejected,
+ * and a clean stream, including one cut inside its last payload, is accepted. */
+UTEST(ws_server_send, stream_checker_sees_a_frame_inside_a_payload) {
+    static unsigned char s[4096];
+    size_t n = 0;
+    s[n++] = 0x82; s[n++] = 127;                    /* binary, 64-bit length = 1 MiB */
+    for (int k = 0; k < 8; k++) s[n++] = (unsigned char)(k == 5 ? 0x10 : 0);
+    memset(s + n, 'B', 1000); n += 1000;            /* the cut: 1000 of 1 MiB sent */
+    size_t clean = n;
+    s[n++] = 0x81; s[n++] = 4; memcpy(s + n, "next", 4); n += 4;   /* then a frame: the desync */
+    memset(s + n, 'B', 500); n += 500;
+    ASSERT_EQ(stream_well_formed(s, clean), 1);
+    ASSERT_EQ(stream_well_formed(s, n), 0);
 }
 
 UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
