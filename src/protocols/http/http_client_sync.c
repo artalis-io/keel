@@ -309,11 +309,14 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         target_len = 1;
     }
 
+    char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+    int alen = kl_http_client_authority(url, authority, sizeof authority);
+    if (alen < 0) return -1;
     char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
                        target_len, target,
-                       (int)url->host_len, url->host);
+                       alen, authority);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
         return -1;
@@ -406,11 +409,14 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         target_len = 1;
     }
 
+    char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+    int alen = kl_http_client_authority(url, authority, sizeof authority);
+    if (alen < 0) return -1;
     char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
                        target_len, target,
-                       (int)url->host_len, url->host);
+                       alen, authority);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
         return -1;
@@ -729,29 +735,25 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     char abs_url_buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     const char *absolute_url = NULL;
     if (is_proxied && !parsed.is_https) {
-        char host_z[KL_HTTP_CLIENT_HOSTNAME_MAX];
-        if (parsed.host_len >= sizeof(host_z)) {
+        if (parsed.host_len >= KL_HTTP_CLIENT_HOSTNAME_MAX) {
             resp->error = KL_ERR_INVALID_ARG;
             goto cleanup;
         }
-        memcpy(host_z, parsed.host, parsed.host_len);
-        host_z[parsed.host_len] = '\0';
+        /* The authority brackets an IPv6 literal and carries a non-default port. */
+        char authority[KL_HTTP_CLIENT_HOSTNAME_MAX + 16];
+        int alen = kl_http_client_authority(&parsed, authority, sizeof authority);
+        if (alen < 0) {
+            resp->error = KL_ERR_OVERFLOW;
+            goto cleanup;
+        }
 
         const char *path = (parsed.path_len > 0) ? parsed.path : "/";
         int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
 
-        int n;
-        if (parsed.port == 80)
-            /* HTTP proxy absolute-form must preserve the caller's cleartext scheme. */
-            // lgtm[cpp/non-https-url]
-            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
-                         "http://%s%.*s", host_z, path_len, path);
-        else
-            /* HTTP proxy absolute-form must preserve the caller's cleartext scheme. */
-            // lgtm[cpp/non-https-url]
-            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
-                         "http://%s:%d%.*s", host_z, parsed.port,
-                         path_len, path);
+        /* HTTP proxy absolute-form must preserve the caller's cleartext scheme. */
+        // lgtm[cpp/non-https-url]
+        int n = snprintf(abs_url_buf, sizeof(abs_url_buf),
+                         "http://%.*s%.*s", alen, authority, path_len, path);
         if (n < 0 || (size_t)n >= sizeof(abs_url_buf)) {
             resp->error = KL_ERR_OVERFLOW;
             goto cleanup;

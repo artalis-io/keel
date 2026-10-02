@@ -80,6 +80,9 @@ typedef struct KlHttpClientResponse {
     int              num_headers;
     KlAllocator      alloc;     /**< Allocator used for body/headers (stored by value) */
     KlError          error;     /**< Diagnostic error code (KL_ERR_NONE on success) */
+    int              closes;    /**< 1 if the server closes the connection after this response
+                                 *   (HTTP/1.0 without Connection: keep-alive, or Connection: close);
+                                 *   0 if it stays open or the parser does not report it */
 } KlHttpClientResponse;
 
 /*
