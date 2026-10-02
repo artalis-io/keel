@@ -19,6 +19,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/socket.h>   /* raw slow-reader client: socket / connect / recv */
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define PORT 18095
 #define BODY   "{\"tls-completion\":true}"
@@ -62,6 +65,52 @@ static void h_stream(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     kl_http_response_end_stream(r);
 }
 
+/* GET /bigstream: a TLS streaming response far larger than the socket buffers. The completion TLS
+ * path pushes each chunk's ciphertext with kl_comp_tls_flush; on pollcomp the accepted socket is
+ * non-blocking, so a client that reads slowly fills the send buffer. That must be backpressure, not
+ * a closed connection. */
+#define BIG_CHUNK  (64 * 1024)
+#define BIG_CHUNKS 64                                /* 4 MiB of payload */
+static void h_bigstream(KlHttpRequest *q, KlHttpResponse *r, void *c) {
+    (void)q; (void)c;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(r, 200, &w, &wc) < 0) return;
+    static char chunk[BIG_CHUNK];
+    memset(chunk, 'T', sizeof chunk);
+    for (int i = 0; i < BIG_CHUNKS; i++) w(wc, chunk, sizeof chunk);
+    kl_http_response_end_stream(r);
+}
+
+/* A raw client (the mock TLS is a passthrough with a 0-RTT handshake, so plaintext on the wire)
+ * that asks for /bigstream, waits before reading, then reads to EOF. Returns the bytes received. */
+static size_t slow_bigstream(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+    int rcv = 4096;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+    struct timeval tmo = { 5, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof tmo);
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons(PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(s, (struct sockaddr *)&to, sizeof to) < 0) { close(s); return 0; }
+    const char *rq = "GET /bigstream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    if (write(s, rq, strlen(rq)) < 0) { close(s); return 0; }
+    nap_ms(300);                                     /* the server fills its send buffer */
+    static char buf[64 * 1024];
+    size_t total = 0;
+    for (;;) {
+        ssize_t n = recv(s, buf, sizeof buf, 0);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    close(s);
+    return total;
+}
+
 static KlHttpServer g_srv;
 static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
@@ -93,6 +142,7 @@ int main(void) {
     kl_http_server_route(&g_srv, "POST", "/echo", h_echo, NULL, kl_http_body_reader_buffer);
     kl_http_server_route(&g_srv, "GET", "/file", h_file, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/stream", h_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigstream", h_bigstream, NULL, NULL);
 
     int wfd = open(FPATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, FDATA, sizeof(FDATA) - 1) != (ssize_t)(sizeof(FDATA) - 1)) {
@@ -125,6 +175,10 @@ int main(void) {
                                  FDATA, sizeof(FDATA) - 1);
     int stream_ok = file_ok && req(&alloc, &ccfg, "GET", "/stream", NULL, 0,
                                    STREAMB, sizeof(STREAMB) - 1);
+    /* The whole stream arrives (payload plus chunk framing), not a connection cut at the first
+     * full send buffer. */
+    size_t big = stream_ok ? slow_bigstream() : 0;
+    int bigstream_ok = big >= (size_t)BIG_CHUNK * BIG_CHUNKS;
 
     kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
@@ -135,7 +189,12 @@ int main(void) {
     if (!post_ok)   { fprintf(stderr, "smoke-pollcomp-tls: POST/echo (body) FAILED\n"); return 1; }
     if (!file_ok)   { fprintf(stderr, "smoke-pollcomp-tls: GET/file FAILED\n");         return 1; }
     if (!stream_ok) { fprintf(stderr, "smoke-pollcomp-tls: GET/stream FAILED\n");       return 1; }
+    if (!bigstream_ok) {
+        fprintf(stderr, "smoke-pollcomp-tls: GET/bigstream to a slow reader got %zu of %d bytes FAILED\n",
+                big, BIG_CHUNK * BIG_CHUNKS);
+        return 1;
+    }
 
-    printf("smoke-pollcomp-tls: TLS-over-completion roundtrip OK (GET + POST body + file + stream)\n");
+    printf("smoke-pollcomp-tls: TLS-over-completion roundtrip OK (GET + POST body + file + stream + bigstream)\n");
     return 0;
 }
