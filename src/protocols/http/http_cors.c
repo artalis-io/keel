@@ -88,6 +88,12 @@ int kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_
     size_t origin_len;
     const char *origin = kl_http_request_header_len(req, "Origin", &origin_len);
 
+    /* With an origin allowlist every response depends on the request's Origin (whether it is
+     * missing, refused or echoed): say so on all of them, or a shared cache may serve one origin's
+     * answer to another. A wildcard ("*") answer is the same for every origin. */
+    if (config->origin_count > 0)
+        kl_http_response_header(res, "Vary", "Origin");
+
     /* No Origin header: not a cross-origin request, continue */
     if (!origin) return 0;
 
@@ -110,10 +116,6 @@ int kl_http_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_
 
     /* Add CORS headers */
     kl_http_response_header(res, "Access-Control-Allow-Origin", allow_origin);
-    /* An echoed origin makes the response depend on the request's Origin: say so, or a shared cache
-     * may serve this Allow-Origin to a different origin. */
-    if (config->origin_count > 0)
-        kl_http_response_header(res, "Vary", "Origin");
 
     if (config->allow_credentials && config->origin_count > 0)
         kl_http_response_header(res, "Access-Control-Allow-Credentials", "true");

@@ -472,4 +472,20 @@ UTEST(response, send_offset_reset_on_response_reset) {
     kl_http_response_free(&res);
 }
 
+/* Ending a stream on a HEAD response marks it ended. It returned early for HEAD (nothing to write)
+ * before setting stream_ended, so a HEAD stream that reached SENDING never completed: readiness
+ * spun on WRITE, and a completion loop held the slot. */
+UTEST(response, end_stream_on_head_marks_the_stream_ended) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    res.head_request = 1;
+    res.body_mode = KL_HTTP_BODY_STREAM;
+    int rc = kl_http_response_end_stream(&res);
+    int ended = res.stream_ended;
+    kl_http_response_free(&res);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(ended, 1);                         /* was 0 */
+}
+
 UTEST_MAIN();

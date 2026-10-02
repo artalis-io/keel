@@ -8,6 +8,7 @@
 #include <keel/http_router.h>
 #include <keel/http_body_reader.h>
 #include <string.h>
+#include <stdlib.h>
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
@@ -824,6 +825,27 @@ UTEST(h2, server_init_rejects_h2_without_factory) {
     int rc = kl_http_server_init(&srv, &cfg);
     if (rc == 0) kl_http_server_free(&srv);
     ASSERT_EQ(rc, -1);
+}
+
+/* A failed kl_http_server_init frees what it allocated before failing. The parsed PROXY trust list
+ * is allocated early and was freed only by kl_http_server_free, which a caller does not call after
+ * a failed init: every later failure path (here the h2 config without a factory) leaked it. */
+static long g_init_live;
+static void *il_malloc(void *c, size_t n) { (void)c; void *p = malloc(n ? n : 1); if (p) g_init_live++; return p; }
+static void *il_realloc(void *c, void *p, size_t o, size_t n) { (void)c; (void)o; void *q = realloc(p, n ? n : 1); if (q && !p) g_init_live++; return q; }
+static void il_free(void *c, void *p, size_t n) { (void)c; (void)n; if (p) { g_init_live--; free(p); } }
+
+UTEST(h2, failed_server_init_frees_the_proxy_trust_list) {
+    KlAllocator a = { il_malloc, il_realloc, il_free, NULL };
+    KlHttp2ServerConfig h2 = {0};                 /* no factory: init fails after the CIDR parse */
+    KlHttpServerConfig cfg = { .port = 0, .h2 = &h2, .alloc = &a,
+                               .proxy_trusted_cidrs = "10.0.0.0/8,192.168.0.0/16" };
+    static KlHttpServer srv;
+    g_init_live = 0;
+    int rc = kl_http_server_init(&srv, &cfg);
+    if (rc == 0) kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(g_init_live, 0L);                   /* was: the trust list left allocated */
 }
 
 UTEST(h2, cb_on_data_reject) {

@@ -99,6 +99,17 @@ static int http1_request_parser_vtable_valid(const KlHttp1RequestParser *p) {
     return p && p->parse && p->reset && p->destroy;
 }
 
+/* Free the parsed PROXY trust list on a kl_http_server_init failure: a caller does not call
+ * kl_http_server_free after a failed init, so every failure path after the list is allocated
+ * must release it. */
+static void server_init_free_cidrs(KlHttpServer *s) {
+    if (s->proxy_cidrs) {
+        kl_free(&s->alloc_storage, s->proxy_cidrs, (size_t)s->proxy_cidr_count * sizeof(KlCidr));
+        s->proxy_cidrs = NULL;
+        s->proxy_cidr_count = 0;
+    }
+}
+
 int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
@@ -287,6 +298,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].parser = s->config.parser(alloc);
         if (!s->pool.conns[i].parser) {
             s->last_error = KL_ERR_ALLOC;
+            server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
             kl_http_conn_pool_free(&s->pool);
             kl_http_router_free(&s->router);
             return -1;
@@ -299,6 +311,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
             if (p->destroy) p->destroy(p);
             s->pool.conns[i].parser = NULL;
             s->last_error = KL_ERR_INVALID_ARG;
+            server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
             kl_http_conn_pool_free(&s->pool);
             kl_http_router_free(&s->router);
             return -1;
@@ -318,6 +331,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * front, as a TLS config without a factory is. */
     if (s->config.h2 && !s->config.h2->factory) {
         s->last_error = KL_ERR_INVALID_ARG;
+        server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
         kl_http_conn_pool_free(&s->pool);
         kl_http_router_free(&s->router);
         return -1;
@@ -329,6 +343,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
          * sessions allocated yet, so pool_free touches no tls). */
         if (!s->config.tls->factory) {
             s->last_error = KL_ERR_TLS_VTABLE;
+            server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
             kl_http_conn_pool_free(&s->pool);
             kl_http_router_free(&s->router);
             return -1;
@@ -338,6 +353,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
                 s->config.tls->ctx, alloc);
             if (!s->pool.conns[i].tls) {
                 s->last_error = KL_ERR_TLS_INIT;
+                server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
                 kl_http_conn_pool_free(&s->pool);
                 kl_http_router_free(&s->router);
                 return -1;
@@ -351,6 +367,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
                 if (s->pool.conns[i].tls->destroy)
                     s->pool.conns[i].tls->destroy(s->pool.conns[i].tls);
                 s->pool.conns[i].tls = NULL;
+                server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
                 kl_http_conn_pool_free(&s->pool);
                 kl_http_router_free(&s->router);
                 return -1;
@@ -362,6 +379,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * A configured event_provider (e.g. lwIP / EFI) installs its own backend. */
     if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
         s->last_error = KL_ERR_EVENT_INIT;
+        server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
         kl_http_conn_pool_free(&s->pool);
         kl_http_router_free(&s->router);
         return -1;
@@ -388,6 +406,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (!kl_event_ctx_sockets_compatible(&s->ev)) {
         s->last_error = KL_ERR_SOCKET;
         kl_event_ctx_free(&s->ev);
+        server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
         kl_http_conn_pool_free(&s->pool);
         kl_http_router_free(&s->router);
         return -1;
@@ -404,6 +423,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
             if (!s->pool.conns[i].comp_cipher) {
                 s->last_error = KL_ERR_ALLOC;
                 kl_event_ctx_free(&s->ev);
+                server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
                 kl_http_conn_pool_free(&s->pool);
                 kl_http_router_free(&s->router);
                 return -1;
