@@ -115,6 +115,7 @@ kl_http_client_error	http_client.h
 kl_http_client_free	http_client.h
 kl_http_client_last_error	http_client.h
 kl_http_client_pool_acquire	http_client_pool.h
+kl_http_client_pool_acquire_tls	http_client_pool.h
 kl_http_client_pool_discard	http_client_pool.h
 kl_http_client_pool_evict_expired	http_client_pool.h
 kl_http_client_pool_free	http_client_pool.h
@@ -122,6 +123,7 @@ kl_http_client_pool_host_count	http_client_pool.h
 kl_http_client_pool_idle_count	http_client_pool.h
 kl_http_client_pool_init	http_client_pool.h
 kl_http_client_pool_release	http_client_pool.h
+kl_http_client_pool_release_tls	http_client_pool.h
 kl_http_client_request	http_client.h
 kl_http_client_request_pooled	http_client_pool.h
 kl_http_client_request_s	http_client.h
