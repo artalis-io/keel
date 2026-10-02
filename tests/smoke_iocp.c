@@ -554,7 +554,7 @@ int main(void) {
         static char sb[1024];
         int closed = 0;
         int n = raw_get("/shortfile", sb, (int)sizeof sb, 3000, &closed);
-        shortfile_ok = n > 0 && closed;
+        shortfile_ok = closed;                       /* with or without a partial body */
         if (!shortfile_ok) fprintf(stderr, "smoke-iocp: /shortfile: %d bytes, closed=%d\n", n, closed);
     }
 

@@ -126,6 +126,9 @@ typedef struct KlIocpOp {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
     };
     int           watcher_removed;             /* WATCHER: kl_event_del'd; free, don't re-post */
+    int           watch_dead;                  /* WATCHER: its re-post failed (the socket is dead):
+                                                * reported ready on every drain, level-triggered,
+                                                * until kl_event_del, and never re-posted */
     int           watch_rearm;                 /* WATCHER: dispatched; re-post at the next drain, not
                                                 * before the callback has had a chance to consume */
     KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
@@ -567,7 +570,10 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
         tb.Head = op->sendbuf;
         tb.HeadLength = (DWORD)op->send_total;
     }
-    BOOL ok = TransmitFile((SOCKET)op->stream->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
+    /* TransmitFile reads a byte count of 0 as "the whole file": with nothing to send from the
+     * file, pass no file at all, so only the head goes out. */
+    BOOL ok = TransmitFile((SOCKET)op->stream->fd, chunk ? op->file_h : NULL, chunk, 0, &op->ov,
+                           &tb, 0);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING)
         return -1;
     return 0;
@@ -1065,42 +1071,59 @@ static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
  * the drain, so it runs after the driver has delivered the last batch to its callbacks: the socket
  * has had its chance to be drained, and a fresh probe reports the CURRENT readiness rather than
  * repeating the one already handled. */
-static void iocp_watch_rearm_dispatched(KlIocpState *st) {
-    if (st->quiescing) return;
+/* Re-arm every watcher dispatched in the previous drain, and report the dead ones. Returns the
+ * number of KL_COMP_WATCHER events written to `out` (at most `max`). */
+static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, int max) {
+    if (st->quiescing) return 0;
+    int count = 0;
     for (KlIocpWatch *w = st->watches; w; w = w->next) {
         KlIocpOp *op = w->op;
         if (!op || !op->watch_rearm || op->watcher_removed) continue;
-        op->watch_rearm = 0;
-        if (iocp_watch_post(op) < 0) {
-            /* Re-post failed: the op owns no kernel I/O and never will. Leave it in the waiting-to-
-             * re-arm state, retired, so the paths that free exactly that state do: kl_event_del frees
-             * a watch_rearm op directly, and kl_event_close's quiesce pre-pass frees every one. (With
-             * watch_rearm cleared, del would CancelIoEx nothing and close would wait forever.) */
+        if (!op->watch_dead) {
+            op->watch_rearm = 0;
+            if (iocp_watch_post(op) == 0) continue;
+            /* Re-post failed (typically the peer reset the connection): the op owns no kernel I/O
+             * and never will. It stays in the waiting-to-re-arm state, which kl_event_del and
+             * kl_event_close's quiesce pre-pass free directly (with watch_rearm cleared, del would
+             * CancelIoEx nothing and close would wait forever). */
             op->watch_rearm = 1;
-            op->watcher_removed = 1;
+            op->watch_dead = 1;
+        }
+        /* A dead socket is reported ready on every drain, as a readiness backend reports one
+         * (level-triggered), so its owner's next read or write sees the error. Retiring it silently
+         * left the owner waiting for an event that would never come. */
+        if (count < max) {
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_WATCHER;
+            out[count].target = op->watcher_udata;
+            out[count].bytes = (size_t)op->watch_mask;
+            out[count].ok = 1;
+            count++;
         }
     }
+    return count;
 }
 
 static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
 
-    iocp_watch_rearm_dispatched(st);
+    int count = iocp_watch_rearm_dispatched(st, out, max);
+    if (count >= max) return count;
+    if (count > 0) timeout_ms = 0;   /* events are already due: do not wait for more */
 
     OVERLAPPED_ENTRY entries[64];
     ULONG got = 0;
-    ULONG want = (max < 64) ? (ULONG)max : 64;
+    ULONG want = ((ULONG)(max - count) < 64) ? (ULONG)(max - count) : 64;
     BOOL ok = GetQueuedCompletionStatusEx(st->port, entries, want, &got,
                                           (DWORD)timeout_ms, FALSE);
     if (!ok) {
         /* Distinguish an idle tick from a fatal loop error. WAIT_TIMEOUT is the normal
-         * "no completions this tick" case → 0. Anything else (e.g. ERROR_ABANDONED_WAIT_0
+         * "no completions this tick" case. Anything else (e.g. ERROR_ABANDONED_WAIT_0
          * or ERROR_INVALID_HANDLE if the port is closed during shutdown) is a real error →
          * -1, so the run loop stops instead of silently spinning on a dead port. */
-        return (GetLastError() == WAIT_TIMEOUT) ? 0 : -1;
+        return (GetLastError() == WAIT_TIMEOUT) ? count : -1;
     }
 
-    int count = 0;
     for (ULONG i = 0; i < got && count < max; i++) {
         KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
         DWORD bytes = entries[i].dwNumberOfBytesTransferred;
@@ -1301,8 +1324,15 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             count++;
             iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE: one chunk of a (possibly multi-chunk) TransmitFile. */
+            /* What this chunk was asked to send: the head rides the first chunk only. A completion
+             * short of it means the file ended early (it shrank after the response was sized): the
+             * body can no longer match its Content-Length, so the write fails and the connection
+             * closes, rather than being reported complete and left waiting on bytes never sent. */
+            uint64_t expect = (uint64_t)op->file_chunk + (op->file_done == 0 ? op->send_total : 0);
+            int short_chunk = (uint64_t)bytes < expect;
             op->file_done += op->file_chunk;
             if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post */
+            if (short_chunk) bytes = 0;
             if (bytes > 0 && op->file_done < op->file_total) {
                 /* More file to send: re-post the next offset-advancing chunk (file-only);
                  * do NOT surface until the whole head+file is out (the driver sees full
@@ -1322,7 +1352,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].kind = KL_COMP_WRITE;
             out[count].target = op->stream;
             out[count].bytes = bytes;
-            out[count].ok = (bytes > 0);
+            out[count].ok = (bytes > 0 || expect == 0);   /* expect 0: an empty head and no file */
             count++;
             iocp_op_free(op);
         }

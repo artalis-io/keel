@@ -480,9 +480,12 @@ static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     return 0;
 }
 
-static void pc_set_blocking(KlSocketHandle fd) {
+/* Accepted sockets are non-blocking: every op here is completed from a poll() result, and a
+ * blocking send of a body larger than the socket buffer, to a peer that stopped reading, would
+ * stall the whole loop inside pc_complete. Each op already treats EAGAIN as "poll again". */
+static void pc_set_nonblocking(KlSocketHandle fd) {
     int fl = fcntl(fd, F_GETFL, 0);
-    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
 /* Complete a ready op into `ev`. Returns 1 if `ev` was filled (op done → remove),
@@ -500,7 +503,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
             if (fdf >= 0) (void)fcntl(a, F_SETFD, fdf | FD_CLOEXEC);
         }
         if (a < 0) return 0;                 /* EAGAIN/spurious: keep the accept op */
-        pc_set_blocking(a);
+        pc_set_nonblocking(a);
         ev->kind = KL_COMP_ACCEPT;
         ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */
         ev->ok = 1;
