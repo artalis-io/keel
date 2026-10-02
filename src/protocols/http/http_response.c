@@ -718,7 +718,10 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
 
 int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_error) return -1;
-    if (res->head_request) return 0;
+    if (res->head_request) {          /* no body to end, but the stream is over all the same */
+        res->stream_ended = 1;
+        return 0;
+    }
 
     if (res->drain_enabled) {
         if (kl_drain_write(&res->drain, "0\r\n\r\n", 5) < 0) {

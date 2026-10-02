@@ -786,8 +786,9 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                         c->res.keep_alive = 0;
                         return c->state;
                     }
-                    c->state = KL_HTTP_CONN_CLOSED;
-                    return c->state;
+                    /* Bytes that came with the headers fail as they would in a later read: 413,
+                     * then the drain (closing outright reset the client with no response). */
+                    return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
                 }
                 if (rc == 1) {
                     c->request_body_complete = 1;   /* terminal chunk in the leftover */
@@ -823,8 +824,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                     c->res.keep_alive = 0;
                     return c->state;
                 }
-                c->state = KL_HTTP_CONN_CLOSED;
-                return c->state;
+                /* As in a later read: 413, then the drain. */
+                return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
             }
             if (bpr == KL_HTTP1_PARSE_OK) {
                 c->request_body_complete = 1;       /* the leftover held the whole body */
@@ -882,8 +883,9 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 int rc = kl_http1_chunked_decode(&c->chunked_dec,
                             leftover_buf, leftover_len, NULL);
                 if (rc < 0) {
-                    c->state = KL_HTTP_CONN_CLOSED;
-                    return c->state;
+                    /* Bytes that came with the headers fail as they would in a later read: 413,
+                     * then the drain (closing outright reset the client with no response). */
+                    return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
                 }
                 if (c->max_body_size > 0 &&
                     c->chunked_dec.total_body > c->max_body_size) {
@@ -903,8 +905,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
             (void)body_consumed;
 
             if (bpr == KL_HTTP1_PARSE_ERROR) {
-                c->state = KL_HTTP_CONN_CLOSED;
-                return c->state;
+                /* As in a later read: 413, then the drain. */
+                return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
             }
             if (bpr == KL_HTTP1_PARSE_OK) {
                 c->request_body_complete = 1;       /* the leftover held the whole body */

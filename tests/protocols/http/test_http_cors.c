@@ -234,8 +234,12 @@ UTEST(cors, middleware_disallowed_origin) {
     kl_http_response_init(&res, &a);
 
     int rc = kl_http_cors_middleware(&req, &res, &c);
-    ASSERT_EQ(rc, 0);  /* continues, but no CORS headers */
-    ASSERT_EQ(res.hdr_len, (size_t)0);
+    ASSERT_EQ(rc, 0);  /* continues, but grants nothing (only Vary: Origin, see below) */
+    char hdrs[512];
+    size_t hn = res.hdr_len < sizeof hdrs - 1 ? res.hdr_len : sizeof hdrs - 1;
+    memcpy(hdrs, res.hdr_buf, hn);
+    hdrs[hn] = '\0';
+    ASSERT_TRUE(strstr(hdrs, "Access-Control-Allow-Origin") == NULL);
 
     kl_http_response_free(&res);
 }
@@ -280,8 +284,12 @@ UTEST(cors, middleware_preflight_disallowed) {
     kl_http_response_init(&res, &a);
 
     int rc = kl_http_cors_middleware(&req, &res, &c);
-    ASSERT_EQ(rc, 0);  /* disallowed origin: no CORS, no preflight */
-    ASSERT_EQ(res.hdr_len, (size_t)0);
+    ASSERT_EQ(rc, 0);  /* disallowed origin: no CORS grant, no preflight (only Vary: Origin) */
+    char hdrs[512];
+    size_t hn = res.hdr_len < sizeof hdrs - 1 ? res.hdr_len : sizeof hdrs - 1;
+    memcpy(hdrs, res.hdr_buf, hn);
+    hdrs[hn] = '\0';
+    ASSERT_TRUE(strstr(hdrs, "Access-Control-") == NULL);
 
     kl_http_response_free(&res);
 }

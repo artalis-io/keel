@@ -339,6 +339,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     records already held by the TLS engine after the reader paused. It now stops at the pause.
   - **A finished plaintext stream on a completion loop could hold its slot.** The timeout sweep now
     releases a sending, drain-enabled stream that has nothing left in flight.
+- **HTTP server Lows (seventeenth audit).**
+  - **A body rejected inside the bytes read with the headers closed the connection with no
+    response.** A reader refusing data, an over-limit body or a malformed chunk in that leftover got
+    no 413 and no drain, unlike the same rejection a read later. It is now answered 413, the same way.
+  - **CORS: `Vary: Origin` was sent only when the origin was allowed.** Responses to a missing or
+    disallowed Origin vary by Origin too, so a cache could serve an allowed origin's response to
+    another. With an allowlist configured, every response now carries `Vary: Origin`.
+  - **A HEAD stream never finished.** `kl_http_response_end_stream` returned early for HEAD without
+    marking the stream ended, so a streamed HEAD response stayed in SENDING.
+  - **`kl_http_server_init` leaked the PROXY-protocol trust list** on every failure after building
+    it.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
