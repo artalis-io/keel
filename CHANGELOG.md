@@ -322,6 +322,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     names (and `/`) are now refused.
   - **The Windows wakeup pair kept Nagle on**, so a signal could wait for a delayed ACK (up to
     ~200 ms). It now sets `TCP_NODELAY`.
+- **An early rejection of a keep-alive request could be cut off by a client that over-sent.** When
+  pre-body middleware rejected a request (401, 413, 415), the server counted the bytes already read
+  past the headers only up to Content-Length, so a client that sent more than it declared was not
+  seen to have done so: the connection then closed on unread bytes and the client could get a reset
+  instead of the response. The bytes are now counted as they are, and the over-send is drained.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
