@@ -571,11 +571,13 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
 
     /* Body bytes that arrived with the headers belong to this request's body: account them, as the
      * body phase does (kl_http_conn_ingest_body), so a drain that starts later knows how much is
-     * still outstanding. A Content-Length body counts at most its declared length: what follows it
-     * in this read is already out of the kernel, so it cannot be reset away and must not look like
-     * an over-send. Chunked framing is the decoder's to finish (request_body_complete below). */
+     * still outstanding. On a keep-alive connection a Content-Length body counts at most its declared
+     * length: what follows it is the next pipelined request, not an over-send. On a connection that
+     * will close, every byte read is this request's, and counting past the declared length is how
+     * kl_http_conn_begin_drain sees an over-send (and drains it rather than resetting it away).
+     * Chunked framing is the decoder's to finish (request_body_complete below). */
     if (leftover_len > 0) {
-        if (c->req.chunked)
+        if (c->req.chunked || !c->req.keep_alive)
             c->request_body_received += (uint64_t)leftover_len;
         else if (c->req.content_length > 0)
             c->request_body_received += (uint64_t)leftover_len < (uint64_t)c->req.content_length
