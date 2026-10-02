@@ -251,6 +251,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A full send buffer ended a plaintext HTTP/2 server connection.** The server's socket writer
+  returned the socket's -1 when a send would block, and the session treats any -1 from its send
+  callback as fatal, so a slow reader of a large response lost the whole connection (every stream on
+  it). A would-block on plaintext is now reported as "nothing sent yet", as TLS already reports
+  WANT_WRITE: the session keeps the bytes and WRITE interest sends them once the socket drains.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
