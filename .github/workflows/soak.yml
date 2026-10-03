@@ -64,12 +64,15 @@ jobs:
       - name: Install deps (Linux)
         if: runner.os == 'Linux' && matrix.deps != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
+      - name: Install timeout (macOS)
+        if: runner.os == 'macOS'
+        run: brew list coreutils >/dev/null 2>&1 || brew install coreutils   # gtimeout
       - name: Build
         run: make ${{ matrix.build }}
       - name: Soak
-        run: sh tools/soak.sh "$ROUNDS" 900 ${{ matrix.target }}
+        run: sh tools/soak.sh "$ROUNDS" 600 ${{ matrix.target }}
       - name: Keep failing logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: soak-${{ matrix.os }}-${{ strategy.job-index }}
@@ -94,7 +97,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64
           release: false
@@ -105,7 +108,7 @@ jobs:
       - name: Soak
         run: sh tools/soak.sh "$(( (ROUNDS + 3) / 4 ))" 2400 ${{ matrix.target }}
       - name: Keep failing logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: soak-windows-${{ strategy.job-index }}
@@ -131,6 +134,10 @@ jobs:
             deps: "liburing-dev"
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    env:
+      # DEBUG_CFLAGS has no -fno-sanitize-recover: without this a UBSan report prints and the test
+      # still exits 0, so the soak could not fail on undefined behaviour.
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install deps
@@ -144,7 +151,7 @@ jobs:
       - name: Soak (sanitized)
         run: sh tools/soak.sh "$(( (ROUNDS + 3) / 4 ))" 1800 ${{ matrix.target }}
       - name: Keep failing logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: soak-sanitized-${{ strategy.job-index }}
@@ -170,7 +177,7 @@ jobs:
           ./fuzz/fuzz_${{ matrix.target }} fuzz/corpus_${{ matrix.target }}/ \
             -max_total_time="$FUZZ_SECONDS" -print_final_stats=1 -artifact_prefix=crashes/
       - name: Keep crash inputs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-crash-${{ matrix.target }}

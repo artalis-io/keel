@@ -207,7 +207,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # NOTE: SHA-pin this to match the repo's action-pinning policy.
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64
           release: false
@@ -273,7 +273,7 @@ jobs:
       # and its gates call. UCRT64 rather than MINGW64 because no MinGW compiler is wanted in this job:
       # if a MinGW gcc were on PATH, a mistake in the toolchain mapping could silently fall back to it
       # and this job would pass while proving nothing.
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           release: false
@@ -330,7 +330,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # NOTE: SHA-pin this to match the repo's action-pinning policy.
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64
           release: false
@@ -797,9 +797,11 @@ jobs:
       # lwip-contrib (unix port) lives only on Savannah (the GitHub mirror is gone), and Savannah
       # intermittently answers HTTP 500. Pin it to one commit (reproducible) and cache that tree,
       # so a Savannah outage no longer fails the job; on a cache miss, fetch with retries.
-      - name: Cache lwip-contrib (pinned)
+      # Restore and save are separate steps: actions/cache saves only when the whole job passes, so a
+      # later lwIP test failure would leave a fresh fetch uncached and the next run on Savannah again.
+      - name: Restore lwip-contrib (pinned)
         id: contrib-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/lwip-contrib
           key: lwip-contrib-058e53d5b3a5a4639823e6f7cdc96f832643bfab
@@ -817,6 +819,13 @@ jobs:
             echo "lwip-contrib fetch failed (attempt $i), retrying"; sleep $((i * 15))
           done
           test "$(git -C "$HOME/lwip-contrib" rev-parse HEAD)" = "$CONTRIB_SHA"
+
+      - name: Save lwip-contrib (right after a verified fetch)
+        if: steps.contrib-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/lwip-contrib
+          key: lwip-contrib-058e53d5b3a5a4639823e6f7cdc96f832643bfab
 
       - name: Fetch lwIP (BYO, not vendored)
         timeout-minutes: 5
@@ -935,7 +944,7 @@ jobs:
         shell: msys2 {0}
     steps:
       # NOTE: SHA-pin this to match the repo's action-pinning policy.
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64
           release: false

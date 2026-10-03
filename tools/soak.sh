@@ -17,16 +17,24 @@ set -u
 rounds=$1; limit=$2; shift 2
 out=${SOAK_DIR:-soak-out}
 mkdir -p "$out"
+# GNU timeout, or gtimeout (Homebrew coreutils on macOS). Without either a hang is never reported
+# as one: the job's own time limit kills it instead, with no tally.
+tmo=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+[ -n "$tmo" ] || echo "soak: no timeout/gtimeout: rounds run without a time limit" >&2
 : > "$out/failures.txt"
 bad=0
 
 i=1
 while [ "$i" -le "$rounds" ]; do
     log="$out/round-$i.log"
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$limit" make "$@" > "$log" 2>&1; rc=$?
+    if [ -n "$tmo" ]; then
+        "$tmo" "$limit" make "$@" > "$log" 2>&1; rc=$?
     else
         make "$@" > "$log" 2>&1; rc=$?
+    fi
+    # A sanitizer report fails the round even when the binary exited 0 (a recovering UBSan build).
+    if [ "$rc" -eq 0 ] && grep -qE 'runtime error:|SUMMARY: [A-Za-z]+Sanitizer' "$log"; then
+        rc=99
     fi
     if [ "$rc" -eq 124 ]; then
         echo "HANG round $i" >> "$out/failures.txt"
@@ -36,7 +44,7 @@ while [ "$i" -le "$rounds" ]; do
         # One line per failed test (utest prints it with the duration once, then again in a list).
         grep -E '^\[  FAILED  \] [a-z_0-9]+\.[a-z_0-9]+ \(' "$log" \
             | sed -E 's/^\[  FAILED  \] ([a-z_0-9.]+) .*/FAIL \1/' >> "$out/failures.txt"
-        grep -E 'Segmentation fault|Aborted|SUMMARY: [A-Za-z]+Sanitizer' "$log" \
+        grep -E 'Segmentation fault|Aborted|SUMMARY: [A-Za-z]+Sanitizer|runtime error:' "$log" \
             | sed -E "s/^/CRASH round $i: /" >> "$out/failures.txt"
         echo "=== round $i failed (rc $rc)"
         bad=$((bad + 1))
