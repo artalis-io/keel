@@ -177,4 +177,68 @@ UTEST(gz_compress, output_is_freed_at_its_own_size) {
     ASSERT_EQ(g_size_mismatch, 0);
 }
 
+/* A stream whose back-references reach further than 4 KiB. dfeed decompressed into a 4 KiB buffer
+ * used as a wrapping dictionary that restarted at every call, but deflate distances reach 32 KiB:
+ * any match more than 4 KiB back read garbage and the CRC check failed. Real responses (HTML, JSON)
+ * repeat at such distances, and the buffered client path decompresses through dfeed. The body is a
+ * repeating 8 KiB pattern, so the compressor emits 8 KiB-distance matches; it must come back whole,
+ * fed in one call and fed in pieces. */
+typedef struct { char *buf; size_t len, cap; } BigSink;
+static int big_emit(void *ctx, const char *d, size_t n) {
+    BigSink *s = ctx;
+    if (s->len + n > s->cap) return -1;
+    memcpy(s->buf + s->len, d, n);
+    s->len += n;
+    return 0;
+}
+
+UTEST(gz_stream, long_distance_matches_round_trip) {
+    KlAllocator al = kl_allocator_default();
+    enum { PERIOD = 8192, N = 200000 };
+    char *body = malloc(N);
+    ASSERT_TRUE(body != NULL);
+    unsigned x = 12345;
+    char pat[PERIOD];
+    for (size_t i = 0; i < PERIOD; i++) { x = x * 1103515245u + 12345u; pat[i] = (char)('a' + (x >> 16) % 26); }
+    for (size_t i = 0; i < N; i++) body[i] = pat[i % PERIOD];
+
+    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6, &al);
+    ASSERT_TRUE(cctx != NULL);
+    KlCompress *c = kl_compress_miniz_create(cctx, &al);
+    ASSERT_TRUE(c != NULL);
+    char *gz = NULL;
+    size_t gz_len = 0;
+    ASSERT_EQ(0, c->compress(c, body, N, &gz, &gz_len, &al));
+    c->destroy(c);
+    ASSERT_LT(gz_len, (size_t)N / 4);             /* the 8 KiB matches were used */
+
+    int whole_rc, piece_rc = 0, whole_ok, piece_ok;
+    BigSink s = { malloc(N), 0, N };
+    {
+        KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+        whole_rc = d->dfeed(d, gz, gz_len, 1, big_emit, &s);
+        done(d, ctx);
+        whole_ok = whole_rc == 0 && s.len == N && memcmp(s.buf, body, N) == 0;
+    }
+    s.len = 0;
+    {
+        KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+        for (size_t off = 0; off < gz_len && piece_rc == 0; off += 1000) {
+            size_t n = gz_len - off < 1000 ? gz_len - off : 1000;
+            piece_rc = d->dfeed(d, gz + off, n, 0, big_emit, &s);
+        }
+        if (piece_rc == 0) piece_rc = d->dfeed(d, NULL, 0, 1, big_emit, &s);
+        done(d, ctx);
+        piece_ok = piece_rc == 0 && s.len == N && memcmp(s.buf, body, N) == 0;
+    }
+    kl_free(&al, gz, gz_len);
+    kl_compress_miniz_ctx_destroy(cctx);
+    free(s.buf);
+    free(body);
+    ASSERT_EQ(whole_rc, 0);                       /* was -1: CRC mismatch */
+    ASSERT_TRUE(whole_ok);
+    ASSERT_EQ(piece_rc, 0);
+    ASSERT_TRUE(piece_ok);
+}
+
 UTEST_MAIN()
