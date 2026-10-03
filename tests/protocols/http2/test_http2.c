@@ -1496,6 +1496,56 @@ UTEST(h2, upgrade_from_h1_answers_the_request_on_stream_1) {
     test_teardown();
 }
 
+/* Stream 1 does not run the pre-body middleware again (it ran in the HTTP/1.1 phase), so it must
+ * carry what that middleware left: req->ctx (the documented way to hand data to the handler) and the
+ * response headers it added (CORS, say). Stream 1 was built from a fresh request and response, so the
+ * handler saw ctx NULL and the HTTP/2 response lacked the headers. */
+static int ieq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+        char y = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+        if (x != y) return 0;
+    }
+    return *a == *b;
+}
+static void *g_seen_ctx;
+static void ctx_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)ud;
+    handler_called++;
+    g_seen_ctx = req->ctx;
+    kl_http_response_json(res, 200, "{}", 2);
+}
+
+UTEST(h2, upgrade_keeps_the_http1_middleware_state) {
+    test_setup();
+    kl_http_router_add(&test_router, "GET", "/test", ctx_handler, NULL, NULL);
+    MockH2Session mock; mock_init(&mock); mock.with_upgrade = 1; g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAMAAABk", 0);
+    static int marker;
+    conn.req.ctx = &marker;                       /* as an auth middleware would set it */
+    ASSERT_EQ(kl_http_response_init(&conn.res, &test_alloc), 0);
+    ASSERT_EQ(kl_http_response_header(&conn.res, "X-Mw", "ran"), 0);   /* as CORS would */
+    g_seen_ctx = NULL;
+
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int found = 0;
+    for (int i = 0; i < mock.last_num_headers && i < 16; i++)
+        if (ieq(mock.last_hdr_names[i], "x-mw") &&
+            strcmp(mock.last_hdr_values[i], "ran") == 0) found = 1;
+    void *seen = g_seen_ctx;
+    kl_http2_server_cleanup(&conn);
+    kl_http_response_free(&conn.res);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_TRUE(seen == &marker);                 /* was NULL */
+    ASSERT_EQ(found, 1);                          /* was 0: the header was dropped */
+}
+
 /* Declined before anything is written: no HTTP2-Settings, a request body, or a session that
  * cannot take an upgrade. */
 static void declined_case(int *utest_result, const char *settings, size_t body, int with_upgrade) {

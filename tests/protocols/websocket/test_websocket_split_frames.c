@@ -692,4 +692,47 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
     ASSERT_TRUE(stream_well_formed(rx, got));       /* was: a frame header inside a payload */
 }
 
+/* Once the server has stopped sending (close_sent: it sent a Close, or a cut-short frame left the
+ * stream unusable), the automatic PONG must not be written either: after a cut frame it would land
+ * inside the cut payload, the very desync close_sent guards against. The server closes from
+ * on_message; the client's PING arrives in the same read, right after. */
+static void close_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
+    (void)data; (void)len; (void)is_binary; (void)ud;
+    (void)kl_ws_server_close(ws, 1000, NULL, 0);
+}
+
+UTEST(ws_server_send, no_pong_after_the_server_stopped_sending) {
+    static Srv s;
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_http_server_init(&s.srv, &cfg), 0);
+    kl_ws_server_config_init(&s.ws_cfg);
+    s.ws_cfg.callbacks.on_message = close_on_message;
+    ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
+    ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
+    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s.port = s.srv.bound_port;
+
+    int saw_close = 0, saw_pong = 0;
+    KlSocketHandle fd = ws_open_raw(s.port);
+    if (kl_handle_valid(fd)) {
+        unsigned char f[64];
+        size_t fl = build_masked(f, 0x1, (const unsigned char *)"bye", 3);
+        fl += build_masked(f + fl, 0x9, (const unsigned char *)"p", 1);   /* PING, same write */
+        (void)send_all(fd, f, fl);
+        for (int i = 0; i < 4; i++) {               /* read what the server sends, to EOF/timeout */
+            int op = -1; size_t got = 0; static unsigned char pl[256];
+            if (read_frame(fd, &op, pl, sizeof pl, &got) != 0) break;
+            if (op == 0x8) saw_close = 1;
+            if (op == 0xA) saw_pong = 1;
+        }
+        kl_test_closesock(fd);
+    }
+    srv_stop(&s);
+    ASSERT_EQ(saw_close, 1);
+    ASSERT_EQ(saw_pong, 0);                         /* was 1: PONG written after the stop */
+}
+
 UTEST_MAIN();

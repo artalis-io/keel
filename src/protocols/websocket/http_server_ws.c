@@ -458,8 +458,9 @@ static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
     if (ws->config->callbacks.on_ping) {
         ws->config->callbacks.on_ping(ws, (const char *)payload, len,
                                        ws->config->user_data);
-    } else {
-        /* Auto-pong */
+    } else if (!ws->close_sent) {
+        /* Auto-pong, unless the server has stopped sending: after its Close, or after a frame the
+         * socket cut short (W26), another frame would be written behind it (into the cut payload). */
         ws_send_frame(ws, KL_WS_OP_PONG, (const char *)payload, len);
     }
     return 0;

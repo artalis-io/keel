@@ -277,6 +277,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   bracket IPv6 (`::1:8443`). The HTTP client's own fix appended the URL's port to an `http+unix`
   request, whose port is 0. All three clients now share one builder: IPv6 bracketed, the port only
   when it is not the scheme's default, and no port for a socket path.
+- **An h2c upgrade dropped what the HTTP/1.1 middleware set, and a WebSocket server could pong after
+  its Close.** The HTTP/2 stream that answers an `Upgrade: h2c` request was built fresh, so the
+  pre-body middleware's `req->ctx` and the response headers it had added (CORS, for one) were lost on
+  the upgraded response; both are now carried over to stream 1. And a Ping that arrived after the
+  server had sent its Close (or stopped sending after a cut frame) was still answered with a Pong,
+  a data frame after the Close (RFC 6455 §5.5.1) or a frame after a broken one; it is no longer
+  answered once the server has stopped sending.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
