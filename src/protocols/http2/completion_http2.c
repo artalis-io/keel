@@ -45,7 +45,7 @@ static kl_ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len)
  * memory-BIO ring for TLS), then read more. The h2 session vtable and kl_http2_server_feed
  * are reused verbatim; this only inverts the transport, exactly as the HTTP/1.1 path
  * does. For TLS the received ciphertext was already fed to the engine (kl_comp_drain);
- * loop on pending() so coalesced records aren't stranded. */
+ * read until WANT_READ so coalesced records aren't stranded. */
 void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         /* Decrypt + feed every currently-available record (the h2 session writes its
@@ -63,7 +63,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
                 kl_comp_close_after_output(s, c);
                 return;
             }
-            if (!c->tls->pending || c->tls->pending(c->tls) == 0) break;
+            /* Read again until WANT_READ: pending() misses whole records held as ciphertext. */
         }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
         kl_comp_recv_after_output(s, c);

@@ -38,10 +38,8 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
             if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → queue */
             /* Closing (a Close frame answered or sent): close once the queued frames are out. */
             if (st != KL_HTTP_CONN_WEBSOCKET) { kl_comp_close_after_output(s, c); return; }
-            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
-                if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-                return;
-            }
+            /* Read again until WANT_READ (which posts the recv): pending() counts only the current
+             * record's decrypted remainder, not whole records the engine holds as ciphertext. */
         }
     }
     /* Plaintext: the received frame bytes are already in read_buf; the callbacks emit

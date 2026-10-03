@@ -635,11 +635,8 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
             c->comp_in_body_drive = 0;
             if (st != KL_HTTP_CONN_READING_BODY) { comp_after_state(s, c, st); return; }
             if (c->stream.read_paused) return;         /* paused by on_data: post nothing */
-            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
-                if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-                return;                                /* more body needs the network */
-            }
-            /* else: another record is already buffered; decrypt the next chunk */
+            /* Read again rather than ask pending(), which misses whole records still held as
+             * ciphertext: the read decrypts the next one, or says WANT_READ (posting the recv). */
         }
     }
 
@@ -658,11 +655,8 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
         }
         c->stream.read_len += (size_t)p;
         if (comp_try_reading(s, c) == 0) return;       /* dispatched / acted / closed */
-        if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
-            if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-            return;                                    /* more headers need the network */
-        }
-        /* else: more buffered; loop and decrypt the next record */
+        /* More headers needed: read again (as above, not pending(), which misses whole records
+         * held as ciphertext); WANT_READ posts the recv. */
     }
 }
 
@@ -1014,8 +1008,12 @@ void kl_http_comp_post_read(struct KlHttpConn *c) {
     if (c->state != KL_HTTP_CONN_READING_BODY || c->comp_recv_posted || c->comp_in_body_drive)
         return;
     struct KlHttpServer *s = server_of_ctx(c->stream.ctx);
-    if (c->tls && c->tls->pending && c->tls->pending(c->tls) > 0) {
-        comp_tls_drive(s, c);                   /* decrypted records held while paused */
+    /* With TLS, drive the engine first: records that arrived while paused may be held in it, and
+     * pending() counts only the current record's decrypted remainder (mbedTLS, OpenSSL), not whole
+     * records still held as ciphertext. The drive posts a network recv itself once the engine wants
+     * more; a recv posted here instead would wait for bytes the client may never send again. */
+    if (c->tls) {
+        comp_tls_drive(s, c);
         return;
     }
     if (kl_comp_post_recv(c) < 0)
