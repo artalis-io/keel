@@ -490,7 +490,8 @@ UTEST(dgram_recv, readiness_pause_inside_delivery) {
  * never returned and timers and other sockets starved. The fake cursor holds 8 views and refills
  * from an endless "kernel" while allowed; what the cursor already holds must still be delivered
  * (the socket may not signal those again), but no new refill once the budget is spent. */
-typedef struct { int in_cursor; int refills; int pulls; } ViewCtx;
+/* rd first: arm/disarm and view_pull share the recv's hook context, so it is a ViewCtx read as RdCtx. */
+typedef struct { RdCtx rd; int in_cursor; int refills; int pulls; } ViewCtx;
 static int view_pull_flood(void *ctx, KlDgramRxView *v, int allow_refill) {
     ViewCtx *c = ctx;
     if (++c->pulls > 100000) return 0;             /* safety stop: the unbounded drive */
@@ -510,10 +511,11 @@ UTEST(dgram_recv, readiness_batch_drain_is_bounded) {
     KlAllocator a = kl_allocator_default();
     KlDgramInbound slots; ASSERT_EQ(kl_dgram_inbound_init(&slots, &a, 64), 0);
     KlDgramRecv r;
-    RdCtx rd = { .slots = &slots, .avail = 0, .payload = "D", .plen = 1 };
-    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &rd), 0);
-    ViewCtx vc = { 0, 0, 0 };
-    kl_dgram_recv_set_view_pull(&r, view_pull_flood, &vc);
+    ViewCtx vc;
+    memset(&vc, 0, sizeof vc);
+    vc.rd.slots = &slots; vc.rd.payload = "D"; vc.rd.plen = 1;
+    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &vc.rd), 0);
+    kl_dgram_recv_set_view_pull(&r, view_pull_flood, NULL);   /* keeps the shared hook context */
     reset_deliver(&r, ACT_NONE, 0);
     ASSERT_EQ(kl_dgram_recv_start(&r), 0);
     ASSERT_EQ(kl_dgram_recv_on_readable(&r), 0);
