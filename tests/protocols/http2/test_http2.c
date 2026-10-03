@@ -1571,6 +1571,43 @@ UTEST(h2, upgrade_from_h1_declined_without_settings)   { declined_case(utest_res
 UTEST(h2, upgrade_from_h1_declined_with_a_body)        { declined_case(utest_result, "AAMAAABk", 5, 1); }
 UTEST(h2, upgrade_from_h1_declined_without_upgrade_op) { declined_case(utest_result, "AAMAAABk", 0, 0); }
 
+/* An HTTP/2 response never carries a connection-specific header (RFC 9113 8.2.2): a client resets
+ * the stream as malformed. The response filter dropped Connection, Transfer-Encoding and Keep-Alive
+ * only; Upgrade, Proxy-Connection and TE went out. Stream 1 of an h2c upgrade now also carries what
+ * the HTTP/1.1-phase middleware set, and a middleware advertising h2c sets Upgrade there. */
+static void hop_headers_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Upgrade", "h2c");
+    kl_http_response_header(res, "Proxy-Connection", "keep-alive");
+    kl_http_response_header(res, "TE", "trailers");
+    kl_http_response_header(res, "X-Kept", "1");
+    (void)kl_http_response_body_copy(res, "ok", 2);
+}
+UTEST(h2, connection_specific_response_headers_are_not_sent) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "GET", "/hop", hop_headers_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/hop", 4, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+    int forbidden = 0, kept = 0;
+    for (int i = 0; i < mock.last_num_headers && i < 16; i++) {
+        const char *n = mock.last_hdr_names[i];
+        if (ieq(n, "upgrade") || ieq(n, "proxy-connection") || ieq(n, "te")) forbidden++;
+        if (ieq(n, "x-kept")) kept++;
+    }
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(forbidden, 0);                      /* was 3 */
+    ASSERT_EQ(kept, 1);
+}
+
 /* A session that refuses the settings (nghttp2 rejects an out-of-range value, or more settings than
  * the adapter takes) is asked before the 101, so the request is still answered over HTTP/1.1. The
  * 101 went out first, and the refusal then closed the connection with no response at all. */

@@ -114,6 +114,19 @@ UTEST(gz_trailer, truncated_trailer_flush_rejected) {
     done(d, ctx);
 }
 
+/* A gzip body that ends inside its own 10-byte header is truncated, not empty: at end of input
+ * (flush) it fails. It was accepted as an empty body, which the client then reported as success. */
+UTEST(gz_trailer, truncated_header_flush_rejected) {
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int fed = d->dfeed(d, (const char *)GZ, 5, 0, sink_emit, &s);   /* half the header */
+    int fin = d->dfeed(d, NULL, 0, 1, sink_emit, &s);               /* and then the end */
+    done(d, ctx);
+    ASSERT_EQ(fed, 0);
+    ASSERT_EQ(fin, -1);                           /* was 0: an empty body, accepted */
+}
+
 /* A trailer split across feeds (with no flush until the end) is captured and verified. */
 UTEST(gz_trailer, split_trailer_across_feeds_ok) {
     KlAllocator al = kl_allocator_default();
