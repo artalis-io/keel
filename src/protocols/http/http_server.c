@@ -284,6 +284,13 @@ static int server_accept_listener_start(KlHttpServer *s) {
     return kl_listener_start(&s->accept_listener);
 }
 
+/* A start-up that fails clears running again: it was set at entry (below), and a server that never
+ * started must not read as running. */
+static int server_start_failed(KlHttpServer *s) {
+    kl_atomic_store_int(&s->running, 0);
+    return -1;
+}
+
 int kl_http_server_run(KlHttpServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
     (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
@@ -296,21 +303,21 @@ int kl_http_server_run(KlHttpServer *s) {
     kl_atomic_store_int(&s->draining, 0);
 
     if (kl_http_server_bind_listener(s) < 0)
-        return -1;
+        return server_start_failed(s);
 
     /* An adopted fd (socket activation) is already listening; don't re-listen. */
     if (s->config.listen_fd <= 0 && kl_sock_listen(s->ev.sockets, s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
         kl_http_server_close_listener(s);
-        return -1;
+        return server_start_failed(s);
     }
 
     if (kl_sock_set_nonblocking(s->ev.sockets, s->listen_fd) < 0) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "fcntl");
         s->last_error = KL_ERR_SOCKET;
         kl_http_server_close_listener(s);
-        return -1;
+        return server_start_failed(s);
     }
 
     /* Register listen socket for read events */
@@ -318,7 +325,7 @@ int kl_http_server_run(KlHttpServer *s) {
         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "event_add listen");
         s->last_error = KL_ERR_EVENT_ADD;
         kl_http_server_close_listener(s);
-        return -1;
+        return server_start_failed(s);
     }
     s->listen_registered = 1;   /* the readiness listener's arm hook treats this as already armed */
 
@@ -345,7 +352,7 @@ int kl_http_server_run(KlHttpServer *s) {
     if (!kl_atomic_int_is_lock_free(&s->running)) {
         s->last_error = KL_ERR_UNSUPPORTED;
         kl_http_server_close_listener(s);
-        return -1;
+        return server_start_failed(s);
     }
     kl_http_server_plat_signals_install(s);
 
@@ -365,7 +372,7 @@ int kl_http_server_run(KlHttpServer *s) {
         if (server_accept_listener_start(s) < 0) {
             s->last_error = KL_ERR_EVENT_ADD;
             kl_http_server_close_listener(s);
-            return -1;
+            return server_start_failed(s);
         }
         s->accept_via_listener = 1;
     }

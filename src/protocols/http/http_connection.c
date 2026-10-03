@@ -763,6 +763,14 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
              * downstream API misuse (direct KlHttpRoute mutation) in
              * debug builds without runtime cost in release. */
             assert(c->route->streaming_handler);
+            /* Keep the head first: the handler may suspend (kl_async_suspend) and, on resume, ask
+             * for the body (kl_http_request_await_body), which is then read into read_buf over a
+             * head its request still points at. Nothing has reached the reader yet, so a failed
+             * copy can still end it the documented way. */
+            if (conn_preserve_head(c) < 0) {
+                c->req.body_reader->on_error(c->req.body_reader);
+                return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
+            }
             KlHttpConnState s = conn_invoke_streaming_handler(c);
             if (s != KL_HTTP_CONN_READING_BODY) {
                 /* Handler completed synchronously (sent a response,
@@ -867,8 +875,12 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
                 return s;
         }
 
-        if (conn_preserve_head(c) < 0)        /* the body is about to reuse read_buf */
+        if (conn_preserve_head(c) < 0) {      /* the body is about to reuse read_buf */
+            /* The reader (and a legacy streaming handler parked on it) ends with on_error, as on
+             * any other failure mid-body, not with only destroy at release. */
+            c->req.body_reader->on_error(c->req.body_reader);
             return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
+        }
         c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
         c->state = KL_HTTP_CONN_READING_BODY;
@@ -1081,6 +1093,8 @@ read_more_body: ;
             return c->state;
         }
         KlHttpConnState bst = kl_http_conn_ingest_body(c, (size_t)nr);
+        /* Drain the decrypted record even when on_data paused: the socket will not signal these bytes
+         * again, so the pause takes hold at the record boundary (http_request.h, pause semantics). */
         if (bst == KL_HTTP_CONN_READING_BODY && c->tls && c->tls->pending(c->tls) > 0
             && ++body_drains < KL_TLS_DRAIN_MAX)
             goto read_more_body;

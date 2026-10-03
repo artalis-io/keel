@@ -110,7 +110,10 @@ static inline KlHttpConn *kl_http_request_conn(const KlHttpRequest *req) {
  * or later from a watcher/timer/thread-pool completion that drives the sink).
  *
  * Semantics:
- *  - Readiness: pause drops READ interest immediately; resume re-arms it.
+ *  - Readiness: pause drops READ interest immediately; resume re-arms it. Over TLS, the rest of
+ *    the record already decrypted when on_data paused is still delivered (at most one TLS record,
+ *    about 16 KiB): the socket would not signal those bytes again, so a pause takes hold at the
+ *    record boundary.
  *  - Completion: pause stops posting the next recv; the one already-submitted recv may still
  *    deliver a final chunk (bounded to ≤1 in flight); resume posts a fresh recv.
  *  - A conn that stays paused is NOT exempt from the idle-read timeout: an indefinitely paused
