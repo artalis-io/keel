@@ -127,6 +127,19 @@ UTEST(gz_trailer, truncated_header_flush_rejected) {
     ASSERT_EQ(fin, -1);                           /* was 0: an empty body, accepted */
 }
 
+/* But a gzip stream that received nothing at all is an empty body, not a truncated one: a streaming
+ * client finishes the decompressor at the end of every response that said Content-Encoding: gzip, and
+ * a HEAD, a 204 or a 304 (or a 200 with Content-Length: 0) has no body bytes. That must not fail. */
+UTEST(gz_trailer, empty_stream_flush_ok) {
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int fin = d->dfeed(d, NULL, 0, 1, sink_emit, &s);               /* the end, and nothing before */
+    done(d, ctx);
+    ASSERT_EQ(fin, 0);                            /* was -1: the response failed as a decode error */
+    ASSERT_EQ(s.len, (size_t)0);
+}
+
 /* A trailer split across feeds (with no flush until the end) is captured and verified. */
 UTEST(gz_trailer, split_trailer_across_feeds_ok) {
     KlAllocator al = kl_allocator_default();
