@@ -264,6 +264,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **gzip responses over a few KB failed to decompress (miniz streaming decompressor).** The miniz
+  backend's streaming `dfeed` decompressed into a 4 KiB buffer used as a wrapping dictionary that
+  restarted at every call, but deflate matches reach 32 KiB back: any match more than 4 KiB back read
+  garbage and the CRC check failed. Ordinary HTML and JSON repeat at such distances. Since the
+  buffered client path started decompressing through `dfeed` (to bound inflation while it happens),
+  this hit every buffered gzip response, not only streaming ones. The decompressor now keeps a 32 KiB
+  dictionary ring across calls, and also drains output still held when its input runs out.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
