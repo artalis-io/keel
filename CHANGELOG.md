@@ -294,6 +294,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   FIN. All TLS output on a completion loop now leaves through one per-connection queue of
   overlapped sends, in order, one at a time; a response completes, the drain half-closes and a
   connection closes only once its queued output is out.
+- **HTTP client decompression and HEAD reuse.** The bounded decompression path (any
+  `max_response_size`) passed the whole body to `dfeed` with `flush=1`, where `decompress.h` has the
+  final call carry no data, so a backend that holds the contract refused the response. It now feeds
+  the body with `flush=0` and finishes with an empty `flush=1` call. And a keep-alive HEAD response
+  with neither Content-Length nor chunked encoding was dropped from the pool: the llhttp response
+  parser asked whether to keep the connection before llhttp knew the response had no body.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was

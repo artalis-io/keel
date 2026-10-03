@@ -362,7 +362,11 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
         /* Bounded: inflate through the streaming op and stop at the limit, so a small body that
          * inflates past it costs at most max bytes, not the whole inflated size first. */
         BoundedBody b = { &resp->alloc, NULL, 0, 0, max, 0 };
-        int frc = decomp->dfeed(decomp, resp->body, resp->body_len, 1, bounded_body_emit, &b);
+        /* The input with flush=0, then the final call with none (decompress.h: data NULL, len 0 when
+         * flush=1); a backend may ignore input on the final call, or refuse it. */
+        int frc = decomp->dfeed(decomp, resp->body, resp->body_len, 0, bounded_body_emit, &b);
+        if (frc == 0 && !b.too_large)
+            frc = decomp->dfeed(decomp, NULL, 0, 1, bounded_body_emit, &b);
         decomp->destroy(decomp);
         if (frc < 0 || b.too_large) {
             if (b.buf) kl_free(&resp->alloc, b.buf, b.cap);
