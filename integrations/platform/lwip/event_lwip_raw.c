@@ -85,6 +85,9 @@
  * block on in NO_SYS=1). 1 ms matches the spike's tick granularity. */
 #define KL_LWR_TICK_SLEEP_NS  1000000L
 #define KL_LWR_NS_PER_MS      1000000L
+/* The longest idle sleep in one drain: lwIP's timers (sys_check_timeouts) only run between drains,
+ * so a long caller timeout is served as several short sleeps, never one that freezes the stack. */
+#define KL_LWR_MAX_SLEEP_MS   10
 
 /* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
  * which completion_core.c caps at KL_COMP_MAX_EVENTS = 64). */
@@ -748,11 +751,10 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
      * bounded sleep so a caller's run loop doesn't busy-spin. When events fired, return
      * immediately so the loop processes them promptly. */
     if (count == 0 && timeout_ms != 0) {
-        long ns = (timeout_ms > 0)
-                    ? (long)(timeout_ms % 1000) * KL_LWR_NS_PER_MS
-                    : KL_LWR_TICK_SLEEP_NS;
-        time_t sec = (timeout_ms > 0) ? timeout_ms / 1000 : 0;
-        struct timespec sl = { sec, ns };
+        int ms = (timeout_ms > 0 && timeout_ms < KL_LWR_MAX_SLEEP_MS) ? timeout_ms
+                                                                       : KL_LWR_MAX_SLEEP_MS;
+        long ns = (timeout_ms > 0) ? (long)ms * KL_LWR_NS_PER_MS : KL_LWR_TICK_SLEEP_NS;
+        struct timespec sl = { 0, ns };
         nanosleep(&sl, NULL);
     }
 

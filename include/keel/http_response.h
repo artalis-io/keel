@@ -123,6 +123,9 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
  * call that ever worked stops working.
  *
  * @param res  Response.
+ * On Windows open it in binary mode (`_O_BINARY`): a text-mode descriptor translates CRLF and stops
+ * at 0x1A, so it reads fewer bytes than `size`, and the response fails (HTTP/2 answers 500).
+ *
  * @param fd   Open file descriptor (ownership transferred to response; closed by kl_http_response_free).
  * @param size File size in bytes.
  */

@@ -377,12 +377,15 @@ int kl_http_server_run(KlHttpServer *s) {
         s->accept_via_listener = 1;
     }
 
+    int run_failed = 0;                 /* the loop stopped on an error, not on a stop */
     while (kl_atomic_load_int(&s->running)) {
         if (completion_loop) {
             /* One completion-loop tick: factored into the freestanding-safe server
              * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */
-            if (kl_http_server_run_completion_loop(s) < 0)
+            if (kl_http_server_run_completion_loop(s) < 0) {
+                run_failed = 1;
                 break;
+            }
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
@@ -410,6 +413,7 @@ int kl_http_server_run(KlHttpServer *s) {
          * fails (max nesting, an unbalanced-bracket bug), fail-stop the run loop. */
         if (kl_event_ctx_dispatch_begin(&s->ev) < 0) {
             kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "dispatch nesting overflow");
+            run_failed = 1;
             break;
         }
 
@@ -419,6 +423,7 @@ int kl_http_server_run(KlHttpServer *s) {
             kl_event_ctx_dispatch_end(&s->ev);
             if (errno == EINTR) continue;
             kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "event_wait");
+            run_failed = 1;
             break;
         }
 
@@ -715,6 +720,12 @@ transition:
 
     kl_http_server_plat_signals_restore(s);
 
+    /* Stopped by an error: a server that is no longer serving does not read as running, and the
+     * caller hears of the failure (the header's contract: -1 on fatal error). */
+    if (run_failed) {
+        kl_atomic_store_int(&s->running, 0);
+        return -1;
+    }
     return 0;
 }
 

@@ -587,7 +587,9 @@ int kl_http_response_send(KlHttpResponse *res) {
             kl_ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
                                             &res->file_offset, remaining);
             if (sent < 0) {
-                if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) return 1;
+                KlIoStatus st = kl_sock_io_status(sp);
+                if (st == KL_IO_WOULD_BLOCK) return 1;
+                if (st == KL_IO_INTERRUPTED) continue;   /* a signal before any byte moved */
                 return -1;
             }
             if (sent == 0)      /* end of file before file_size: it shrank after sizing, so */

@@ -879,6 +879,14 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
             /* The reader (and a legacy streaming handler parked on it) ends with on_error, as on
              * any other failure mid-body, not with only destroy at release. */
             c->req.body_reader->on_error(c->req.body_reader);
+            /* The on_error chain may have resumed that handler into a response of its own: keep it
+             * (as every other on_error site does) rather than write a second response after it. */
+            if (c->route->streaming_handler &&
+                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
             return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
         }
         c->stream.read_len = 0;
