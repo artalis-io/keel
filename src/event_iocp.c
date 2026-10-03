@@ -131,7 +131,8 @@ typedef struct KlIocpOp {
                                                 * until kl_event_del, and never re-posted */
     int           watch_rearm;                 /* WATCHER: dispatched; re-post at the next drain, not
                                                 * before the callback has had a chance to consume */
-    int           watch_retries;               /* WATCHER: consecutive transient re-post failures */
+    int           watch_retries;               /* WATCHER: consecutive transient re-post failures
+                                                * (diagnostic; a transient failure never kills it) */
     KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
     /* Global outstanding-op registry: EVERY posted op is linked here so teardown
      * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
@@ -1082,9 +1083,6 @@ static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
  * repeating the one already handled. */
 /* Re-arm every watcher dispatched in the previous drain, and report the dead ones. Returns the
  * number of KL_COMP_WATCHER events written to `out` (at most `max`). */
-/* Consecutive transient re-post failures before a watcher is treated as dead after all. */
-#define KL_IOCP_WATCH_RETRY_MAX 64
-
 static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, int max,
                                        int *retry_pending) {
     *retry_pending = 0;
@@ -1097,10 +1095,15 @@ static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, 
             op->watch_rearm = 0;
             int pr = iocp_watch_post(op);
             if (pr == 0) { op->watch_retries = 0; continue; }
-            if (pr == -2 && ++op->watch_retries < KL_IOCP_WATCH_RETRY_MAX) {
-                /* Transient: nothing is reported (the socket is healthy, so reporting it ready
-                 * every drain would spin the loop); the re-post is tried again next drain, which
-                 * comes soon because the caller shortens its wait. */
+            if (pr == -2) {
+                /* Transient (no buffers or memory for now): the socket is healthy, so it is neither
+                 * reported (that would spin the loop on a socket with nothing to read) nor given up
+                 * on. The re-post is tried again on the next drain, which the caller makes come
+                 * within a short wait, for as long as the pressure lasts. A count of attempts used
+                 * to mark it dead after 64 failures, which a busy loop burns through in
+                 * milliseconds; the dead watcher was then reported on every drain, a 100% CPU spin
+                 * for good, since nothing deletes a wakeup or pool watcher. */
+                op->watch_retries++;
                 op->watch_rearm = 1;
                 *retry_pending = 1;
                 continue;
