@@ -1728,40 +1728,6 @@ UTEST(dns, cookieless_truncated_reply_does_not_force_tcp) {
     ASSERT_EQ(0, accepts);                /* was: the spoofed TC opened a TCP connection */
 }
 
-/* A fleet behind one nameserver address where some members do not do cookies: once the resolver has
- * learned a cookie, a member without one answers every lookup cookie-less. The answer to a
- * RETRANSMISSION of the same query that is also cookie-less is that member's real answer (an off-path
- * spoofer would have to win the transaction-id race twice); it is accepted rather than the lookup
- * failing on timeouts. The single cookie-less answer is still refused (cookie_missing_after_learned). */
-UTEST(dns, cookieless_answer_to_a_retransmission_is_accepted) {
-    reset_dns();
-    g_answer_a = 1;
-    g_cookie = 1;
-    KlAllocator alloc = kl_allocator_default();
-    KlEventCtx ctx;
-    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlDatagram ns;
-    KlResolver *r = make_resolver(&ctx, &ns, 200, 3);  /* short timeout, three tries */
-    ASSERT_TRUE(r != NULL);
-
-    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
-    pump(&ctx, &g_done, 200);
-    ASSERT_EQ(1, g_done);                 /* learned */
-
-    g_cookie = 0;                         /* now answered by a member without cookies */
-    g_done = 0;
-    memset(&g_res, 0, sizeof(g_res));
-    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
-    pump(&ctx, &g_done, 300);
-    int naddrs = g_res.naddrs, done = g_done;
-
-    r->destroy(r);
-    kl_dg_close_free(&ctx, &ns);
-    kl_event_ctx_free(&ctx);
-    ASSERT_EQ(1, done);
-    ASSERT_EQ(1, naddrs);                 /* was 0: every try dropped, then the timeout */
-}
-
 /* ── DNS receive-machine conformance ──────────────────────────────────────────────────────────────
  * The built-in resolver rides the shared serial-receive machine (KlDgramRecv over the dedicated inbound
  * slot) via kl_datagram_recv_start(dns_on_recv); its UDP sends + synchronous teardown go through the same

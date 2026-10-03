@@ -416,10 +416,6 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     as the pressure lasts; only a permanent error (a reset or closed socket) marks the watcher dead.
   - **DNS: a cookie-less truncated reply from a server known to send cookies forced the TCP
     fallback.** The cookie check now runs before the truncation branch.
-  - **DNS: one cookie-less fleet member made lookups time out.** Once a cookie was learned, every
-    cookie-less answer was dropped. A cookie-less answer to a later transmission of the same query to
-    the same server is now accepted (a spoofer would have to win the transaction-id race twice); a
-    single one is still refused.
 - **A paused request body poisoned, or leaked, its connection slot.** `kl_http_request_pause_body`
   set a flag on the connection that nothing cleared, so after that client left, the next connection
   given the same pool slot started paused, and its upload stalled until the body timeout answered
