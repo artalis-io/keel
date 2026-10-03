@@ -73,6 +73,7 @@ struct KlHttp2ClientConn {
      * unwind, once nothing on the stack uses the connection or its session. */
     int                    in_event;
     int                    free_requested;
+    int                    flush_pending;  /* a request issued inside a callback: flush on unwind */
 
     /* The socket took only part of the session's output: the rest waits in the session until the
      * socket is writable again, so WRITE is watched while this is set (h2c_arm). */
@@ -449,10 +450,16 @@ static void h2c_arm(KlHttp2ClientConn *c)
 }
 
 /* Hand the session's output to the socket; out_blocked records whether some of it had to wait. */
+/* Flush the session's output. A request issued while this runs (from on_resp, when a send closes a
+ * stream) only marks flush_pending; flush again for it here, once the session's send has returned. */
 static int h2c_flush(KlHttp2ClientConn *c)
 {
-    c->out_blocked = 0;
-    return c->session->flush(c->session);
+    do {
+        c->flush_pending = 0;
+        c->out_blocked = 0;
+        if (c->session->flush(c->session) < 0) return -1;
+    } while (c->flush_pending && !c->free_requested && c->state != H2C_CLOSED);
+    return 0;
 }
 
 static void h2c_handle_active(KlHttp2ClientConn *c, KlEventMask ready)
@@ -748,6 +755,14 @@ int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
         return -1;
     }
     st->stream_id = stream_id;
+
+    /* Inside a client callback (on_resp, run by the session's recv or send): the session must not be
+     * re-entered from there. The event path flushes once the session call has returned (h2c_flush
+     * loops on flush_pending), so the request goes out then. */
+    if (c->in_event) {
+        c->flush_pending = 1;
+        return stream_id;
+    }
 
     /* Flush to send the request. A send can close a stream (one whose RST_STREAM was waiting to
      * go out), running on_resp here; a kl_http2_client_free from it must wait until the flush has

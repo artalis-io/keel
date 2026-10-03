@@ -541,6 +541,78 @@ UTEST(h2c_live, free_in_on_resp_is_safe) {
     ASSERT_EQ(h2q_check_and_release(), 0);
 }
 
+/* The next request issued from on_resp (the common pattern) is not flushed re-entrantly. on_resp runs
+ * inside the session's recv (nghttp2's stream-close callback during mem_recv); kl_http2_client_request
+ * flushed right there, re-entering the session's send from inside its receive, which nghttp2 does
+ * not support (later frames in the same batch are mis-processed). The request must be sent once the
+ * receive has returned. */
+static int g_rn_in_recv, g_rn_flush_in_recv, g_rn_flush_after, g_rn_second;
+static int32_t g_rn_id;
+static int rn_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
+    (void)data; (void)len;
+    g_rn_in_recv = 1;
+    if (g_rn_id > 0) {
+        int32_t id = g_rn_id;
+        g_rn_id = 0;
+        self->keel_cbs.on_response(self, id, 200, NULL, 0);
+        self->keel_cbs.on_stream_close(self, id, 0);       /* → on_resp, which issues a request */
+    }
+    g_rn_in_recv = 0;
+    return 0;
+}
+static int rn_flush(KlHttp2ClientSession *self) {
+    (void)self;
+    if (g_rn_in_recv) g_rn_flush_in_recv++;
+    else if (g_rn_second > 0) g_rn_flush_after++;
+    return 0;
+}
+static KlHttp2ClientSession *rn_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) { g_live_session->recv = rn_recv; g_live_session->flush = rn_flush; }
+    return g_live_session;
+}
+static void rn_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r, void *ud) {
+    (void)id; (void)r; (void)ud;
+    if (g_rn_second == 0)
+        g_rn_second = kl_http2_client_request(c, "GET", "/next", NULL, 0, NULL, 0, rn_on_resp, NULL);
+}
+
+UTEST(h2c_live, request_from_on_resp_is_not_flushed_inside_recv) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = rn_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_rn_in_recv = g_rn_flush_in_recv = g_rn_flush_after = g_rn_second = 0;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &a, &cfg, url, NULL, NULL);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    ASSERT_TRUE(g_live_session != NULL);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+    ASSERT_TRUE(kl_handle_valid(peer));
+
+    g_rn_id = kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, rn_on_resp, NULL);
+    ASSERT_GT(g_rn_id, 0);
+    (void)send((int)peer, "x", 1, 0);                      /* readable: fed to session->recv */
+    for (int i = 0; i < 100 && g_rn_second == 0; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    for (int i = 0; i < 10; i++) (void)kl_event_ctx_run(&ev, 16, 5);
+
+    int second = g_rn_second, in_recv = g_rn_flush_in_recv, after = g_rn_flush_after;
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_GT(second, 0);                                  /* the second request was submitted */
+    ASSERT_EQ(in_recv, 0);                                 /* was 1: flushed inside the recv */
+    ASSERT_GT(after, 0);                                   /* and it is still sent, afterwards */
+}
+
 /* ── Over TLS: a record split across reads ──────────────────────────────────────────────────
  * A read that gets part of a TLS record returns 0, WANT_READ (the KlTls contract; -1 is error or
  * close). The client took it for "connection closed". The identity mock TLS simulates the split. */
