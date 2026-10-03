@@ -615,7 +615,23 @@ UTEST(tls_integration, a_rejected_chunked_upload_drains_to_its_terminal_chunk) {
         memset(big + n, 'c', 2000);
         memcpy(big + n + 2000, "\r\n", 2);
         (void)kl_test_sockwrite(fd, big, (size_t)n + 2002);
-        read_one_response(fd, buf, sizeof buf, 2000);          /* the 413 */
+        {   /* PROBE: every poll/read the client makes, with errno and time */
+            size_t tot = 0;
+            uint64_t t0 = kl_monotonic_ms();
+            for (int k = 0; k < 20 && tot < sizeof buf - 1; k++) {
+                int pr = kl_test_poll1(fd, 0, 2000);
+                fprintf(stderr, "PROBE poll=%d at %llu ms\n", pr, (unsigned long long)(kl_monotonic_ms() - t0));
+                if (pr <= 0) break;
+                errno = 0;
+                long r = kl_test_sockread(fd, buf + tot, sizeof buf - 1 - tot);
+                fprintf(stderr, "PROBE read=%ld errno=%d at %llu ms\n", r, errno, (unsigned long long)(kl_monotonic_ms() - t0));
+                if (r <= 0) break;
+                tot += (size_t)r;
+                buf[tot] = 0;
+                if (strstr(buf, "\r\n\r\n")) break;
+            }
+            buf[tot] = 0;
+        }
         for (int i = 0; i < 3; i++) {                          /* more body, 16 KiB chunks */
             n = snprintf(big, sizeof big, "%x\r\n", 16384);
             memset(big + n, 'c', 16384);
