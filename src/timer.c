@@ -1,6 +1,7 @@
 #include <keel/timer.h>
 #include <keel/clock.h>            /* kl_monotonic_ms */
 #include "event_ctx_internal.h"   /* KlTimerEntry layout (opaque on the public surface) */
+#include <limits.h>                /* INT_MAX */
 #include <stdint.h>
 
 /* ── Min-heap helpers ──────────────────────────────────────────────── */
@@ -113,6 +114,8 @@ int kl_timer_next_timeout(KlEventCtx *ctx, int max_ms) {
         return 0;
 
     uint64_t rem = deadline - now;
+    if (max_ms < 0)                          /* no cap: still an int, so INT_MAX at most */
+        return rem > (uint64_t)INT_MAX ? INT_MAX : (int)rem;
     if (rem < (uint64_t)max_ms)
         return (int)rem;
 

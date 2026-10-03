@@ -78,14 +78,22 @@ static int recv_present_view(KlDgramRecv *r, const KlDgramRxView *v) {
  * view_pull → deliver, re-checking paused/stopped each iteration. `allow_refill` = 1 for the readable
  * edge (refill via recv_batch when the cursor drains); 0 for the resume held-drain (deliver only
  * already-buffered datagrams, NEVER read new kernel data). Runs inside a recv_enter/leave bracket. */
+/* Datagrams one readable event may deliver before returning to the loop. */
+#define KL_DGRAM_RECV_BUDGET 64
+
 static int recv_drive_view(KlDgramRecv *r, int allow_refill) {
     int ret = 0;
+    /* Bounded like the serial path: past the budget, deliver only what the cursor already holds (the
+     * socket may not signal those again) and read nothing new; a flooded socket stays readable and
+     * is reported again on the next tick, after timers and other sockets. */
+    int budget = KL_DGRAM_RECV_BUDGET;
     while (!r->paused && !r->stopped) {
         KlDgramRxView v; memset(&v, 0, sizeof(v));
-        int pr = r->view_pull(r->hook_ctx, &v, allow_refill);
+        int pr = r->view_pull(r->hook_ctx, &v, allow_refill && budget > 0);
         if (pr == 0) break;                              /* drained (would-block / cursor empty) */
         if (pr < 0) { recv_fail(r); ret = -1; break; }   /* fatal receive error */
         if (recv_present_view(r, &v) < 0) { ret = -1; break; }
+        if (budget > 0) budget--;
     }
     return ret;
 }
@@ -210,9 +218,6 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     recv_leave(r);                           /* LAST action; coordinator finalize may detach (frees r) */
     return ret;
 }
-
-/* Datagrams one readable event may deliver before returning to the loop. */
-#define KL_DGRAM_RECV_BUDGET 64
 
 int kl_dgram_recv_on_readable(KlDgramRecv *r) {
     if (!r || !r->inited || r->completion)
