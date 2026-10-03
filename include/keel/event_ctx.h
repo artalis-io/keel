@@ -241,6 +241,15 @@ void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
  * Uses a stack buffer for up to 64 events; heap-allocates via ctx->alloc
  * for larger requests.
  *
+ * io_uring: a thread that submits work to a loop (by running it, or by freeing an object that
+ * reaps its operations, such as kl_http_server_free) can later have its OWN blocking calls
+ * interrupted with EINTR when that work completes. The kernel delivers a completion's task_work
+ * to the thread that submitted the request and wakes it if it is asleep; a blocking call there,
+ * for example a recv on a socket with SO_RCVTIMEO, then returns EINTR instead of restarting.
+ * IORING_SETUP_COOP_TASKRUN does not prevent this (it skips only the kick to a running thread),
+ * and DEFER_TASKRUN would require one thread to do every submission. As POSIX requires anyway,
+ * retry a blocking call that fails with EINTR. Other backends do not interrupt the caller.
+ *
  * @param ctx        Event context (loop + allocator + watchers).
  * @param max_events Maximum events to process per tick.
  * @param timeout_ms Timeout in milliseconds (-1 for infinite).
