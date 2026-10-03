@@ -659,13 +659,9 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                     kl_http_server_conn_release(s, tc);   /* cancels the receive; released by its completion */
                 continue;
             }
-            if (kl_http_conn_drain_step(tc, now) == KL_HTTP_CONN_CLOSED) {
-                if (completion_loop) {
-                    kl_comp_cancel(&s->ev, tc->stream.fd);
-                } else {
-                    kl_event_del(&s->ev.loop, tc->stream.fd);
-                    kl_http_server_conn_release(s, tc);
-                }
+            if (kl_http_conn_drain_step(tc, now) == KL_HTTP_CONN_CLOSED) {   /* readiness */
+                kl_event_del(&s->ev.loop, tc->stream.fd);
+                kl_http_server_conn_release(s, tc);
             }
             continue;
         }
