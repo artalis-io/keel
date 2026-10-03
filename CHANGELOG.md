@@ -314,6 +314,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   receive, which nghttp2 does not support. Issuing the next request from `on_resp` (the common
   pattern) could mis-process later frames in the same batch. A request issued inside a client
   callback is now flushed once the session call has returned.
+- **HTTP/2 and WebSocket edge cases.** An HTTP/2 HEAD whose response fell back to a 500 (a
+  streaming body, an oversized or unreadable file) was sent the error text as a body; it now gets
+  headers only. An HTTP/2 file response whose file was shorter than its declared size (it shrank
+  after the handler sized it) went out as a complete 200 with the short body, which the client
+  could not tell from a whole one (no content-length); it is now a 500. A WebSocket server frame the
+  drain cut short (over `max_size`, or a socket error) left the connection open with no close
+  scheduled, though every later send failed; it now closes, as when the direct path cuts a frame.
+  And the WebSocket client's drain writer took a TLS write error for a full socket when an earlier
+  call had left `EAGAIN` in `errno`, so the client stalled instead of failing; would-block is now
+  asked of the socket provider, and only for a plaintext write.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was

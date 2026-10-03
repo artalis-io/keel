@@ -735,4 +735,61 @@ UTEST(ws_server_send, no_pong_after_the_server_stopped_sending) {
     ASSERT_EQ(saw_pong, 0);                         /* was 1: PONG written after the stop */
 }
 
+/* The drain path's twin of a_cut_short_frame_is_never_followed_by_another: with the drain enabled,
+ * a frame larger than its max_size is written in part, the rest refused (a sticky drain error). The
+ * stream now holds a broken frame and every later send fails, so the connection must close; it was
+ * left open with no close scheduled (close_sent unset), until the peer gave up. The handler sends
+ * 1 MiB frames to a client that is not reading until one is refused (a loopback socket may take
+ * several whole first). Where the server's sends block (io_uring's accepted sockets), no send is ever
+ * refused and there is no cut to observe: the case is skipped there. */
+static volatile int g_drain_refused;
+static void drain_on_open(KlWsServerConn *ws, void *ud) {
+    (void)ud;
+    (void)kl_ws_server_enable_drain(ws, 64 * 1024);
+}
+static void drain_big_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
+    (void)data; (void)len; (void)is_binary; (void)ud;
+    static char big[1024 * 1024];
+    memset(big, 'D', sizeof big);
+    for (int i = 0; i < 64; i++)                           /* until the socket + drain refuse */
+        if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) { g_drain_refused = 1; break; }
+}
+
+UTEST(ws_server_send, a_frame_the_drain_cuts_short_closes_the_connection) {
+    static Srv s;
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_http_server_init(&s.srv, &cfg), 0);
+    kl_ws_server_config_init(&s.ws_cfg);
+    s.ws_cfg.callbacks.on_open = drain_on_open;
+    s.ws_cfg.callbacks.on_message = drain_big_on_message;
+    ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
+    ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
+    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s.port = s.srv.bound_port;
+
+    int closed = 0;
+    g_drain_refused = 0;
+    KlSocketHandle fd = ws_open_raw(s.port);
+    if (kl_handle_valid(fd)) {
+        unsigned char f[32];
+        size_t fl = build_masked(f, 0x1, (const unsigned char *)"go", 2);
+        (void)send_all(fd, f, fl);
+        kl_test_sleep_ms(500);                      /* the server cuts the frame and should close */
+        static char sink[64 * 1024];
+        for (;;) {                                  /* read all that was sent, up to EOF or a lull */
+            if (kl_test_poll1(fd, 0, 3000) <= 0) break;
+            long r = kl_test_sockread(fd, sink, sizeof sink);
+            if (r <= 0) { closed = 1; break; }
+        }
+        kl_test_closesock(fd);
+    }
+    srv_stop(&s);
+    if (!g_drain_refused)
+        UTEST_SKIP("the server's sends block on this backend: no frame is ever cut");
+    ASSERT_EQ(closed, 1);                           /* was 0 (where the socket cut the frame) */
+}
+
 UTEST_MAIN();

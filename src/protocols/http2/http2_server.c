@@ -113,6 +113,17 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
  * Response submission
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* A 500 in place of a response HTTP/2 cannot send as asked (a streaming body, an oversized or
+ * unreadable file). A HEAD keeps the headers-only rule: the error text goes out only for other
+ * methods. */
+static void h2_submit_500(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream, const char *msg) {
+    const char *err_names[] = {"content-type"};
+    const char *err_values[] = {"text/plain"};
+    int head = stream->res.head_request;
+    h2c->session->submit_response(h2c->session, stream->stream_id, 500, err_names, err_values, 1,
+                                  head ? NULL : msg, head ? 0 : strlen(msg));
+}
+
 static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
     if (stream->response_submitted) return 0;
     stream->response_submitted = 1;
@@ -127,39 +138,29 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
         body_len = res->body_len;
     } else if (res->body_mode == KL_HTTP_BODY_FILE) {
         if (res->file_size > 16 * 1024 * 1024) {
-            const char *err_names[] = {"content-type"};
-            const char *err_values[] = {"text/plain"};
-            const char *err_body = "File too large for HTTP/2 response";
-            h2c->session->submit_response(h2c->session, stream->stream_id,
-                                           500, err_names, err_values, 1,
-                                           err_body, strlen(err_body));
+            h2_submit_500(h2c, stream, "File too large for HTTP/2 response");
             return 0;
         }
-        if (res->file_size > 0) {
+        if (res->file_size > 0 && !res->head_request) {     /* HEAD: no body to read */
             size_t fsize = (size_t)res->file_size;
             file_buf = kl_malloc(h2c->alloc, fsize);
             if (!file_buf) {
-                const char *err_names[] = {"content-type"};
-                const char *err_values[] = {"text/plain"};
-                const char *err_body = "Internal server error";
-                h2c->session->submit_response(h2c->session, stream->stream_id,
-                                               500, err_names, err_values, 1,
-                                               err_body, strlen(err_body));
+                h2_submit_500(h2c, stream, "Internal server error");
                 return 0;
             }
             kl_ssize_t nr = kl_plat_file_pread(res->file_fd, file_buf, fsize, 0);
-            if (nr > 0) {
-                body = file_buf;
-                body_len = (size_t)nr;
+            /* All of it, or a 500: the file may have shrunk after the handler sized it, and HTTP/2
+             * sends no content-length here, so a short body would look complete to the client. */
+            if (nr < 0 || (size_t)nr != fsize) {
+                kl_free(h2c->alloc, file_buf, fsize);
+                h2_submit_500(h2c, stream, "File shorter than its declared size");
+                return 0;
             }
+            body = file_buf;
+            body_len = fsize;
         }
     } else if (res->body_mode == KL_HTTP_BODY_STREAM) {
-        const char *err_names[] = {"content-type"};
-        const char *err_values[] = {"text/plain"};
-        const char *err_body = "Streaming responses not supported over HTTP/2";
-        h2c->session->submit_response(h2c->session, stream->stream_id,
-                                       500, err_names, err_values, 1,
-                                       err_body, strlen(err_body));
+        h2_submit_500(h2c, stream, "Streaming responses not supported over HTTP/2");
         return 0;
     }
     if (res->head_request) {            /* HEAD: the headers only, as on HTTP/1.1 */

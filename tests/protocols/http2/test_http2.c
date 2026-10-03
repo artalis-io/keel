@@ -1615,6 +1615,80 @@ UTEST(h2, head_response_has_no_body) {
     ASSERT_EQ(blen, (size_t)0);                   /* was: the handler's body */
 }
 
+/* The early 500 fallbacks (a streaming body HTTP/2 does not support, an oversized or unreadable
+ * file) keep the HEAD rule too: headers only. They submitted their error text as a body. */
+static void stream_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    w(wc, "x", 1);
+    kl_http_response_end_stream(res);
+}
+UTEST(h2, head_fallback_500_has_no_body) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "HEAD", "/s", stream_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    mock.callbacks.on_request(mock.cb_user_data, 1, "HEAD", 4, "/s", 2, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+    int status = mock.last_status;
+    size_t blen = mock.last_body_len;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(status, 500);
+    ASSERT_EQ(blen, (size_t)0);                   /* was: "Streaming responses not supported ..." */
+}
+
+/* A file response whose file is shorter than its declared size (it shrank after the handler sized
+ * it) must not go out as a complete 200: HTTP/2 sends no content-length here, so the client could
+ * not tell the body was cut. HTTP/1 closes the connection in the same case (E13). */
+#if defined(_WIN32)
+#include <io.h>
+#include <fcntl.h>
+#define T_OPEN_RD(p) _open((p), _O_RDONLY | _O_BINARY)
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#define T_OPEN_RD(p) open((p), O_RDONLY)
+#endif
+static char g_short_path[64];
+static void short_file_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    int fd = T_OPEN_RD(g_short_path);
+    if (fd < 0) { kl_http_response_error(res, 404, "missing"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, 10 + 100);   /* 100 bytes the file lacks */
+}
+UTEST(h2, file_shorter_than_its_size_is_not_a_complete_200) {
+    snprintf(g_short_path, sizeof g_short_path, "keel_h2_short_%d.tmp", (int)rand());
+    FILE *f = fopen(g_short_path, "wb");
+    ASSERT_TRUE(f != NULL);
+    fwrite("0123456789", 1, 10, f);
+    fclose(f);
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "GET", "/f", short_file_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/f", 2, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+    int status = mock.last_status;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    remove(g_short_path);
+    ASSERT_NE(status, 200);                       /* was 200 with the 10 bytes it had */
+}
+
 /* A request that ends with its HEADERS (no body) is handled like a bodiless HTTP/1.1 request: no body
  * reader is created for it. The reader factory ran anyway, and one that needs a body (a multipart
  * reader without a Content-Type) answered 415. */

@@ -152,7 +152,11 @@ static kl_ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
     kl_ssize_t r = wsc_write(ws, data, len);
     if (r > 0) return r;
     if (r == 0) return 0;  /* TLS WANT_*, treat as would-block */
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS reports
+     * a full buffer as 0), and errno after it is whatever an earlier call left. Ask the provider,
+     * which also covers one that reports would-block by status rather than errno. */
+    if (!ws->tls && kl_sock_io_status(ws->ev ? ws->ev->sockets : NULL) == KL_IO_WOULD_BLOCK)
+        return 0;
     return -1;
 }
 
