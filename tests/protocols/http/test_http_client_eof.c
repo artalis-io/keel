@@ -430,8 +430,8 @@ static void multi_peer_finish(MultiPeer *p) {
     kl_test_closesock(p->listen_fd);
 }
 
-/* Two sync pooled GETs to the same peer; returns how many succeeded (0, 1 or 2). */
-static int two_pooled_gets(MultiPeer *p) {
+/* Two sync pooled requests to the same peer; returns how many succeeded (0, 1 or 2). */
+static int two_pooled_reqs(MultiPeer *p, const char *method) {
     KlAllocator a = kl_allocator_default();
     KlHttpClientPool pool;
     if (kl_http_client_pool_init(&pool, NULL, &a, NULL) != 0) return -1;
@@ -444,13 +444,27 @@ static int two_pooled_gets(MultiPeer *p) {
     for (int i = 0; i < 2; i++) {
         KlHttpClientResponse r;
         memset(&r, 0, sizeof r);
-        if (kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &r) == 0 &&
+        if (kl_http_client_request_pooled(&pool, &a, &cfg, method, url, NULL, 0, NULL, 0, &r) == 0 &&
             r.status == 200)
             ok++;
         kl_http_client_response_free(&r);
     }
     kl_http_client_pool_free(&pool);
     return ok;
+}
+static int two_pooled_gets(MultiPeer *p) { return two_pooled_reqs(p, "GET"); }
+
+/* A keep-alive HEAD response needs no framing headers: it has no body whatever they say. The llhttp
+ * response parser asked llhttp whether to keep the connection before llhttp knew the response had
+ * no body, so one with neither Content-Length nor chunked encoding read as close-delimited and was
+ * dropped from the pool. The peer answers one request per connection (hold): a reuse shows as a
+ * single accept. */
+UTEST(pooled, an_unframed_head_response_is_reused) {
+    static MultiPeer p;
+    ASSERT_EQ(multi_peer_start(&p, "HTTP/1.1 200 OK\r\nX-A: 1\r\n\r\n", 1), 0);
+    (void)two_pooled_reqs(&p, "HEAD");
+    multi_peer_finish(&p);
+    ASSERT_EQ(p.accepts, 1);     /* was 2: closes was set, so the connection was not pooled */
 }
 
 UTEST(pooled, bytes_after_the_response_are_not_pooled) {
@@ -659,6 +673,18 @@ static const char *md_encoding(KlDecompress *self) { (void)self; return "x-doubl
 static void md_reset(KlDecompress *self) { (void)self; }
 static void md_destroy(KlDecompress *self) { (void)self; }
 static KlDecompress g_md = { md_decompress, md_dfeed, md_encoding, md_reset, md_destroy };
+
+/* A decompressor that holds the dfeed contract to the letter: input comes with flush=0, and the
+ * final call (flush=1) has none (decompress.h: data NULL, len 0). The client's bounded path passed
+ * the whole body in one flush=1 call, which such a backend refuses. */
+static int strict_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
+                        int (*emit)(void *, const char *, size_t), void *ctx) {
+    if (flush && (d || n)) return -1;
+    return md_dfeed(self, d, n, flush, emit, ctx);
+}
+static KlDecompress g_strict = { md_decompress, strict_dfeed, md_encoding, md_reset, md_destroy };
+static KlDecompress *strict_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_strict; }
+static KlDecompressConfig g_strict_cfg = { .ctx = NULL, .factory = strict_factory };
 static KlDecompress *md_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_md; }
 static KlDecompressConfig g_md_cfg = { .ctx = NULL, .factory = md_factory };
 
@@ -686,6 +712,26 @@ UTEST(decompress, sync_decompressed_body_over_the_limit_fails) {
     ASSERT_EQ(rc, -1);                           /* was 0, with a 16-byte body */
     ASSERT_EQ((int)err, (int)KL_ERR_TOO_LARGE);
     (void)len;
+}
+
+UTEST(decompress, bounded_decompression_keeps_the_dfeed_contract) {
+    Peer p;
+    ASSERT_EQ(peer_listen(&p, DOUBLED_8), 0);
+    peer_start(&p);
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.timeout_ms = 3000;
+    cfg.max_response_size = 100;                 /* bounded: the streaming (dfeed) path */
+    cfg.decompress = &g_strict_cfg;
+    KlHttpClientResponse r;
+    memset(&r, 0, sizeof r);
+    int rc = kl_http_client_request(&a, &cfg, "GET", url_for(&p), NULL, 0, NULL, 0, &r);
+    int same = r.body && r.body_len == 16 && memcmp(r.body, "aabbccddeeffgghh", 16) == 0;
+    kl_http_client_response_free(&r);
+    peer_finish(&p);
+    ASSERT_EQ(rc, 0);                            /* was -1: the backend refused the call */
+    ASSERT_TRUE(same);
 }
 
 /* The async client ignored a failed decompression and delivered the encoded body as a success. */
