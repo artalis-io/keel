@@ -361,4 +361,93 @@ UTEST(tls_integration, paused_body_stays_paused) {
     ASSERT_EQ(g_tls_pause_calls, 1);                       /* was (completion): 3, the pause ignored */
 }
 
+/* ── TLS output on a completion loop never blocks the loop ─────────────────────────────────
+ * On a completion loop TLS ciphertext was pushed with a synchronous send on the loop thread. A
+ * client that stops reading a large TLS response then stalled EVERY connection on the loop: for
+ * 30 s per stall on pollcomp (a bounded poll), indefinitely on IOCP and io_uring (accepted sockets
+ * are blocking there). Another client's request must be answered meanwhile. Readiness loops already
+ * use WRITE interest, so they pass either way. */
+#define TQ_CHUNK  (64 * 1024)
+#define TQ_CHUNKS 64                                       /* 4 MiB of payload */
+static void handle_tq_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    static char chunk[TQ_CHUNK];
+    memset(chunk, 'T', sizeof chunk);
+    for (int i = 0; i < TQ_CHUNKS; i++) w(wc, chunk, sizeof chunk);
+    kl_http_response_end_stream(res);
+}
+static KlHttpServer tq_srv;
+
+UTEST(tls_integration, a_stalled_reader_does_not_block_other_connections) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 8 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_srv, &cfg));
+    kl_http_server_route(&tq_srv, "GET", "/big", handle_tq_bigstream, NULL, NULL);
+    kl_http_server_route(&tq_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_srv);
+    wait_for_bind(&tq_srv);
+    int port = tq_srv.bound_port;
+
+    int a = connect_to(port);                              /* asks for 4 MiB, then reads nothing */
+    if (a >= 0) {
+        int rcv = 4096;
+        (void)setsockopt(a, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
+        const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(a, rq, strlen(rq));
+    }
+    kl_test_sleep_ms(300);                                 /* the server is now stuck on A, or not */
+
+    char buf[1024];
+    buf[0] = '\0';
+    int b = connect_to(port);
+    if (b >= 0) {
+        const char *rq = "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(b, rq, strlen(rq));
+        read_response(b, buf, sizeof buf, 2000);
+        kl_test_closesock(b);
+    }
+    if (a >= 0) kl_test_closesock(a);                      /* unblocks a loop stuck on A */
+    kl_http_server_stop(&tq_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (completion): no answer in 2 s */
+}
+
+/* A request rejected on a TLS completion connection gets its response. The rejection wrote the 413
+ * through the TLS engine (on a completion loop, into its output ring) and then half-closed the
+ * socket for the drain without sending that ring: the client saw FIN and no status. */
+static KlHttpServer tq_rej_srv;
+
+UTEST(tls_integration, a_rejected_upload_gets_its_413) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg };
+    ASSERT_EQ(0, kl_http_server_init(&tq_rej_srv, &cfg));
+    kl_http_server_route(&tq_rej_srv, "POST", "/up", handle_hello,
+                         (void *)(size_t)1024, kl_http_body_reader_buffer);   /* a 1 KiB reader */
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_rej_srv);
+    wait_for_bind(&tq_rej_srv);
+
+    char buf[2048];
+    buf[0] = '\0';
+    int fd = connect_to(tq_rej_srv.bound_port);
+    if (fd >= 0) {
+        const char *h = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 20000\r\n\r\n";
+        (void)kl_test_sockwrite(fd, h, strlen(h));
+        static char body[20000];
+        memset(body, 'b', sizeof body);
+        (void)kl_test_sockwrite(fd, body, sizeof body);    /* the declared body, no more */
+        read_response(fd, buf, sizeof buf, 2000);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&tq_rej_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_rej_srv);
+    ASSERT_TRUE(strstr(buf, "413") != NULL);               /* was (completion + TLS): FIN, no status */
+}
+
 UTEST_MAIN();

@@ -124,6 +124,18 @@ void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
  * pool slot, or the previous request on a kept-alive connection), request_body_complete made the
  * drain think the new request's body was already consumed, so it closed with the body unread and
  * the reset destroyed the early response. */
+/* Drop the completion-mode TLS output queue: its buffer, the in-flight bookkeeping and the actions
+ * pending on it. The connection is being released (or reused): nothing it held can still be sent. */
+static void conn_comp_tlsq_reset(KlHttpConn *c) {
+    if (c->comp_tlsq) kl_free(c->stream.alloc, c->comp_tlsq, c->comp_tlsq_cap);
+    c->comp_tlsq = NULL;
+    c->comp_tlsq_len = c->comp_tlsq_cap = c->comp_tlsq_inflight_len = 0;
+    c->comp_tlsq_inflight = 0;
+    c->comp_tlsq_appended = c->comp_tlsq_sent = c->comp_tlsq_resp_mark = 0;
+    c->comp_tlsq_resp_pending = c->comp_tlsq_then_recv = 0;
+    c->comp_tlsq_then_shutwr = c->comp_tlsq_then_close = 0;
+}
+
 static void conn_request_body_reset(KlHttpConn *c) {
     c->request_body_received = 0;
     c->request_body_complete = 0;
@@ -155,6 +167,8 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
+    c->comp_driven = 0;
+    conn_comp_tlsq_reset(c);
     memset(&c->req, 0, sizeof(c->req));
     conn_request_body_reset(c);
 
@@ -276,6 +290,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
         c->stream.fd = KL_INVALID_SOCKET;
     }
     conn_cleanup_body_reader(c);
+    conn_comp_tlsq_reset(c);
     if (c->parser) {
         c->parser->reset(c->parser);
     }
@@ -300,6 +315,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
             if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
             if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
             conn_cleanup_body_reader(&pool->conns[i]);   /* the reader and the head copy */
+            conn_comp_tlsq_reset(&pool->conns[i]);
             if (pool->conns[i].tls && pool->conns[i].tls->shutdown &&
                 kl_handle_valid(pool->conns[i].stream.fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
@@ -1380,7 +1396,13 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
 
     /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
      * a provider without half-close returns -1 and the drain still removes the unread-data condition. */
-    (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+    /* On a completion loop with TLS the final response is still ciphertext in the engine's output
+     * ring (it reaches the socket through the driver's output queue): half-closing now would cut it
+     * off. The completion driver half-closes once that output is out (comp_tlsq_then_shutwr). */
+    if (c->comp_driven && c->tls)
+        c->comp_tlsq_then_shutwr = 1;
+    else
+        (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
 
     /* The configured cap is the ONLY byte bound (#281). This used to be min(remaining, cap), where
      * `remaining` came from the declared Content-Length, to avoid sitting out the deadline waiting
