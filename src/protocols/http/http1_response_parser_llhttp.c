@@ -234,7 +234,11 @@ static int resp_on_headers_complete(llhttp_t *parser)
         return 0;
 
     p->resp->status = (int)parser->status_code;
-    /* HTTP/1.0 closes unless it says keep-alive, HTTP/1.1 unless it says close: llhttp knows. */
+    /* HTTP/1.0 closes unless it says keep-alive, HTTP/1.1 unless it says close: llhttp knows. A HEAD
+     * response has no body, but llhttp learns that only from this callback's return (F_SKIPBODY), and
+     * without it an unframed response reads as close-delimited: set the flag first. */
+    if (p->no_body)
+        parser->flags |= F_SKIPBODY;
     p->resp->closes = !llhttp_should_keep_alive(parser);
 
     /* Streaming: invoke on_headers callback */
