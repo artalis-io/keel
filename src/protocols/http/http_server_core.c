@@ -650,6 +650,15 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
          * a connection whose final response is already out. It carries its own deadline, so a client
          * that simply stops sending is closed by the drain rather than left parked. */
         if (tc->state == KL_HTTP_CONN_DRAINING) {
+            /* Completion: the posted receive is what drains (comp_on_read), so only the deadline is
+             * checked here. kl_http_conn_drain_step reads the socket synchronously, which on io_uring
+             * and IOCP (blocking accepted sockets) parked the whole loop on a client that went quiet,
+             * and with TLS took ciphertext away from the engine. */
+            if (completion_loop) {
+                if (now >= tc->drain_deadline_ms)
+                    kl_http_server_conn_release(s, tc);   /* cancels the receive; released by its completion */
+                continue;
+            }
             if (kl_http_conn_drain_step(tc, now) == KL_HTTP_CONN_CLOSED) {
                 if (completion_loop) {
                     kl_comp_cancel(&s->ev, tc->stream.fd);

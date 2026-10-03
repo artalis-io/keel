@@ -331,7 +331,14 @@ int kl_comp_tls_flush(KlHttpConn *c) {
 /* Close once the queued output is out (a Close frame, an alert, a final response), or now when
  * nothing is queued. Exported (completion_internal.h). */
 void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
-    if (c->tls && !comp_tlsq_idle(c)) { c->comp_tlsq_then_close = 1; return; }
+    if (c->tls && !comp_tlsq_idle(c)) {
+        /* CLOSED, so the idle sweep times it out if the client never reads; and the idle clock starts
+         * now, so output just queued (after a long suspension, say) gets its full timeout. */
+        c->state = KL_HTTP_CONN_CLOSED;
+        c->comp_tlsq_then_close = 1;
+        c->last_active_ms = kl_monotonic_ms();
+        return;
+    }
     kl_comp_close(s, c);
 }
 
@@ -911,9 +918,20 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         if (c->comp_ops == 0) { c->comp_closing = 0; kl_http_server_conn_release(s, c); }
         return;
     }
-    if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
-    /* Closing once its queued output is out (a receive was still posted): the input is not wanted. */
-    if (c->state == KL_HTTP_CONN_CLOSED) return;
+    if (!ev->ok || ev->bytes == 0) {                           /* peer closed */
+        /* A half-close (EOF) while a final response is still queued (a TLS 408 or 413): send it
+         * first. An error closes now. */
+        if (ev->ok && c->tls && !comp_tlsq_idle(c)) { kl_comp_close_after_output(s, c); return; }
+        kl_comp_close(s, c);
+        return;
+    }
+    /* CLOSED: either closing once its queued output is out (the input is not wanted), or set CLOSED
+     * by a path that only cancelled, whose cancel lost the race with this read (IOCP reports such a
+     * read as a success): then nothing else will close it. */
+    if (c->state == KL_HTTP_CONN_CLOSED) {
+        if (!c->comp_tlsq_then_close) kl_comp_close(s, c);
+        return;
+    }
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
@@ -1069,6 +1087,8 @@ static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
  * normal request's dispatch takes. The completion seam kl_async_complete calls (only on a
  * completion loop). Keeps the async runtime free of completion knowledge. */
 void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
+    /* A suspension is exempt from the idle timeout; the response it produces starts a fresh one. */
+    conn->last_active_ms = kl_monotonic_ms();
     if (conn->state == KL_HTTP_CONN_READING) {   /* handler yielded without a response: read on */
         conn->stream.read_len = 0;
         if (conn->tls) { comp_tls_drive(s, conn); return; }   /* input may be held in the engine */

@@ -281,6 +281,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   nothing at all, which a streaming client makes at the end of every response with
   `Content-Encoding: gzip`: a HEAD, a 204, a 304 or an empty 200 then failed with `KL_ERR_COMPRESS`.
   A stream with no bytes now ends cleanly; one that ends inside its header still fails.
+- **A rejected upload whose client went quiet could hang a completion-loop server.** After a
+  rejection (a 413), the idle sweep read the connection's socket synchronously to drain the rest of
+  the upload. On io_uring the accepted sockets are blocking, so a client that then sent nothing more
+  but kept the connection open parked the whole server in that read; with TLS the read also took the
+  client's ciphertext away from the engine, so the 413 itself never arrived. On a completion loop the
+  posted receive now does the draining and the sweep only enforces the deadline. Related, on completion
+  loops: a receive completing on a connection the sweep had only cancelled (an IOCP race) no longer
+  leaks the slot; a response queued after a long async suspension is no longer cancelled at once by a
+  stale idle clock; and a client that half-closes while its final TLS response is still queued gets it.
 - **Edge cases found re-auditing the previous round.** An HTTP/2 response no longer carries
   `Upgrade`, `Proxy-Connection` or `TE` (only `Connection`, `Transfer-Encoding` and `Keep-Alive` were
   dropped): clients reset a stream that has them, and stream 1 of an h2c upgrade now carries the
