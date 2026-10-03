@@ -195,6 +195,36 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
     return rc;
 }
 
+/* Stream 1 of an h2c upgrade: take over what the HTTP/1.1-phase middleware left on the connection's
+ * request and response, since it does not run again for the stream. The response headers are its
+ * "Name: value\r\n" lines, re-added one by one. 0, or -1 on allocation failure. */
+static int h2_carry_upgrade_state(KlHttp2ServerStream *stream, const KlHttpRequest *req1,
+                                  const KlHttpResponse *res1) {
+    stream->req.ctx = req1->ctx;
+    const char *p = res1->hdr_buf, *end = res1->hdr_buf ? res1->hdr_buf + res1->hdr_len : NULL;
+    while (p && p < end) {
+        const char *eol = p;
+        while (eol + 1 < end && !(eol[0] == '\r' && eol[1] == '\n')) eol++;
+        if (eol + 1 >= end) break;                    /* no terminated line left */
+        const char *colon = p;                        /* (no memchr: freestanding builds) */
+        while (colon < eol && *colon != ':') colon++;
+        if (colon < eol) {
+            const char *v = colon + 1;
+            while (v < eol && *v == ' ') v++;
+            size_t nl = (size_t)(colon - p), vl = (size_t)(eol - v);
+            char *tmp = kl_malloc(stream->res.alloc, nl + vl + 2);
+            if (!tmp) return -1;
+            memcpy(tmp, p, nl); tmp[nl] = '\0';
+            memcpy(tmp + nl + 1, v, vl); tmp[nl + 1 + vl] = '\0';
+            int rc = kl_http_response_header(&stream->res, tmp, tmp + nl + 1);
+            kl_free(stream->res.alloc, tmp, nl + vl + 2);
+            if (rc < 0) return -1;
+        }
+        p = eol + 2;
+    }
+    return 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Callback implementations (wired into KlHttp2ServerCallbacks)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -379,6 +409,15 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     stream->res.keep_alive = 1;
     stream->res.head_request = (req->method_len == 4 &&
                                  memcmp(req->method, "HEAD", 4) == 0);
+
+    /* The upgrading request's stream 1 does not run the pre-body middleware again: it ran in the
+     * HTTP/1.1 phase, on the connection's own request and response. Carry what it left there: the
+     * request context (how middleware hands data to the handler) and the response headers it added. */
+    if (h2c->upgrading && stream_id == 1 &&
+        h2_carry_upgrade_state(stream, &h2c->conn->req, &h2c->conn->res) < 0) {
+        h2_stream_destroy(h2c, stream);
+        return -1;
+    }
 
     /* Run middleware, except for the upgrading request's stream 1: it ran in its HTTP/1.1 phase. */
     if (!(h2c->upgrading && stream_id == 1) &&
