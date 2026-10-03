@@ -308,6 +308,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   reader was dropped with only `destroy`; it now gets `on_error` first, as on any other failure
   mid-body. `kl_http_request_pause_body` now documents that over TLS on a readiness backend the rest
   of the record already decrypted is still delivered (at most one TLS record).
+- **An HTTP/2 client request issued from `on_resp` re-entered the session.** `on_resp` runs inside
+  the session's receive (nghttp2's stream-close callback during `mem_recv`), and
+  `kl_http2_client_request` flushed the session right there, re-entering its send from inside its
+  receive, which nghttp2 does not support. Issuing the next request from `on_resp` (the common
+  pattern) could mis-process later frames in the same batch. A request issued inside a client
+  callback is now flushed once the session call has returned.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
