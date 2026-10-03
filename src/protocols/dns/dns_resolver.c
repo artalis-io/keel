@@ -99,8 +99,6 @@ typedef struct {
     int              tcp_pending;  /* 1 = awaiting a DNS-over-TCP response */
     int              tcp_ns;       /* nameserver index of the TCP connection, or -1 */
     int              cookie_retry; /* BADCOOKIE re-transmits already spent on this leg */
-    int              cookieless_tx; /* tries_left + 1 when a cookie-less answer was dropped (0 none) */
-    int              cookieless_ns; /* ... and the nameserver it came from */
 } KlDnsLeg;
 
 typedef struct KlDnsReq {
@@ -637,8 +635,6 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
         leg->tcp_pending = 0;
         leg->tcp_ns = -1;
         leg->cookie_retry = 0;
-        leg->cookieless_tx = 0;
-        leg->cookieless_ns = -1;
         leg->send_pending = 0;
         DnsTxResult tr = dns_transmit_leg(r, q, leg);
         if (tr == DNS_TX_SENT) {
@@ -1173,22 +1169,10 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
         uint8_t ck_server[DNS_COOKIE_SRV_MAX], ck_slen = 0;
         int have = 0;
         int opt = dns_extract_opt(pkt, len, &ext, ck_client, ck_server, &ck_slen, &have);
-        if (!(opt == 0 && have) && r->cookie[ns_idx].server_len > 0) {
-            /* No cookie from a server known to send one (we learned its cookie): an off-path
-             * spoofer, who cannot see our client cookie, just omits it (RFC 7873 5.3), so it is
-             * dropped. But a fleet behind one address may have members without cookies: when the
-             * answer to a LATER transmission of this leg to the same server is cookie-less too, it
-             * is that member's real answer (a spoofer would have to win the transaction-id race
-             * twice) and is accepted, rather than the lookup failing on timeouts. A server that
-             * never sent a cookie is accepted as before. */
-            int tx = leg->tries_left + 1;
-            if (!(leg->cookieless_tx != 0 && leg->cookieless_tx != tx &&
-                  leg->cookieless_ns == ns_idx)) {
-                leg->cookieless_tx = tx;
-                leg->cookieless_ns = ns_idx;
-                return;
-            }
-        }
+        if (!(opt == 0 && have) && r->cookie[ns_idx].server_len > 0)
+            return;   /* no cookie from a server known to send one (we learned its cookie): an
+                       * off-path spoofer, who cannot see our client cookie, just omits it
+                       * (RFC 7873 5.3). A server that never sent one is still accepted. */
         if (opt == 0 && have) {
             KlDnsCookie *c = &r->cookie[ns_idx];
             if (c->have_client &&
