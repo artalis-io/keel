@@ -215,6 +215,39 @@ UTEST(reject_drain, content_length_larger_than_supplied) {
     rd_stop();
 }
 
+/* A drain the client never feeds does not hold the loop. The sweep's drain step read the socket
+ * synchronously; on io_uring and IOCP accepted sockets block, so a client that was sent its 413 and then
+ * went quiet (connection open, nothing more sent) parked the whole server in that read until the client
+ * moved: nobody else was served. A second client must be answered while the first one stalls. */
+UTEST(reject_drain, a_stalled_drain_does_not_hold_the_loop) {
+    ASSERT_EQ(0, rd_start(1024 * 1024, 5000));             /* drain on, 5 s deadline */
+    int fd = rd_connect();
+    ASSERT_TRUE(fd >= 0);
+    const char *hdr = "POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 300000\r\n"
+                      "Connection: close\r\n\r\n";
+    ASSERT_TRUE(kl_test_sockwrite(fd, hdr, strlen(hdr)) > 0);
+    char chunk[4096];
+    memset(chunk, 'B', sizeof(chunk));
+    (void)kl_test_sockwrite(fd, chunk, sizeof(chunk));     /* over the 1 KiB reader: 413, drain */
+    /* ...and then nothing more, with the connection left open; past a sweep or two */
+    kl_test_sleep_ms(1500);
+
+    char buf[4096];
+    buf[0] = '\0';
+    int b = rd_connect();
+    if (b >= 0) {
+        kl_test_set_rcvtimeo(b, 1500);
+        const char *rq = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n"
+                         "Connection: close\r\n\r\nhi";
+        (void)kl_test_sockwrite(b, rq, strlen(rq));
+        (void)rd_read_all(b, buf, sizeof(buf));
+        kl_test_closesock(b);
+    }
+    kl_test_closesock(fd);
+    rd_stop();
+    ASSERT_TRUE(strstr(buf, "200") != NULL);               /* was (io_uring, IOCP): no answer */
+}
+
 /* Chunked body rejected mid-stream: framing is unknown, so only the byte cap bounds the drain. */
 UTEST(reject_drain, chunked_rejected_mid_stream) {
     ASSERT_EQ(0, rd_start(0, 0));
