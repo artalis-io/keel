@@ -1,0 +1,177 @@
+name: Soak
+
+# Intermittent failures are what one CI run per change misses. Two this cycle were found only by
+# repetition: the io_uring EINTR flake (4 in 120 runs) and the server start-up stop race (one hang).
+# This workflow runs the unit suites many times per backend, the sanitized completion suites, and the
+# fuzzers for much longer than CI does, and reports a per-test tally (tools/soak.sh). It runs weekly
+# and on demand; it is not a merge gate.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"          # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "Rounds per suite lane"
+        default: "20"
+      fuzz_seconds:
+        description: "Seconds per fuzz target"
+        default: "1200"
+
+permissions:
+  contents: read
+
+env:
+  ROUNDS: ${{ github.event.inputs.rounds || '20' }}
+  FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '1200' }}
+
+jobs:
+  repeat:
+    name: Repeat ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (epoll)
+            os: ubuntu-latest
+            build: ""
+            target: "test"
+            deps: ""
+          - name: Linux (poll)
+            os: ubuntu-latest
+            build: "BACKEND=poll"
+            target: "BACKEND=poll test"
+            deps: ""
+          - name: Completion (pollcomp)
+            os: ubuntu-latest
+            build: "BACKEND=pollcomp"
+            target: "BACKEND=pollcomp test-pollcomp"
+            deps: ""
+          - name: Completion (io_uring)
+            os: ubuntu-latest
+            build: "BACKEND=iouring"
+            target: "BACKEND=iouring test-iouring"
+            deps: "liburing-dev"
+          - name: macOS (kqueue)
+            os: macos-latest
+            build: ""
+            target: "test"
+            deps: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux' && matrix.deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
+      - name: Build
+        run: make ${{ matrix.build }}
+      - name: Soak
+        run: sh tools/soak.sh "$ROUNDS" 900 ${{ matrix.target }}
+      - name: Keep failing logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-${{ matrix.os }}-${{ strategy.job-index }}
+          path: soak-out/
+
+  repeat-windows:
+    name: Repeat Windows (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: WSAPoll
+            build: "OS=windows CC=gcc"
+            target: "OS=windows CC=gcc test-win"
+          - name: IOCP
+            build: "OS=windows BACKEND=iocp CC=gcc"
+            target: "OS=windows BACKEND=iocp CC=gcc test-win-iocp"
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf
+      - name: Build
+        run: make ${{ matrix.build }}
+      # A quarter of the rounds: a full Windows suite run takes about 15 minutes.
+      - name: Soak
+        run: sh tools/soak.sh "$(( (ROUNDS + 3) / 4 ))" 2400 ${{ matrix.target }}
+      - name: Keep failing logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-windows-${{ strategy.job-index }}
+          path: soak-out/
+
+  sanitized:
+    name: Sanitized ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: readiness (epoll)
+            build: "'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)'"
+            target: "'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)' test"
+            deps: ""
+          - name: completion (pollcomp)
+            build: "BACKEND=pollcomp 'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)'"
+            target: "BACKEND=pollcomp 'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)' test-pollcomp-san"
+            deps: ""
+          - name: completion (io_uring)
+            build: "BACKEND=iouring 'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)' KEEL_EXTRA_LDFLAGS=-luring"
+            target: "BACKEND=iouring 'CFLAGS=$(DEBUG_CFLAGS)' 'LDFLAGS=$(DEBUG_LDFLAGS)' KEEL_EXTRA_LDFLAGS=-luring test-iouring-san"
+            deps: "liburing-dev"
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install deps
+        if: matrix.deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
+      # The make variables are single-quoted, so the shell passes $(DEBUG_CFLAGS) through literally
+      # and make expands it, exactly as the debug-* targets do; the build happens once, and each round
+      # only re-runs. A quarter of the rounds: a sanitized round takes several times longer.
+      - name: Build (sanitized)
+        run: make ${{ matrix.build }}
+      - name: Soak (sanitized)
+        run: sh tools/soak.sh "$(( (ROUNDS + 3) / 4 ))" 1800 ${{ matrix.target }}
+      - name: Keep failing logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-sanitized-${{ strategy.job-index }}
+          path: soak-out/
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parser, multipart, websocket, response_parser, dns, proxy, url]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build fuzz targets
+        run: make fuzz CC=clang
+      - name: Fuzz (long run)
+        run: |
+          mkdir -p crashes
+          ./fuzz/fuzz_${{ matrix.target }} fuzz/corpus_${{ matrix.target }}/ \
+            -max_total_time="$FUZZ_SECONDS" -print_final_stats=1 -artifact_prefix=crashes/
+      - name: Keep crash inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: crashes/
