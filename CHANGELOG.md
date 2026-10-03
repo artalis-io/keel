@@ -7,6 +7,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **A TLS connection on a completion loop could be released twice, corrupting the connection
+  pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
+  completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that
+  stops reading, then resets) put the slot on the free list twice, so two later accepts could share
+  one connection. Every op posted on a connection is now counted, and a connection with ops in flight
+  is released by the last completion, after the others are cancelled. Related: a connection closing
+  once its queued TLS output was out was never timed out, so a client that never read held its slot
+  for good; a TLS WebSocket connection kept reading while its output queued, so a client that never
+  read grew server memory without bound (it is now read only once its output is out); a body or a
+  pipelined request that came with the headers was left in the TLS engine until the body timeout; a
+  rejected TLS upload was drained from the wrong buffer (stale bytes, an over-read for a large
+  receive); and a timed-out TLS request's 408 was never sent.
 - **Post-body middleware and the access log read request headers the body had overwritten.** The
   body read reuses the connection's read buffer from offset 0, where `method`, `path` and the header
   pointers point. Post-body middleware (and the `access_log` callback) then saw body bytes in place of

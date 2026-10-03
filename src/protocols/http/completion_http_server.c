@@ -67,6 +67,7 @@ static inline KlHttpConn *conn_of_stream(KlStream *st) {
 /* The TLS output queue (defined below, with kl_comp_tls_flush). */
 static int comp_tlsq_idle(const KlHttpConn *c);
 static int comp_tlsq_settle(struct KlHttpServer *s, KlHttpConn *c);
+static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c);
 
 /* ── HTTP-adapter completion helpers (KlHttpConn form) ────────────────────────
  * These own ALL the TLS/PROXY/connection-state knowledge for posting transport I/O; the
@@ -89,14 +90,25 @@ static int comp_post_recv_buf(KlHttpConn *c) {
     return kl_comp_post_recv_raw(&c->stream, c->stream.read_buf + c->stream.read_len, space);
 }
 
+/* Every op posted on a connection is counted (comp_ops) until its completion arrives: a connection can
+ * hold a receive and a send at once (TLS output drains while the next input is read), and it may only
+ * go back to the pool once no completion can still arrive for it (kl_http_server_conn_release defers
+ * to the last one). A closing connection posts nothing new. */
 int kl_comp_post_recv(KlHttpConn *c) {
+    if (c->comp_closing) return -1;
+    c->comp_ops++;
     int r = comp_post_recv_buf(c);
     if (r == 0) c->comp_recv_posted = 1;   /* the timeout sweep needs to know whether one is posted */
+    else c->comp_ops--;
     return r;
 }
 
 int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    return kl_comp_post_send_raw(&c->stream, iov, iovcnt, total);
+    if (c->comp_closing) return -1;
+    c->comp_ops++;
+    int r = kl_comp_post_send_raw(&c->stream, iov, iovcnt, total);
+    if (r < 0) c->comp_ops--;
+    return r;
 }
 
 /* Accept/sendfile HTTP wrappers: each forwards the neutral arg (&s->ev, s->listen_fd, &c->stream)
@@ -112,7 +124,11 @@ int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
 }
 int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    return kl_comp_post_sendfile_raw(&c->stream, head_iov, head_n, head_total, file_fd, count);
+    if (c->comp_closing) return -1;
+    c->comp_ops++;
+    int r = kl_comp_post_sendfile_raw(&c->stream, head_iov, head_n, head_total, file_fd, count);
+    if (r < 0) c->comp_ops--;
+    return r;
 }
 
 /* Serialize the response head and post it: buffered body inline via WSASend, or a
@@ -140,6 +156,9 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->comp_recv_posted) return;     /* one receive at a time: it lands at read_buf[0] */
     c->stream.read_len = 0;
     if (c->stream.read_paused) return;   /* paused: resume re-posts via kl_http_comp_post_read */
+    /* TLS: body records that came with the headers may already be in the engine; read those first
+     * (the drive posts the receive once the engine wants the network). */
+    if (c->tls) { comp_tls_drive(s, c); return; }
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
@@ -157,6 +176,7 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
 static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
     switch (st) {
     case KL_HTTP_CONN_READING:            /* keep-alive: next request */
+        if (c->tls) { comp_tls_drive(s, c); break; }   /* a pipelined request may be in the engine */
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         break;
     case KL_HTTP_CONN_DRAINING:
@@ -322,6 +342,15 @@ void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c) {
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
+/* completion_http.h: send a final response the engine holds (the sweep's 408), then half-close for
+ * the drain or close, each once it is out. A receive still posted completes on its own: a closing
+ * connection is released by the last of its completions. */
+void kl_http_comp_tls_finish(struct KlHttpServer *s, KlHttpConn *c, int draining) {
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+    if (draining) { (void)comp_tlsq_settle(s, c); return; }
+    kl_comp_close_after_output(s, c);
+}
+
 /* Encrypt plaintext through the TLS engine onto the output queue, absorbing the engine's ring as it
  * fills (so a response larger than the ring cap is handled). 0, or -1 on error. */
 static int comp_tls_queue_plaintext(KlHttpConn *c, const KlIoVec *iov, int n) {
@@ -441,15 +470,16 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * upgrade request must not be re-fed), then read h2 frames. */
         c->stream.read_len = 0;
         if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        kl_comp_recv_after_output(s, c);
         break;
     case KL_HTTP_CONN_WEBSOCKET:
         /* WS upgrade done during dispatch: kl_ws_server_upgrade wrote the 101 handshake
          * (and processed any leftover frames) through conn_write; for TLS that ciphertext
-         * is in the out ring. Flush it, reset the read window, then read WS frames. */
+         * is in the out ring. Flush it, reset the read window, then read WS frames once it is out
+         * (no new input while output is pending: a client that does not read stops being read). */
         c->stream.read_len = 0;
         if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        kl_comp_recv_after_output(s, c);
         break;
     case KL_HTTP_CONN_SUSPENDED:
         /* Handler suspended for async I/O: leave the connection parked; it holds
@@ -582,7 +612,24 @@ static void comp_drive_body(struct KlHttpServer *s, KlHttpConn *c) {
  * kl_http_conn_ingest_body verbatim. Because TLS records can arrive coalesced in one recv,
  * each decrypt phase loops on pending() so buffered plaintext isn't stranded waiting
  * for the next network read. Ciphertext output is flushed synchronously. */
+static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c);
+
+/* Drive a TLS connection, never re-entrantly: a drive can lead (through a dispatch, a send that
+ * completes at once, a resumed body read) to a request to drive the same connection again, which the
+ * running drive then honours by looping, on the state it left, instead of a nested drive working on
+ * state the outer one still holds. Stops once the connection was released or is closing. */
 static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
+    if (c->comp_tls_driving) { c->comp_tls_redrive = 1; return; }
+    unsigned gen = c->comp_gen;
+    c->comp_tls_driving = 1;
+    do {
+        c->comp_tls_redrive = 0;
+        comp_tls_drive_once(s, c);
+    } while (c->comp_gen == gen && !c->comp_closing && c->comp_tls_redrive);
+    if (c->comp_gen == gen) c->comp_tls_driving = 0;   /* a release already cleared it */
+}
+
+static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c) {
     /* Upgraded connections drive through the completion-drive seam (NULL in a
      * freestanding HTTP/1.1 build, which never reaches these states). */
     if (c->state == KL_HTTP_CONN_HTTP2) {
@@ -609,7 +656,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
             if (h2c && h2c->drive) h2c->drive(s, c);   /* process any buffered h2 frames */
             return;
         }
-        if (st != KL_HTTP_CONN_READING) { kl_comp_close(s, c); return; }   /* CLOSED */
+        if (st != KL_HTTP_CONN_READING) { kl_comp_close_after_output(s, c); return; }   /* an alert */
         /* Handshake complete. Fall through to the read logic below to process any
          * application data already buffered with the handshake (TLS 1.3 0-RTT / a
          * client's Finished coalesced with its first request) rather than blindly
@@ -640,7 +687,10 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
         }
     }
 
-    /* Reading request headers: accumulate decrypted plaintext, parse, dispatch. */
+    /* Reading request headers: accumulate decrypted plaintext, parse, dispatch. Only in that state: a
+     * repeated drive (comp_tls_drive) may find the connection sending, draining or suspended, and
+     * reading the next request then would interleave it with the response still going out. */
+    if (c->state != KL_HTTP_CONN_READING) return;
     for (;;) {
         size_t off = c->stream.read_len;
         if (off >= c->stream.read_cap) {   /* buffer full: grow to max_header_size, else 431 + close */
@@ -650,6 +700,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
         kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
         if (p < 0) { kl_comp_close(s, c); return; }
         if (p == 0) {                                  /* WANT_READ: need the network */
+            if (c->comp_recv_posted) return;           /* one receive at a time */
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
             return;
         }
@@ -855,11 +906,35 @@ static void comp_drive_proxy(struct KlHttpServer *s, KlHttpConn *c) {
 static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     c->comp_recv_posted = 0;
+    c->comp_ops--;
+    if (c->comp_closing) {                     /* being released: the last completion does it */
+        if (c->comp_ops == 0) { c->comp_closing = 0; kl_http_server_conn_release(s, c); }
+        return;
+    }
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
+    /* Closing once its queued output is out (a receive was still posted): the input is not wanted. */
+    if (c->state == KL_HTTP_CONN_CLOSED) return;
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
      * bounded recv was posted per completion, so this is the non-blocking drain progression. */
+    if (c->state == KL_HTTP_CONN_DRAINING && c->tls) {
+        /* TLS: the bytes are ciphertext in comp_cipher. Decrypt into read_buf and drain the
+         * plaintext, so the framing (a terminal chunk) is seen as on any other transport. */
+        if (c->tls->feed_input(c->tls, c->comp_cipher, ev->bytes) < 0) { kl_comp_close(s, c); return; }
+        for (;;) {
+            kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
+            if (p < 0) { kl_comp_close(s, c); return; }
+            if (p == 0) break;                         /* WANT_READ */
+            KlHttpConnState st = kl_http_conn_drain_ingest(c, (size_t)p, kl_monotonic_ms());
+            c->stream.read_len = 0;
+            if (st == KL_HTTP_CONN_CLOSED) { kl_comp_close_after_output(s, c); return; }
+        }
+        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+        if (comp_tlsq_settle(s, c)) return;
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        return;
+    }
     if (c->state == KL_HTTP_CONN_DRAINING) {
         /* The bytes are in read_buf; hand them to the SAME framing-aware step the readiness path
          * uses, so completion terminates on the terminal chunk exactly as readiness does rather than
@@ -930,6 +1005,11 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
 
 static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
+    c->comp_ops--;
+    if (c->comp_closing) {                     /* being released: the last completion does it */
+        if (c->comp_ops == 0) { c->comp_closing = 0; kl_http_server_conn_release(s, c); }
+        return;
+    }
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     /* Every send on a TLS connection is the output queue's. */
@@ -991,6 +1071,7 @@ static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
 void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
     if (conn->state == KL_HTTP_CONN_READING) {   /* handler yielded without a response: read on */
         conn->stream.read_len = 0;
+        if (conn->tls) { comp_tls_drive(s, conn); return; }   /* input may be held in the engine */
         if (kl_comp_post_recv(conn) < 0) kl_comp_close(s, conn);
         return;
     }

@@ -41,6 +41,25 @@ static int connect_to(int port) {
     return fd;
 }
 
+/* As connect_to, with a 4 KiB receive buffer set BEFORE connecting, so the window the peer sees
+ * is small from the start: a client that then never reads stops the server's sends quickly. */
+static int connect_small_rcvbuf(int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int rcv = 4096;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons((uint16_t)port),
+    };
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        kl_test_closesock(fd);
+        return -1;
+    }
+    return fd;
+}
+
 static kl_ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
     kl_ssize_t total = 0;
     while (total < (kl_ssize_t)buflen - 1) {
@@ -448,6 +467,124 @@ UTEST(tls_integration, a_rejected_upload_gets_its_413) {
     kl_plat_thread_join(&tid);
     kl_http_server_free(&tq_rej_srv);
     ASSERT_TRUE(strstr(buf, "413") != NULL);               /* was (completion + TLS): FIN, no status */
+}
+
+/* A connection that is waiting for its output to go before it closes is still timed out. A TLS
+ * response with Connection: close leaves it closing once the output queue is empty, a state the
+ * idle sweep skipped, so a client that never reads held the slot for good: with one slot, nobody
+ * else was served again. (IOCP over loopback takes even a 16 MiB send whole, so this shows on the
+ * POSIX completion backends, whose sends stop at a peer that does not read.) */
+static KlHttpServer tq_hold_srv;
+static void handle_tq_hugestream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    static char chunk[TQ_CHUNK];
+    memset(chunk, 'H', sizeof chunk);
+    for (int i = 0; i < 4 * TQ_CHUNKS; i++) w(wc, chunk, sizeof chunk);   /* 16 MiB */
+    kl_http_response_end_stream(res);
+}
+
+UTEST(tls_integration, a_client_that_never_reads_does_not_hold_its_slot) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 1,
+                               .read_timeout_ms = 300 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_hold_srv, &cfg));
+    kl_http_server_route(&tq_hold_srv, "GET", "/big", handle_tq_hugestream, NULL, NULL);
+    kl_http_server_route(&tq_hold_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_hold_srv);
+    wait_for_bind(&tq_hold_srv);
+    int port = tq_hold_srv.bound_port;
+
+    int a = connect_small_rcvbuf(port);                    /* asks for 16 MiB, never reads */
+    if (a >= 0) {
+        const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(a, rq, strlen(rq));
+    }
+    kl_test_sleep_ms(1500);                                /* well past the 300 ms idle timeout */
+
+    char buf[1024];
+    buf[0] = '\0';
+    int b = connect_to(port);
+    if (b >= 0) {
+        const char *rq = "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(b, rq, strlen(rq));
+        read_response(b, buf, sizeof buf, 2000);
+        kl_test_closesock(b);
+    }
+    if (a >= 0) kl_test_closesock(a);
+    kl_http_server_stop(&tq_hold_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_hold_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (completion + TLS): never served */
+}
+
+/* Input the engine already holds is read before the network is asked for more. A real engine hands
+ * out one record per read, so headers and body that came in one receive come out over several reads;
+ * once the headers were parsed, the body read posted a network receive and left the rest of the body
+ * in the engine, waiting for bytes the client had already sent. mock_tls_read_max hands out 48 bytes
+ * per read. */
+static KlHttpServer tq_rec_srv;
+
+UTEST(tls_integration, a_body_that_came_with_its_headers_is_not_left_in_the_engine) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg };
+    ASSERT_EQ(0, kl_http_server_init(&tq_rec_srv, &cfg));
+    kl_http_server_route(&tq_rec_srv, "POST", "/echo", handle_echo_body,
+                         (void *)(size_t)4096, kl_http_body_reader_buffer);
+    mock_tls_read_max = 48;
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_rec_srv);
+    wait_for_bind(&tq_rec_srv);
+
+    char buf[4096];
+    buf[0] = '\0';
+    int fd = connect_to(tq_rec_srv.bound_port);
+    if (fd >= 0) {
+        static char rq[2048];
+        int hl = snprintf(rq, sizeof rq,
+                          "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n"
+                          "Connection: close\r\n\r\n");
+        memset(rq + hl, 'e', 1000);
+        (void)kl_test_sockwrite(fd, rq, (size_t)hl + 1000);   /* headers and body in one write */
+        read_response(fd, buf, sizeof buf, 1500);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&tq_rec_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_rec_srv);
+    mock_tls_read_max = 0;
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (completion + TLS): no answer */
+}
+
+/* A request that times out over TLS gets its 408. The sweep wrote it through the TLS engine (on a
+ * completion loop, into its output ring) and nothing ever sent it. */
+static KlHttpServer tq_408_srv;
+
+UTEST(tls_integration, a_timed_out_request_gets_its_408) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .read_timeout_ms = 300 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_408_srv, &cfg));
+    kl_http_server_route(&tq_408_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_408_srv);
+    wait_for_bind(&tq_408_srv);
+
+    char buf[1024];
+    buf[0] = '\0';
+    int fd = connect_to(tq_408_srv.bound_port);
+    if (fd >= 0) {
+        const char *part = "GET /hello HTTP/1.1\r\nHost: x\r\n";   /* and then nothing */
+        (void)kl_test_sockwrite(fd, part, strlen(part));
+        read_response(fd, buf, sizeof buf, 2500);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&tq_408_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_408_srv);
+    ASSERT_TRUE(strstr(buf, "408") != NULL);               /* was (completion + TLS): no status */
 }
 
 UTEST_MAIN();

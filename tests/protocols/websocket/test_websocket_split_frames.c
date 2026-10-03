@@ -792,4 +792,58 @@ UTEST(ws_server_send, a_frame_the_drain_cuts_short_closes_the_connection) {
     ASSERT_EQ(closed, 1);                           /* was 0 (where the socket cut the frame) */
 }
 
+/* A TLS WebSocket connection on a completion loop holds a receive AND a send at once (the server
+ * keeps reading while its output queue drains). When the peer resets, both complete with an error,
+ * and each completion closed the connection: it was released twice, which corrupts the pool (the
+ * slot goes onto the free list twice and two later accepts share it). The server answers each
+ * message with a 128 KiB frame; the client sends 64 messages without reading, then resets. Every
+ * connection must be released exactly once: none active once the server has stopped. */
+static void rst_big_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
+    (void)data; (void)len; (void)is_binary; (void)ud;
+    static char big[128 * 1024];
+    memset(big, 'R', sizeof big);
+    (void)kl_ws_server_send_binary(ws, big, sizeof big);
+}
+
+UTEST(ws_server_send, a_reset_with_a_receive_and_a_send_in_flight_releases_once) {
+    static Srv s;
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.port = 0;
+    cfg.bind_addr = "127.0.0.1";
+    cfg.tls = &g_tls_cfg;
+    ASSERT_EQ(kl_http_server_init(&s.srv, &cfg), 0);
+    kl_ws_server_config_init(&s.ws_cfg);
+    s.ws_cfg.callbacks.on_message = rst_big_on_message;
+    ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
+    ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
+    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    s.port = s.srv.bound_port;
+
+    KlSocketHandle fd = ws_open_raw(s.port);
+    if (kl_handle_valid(fd)) {
+        int rcv = 4096;
+        (void)setsockopt((int)fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
+        unsigned char f[32];
+        size_t fl = build_masked(f, 0x1, (const unsigned char *)"go", 2);
+        for (int i = 0; i < 64; i++) (void)send_all(fd, f, fl);
+        kl_test_sleep_ms(300);                      /* the server is now sending, and reading */
+        struct linger lg = { 1, 0 };                /* close with a reset, not a FIN */
+        (void)setsockopt((int)fd, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(500);                          /* both completions have come back */
+    KlSocketHandle probe = ws_open_raw(s.port);     /* the server still accepts and upgrades */
+    int probe_ok = kl_handle_valid(probe);
+    if (probe_ok) kl_test_closesock(probe);
+    kl_test_sleep_ms(300);
+    kl_http_server_stop(&s.srv);
+    kl_plat_thread_join(&s.t);
+    KlHttpServerStats st;
+    kl_http_server_stats(&s.srv, &st);
+    kl_http_server_free(&s.srv);
+    ASSERT_TRUE(probe_ok);
+    ASSERT_EQ(st.active_connections, 0);            /* was -1: one connection released twice */
+}
+
 UTEST_MAIN();

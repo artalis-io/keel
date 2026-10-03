@@ -28,7 +28,9 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ: need the network */
-                if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+                /* ...once the queued frames are out: a client that does not read its frames is not
+                 * read either, so its output cannot pile up without bound. */
+                kl_comp_recv_after_output(s, c);
                 return;
             }
             KlHttpConnState st = (KlHttpConnState)kl_ws_server_on_readable_data(

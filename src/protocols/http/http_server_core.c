@@ -594,6 +594,15 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
 /* Release a connection and resume the listen socket if it was paused due to pool
  * exhaustion. Called from the event loop, timeout sweep, and async completion. */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
+    /* Completion loop: an op still posted on this connection will complete against it, so the slot
+     * cannot go back to the pool yet. Cancel what is posted and let the last completion release it
+     * (completion_http_server.c). A second release meanwhile is the same request: a no-op. */
+    if (c->comp_closing) return;
+    if (c->comp_ops > 0) {
+        c->comp_closing = 1;
+        kl_comp_cancel(&s->ev, c->stream.fd);
+        return;
+    }
     if (s->accept_via_listener) {
         /* Split-credit accept path: return the physical KlHttpConn to the pool FIRST, then
          * consume the admission lease. The lease's release returns the credit and resumes the
@@ -625,6 +634,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                             : timeout;
     for (int i = 0; i < s->pool.capacity; i++) {
         KlHttpConn *tc = &s->pool.conns[i];
+        /* Completion: a connection closing once its queued TLS output is out stays in the pool
+         * until that output goes; a client that never reads must not hold the slot for good. */
+        if (completion_loop && tc->state == KL_HTTP_CONN_CLOSED && tc->comp_tlsq_then_close &&
+            !tc->comp_closing && now - tc->last_active_ms > timeout) {
+            kl_http_server_conn_release(s, tc);   /* cancels the send; its completion releases */
+            continue;
+        }
         if (tc->state == KL_HTTP_CONN_CLOSED || tc->state == KL_HTTP_CONN_PROCESSING)
             continue;
         /* Suspended: exempt from idle timeout; has its own deadline */
@@ -699,8 +715,15 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 tc->state == KL_HTTP_CONN_READING_BODY) {
                 /* 408 is a final response too, so it goes through the same ownership point; a
                  * timed-out upload is precisely the case with unread body left (#278). */
-                if (kl_http_conn_reject_final(tc, kl_408_response,
-                                             sizeof(kl_408_response) - 1) == KL_HTTP_CONN_DRAINING)
+                KlHttpConnState rs = kl_http_conn_reject_final(tc, kl_408_response,
+                                                              sizeof(kl_408_response) - 1);
+                /* Completion + TLS: the 408 is ciphertext in the engine, and the receive that is
+                 * posted may never complete: send it now, then drain or close once it is out. */
+                if (completion_loop && tc->tls) {
+                    kl_http_comp_tls_finish(s, tc, rs == KL_HTTP_CONN_DRAINING);
+                    continue;
+                }
+                if (rs == KL_HTTP_CONN_DRAINING)
                     continue;   /* drain first; the branch above closes it when a bound is reached */
             }
             if (completion_loop) {
