@@ -376,20 +376,45 @@ static void mock_tcp_on_listen(KlSocketHandle fd, KlEventMask ready, void *ud) {
 }
 
 /* Bind a TCP DNS listener on 127.0.0.1:port (the same port the UDP mock uses). */
-static int mock_tcp_start(MockTcp *m, KlEventCtx *ctx, int port) {
-    memset(m, 0, sizeof(*m));
-    m->ctx = ctx;
-    m->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m->listen_fd < 0) return -1;
+/* The mock TCP nameserver listens on the UDP nameserver's port number (the resolver has one port for
+ * both). That number came free for UDP, but the same TCP port can be held by another socket, so the
+ * nameserver setup reserves it: make_resolver_cfg binds this TCP socket to the port as soon as the
+ * UDP one is bound, and picks a new port when it cannot. mock_tcp_start listens on the reservation. */
+static int g_tcp_reserve = -1;
+static int g_tcp_reserve_port;
+static void tcp_reserve_drop(void) {
+    if (g_tcp_reserve >= 0) kl_test_closesock(g_tcp_reserve);
+    g_tcp_reserve = -1;
+}
+static int tcp_bind_loopback(int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
     int one = 1;
-    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(m->listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
-        kl_test_closesock(m->listen_fd); return -1;
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { kl_test_closesock(fd); return -1; }
+    return fd;
+}
+static int tcp_reserve(int port) {
+    tcp_reserve_drop();
+    g_tcp_reserve = tcp_bind_loopback(port);
+    g_tcp_reserve_port = port;
+    return g_tcp_reserve >= 0 ? 0 : -1;
+}
+
+static int mock_tcp_start(MockTcp *m, KlEventCtx *ctx, int port) {
+    memset(m, 0, sizeof(*m));
+    m->ctx = ctx;
+    if (g_tcp_reserve >= 0 && g_tcp_reserve_port == port) {
+        m->listen_fd = g_tcp_reserve;              /* the port make_resolver_cfg reserved */
+        g_tcp_reserve = -1;
+    } else {
+        m->listen_fd = tcp_bind_loopback(port);
     }
+    if (m->listen_fd < 0) return -1;
     if (listen(m->listen_fd, 8) != 0) { kl_test_closesock(m->listen_fd); return -1; }
     kl_test_set_nonblock(m->listen_fd);
     return kl_watcher_add(ctx, m->listen_fd, KL_EVENT_READ, mock_tcp_on_listen, m);
@@ -439,11 +464,16 @@ static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlDatagram *ns,
      * (instead of a bare `r == NULL` from the 30+ resolver-backed cases). Two distinct failure
      * points: the mock nameserver's bound KlDatagram vs the resolver's own KlDatagram construction
      * (kl_datagram_open -> _init -> _recv_start). */
-    errno = 0;
-    if (kl_datagram_socket_init(ns, &sc) != 0) {
-        fprintf(stderr, "make_resolver: nameserver socket_init FAILED: %s (errno=%d: %s)\n",
-                kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
-        return NULL;   /* socket_init closed the fd on failure; nothing to reclaim */
+    for (int tries = 0;; tries++) {
+        errno = 0;
+        if (kl_datagram_socket_init(ns, &sc) != 0) {
+            fprintf(stderr, "make_resolver: nameserver socket_init FAILED: %s (errno=%d: %s)\n",
+                    kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
+            return NULL;   /* socket_init closed the fd on failure; nothing to reclaim */
+        }
+        if (tcp_reserve(kl_datagram_local_port(ns)) == 0 || tries == 20)
+            break;                                  /* the TCP port is ours (or give up trying) */
+        kl_dg_close_free(ctx, ns);                  /* held for TCP: take another port */
     }
     if (kl_datagram_recv_start(ns, mock_ns, ns) != 0) {         /* split: reclaim the ADOPTED nameserver */
         fprintf(stderr, "make_resolver: nameserver recv_start FAILED: %s\n",
