@@ -794,15 +794,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential git python3-jinja2 python3-jsonschema
 
-      - name: Fetch lwIP + contrib (BYO, not vendored)
+      # lwip-contrib (unix port) lives only on Savannah (the GitHub mirror is gone), and Savannah
+      # intermittently answers HTTP 500. Pin it to one commit (reproducible) and cache that tree,
+      # so a Savannah outage no longer fails the job; on a cache miss, fetch with retries.
+      - name: Cache lwip-contrib (pinned)
+        id: contrib-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/lwip-contrib
+          key: lwip-contrib-058e53d5b3a5a4639823e6f7cdc96f832643bfab
+
+      - name: Fetch lwip-contrib (cache miss only)
+        if: steps.contrib-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 8
+        run: |
+          CONTRIB_SHA=058e53d5b3a5a4639823e6f7cdc96f832643bfab
+          # Full clone, then the pinned commit: a server need not serve a non-tip commit by SHA.
+          for i in 1 2 3 4 5; do
+            rm -rf "$HOME/lwip-contrib" &&
+              git clone -q https://git.savannah.nongnu.org/git/lwip/lwip-contrib.git "$HOME/lwip-contrib" &&
+              git -C "$HOME/lwip-contrib" checkout -q "$CONTRIB_SHA" && break
+            echo "lwip-contrib fetch failed (attempt $i), retrying"; sleep $((i * 15))
+          done
+          test "$(git -C "$HOME/lwip-contrib" rev-parse HEAD)" = "$CONTRIB_SHA"
+
+      - name: Fetch lwIP (BYO, not vendored)
         timeout-minutes: 5
         run: |
           git clone --depth 1 -b STABLE-2_2_0_RELEASE \
             https://github.com/lwip-tcpip/lwip "$HOME/lwip"
-          # lwip-contrib (unix port) is on Savannah; the GitHub mirror is gone.
           rm -rf "$HOME/lwip/contrib"
-          git clone --depth 1 \
-            https://git.savannah.nongnu.org/git/lwip/lwip-contrib.git "$HOME/lwip/contrib"
+          cp -r "$HOME/lwip-contrib" "$HOME/lwip/contrib"
 
       - name: Build mbedTLS 3.6.x from source (for the HTTPS-over-lwIP phase)
         timeout-minutes: 6
