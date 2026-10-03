@@ -99,8 +99,11 @@ struct KlHttp2ServerSession {
      * header value as received (base64url, unpadded); the session decodes and
      * applies it, and opens stream 1 half-closed (remote) for the upgrading
      * request, which KEEL then answers on stream 1. `head_request` is non-zero for
-     * a HEAD request. Called before any client data is fed. Returns 0 on success,
-     * -1 on error (a malformed HTTP2-Settings included). A NULL upgrade makes KEEL
+     * a HEAD request. Called before any client data is fed, and BEFORE KEEL writes the
+     * `101 Switching Protocols`: the session must not send anything from here (no
+     * callbacks.send call); its output, the SETTINGS preface included, goes out on the next
+     * flush, after the 101. Returns 0 on success, -1 on error (a malformed HTTP2-Settings
+     * included, or values the session refuses), which declines the upgrade. A NULL upgrade makes KEEL
      * decline h2c upgrades: the request is answered over HTTP/1.1, which RFC 9113
      * allows (the Upgrade header may be ignored).
      */
@@ -146,8 +149,8 @@ int  kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerC
 /** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 `Upgrade: h2c` request (c->req, before
  *  its body is read), answering that request on stream 1. Returns the new connection state, or
  *  KL_HTTP2_UPGRADE_DECLINED when the upgrade cannot be done (no single HTTP2-Settings header, a
- *  request body, or a session without the upgrade op): the caller then serves the request over
- *  HTTP/1.1 as if no Upgrade had been asked for. */
+ *  request body, a session without the upgrade op, or a session that refuses the settings): the
+ *  caller then serves the request over HTTP/1.1 as if no Upgrade had been asked for. */
 #define KL_HTTP2_UPGRADE_DECLINED (-1)
 int  kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
                                    KlHttp2ServerConfig *cfg,

@@ -296,7 +296,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
             remaining--;
         }
         if (s->hdr_len < 10)
-            return 0;  /* need more data */
+            return flush ? -1 : 0;  /* need more data; at end of input, truncated */
 
         /* Validate header */
         if (s->hdr_buf[0] != 0x1f || s->hdr_buf[1] != 0x8b ||

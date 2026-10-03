@@ -124,6 +124,8 @@ static void h2_submit_500(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream, c
                                   head ? NULL : msg, head ? 0 : strlen(msg));
 }
 
+static int h2c_hop_by_hop(const char *name, size_t len);
+
 static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
     if (stream->response_submitted) return 0;
     stream->response_submitted = 1;
@@ -177,9 +179,9 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
     const char *filt_values[H2_MAX_RESP_HEADERS];
     int filt_count = 0;
     for (int i = 0; i < num_hdrs; i++) {
-        if (kl_ascii_strcasecmp(names[i], "connection") == 0) continue;
-        if (kl_ascii_strcasecmp(names[i], "transfer-encoding") == 0) continue;
-        if (kl_ascii_strcasecmp(names[i], "keep-alive") == 0) continue;
+        /* Connection-specific headers are malformed in HTTP/2 (RFC 9113 8.2.2): the same list the
+         * h2c upgrade strips from the request. */
+        if (h2c_hop_by_hop(names[i], strlen(names[i]))) continue;
         filt_names[filt_count] = names[i];
         filt_values[filt_count] = values[i];
         filt_count++;

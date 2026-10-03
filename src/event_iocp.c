@@ -28,6 +28,7 @@
 #include "udp_cmsg_win.h"        /* WSARecvMsg fetch + pktinfo parse: UDP local addr (shared) */
 #include "dgram_recv_classify.h" /* platform-agnostic completed-recv classification (unit-tested) */
 #include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
+#include <limits.h>              /* INT_MAX: the saturating watcher retry count */
 #include <string.h>
 #include <stdlib.h>              /* getenv / strtol: TransmitFile chunk-cap test seam */
 
@@ -1103,7 +1104,7 @@ static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, 
                  * to mark it dead after 64 failures, which a busy loop burns through in
                  * milliseconds; the dead watcher was then reported on every drain, a 100% CPU spin
                  * for good, since nothing deletes a wakeup or pool watcher. */
-                op->watch_retries++;
+                if (op->watch_retries < INT_MAX) op->watch_retries++;   /* saturates */
                 op->watch_rearm = 1;
                 *retry_pending = 1;
                 continue;

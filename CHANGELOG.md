@@ -264,6 +264,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Edge cases found re-auditing the previous round.** An HTTP/2 response no longer carries
+  `Upgrade`, `Proxy-Connection` or `TE` (only `Connection`, `Transfer-Encoding` and `Keep-Alive` were
+  dropped): clients reset a stream that has them, and stream 1 of an h2c upgrade now carries the
+  HTTP/1.1 middleware's headers. A gzip body that ends inside its own header is rejected at end of
+  input instead of accepted as empty. When a legacy streaming handler's response came from the body
+  reader's `on_error` (a failed head copy), a 500 no longer follows it. `kl_http_server_run` stopped by
+  an error (a failed event wait) now returns -1 and clears `running`. A file `sendfile` interrupted
+  before sending anything is retried instead of cutting the response. The IOCP watcher retry count
+  saturates. The lwIP NO_SYS engine sleeps at most 10 ms per idle drain, so its timers keep running.
+  Documented: an HTTP/2 session's `upgrade` runs before the 101 and must not send, and a file response's
+  descriptor must be binary on Windows.
 - **gzip responses over a few KB failed to decompress (miniz streaming decompressor).** The miniz
   backend's streaming `dfeed` decompressed into a 4 KiB buffer used as a wrapping dictionary that
   restarted at every call, but deflate matches reach 32 KiB back: any match more than 4 KiB back read
