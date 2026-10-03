@@ -20,6 +20,11 @@ typedef struct {
     KlDecompress        base;       /* vtable; must be first */
     KlAllocator        *alloc;
     tinfl_decompressor   decomp;    /* ~11KB */
+    /* The deflate dictionary for streaming (dfeed): a 32 KiB ring that persists across calls, with
+     * the running write offset. Deflate matches reach 32 KiB back, so the output buffer of a wrapping
+     * tinfl_decompress must be the whole dictionary and must not restart at each call. */
+    unsigned char       dict[TINFL_LZ_DICT_SIZE];
+    size_t              dict_ofs;
     uint32_t            crc;
     uint32_t            total_out;
     uint64_t            out_full;   /* non-wrapping cumulative output (bomb cap) */
@@ -327,6 +332,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         }
 
         tinfl_init(&s->decomp);
+        s->dict_ofs = 0;
         s->crc = (uint32_t)MZ_CRC32_INIT;
         s->total_out = 0;
         s->out_full = 0;
@@ -334,19 +340,23 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         s->started = 1;
     }
 
-    /* Decompress data */
-    unsigned char out_buf[4096];
-
-    while (remaining > 0 && !s->done) {
+    /* Decompress data into the dictionary ring at the running offset (as miniz's own
+     * tinfl_decompress_mem_to_callback does): the bytes just produced are emitted from there. */
+    /* Also continue with no input left while tinfl still holds output (HAS_MORE_OUTPUT: the ring
+     * segment up to the wrap point was full), or that output would be stranded inside it. */
+    tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
+    while (!s->done && (remaining > 0 || status == TINFL_STATUS_HAS_MORE_OUTPUT)) {
         size_t in_bytes = remaining;
-        size_t out_bytes = sizeof(out_buf);
+        size_t out_bytes = TINFL_LZ_DICT_SIZE - s->dict_ofs;
+        unsigned char *out_buf = s->dict + s->dict_ofs;
 
         int flags = TINFL_FLAG_HAS_MORE_INPUT;
 
-        tinfl_status status = tinfl_decompress(&s->decomp,
+        status = tinfl_decompress(&s->decomp,
                                                 p, &in_bytes,
-                                                out_buf, out_buf, &out_bytes,
+                                                s->dict, out_buf, &out_bytes,
                                                 flags);
+        s->dict_ofs = (s->dict_ofs + out_bytes) & (TINFL_LZ_DICT_SIZE - 1);
 
         p += in_bytes;
         remaining -= in_bytes;
