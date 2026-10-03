@@ -46,6 +46,9 @@ static size_t mock_tls_split_after = 0;
 /* The next mock_tls_write_want socket-mode writes return 0 (WANT_WRITE) without sending, as a real
  * engine does when the socket's send buffer is full. Static-per-TU, default 0. */
 static int mock_tls_write_want = 0;
+/* Completion mode: the most plaintext one read() returns (0 = no limit). A real engine returns one
+ * record per read, so input that arrived together comes out over several reads. */
+static size_t mock_tls_read_max = 0;
 
 static int mock_tls_grow(KlAllocator *a, unsigned char **buf, size_t *cap, size_t need) {
     if (need <= *cap) return 0;
@@ -69,6 +72,7 @@ static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_
         size_t avail = m->in_len - m->in_pos;
         if (avail == 0) return 0;   /* WANT_READ */
         size_t n = avail < len ? avail : len;
+        if (mock_tls_read_max && n > mock_tls_read_max) n = mock_tls_read_max;
         memcpy(buf, m->in + m->in_pos, n);
         m->in_pos += n;
         if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;   /* drained; reset ring */
