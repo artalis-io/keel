@@ -74,4 +74,8 @@ void kl_http_comp_resume(struct KlHttpServer *server, KlHttpConn *conn);
  * */
 void kl_http_comp_post_read(KlHttpConn *conn);
 
+/* Send a final response a TLS connection's engine holds (written outside a completion: the sweep's
+ * 408), then, once it is out, half-close for the drain (`draining`) or close. */
+void kl_http_comp_tls_finish(struct KlHttpServer *server, KlHttpConn *conn, int draining);
+
 #endif /* KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H */

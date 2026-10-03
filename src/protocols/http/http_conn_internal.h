@@ -134,6 +134,11 @@ struct KlHttpConn {
     int            comp_tlsq_then_recv;    /* post the next recv once the queue drains (h2 backpressure) */
     int            comp_tlsq_then_shutwr;  /* half-close once the queue drains (the rejection drain) */
     int            comp_tlsq_then_close;   /* close once the queue drains */
+    int            comp_ops;               /* completion: posted recv/send ops not yet completed */
+    int            comp_closing;           /* released with ops outstanding: the last completion releases */
+    unsigned       comp_gen;               /* bumped at every release (a caller can tell it was released) */
+    int            comp_tls_driving;       /* comp_tls_drive is running for this connection */
+    int            comp_tls_redrive;       /* asked to drive again while it ran: the running drive loops */
 
     KlWsServerConn *ws;
 

@@ -134,6 +134,8 @@ static void conn_comp_tlsq_reset(KlHttpConn *c) {
     c->comp_tlsq_appended = c->comp_tlsq_sent = c->comp_tlsq_resp_mark = 0;
     c->comp_tlsq_resp_pending = c->comp_tlsq_then_recv = 0;
     c->comp_tlsq_then_shutwr = c->comp_tlsq_then_close = 0;
+    c->comp_ops = c->comp_closing = 0;
+    c->comp_tls_driving = c->comp_tls_redrive = 0;
 }
 
 static void conn_request_body_reset(KlHttpConn *c) {
@@ -291,6 +293,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
     }
     conn_cleanup_body_reader(c);
     conn_comp_tlsq_reset(c);
+    c->comp_gen++;                          /* anyone holding c across a call can tell */
     if (c->parser) {
         c->parser->reset(c->parser);
     }
