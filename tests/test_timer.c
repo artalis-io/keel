@@ -147,6 +147,30 @@ UTEST(timer, next_timeout_clamps) {
     kl_event_ctx_free(&ctx);
 }
 
+/* max_ms = -1 is "no cap" (kl_event_ctx_run's wait-forever). The cap compare was unsigned, so a timer
+ * more than INT_MAX ms out (about 24.8 days) was returned as (int) of its distance: negative, which a
+ * wait reads as forever (the timer is missed) or as an error. It must clamp to INT_MAX. */
+UTEST(timer, next_timeout_uncapped_far_timer_stays_positive) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+    kl_timer_add(&ctx, (uint64_t)INT32_MAX + 3600000u, counting_cb, NULL);   /* ~25.9 days */
+    int t = kl_timer_next_timeout(&ctx, -1);
+    kl_event_ctx_free(&ctx);
+    ASSERT_GT(t, 0);                              /* was negative */
+}
+
+/* With no cap, a near timer is still the timeout (as with a cap). */
+UTEST(timer, next_timeout_uncapped_near_timer) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+    kl_timer_add(&ctx, 50, counting_cb, NULL);
+    int t = kl_timer_next_timeout(&ctx, -1);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(t >= 0 && t <= 55);
+}
+
 UTEST(timer, next_timeout_overdue) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;

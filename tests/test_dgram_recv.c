@@ -485,6 +485,47 @@ UTEST(dgram_recv, readiness_pause_inside_delivery) {
     kl_dgram_inbound_free(&slots);
 }
 
+/* readiness batch mode (borrowed views): one readable event is bounded like the serial path. A
+ * flooded socket refilled the batch cursor (recvmmsg) until the kernel had nothing, so one event
+ * never returned and timers and other sockets starved. The fake cursor holds 8 views and refills
+ * from an endless "kernel" while allowed; what the cursor already holds must still be delivered
+ * (the socket may not signal those again), but no new refill once the budget is spent. */
+typedef struct { int in_cursor; int refills; int pulls; } ViewCtx;
+static int view_pull_flood(void *ctx, KlDgramRxView *v, int allow_refill) {
+    ViewCtx *c = ctx;
+    if (++c->pulls > 100000) return 0;             /* safety stop: the unbounded drive */
+    if (c->in_cursor == 0) {
+        if (!allow_refill) return 0;               /* cursor empty, no kernel read */
+        c->in_cursor = 8;                          /* one recvmmsg: 8 more */
+        c->refills++;
+    }
+    c->in_cursor--;
+    memset(v, 0, sizeof(*v));
+    v->data = "V";
+    v->len = 1;
+    kl_sockaddr_from_ipv4(&v->peer, (const unsigned char *)"\x7f\0\0\1", 12345);
+    return 1;
+}
+UTEST(dgram_recv, readiness_batch_drain_is_bounded) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramInbound slots; ASSERT_EQ(kl_dgram_inbound_init(&slots, &a, 64), 0);
+    KlDgramRecv r;
+    RdCtx rd = { .slots = &slots, .avail = 0, .payload = "D", .plen = 1 };
+    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &rd), 0);
+    ViewCtx vc = { 0, 0, 0 };
+    kl_dgram_recv_set_view_pull(&r, view_pull_flood, &vc);
+    reset_deliver(&r, ACT_NONE, 0);
+    ASSERT_EQ(kl_dgram_recv_start(&r), 0);
+    ASSERT_EQ(kl_dgram_recv_on_readable(&r), 0);
+    int deliv = g_deliv, left = vc.in_cursor;
+    kl_dgram_recv_stop(&r);
+    kl_dgram_recv_free(&r);
+    kl_dgram_inbound_free(&slots);
+    ASSERT_TRUE(deliv >= 64);                      /* the budget's worth */
+    ASSERT_TRUE(deliv <= 64 + 8);                  /* was 100000: refilled until the safety stop */
+    ASSERT_EQ(left, 0);                            /* nothing the cursor held is stranded */
+}
+
 /* free is refused while a receive is outstanding (references the inbound slot) */
 UTEST(dgram_recv, free_refused_while_inflight) {
     KlAllocator a = kl_allocator_default();
