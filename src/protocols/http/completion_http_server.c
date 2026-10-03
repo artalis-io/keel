@@ -30,7 +30,7 @@
 #include "completion_internal.h"
 #include "internal_trace.h"   /* PROBE */
 #define CT(why, c, x) KL_TRACE("comp", (why), (c)->stream.fd, (c)->state, (c)->comp_ops, \
-                               (c)->comp_tlsq_inflight, (long long)(c)->comp_tlsq_len, (x)) /* the cross-TU h2/ws drives + exported server helpers */
+                               (long long)(kl_monotonic_ms() % 100000), (long long)(c)->comp_tlsq_len, (x)) /* the cross-TU h2/ws drives + exported server helpers */
 #include "completion_io.h"           /* kl_comp_run (the neutral generic tick) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
 #include <keel/sockaddr.h>       /* kl_sockaddr_family: neutral accept addrs from the event */

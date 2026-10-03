@@ -614,7 +614,9 @@ UTEST(tls_integration, a_rejected_chunked_upload_drains_to_its_terminal_chunk) {
         int n = snprintf(big, sizeof big, "%x\r\n", 2000);     /* over the reader's 1 KiB: 413 */
         memset(big + n, 'c', 2000);
         memcpy(big + n + 2000, "\r\n", 2);
+        fprintf(stderr, "PROBE client sent headers+chunk at %llu\n", (unsigned long long)(kl_monotonic_ms() % 100000));
         (void)kl_test_sockwrite(fd, big, (size_t)n + 2002);
+        fprintf(stderr, "PROBE client sent chunk done at %llu\n", (unsigned long long)(kl_monotonic_ms() % 100000));
         {   /* PROBE: every poll/read the client makes, with errno and time */
             size_t tot = 0;
             uint64_t t0 = kl_monotonic_ms();
