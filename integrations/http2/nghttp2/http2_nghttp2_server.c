@@ -246,6 +246,19 @@ static int ng_on_stream_close_cb(nghttp2_session *ng, int32_t stream_id,
     return 0;
 }
 
+/* A response that ended its stream (END_STREAM sent) while the client is still sending the request:
+ * KEEL answered early (a 413 for an over-limit body, a refused reader) and has dropped the stream.
+ * Reset it with NO_ERROR (RFC 9113 8.1) so the client stops; nghttp2 would otherwise keep opening
+ * the flow-control windows, and the client's upload would be received and discarded unbounded. */
+static int ng_on_frame_send_cb(nghttp2_session *ng, const nghttp2_frame *frame, void *user_data) {
+    (void)user_data;
+    if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
+        (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) &&
+        nghttp2_session_get_stream_remote_close(ng, frame->hd.stream_id) == 0)
+        (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE, frame->hd.stream_id, NGHTTP2_NO_ERROR);
+    return 0;
+}
+
 /* ── Response body data provider ────────────────────────────────────── */
 
 static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
@@ -453,6 +466,7 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
     nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, ng_on_frame_recv_cb);
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, ng_on_data_chunk_cb);
     nghttp2_session_callbacks_set_on_stream_close_callback(cbs, ng_on_stream_close_cb);
+    nghttp2_session_callbacks_set_on_frame_send_callback(cbs, ng_on_frame_send_cb);
 
     /* Expect the client connection preface ("PRI * HTTP/2.0...") on the stream:
      * nghttp2's default. KEEL feeds the full preface through for all three h2

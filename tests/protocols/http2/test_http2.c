@@ -54,6 +54,7 @@ typedef struct {
     int upgrade_count;
     char upgrade_settings[64];
     int upgrade_head;
+    int upgrade_fail;                 /* the upgrade op refuses the settings (a bad value, say) */
 
     /* The first bytes fed to recv */
     char first_recv[64];
@@ -127,7 +128,7 @@ static int mock_upgrade(KlHttp2ServerSession *self, const char *settings, size_t
     if (len >= sizeof(m->upgrade_settings)) len = sizeof(m->upgrade_settings) - 1;
     memcpy(m->upgrade_settings, settings, len);
     m->upgrade_settings[len] = '\0';
-    return 0;
+    return m->upgrade_fail ? -1 : 0;
 }
 
 static void mock_destroy(KlHttp2ServerSession *self) {
@@ -1569,6 +1570,28 @@ static void declined_case(int *utest_result, const char *settings, size_t body, 
 UTEST(h2, upgrade_from_h1_declined_without_settings)   { declined_case(utest_result, NULL, 0, 1); }
 UTEST(h2, upgrade_from_h1_declined_with_a_body)        { declined_case(utest_result, "AAMAAABk", 5, 1); }
 UTEST(h2, upgrade_from_h1_declined_without_upgrade_op) { declined_case(utest_result, "AAMAAABk", 0, 0); }
+
+/* A session that refuses the settings (nghttp2 rejects an out-of-range value, or more settings than
+ * the adapter takes) is asked before the 101, so the request is still answered over HTTP/1.1. The
+ * 101 went out first, and the refusal then closed the connection with no response at all. */
+UTEST(h2, upgrade_from_h1_declined_when_the_session_refuses_the_settings) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); mock.with_upgrade = 1; mock.upgrade_fail = 1;
+    g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAIAAAAC", 0);                /* ENABLE_PUSH = 2: well-formed, invalid */
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int quiet = kl_test_poll1(pfd[0], 0, 50) == 0;
+    int h2_null = conn.h2 == NULL;
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r, KL_HTTP2_UPGRADE_DECLINED);      /* was KL_HTTP_CONN_CLOSED */
+    ASSERT_TRUE(h2_null);
+    ASSERT_TRUE(quiet);                           /* was: a 101, then nothing */
+}
 
 /* The upgrading request already went through the pre-body middleware in its HTTP/1.1 phase (the only
  * caller of upgrade_from_h1 runs it first); stream 1 must not run it again, or a rate limiter or an
