@@ -746,4 +746,37 @@ UTEST(server_integration, file_shorter_than_its_length_closes_the_connection) {
 }
 #endif
 
+/* A stop that arrives while the server is starting up is not lost. kl_http_server_run published
+ * bound_port and logged "listening" before it set running = 1, so a kl_http_server_stop from another
+ * thread (or the SIGTERM handler) in that window was overwritten and the loop ran on: the caller's
+ * join hung forever (seen once on CI, in teardown_while_armed). The log callback runs on the server
+ * thread inside that window, so it can stop the server at exactly that point. */
+static KlHttpServer stop_early_srv;
+static volatile int stop_early_returned;
+static void stop_in_listening_log(int level, const char *fmt, va_list ap, void *ud) {
+    (void)level; (void)ap;
+    if (strncmp(fmt, "listening", 9) == 0)
+        kl_http_server_stop((KlHttpServer *)ud);
+}
+static void stop_early_thread(void *arg) {
+    (void)arg;
+    kl_http_server_run(&stop_early_srv);
+    stop_early_returned = 1;
+}
+
+UTEST(server_integration, stop_during_startup_is_not_lost) {
+    KlHttpServerConfig cfg = { .port = 0, .log_fn = stop_in_listening_log,
+                               .log_user_data = &stop_early_srv };
+    ASSERT_EQ(0, kl_http_server_init(&stop_early_srv, &cfg));
+    stop_early_returned = 0;
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, stop_early_thread, NULL));
+    for (int i = 0; i < 200 && !stop_early_returned; i++) kl_test_sleep_ms(10);
+    int returned = stop_early_returned;
+    if (!returned) kl_http_server_stop(&stop_early_srv);   /* rescue, so a failure does not hang */
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&stop_early_srv);
+    ASSERT_EQ(returned, 1);                        /* was 0: run overwrote the stop and kept going */
+}
+
 UTEST_MAIN();

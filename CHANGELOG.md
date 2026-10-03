@@ -264,6 +264,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
+  socket, published the port and logged "listening" before it marked the server running, so a
+  `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
+  overwritten: the loop kept going, and a caller joining the server thread waited forever. The
+  server is now marked running before anything else can see it start.
 - **A full send buffer ended a plaintext HTTP/2 server connection.** The server's socket writer
   returned the socket's -1 when a send would block, and the session treats any -1 from its send
   callback as fatal, so a slow reader of a large response lost the whole connection (every stream on
