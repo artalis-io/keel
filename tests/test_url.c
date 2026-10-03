@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/url.h>
+#include "url_internal.h"   /* kl_url_authority */
 #include <string.h>
 
 UTEST(url, null_args) {
@@ -236,6 +237,29 @@ UTEST(url, http_is_not_ws) {
     ASSERT_EQ(u.is_ws, 0);
     ASSERT_EQ(kl_url_parse("https://example.com", &u), 0);
     ASSERT_EQ(u.is_ws, 0);
+}
+
+/* kl_url_authority: the one Host / absolute-form / :authority builder the HTTP, WebSocket and HTTP/2
+ * clients share (RFC 9110 7.2). */
+static const char *authority_of(const char *s, char *buf, size_t cap) {
+    KlUrl u;
+    if (kl_url_parse(s, &u) != 0) return "(parse failed)";
+    if (u.is_unix) { u.host = "localhost"; u.host_len = 9; }   /* as the clients do */
+    return kl_url_authority(&u, buf, cap) < 0 ? "(no fit)" : buf;
+}
+
+UTEST(url, authority_brackets_ipv6_and_keeps_only_non_default_ports) {
+    char b[300];
+    ASSERT_STREQ("example.com", authority_of("http://example.com/x", b, sizeof b));
+    ASSERT_STREQ("example.com", authority_of("https://example.com/x", b, sizeof b));
+    ASSERT_STREQ("example.com:8080", authority_of("http://example.com:8080/", b, sizeof b));
+    ASSERT_STREQ("example.com:80", authority_of("https://example.com:80/", b, sizeof b));
+    ASSERT_STREQ("example.com", authority_of("wss://example.com/", b, sizeof b));
+    ASSERT_STREQ("example.com:9000", authority_of("ws://example.com:9000/", b, sizeof b));
+    ASSERT_STREQ("[::1]:8443", authority_of("https://[::1]:8443/", b, sizeof b));
+    ASSERT_STREQ("[::1]", authority_of("http://[::1]/", b, sizeof b));
+    ASSERT_STREQ("localhost", authority_of("http+unix://%2Ftmp%2Fs.sock/x", b, sizeof b));
+    ASSERT_STREQ("(no fit)", authority_of("http://example.com:8080/", b, 8));
 }
 
 UTEST_MAIN();

@@ -21,6 +21,7 @@
 
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
+#include "url_internal.h"   /* kl_url_authority: :authority */
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -682,10 +683,9 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     c->user_data = user_data;
 
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
-    if (parsed.is_unix)
-        snprintf(c->authority, sizeof(c->authority), "%s", host_buf);
-    else
-        snprintf(c->authority, sizeof(c->authority), "%s:%d", host_buf, parsed.port);
+    /* :authority as RFC 9110 7.2 writes it: an IPv6 literal bracketed, the port only when it is not
+     * the scheme's default, no port for a socket path. host_len < 256 (checked above), so it fits. */
+    (void)kl_url_authority(&parsed, c->authority, sizeof(c->authority));
 
     /* If already connected (rc == 0), create session immediately */
     if (c->state == H2C_H2_INIT) {

@@ -24,6 +24,7 @@
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "http_client_internal.h"
 #include "kl_cstr.h"    /* locale-free append builders + ASCII case compare */
+#include "url_internal.h"   /* kl_url_authority */
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
@@ -38,23 +39,10 @@ int kl_http_client_has_crlf(const char *s, size_t len)
 
 /* ── Authority (Host / absolute-form) ──────────────────────────────── */
 
+/* The one authority builder, shared with the WebSocket and HTTP/2 clients (src/url.c). */
 int kl_http_client_authority(const KlUrl *url, char *out, size_t cap)
 {
-    if (!cap) return -1;
-    size_t n = 0;
-    int v6 = 0;                          /* KlUrl strips an IPv6 literal's brackets; a ':' marks it */
-    for (size_t i = 0; i < url->host_len && !v6; i++)   /* (no memchr: the freestanding client */
-        v6 = url->host[i] == ':';                        /* links without it) */
-    int deflt = url->is_https ? 443 : 80;
-    if ((v6 && kl_buf_append_n(out, cap, &n, "[", 1) != 0) ||
-        kl_buf_append_n(out, cap, &n, url->host, url->host_len) != 0 ||
-        (v6 && kl_buf_append_n(out, cap, &n, "]", 1) != 0))
-        return -1;
-    if (url->port != deflt &&
-        (kl_buf_append_n(out, cap, &n, ":", 1) != 0 ||
-         kl_buf_append_u64(out, cap, &n, (uint64_t)url->port) != 0))
-        return -1;
-    return (int)n;
+    return kl_url_authority(url, out, cap);
 }
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */

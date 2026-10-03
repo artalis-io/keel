@@ -30,6 +30,7 @@
 #include "socket.h"
 #include "resolve_sync.h" /* kl_resolve_sync: blocking name resolution -> KlSockAddr */
 #include "platform.h"
+#include "url_internal.h"   /* kl_url_authority: the Host header */
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -215,8 +216,13 @@ static int wsc_validate_accept(const KlWsClientConn *ws, const char *accept_val,
 static int wsc_build_upgrade(KlWsClientConn *ws, const KlUrl *url,
                               const char *protocol)
 {
+    /* Host carries the port when it is not the scheme's default, and brackets an IPv6 literal. */
+    char authority[300];
+    int alen = kl_url_authority(url, authority, sizeof authority);
+    if (alen < 0) return -1;
+
     /* Estimate buffer size */
-    size_t cap = KL_WS_CLIENT_UPGRADE_BUF_INIT + url->path_len + url->host_len;
+    size_t cap = KL_WS_CLIENT_UPGRADE_BUF_INIT + url->path_len + (size_t)alen;
     ws->upgrade_buf = kl_malloc(ws->alloc, cap);
     if (!ws->upgrade_buf) return -1;
 
@@ -228,7 +234,7 @@ static int wsc_build_upgrade(KlWsClientConn *ws, const KlUrl *url,
         "Sec-WebSocket-Version: 13\r\n"
         "Sec-WebSocket-Key: %s\r\n",
         (int)url->path_len, url->path,
-        (int)url->host_len, url->host,
+        alen, authority,
         ws->ws_key_b64);
 
     if (off < 0 || (size_t)off >= cap) {
