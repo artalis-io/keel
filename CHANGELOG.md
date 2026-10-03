@@ -412,7 +412,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
     with the body short of its Content-Length. The connection now closes, as on IOCP.
   - **IOCP: a transient watcher re-post failure marked the socket dead**, and a healthy socket was
     then reported ready on every drain (a busy loop). Out-of-buffers and similar errors are now
-    retried on the next drain (bounded); only a lasting failure marks the watcher dead.
+    retried on each drain, with the loop's wait capped at 10 ms while a retry is pending, for as long
+    as the pressure lasts; only a permanent error (a reset or closed socket) marks the watcher dead.
   - **DNS: a cookie-less truncated reply from a server known to send cookies forced the TCP
     fallback.** The cookie check now runs before the truncation branch.
   - **DNS: one cookie-less fleet member made lookups time out.** Once a cookie was learned, every
