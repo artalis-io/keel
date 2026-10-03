@@ -324,6 +324,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   And the WebSocket client's drain writer took a TLS write error for a full socket when an earlier
   call had left `EAGAIN` in `errno`, so the client stalled instead of failing; would-block is now
   asked of the socket provider, and only for a plaintext write.
+- **Engine edge cases.** `kl_timer_next_timeout` with `max_ms = -1` (no cap) returned a negative
+  timeout for a timer more than about 24.8 days out; it now clamps to `INT_MAX`. A datagram receive
+  in batch mode (`recvmmsg`) refilled from the socket until the kernel had nothing, so one readable
+  event under a flood never returned to timers and other sockets; it is now bounded like the serial
+  path (64 datagrams, then only what the batch already holds). And on macOS a `sendfile` interrupted
+  by a signal (EINTR) after sending part of the file returned -1, so a caller that retried sent
+  those bytes again; the partial count is now returned.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was

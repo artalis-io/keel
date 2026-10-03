@@ -218,7 +218,9 @@ kl_ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offse
 #elif defined(__APPLE__)
     off_t len = (off_t)count;
     int r = sendfile(in_fd, (int)out_fd, soff, &len, NULL, 0);
-    if (r < 0 && errno != EAGAIN) return -1;
+    /* EAGAIN and EINTR both report in len the bytes already sent (sendfile(2)): those count, or a
+     * caller that retries an EINTR from the unadvanced offset sends them twice. */
+    if (r < 0 && errno != EAGAIN && errno != EINTR) return -1;
     /* EAGAIN with nothing sent is would-block, not end of file: return -1 with errno still EAGAIN,
      * as Linux does. Returning the 0 bytes made every caller (which reads 0 as EOF) stop and report
      * a file response complete at the first full send buffer. EAGAIN with a partial send returns
