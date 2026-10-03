@@ -27,7 +27,10 @@
 #include "http_response_internal.h"   /* kl_http_response_build_iovec */
 #include "completion.h"          /* the neutral completion axis (kl_comp_*_raw + kl_comp_drain) */
 #include "completion_http.h"     /* the HTTP completion seam this TU DEFINES (wrappers + kl_http_comp_*) */
-#include "completion_internal.h" /* the cross-TU h2/ws drives + exported server helpers */
+#include "completion_internal.h"
+#include "internal_trace.h"   /* PROBE */
+#define CT(why, c, x) KL_TRACE("comp", (why), (c)->stream.fd, (c)->state, (c)->comp_ops, \
+                               (c)->comp_tlsq_inflight, (long long)(c)->comp_tlsq_len, (x)) /* the cross-TU h2/ws drives + exported server helpers */
 #include "completion_io.h"           /* kl_comp_run (the neutral generic tick) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
 #include <keel/sockaddr.h>       /* kl_sockaddr_family: neutral accept addrs from the event */
@@ -54,6 +57,7 @@
 
 /* Exported (completion_internal.h): release the connection. Called by the h2/ws drives. */
 void kl_comp_close(struct KlHttpServer *s, KlHttpConn *c) {
+    CT("close", c, 0);
     kl_http_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
 }
 
@@ -292,6 +296,7 @@ static int comp_tlsq_absorb_ring(KlHttpConn *c) {
  * rest). 0, or -1 if the post failed. */
 static int comp_tlsq_kick(KlHttpConn *c) {
     if (c->comp_tlsq_inflight || c->comp_tlsq_len == 0) return 0;
+    CT("kick", c, 0);
     KlIoVec iov = { c->comp_tlsq, c->comp_tlsq_len };
     if (kl_comp_post_send(c, &iov, 1, c->comp_tlsq_len) < 0) return -1;   /* the backend copies */
     c->comp_tlsq_inflight = 1;
@@ -312,6 +317,7 @@ static int comp_tlsq_settle(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->comp_tlsq_then_shutwr) {
         c->comp_tlsq_then_shutwr = 0;
         const KlSocketProvider *sp = c->stream.ctx ? c->stream.ctx->sockets : NULL;
+        CT("shutwr", c, 0);
         (void)kl_sock_shutdown(sp, c->stream.fd, KL_SHUT_WR);
     }
     if (c->comp_tlsq_then_recv) {
@@ -331,6 +337,7 @@ int kl_comp_tls_flush(KlHttpConn *c) {
 /* Close once the queued output is out (a Close frame, an alert, a final response), or now when
  * nothing is queued. Exported (completion_internal.h). */
 void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
+    CT("close_after", c, 0);
     if (c->tls && !comp_tlsq_idle(c)) { c->comp_tlsq_then_close = 1; return; }
     kl_comp_close(s, c);
 }
@@ -435,6 +442,7 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
+    CT("after_state", c, (long long)st);
     switch (st) {
     case KL_HTTP_CONN_SENDING:
         if (c->tls) {
@@ -905,6 +913,7 @@ static void comp_drive_proxy(struct KlHttpServer *s, KlHttpConn *c) {
 
 static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
+    CT(ev->ok ? "read" : "read-err", c, (long long)ev->bytes);
     c->comp_recv_posted = 0;
     c->comp_ops--;
     if (c->comp_closing) {                     /* being released: the last completion does it */
@@ -1005,6 +1014,7 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
 
 static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
+    CT(ev->ok ? "write" : "write-err", c, (long long)ev->bytes);
     c->comp_ops--;
     if (c->comp_closing) {                     /* being released: the last completion does it */
         if (c->comp_ops == 0) { c->comp_closing = 0; kl_http_server_conn_release(s, c); }

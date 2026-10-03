@@ -193,9 +193,16 @@ jobs:
           sudo apt-get install -y liburing-dev
       - name: Build completion backend (io_uring)
         run: make BACKEND=iouring
-      - name: Unit-test suites over io_uring completion
+      - name: PROBE (io_uring, traced)
         timeout-minutes: 10
-        run: make BACKEND=iouring test-iouring
+        run: |
+          make clean
+          make BACKEND=iouring KEEL_EXTRA_CFLAGS=-DKEEL_INTERNAL_TRACE
+          make BACKEND=iouring KEEL_EXTRA_CFLAGS=-DKEEL_INTERNAL_TRACE tests/protocols/http/test_tls_integration
+          for i in 1 2 3; do
+            ./tests/protocols/http/test_tls_integration --filter=tls_integration.a_rejected_chunked_upload_drains_to_its_terminal_chunk || true
+          done
+          exit 1
 
   windows:
     name: Windows (MinGW, full core)
