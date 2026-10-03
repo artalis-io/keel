@@ -284,6 +284,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   server had sent its Close (or stopped sending after a cut frame) was still answered with a Pong,
   a data frame after the Close (RFC 6455 §5.5.1) or a frame after a broken one; it is no longer
   answered once the server has stopped sending.
+- **On a completion loop, TLS output could stall every connection, and a rejection over TLS lost
+  its response.** TLS ciphertext was pushed with a synchronous send on the loop thread, so a client
+  that stopped reading a large TLS response (a stream, WebSocket or HTTP/2 output, the handshake)
+  blocked every connection on the loop: indefinitely on IOCP and io_uring, whose accepted sockets
+  are blocking, and up to 30 s per stall on pollcomp. And a request rejected on a TLS connection
+  (an over-limit body, a refused reader, a malformed chunk) had its 413 written into the TLS
+  engine's buffer and the socket half-closed before that buffer was sent, so the client saw only
+  FIN. All TLS output on a completion loop now leaves through one per-connection queue of
+  overlapped sends, in order, one at a time; a response completes, the drain half-closes and a
+  connection closes only once its queued output is out.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was

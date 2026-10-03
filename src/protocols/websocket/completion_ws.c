@@ -35,8 +35,9 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
                                  c, (uint8_t *)c->stream.read_buf, (size_t)p);
             if (st == KL_HTTP_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
                 st = (KlHttpConnState)kl_ws_server_on_writable(c);   /* flush buffered frames */
-            if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → socket */
-            if (st != KL_HTTP_CONN_WEBSOCKET) { kl_comp_close(s, c); return; }
+            if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → queue */
+            /* Closing (a Close frame answered or sent): close once the queued frames are out. */
+            if (st != KL_HTTP_CONN_WEBSOCKET) { kl_comp_close_after_output(s, c); return; }
             if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;

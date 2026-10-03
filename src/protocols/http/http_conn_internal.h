@@ -120,6 +120,20 @@ struct KlHttpConn {
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;
+    /* Completion-mode TLS output queue (completion_http_server.c): every ciphertext byte leaves
+     * through it, in order, as at most one overlapped send at a time, so the loop never blocks on a
+     * slow reader. The tail holds bytes not yet posted; the counters are cumulative. */
+    int            comp_driven;            /* driven by a completion loop (set at accept) */
+    unsigned char *comp_tlsq;              /* ciphertext waiting to be posted */
+    size_t         comp_tlsq_len, comp_tlsq_cap;
+    int            comp_tlsq_inflight;     /* a queue send is posted */
+    size_t         comp_tlsq_inflight_len;
+    uint64_t       comp_tlsq_appended, comp_tlsq_sent;
+    uint64_t       comp_tlsq_resp_mark;    /* the response is fully out once this many bytes are sent */
+    int            comp_tlsq_resp_pending;
+    int            comp_tlsq_then_recv;    /* post the next recv once the queue drains (h2 backpressure) */
+    int            comp_tlsq_then_shutwr;  /* half-close once the queue drains (the rejection drain) */
+    int            comp_tlsq_then_close;   /* close once the queue drains */
 
     KlWsServerConn *ws;
 

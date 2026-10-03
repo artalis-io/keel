@@ -38,15 +38,15 @@ struct KlHttpServer;
 /* Release the connection (close the socket + return the pool slot). */
 void kl_comp_close(struct KlHttpServer *s, KlHttpConn *c);
 
-/* Push the TLS engine's pending outgoing ciphertext to the socket synchronously
- * (memory-BIO out ring → socket). Returns 0 on success, -1 on a fatal send error. */
+/* Queue the TLS engine's pending outgoing ciphertext on the connection's output queue and start
+ * sending it (one overlapped send at a time, in order). Never blocks. 0, or -1 on error. */
 int  kl_comp_tls_flush(KlHttpConn *c);
 
-/* Drain the TLS engine's pending outgoing ciphertext into one heap buffer (grow as it
- * fills). On success returns 0 with out/outlen/outcap set (caller frees outcap bytes),
- * -1 on error. Used to post h2 output overlapped instead of a synchronous flush. */
-int  kl_comp_tls_drain_output(KlHttpConn *c, unsigned char **out, size_t *outlen,
-                              size_t *outcap);
+/* Close once the connection's queued TLS output is out (or now, when nothing is queued). */
+void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c);
+
+/* Post the next recv once the queued TLS output is out (or now, when nothing is queued). */
+void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c);
 
 /* ── the h2/ws drive functions the server dispatch calls ─────────────────── */
 
