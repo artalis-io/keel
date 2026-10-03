@@ -276,6 +276,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A streaming gzip response with no body failed as a decompression error.** The miniz backend
+  (since the truncated-header check) failed the final call of a gzip stream that had received
+  nothing at all, which a streaming client makes at the end of every response with
+  `Content-Encoding: gzip`: a HEAD, a 204, a 304 or an empty 200 then failed with `KL_ERR_COMPRESS`.
+  A stream with no bytes now ends cleanly; one that ends inside its header still fails.
 - **Edge cases found re-auditing the previous round.** An HTTP/2 response no longer carries
   `Upgrade`, `Proxy-Connection` or `TE` (only `Connection`, `Transfer-Encoding` and `Keep-Alive` were
   dropped): clients reset a stream that has them, and stream 1 of an h2c upgrade now carries the

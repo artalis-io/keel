@@ -295,8 +295,10 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
             s->hdr_buf[s->hdr_len++] = *p++;
             remaining--;
         }
+        /* Need more data. At end of input a header cut short is truncated, but a stream that got no
+         * byte at all is an empty body (a HEAD, a 204/304, Content-Length: 0): that ends cleanly. */
         if (s->hdr_len < 10)
-            return flush ? -1 : 0;  /* need more data; at end of input, truncated */
+            return (flush && s->hdr_len > 0) ? -1 : 0;
 
         /* Validate header */
         if (s->hdr_buf[0] != 0x1f || s->hdr_buf[1] != 0x8b ||
