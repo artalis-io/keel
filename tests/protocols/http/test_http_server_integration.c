@@ -779,4 +779,18 @@ UTEST(server_integration, stop_during_startup_is_not_lost) {
     ASSERT_EQ(returned, 1);                        /* was 0: run overwrote the stop and kept going */
 }
 
+/* The other side of that fix: running is set before the bind, so a start-up that fails (here, a bind
+ * address that does not parse) must clear it again. Every setup failure returned -1 with running
+ * still 1, so a supervisor reading the public field saw a server that had never started as running. */
+UTEST(server_integration, a_failed_start_leaves_running_clear) {
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "256.0.0.1" };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    int rc = kl_http_server_run(&srv);
+    int running = srv.running;
+    kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(running, 0);                         /* was 1 */
+}
+
 UTEST_MAIN();

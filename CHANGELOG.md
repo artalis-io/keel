@@ -300,6 +300,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the body with `flush=0` and finishes with an empty `flush=1` call. And a keep-alive HEAD response
   with neither Content-Length nor chunked encoding was dropped from the pool: the llhttp response
   parser asked whether to keep the connection before llhttp knew the response had no body.
+- **Server start-up and body-read edge cases.** `kl_http_server_run` sets `running` before the bind
+  (so a stop during start-up is not lost), but a start-up that then failed returned -1 with
+  `running` still set; it is cleared again. A streaming-async handler that suspended before its
+  body was read could later read the body over the request head its `req` still pointed at; the
+  head is now kept before the handler runs. When keeping the head could not allocate, the body
+  reader was dropped with only `destroy`; it now gets `on_error` first, as on any other failure
+  mid-body. `kl_http_request_pause_body` now documents that over TLS on a readiness backend the rest
+  of the record already decrypted is still delivered (at most one TLS record).
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
