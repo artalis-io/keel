@@ -70,6 +70,7 @@ typedef struct {
     const char    *extra_headers;   /* extra 101 header lines, each ending in \r\n (NULL = none) */
     unsigned char  got[256];        /* what the client sent after the upgrade request */
     size_t         got_len;
+    char           req_head[2048];  /* the upgrade request itself, as received */
     KlPlatThread   tid;
 } Peer;
 
@@ -125,6 +126,7 @@ static void peer_thread(void *arg) {
         req[got] = '\0';
         if (strstr(req, "\r\n\r\n")) break;
     }
+    memcpy(p->req_head, req, got + 1);
     static unsigned char out[32 * 1024];
     size_t ol = 0;
     if (!p->raw_reply) {
@@ -293,6 +295,23 @@ UTEST(wsc_peer, close_reason_not_utf8_fails_with_1007) {
     ASSERT_EQ(c.errors, 1);
     ASSERT_EQ(client_close_code(&p), 1007);
     (void)quarantine_check_and_release();
+}
+
+/* The Host header carries the port when it is not the scheme's default (RFC 9110 7.2). The upgrade
+ * request wrote only the host, so a server on another port (every test peer here) saw the wrong
+ * authority, and a virtual-hosted WebSocket server could route the upgrade to the wrong site. */
+UTEST(wsc_peer, upgrade_request_host_carries_a_non_default_port) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[16];
+    const unsigned char pl[2] = { 0x03, 0xE8 };               /* a normal close ends the case */
+    p.after = f; p.after_len = frame(f, KL_WS_OP_CLOSE, pl, sizeof pl);
+    Cli c; memset(&c, 0, sizeof c);
+    run_case(&p, &c);
+    (void)quarantine_check_and_release();
+    char want[64];
+    snprintf(want, sizeof want, "Host: 127.0.0.1:%d\r\n", p.port);
+    ASSERT_TRUE(strstr(p.req_head, "GET / HTTP/1.1") != NULL);
+    ASSERT_TRUE(strstr(p.req_head, want) != NULL);   /* was "Host: 127.0.0.1", the port dropped */
 }
 
 UTEST(wsc_peer, valid_close_is_echoed_and_reported) {

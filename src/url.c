@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "kl_cstr.h"   /* locale-free port parse + bounded find (no strtol) */
+#include "url_internal.h"
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
@@ -274,4 +275,25 @@ int kl_url_resolve(const char *base_url, const char *location,
 
     /* Bare relative refs not supported */
     return -1;
+}
+
+/* ── Authority (Host / absolute-form / :authority) ────────────────── */
+
+int kl_url_authority(const KlUrl *url, char *out, size_t cap)
+{
+    if (!url || !out || !cap) return -1;
+    size_t n = 0;
+    int v6 = 0;                          /* KlUrl strips an IPv6 literal's brackets; a ':' marks it */
+    for (size_t i = 0; i < url->host_len && !v6; i++)   /* (no memchr: the freestanding client */
+        v6 = url->host[i] == ':';                        /* links without it) */
+    int deflt = url->is_https ? 443 : 80;
+    if ((v6 && kl_buf_append_n(out, cap, &n, "[", 1) != 0) ||
+        kl_buf_append_n(out, cap, &n, url->host, url->host_len) != 0 ||
+        (v6 && kl_buf_append_n(out, cap, &n, "]", 1) != 0))
+        return -1;
+    if (!url->is_unix && url->port != deflt &&           /* a socket path has no TCP port */
+        (kl_buf_append_n(out, cap, &n, ":", 1) != 0 ||
+         kl_buf_append_u64(out, cap, &n, (uint64_t)url->port) != 0))
+        return -1;
+    return (int)n;
 }

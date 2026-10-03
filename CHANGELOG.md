@@ -271,6 +271,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   buffered client path started decompressing through `dfeed` (to bound inflation while it happens),
   this hit every buffered gzip response, not only streaming ones. The decompressor now keeps a 32 KiB
   dictionary ring across calls, and also drains output still held when its input runs out.
+- **The WebSocket and HTTP/2 clients wrote the authority wrongly, and AF_UNIX requests sent
+  `Host: localhost:0`.** The WebSocket upgrade's `Host` dropped a non-default port and the brackets of
+  an IPv6 literal (`ws://[::1]:9000/` sent `Host: ::1`), and the HTTP/2 client's `:authority` did not
+  bracket IPv6 (`::1:8443`). The HTTP client's own fix appended the URL's port to an `http+unix`
+  request, whose port is 0. All three clients now share one builder: IPv6 bracketed, the port only
+  when it is not the scheme's default, and no port for a socket path.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was

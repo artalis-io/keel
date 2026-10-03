@@ -583,6 +583,48 @@ UTEST(unix_socket, client_connects_over_http_unix) {
     kl_http_server_free(&srv);
 }
 
+/* An AF_UNIX request names no TCP port, so its Host is just "localhost" (url.h: callers use
+ * localhost). The authority builder compared the URL's port, 0 for a socket path, with the scheme's
+ * default and appended ":0", sending "Host: localhost:0", which a Host-validating server rejects. */
+static char g_unix_host[64];
+static void unix_handle_host(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    const char *h = kl_http_request_header(req, "Host");
+    snprintf(g_unix_host, sizeof g_unix_host, "%s", h ? h : "(none)");
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+UTEST(unix_socket, host_header_is_localhost_without_a_port) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "hosthdr");
+    unlink(path);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .unix_socket_path = path, .unix_socket_unlink = 1, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/host", unix_handle_host, NULL, NULL);
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "http+unix://%s/host", enc);
+    g_unix_host[0] = '\0';
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&a, NULL, "GET", url, NULL, 0, NULL, 0, &resp);
+    if (rc == 0) kl_http_client_response_free(&resp);
+
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+    ASSERT_EQ(0, rc);
+    ASSERT_STREQ("localhost", g_unix_host);       /* was "localhost:0" */
+}
+
 UTEST(unix_socket, async_client_connects_over_http_unix) {
     char path[108];
     test_sock_path(path, sizeof(path), "asyncunix");
