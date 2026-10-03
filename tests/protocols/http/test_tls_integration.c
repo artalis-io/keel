@@ -587,4 +587,54 @@ UTEST(tls_integration, a_timed_out_request_gets_its_408) {
     ASSERT_TRUE(strstr(buf, "408") != NULL);               /* was (completion + TLS): no status */
 }
 
+/* A chunked upload rejected over TLS gets its 413 while the client keeps uploading. On io_uring the
+ * client received nothing: the sweep's drain step read the (blocking) socket synchronously, parking
+ * the loop, and on TLS took the client's ciphertext away from the engine. */
+static KlHttpServer tq_chk_srv;
+
+UTEST(tls_integration, a_rejected_chunked_upload_gets_its_413) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .reject_drain_timeout_ms = 5000 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_chk_srv, &cfg));
+    kl_http_server_route(&tq_chk_srv, "POST", "/up", handle_hello,
+                         (void *)(size_t)1024, kl_http_body_reader_buffer);   /* a 1 KiB reader */
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_chk_srv);
+    wait_for_bind(&tq_chk_srv);
+
+    char buf[2048];
+    buf[0] = '\0';
+    int closed = 0;
+    int fd = connect_to(tq_chk_srv.bound_port);
+    if (fd >= 0) {
+        static char big[16384 + 64];
+        const char *h = "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+        (void)kl_test_sockwrite(fd, h, strlen(h));
+        int n = snprintf(big, sizeof big, "%x\r\n", 2000);     /* over the reader's 1 KiB: 413 */
+        memset(big + n, 'c', 2000);
+        memcpy(big + n + 2000, "\r\n", 2);
+        (void)kl_test_sockwrite(fd, big, (size_t)n + 2002);
+        read_one_response(fd, buf, sizeof buf, 2000);          /* the 413 */
+        for (int i = 0; i < 3; i++) {                          /* more body, 16 KiB chunks */
+            n = snprintf(big, sizeof big, "%x\r\n", 16384);
+            memset(big + n, 'c', 16384);
+            memcpy(big + n + 16384, "\r\n", 2);
+            (void)kl_test_sockwrite(fd, big, (size_t)n + 16386);
+        }
+        (void)kl_test_sockwrite(fd, "0\r\n\r\n", 5);           /* the terminal chunk */
+        char sink[512];
+        for (int i = 0; i < 20; i++) {                         /* EOF well before the deadline */
+            if (kl_test_poll1(fd, 0, 1500) <= 0) break;
+            long r = kl_test_sockread(fd, sink, sizeof sink);
+            if (r <= 0) { closed = 1; break; }
+        }
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&tq_chk_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_chk_srv);
+    (void)closed;                     /* the FIN of the drain's half-close: not evidence either way */
+    ASSERT_TRUE(strstr(buf, "413") != NULL);               /* was (io_uring): no response at all */
+}
+
 UTEST_MAIN();
