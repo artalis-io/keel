@@ -738,7 +738,9 @@ UTEST(ws_server_send, no_pong_after_the_server_stopped_sending) {
 /* The drain path's twin of a_cut_short_frame_is_never_followed_by_another: with the drain enabled,
  * a frame larger than its max_size is written in part, the rest refused (a sticky drain error). The
  * stream now holds a broken frame and every later send fails, so the connection must close; it was
- * left open with no close scheduled (close_sent unset), until the peer gave up. */
+ * left open with no close scheduled (close_sent unset), until the peer gave up. The handler sends
+ * 1 MiB frames to a client that is not reading until one is refused (a loopback socket may take
+ * several whole first). */
 static void drain_on_open(KlWsServerConn *ws, void *ud) {
     (void)ud;
     (void)kl_ws_server_enable_drain(ws, 64 * 1024);
@@ -747,7 +749,8 @@ static void drain_big_on_message(KlWsServerConn *ws, const char *data, size_t le
     (void)data; (void)len; (void)is_binary; (void)ud;
     static char big[1024 * 1024];
     memset(big, 'D', sizeof big);
-    (void)kl_ws_server_send_binary(ws, big, sizeof big);   /* more than the socket + drain take */
+    for (int i = 0; i < 256; i++)                          /* until the socket + drain refuse */
+        if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) break;
 }
 
 UTEST(ws_server_send, a_frame_the_drain_cuts_short_closes_the_connection) {
