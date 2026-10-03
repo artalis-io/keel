@@ -288,6 +288,13 @@ int kl_http_server_run(KlHttpServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
     (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
 
+    /* Mark the server running BEFORE anything another thread can observe (bound_port, the
+     * "listening" log). A kl_http_server_stop issued once a caller has seen the server start (from
+     * another thread, or the SIGTERM handler) then clears it, and the loop below sees the stop.
+     * Setting it after the bind, as this did, overwrote such a stop and the server ran on. */
+    kl_atomic_store_int(&s->running, 1);
+    kl_atomic_store_int(&s->draining, 0);
+
     if (kl_http_server_bind_listener(s) < 0)
         return -1;
 
@@ -342,8 +349,7 @@ int kl_http_server_run(KlHttpServer *s) {
     }
     kl_http_server_plat_signals_install(s);
 
-    kl_atomic_store_int(&s->running, 1);
-    kl_atomic_store_int(&s->draining, 0);
+    /* running / draining were set at entry, before the server could be seen to start. */
     KlEvent events[KL_EVENTS_PER_TICK];
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
