@@ -151,10 +151,15 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
     }
 
     if (ws->drain_enabled) {
-        if (kl_drain_write(&ws->drain, (const char *)hdr, hdr_len) < 0)
+        /* A refused write (over max_size, or a socket error) can leave part of the frame on the wire:
+         * the stream is broken and the drain's error sticky. Stop sending and close at the next sweep,
+         * as for a frame the direct path cuts short. */
+        if (kl_drain_write(&ws->drain, (const char *)hdr, hdr_len) < 0 ||
+            (len > 0 && kl_drain_write(&ws->drain, data, len) < 0)) {
+            ws->close_sent = 1;
+            ws->close_deadline_ms = kl_monotonic_ms();
             return -1;
-        if (len > 0 && kl_drain_write(&ws->drain, data, len) < 0)
-            return -1;
+        }
         return 0;
     }
 
