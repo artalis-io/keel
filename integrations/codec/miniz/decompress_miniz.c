@@ -352,10 +352,8 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
 
         int flags = TINFL_FLAG_HAS_MORE_INPUT;
 
-        status = tinfl_decompress(&s->decomp,
-                                                p, &in_bytes,
-                                                s->dict, out_buf, &out_bytes,
-                                                flags);
+        status = tinfl_decompress(&s->decomp, p, &in_bytes,
+                                  s->dict, out_buf, &out_bytes, flags);
         s->dict_ofs = (s->dict_ofs + out_bytes) & (TINFL_LZ_DICT_SIZE - 1);
 
         p += in_bytes;
