@@ -758,17 +758,20 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
     }
     target[target_len] = '\0';
 
-    if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0) {
-        kl_free(h2c->alloc, target, target_len + 1);
-        h2_conn_abandon(h2c);
-        return KL_HTTP_CONN_CLOSED;
-    }
-
+    /* Hand the settings to the session BEFORE the 101: it can still refuse them (a value out of
+     * range, more settings than it takes), and a refusal is then a decline answered over HTTP/1.1.
+     * The session writes nothing until it is flushed, so nothing reaches the wire before the 101. */
     int is_head = req->method_len == 4 && memcmp(req->method, "HEAD", 4) == 0;
     if (h2c->session->upgrade(h2c->session, settings, settings_len, is_head) != 0) {
         kl_free(h2c->alloc, target, target_len + 1);
         h2_conn_abandon(h2c);
-        return KL_HTTP_CONN_CLOSED;             /* 101 already sent: nothing else to say */
+        return KL_HTTP2_UPGRADE_DECLINED;
+    }
+
+    if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0) {
+        kl_free(h2c->alloc, target, target_len + 1);
+        h2_conn_abandon(h2c);
+        return KL_HTTP_CONN_CLOSED;
     }
 
     c->h2 = h2c;

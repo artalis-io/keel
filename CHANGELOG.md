@@ -331,6 +331,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   path (64 datagrams, then only what the batch already holds). And on macOS a `sendfile` interrupted
   by a signal (EINTR) after sending part of the file returned -1, so a caller that retried sent
   those bytes again; the partial count is now returned.
+- **HTTP/2 h2c upgrade refusals and uploads after an early response.** A session that refused an
+  h2c upgrade's HTTP2-Settings (a value out of range, more settings than the nghttp2 adapter takes)
+  was asked only after the 101 was written, so the connection then closed with no response at all;
+  the session is now asked first, and a refusal answers the request over HTTP/1.1. And after a
+  response that ended a stream the client was still uploading (a 413 for an over-limit body), the
+  nghttp2 adapter never reset the stream, and nghttp2 kept opening the flow-control windows, so the
+  server received and discarded the client's whole upload; it now sends RST_STREAM(NO_ERROR)
+  (RFC 9113 §8.1), and the upload stops at the window.
 - **A stop during server start-up was lost, and the server ran on.** `kl_http_server_run` bound the
   socket, published the port and logged "listening" before it marked the server running, so a
   `kl_http_server_stop` from another thread (or the SIGTERM/SIGINT handler) in that window was
