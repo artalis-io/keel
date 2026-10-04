@@ -276,6 +276,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
+  streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
+  of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any
+  streamed compressed response of roughly 15 KiB of text or more could not be decoded. It now drains
+  the deflater until the stream is done. Also, the decompressor no longer accepts bytes after the gzip
+  trailer (trailing garbage, or a second member it does not read) as part of a verified body.
 - **Completion loops: a finished rejection drain held its slot, and a graceful stop could cut queued
   TLS output.** A rejected client that sent the rest of its declared body and kept the connection
   open held its slot until the drain deadline on io_uring, IOCP and pollcomp; the drain now ends once
