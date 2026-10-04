@@ -276,6 +276,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion loops: a finished rejection drain held its slot, and a graceful stop could cut queued
+  TLS output.** A rejected client that sent the rest of its declared body and kept the connection
+  open held its slot until the drain deadline on io_uring, IOCP and pollcomp; the drain now ends once
+  the framing is complete and a receive comes back short (nothing more queued), as on readiness. And
+  the shutdown drain counted a connection closing once its queued TLS output was out (a response, a
+  WebSocket Close, an HTTP/2 GOAWAY) as idle, so a graceful stop could end under that send; a
+  connection with operations in flight now counts as active.
 - **A streaming gzip response with no body failed as a decompression error.** The miniz backend
   (since the truncated-header check) failed the final call of a gzip stream that had received
   nothing at all, which a streaming client makes at the end of every response with

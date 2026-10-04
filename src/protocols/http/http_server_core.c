@@ -751,9 +751,11 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
         if (h2h && h2h->drain_shutdown && s->pool.conns[j].state == KL_HTTP_CONN_HTTP2)
             h2h->drain_shutdown(&s->pool.conns[j]);
     }
+    /* Active: not closed, or (completion) still has ops in flight, such as a TLS response closing once
+     * its queued output is out. Stopping under it would cut that output off. */
     int active = 0;
     for (int j = 0; j < s->pool.capacity; j++)
-        if (s->pool.conns[j].state != KL_HTTP_CONN_CLOSED) active++;
+        if (s->pool.conns[j].state != KL_HTTP_CONN_CLOSED || s->pool.conns[j].comp_ops > 0) active++;
     if (active == 0 || now >= s->drain_deadline_ms)
         kl_atomic_store_int(&s->running, 0);
 }

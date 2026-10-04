@@ -950,6 +950,13 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
         if (comp_tlsq_settle(s, c)) return;
+        /* The framing is complete and this receive did not fill its buffer: nothing more was queued,
+         * the completion-side "would block". Close (after the queued response) instead of holding the
+         * slot to the deadline; a client that over-sends fills the buffer and keeps being drained. */
+        if (c->request_body_complete && ev->bytes < c->comp_cipher_cap) {
+            kl_comp_close_after_output(s, c);
+            return;
+        }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         return;
     }
@@ -960,6 +967,8 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         KlHttpConnState st = kl_http_conn_drain_ingest(c, ev->bytes, kl_monotonic_ms());
         c->stream.read_len = 0;
         if (st == KL_HTTP_CONN_CLOSED) { kl_comp_close(s, c); return; }
+        /* As for TLS above: framing complete and a short receive means nothing more is queued. */
+        if (c->request_body_complete && ev->bytes < c->stream.read_cap) { kl_comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         return;
     }
