@@ -1143,6 +1143,123 @@ static void poison_error_queue(void)
  *       makes SSL_get_error report SSL_ERROR_SSL and at_eof() would be 0), and
  *   (b) an independent session completes a full handshake + round-trip with the
  *       queue poisoned before each op: no cross-session contamination. */
+
+/* ── Audit 18 I2: a completion-mode write larger than the output ring ────────────────────────
+ * In completion mode the engine writes ciphertext into a ring capped at 256 KiB. A full ring returned
+ * -1 with no retry flag, so SSL_write failed and the connection was closed; the core expects
+ * WANT_WRITE (0), moves the ring out, and retries. A 600 KiB write must go through. */
+static void test_comp_large_write(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Audit 18 I2: completion-mode write larger than the output ring ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(sctx && cctx);
+    KlTls *srv, *cli;
+    mem_handshake(alloc, sctx, cctx, "server.local", &srv, &cli);
+    const size_t total = 600 * 1024;
+    unsigned char *src = malloc(total), *got = malloc(total);
+    assert(src && got);
+    for (size_t i = 0; i < total; i++) src[i] = (unsigned char)(i * 7 + (i >> 11));
+    size_t off = 0, glen = 0;
+    int failed = 0;
+    for (int iter = 0; iter < 100000 && glen < total && !failed; iter++) {
+        if (off < total) {
+            kl_ssize_t n = srv->write(srv, KL_INVALID_SOCKET, src + off, total - off);
+            if (n < 0) { failed = 1; break; }
+            off += (size_t)n;                             /* 0 = WANT_WRITE: move the ring, retry */
+        }
+        pump(srv, cli);
+        for (int k = 0; k < 64; k++) {
+            kl_ssize_t r = cli->read(cli, KL_INVALID_SOCKET, got + glen, total - glen);
+            if (r > 0) glen += (size_t)r; else break;
+        }
+    }
+    printf("  wrote %zu, read %zu, failed=%d\n", off, glen, failed);
+    assert(!failed);                                      /* was: -1 once the ring was full */
+    assert(glen == total && memcmp(got, src, total) == 0);
+    printf("  PASS: 600 KiB through a 256 KiB ring\n");
+    free(src); free(got);
+    cli->destroy(cli); srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
+/* ── Audit 18 I3: a TLS write retried the way KlDrain retries it ─────────────────────────────
+ * After a write would block, KlDrain copies what was not taken into its own buffer, may append more,
+ * and retries from that buffer: a different pointer and a larger length. The adapter must keep the
+ * write-retry contract under that (OpenSSL: a moved buffer is a fatal BAD_WRITE_RETRY unless allowed;
+ * mbedTLS: a larger retry length was acknowledged although only the pending record was sent). The
+ * reader must get every byte, in order. */
+static void test_drain_style_retry(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Audit 18 I3: drain-style write retry (moved buffer, larger length) ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    int small = 8192;
+    (void)setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    (void)setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    assert(drive_handshake(cli, cfd, srv, sfd) == 0);
+
+    const size_t total = 512 * 1024, piece = 16 * 1024;
+    unsigned char *src = malloc(total), *got = malloc(total), *dbuf = malloc(total);
+    assert(src && got && dbuf);
+    for (size_t i = 0; i < total; i++) src[i] = (unsigned char)(i * 131 + (i >> 9));
+    size_t produced = 0, dlen = 0, glen = 0;
+    int failed = 0;
+    for (int iter = 0; iter < 200000 && glen < total && !failed; iter++) {
+        if (dlen > 0) {                                   /* flush the drain, as kl_drain_flush */
+            kl_ssize_t n = srv->write(srv, sfd, dbuf, dlen);
+            if (n < 0) { failed = 1; break; }
+            if (n > 0) { memmove(dbuf, dbuf + n, dlen - (size_t)n); dlen -= (size_t)n; }
+        } else if (produced < total) {                    /* a new write, as kl_drain_write */
+            size_t len = total - produced < piece ? total - produced : piece;
+            kl_ssize_t n = srv->write(srv, sfd, src + produced, len);
+            if (n < 0) { failed = 1; break; }
+            memcpy(dbuf, src + produced + n, len - (size_t)n);   /* the rest goes to the drain */
+            dlen = len - (size_t)n;
+            produced += len;
+        }
+        if (dlen > 0 && produced < total) {               /* more appended behind the stall */
+            size_t len = total - produced < piece ? total - produced : piece;
+            memcpy(dbuf + dlen, src + produced, len);
+            dlen += len;
+            produced += len;
+        }
+        for (int k = 0; k < 8; k++) {                     /* the reader drains a little */
+            kl_ssize_t r = cli->read(cli, cfd, got + glen, total - glen);
+            if (r > 0) glen += (size_t)r; else break;
+        }
+    }
+    int intact = !failed && glen == total && memcmp(got, src, total) == 0;
+    printf("  wrote %zu, read %zu, failed=%d, intact=%d\n", produced, glen, failed, intact);
+    assert(!failed);                                      /* was (OpenSSL): BAD_WRITE_RETRY */
+    assert(intact);                                       /* was (mbedTLS): bytes lost */
+    printf("  PASS: every byte arrived, in order\n");
+    free(src); free(got); free(dbuf);
+    cli->destroy(cli); srv->destroy(srv);
+    close(fds[0]); close(fds[1]);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
 static void test_error_queue_discipline(KlAllocator *alloc, PemPair *ca, PemPair *server)
 {
     printf("== Finding (r6): OpenSSL error-queue discipline ==\n");
@@ -1527,6 +1644,8 @@ int main(void) {
     test_client_verified_flag(&alloc, &ca, &server);
     test_overlong_cn_omitted(&alloc, ca_key, ca_crt, &ca, &server);
     test_error_queue_discipline(&alloc, &ca, &server);
+    test_comp_large_write(&alloc, &ca, &server);
+    test_drain_style_retry(&alloc, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

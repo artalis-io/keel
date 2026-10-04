@@ -724,6 +724,116 @@ static KlAllocator fail_alloc_make(FailAlloc *f, int fail_after) {
  * N allocations, for a sweep of N. Each iteration must fail gracefully (no
  * crash / no UAF under ASan); some N complete, some don't; either is fine, the
  * point is memory-safety on the failure paths. */
+
+/* ── Audit 18 I3: a TLS write retried the way KlDrain retries it ─────────────────────────────
+ * After a write would block, KlDrain copies what was not taken into its own buffer, may append more,
+ * and retries from that buffer: a different pointer and a larger length. The adapter must keep the
+ * write-retry contract under that (OpenSSL: a moved buffer is a fatal BAD_WRITE_RETRY unless allowed;
+ * mbedTLS: a larger retry length was acknowledged although only the pending record was sent). The
+ * reader must get every byte, in order. */
+static void test_drain_style_retry(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Audit 18 I3: drain-style write retry (moved buffer, larger length) ==\n");
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, pemlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, pemlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, pemlen(ca->cert_pem), alloc);
+    assert(cctx);
+    KlTls *srv = kl_tls_mbedtls_create(sctx, alloc);
+    KlTls *cli = kl_tls_mbedtls_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_mbedtls_set_hostname(cli, "server.local") == 0);
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    int small = 8192;
+    (void)setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    (void)setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    assert(drive_handshake(cli, cfd, srv, sfd) == 0);
+
+    const size_t total = 512 * 1024, piece = 16 * 1024;
+    unsigned char *src = malloc(total), *got = malloc(total), *dbuf = malloc(total);
+    assert(src && got && dbuf);
+    for (size_t i = 0; i < total; i++) src[i] = (unsigned char)(i * 131 + (i >> 9));
+    size_t produced = 0, dlen = 0, glen = 0;
+    int failed = 0;
+    for (int iter = 0; iter < 200000 && glen < total && !failed; iter++) {
+        if (dlen > 0) {                                   /* flush the drain, as kl_drain_flush */
+            kl_ssize_t n = srv->write(srv, sfd, dbuf, dlen);
+            if (n < 0) { failed = 1; break; }
+            if (n > 0) { memmove(dbuf, dbuf + n, dlen - (size_t)n); dlen -= (size_t)n; }
+        } else if (produced < total) {                    /* a new write, as kl_drain_write */
+            size_t len = total - produced < piece ? total - produced : piece;
+            kl_ssize_t n = srv->write(srv, sfd, src + produced, len);
+            if (n < 0) { failed = 1; break; }
+            memcpy(dbuf, src + produced + n, len - (size_t)n);   /* the rest goes to the drain */
+            dlen = len - (size_t)n;
+            produced += len;
+        }
+        if (dlen > 0 && produced < total) {               /* more appended behind the stall */
+            size_t len = total - produced < piece ? total - produced : piece;
+            memcpy(dbuf + dlen, src + produced, len);
+            dlen += len;
+            produced += len;
+        }
+        for (int k = 0; k < 8; k++) {                     /* the reader drains a little */
+            kl_ssize_t r = cli->read(cli, cfd, got + glen, total - glen);
+            if (r > 0) glen += (size_t)r; else break;
+        }
+    }
+    int intact = !failed && glen == total && memcmp(got, src, total) == 0;
+    printf("  wrote %zu, read %zu, failed=%d, intact=%d\n", produced, glen, failed, intact);
+    assert(!failed);                                      /* was (OpenSSL): BAD_WRITE_RETRY */
+    assert(intact);                                       /* was (mbedTLS): bytes lost */
+    printf("  PASS: every byte arrived, in order\n");
+    free(src); free(got); free(dbuf);
+    cli->destroy(cli); srv->destroy(srv);
+    close(fds[0]); close(fds[1]);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+}
+
+/* ── Audit 18 I4: a bare TCP close is not a clean TLS close ──────────────────────────────────
+ * The socket-BIO mapped a 0-byte recv to close_notify, so at_eof() reported a clean shutdown for a
+ * connection that was simply cut (an on-path FIN): a close-delimited response was accepted as whole. */
+static void test_truncation_is_not_eof(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Audit 18 I4: TCP FIN without close_notify ==\n");
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, pemlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, pemlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, pemlen(ca->cert_pem), alloc);
+    assert(sctx && cctx);
+    KlTls *srv = kl_tls_mbedtls_create(sctx, alloc);
+    KlTls *cli = kl_tls_mbedtls_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_mbedtls_set_hostname(cli, "server.local") == 0);
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    assert(drive_handshake(cli, cfd, srv, sfd) == 0);
+    roundtrip(srv, sfd, cli, cfd, "partial body");
+    shutdown(sfd, SHUT_WR);                               /* a FIN, no close_notify */
+    char buf[64];
+    kl_ssize_t r = 0;
+    for (int i = 0; i < 100; i++) { r = cli->read(cli, cfd, buf, sizeof buf); if (r != 0) break; }
+    printf("  read=%zd at_eof=%d\n", (ssize_t)r, cli->at_eof(cli));
+    assert(r < 0);
+    assert(cli->at_eof(cli) == 0);                        /* was 1: the cut read as a clean close */
+    printf("  PASS: a bare FIN is not reported as a clean TLS close\n");
+    cli->destroy(cli); srv->destroy(srv);
+    close(fds[0]); close(fds[1]);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+}
+
 static void test_alloc_failure_injection(PemPair *ca, PemPair *server)
 {
     printf("== allocation-failure injection (graceful, ASan-clean) ==\n");
@@ -811,6 +921,8 @@ int main(void) {
     test_second_handshake_after_reset(&alloc, &ca, &server);
     test_two_simultaneous(&alloc, &ca, &server);
     test_alloc_failure_injection(&ca, &server);
+    test_drain_style_retry(&alloc, &ca, &server);
+    test_truncation_is_not_eof(&alloc, &ca, &server);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
