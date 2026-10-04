@@ -1090,7 +1090,7 @@ COMPLETION_EXCLUDE ?=
 #   make print-pollcomp-suites
 # The derived eligible set, before exclusions. POLLCOMP_TEST_SUITES below is this minus
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
-POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec compress cross_module datagram_batch completion_life loop_teardown \
+POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec completion_output compress cross_module datagram_batch completion_life loop_teardown \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
