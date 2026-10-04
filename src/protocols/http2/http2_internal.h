@@ -48,8 +48,6 @@ struct KlHttp2ServerStream {
     KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS]; /**< Extracted route parameters. */
     int num_params;             /**< Number of extracted parameters. */
     int route_result;           /**< Route match result code. */
-    int headers_done;           /**< Non-zero after HEADERS frame received. */
-    int body_done;              /**< Non-zero after END_STREAM received. */
     int reader_lazy;            /**< No content-length: make the body reader on the first DATA. */
     size_t body_received;       /**< Total body bytes received so far. */
     int response_submitted;     /**< Non-zero after response submitted. */

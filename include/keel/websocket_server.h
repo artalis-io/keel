@@ -42,7 +42,9 @@ struct KlWsServerConfig {
     size_t max_message_size;        /**< 0 = 1MB default */
     size_t max_frame_size;          /**< 0 = 64KB default */
     int close_timeout_ms;           /**< 0 = 5000ms default */
-    int ping_interval_ms;           /**< 0 = disabled (default) */
+    int ping_interval_ms;           /**< 0 = disabled (default): no pings, no liveness check. Else
+                                         a PING every interval; a peer that sends nothing for a
+                                         whole interval after one is failed (Close 1001). */
 };
 typedef struct KlWsServerConfig KlWsServerConfig;
 

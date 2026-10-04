@@ -34,6 +34,7 @@
 /* ── Config ──────────────────────────────────────────────────────── */
 
 void kl_ws_server_config_init(KlWsServerConfig *config) {
+    if (!config) return;
     memset(config, 0, sizeof(*config));
 }
 
@@ -180,19 +181,19 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
 /* ── Public send functions ───────────────────────────────────────── */
 
 int kl_ws_server_send_text(KlWsServerConn *ws, const char *data, size_t len) {
-    if (!ws) return -1;
+    if (!ws || (!data && len > 0)) return -1;
     if (ws->close_sent) return -1;
     return ws_send_frame(ws, KL_WS_OP_TEXT, data, len);
 }
 
 int kl_ws_server_send_binary(KlWsServerConn *ws, const char *data, size_t len) {
-    if (!ws) return -1;
+    if (!ws || (!data && len > 0)) return -1;
     if (ws->close_sent) return -1;
     return ws_send_frame(ws, KL_WS_OP_BINARY, data, len);
 }
 
 int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len) {
-    if (!ws) return -1;
+    if (!ws || (!data && len > 0)) return -1;
     if (ws->close_sent) return -1;
     if (len > 125) return -1;
     return ws_send_frame(ws, KL_WS_OP_PING, data, len);
@@ -203,7 +204,6 @@ int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
     if (!ws) return -1;
     if (ws->close_sent) return 0;
     ws->close_sent = 1;
-    ws->close_code = code;
     ws->close_deadline_ms = kl_monotonic_ms() +
                             (uint64_t)ws_close_timeout(ws->config);
 
@@ -465,8 +465,18 @@ static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
                                        ws->config->user_data);
     } else if (!ws->close_sent) {
         /* Auto-pong, unless the server has stopped sending: after its Close, or after a frame the
-         * socket cut short (W26), another frame would be written behind it (into the cut payload). */
-        ws_send_frame(ws, KL_WS_OP_PONG, (const char *)payload, len);
+         * socket cut short, another frame would be written behind it (into the cut payload). */
+        if (ws->drain_enabled && kl_drain_pending(&ws->drain)) {
+            /* Output is backed up (the peer is not reading): queueing a PONG per ping would grow
+             * the drain without bound. Keep only the latest ping, answered once the drain empties
+             * (RFC 6455 5.5.3 allows answering only the most recent one). */
+            if (len > sizeof ws->pong_buf) len = sizeof ws->pong_buf;   /* the parser caps it */
+            if (len > 0) memcpy(ws->pong_buf, payload, len);
+            ws->pong_len = len;
+            ws->pong_owed = 1;
+        } else {
+            ws_send_frame(ws, KL_WS_OP_PONG, (const char *)payload, len);
+        }
     }
     return 0;
 }
@@ -476,6 +486,8 @@ static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
 int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
     KlWsServerConn *ws = c->ws;
     size_t pos = 0;
+
+    if (len > 0) ws->ping_unanswered = 0;   /* the peer is alive: any bytes answer the auto-ping */
 
     while (pos < len) {
         /* Remember where payload starts for this frame parse iteration */
@@ -664,8 +676,16 @@ read_more: ;
 int kl_ws_server_on_writable(KlHttpConn *c) {
     if (!c->ws || !c->ws->drain_enabled)
         return KL_HTTP_CONN_WEBSOCKET;
-    int r = kl_drain_flush(&c->ws->drain);
+    KlWsServerConn *ws = c->ws;
+    int r = kl_drain_flush(&ws->drain);
     if (r < 0) return KL_HTTP_CONN_CLOSED;
+    if (r == 0 && ws->pong_owed) {
+        /* The output drained: answer the latest ping that arrived while it was backed up. A send
+         * that fails marks the connection for closing (ws_send_frame). */
+        ws->pong_owed = 0;
+        if (!ws->close_sent)
+            (void)ws_send_frame(ws, KL_WS_OP_PONG, (const char *)ws->pong_buf, ws->pong_len);
+    }
     return KL_HTTP_CONN_WEBSOCKET;
 }
 
@@ -714,11 +734,22 @@ int kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now) {
 /* ── Auto-ping keep-alive ─────────────────────────────────────────── */
 
 int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
-    if (!c->ws || c->ws->next_ping_ms == 0) return 0;
-    if (c->ws->close_sent || c->ws->close_received) return 0;
-    if (now < c->ws->next_ping_ms) return 0;
-    kl_ws_server_send_ping(c->ws, NULL, 0);
-    c->ws->next_ping_ms = now + (uint64_t)c->ws->config->ping_interval_ms;
+    KlWsServerConn *ws = c->ws;
+    if (!ws || ws->next_ping_ms == 0) return 0;
+    if (ws->close_sent || ws->close_received) return 0;
+    if (now < ws->next_ping_ms) return 0;
+    if (ws->ping_unanswered) {
+        /* Nothing arrived for a whole interval after the last ping: the peer is gone (a dead peer
+         * behind a NAT never answers and never resets). Fail the connection: Close 1001 as a
+         * courtesy, with a deadline already passed so the sweep closes it now rather than waiting
+         * out the close handshake with a peer that will not answer. */
+        (void)kl_ws_server_close(ws, KL_WS_GOING_AWAY, NULL, 0);
+        ws->close_deadline_ms = now;
+        return 0;
+    }
+    kl_ws_server_send_ping(ws, NULL, 0);
+    ws->ping_unanswered = 1;
+    ws->next_ping_ms = now + (uint64_t)ws->config->ping_interval_ms;
     return 1;
 }
 
@@ -756,6 +787,7 @@ static void ws_route_not_upgraded(KlHttpRequest *req, KlHttpResponse *res, void 
 }
 
 int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
+    if (!s || !pattern || !config) return -1;
     /* Register as a GET route; ws_config triggers the upgrade. */
     if (kl_http_router_add(&s->router, "GET", pattern, ws_route_not_upgraded, NULL, NULL) < 0)
         return -1;

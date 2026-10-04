@@ -38,7 +38,6 @@ UTEST(ws_server_close, emits_close_frame) {
 
     ASSERT_EQ(kl_ws_server_close(&ws, 1000, "bye", 3), 0);
     ASSERT_EQ(ws.close_sent, 1);
-    ASSERT_EQ((int)ws.close_code, 1000);
 
     /* Server frame, unmasked: 0x88 (FIN|CLOSE), len 5, [0x03,0xE8]=1000, "bye". */
     ASSERT_EQ(g_cap_len, (size_t)7);
@@ -51,7 +50,7 @@ UTEST(ws_server_close, emits_close_frame) {
     kl_drain_free(&ws.drain);
 }
 
-/* A second close is an idempotent no-op: returns 0, emits nothing, code unchanged. */
+/* A second close is an idempotent no-op: returns 0, emits nothing, only the first close is on the wire. */
 UTEST(ws_server_close, idempotent) {
     KlAllocator a = kl_allocator_default();
     KlWsServerConn ws; KlWsServerConfig cfg; ws_setup(&ws, &cfg, &a);
@@ -62,7 +61,7 @@ UTEST(ws_server_close, idempotent) {
 
     ASSERT_EQ(kl_ws_server_close(&ws, 1001, "y", 1), 0);  /* no-op */
     ASSERT_EQ(g_cap_len, after_first);                    /* nothing new emitted */
-    ASSERT_EQ((int)ws.close_code, 1000);                  /* first code preserved */
+    ASSERT_EQ(g_cap[3], (unsigned char)0xE8);             /* only the first close (1000) went out */
     ASSERT_EQ(ws.close_sent, 1);
 
     kl_drain_free(&ws.drain);
@@ -128,6 +127,53 @@ UTEST(ws_server_send, emits_binary_frame) {
     ASSERT_EQ(g_cap[4], (unsigned char)0x02);
 
     kl_drain_free(&ws.drain);
+}
+
+/* ── NULL arguments to the public entry points ─────────────────────────────── */
+
+/* A WebSocket route without a config would match and upgrade nothing: it is refused, as are a
+ * NULL server and pattern. A NULL config used to register a dead route. */
+UTEST(ws_server_null, upgrade_route_needs_server_pattern_and_config) {
+    static KlHttpServer srv;
+    KlHttpServerConfig scfg;
+    memset(&scfg, 0, sizeof scfg);
+    scfg.port = 0;
+    scfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_http_server_init(&srv, &scfg), 0);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    int no_cfg = kl_http_server_ws_upgrade(&srv, "/ws", NULL);
+    int no_pat = kl_http_server_ws_upgrade(&srv, NULL, &cfg);
+    kl_http_server_free(&srv);
+    ASSERT_EQ(no_cfg, -1);
+    ASSERT_EQ(no_pat, -1);
+    ASSERT_EQ(kl_http_server_ws_upgrade(NULL, "/ws", &cfg), -1);   /* used to crash */
+}
+
+/* NULL data with a nonzero length is refused (it used to be read through), and a NULL config is a
+ * no-op for config_init (it used to be written through). */
+UTEST(ws_server_null, sends_and_config_init_refuse_null) {
+    KlAllocator a = kl_allocator_default();
+    KlWsServerConn ws; KlWsServerConfig cfg; ws_setup(&ws, &cfg, &a);
+
+    kl_ws_server_config_init(NULL);
+    int t = kl_ws_server_send_text(&ws, NULL, 4);
+    int b = kl_ws_server_send_binary(&ws, NULL, 4);
+    int p = kl_ws_server_send_ping(&ws, NULL, 4);
+    size_t emitted = g_cap_len;
+    /* An empty payload needs no data. */
+    int e = kl_ws_server_send_text(&ws, NULL, 0);
+    kl_drain_free(&ws.drain);
+
+    ASSERT_EQ(t, -1);
+    ASSERT_EQ(b, -1);
+    ASSERT_EQ(p, -1);
+    ASSERT_EQ(emitted, (size_t)0);
+    ASSERT_EQ(e, 0);
+    ASSERT_EQ(kl_ws_server_send_text(NULL, "x", 1), -1);
+    ASSERT_EQ(kl_ws_server_enable_drain(NULL, 0), -1);
+    KlPeerCred pc;
+    ASSERT_EQ(kl_ws_server_peer_cred(NULL, &pc), -1);
 }
 
 UTEST_MAIN();

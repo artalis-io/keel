@@ -573,7 +573,6 @@ UTEST(h2, cb_on_request_creates_stream) {
     ASSERT_EQ(s->req.version_minor, 0);
     ASSERT_EQ(s->req.keep_alive, 1);
     ASSERT_EQ(s->req.num_headers, 2);
-    ASSERT_EQ(s->headers_done, 1);
 
     kl_http2_server_cleanup(&conn);
     kl_test_closesock(pfd[0]);

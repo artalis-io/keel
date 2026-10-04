@@ -40,6 +40,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   is now validated: both addresses must be literals of the header's family, and both ports one to
   five digits in 0-65535, with exactly six fields.
 
+- **WebSocket server: a dead peer held its connection forever.** With `ping_interval_ms` set, the
+  server pinged but never expected an answer, so a peer that vanished without a reset (behind a NAT,
+  or a client that lost power) kept its slot for good. A peer that sends nothing at all, PONG or any
+  other frame, for a whole interval after a ping is now failed: the server sends Close 1001 and
+  closes the connection at once. `ping_interval_ms = 0` (the default) still means no pings and no
+  liveness check.
+- **WebSocket server: pings from a client that never reads grew server memory without bound.** With
+  the drain enabled and no `max_size` (unlimited), every ping queued a PONG behind the output the
+  client was not reading. While output is backed up, the server now keeps only the latest ping and
+  answers it once the drain empties (RFC 6455 allows answering only the most recent ping).
 - **HTTP/2: peer-driven resource limits, idle connections and graceful shutdown.** The nghttp2
   server adapter sent empty SETTINGS, so a peer could open streams without limit, and it copied every
   request header with no count or size cap: one HPACK table entry referenced again and again (an
@@ -395,6 +405,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `KEEL_IOCP_TF_CHUNK`, a test seam, in every build, so the environment of a production process
   could shrink each TransmitFile call to a single byte. Only a test build of the IOCP backend
   (`-DKEEL_IOCP_TEST_HOOKS`, linked into `smoke-iocp`) reads it now.
+- **WebSocket server: NULL arguments to the public API crashed.** `kl_ws_server_config_init(NULL)`
+  wrote through the pointer, `kl_http_server_ws_upgrade` crashed on a NULL server and registered a
+  dead route for a NULL config, and the send functions read through NULL data given a nonzero length.
+  `kl_ws_server_config_init(NULL)` is now a no-op, and the others return -1.
+- **Internal: write-only fields removed.** The WebSocket server's recorded close code, and the HTTP/2
+  server stream's `headers_done` and `body_done` flags, were set and never read. They are gone; both
+  structs are internal, so the public API is unchanged.
 - **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
   streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
   of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any
