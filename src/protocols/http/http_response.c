@@ -28,6 +28,19 @@ typedef struct { const char *str; size_t len; } KlStatusLine;
 
 #define SL(s) { (s), sizeof(s) - 1 }
 
+/* "HTTP/1.1 NNN \r\n" for every code 100-599, built at compile time: the status line of a code
+ * with no registered reason phrase. Static storage, since the line is sent by reference. */
+#define KL_STATUS_LINE_BARE_LEN 15
+#define SLB(h, t, u) "HTTP/1.1 " #h #t #u " \r\n"
+#define SLB_TENS(h, t) SLB(h, t, 0), SLB(h, t, 1), SLB(h, t, 2), SLB(h, t, 3), SLB(h, t, 4), \
+                       SLB(h, t, 5), SLB(h, t, 6), SLB(h, t, 7), SLB(h, t, 8), SLB(h, t, 9)
+#define SLB_HUNDREDS(h) SLB_TENS(h, 0), SLB_TENS(h, 1), SLB_TENS(h, 2), SLB_TENS(h, 3), \
+                        SLB_TENS(h, 4), SLB_TENS(h, 5), SLB_TENS(h, 6), SLB_TENS(h, 7), \
+                        SLB_TENS(h, 8), SLB_TENS(h, 9)
+static const char status_line_bare[500][KL_STATUS_LINE_BARE_LEN + 1] = {
+    SLB_HUNDREDS(1), SLB_HUNDREDS(2), SLB_HUNDREDS(3), SLB_HUNDREDS(4), SLB_HUNDREDS(5)
+};
+
 static KlStatusLine status_line_for(int code) {
     switch (code) {
         case 200: return (KlStatusLine)SL("HTTP/1.1 200 OK\r\n");
@@ -56,8 +69,49 @@ static KlStatusLine status_line_for(int code) {
         case 502: return (KlStatusLine)SL("HTTP/1.1 502 Bad Gateway\r\n");
         case 503: return (KlStatusLine)SL("HTTP/1.1 503 Service Unavailable\r\n");
         case 504: return (KlStatusLine)SL("HTTP/1.1 504 Gateway Timeout\r\n");
-        default:  return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
+        case 100: return (KlStatusLine)SL("HTTP/1.1 100 Continue\r\n");
+        case 101: return (KlStatusLine)SL("HTTP/1.1 101 Switching Protocols\r\n");
+        case 102: return (KlStatusLine)SL("HTTP/1.1 102 Processing\r\n");
+        case 103: return (KlStatusLine)SL("HTTP/1.1 103 Early Hints\r\n");
+        case 203: return (KlStatusLine)SL("HTTP/1.1 203 Non-Authoritative Information\r\n");
+        case 205: return (KlStatusLine)SL("HTTP/1.1 205 Reset Content\r\n");
+        case 207: return (KlStatusLine)SL("HTTP/1.1 207 Multi-Status\r\n");
+        case 208: return (KlStatusLine)SL("HTTP/1.1 208 Already Reported\r\n");
+        case 226: return (KlStatusLine)SL("HTTP/1.1 226 IM Used\r\n");
+        case 300: return (KlStatusLine)SL("HTTP/1.1 300 Multiple Choices\r\n");
+        case 305: return (KlStatusLine)SL("HTTP/1.1 305 Use Proxy\r\n");
+        case 402: return (KlStatusLine)SL("HTTP/1.1 402 Payment Required\r\n");
+        case 406: return (KlStatusLine)SL("HTTP/1.1 406 Not Acceptable\r\n");
+        case 407: return (KlStatusLine)SL("HTTP/1.1 407 Proxy Authentication Required\r\n");
+        case 408: return (KlStatusLine)SL("HTTP/1.1 408 Request Timeout\r\n");
+        case 411: return (KlStatusLine)SL("HTTP/1.1 411 Length Required\r\n");
+        case 412: return (KlStatusLine)SL("HTTP/1.1 412 Precondition Failed\r\n");
+        case 414: return (KlStatusLine)SL("HTTP/1.1 414 URI Too Long\r\n");
+        case 416: return (KlStatusLine)SL("HTTP/1.1 416 Range Not Satisfiable\r\n");
+        case 417: return (KlStatusLine)SL("HTTP/1.1 417 Expectation Failed\r\n");
+        case 421: return (KlStatusLine)SL("HTTP/1.1 421 Misdirected Request\r\n");
+        case 423: return (KlStatusLine)SL("HTTP/1.1 423 Locked\r\n");
+        case 424: return (KlStatusLine)SL("HTTP/1.1 424 Failed Dependency\r\n");
+        case 425: return (KlStatusLine)SL("HTTP/1.1 425 Too Early\r\n");
+        case 426: return (KlStatusLine)SL("HTTP/1.1 426 Upgrade Required\r\n");
+        case 428: return (KlStatusLine)SL("HTTP/1.1 428 Precondition Required\r\n");
+        case 431: return (KlStatusLine)SL("HTTP/1.1 431 Request Header Fields Too Large\r\n");
+        case 451: return (KlStatusLine)SL("HTTP/1.1 451 Unavailable For Legal Reasons\r\n");
+        case 501: return (KlStatusLine)SL("HTTP/1.1 501 Not Implemented\r\n");
+        case 505: return (KlStatusLine)SL("HTTP/1.1 505 HTTP Version Not Supported\r\n");
+        case 506: return (KlStatusLine)SL("HTTP/1.1 506 Variant Also Negotiates\r\n");
+        case 507: return (KlStatusLine)SL("HTTP/1.1 507 Insufficient Storage\r\n");
+        case 508: return (KlStatusLine)SL("HTTP/1.1 508 Loop Detected\r\n");
+        case 510: return (KlStatusLine)SL("HTTP/1.1 510 Not Extended\r\n");
+        case 511: return (KlStatusLine)SL("HTTP/1.1 511 Network Authentication Required\r\n");
+        default:  break;
     }
+    /* Any other three-digit code goes out as itself with an empty reason phrase, which HTTP/1.1
+     * allows (status-line = HTTP-version SP status-code SP [ reason-phrase ]). Only a value that
+     * is not a status code at all is sent as 500. */
+    if (code >= 100 && code <= 599)
+        return (KlStatusLine){ status_line_bare[code - 100], KL_STATUS_LINE_BARE_LEN };
+    return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
 }
 
 /* ── Fast integer formatting: replaces snprintf for Content-Length ── */

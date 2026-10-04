@@ -94,10 +94,10 @@ int  kl_http_router_init(KlHttpRouter *r, KlAllocator *alloc);
  * @param r           Router instance.
  * @param method      HTTP method ("GET", "POST", "*" for any).
  * @param pattern     URL pattern to match.
- * @param handler     Handler function invoked on match.
+ * @param handler     Handler function invoked on match (required).
  * @param user_data   Passed to handler and body reader factory.
  * @param body_reader Factory for body reader, or NULL to discard body.
- * @return 0 on success, -1 on allocation failure.
+ * @return 0 on success, -1 on a NULL router, method, pattern or handler, or on allocation failure.
  */
 int  kl_http_router_add(KlHttpRouter *r, const char *method, const char *pattern,
                    KlHttpHandler handler, void *user_data,

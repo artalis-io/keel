@@ -24,7 +24,8 @@ int kl_http_router_init(KlHttpRouter *r, KlAllocator *alloc) {
 int kl_http_router_add(KlHttpRouter *r, const char *method, const char *pattern,
                   KlHttpHandler handler, void *user_data,
                   KlHttpBodyReaderFactory body_reader) {
-    if (!r || !method || !pattern) return -1;
+    /* A route without a handler would call through NULL on its first matching request. */
+    if (!r || !method || !pattern || !handler) return -1;
     if (r->count >= r->capacity) {
         if (r->capacity > INT_MAX / 2) return -1;
         int new_cap = r->capacity * 2;

@@ -99,11 +99,28 @@ static const void *mp_memmem(const void *hay, size_t hlen,
 }
 
 /*
+ * `p` points just past the opening '"' of a quoted string, with n bytes
+ * left in the value. Return the closing '"', or NULL if the string is
+ * unterminated. A backslash escapes the byte after it (RFC 9110 quoted-pair),
+ * so `\"` does not close the string.
+ */
+static const char *mp_quote_close(const char *p, size_t n) {
+    for (size_t j = 0; j < n; j++) {
+        if (p[j] == '\\') { j++; continue; }
+        if (p[j] == '"') return p + j;
+    }
+    return NULL;
+}
+
+/*
  * Find a MIME parameter "<name>=" inside a header value, returning a
  * pointer to the byte AFTER the '='. The match must be at the start
  * of the value or be preceded by ';', SP, or HTAB; otherwise a
  * parameter with a colliding prefix (e.g. "somename=" vs "name=", or
- * "X-boundary=" vs "boundary=") could front-run the real one.
+ * "X-boundary=" vs "boundary=") could front-run the real one. Quoted
+ * strings are skipped whole: text inside one, such as the filename in
+ * `filename="x; name=evil"`, is a value and never names a parameter.
+ * An unterminated quoted string ends the search (NULL).
  *
  * `needle` MUST include the trailing '=' (so "name=", "filename=",
  * "boundary="). nlen is its length. Case-insensitive match per
@@ -116,6 +133,12 @@ static const char *mp_find_param(const char *val, size_t vlen,
      * Use the subtractive form rather than `i + nlen <= vlen` so the
      * loop guard is overflow-safe even on adversarial vlen. */
     for (size_t i = 0; i <= vlen - nlen; i++) {
+        if (val[i] == '"') {
+            const char *close = mp_quote_close(val + i + 1, vlen - i - 1);
+            if (!close) return NULL;
+            i = (size_t)(close - val);   /* the loop step moves past the closing quote */
+            continue;
+        }
         if (i > 0) {
             char prev = val[i - 1];
             if (prev != ';' && prev != ' ' && prev != '\t')
@@ -247,7 +270,7 @@ static int mp_parse_disposition(KlHttpMultipartReader *mr, const char *val,
     size_t      name_len;
     if (nremain > 0 && *np == '"') {
         np++; nremain--;
-        const char *end = memchr(np, '"', nremain);
+        const char *end = mp_quote_close(np, nremain);
         if (!end) return -1;  /* unterminated quoted name → MALFORMED */
         name_src = np;
         name_len = (size_t)(end - np);
@@ -276,7 +299,7 @@ static int mp_parse_disposition(KlHttpMultipartReader *mr, const char *val,
     size_t      fn_len;
     if (fremain > 0 && *fp == '"') {
         fp++; fremain--;
-        const char *end = memchr(fp, '"', fremain);
+        const char *end = mp_quote_close(fp, fremain);
         if (!end) return -1;  /* unterminated quoted filename → MALFORMED */
         fn_src = fp;
         fn_len = (size_t)(end - fp);
@@ -680,7 +703,7 @@ KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttp
     if (bp_remain > 0 && *bp == '"') {
         bp++;
         bp_remain--;
-        const char *end = memchr(bp, '"', bp_remain);
+        const char *end = mp_quote_close(bp, bp_remain);
         if (!end) return NULL;
         bnd     = bp;
         bnd_len = (size_t)(end - bp);

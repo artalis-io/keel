@@ -746,9 +746,18 @@ void kl_ws_server_hooks_install(void) {
 
 /* Public WebSocket route-registration API. Lives in the ws module so the readiness http_server.c owns no WebSocket type; a
  * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
+/* Handler of a WebSocket route. An HTTP/1.1 request on the route takes the upgrade branch
+ * (ws_config) and never reaches it. A dispatch that cannot upgrade (an HTTP/2 stream, a
+ * synthetic router dispatch) answers 404, as an HTTP/2 stream on the route always has. */
+static void ws_route_not_upgraded(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
+    (void)req;
+    (void)user_data;
+    kl_http_response_error(res, 404, "Not Found");
+}
+
 int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
-    /* Register as a GET route with no handler; ws_config triggers the upgrade. */
-    if (kl_http_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
+    /* Register as a GET route; ws_config triggers the upgrade. */
+    if (kl_http_router_add(&s->router, "GET", pattern, ws_route_not_upgraded, NULL, NULL) < 0)
         return -1;
     s->router.routes[s->router.count - 1].ws_config = config;
     return 0;
