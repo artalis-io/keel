@@ -332,4 +332,50 @@ UTEST(url, resolve_absolute_location_scheme_is_case_insensitive) {
     ASSERT_STREQ(out, "HTTPS://b.example/y");
 }
 
+/* A base URL with no path ends its authority at '?' or '#', not only at '/': an absolute-path
+ * Location replaces everything after the authority. */
+UTEST(url, resolve_absolute_path_against_base_without_path) {
+    char out[KL_URL_MAX];
+    ASSERT_EQ(kl_url_resolve("http://example.com#top", "/login", out, sizeof out), 0);
+    ASSERT_STREQ(out, "http://example.com/login");
+    ASSERT_EQ(kl_url_resolve("http://example.com:8080#top", "/login", out, sizeof out), 0);
+    ASSERT_STREQ(out, "http://example.com:8080/login");
+    ASSERT_EQ(kl_url_resolve("http://example.com?q=1", "/login", out, sizeof out), 0);
+    ASSERT_STREQ(out, "http://example.com/login");
+    ASSERT_EQ(kl_url_resolve("http://example.com/a/b?q=1#f", "/login", out, sizeof out), 0);
+    ASSERT_STREQ(out, "http://example.com/login");
+}
+
+/* The closing bracket of an IPv6 literal is looked for inside the authority only, and only an
+ * address (hex digits, ':', '.', and a zone after '%') may sit between the brackets. */
+UTEST(url, ipv6_brackets_stay_inside_the_authority) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://[a/b?c]", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[::1/x]/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[::1#]", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[evil.com]/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[]/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[2001:db8::a]:8443/p", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)11);
+    ASSERT_EQ(memcmp(u.host, "2001:db8::a", 11), 0);
+    ASSERT_EQ(u.port, 8443);
+    ASSERT_EQ(kl_url_parse("http://[::ffff:10.0.0.1]/", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)15);
+    ASSERT_EQ(kl_url_parse("http://[fe80::1%25eth0]/", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)14);
+}
+
+/* Userinfo is not supported in a request URL (proxy credentials are configured separately): an
+ * '@' in the authority is an error, never part of the host. */
+UTEST(url, userinfo_rejected) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://user@example.com/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://user:pw@example.com/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com@evil.com/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://a@b:8443/", &u), -1);
+    ASSERT_EQ(kl_url_parse("ws://u@[::1]/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com/a@b", &u), 0);      /* '@' in the path is fine */
+    ASSERT_EQ(kl_url_parse("http://example.com/p?x=a@b", &u), 0);  /* and in the query */
+}
+
 UTEST_MAIN();

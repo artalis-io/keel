@@ -186,6 +186,7 @@ struct KlDnsResolver {
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
     int            rnd_failed;    /* a draw found no OS entropy; the query being built is refused */
+    int          (*rnd_fn)(void *buf, size_t len); /* entropy source; NULL = kl_plat_random */
 };
 
 /* ── Entropy (pooled OS RNG via the platform layer) ─────────────────────── */
@@ -196,7 +197,8 @@ struct KlDnsResolver {
  * next draw tries the OS again. */
 static unsigned char dns_rand_byte(KlDnsResolver *r) {
     if (r->rnd_off >= sizeof(r->rnd_pool)) {
-        if (kl_plat_random(r->rnd_pool, sizeof(r->rnd_pool)) != 0) {
+        int (*fill)(void *, size_t) = r->rnd_fn ? r->rnd_fn : kl_plat_random;
+        if (fill(r->rnd_pool, sizeof(r->rnd_pool)) != 0) {
             r->rnd_failed = 1;
             return 0;
         }
@@ -1635,6 +1637,14 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 }
 
 /* ── Constructor ─────────────────────────────────────────────────────── */
+
+/* Internal TEST hook (NOT in the public header): replace the resolver's entropy source, so a test can
+ * make a draw fail deterministically. NULL restores kl_plat_random. */
+void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len));
+void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len)) {
+    if (self)
+        ((KlDnsResolver *)self)->rnd_fn = fn;
+}
 
 /* Internal creator with an explicit outbound-slot count (NOT in the public header). send_slots 0 = the
  * DNS_SEND_SLOTS default; a positive value is a TEST hook to force KL_DATAGRAM_WOULD_BLOCK deterministically
