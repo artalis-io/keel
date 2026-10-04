@@ -725,6 +725,12 @@ static KlAllocator fail_alloc_make(FailAlloc *f, int fail_after) {
  * crash / no UAF under ASan); some N complete, some don't; either is fine, the
  * point is memory-safety on the failure paths. */
 
+/* Audit 18 tests record a failure and go on (the suite asserts elsewhere), so every one of
+ * them reports its result in one run; main fails at the end if any did. */
+static int g_a18_fail;
+#define A18_CHECK(cond, what) do { if (!(cond)) { printf("  FAIL: %s\n", what); \
+        g_a18_fail++; } } while (0)
+
 /* ── Audit 18 I3: a TLS write retried the way KlDrain retries it ─────────────────────────────
  * After a write would block, KlDrain copies what was not taken into its own buffer, may append more,
  * and retries from that buffer: a different pointer and a larger length. The adapter must keep the
@@ -787,8 +793,8 @@ static void test_drain_style_retry(KlAllocator *alloc, PemPair *ca, PemPair *ser
     }
     int intact = !failed && glen == total && memcmp(got, src, total) == 0;
     printf("  wrote %zu, read %zu, failed=%d, intact=%d\n", produced, glen, failed, intact);
-    assert(!failed);                                      /* was (OpenSSL): BAD_WRITE_RETRY */
-    assert(intact);                                       /* was (mbedTLS): bytes lost */
+    A18_CHECK(!failed, "a drain-style retry failed (I3; OpenSSL: BAD_WRITE_RETRY)");
+    A18_CHECK(intact, "bytes were lost or reordered (I3; mbedTLS)");
     printf("  PASS: every byte arrived, in order\n");
     free(src); free(got); free(dbuf);
     cli->destroy(cli); srv->destroy(srv);
@@ -825,8 +831,8 @@ static void test_truncation_is_not_eof(KlAllocator *alloc, PemPair *ca, PemPair 
     kl_ssize_t r = 0;
     for (int i = 0; i < 100; i++) { r = cli->read(cli, cfd, buf, sizeof buf); if (r != 0) break; }
     printf("  read=%zd at_eof=%d\n", (ssize_t)r, cli->at_eof(cli));
-    assert(r < 0);
-    assert(cli->at_eof(cli) == 0);                        /* was 1: the cut read as a clean close */
+    A18_CHECK(r < 0, "the read after the FIN did not fail (I4)");
+    A18_CHECK(cli->at_eof(cli) == 0, "a bare FIN read as a clean TLS close (I4)");   /* was 1 */
     printf("  PASS: a bare FIN is not reported as a clean TLS close\n");
     cli->destroy(cli); srv->destroy(srv);
     close(fds[0]); close(fds[1]);
@@ -938,6 +944,7 @@ int main(void) {
     pem_pair_free(&server);
     rng_free(&rng);
 
+    if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }

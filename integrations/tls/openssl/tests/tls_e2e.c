@@ -1144,6 +1144,12 @@ static void poison_error_queue(void)
  *   (b) an independent session completes a full handshake + round-trip with the
  *       queue poisoned before each op: no cross-session contamination. */
 
+/* Audit 18 tests record a failure and go on (the suite asserts elsewhere), so every one of
+ * them reports its result in one run; main fails at the end if any did. */
+static int g_a18_fail;
+#define A18_CHECK(cond, what) do { if (!(cond)) { printf("  FAIL: %s\n", what); \
+        g_a18_fail++; } } while (0)
+
 /* ── Audit 18 I2: a completion-mode write larger than the output ring ────────────────────────
  * In completion mode the engine writes ciphertext into a ring capped at 256 KiB. A full ring returned
  * -1 with no retry flag, so SSL_write failed and the connection was closed; the core expects
@@ -1179,8 +1185,8 @@ static void test_comp_large_write(KlAllocator *alloc, PemPair *ca, PemPair *serv
         }
     }
     printf("  wrote %zu, read %zu, failed=%d\n", off, glen, failed);
-    assert(!failed);                                      /* was: -1 once the ring was full */
-    assert(glen == total && memcmp(got, src, total) == 0);
+    A18_CHECK(!failed, "a completion write past the ring failed (I2)");   /* was: -1 */
+    A18_CHECK(glen == total && memcmp(got, src, total) == 0, "the data did not all arrive (I2)");
     printf("  PASS: 600 KiB through a 256 KiB ring\n");
     free(src); free(got);
     cli->destroy(cli); srv->destroy(srv);
@@ -1250,8 +1256,8 @@ static void test_drain_style_retry(KlAllocator *alloc, PemPair *ca, PemPair *ser
     }
     int intact = !failed && glen == total && memcmp(got, src, total) == 0;
     printf("  wrote %zu, read %zu, failed=%d, intact=%d\n", produced, glen, failed, intact);
-    assert(!failed);                                      /* was (OpenSSL): BAD_WRITE_RETRY */
-    assert(intact);                                       /* was (mbedTLS): bytes lost */
+    A18_CHECK(!failed, "a drain-style retry failed (I3; OpenSSL: BAD_WRITE_RETRY)");
+    A18_CHECK(intact, "bytes were lost or reordered (I3; mbedTLS)");
     printf("  PASS: every byte arrived, in order\n");
     free(src); free(got); free(dbuf);
     cli->destroy(cli); srv->destroy(srv);
@@ -1653,6 +1659,7 @@ int main(void) {
     pem_pair_free(&server);
     pem_pair_free(&client);
 
+    if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }
