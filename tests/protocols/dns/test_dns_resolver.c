@@ -91,6 +91,7 @@ static int g_queries;
 static int g_flip_case;     /* echo the question name with each letter case-flipped */
 static int g_wrong_question;/* echo a different question entirely (spoof) */
 static int g_silent_aaaa;   /* drop only AAAA queries (to exercise resolution delay) */
+static const char *g_answer_only_name; /* non-NULL: NXDOMAIN for every query name but this one */
 static uint16_t g_seen_ids[8];   /* transaction ids observed, in order */
 static int g_seen_n;
 static uint8_t g_last_q[128];    /* last query's question-section bytes */
@@ -131,7 +132,10 @@ static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
     size_t n = 0;
     resp[0] = q[0]; resp[1] = q[1];              /* echo id */
     resp[2] = (uint8_t)(tc ? 0x83 : 0x81);       /* QR + RD (+ TC when truncated) */
-    resp[3] = (uint8_t)(0x80 | (g_rcode & 0x0F));/* RA + rcode */
+    int rcode = g_rcode;
+    if (g_answer_only_name && strcmp(g_last_qname, g_answer_only_name) != 0)
+        rcode = 3;                               /* NXDOMAIN for every other name */
+    resp[3] = (uint8_t)(0x80 | (rcode & 0x0F));  /* RA + rcode */
     resp[4] = 0; resp[5] = 1;                    /* qdcount */
     int answer = !tc && ((qtype == KL_DNS_TYPE_A && g_answer_a) ||
                          (qtype == KL_DNS_TYPE_AAAA && g_answer_aaaa));
@@ -445,7 +449,7 @@ static void on_done(KlResolveReq *req, const KlResolveResult *result,
 static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
-    g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0;
+    g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0; g_answer_only_name = NULL;
     g_truncate = 0;
     g_dup_reply = 0;
     g_cookie = g_cookie_wrong_client = g_cookie_badcookie_once = g_cookie_bad_sent = 0;
@@ -1119,6 +1123,214 @@ UTEST(dns, all_nameservers_silent_times_out) {
     unlink(rcpath);
 }
 
+/* ── answers bound to the nameserver the query went to ─────────────── */
+
+/* A primary nameserver that answers normally until g_relay_spoof is set; from then on it never answers
+ * itself, and instead a forged answer (A poisoned to 10.1.2.238, no cookie option) goes back to the
+ * resolver FROM g_spoof_sock, the secondary nameserver's socket. That is an off-path spoofer forging
+ * the secondary's address for a query that was sent to the primary. */
+static int g_relay_spoof;
+static void relay_spoof_ns(void *ud, const void *data, size_t len,
+                           const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    if (!g_relay_spoof) {
+        mock_ns(ud, data, len, src, local, flags);
+        return;
+    }
+    int qtype = 0;
+    size_t qend = len >= 12 ? dns_q_parse(data, len, &qtype) : 0;
+    if (qend == 0 || !g_spoof_sock)
+        return;
+    uint8_t resp[512];
+    size_t n = dns_write_response(data, qend, qtype, resp, 0);
+    if (resp[7] >= 1 && qtype == KL_DNS_TYPE_A)
+        resp[n - 1] = 0xEE;                       /* 10.1.2.3 -> 10.1.2.238 */
+    KlDatagramMessage pm = { .data = resp, .len = n, .peer = src, .tos = -1 };
+    if (kl_datagram_send(g_spoof_sock, &pm) == KL_DATAGRAM_ACCEPTED)
+        g_poison_sent++;
+    else
+        g_poison_fail++;
+}
+
+/* Two nameservers; the primary learns a server cookie, then a forged answer for a query sent to the
+ * primary arrives from the secondary's address. It must be ignored: a reply counts only when it comes
+ * from the nameserver the query was sent to, and the cookie check uses that nameserver's state. The
+ * reply was matched on its source alone, so the secondary (which never sent a cookie) let the cookie-less
+ * forgery through and the poisoned address was returned. */
+UTEST(dns, reply_from_other_nameserver_ignored) {
+    reset_dns();
+    g_answer_a = 1;
+    g_cookie = 1;                         /* the primary is cookie-capable */
+    g_silent_hits = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlDatagram ns1, ns2;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns1, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns1, relay_spoof_ns, &ns1));
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns2, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns2, silent_ns, &ns2));
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n",
+             kl_datagram_local_port(&ns1), kl_datagram_local_port(&ns2));
+    const char *rcpath = write_resolv(rc);
+    ASSERT_TRUE(rcpath != NULL);
+
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 150, .attempts = 1 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    /* First: a genuine answer from the primary, so its server cookie is learned. */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+
+    /* Then: the primary goes quiet and the forgery arrives from the secondary's address. */
+    g_cookie = 0;
+    g_relay_spoof = 1;
+    g_spoof_sock = &ns2;
+    g_done = 0; g_err = 0;
+    memset(&g_res, 0, sizeof(g_res));
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 400);
+    int done = g_done, err = g_err, naddrs = g_res.naddrs, sent = g_poison_sent;
+    uint8_t last = naddrs > 0 ? g_res.addrs[0].u.ip[3] : 0;
+
+    g_relay_spoof = 0;
+    g_spoof_sock = NULL;
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns1);
+    kl_dg_close_free(&ctx, &ns2);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
+    ASSERT_EQ(0, g_poison_fail);
+    ASSERT_TRUE(sent >= 1);               /* the forgery was really sent */
+    ASSERT_EQ(1, done);
+    ASSERT_NE(0xEE, (int)last);           /* was: the poisoned 10.1.2.238 was returned */
+    ASSERT_EQ(KL_ERR_DNS, err);           /* both nameservers stayed silent: the resolve fails */
+    ASSERT_EQ(0, naddrs);
+}
+
+/* Primary nameserver answering every query with the rcode g_fail_rcode (counted); the secondary answers
+ * normally (counted), so a failover is visible in g_ns2_hits. */
+static int g_fail_rcode;
+static int g_fail_hits;
+static int g_ns2_hits;
+static void rcode_ns(void *ud, const void *data, size_t len,
+                     const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    g_fail_hits++;
+    int saved = g_rcode;
+    g_rcode = g_fail_rcode;
+    mock_ns(ud, data, len, src, local, flags);
+    g_rcode = saved;
+}
+static void counting_ns(void *ud, const void *data, size_t len,
+                        const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    g_ns2_hits++;
+    mock_ns(ud, data, len, src, local, flags);
+}
+
+typedef struct { int done, err, naddrs, fail_hits, ns2_hits; } RcodeRun;
+
+/* Resolve "host.test" against [primary answering `rcode`, secondary answering normally, or also
+ * answering `rcode` when `both_fail`]. The per-attempt timeout is far longer than the pump, so any
+ * failover seen here was driven by the rcode, not by a timeout. */
+static int rcode_failover_run(int rcode, int both_fail, RcodeRun *out) {
+    reset_dns();
+    g_answer_a = 1;
+    g_fail_rcode = rcode;
+    g_fail_hits = 0;
+    g_ns2_hits = 0;
+    memset(out, 0, sizeof(*out));
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    if (kl_event_ctx_init(&ctx, &alloc) != 0)
+        return -1;
+    KlDatagram ns1, ns2;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    if (kl_datagram_socket_init(&ns1, &sc) != 0 ||
+        kl_datagram_recv_start(&ns1, rcode_ns, &ns1) != 0 ||
+        kl_datagram_socket_init(&ns2, &sc) != 0 ||
+        kl_datagram_recv_start(&ns2, both_fail ? rcode_ns : counting_ns, &ns2) != 0)
+        return -1;
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n",
+             kl_datagram_local_port(&ns1), kl_datagram_local_port(&ns2));
+    const char *rcpath = write_resolv(rc);
+    if (!rcpath)
+        return -1;
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 5000, .attempts = 1 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    if (!r)
+        return -1;
+    if (!r->resolve(r, &ctx, "host.test", 80, on_done, NULL))
+        return -1;
+    pump(&ctx, &g_done, 100);             /* about one second: well inside the 5 s timeout */
+    out->done = g_done;
+    out->err = g_err;
+    out->naddrs = g_res.naddrs;
+    out->fail_hits = g_fail_hits;
+    out->ns2_hits = g_ns2_hits;
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns1);
+    kl_dg_close_free(&ctx, &ns2);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
+    return 0;
+}
+
+/* SERVFAIL, NOTIMP and REFUSED say "this server can't answer", not "the name has no address": the
+ * query moves on to the next nameserver, like a timeout. They used to end the leg empty at once, so
+ * the resolve failed without the secondary ever being asked. */
+UTEST(dns, servfail_fails_over_to_next_nameserver) {
+    RcodeRun run;
+    ASSERT_EQ(0, rcode_failover_run(2, 0, &run));
+    ASSERT_EQ(1, run.done);
+    ASSERT_TRUE(run.fail_hits >= 1);      /* the primary answered SERVFAIL */
+    ASSERT_TRUE(run.ns2_hits >= 1);       /* was: 0, the secondary was never asked */
+    ASSERT_EQ(0, run.err);                /* was: KL_ERR_DNS */
+    ASSERT_EQ(1, run.naddrs);
+}
+
+UTEST(dns, notimp_fails_over_to_next_nameserver) {
+    RcodeRun run;
+    ASSERT_EQ(0, rcode_failover_run(4, 0, &run));
+    ASSERT_EQ(1, run.done);
+    ASSERT_TRUE(run.ns2_hits >= 1);       /* was: 0 */
+    ASSERT_EQ(0, run.err);                /* was: KL_ERR_DNS */
+    ASSERT_EQ(1, run.naddrs);
+}
+
+UTEST(dns, refused_fails_over_to_next_nameserver) {
+    RcodeRun run;
+    ASSERT_EQ(0, rcode_failover_run(5, 0, &run));
+    ASSERT_EQ(1, run.done);
+    ASSERT_TRUE(run.ns2_hits >= 1);       /* was: 0 */
+    ASSERT_EQ(0, run.err);                /* was: KL_ERR_DNS */
+    ASSERT_EQ(1, run.naddrs);
+}
+
+/* Every nameserver answers SERVFAIL: the resolve fails once they are all used up, promptly (not by
+ * waiting out a timeout). */
+UTEST(dns, servfail_from_every_nameserver_fails) {
+    RcodeRun run;
+    ASSERT_EQ(0, rcode_failover_run(2, 1, &run));
+    ASSERT_EQ(1, run.done);
+    ASSERT_EQ(KL_ERR_DNS, run.err);
+    ASSERT_TRUE(run.fail_hits >= 4);      /* A + AAAA, each asked of both nameservers */
+}
+
+/* NXDOMAIN is an authoritative "no such name": it ends the resolve at once, no failover. */
+UTEST(dns, nxdomain_does_not_fail_over) {
+    RcodeRun run;
+    ASSERT_EQ(0, rcode_failover_run(3, 0, &run));
+    ASSERT_EQ(1, run.done);
+    ASSERT_EQ(KL_ERR_DNS, run.err);
+    ASSERT_EQ(0, run.ns2_hits);           /* the secondary is not asked */
+}
+
 /* ── search domains + ndots ─────────────────────────────── */
 
 /* Build a resolver from a resolv.conf fixture with one mock nameserver. */
@@ -1211,6 +1423,62 @@ UTEST(dns, search_falls_back_to_bare) {
     r->destroy(r);
     kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
+}
+
+/* A search domain whose first label is 64 bytes: any name joined to it cannot be encoded as a query. */
+#define BAD_SEARCH_DOMAIN \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example"
+
+/* A search-list candidate that cannot be encoded is skipped; the next candidate is queried. When the
+ * bad candidate came first, resolve() returned NULL and nothing was queried at all. */
+UTEST(dns, unencodable_first_search_candidate_skipped) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = resolver_with_search(&ctx, &ns, "search " BAD_SEARCH_DOMAIN " corp.example", 500);
+    ASSERT_TRUE(r != NULL);
+
+    KlResolveReq *req = r->resolve(r, &ctx, "myhost", 80, on_done, NULL);
+    if (req)
+        pump(&ctx, &g_done, 200);
+    int done = g_done, err = g_err;
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(req != NULL);                /* was: NULL, the whole resolve refused */
+    ASSERT_EQ(1, done);
+    ASSERT_EQ(0, err);
+    ASSERT_STREQ("myhost.corp.example", g_last_qname);   /* the next search candidate */
+}
+
+/* The same in the middle of the list: the first candidate gets NXDOMAIN, the second cannot be encoded,
+ * and the third (the bare name) answers. Advancing onto the bad candidate failed the whole resolve. */
+UTEST(dns, unencodable_middle_search_candidate_skipped) {
+    reset_dns();
+    g_answer_a = 1;
+    g_answer_only_name = "myhost";           /* NXDOMAIN for every search-expanded name */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example " BAD_SEARCH_DOMAIN, 500);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "myhost", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 300);
+    int done = g_done, err = g_err, naddrs = g_res.naddrs;
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(1, done);
+    ASSERT_EQ(0, err);                       /* was: KL_ERR_DNS */
+    ASSERT_EQ(1, naddrs);
+    ASSERT_STREQ("myhost", g_last_qname);    /* the bare name was reached */
 }
 
 /* ── Real-response corpus (hermetic): wire formats the mock doesn't emit ── */
