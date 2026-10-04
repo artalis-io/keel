@@ -253,7 +253,9 @@ jobs:
       # Winsock today). Staged toward parity; see docs/phase6_winsock_design.md
       # Part C; expand WIN_TEST_SUITES in the Makefile as more suites are ported.
       - name: Run Windows unit-test subset
-        timeout-minutes: 5
+        # Builds and runs the whole Windows suite set: it took 4m20s-4m40s on main before this round's
+        # longer tests, so 5 minutes no longer left room. Same budget as the IOCP suite step.
+        timeout-minutes: 15
         run: make OS=windows CC=gcc test-win
 
   windows-msvc:
