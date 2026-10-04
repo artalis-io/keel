@@ -323,6 +323,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   already in the header block, so a caller that then sent the body as is labelled plain bytes as
   compressed. The two headers are now added as a pair: on failure the header block is left as it was
   before the call.
+- **Completion loops: a long download that keeps moving is no longer cut off at the read timeout.**
+  A buffered or file response is one send op until all of it is out: the engine re-posts the rest
+  of a partial send itself and reports nothing until the end. The idle clock only moved when the
+  whole response completed, so on io_uring and pollcomp a download that took longer than
+  `read_timeout_ms` (30 s by default) was cut off however steadily the client read. The engines now
+  count the bytes each posted send moves (`KlStream.send_progress`), and the idle sweep treats any
+  movement as activity. A client that stops reading is still timed out.
+- **IOCP: a failed or cancelled send is no longer re-posted.** A send that completed with an error,
+  or was aborted by the cancel at close after moving some bytes, was re-posted for the rest. To a
+  client that had stopped reading, that op never completed, so the closing connection never gave
+  back its slot. The send's own status is now checked: a failed send is reported as failed and never
+  re-posted.
 - **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
   streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
   of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any

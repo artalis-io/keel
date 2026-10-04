@@ -1206,8 +1206,15 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_WRITE) {
             op->send_done += bytes;
+            op->stream->send_progress += (uint64_t)bytes;   /* a long send that moves is not idle */
             if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post */
-            if (bytes > 0 && op->send_done < op->send_total) {
+            /* The send's own status (the OVERLAPPED's Internal NTSTATUS, read without touching a socket
+             * that may already be closed). A failed or cancelled send (CancelIoEx at close completes
+             * ABORTED, possibly having moved some bytes) is never re-posted: re-posting it to a client
+             * that stopped reading left an op that never completed, and the closing connection's slot
+             * with it. */
+            int failed = op->ov.Internal != 0;
+            if (!failed && bytes > 0 && op->send_done < op->send_total) {
                 /* Partial send: re-post the remainder; do NOT surface an event
                  * until the whole response is out (the driver sees full writes). */
                 WSABUF buf = { (ULONG)(op->send_total - op->send_done),
@@ -1228,7 +1235,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].kind = KL_COMP_WRITE;
             out[count].target = op->stream;
             out[count].bytes = bytes;
-            out[count].ok = (bytes > 0);
+            out[count].ok = !failed && bytes > 0;
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_DGRAM_RECV) {

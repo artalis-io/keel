@@ -170,6 +170,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
     c->comp_driven = 0;
+    c->comp_progress_seen = c->stream.send_progress;   /* the next connection starts level */
     conn_comp_tlsq_reset(c);
     memset(&c->req, 0, sizeof(c->req));
     conn_request_body_reset(c);
