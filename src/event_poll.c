@@ -1,6 +1,7 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include "event_caps.h"
+#include <errno.h>
 #include <limits.h>
 #include <poll.h>
 #include <string.h>
@@ -194,7 +195,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 
     int n = poll(st->fds, (nfds_t)st->count, timeout_ms);
     if (n < 0)
-        return -1;
+        return errno == EINTR ? 0 : -1;   /* a signal interrupted the wait: an empty tick */
 
     int count = 0;
     for (int i = 0; i < st->count && count < max; i++) {

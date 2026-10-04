@@ -36,7 +36,7 @@
  * platform_uefi.c. Declared here directly so the self-test needs no internal
  * header (src/platform.h drags in keel/handle.h + the socket surface). */
 uint64_t kl_monotonic_ms(void);
-void     kl_plat_random(void *buf, size_t len);
+int      kl_plat_random(void *buf, size_t len);
 
 /* ── tiny ASCII->UTF-16 console print (no libc, no wchar) ──────────────────── */
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_out;

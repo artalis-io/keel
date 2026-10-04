@@ -112,7 +112,8 @@ int  kl_event_del(KlEventLoop *loop, KlSocketHandle fd);
  * @param out        Array to receive ready events.
  * @param max        Maximum events to return.
  * @param timeout_ms Timeout in milliseconds (-1 for infinite).
- * @return Number of ready events, or -1 on error.
+ * @return Number of ready events, or -1 on error. A wait a signal interrupts returns 0, as a
+ *         timeout does, so a caller looping while the result is >= 0 keeps running.
  */
 int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
 

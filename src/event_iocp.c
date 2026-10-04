@@ -30,7 +30,9 @@
 #include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
 #include <limits.h>              /* INT_MAX: the saturating watcher retry count */
 #include <string.h>
+#ifdef KEEL_IOCP_TEST_HOOKS
 #include <stdlib.h>              /* getenv / strtol: TransmitFile chunk-cap test seam */
+#endif
 
 #define KL_IOCP_ACCEPT_BACKLOG 8
 #define KL_IOCP_ADDR_LEN       (sizeof(struct sockaddr_storage) + 16)
@@ -545,11 +547,15 @@ static void iocp_accept_untrack(KlIocpState *st, const KlIocpOp *op) {
         }
 }
 
-/* TransmitFile's per-call byte cap. Defaults to the documented ~2 GiB maximum; a test may
- * lower it via KEEL_IOCP_TF_CHUNK to exercise the chunked (offset-advancing) path on a small
- * file without a >2 GiB fixture. Read + cached once (single-threaded loop; same value across
- * servers in a process). */
+/* TransmitFile's per-call byte cap: the documented ~2 GiB maximum. A test build of this file
+ * (-DKEEL_IOCP_TEST_HOOKS, linked only into the IOCP smoke) may lower it through the
+ * KEEL_IOCP_TF_CHUNK environment variable to exercise the chunked (offset-advancing) path on a
+ * small file without a >2 GiB fixture; the library itself never reads the environment here. Read
+ * + cached once (single-threaded loop; same value across servers in a process). */
 static DWORD iocp_tf_chunk_cap(void) {
+#ifndef KEEL_IOCP_TEST_HOOKS
+    return (DWORD)KL_IOCP_TRANSMITFILE_MAX;
+#else
     static long cap = 0;
     if (cap == 0) {
         const char *e = getenv("KEEL_IOCP_TF_CHUNK");
@@ -558,6 +564,7 @@ static DWORD iocp_tf_chunk_cap(void) {
                   ? v : (long)KL_IOCP_TRANSMITFILE_MAX;
     }
     return (DWORD)cap;
+#endif
 }
 
 /* Post one chunk of a (possibly multi-chunk) TransmitFile: file bytes

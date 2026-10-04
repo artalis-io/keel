@@ -184,18 +184,23 @@ struct KlDnsResolver {
     KlDnsCookie    cookie[DNS_MAX_NS]; /* per-nameserver DNS cookie state (RFC 7873) */
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
+    int            rnd_failed;    /* a draw found no OS entropy; the query being built is refused */
 };
 
 /* ── Entropy (pooled OS RNG via the platform layer) ─────────────────────── */
 
-static void dns_rand_refill(KlDnsResolver *r) {
-    kl_plat_random(r->rnd_pool, sizeof(r->rnd_pool));
-    r->rnd_off = 0;
-}
-
+/* A draw with no OS entropy behind it returns 0 and sets rnd_failed; the transmit path clears the
+ * flag before it draws and refuses to send a query built while it was set (a guessable id, case
+ * pattern or cookie would let an off-path attacker forge the answer). The pool stays empty, so the
+ * next draw tries the OS again. */
 static unsigned char dns_rand_byte(KlDnsResolver *r) {
-    if (r->rnd_off >= sizeof(r->rnd_pool))
-        dns_rand_refill(r);
+    if (r->rnd_off >= sizeof(r->rnd_pool)) {
+        if (kl_plat_random(r->rnd_pool, sizeof(r->rnd_pool)) != 0) {
+            r->rnd_failed = 1;
+            return 0;
+        }
+        r->rnd_off = 0;
+    }
     return r->rnd_pool[r->rnd_off++];
 }
 
@@ -304,7 +309,7 @@ static const uint8_t *dns_cookie_client(KlDnsResolver *r, int ns_idx) {
     if (!c->have_client) {
         for (int i = 0; i < DNS_COOKIE_CLIENT; i++)
             c->client[i] = dns_rand_byte(r);
-        c->have_client = 1;
+        c->have_client = !r->rnd_failed;   /* never keep a cookie drawn without entropy */
     }
     return c->client;
 }
@@ -391,6 +396,8 @@ static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t 
             }
         }
     }
+    if (r->rnd_failed)             /* an id, case pattern or cookie was drawn without entropy */
+        return -1;
     *out_len = off;
     return 0;
 }
@@ -497,6 +504,7 @@ static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *se
  * (KL_DATAGRAM_ACCEPTED); on transient WOULD_BLOCK nothing is consumed and the leg stays on the same
  * nameserver/id-space for a writable-edge retry. Returns a 3-way DnsTxResult. */
 static DnsTxResult dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) {
+    r->rnd_failed = 0;             /* dns_build_query refuses a query drawn without entropy */
     if (leg->tries_left <= 0)
         return DNS_TX_FAILED;
 
@@ -1093,6 +1101,7 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
 
     uint8_t qb[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
+    r->rnd_failed = 0;             /* dns_build_query refuses a query drawn without entropy */
     if (dns_build_query(r, qb, sizeof(qb), leg->id, q->host, leg->qtype,
                         ns_idx, &qlen, &q_off, &q_len) != 0 ||
         q_len > sizeof(leg->question) || qlen > DNS_TCP_MSG_MAX) {

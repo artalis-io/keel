@@ -801,12 +801,16 @@ $(SMOKE_BIN): tests/protocols/http/smoke_tcp.c $(KEEL_LIB)
 
 # End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
 # the completion connection driver; build libkeel with BACKEND=iocp first so the
-# server runs on the IOCP completion loop.
+# server runs on the IOCP completion loop. Links a -DKEEL_IOCP_TEST_HOOKS copy of the IOCP
+# backend AHEAD of libkeel.a (as a direct object it defines every event_iocp symbol, so the
+# archive's member is never pulled): only that copy reads KEEL_IOCP_TF_CHUNK, which the smoke sets
+# to exercise the chunked TransmitFile path. The library never reads it.
 SMOKE_IOCP_BIN = tests/smoke_iocp$(EXE)
 smoke-iocp: $(SMOKE_IOCP_BIN)
 	./$(SMOKE_IOCP_BIN)
-$(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(KEEL_LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
+$(SMOKE_IOCP_BIN): tests/smoke_iocp.c src/event_iocp.c $(KEEL_LIB)
+	$(CC) $(CFLAGS) -DKEEL_IOCP_TEST_HOOKS -c -o tests/event_iocp_hooked.o src/event_iocp.c
+	$(CC) $(CFLAGS) -o $@ $< tests/event_iocp_hooked.o $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 
 # TLS-over-IOCP roundtrip (Windows, BACKEND=iocp) via the identity mock TLS: runtime
 # gate for event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV, feed-in-drain,
@@ -1364,7 +1368,7 @@ clean:
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
 	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe
-	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
+	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/event_iocp_hooked.o tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
 	rm -f tests/protocols/websocket/smoke_pollcomp_ws tests/protocols/websocket/smoke_pollcomp_ws.exe

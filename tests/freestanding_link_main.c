@@ -106,7 +106,7 @@ int efi_main(void *image_handle, void *system_table) {
  * PLATFORM SEAMS (fail-closed link stubs)
  * ══════════════════════════════════════════════════════════════════════ */
 uint64_t kl_monotonic_ms(void) { return 0; }
-void kl_plat_random(void *buf, size_t len) { (void)buf; (void)len; }
+int kl_plat_random(void *buf, size_t len) { (void)buf; (void)len; return -1; }
 int kl_resolve_sync(const char *host, uint16_t port, int socktype,
                     KlSockAddr *out, int max, int *n) {
     (void)host; (void)port; (void)socktype; (void)out; (void)max; (void)n;

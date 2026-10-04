@@ -798,6 +798,13 @@ static void comp_accept_release(void *ctx) {
 }
 static int comp_accept_arm(void *ctx) {
     KlHttpServer *s = ctx;
+    /* Out of descriptors or memory a moment ago: the connection is still queued, so an accept posted
+     * now fails the same way at once (a busy loop). Pause until the back-off has passed; the sweep's
+     * per-tick notify posts again then. */
+    if (s->accept_backoff_until) {
+        if (kl_monotonic_ms() < s->accept_backoff_until) return KL_LISTENER_ARM_RETRY;
+        s->accept_backoff_until = 0;
+    }
     /* Post ONE accept op. A backend fails a post only for a moment (no memory for the op, a full
      * submission queue, a socket or AcceptEx that failed now): never close the listener over it.
      * It pauses, and the sweep tries again (kl_http_server_sweep_conn_timeouts). */
@@ -859,6 +866,11 @@ static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) 
          * credit to a KlHttpConn (comp_accept_on_accept) and the listener tops the window back up, or
          * PAUSEs if the pool is now full (the kernel backlog queues; no accept-and-drop). */
         if (!ev->ok || !kl_handle_valid(ev->accepted_fd)) {
+            /* Out of descriptors or kernel memory: the connection is still queued, so the accept the
+             * listener posts next would fail again at once, a busy loop. Start the back-off first:
+             * the arm hook then pauses the listener until it has passed (comp_accept_arm). */
+            if (ev->resource_exhausted)
+                s->accept_backoff_until = kl_monotonic_ms() + KL_HTTP_ACCEPT_RETRY_MS;
             kl_listener_on_accept_failed(&s->accept_listener, -1);
             return;
         }

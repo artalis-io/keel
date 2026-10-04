@@ -19,7 +19,7 @@
  *              A real freestanding build backs this with an EFI timer tick /
  *              GetTime; here it is a MOCK, advanceable clock (fs_clock_*) so
  *              timeouts are DETERMINISTIC with no sleeps.
- *        - void kl_plat_random(void *buf, size_t len)
+ *        - int kl_plat_random(void *buf, size_t len)
  *              Fills `len` bytes with randomness. In the hosted build this is
  *              the DNS query-ID / cookie entropy source; the freestanding
  *              CLIENT archive does not pull the DNS stack, so this is only a
@@ -100,7 +100,7 @@ uint64_t fs_clock_now(void)        { return g_fs_now_ms; }
  * complete and an embedder adding DNS/TLS sees the shape. */
 static uint64_t g_fs_prng = 0x9E3779B97F4A7C15ull;
 
-void kl_plat_random(void *buf, size_t len) {
+int kl_plat_random(void *buf, size_t len) {
     unsigned char *p = buf;
     for (size_t i = 0; i < len; i++) {
         g_fs_prng += 0x9E3779B97F4A7C15ull;
@@ -110,6 +110,7 @@ void kl_plat_random(void *buf, size_t len) {
         z = z ^ (z >> 31);
         p[i] = (unsigned char)z;
     }
+    return 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════

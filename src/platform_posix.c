@@ -8,10 +8,21 @@
 #include "platform.h"
 
 #include <time.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include <poll.h>
+
+/* getrandom(2): Linux 3.17+, declared by glibc 2.25+ and musl 1.1.20+. Without the header the
+ * entropy fill uses /dev/urandom alone. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && defined(__has_include)
+#  if __has_include(<sys/random.h>)
+#    include <sys/random.h>
+#    define KL_HAVE_GETRANDOM 1
+#  endif
+#endif
 
 uint64_t kl_monotonic_ms(void) {
     struct timespec ts;
@@ -24,41 +35,41 @@ int kl_plat_open_read(const char *path) {
     return open(path, O_RDONLY | O_CLOEXEC);
 }
 
-void kl_plat_random_weak(void *buf, size_t len) {
-    struct timespec ts = { 0, 0 };
-    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
-    struct timespec rt = { 0, 0 };
-    (void)clock_gettime(CLOCK_REALTIME, &rt);
-    uint64_t x = ((uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec) ^
-                 ((uint64_t)rt.tv_nsec << 32) ^ ((uint64_t)getpid() << 16) ^ (uint64_t)(uintptr_t)buf;
-    unsigned char *p = buf;
-    for (size_t i = 0; i < len; i++) {
-        x += 0x9E3779B97F4A7C15ull;                     /* splitmix64 */
-        uint64_t z = x;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        p[i] = (unsigned char)(z ^ (z >> 31));
-    }
-}
-
-void kl_plat_random(void *buf, size_t len) {
+int kl_plat_random(void *buf, size_t len) {
+    if (len == 0) return 0;
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-    arc4random_buf(buf, len);
+    arc4random_buf(buf, len);                           /* cannot fail */
+    return 0;
 #else
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    unsigned char *p = buf;
+    size_t total = 0;
+#ifdef KL_HAVE_GETRANDOM
+    /* getrandom(2) first: it needs no descriptor, so it still works when the process has run out
+     * of them or /dev is absent (a chroot, a minimal container). A signal can cut a large read
+     * short or interrupt it, so loop. */
+    while (total < len) {
+        ssize_t r = getrandom(p + total, len - total, 0);
+        if (r > 0) { total += (size_t)r; continue; }
+        if (r < 0 && errno == EINTR) continue;
+        break;                                          /* ENOSYS (kernel < 3.17): use the device */
+    }
+    if (total == len) return 0;
+#endif
+    int fd;
+    do { fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC); } while (fd < 0 && errno == EINTR);
     if (fd >= 0) {
-        unsigned char *p = buf;
-        size_t total = 0;
         while (total < len) {
             kl_ssize_t r = read(fd, p + total, len - total);
-            if (r <= 0) break;
-            total += (size_t)r;
+            if (r > 0) { total += (size_t)r; continue; }
+            if (r < 0 && errno == EINTR) continue;
+            break;
         }
         close(fd);
-        if (total == len) return;
+        if (total == len) return 0;
     }
-    /* Last resort (effectively never on a real system). */
-    kl_plat_random_weak(buf, len);
+    /* No OS entropy: fail rather than fill the buffer with something guessable. */
+    memset(buf, 0, len);
+    return -1;
 #endif
 }
 

@@ -3,6 +3,7 @@
 #include "event_caps.h"
 #include <sys/event.h>
 #include <fcntl.h>       /* FD_CLOEXEC on the kqueue descriptor */
+#include <errno.h>
 #include <unistd.h>
 
 #define KL_EVENT_BATCH 256  /* internal stack buffer for kernel events */
@@ -97,7 +98,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     }
 
     int n = kevent(st->fd, NULL, 0, events, batch, tsp);
-    if (n < 0) return -1;
+    if (n < 0) return errno == EINTR ? 0 : -1;   /* a signal interrupted the wait: an empty tick */
 
     for (int i = 0; i < n; i++) {
         out[i].udata = events[i].udata;

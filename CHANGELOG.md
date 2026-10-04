@@ -19,6 +19,27 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   letting one part pose as another form field. Parameters are now recognised only outside quoted
   strings, and a quoted string honours backslash escapes (`\"` does not end it), both when looking
   for a parameter and when reading its value. A quoted value with no closing quote is malformed.
+- **Entropy fell back to a guessable generator when `/dev/urandom` could not be opened.** On Linux
+  the random source opened `/dev/urandom` on every fill, and when that failed (a process out of
+  descriptors, a chroot without `/dev`) it filled the buffer from the clock and process id instead.
+  Those bytes become DNS transaction ids, 0x20 case patterns and cookies, and WebSocket mask and
+  handshake keys, so an off-path attacker who could exhaust the server's descriptors could predict
+  them. Linux now reads `getrandom(2)` first, which needs no descriptor, then `/dev/urandom`; if
+  neither yields entropy the fill fails (Windows likewise, if `BCryptGenRandom` fails) and the
+  caller refuses the operation: the DNS query is not sent and the lookup fails, and the WebSocket
+  connect or frame send returns an error. There is no weak fallback any more.
+- **Binding an AF_UNIX server socket with a mode changed the process umask.** To create the socket
+  node with `unix_socket_mode`, the bind set the process-wide umask and restored it afterwards, so a
+  file another thread created in that window got the wrong permissions. The umask is no longer
+  touched: the node is created under the process umask and set to the exact mode with `fchmodat`
+  before the socket listens, so nothing can connect while its mode is still the default.
+- **PROXY protocol v1: the destination address and ports were not validated.** Only the source
+  address and port were checked, the port with `strtol`, so a header with a bad destination
+  address, a destination of the wrong family, a destination port of 70000, a signed (`+80`, `-0`)
+  or overlong (`000080`) port, or a seventh field was accepted and its source trusted. Every field
+  is now validated: both addresses must be literals of the header's family, and both ports one to
+  five digits in 0-65535, with exactly six fields.
+
 - **HTTP/2: peer-driven resource limits, idle connections and graceful shutdown.** The nghttp2
   server adapter sent empty SETTINGS, so a peer could open streams without limit, and it copied every
   request header with no count or size cap: one HPACK table entry referenced again and again (an
@@ -341,6 +362,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   client that had stopped reading, that op never completed, so the closing connection never gave
   back its slot. The send's own status is now checked: a failed send is reported as failed and never
   re-posted.
+- **A signal ended `kl_event_ctx_run` loops on epoll, kqueue and poll.** A signal that arrived
+  while the loop waited (SIGCHLD, a profiler's SIGPROF) made the wait fail with EINTR, which
+  `kl_event_wait` and `kl_event_ctx_run` returned as -1, so a caller's
+  `while (kl_event_ctx_run(...) >= 0)` loop stopped. An interrupted wait now returns 0, a tick with
+  no events, as io_uring already did; due timers still fire.
+- **A server out of file descriptors spun at full CPU.** When `accept()` failed with EMFILE,
+  ENFILE, ENOBUFS or ENOMEM, the connection stayed queued and the listen socket stayed ready, so
+  the loop retried at once and failed again without pause: readiness backends woke on the listen
+  socket every tick (logging each failure), io_uring re-posted the accept immediately, and pollcomp
+  kept the accept op and completed it on every poll. Accepting now pauses for 100 ms and then
+  resumes, so a server at its descriptor limit idles until one frees and then serves the queued
+  connection. Other accept failures (a peer that reset) still retry at once.
+- **IOCP: the TransmitFile chunk size was read from the environment.** The library read
+  `KEEL_IOCP_TF_CHUNK`, a test seam, in every build, so the environment of a production process
+  could shrink each TransmitFile call to a single byte. Only a test build of the IOCP backend
+  (`-DKEEL_IOCP_TEST_HOOKS`, linked into `smoke-iocp`) reads it now.
 - **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
   streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
   of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any

@@ -12,6 +12,20 @@ static const uint8_t V2SIG[12] = {
 };
 static const char V1SIG[6] = { 'P', 'R', 'O', 'X', 'Y', ' ' };
 
+/* A v1 port: 1 to 5 ASCII digits, value 0..65535. No sign, no whitespace, nothing after. strtol
+ * would accept a leading '+', '-' or whitespace and any number of leading zeros. */
+static int v1_port(const char *s, uint16_t *out) {
+    unsigned long v = 0;
+    size_t n = 0;
+    for (; s[n] != '\0'; n++) {
+        if (n >= 5 || s[n] < '0' || s[n] > '9') return -1;
+        v = v * 10u + (unsigned long)(s[n] - '0');
+    }
+    if (n == 0 || v > 65535u) return -1;
+    *out = (uint16_t)v;
+    return 0;
+}
+
 static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
                               KlSockAddr *peer) {
     /* Locate CRLF within the 107-byte cap. */
@@ -51,22 +65,25 @@ static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
     const char *dport = strtok_r(NULL, " ", &save);
     if (!src || !dst || !sport || !dport)
         return KL_PROXY_INVALID;
+    if (strtok_r(NULL, " ", &save) != NULL)           /* exactly six fields */
+        return KL_PROXY_INVALID;
 
-    char *end;
-    long p = strtol(sport, &end, 10);
-    if (end == sport || *end != '\0' || p < 0 || p > 65535)
+    /* Validate every field, the destination included, before trusting any of them: a header
+     * malformed anywhere is not a header to take the source address from. */
+    uint16_t sp, dp;
+    if (v1_port(sport, &sp) < 0 || v1_port(dport, &dp) < 0)
         return KL_PROXY_INVALID;
 
     if (family == AF_INET) {
-        uint8_t b[4];
-        if (inet_pton(AF_INET, src, b) != 1)
+        uint8_t b[4], d[4];
+        if (inet_pton(AF_INET, src, b) != 1 || inet_pton(AF_INET, dst, d) != 1)
             return KL_PROXY_INVALID;
-        kl_sockaddr_from_ipv4(peer, b, (uint16_t)p);
+        kl_sockaddr_from_ipv4(peer, b, sp);
     } else {
-        uint8_t b[16];
-        if (inet_pton(AF_INET6, src, b) != 1)
+        uint8_t b[16], d[16];
+        if (inet_pton(AF_INET6, src, b) != 1 || inet_pton(AF_INET6, dst, d) != 1)
             return KL_PROXY_INVALID;
-        kl_sockaddr_from_ipv6(peer, b, (uint16_t)p, 0);
+        kl_sockaddr_from_ipv6(peer, b, sp, 0);
     }
     return KL_PROXY_OK;
 }

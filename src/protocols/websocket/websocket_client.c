@@ -173,19 +173,23 @@ static void wsc_update_write_interest(KlWsClientConn *ws)
 
 /* ── Random bytes for mask key ──────────────────────────────────── */
 
-static void wsc_random_bytes(uint8_t *buf, size_t len)
+/* 0, or -1 when the OS has no entropy to give: the caller fails rather than send a predictable
+ * mask (RFC 6455 section 10.3) or handshake key. */
+static int wsc_random_bytes(uint8_t *buf, size_t len)
 {
-    kl_plat_random(buf, len);
+    return kl_plat_random(buf, len);
 }
 
 /* ── Generate WebSocket key ─────────────────────────────────────── */
 
-static void wsc_generate_key(KlWsClientConn *ws)
+static int wsc_generate_key(KlWsClientConn *ws)
 {
     uint8_t raw[16];
-    wsc_random_bytes(raw, sizeof(raw));
+    if (wsc_random_bytes(raw, sizeof(raw)) != 0)
+        return -1;
     size_t out_len;
     kl_base64_encode(raw, sizeof(raw), ws->ws_key_b64, &out_len);
+    return 0;
 }
 
 /* ── Validate Sec-WebSocket-Accept ──────────────────────────────── */
@@ -384,7 +388,8 @@ static int wsc_send_frame(KlWsClientConn *ws, int opcode, const char *data,
 
     /* Client frames MUST be masked (RFC 6455 Section 5.3) */
     uint8_t mask_key[KL_WS_MASK_KEY_LEN];
-    wsc_random_bytes(mask_key, KL_WS_MASK_KEY_LEN);
+    if (wsc_random_bytes(mask_key, KL_WS_MASK_KEY_LEN) != 0)
+        return -1;                     /* nothing written: the stream stays frame-aligned */
 
     size_t mask_offset;
     if (len < 126) {
@@ -1202,8 +1207,8 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     memcpy(ws->host_buf, host_buf, parsed.host_len + 1);
 
     /* Generate WebSocket key and build upgrade request */
-    wsc_generate_key(ws);
-    if (wsc_build_upgrade(ws, &parsed, cfg ? cfg->protocol : NULL) != 0) {
+    if (wsc_generate_key(ws) != 0 ||
+        wsc_build_upgrade(ws, &parsed, cfg ? cfg->protocol : NULL) != 0) {
         kl_sock_close(ev->sockets, fd);
         kl_free(alloc, ws, sizeof(KlWsClientConn));
         return NULL;
