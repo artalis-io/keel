@@ -76,7 +76,7 @@ typedef struct {
     KlSocketHandle      fd;        /* cached for BIO callbacks (socket-BIO mode) */
     const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
-    int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
+    int                 eof_seen;  /* set when read() hit a close_notify (at_eof); a bare EOF is not */
     int                 reset_failed;  /* session_reset() failed → refuse next handshake */
     size_t              wpend;     /* a write that would block: the length it was made with */
     /* Completion (memory-BIO) mode. Active once feed_input() is first called:
@@ -212,17 +212,21 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
 
     if (ret > 0)
         return ret;
-    if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
-        t->eof_seen = 1;  /* clean shutdown / EOF: at_eof() reports it */
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+        t->eof_seen = 1;  /* clean shutdown (close_notify): at_eof() reports it */
         return -1;
     }
+    /* mbedtls_ssl_read returns 0 for a transport EOF with no close_notify (it maps CONN_EOF to
+     * 0): a truncation, not a clean close. Fail the read and leave at_eof() false. */
+    if (ret == 0)
+        return -1;
     if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
         return 0;   /* retry */
 
     return -1;  /* error */
 }
 
-/* at_eof: was the last read() -1 a clean TLS shutdown (close_notify/EOF)? See
+/* at_eof: was the last read() -1 a clean TLS shutdown (close_notify)? See
  * KlTls.at_eof: lets a caller finalize a close-delimited response instead of
  * treating the -1 as an I/O error. */
 static int tls_at_eof(KlTls *self)
