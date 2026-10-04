@@ -230,6 +230,7 @@ UTEST(server_stats, accept_descriptor_exhaustion_backs_off) {
 #ifdef __linux__
     /* Linux keeps the connection queued when accept() fails for a descriptor, so once one is free
      * the server accepts it and answers. */
+    ASSERT_FALSE(timed_out);
     ASSERT_GT(got, 0L);
     buf[got > 0 ? got : 0] = '\0';
     ASSERT_EQ(0, strncmp(buf, "HTTP/1.1 ", 9));
