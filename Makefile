@@ -1035,7 +1035,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
-IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec compress cross_module datagram_batch completion_life datagram_live loop_teardown \
+IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec completion_output compress cross_module datagram_batch completion_life datagram_live loop_teardown \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
                           dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
