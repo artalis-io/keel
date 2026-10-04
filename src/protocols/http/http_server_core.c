@@ -731,14 +731,6 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 kl_http_server_conn_release(s, tc);
                 continue;
             }
-            /* Completion, a plaintext stream waiting on its producer: no send is posted either, so
-             * cancelling would release nothing. Release it now, as for a paused body read. */
-            if (completion_loop && tc->state == KL_HTTP_CONN_SENDING && !tc->tls &&
-                tc->res.body_mode == KL_HTTP_BODY_STREAM && tc->res.drain_enabled &&
-                !tc->res.stream_inflight) {
-                kl_http_server_conn_release(s, tc);
-                continue;
-            }
             /* Best-effort 408 (skip for TLS handshake, no HTTP framing yet). */
             if (tc->state == KL_HTTP_CONN_READING ||
                 tc->state == KL_HTTP_CONN_READING_BODY) {
@@ -746,9 +738,10 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                  * timed-out upload is precisely the case with unread body left (#278). */
                 KlHttpConnState rs = kl_http_conn_reject_final(tc, kl_408_response,
                                                               sizeof(kl_408_response) - 1);
-                /* Completion + TLS: the 408 is ciphertext in the engine, and the receive that is
-                 * posted may never complete: send it now, then drain or close once it is out. */
-                if (completion_loop && tc->tls) {
+                /* Completion: the 408 is on the output queue (with TLS, possibly still in the
+                 * engine), and the receive that is posted may never complete: send it now, then
+                 * drain or close once it is out. */
+                if (completion_loop && tc->comp_driven) {
                     kl_http_comp_tls_finish(s, tc, rs == KL_HTTP_CONN_DRAINING);
                     continue;
                 }

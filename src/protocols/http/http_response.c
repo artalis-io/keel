@@ -667,7 +667,13 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
         if (nw < 0) return -1;
         return nw;  /* 0 = WANT_WRITE (would-block) */
     }
-    nw = kl_sock_send(res_provider(res), res->conn_fd, data, len);
+    /* A completion loop: the connection's output queue sends it, in order with everything else the
+     * connection sends; a synchronous send here would block the loop (io_uring accepted sockets are
+     * blocking) or overtake a send already posted. */
+    const KlSocketProvider *sp = res_provider(res);
+    if (sp && (sp->capabilities & KL_SOCK_CAP_OVERLAPPED))
+        return kl_http_comp_stream_write(res, data, len);
+    nw = kl_sock_send(sp, res->conn_fd, data, len);
     if (nw < 0) {
         KlIoStatus st = kl_sock_io_status(res_provider(res));
         if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED)

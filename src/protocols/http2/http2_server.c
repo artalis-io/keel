@@ -555,8 +555,8 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
     h2_stream_destroy(h2c, stream);
 }
 
-/* Default output writer: write the socket (TLS-aware conn_write). Used on the readiness
- * path and whenever a completion driver has not installed a buffering writer. */
+/* Output writer: write the connection (TLS-aware conn_write; on a completion loop, the
+ * connection's output queue). */
 static kl_ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ctx;
     KlHttpConn *c = h2c->conn;
@@ -570,25 +570,10 @@ static kl_ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
     return nw;
 }
 
-/* The session emits produced frame bytes here; route them through the output seam
- * (default: the socket; a completion driver can install a buffering writer). */
+/* The session emits produced frame bytes here; route them through the output boundary. */
 static kl_ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     return h2c->out_write(h2c->out_ctx, data, len);
-}
-
-/* Install a custom output writer (fn != NULL) or restore the default socket writer
- * (fn == NULL). The completion driver brackets a feed with this to capture the produced
- * frames into its own buffer for one ordered overlapped send. See internal.h. */
-void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx) {
-    if (!c->h2) return;
-    if (fn) {
-        c->h2->out_write = fn;
-        c->h2->out_ctx = ctx;
-    } else {
-        c->h2->out_write = h2_out_conn_write;
-        c->h2->out_ctx = c->h2;
-    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -645,7 +630,7 @@ static KlHttp2ServerConn *h2_conn_open(KlHttpConn *c, KlHttpRouter *router,
     h2c->callbacks.initial_window_size = cfg->initial_window_size > 0
                                          ? (uint32_t)cfg->initial_window_size : 0;
     h2c->callbacks.max_header_list_size = KL_HTTP2_MAX_HEADER_LIST_SIZE;
-    h2c->out_write = h2_out_conn_write;   /* default output sink; driver may override */
+    h2c->out_write = h2_out_conn_write;   /* the connection: socket or completion output queue */
     h2c->out_ctx = h2c;
 
     h2c->session = cfg->factory(alloc, &h2c->callbacks, h2c);

@@ -134,6 +134,7 @@ static void conn_comp_tlsq_reset(KlHttpConn *c) {
     c->comp_tlsq_appended = c->comp_tlsq_sent = c->comp_tlsq_resp_mark = 0;
     c->comp_tlsq_resp_pending = c->comp_tlsq_then_recv = 0;
     c->comp_tlsq_then_shutwr = c->comp_tlsq_then_close = 0;
+    c->comp_tlsq_then_send = c->comp_stream_flushing = 0;
     c->comp_ops = c->comp_closing = 0;
     c->comp_tls_driving = c->comp_tls_redrive = 0;
 }
@@ -1422,10 +1423,10 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
 
     /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
      * a provider without half-close returns -1 and the drain still removes the unread-data condition. */
-    /* On a completion loop with TLS the final response is still ciphertext in the engine's output
-     * ring (it reaches the socket through the driver's output queue): half-closing now would cut it
-     * off. The completion driver half-closes once that output is out (comp_tlsq_then_shutwr). */
-    if (c->comp_driven && c->tls)
+    /* On a completion loop the final response reaches the socket through the driver's output queue
+     * (with TLS it may still be ciphertext in the engine's ring): half-closing now would cut it off.
+     * The completion driver half-closes once that output is out (comp_tlsq_then_shutwr). */
+    if (c->comp_driven)
         c->comp_tlsq_then_shutwr = 1;
     else
         (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);

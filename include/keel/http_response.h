@@ -50,7 +50,8 @@ typedef struct KlHttpResponse {
 
     int stream_error;       /**< Streaming error flag */
     int stream_ended;       /**< 1 = end_stream called, drain flush will close */
-    int stream_inflight;    /**< completion loop: an overlapped stream send is posted */
+    int stream_inflight;    /**< Unused (kept for layout): a completion loop sends a stream through the
+                                 connection's output queue */
 
     KlDrain drain;          /**< Streaming backpressure buffer */
     int drain_enabled;      /**< 0 = off (default), 1 = on */

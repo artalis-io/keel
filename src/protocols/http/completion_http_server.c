@@ -153,6 +153,9 @@ static int comp_send_response(KlHttpConn *c) {
  * Read-side flow control (kl_http_request_pause_body): while paused, do NOT post the next recv;
  * the conn parks with no outstanding op until kl_http_request_resume_body re-posts it. */
 static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
+    /* Send what dispatch wrote before the body (a 100 Continue): a client may wait for it before it
+     * sends the body. With TLS it is still in the engine's output. */
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
     if (c->comp_recv_posted) return;     /* one receive at a time: it lands at read_buf[0] */
     c->stream.read_len = 0;
     if (c->stream.read_paused) return;   /* paused: resume re-posts via kl_http_comp_post_read */
@@ -163,7 +166,7 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
 }
 
 /* Act on what kl_http_conn_send_complete() decided once a response is fully out. Shared by the
- * buffered/file path (comp_on_write) and the streaming path (comp_stream_pump) so the two cannot
+ * buffered/file path (comp_on_write) and the streaming path (comp_tls_on_write) so the two cannot
  * drift: both previously treated anything that was not READING as "close now", which silently
  * swallowed the post-rejection DRAINING state and closed on top of unread request bytes, the exact
  * abortive close the drain exists to prevent.
@@ -181,10 +184,10 @@ static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHt
         break;
     case KL_HTTP_CONN_DRAINING:
         /* Final response physically retired and SEND half-closed: post a recv so each completion
-         * discards one bounded chunk. The idle sweep enforces the byte and time bounds. With TLS
-         * the half-close was left to the output queue (empty by now): do it here. */
+         * discards one bounded chunk. The idle sweep enforces the byte and time bounds. The
+         * half-close was left to the output queue (empty by now): do it here. */
         c->stream.read_len = 0;
-        if (c->tls && comp_tlsq_settle(s, c)) break;
+        if (comp_tlsq_settle(s, c)) break;
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         break;
     case KL_HTTP_CONN_CLOSED:             /* response was final and nothing is outstanding */
@@ -207,42 +210,10 @@ static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHt
     }
 }
 
-/* Drive a plaintext streaming connection over the completion loop. Post the
- * outbound buffer's pending bytes as ONE overlapped send (bounded, at most one in flight)
- * instead of busy-spinning a blocking flush on a slow client (the head-of-line defect:
- * a full socket send buffer made the old kl_drain_flush spin stall the whole loop thread).
- * kl_comp_post_send copies the bytes (so the buffer is released immediately) and the
- * backend surfaces one KL_COMP_WRITE when the whole chunk is out, at which point
- * comp_on_write pumps again: posting freshly-produced bytes (async producer) or completing
- * the response once the stream ended and the buffer drained. */
-static void comp_stream_pump(struct KlHttpServer *s, KlHttpConn *c) {
-    if (c->res.stream_inflight)
-        return;   /* a send is already in flight; its completion pumps the next */
-
-    KlDrain *d = &c->res.drain;
-    size_t pending = kl_drain_buffered(d);
-    if (pending > 0) {
-        KlIoVec iov = { .base = (void *)kl_drain_data(d), .len = pending };
-        int rc = kl_comp_post_send(c, &iov, 1, pending);
-        kl_drain_consume(d, pending);   /* post_send copied: release the buffer */
-        if (rc < 0) { kl_comp_close(s, c); return; }
-        c->res.stream_inflight = 1;
-        return;
-    }
-    if (!c->res.stream_ended)
-        return;   /* async producer will write more and resume (kl_async_complete) */
-
-    /* Fully sent + ended: keep-alive read, bounded drain, or close. */
-    comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
-}
-
+/* A plaintext stream with no outbound buffer (no allocator at begin_stream): the legacy synchronous
+ * spin-write. Only reachable when kl_http_response_enable_drain was skipped, so a fully-produced
+ * stream; every other streamed response goes through the output queue (comp_tls_send_stream). */
 static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
-    if (c->res.drain_enabled) {   /* overlapped, non-blocking flush (no HOL) */
-        comp_stream_pump(s, c);
-        return;
-    }
-    /* No outbound buffer (no allocator at begin_stream): the legacy synchronous spin-write.
-     * Only reachable when kl_http_response_enable_drain was skipped, so a fully-produced stream. */
     int r;
     do { r = kl_http_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
     if (r < 0) { kl_comp_close(s, c); return; }
@@ -304,11 +275,19 @@ static int comp_tlsq_idle(const KlHttpConn *c) {
     return !c->comp_tlsq_inflight && c->comp_tlsq_len == 0;
 }
 
-/* Run what waits for an empty queue: the drain's half-close, the deferred recv, a close. Returns 1
- * if the connection was closed (the caller must not touch it), else 0. */
+/* Run what waits for an empty queue: the drain's half-close, the deferred recv, a close, a plaintext
+ * response held back behind interim output. Returns 1 if the connection was closed (the caller must
+ * not touch it), else 0. */
 static int comp_tlsq_settle(struct KlHttpServer *s, KlHttpConn *c) {
     if (!comp_tlsq_idle(c)) return 0;
     if (c->comp_tlsq_then_close) { kl_comp_close(s, c); return 1; }
+    if (c->comp_tlsq_then_send) {
+        /* Posted directly (a file body goes out zero-copy), so only once the queue is idle: two
+         * sends in flight could reorder, and their completions could not be told apart. */
+        c->comp_tlsq_then_send = 0;
+        if (comp_send_response(c) < 0) { kl_comp_close(s, c); return 1; }
+        return 0;
+    }
     if (c->comp_tlsq_then_shutwr) {
         c->comp_tlsq_then_shutwr = 0;
         const KlSocketProvider *sp = c->stream.ctx ? c->stream.ctx->sockets : NULL;
@@ -324,14 +303,46 @@ static int comp_tlsq_settle(struct KlHttpServer *s, KlHttpConn *c) {
 /* Queue whatever the TLS engine has produced and start sending it. Never blocks. Exported
  * (completion_internal.h): the h2/ws drives call it after feeding their session. 0 or -1. */
 int kl_comp_tls_flush(KlHttpConn *c) {
-    if (comp_tlsq_absorb_ring(c) < 0) return -1;
+    if (c->tls && comp_tlsq_absorb_ring(c) < 0) return -1;
     return comp_tlsq_kick(c);
+}
+
+/* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
+ * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
+ * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
+kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
+    if (len == 0) return 0;
+    if (c->comp_closing || len > (size_t)INTPTR_MAX) return -1;
+    if (comp_tlsq_reserve(c, len) < 0) return -1;
+    memcpy(c->comp_tlsq + c->comp_tlsq_len, buf, len);
+    c->comp_tlsq_len += len;
+    c->comp_tlsq_appended += (uint64_t)len;
+    if (comp_tlsq_kick(c) < 0) return -1;
+    return (kl_ssize_t)len;
+}
+
+/* Queued plaintext of a streamed response a producer may add to outside the handler (an async
+ * producer): past this, its writes stay in the response's outbound buffer, which bounds them and
+ * reports would-block (the streaming contract's backpressure). */
+#define KL_COMP_STREAM_QUEUE_MAX (1u << 20)
+
+/* http_response_internal.h: the streamed response's outbound-buffer writer on a completion loop. The
+ * response is the one embedded in its connection (only a pooled connection binds an overlapped
+ * provider to it). While the handler runs, or while the driver itself moves the buffer onto the
+ * queue, everything is taken: nothing can drain meanwhile, and the outbound buffer bounds it. */
+kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len) {
+    KlHttpConn *c = (KlHttpConn *)((char *)res - offsetof(KlHttpConn, res));
+    if (!c->comp_driven) return -1;
+    if (!c->comp_stream_flushing && c->state != KL_HTTP_CONN_PROCESSING &&
+        c->comp_tlsq_len >= KL_COMP_STREAM_QUEUE_MAX)
+        return 0;
+    return kl_comp_queue_write(c, data, len);
 }
 
 /* Close once the queued output is out (a Close frame, an alert, a final response), or now when
  * nothing is queued. Exported (completion_internal.h). */
 void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
-    if (c->tls && !comp_tlsq_idle(c)) {
+    if (!comp_tlsq_idle(c)) {
         /* CLOSED, so the idle sweep times it out if the client never reads; and the idle clock starts
          * now, so output just queued (after a long suspension, say) gets its full timeout. */
         c->state = KL_HTTP_CONN_CLOSED;
@@ -345,7 +356,7 @@ void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
 /* Read the next recv once the queued output is out (h2: no new input while output is pending), or
  * now when nothing is queued. Exported (completion_internal.h). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c) {
-    if (c->tls && !comp_tlsq_idle(c)) { c->comp_tlsq_then_recv = 1; return; }
+    if (!comp_tlsq_idle(c)) { c->comp_tlsq_then_recv = 1; return; }
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
@@ -418,20 +429,22 @@ static void comp_tls_send_response(struct KlHttpServer *s, KlHttpConn *c) {
     if (comp_tls_post_encrypted(c, iov, n) < 0) kl_comp_close(s, c);
 }
 
-/* Chunked/streaming response (KL_HTTP_BODY_STREAM) over TLS. The TLS-aware streaming write
- * path (kl_http_response_send → stream_writev_all / response_drain_writer) already encrypts
- * via tls->write, but in completion mode that only appends ciphertext to the engine's
- * out ring: move it onto the output queue after each send (which also makes room in the ring),
- * then mark the end. The response completes (comp_on_write) once the queue has sent up to the mark,
- * so a client that reads slowly holds only its own connection. Mirrors comp_send_stream (the same
- * synchronously-produced stream subset). */
+/* Chunked/streaming response (KL_HTTP_BODY_STREAM) through the output queue. The streaming write
+ * path (kl_http_response_send → response_drain_writer) puts it there: with TLS by encrypting into the
+ * engine's out ring, which is moved onto the queue after each send (making room in the ring); in
+ * plaintext directly (kl_http_comp_stream_write). Then mark the end. The response completes
+ * (comp_on_write) once the queue has sent up to the mark, so a client that reads slowly holds only
+ * its own connection. */
 static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
+    c->comp_stream_flushing = 1;                    /* the outbound buffer goes onto the queue whole */
     do {
-        r = kl_http_response_send(&c->res);         /* encrypts chunks into the out ring */
-        if (r < 0) { kl_comp_close(s, c); return; }
-        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → queue */
+        r = kl_http_response_send(&c->res);
+        if (r < 0) break;
+        if (kl_comp_tls_flush(c) < 0) { r = -1; break; }   /* ring → queue (TLS), then send */
     } while (r == 1 && c->res.stream_ended);
+    c->comp_stream_flushing = 0;
+    if (r < 0) { kl_comp_close(s, c); return; }
     c->comp_tlsq_resp_mark = c->comp_tlsq_appended;
     c->comp_tlsq_resp_pending = 1;
     if (comp_tlsq_idle(c)) {                        /* nothing to send: complete now */
@@ -444,13 +457,14 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
     switch (st) {
     case KL_HTTP_CONN_SENDING:
-        if (c->tls) {
-            if (c->res.body_mode == KL_HTTP_BODY_STREAM)
-                comp_tls_send_stream(s, c);    /* flush encrypted chunks synchronously */
-            else
-                comp_tls_send_response(s, c);  /* buffered/file: encrypt + overlapped */
+        if (c->res.body_mode == KL_HTTP_BODY_STREAM && (c->tls || c->res.drain_enabled)) {
+            comp_tls_send_stream(s, c);        /* through the output queue */
+        } else if (c->tls) {
+            comp_tls_send_response(s, c);      /* buffered/file: encrypt + overlapped */
         } else if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             comp_send_stream(s, c);
+        } else if (!comp_tlsq_idle(c)) {
+            c->comp_tlsq_then_send = 1;        /* after the interim output still going out */
         } else if (comp_send_response(c) < 0) {
             kl_comp_close(s, c);
         }
@@ -461,10 +475,8 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * discards one bounded chunk; the idle sweep enforces the deadline. With TLS the final
          * response is still in the engine's ring: queue it; the half-close waits for it to go. */
         c->stream.read_len = 0;
-        if (c->tls) {
-            if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-            if (comp_tlsq_settle(s, c)) break;
-        }
+        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
+        if (comp_tlsq_settle(s, c)) break;
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         break;
     case KL_HTTP_CONN_READING_BODY:
@@ -476,7 +488,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * read window so the next recv starts a fresh h2 frame buffer (the HTTP/1.1
          * upgrade request must not be re-fed), then read h2 frames. */
         c->stream.read_len = 0;
-        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
+        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
         kl_comp_recv_after_output(s, c);
         break;
     case KL_HTTP_CONN_WEBSOCKET:
@@ -485,7 +497,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * is in the out ring. Flush it, reset the read window, then read WS frames once it is out
          * (no new input while output is pending: a client that does not read stops being read). */
         c->stream.read_len = 0;
-        if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
+        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
         kl_comp_recv_after_output(s, c);
         break;
     case KL_HTTP_CONN_SUSPENDED:
@@ -504,15 +516,11 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
     case KL_HTTP_CONN_TLS_HANDSHAKE:
     case KL_HTTP_CONN_PROCESSING:
     case KL_HTTP_CONN_CLOSED:
-        /* With TLS, whatever was written during dispatch (a streaming response the handler "already
-         * sent", a rejection's final response) is still ciphertext in the engine's ring on a
-         * completion loop: queue it and close once it is out, so the response is delivered. */
-        if (c->tls) {
-            if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-            kl_comp_close_after_output(s, c);
-            break;
-        }
-        kl_comp_close(s, c);
+        /* Whatever was written during dispatch (a rejection's final response) is on the output queue
+         * (with TLS, possibly still ciphertext in the engine's ring): send it and close once it is
+         * out, so the response is delivered. Nothing queued closes now. */
+        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
+        kl_comp_close_after_output(s, c);
         break;
 
     }
@@ -936,7 +944,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     if (!ev->ok || ev->bytes == 0) {                           /* peer closed */
         /* A half-close (EOF) while a final response is still queued (a TLS 408 or 413): send it
          * first. An error closes now. */
-        if (ev->ok && c->tls && !comp_tlsq_idle(c)) { kl_comp_close_after_output(s, c); return; }
+        if (ev->ok && !comp_tlsq_idle(c)) { kl_comp_close_after_output(s, c); return; }
         kl_comp_close(s, c);
         return;
     }
@@ -1029,12 +1037,21 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
     c->comp_tlsq_inflight = 0;
     c->comp_tlsq_sent += c->comp_tlsq_inflight_len;
     c->comp_tlsq_inflight_len = 0;
+    /* A streamed response's backlog (what an async producer wrote while the queue was full): move it
+     * onto the queue now there is room, which also tells the producer it may write more. */
+    if (c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&
+        kl_drain_pending(&c->res.drain)) {
+        c->comp_stream_flushing = 1;
+        int fr = kl_drain_flush(&c->res.drain);
+        c->comp_stream_flushing = 0;
+        if (fr < 0 || (c->tls && comp_tlsq_absorb_ring(c) < 0)) { kl_comp_close(s, c); return; }
+    }
     if (comp_tlsq_kick(c) < 0) { kl_comp_close(s, c); return; }   /* anything queued since */
     if (c->comp_tlsq_resp_pending && c->comp_tlsq_sent >= c->comp_tlsq_resp_mark) {
         c->comp_tlsq_resp_pending = 0;
         /* A file body: the head (or the previous chunk) is out; queue the next encrypted chunk.
          * HEAD requests carry no body. */
-        if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request) {
+        if (c->tls && c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request) {
             int r = comp_tls_send_file_chunk(c);
             if (r < 0) { kl_comp_close(s, c); return; }
             if (r == 1) return;                /* another chunk queued, with its own mark */
@@ -1054,25 +1071,12 @@ static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     }
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
-    /* Every send on a TLS connection is the output queue's. */
-    if (c->tls) { comp_tls_on_write(s, c); return; }
-    /* Plaintext h2 output send completed: the frames produced by the last feed are out;
-     * read the next frames. Deferring the recv until here means at most one h2 send is
-     * in flight, so overlapped output cannot reorder frames. */
-    if (c->state == KL_HTTP_CONN_HTTP2) {
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
-        return;
-    }
-    /* Plaintext streaming: the posted stream chunk is out. Pump the next buffered
-     * chunk (a slow client's remainder, or bytes an async producer wrote meanwhile), else
-     * complete once the stream ended and the buffer drained. */
-    if (!c->tls && c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled) {
-        c->res.stream_inflight = 0;
-        comp_stream_pump(s, c);
-        return;
-    }
-    /* The backend only reports a WRITE once the whole response is out (it handles
-     * partial sends internally). Response fully sent: keep-alive reset, bounded drain, or close. */
+    /* Every send on a TLS connection is the output queue's; in plaintext, the queue's send is the only
+     * one in flight while it is (a direct response waits for the queue to be idle). */
+    if (c->tls || c->comp_tlsq_inflight) { comp_tls_on_write(s, c); return; }
+    /* A directly-posted plaintext response (buffered, or a file zero-copy). The backend only reports a
+     * WRITE once the whole response is out (it handles partial sends internally). Response fully
+     * sent: keep-alive reset, bounded drain, or close. */
     comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
 

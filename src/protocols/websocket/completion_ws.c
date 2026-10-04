@@ -44,15 +44,18 @@ void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
              * record's decrypted remainder, not whole records the engine holds as ciphertext. */
         }
     }
-    /* Plaintext: the received frame bytes are already in read_buf; the callbacks emit
-     * through conn_write (a synchronous blocking send on this loop). */
+    /* Plaintext: the received frame bytes are already in read_buf; the callbacks emit through
+     * conn_write, which on a completion loop puts the frames on the connection's output queue (one
+     * ordered overlapped send at a time, never a send on the loop thread). */
     KlHttpConnState st = (KlHttpConnState)kl_ws_server_on_readable_data(
                          c, (uint8_t *)c->stream.read_buf, c->stream.read_len);
     c->stream.read_len = 0;
     if (st == KL_HTTP_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
         st = (KlHttpConnState)kl_ws_server_on_writable(c);
-    if (st != KL_HTTP_CONN_WEBSOCKET) { kl_comp_close(s, c); return; }
-    if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+    /* Closing (a Close frame answered or sent): close once the queued frames are out. */
+    if (st != KL_HTTP_CONN_WEBSOCKET) { kl_comp_close_after_output(s, c); return; }
+    /* Read again once the frames are out: a client that does not read its frames is not read. */
+    kl_comp_recv_after_output(s, c);
 }
 
 /* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches

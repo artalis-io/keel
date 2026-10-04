@@ -24,4 +24,11 @@
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out);
 
+/* A streamed plaintext response on a completion loop: hand the bytes to the connection's output
+ * queue (completion_http_server.c) instead of sending them on the loop thread. Called by the
+ * response's outbound-buffer writer only for a response bound to a completion-driven connection
+ * (its socket provider is overlapped). Bytes taken (all of them), 0 to leave them buffered
+ * (backpressure), or -1. */
+kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len);
+
 #endif /* KEEL_SRC_HTTP_RESPONSE_INTERNAL_H */

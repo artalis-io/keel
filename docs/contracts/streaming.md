@@ -25,8 +25,10 @@ never borrows or takes ownership of the caller's write buffer.
 - *error*: allocation or transport failure.
 
 There is **one** writable/drain notification: the drain empties → the producer may write more. On
-the completion axis the overlapped flush keeps ≤1 send in flight (`KlHttpResponse.stream_inflight`) and
-re-pumps from the WRITE completion (`comp_stream_pump`); on readiness it flushes on writability.
+the completion axis the bytes go onto the connection's output queue (the one TLS, WebSocket and HTTP/2
+output use), which keeps ≤1 send in flight and moves a producer's backlog onto the queue from the WRITE
+completion (`comp_tls_on_write`); nothing is ever sent synchronously on the loop thread. On readiness
+it flushes on writability.
 Both surface the same "buffer drained, resume producing" signal; no parallel callbacks with
 divergent meaning.
 

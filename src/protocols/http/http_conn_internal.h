@@ -120,12 +120,13 @@ struct KlHttpConn {
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;
-    /* Completion-mode TLS output queue (completion_http_server.c): every ciphertext byte leaves
-     * through it, in order, as at most one overlapped send at a time, so the loop never blocks on a
-     * slow reader. The tail holds bytes not yet posted; the counters are cumulative. */
+    /* Completion-mode output queue (completion_http_server.c): every TLS ciphertext byte, and every
+     * plaintext byte written through conn_write or a streamed response, leaves through it, in order,
+     * as at most one overlapped send at a time, so the loop never blocks on a slow reader. The tail
+     * holds bytes not yet posted; the counters are cumulative. */
     int            comp_driven;            /* driven by a completion loop (set at accept) */
     uint64_t       comp_progress_seen;     /* stream.send_progress at the last idle sweep */
-    unsigned char *comp_tlsq;              /* ciphertext waiting to be posted */
+    unsigned char *comp_tlsq;              /* output waiting to be posted */
     size_t         comp_tlsq_len, comp_tlsq_cap;
     int            comp_tlsq_inflight;     /* a queue send is posted */
     size_t         comp_tlsq_inflight_len;
@@ -135,6 +136,8 @@ struct KlHttpConn {
     int            comp_tlsq_then_recv;    /* post the next recv once the queue drains (h2 backpressure) */
     int            comp_tlsq_then_shutwr;  /* half-close once the queue drains (the rejection drain) */
     int            comp_tlsq_then_close;   /* close once the queue drains */
+    int            comp_tlsq_then_send;    /* post the plaintext response once the queue drains */
+    int            comp_stream_flushing;   /* the driver is moving a streamed response onto the queue */
     int            comp_ops;               /* completion: posted recv/send ops not yet completed */
     int            comp_closing;           /* released with ops outstanding: the last completion releases */
     unsigned       comp_gen;               /* bumped at every release (a caller can tell it was released) */

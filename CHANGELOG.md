@@ -79,6 +79,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   socket now stays non-blocking for the whole request, and every step (connect, handshake, send,
   receive) waits only for the time left before the request deadline; running out of it fails the
   request with `KL_ERR_TIMEOUT`.
+- **Completion loops: plaintext output never blocks the loop.** On io_uring, IOCP and the other
+  completion engines, plaintext output did not use the ordered output queue that TLS output goes
+  through. A streamed response (chunked, SSE, compressed), WebSocket frames and HTTP/2 frames
+  written outside a feed (an h2c upgrade's first response, a drain's GOAWAY) were sent with a
+  synchronous send on the loop thread. On io_uring, where accepted sockets are blocking, one client
+  that stopped reading stalled every connection on the loop. On pollcomp such a send could overtake a
+  send already posted and reorder the output. All of it now goes through the connection's output
+  queue: one ordered overlapped send at a time, never a send on the loop thread. A plaintext HTTP/2
+  connection that the session ends now sends its GOAWAY before closing (it was dropped), and over TLS
+  a `100 Continue` is sent before the body is read (it stayed in the engine until the final
+  response, so a client that waits for it before sending the body waited for nothing).
 - **A TLS connection on a completion loop could be released twice, corrupting the connection
   pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
   completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that
