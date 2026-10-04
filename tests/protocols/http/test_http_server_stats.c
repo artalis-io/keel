@@ -224,9 +224,17 @@ UTEST(server_stats, accept_descriptor_exhaustion_backs_off) {
     ASSERT_EQ(0, connected);
     /* 600 ms of wall time with accept() failing: a spinning loop burns about all of it. */
     ASSERT_LT(spent, 200.0);
+#ifdef __linux__
+    /* Linux keeps the connection queued when accept() fails for a descriptor, so once one is free
+     * the server accepts it and answers. */
     ASSERT_GT(got, 0L);
     buf[got > 0 ? got : 0] = '\0';
     ASSERT_EQ(0, strncmp(buf, "HTTP/1.1 ", 9));
+#else
+    /* macOS (kqueue) was seen to drop the connection whose accept() failed instead of leaving it
+     * queued: the client sees it closed (0). What must not happen is a hang (-1, the 5 s timeout). */
+    ASSERT_GE(got, 0L);
+#endif
 }
 #endif
 
