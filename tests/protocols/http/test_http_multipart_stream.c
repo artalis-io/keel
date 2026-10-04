@@ -1093,6 +1093,73 @@ UTEST(mp, unquoted_param_trims_trailing_lws) {
     br->destroy(br);
 }
 
+/* Parse one part with the given Content-Disposition value; fill `c`. */
+static void parse_one_disposition(KlAllocator *a, const char *disposition, Collector *c) {
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=QS");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(a, &req, NULL);
+    char body[512];
+    int n = snprintf(body, sizeof(body),
+                     "--QS\r\nContent-Disposition: %s\r\n\r\nv\r\n--QS--\r\n", disposition);
+    collector_init(c, a);
+    if (!br || n <= 0 || (size_t)n >= sizeof(body)) { c->last_event = KL_HTTP_MP_EVT_ERROR; return; }
+    if (br->on_data(br, body, (size_t)n) == 0) {
+        br->on_complete(br);
+        collect_eager(br, c);
+    } else {
+        c->last_event = KL_HTTP_MP_EVT_ERROR;
+    }
+    br->destroy(br);
+}
+
+/* A parameter is found only outside quoted strings: "name=" inside a quoted filename is part of
+ * the filename, not the field name. */
+UTEST(mp, param_inside_quoted_string_is_not_a_param) {
+    KlAllocator a = kl_allocator_default();
+    Collector c;
+    parse_one_disposition(&a, "form-data; filename=\"x; name=evil\"; name=\"real\"", &c);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
+    ASSERT_EQ(c.count, 1);
+    ASSERT_STREQ(c.parts[0].name, "real");
+    ASSERT_STREQ(c.parts[0].filename, "x; name=evil");
+    collector_free(&c);
+}
+
+/* A backslash-escaped quote does not end a quoted string, so what follows it is still quoted. */
+UTEST(mp, escaped_quote_does_not_end_quoted_string) {
+    KlAllocator a = kl_allocator_default();
+    Collector c;
+    parse_one_disposition(&a, "form-data; filename=\"a\\\"; name=evil\"; name=\"real\"", &c);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
+    ASSERT_EQ(c.count, 1);
+    ASSERT_STREQ(c.parts[0].name, "real");
+    collector_free(&c);
+}
+
+/* The same holds for the boundary parameter of the request Content-Type. */
+UTEST(mp, boundary_inside_quoted_string_is_not_a_param) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRequest req = make_mp_request(
+        "multipart/form-data; x=\"; boundary=EVIL\"; boundary=REAL");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
+    ASSERT_TRUE(br != NULL);
+
+    const char *body =
+        "--REAL\r\n"
+        "Content-Disposition: form-data; name=\"x\"\r\n\r\n"
+        "ok\r\n"
+        "--REAL--\r\n";
+    ASSERT_EQ(br->on_data(br, body, strlen(body)), 0);
+    br->on_complete(br);
+
+    Collector c; collector_init(&c, &a);
+    collect_eager(br, &c);
+    br->destroy(br);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
+    ASSERT_EQ(c.count, 1);
+    ASSERT_STREQ(c.parts[0].body, "ok");
+    collector_free(&c);
+}
+
 UTEST(mp, rejects_null_alloc_or_req) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
