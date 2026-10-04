@@ -13,6 +13,8 @@
  * abort() (fail-loud), exactly like the neutral stubs.
  */
 #include "completion_http.h"
+#include "http_internal.h"            /* kl_comp_queue_write */
+#include "http_response_internal.h"   /* kl_http_comp_stream_write */
 #include <stdlib.h>   /* abort */
 
 /* ── Tier 2: HTTP wrappers (normally in completion_http_server.c) ─────────────── */
@@ -51,4 +53,14 @@ void kl_http_comp_post_read(KlHttpConn *conn) { (void)conn; abort(); }
 
 void kl_http_comp_tls_finish(struct KlHttpServer *server, KlHttpConn *conn, int draining) {
     (void)server; (void)conn; (void)draining; abort();
+}
+
+/* The output queue: reached only through a completion-driven connection (comp_driven, set at a
+ * completion accept) or an overlapped socket provider, neither of which a readiness loop has. */
+kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
+    (void)c; (void)buf; (void)len; abort();
+}
+
+kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len) {
+    (void)res; (void)data; (void)len; abort();
 }

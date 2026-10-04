@@ -1051,7 +1051,7 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
         c->comp_tlsq_resp_pending = 0;
         /* A file body: the head (or the previous chunk) is out; queue the next encrypted chunk.
          * HEAD requests carry no body. */
-        if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request) {
+        if (c->tls && c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request) {
             int r = comp_tls_send_file_chunk(c);
             if (r < 0) { kl_comp_close(s, c); return; }
             if (r == 1) return;                /* another chunk queued, with its own mark */
