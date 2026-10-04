@@ -162,7 +162,9 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         remaining -= in_bytes;
 
         if (status == TDEFL_STATUS_DONE) break;
-    } while (remaining > 0);
+        /* Input left, or (finishing) the final block may still be inside tdefl: keep draining it
+         * through out_buf until tdefl reports DONE. */
+    } while (remaining > 0 || flush);
 
     /* Emit trailer on final flush */
     if (flush) {

@@ -31,6 +31,7 @@ typedef struct {
     int                 started;    /* gzip header parsed? */
     int                 done;       /* decompression finished? */
     int                 verified;   /* trailer (CRC32 + ISIZE) checked and matched? */
+    int                 trailing;   /* bytes arrived after the 8-byte trailer */
     unsigned char       hdr_buf[10];
     size_t              hdr_len;
     /* Trailer accumulation for streaming */
@@ -270,11 +271,14 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
          * feeds is still captured), verify once the full 8 bytes are present -- independent
          * of `flush`, so a stream that completes without a trailing flush is still checked --
          * and on end-of-input (flush) require a verified trailer. */
-        if (remaining > 0 && s->trail_len < 8) {
-            size_t need = 8 - s->trail_len;
+        if (remaining > 0) {
+            size_t need = s->trail_len < 8 ? 8 - s->trail_len : 0;
             size_t take = remaining < need ? remaining : need;
-            memcpy(s->trail_buf + s->trail_len, p, take);
-            s->trail_len += take;
+            if (take > 0) {
+                memcpy(s->trail_buf + s->trail_len, p, take);
+                s->trail_len += take;
+            }
+            if (remaining > take) s->trailing = 1;   /* past the trailer: garbage, or a 2nd member */
         }
         if (s->trail_len >= 8 && !s->verified) {
             uint32_t expected_crc   = read_le32(s->trail_buf);
@@ -283,8 +287,10 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
                 return -1;
             s->verified = 1;
         }
-        if (flush && !s->verified)
-            return -1;   /* end-of-input with a missing/short trailer: truncated stream */
+        /* End of input: a missing or short trailer is a truncated stream, and bytes after it are
+         * not part of this body (a second gzip member is not read): either way, fail closed. */
+        if (flush && (!s->verified || s->trailing))
+            return -1;
         return 0;
     }
 
@@ -339,6 +345,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         s->total_out = 0;
         s->out_full = 0;
         s->verified = 0;
+        s->trailing = 0;
         s->started = 1;
     }
 
@@ -390,11 +397,14 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
     }
 
     /* Accumulate trailer bytes from remaining data (trailer may span feeds). */
-    if (s->done && remaining > 0 && s->trail_len < 8) {
-        size_t need = 8 - s->trail_len;
+    if (s->done && remaining > 0) {
+        size_t need = s->trail_len < 8 ? 8 - s->trail_len : 0;
         size_t take = remaining < need ? remaining : need;
-        memcpy(s->trail_buf + s->trail_len, p, take);
-        s->trail_len += take;
+        if (take > 0) {
+            memcpy(s->trail_buf + s->trail_len, p, take);
+            s->trail_len += take;
+        }
+        if (remaining > take) s->trailing = 1;   /* past the trailer */
     }
 
     /* Verify the trailer (CRC32 + ISIZE) as soon as the full 8 bytes are present, whether
@@ -410,7 +420,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
 
     /* End-of-input: a stream that did not complete with a full, matching trailer is
      * truncated or corrupt -- fail closed rather than accept unverified output. */
-    if (flush && !s->verified)
+    if (flush && (!s->verified || s->trailing))
         return -1;
 
     return 0;
