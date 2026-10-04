@@ -885,6 +885,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             return 1;
         }
         op->send_done += (size_t)res;
+        op->stream->send_progress += (uint64_t)res;   /* a long send that moves is not idle */
         if (op->send_done < op->send_total) {         /* short write: send the tail */
             if (iou_prep_send_tail(st, op) == 0)
                 return 0;                             /* still in flight, no event */
@@ -907,6 +908,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         if (op->sf_stage == 0) {                      /* head SEND (partial-capable) */
             op->send_done += (size_t)res;
+            op->stream->send_progress += (uint64_t)res;
             if (op->send_done < op->send_total) {
                 if (iou_prep_send_tail(st, op) == 0) return 0;
                 goto sendfile_reprep_failed;          /* no SQE: fail now, never strand */
@@ -941,6 +943,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         op->pipe_len -= (size_t)res;
         op->sent_total += (size_t)res;
+        op->stream->send_progress += (uint64_t)res;
         if (op->pipe_len > 0) {                       /* drain the pipe */
             if (iou_prep_splice_out(st, op) == 0) return 0;
             goto sendfile_reprep_failed;

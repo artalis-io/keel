@@ -533,6 +533,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 return -1;
             }
             op->send_done += (size_t)n;
+            op->stream->send_progress += (uint64_t)n;     /* a long send that moves is not idle */
         }
         ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
         ev->bytes = op->send_total;
@@ -549,6 +550,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 return -1;
             }
             op->send_done += (size_t)n;
+            op->stream->send_progress += (uint64_t)n;
         }
         while (op->file_off < op->file_count) {           /* then the file bytes */
             uint64_t off = op->file_off;

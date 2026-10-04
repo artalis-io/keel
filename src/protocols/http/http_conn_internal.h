@@ -124,6 +124,7 @@ struct KlHttpConn {
      * through it, in order, as at most one overlapped send at a time, so the loop never blocks on a
      * slow reader. The tail holds bytes not yet posted; the counters are cumulative. */
     int            comp_driven;            /* driven by a completion loop (set at accept) */
+    uint64_t       comp_progress_seen;     /* stream.send_progress at the last idle sweep */
     unsigned char *comp_tlsq;              /* ciphertext waiting to be posted */
     size_t         comp_tlsq_len, comp_tlsq_cap;
     int            comp_tlsq_inflight;     /* a queue send is posted */

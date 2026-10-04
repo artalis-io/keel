@@ -700,6 +700,14 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
+        /* Completion: a posted send that moved bytes since the last sweep is progress, as a
+         * completion would be. A response is one send op until all of it is out (the engine re-posts
+         * the rest of a partial send itself), so without this a long download that keeps moving was
+         * cut off at the read timeout. */
+        if (completion_loop && tc->stream.send_progress != tc->comp_progress_seen) {
+            tc->comp_progress_seen = tc->stream.send_progress;
+            tc->last_active_ms = now;
+        }
         /* TLS handshake time counts against read timeout */
         int timed_out = (now - tc->last_active_ms > timeout);
         /* Body deadline: absolute time from body start, not resettable. */

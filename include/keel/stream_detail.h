@@ -85,6 +85,10 @@ struct KlStream {
     int              (*cancel_recv)(void *ctx);
     int              (*cancel_send)(void *ctx);
     void             (*on_retire)(struct KlStream *s); /**< read/write → close finalize */
+
+    /* Completion engines move a posted send in parts and report it only once all of it is out. They
+     * add each part here, so an owner can tell a long send that is moving from one that is stuck. */
+    uint64_t           send_progress;    /**< bytes a posted send has moved so far (cumulative) */
 };
 
 #ifdef __cplusplus

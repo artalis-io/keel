@@ -793,4 +793,69 @@ UTEST(server_integration, a_failed_start_leaves_running_clear) {
     ASSERT_EQ(running, 0);                         /* was 1 */
 }
 
+/* A long download that keeps moving is not an idle connection. On a completion loop a buffered
+ * response is one send op until all of it is out (the engine re-posts partial sends itself), and the
+ * idle clock only moved when the whole response completed: a download longer than read_timeout_ms
+ * was cut off at read_timeout_ms however steadily the client read. Here the client reads 16 MiB in
+ * 64 KiB steps, paced to take several times the 400 ms timeout, and must receive all of it. */
+#define LD_BODY (16u * 1024u * 1024u)
+static char *g_ld_body;
+static void handle_long_download(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, g_ld_body, LD_BODY);
+}
+
+static KlHttpServer ld_srv;
+
+UTEST(server_integration, a_long_steady_download_is_not_timed_out) {
+    g_ld_body = malloc(LD_BODY);
+    ASSERT_TRUE(g_ld_body != NULL);
+    memset(g_ld_body, 'D', LD_BODY);
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8, .read_timeout_ms = 400 };
+    ASSERT_EQ(0, kl_http_server_init(&ld_srv, &cfg));
+    kl_http_server_route(&ld_srv, "GET", "/dl", handle_long_download, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ld_srv);
+    wait_for_bind(&ld_srv);
+
+    size_t body = 0;
+    uint64_t start = kl_monotonic_ms();
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        int rcv = 16 * 1024;
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
+        struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons((uint16_t)ld_srv.bound_port) };
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            const char *rq = "GET /dl HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            (void)kl_test_sockwrite(fd, rq, strlen(rq));
+            static char chunk[64 * 1024];
+            size_t total = 0, hdr = 0;
+            for (;;) {
+                if (kl_test_poll1(fd, 0, 3000) <= 0) break;
+                kl_ssize_t n = kl_test_sockread(fd, chunk, sizeof chunk);
+                if (n <= 0) break;
+                if (hdr == 0) {                       /* the head arrives in the first read */
+                    char *e = NULL;
+                    for (kl_ssize_t i = 0; i + 3 < n; i++)
+                        if (memcmp(chunk + i, "\r\n\r\n", 4) == 0) { e = chunk + i + 4; break; }
+                    if (e) hdr = (size_t)(e - chunk);
+                }
+                total += (size_t)n;
+                kl_test_sleep_ms(10);                 /* a slow but steady reader */
+            }
+            body = total > hdr ? total - hdr : 0;
+        }
+        kl_test_closesock(fd);
+    }
+    uint64_t took = kl_monotonic_ms() - start;
+    kl_http_server_stop(&ld_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ld_srv);
+    free(g_ld_body);
+    ASSERT_EQ(body, (size_t)LD_BODY);                 /* was (completion): cut off after ~400 ms */
+    ASSERT_TRUE(took > 400);                          /* the download did outlast the timeout */
+}
+
 UTEST_MAIN();
