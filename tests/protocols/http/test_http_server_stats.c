@@ -206,12 +206,15 @@ UTEST(server_stats, accept_descriptor_exhaustion_backs_off) {
     /* Descriptors are free again: the queued connection must now be served. */
     char buf[256];
     long got = -1;
+    int timed_out = 0;                                   /* the read gave up waiting: a hang */
     if (connected == 0) {
         struct timeval tv = { 5, 0 };
         (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         const char *req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-        if (send(cfd, req, strlen(req), 0) == (long)strlen(req))
+        if (send(cfd, req, strlen(req), 0) == (long)strlen(req)) {
             got = (long)recv(cfd, buf, sizeof(buf) - 1, 0);
+            timed_out = got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+        }
     }
     if (cfd >= 0) close(cfd);
 
@@ -232,8 +235,10 @@ UTEST(server_stats, accept_descriptor_exhaustion_backs_off) {
     ASSERT_EQ(0, strncmp(buf, "HTTP/1.1 ", 9));
 #else
     /* macOS (kqueue) was seen to drop the connection whose accept() failed instead of leaving it
-     * queued: the client sees it closed (0). What must not happen is a hang (-1, the 5 s timeout). */
-    ASSERT_GE(got, 0L);
+     * queued: the client sees it closed (0) or reset (-1, ECONNRESET), on the send or the read. What
+     * must not happen is a hang: the read giving up after its 5 s timeout. */
+    (void)got;
+    ASSERT_FALSE(timed_out);
 #endif
 }
 #endif
