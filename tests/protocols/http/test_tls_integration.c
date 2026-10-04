@@ -5,6 +5,7 @@
 #include "mock_tls.h"   /* shared identity TLS mock: completion-capable (feed_input/drain_output) */
 #include <string.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "../../../src/event_caps.h"   /* kl_event_caps: is the server a completion loop? */
 #include <errno.h>
 
 /* The passthrough TLS mock (identity, no crypto) now lives in tests/mock_tls.h and implements
@@ -635,6 +636,51 @@ UTEST(tls_integration, a_rejected_chunked_upload_gets_its_413) {
     kl_http_server_free(&tq_chk_srv);
     (void)closed;                     /* the FIN of the drain's half-close: not evidence either way */
     ASSERT_TRUE(strstr(buf, "413") != NULL);               /* was (io_uring): no response at all */
+}
+
+/* A graceful stop waits for output still queued. A TLS response finished with Connection: close is
+ * closing once its queued output is out, which the shutdown drain counted as idle (it counts states), so
+ * the loop stopped and the server's teardown closed the socket under the send: the client got a cut
+ * response. Completion loops only: a readiness server writes the response through a capped buffer,
+ * so a handler that writes 16 MiB at once to a client not reading yet is cut by design there. (IOCP
+ * over loopback takes the send whole, so this shows on the POSIX completion backends.) */
+static KlHttpServer tq_stop_srv;
+static void stop_srv_thread(void *arg) { (void)arg; kl_http_server_run(&tq_stop_srv); }
+
+UTEST(tls_integration, a_graceful_stop_lets_queued_output_finish) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .drain_timeout_ms = 5000 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_stop_srv, &cfg));
+    kl_http_server_route(&tq_stop_srv, "GET", "/big", handle_tq_hugestream, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, stop_srv_thread, NULL);
+    wait_for_bind(&tq_stop_srv);
+    if (!(kl_event_caps(&kl_http_server_event_ctx(&tq_stop_srv)->loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_stop(&tq_stop_srv);
+        kl_plat_thread_join(&tid);
+        kl_http_server_free(&tq_stop_srv);
+        UTEST_SKIP("readiness loop: the response buffer is capped there");
+    }
+
+    long total = 0;
+    int a = connect_small_rcvbuf(tq_stop_srv.bound_port);
+    if (a >= 0) {
+        const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(a, rq, strlen(rq));
+        kl_test_sleep_ms(300);                             /* the response is queued, not yet sent */
+        kl_http_server_stop(&tq_stop_srv);                 /* graceful: drain_timeout_ms = 5 s */
+        static char sink[64 * 1024];
+        for (;;) {                                         /* now read it all, up to EOF */
+            if (kl_test_poll1(a, 0, 3000) <= 0) break;
+            long r = (long)kl_test_sockread(a, sink, sizeof sink);
+            if (r <= 0) break;
+            total += r;
+        }
+        kl_test_closesock(a);
+    }
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_stop_srv);
+    ASSERT_GT(total, (long)(16 * 1024 * 1024));            /* was (POSIX completion): cut short */
 }
 
 UTEST_MAIN();
