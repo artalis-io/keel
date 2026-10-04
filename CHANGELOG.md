@@ -7,6 +7,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **HTTP/2: peer-driven resource limits, idle connections and graceful shutdown.** The nghttp2
+  server adapter sent empty SETTINGS, so a peer could open streams without limit, and it copied every
+  request header with no count or size cap: one HPACK table entry referenced again and again (an
+  HPACK bomb) cost hundreds of MB per stream. It now advertises MAX_CONCURRENT_STREAMS and
+  MAX_HEADER_LIST_SIZE (64 KiB) and resets a stream past `KL_MAX_HEADERS` fields or that size; the
+  client adapter caps response headers the same way and refuses server push. An HTTP/2 connection
+  with no stream open and nothing to send is now timed out by the idle sweep (it held its slot
+  forever). A graceful shutdown now lets responses in flight finish (it cut them once its GOAWAY was
+  out), and a response that cannot be submitted resets its stream instead of leaving it open.
+  `KlHttp2ServerCallbacks` gains `max_concurrent_streams`, `initial_window_size` and
+  `max_header_list_size`, which KEEL fills from `KlHttp2ServerConfig` (whose `initial_window_size`
+  was never used).
 - **A TLS connection on a completion loop could be released twice, corrupting the connection
   pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
   completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that

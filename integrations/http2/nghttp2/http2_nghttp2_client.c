@@ -14,6 +14,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "keel_http2_nghttp2.h"
+#include <keel/http2.h>          /* KL_HTTP2_DEFAULT_MAX_STREAMS, KL_HTTP2_MAX_HEADER_LIST_SIZE */
+#include <keel/http_request.h>   /* KL_MAX_HEADERS */
 
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>
@@ -43,6 +45,7 @@ struct NgClientStream {
     size_t            body_len;
     size_t            body_off;
     int               final_reported;   /* the final (non-1xx) response went to on_response */
+    size_t            hlist;            /* this header block so far (RFC 9113 6.5.2 accounting) */
 };
 
 /* ── Small helpers ──────────────────────────────────────────────────── */
@@ -87,6 +90,7 @@ static void ng_stream_clear_headers(NgClientStream *st) {
     }
     st->n = 0;
     st->status = 0;
+    st->hlist = 0;
 }
 
 static int ng_stream_add_header(NgClientStream *st,
@@ -150,6 +154,12 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
         return 0;
     }
     if (namelen > 0 && name[0] == ':') return 0;   /* other pseudo-headers */
+    /* Bound what a response makes us hold (the client side of the HPACK bomb): past the field or
+     * header-list limit the stream fails. Responses legitimately carry more fields than requests
+     * (many Set-Cookie), hence twice KL_MAX_HEADERS. */
+    st->hlist += namelen + valuelen + 32;
+    if (st->n >= 2 * KL_MAX_HEADERS || st->hlist > KL_HTTP2_MAX_HEADER_LIST_SIZE)
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     /* A header that cannot be kept fails the stream (RST_STREAM) rather than reporting a response
      * with it silently missing. */
     if (ng_stream_add_header(st, name, namelen, value, valuelen) < 0)
@@ -324,8 +334,14 @@ KlHttp2ClientSession *kl_http2_nghttp2_client_session(KlAllocator *alloc) {
         return NULL;
     }
 
-    /* Queue the client's initial SETTINGS (sent with the preface on first flush). */
-    if (nghttp2_submit_settings(s->ng, NGHTTP2_FLAG_NONE, NULL, 0) != 0) {
+    /* Queue the client's initial SETTINGS (sent with the preface on first flush): no server push
+     * (KEEL never uses a pushed stream, and receiving one only wastes bandwidth), and the header
+     * list it accepts. */
+    nghttp2_settings_entry iv[2] = {
+        { NGHTTP2_SETTINGS_ENABLE_PUSH, 0 },
+        { NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, KL_HTTP2_MAX_HEADER_LIST_SIZE },
+    };
+    if (nghttp2_submit_settings(s->ng, NGHTTP2_FLAG_NONE, iv, 2) != 0) {
         nghttp2_session_del(s->ng);
         kl_free(alloc, s, sizeof(*s));
         return NULL;

@@ -649,6 +649,10 @@ static KlHttp2ServerConn *h2_conn_open(KlHttpConn *c, KlHttpRouter *router,
     h2c->callbacks.on_stream_end = h2_cb_on_stream_end;
     h2c->callbacks.on_stream_reset = h2_cb_on_stream_reset;
     h2c->callbacks.send = h2_cb_send;
+    h2c->callbacks.max_concurrent_streams = (uint32_t)h2c->max_streams;
+    h2c->callbacks.initial_window_size = cfg->initial_window_size > 0
+                                         ? (uint32_t)cfg->initial_window_size : 0;
+    h2c->callbacks.max_header_list_size = KL_HTTP2_MAX_HEADER_LIST_SIZE;
     h2c->out_write = h2_out_conn_write;   /* default output sink; driver may override */
     h2c->out_ctx = h2c;
 
@@ -907,6 +911,14 @@ static int kl_http2_server_want_write_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && c->h2->session->want_write(c->h2->session);
 }
 
+/* Idle: no stream open and no output pending. The sweep times such a connection out on the
+ * connection's own read timeout (an HTTP/2 connection otherwise held its slot forever). */
+static int kl_http2_server_idle_hook(const KlHttpConn *c) {
+    const KlHttp2ServerConn *h2c = c->h2;
+    return h2c && h2c->num_streams == 0 &&
+           !(h2c->session && h2c->session->want_write(h2c->session));
+}
+
 static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .upgrade         = kl_http2_server_upgrade,
     .upgrade_from_h1 = kl_http2_server_upgrade_from_h1,
@@ -915,6 +927,7 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .want_write      = kl_http2_server_want_write_hook,
     .cleanup         = kl_http2_server_cleanup,
     .drain_shutdown  = kl_http2_server_drain_shutdown,
+    .idle            = kl_http2_server_idle_hook,
 };
 
 /* No GCC constructor auto-installing this. kl_http_server_init() calls every installer

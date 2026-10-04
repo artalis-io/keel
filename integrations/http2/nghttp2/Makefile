@@ -60,6 +60,9 @@ test: $(LIB) e2e
 	$(CC) $(CFLAGS) -o tests/test_rst_after_response tests/test_rst_after_response.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
 	./tests/test_rst_after_response
+	$(CC) $(CFLAGS) -o tests/test_h2_limits tests/test_h2_limits.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
+	./tests/test_h2_limits
 
 # End-to-end over a real loopback socket + KEEL event loop: KEEL nghttp2 client
 # (kl_http2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlHttpServerConfig.h2,
@@ -69,6 +72,9 @@ e2e: $(LIB)
 	$(CC) $(CFLAGS) -o tests/e2e_socket tests/e2e_socket.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/e2e_socket
+	$(CC) $(CFLAGS) -o tests/e2e_idle tests/e2e_idle.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./tests/e2e_idle
 	@echo "integrations/http2/nghttp2: e2e (real socket) OK"
 	$(CC) $(CFLAGS) -o tests/test_client_interim tests/test_client_interim.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
@@ -174,7 +180,7 @@ alpn-interop: $(LIB)
 
 clean:
 	rm -f $(LIB) $(OBJ) http2_nghttp2_client.d http2_nghttp2_server.d \
-	      tests/test_roundtrip tests/test_destroy_open_streams tests/test_rst_after_response tests/e2e_socket tests/interop_server tests/client_probe \
+	      tests/test_roundtrip tests/test_destroy_open_streams tests/test_rst_after_response tests/test_h2_limits tests/e2e_socket tests/e2e_idle tests/interop_server tests/client_probe \
 	      tests/alpn_server tests/alpn_client tests/test_client_interim
 	rm -rf tests/*.dSYM
 

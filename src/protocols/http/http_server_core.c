@@ -681,9 +681,20 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
-        /* HTTP/2: PING keepalive is session's responsibility */
-        if (tc->state == KL_HTTP_CONN_HTTP2)
+        /* HTTP/2: streams in progress are the session's business, but a connection with none open
+         * and nothing to send is idle, and is timed out like any other idle connection. */
+        if (tc->state == KL_HTTP_CONN_HTTP2) {
+            const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
+            if (h2h && h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout) {
+                if (completion_loop) {
+                    kl_http_server_conn_release(s, tc);   /* cancels the receive; released by it */
+                } else {
+                    kl_event_del(&s->ev.loop, tc->stream.fd);
+                    kl_http_server_conn_release(s, tc);
+                }
+            }
             continue;
+        }
         /* TLS handshake time counts against read timeout */
         int timed_out = (now - tc->last_active_ms > timeout);
         /* Body deadline: absolute time from body start, not resettable. */

@@ -66,6 +66,7 @@ typedef struct KlHttp2ServerHooks {
     int  (*want_write)(const KlHttpConn *c);              /* readiness: arm WRITE interest? */
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
+    int  (*idle)(const KlHttpConn *c);                    /* no stream open, no output pending */
 } KlHttp2ServerHooks;
 
 const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if http2_server.c absent */

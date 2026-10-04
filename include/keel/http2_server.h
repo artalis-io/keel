@@ -61,6 +61,11 @@ struct KlHttp2ServerCallbacks {
      * the session library is expected to manage its own send queue.)
      */
     kl_ssize_t (*send)(void *ud, const void *data, size_t len);
+    /* Limits the session advertises in its SETTINGS and enforces (appended members; 0 selects the
+     * session's default). KEEL fills them from KlHttp2ServerConfig. */
+    uint32_t max_concurrent_streams;   /**< SETTINGS_MAX_CONCURRENT_STREAMS */
+    uint32_t initial_window_size;      /**< SETTINGS_INITIAL_WINDOW_SIZE (0: protocol default) */
+    uint32_t max_header_list_size;     /**< SETTINGS_MAX_HEADER_LIST_SIZE, and the per-request cap */
 };
 
 /* ── KlHttp2ServerSession: user-provided vtable ───────────────────── */
