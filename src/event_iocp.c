@@ -1375,6 +1375,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             uint64_t expect = (uint64_t)op->file_chunk + (op->file_done == 0 ? op->send_total : 0);
             int short_chunk = (uint64_t)bytes < expect;
             op->file_done += op->file_chunk;
+            op->stream->send_progress += (uint64_t)bytes;   /* a long send that moves is not idle */
             if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post */
             if (short_chunk) bytes = 0;
             if (bytes > 0 && op->file_done < op->file_total) {

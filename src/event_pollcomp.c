@@ -578,6 +578,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 ev->target = op->stream; ev->ok = 0;       /* its length, so fail the write and */
                 return -1;                                 /* let the connection close */
             }
+            op->stream->send_progress += (uint64_t)n;     /* a long send that moves is not idle */
             op->file_off = off;
         }
         ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;

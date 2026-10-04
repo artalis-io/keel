@@ -50,8 +50,10 @@ typedef struct KlHttpResponse {
 
     int stream_error;       /**< Streaming error flag */
     int stream_ended;       /**< 1 = end_stream called, drain flush will close */
-    int stream_inflight;    /**< Unused (kept for layout): a completion loop sends a stream through the
-                                 connection's output queue */
+    int stream_inflight;    /**< Internal (historical name): 1 while the response is the one embedded in
+                                 a pooled server connection, whose output queue a completion loop
+                                 sends a stream through; 0 for any other response (an HTTP/2 stream's,
+                                 a standalone one). Set by the server; do not touch. */
 
     KlDrain drain;          /**< Streaming backpressure buffer */
     int drain_enabled;      /**< 0 = off (default), 1 = on */

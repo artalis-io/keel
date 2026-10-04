@@ -129,7 +129,7 @@ void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
 static void conn_comp_tlsq_reset(KlHttpConn *c) {
     if (c->comp_tlsq) kl_free(c->stream.alloc, c->comp_tlsq, c->comp_tlsq_cap);
     c->comp_tlsq = NULL;
-    c->comp_tlsq_len = c->comp_tlsq_cap = c->comp_tlsq_inflight_len = 0;
+    c->comp_tlsq_len = c->comp_tlsq_cap = c->comp_tlsq_inflight_len = c->comp_tlsq_head = 0;
     c->comp_tlsq_inflight = 0;
     c->comp_tlsq_appended = c->comp_tlsq_sent = c->comp_tlsq_resp_mark = 0;
     c->comp_tlsq_resp_pending = c->comp_tlsq_then_recv = 0;
@@ -393,6 +393,7 @@ static int conn_init_response(KlHttpConn *c) {
     c->res.conn_fd = c->stream.fd;
     c->res.tls = c->tls;
     c->res.ctx = c->stream.ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
+    c->res.stream_inflight = 1;   /* this response is the connection's own (see the field) */
     c->res.keep_alive = c->req.keep_alive;
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
