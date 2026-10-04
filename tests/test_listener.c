@@ -30,6 +30,7 @@ typedef struct {
     int hardfail;              /* arm returns -1 */
     int sync_accept_budget;    /* arm inline-accepts this many times, then goes async */
     int sync_fail_budget;      /* arm inline-fails this many times, then goes async */
+    int retry_budget;          /* arm returns -2 (transient: nothing posted) this many times */
     int arm_fd_base, arm_fd_next, arm_err;
     /* reentrancy */
     int accept_reentrant_close, dispose_reentrant_close;
@@ -61,6 +62,7 @@ static int lt_arm(void *ctx) {
     }
     if (m->arm_reentrant_close) { m->arm_reentrant_close = 0; kl_listener_close(m->l); return 0; }
     if (m->hardfail) return -1;
+    if (m->retry_budget > 0) { m->retry_budget--; return -2; }
     if (m->sync_accept_budget > 0) {
         m->sync_accept_budget--;
         kl_listener_on_accepted(m->l, (KlSocketHandle)(m->arm_fd_base + m->arm_fd_next++));
@@ -360,6 +362,25 @@ UTEST(listener, hard_arm_failure_closes) {
     ASSERT_EQ(m.release_calls, 1);            /* reserved slot returned */
     ASSERT_EQ(m.close_calls, 1);
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
+}
+
+/* A completion accept post can fail for a moment (no memory for the op, a full submission queue, a
+ * connection reset before AcceptEx took it): the hook says so with -2 (KL_LISTENER_ARM_RETRY), and
+ * the listener returns the credit and pauses, to try again when told a slot is free (the server's
+ * sweep tells it every tick). It used to treat every failed post as a broken listen socket and
+ * close: the server kept running and never accepted again. */
+UTEST(listener, transient_arm_failure_pauses_and_retries) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.retry_budget = 1;
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.close_calls, 0);                          /* was: 1, the listener closed */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
+    ASSERT_EQ(m.release_calls, 1);                        /* the post's credit came back */
+    ASSERT_EQ(m.reserved_now, 0);
+    kl_listener_notify_slot_free(&l);                     /* the next tick: post again */
+    ASSERT_EQ(m.arm_calls, 2);
+    ASSERT_EQ(m.reserved_now, 1);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
 }
 
 UTEST(listener, reserve_error_closes) {

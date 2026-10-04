@@ -798,7 +798,10 @@ static void comp_accept_release(void *ctx) {
 }
 static int comp_accept_arm(void *ctx) {
     KlHttpServer *s = ctx;
-    return kl_comp_post_accept(s);                       /* post ONE accept op */
+    /* Post ONE accept op. A backend fails a post only for a moment (no memory for the op, a full
+     * submission queue, a socket or AcceptEx that failed now): never close the listener over it.
+     * It pauses, and the sweep tries again (kl_http_server_sweep_conn_timeouts). */
+    return kl_comp_post_accept(s) < 0 ? KL_LISTENER_ARM_RETRY : 0;
 }
 static void comp_accept_cancel(void *ctx) {
     KlHttpServer *s = ctx;

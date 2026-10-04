@@ -632,6 +632,11 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
                             : timeout;
+    /* Completion: an accept post that failed for a moment left the listener paused with nothing
+     * posted, and no connection may be left to free a slot and resume it. Try again every sweep
+     * (a no-op while accepts are posted, or while the pool is full). */
+    if (completion_loop && s->accept_via_listener)
+        kl_listener_notify_slot_free(&s->accept_listener);
     for (int i = 0; i < s->pool.capacity; i++) {
         KlHttpConn *tc = &s->pool.conns[i];
         /* Completion: a connection closing once its queued TLS output is out stays in the pool

@@ -78,9 +78,15 @@ void kl_slot_lease_release(KlSlotLease *lease);
 
 /* ── Accept hooks ──────────────────────────────────────────────────────────────────────────── */
 
+/** An arm hook's "nothing posted, try again later" (a transient failure: no memory for the op, a
+ *  full submission queue). The listener returns the post's credit and, with nothing else posted,
+ *  PAUSEs until kl_listener_notify_slot_free; it does not close. */
+#define KL_LISTENER_ARM_RETRY (-2)
+
 /** Arm/post ONE accept. Readiness: (re)assert the single persistent listen interest. Completion:
- *  post one discrete accept op. May complete inline. Returns 0 (posted / inline-decided), -1 on a
- *  hard failure that closes the listener.
+ *  post one discrete accept op. May complete inline. Returns 0 (posted / inline-decided),
+ *  KL_LISTENER_ARM_RETRY when nothing could be posted for now, or -1 on a hard failure that closes
+ *  the listener.
  *
  *  SYNCHRONOUS-COMPLETION ASSOCIATION (required for window > 1): if this hook completes inline, the
  *  inline kl_listener_on_accepted / on_accept_failed MUST retire the accept THIS call is posting,
