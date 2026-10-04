@@ -300,6 +300,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion server: a failed accept post could crash the server.** When the next accept could not
+  be posted, the listener returned its credit through the pool's release hook. The HTTP server's
+  release hook announces the free slot, and that re-entered the listener while it was still
+  listening: it posted again, failed again, and recursed until the stack overflowed. This happened
+  on a server whose accept posts kept failing, for example one out of descriptors. Returning a failed
+  post's credit no longer re-enters the listener; it posts again on the next sweep.
 - **Completion server: a failed accept post no longer stops all accepts.** On a completion loop
   (IOCP, io_uring, pollcomp), posting the next accept can fail for a moment: no memory for the op,
   a full submission queue, a `WSASocketW` or AcceptEx call that fails, for example because a queued

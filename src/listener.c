@@ -149,7 +149,14 @@ static void l_pump(KlListener *l) {
                 continue;
             if (rc < 0) {                     /* post failure: never became a real accept */
                 l->inflight = before;
-                l_release_credit(l);          /* return this post's credit */
+                /* Return this post's credit. The pool's release hook may announce the free slot
+                 * (kl_listener_notify_slot_free): that is the credit this failure just gave back,
+                 * not a reason to post again from inside this pump, which would fail the same way
+                 * and recurse. Hold the pump flag across it and drop the request it makes. */
+                l->pumping = 1;
+                l_release_credit(l);
+                l->pumping = 0;
+                l->pump_pending = 0;
                 l->last_error = rc;
                 if (rc == KL_LISTENER_ARM_RETRY) {
                     /* Transient: hold what is posted. With nothing posted, pause until told a slot
