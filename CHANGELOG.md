@@ -61,6 +61,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   stream. mbedTLS reported a bare TCP close as a clean TLS shutdown, so a truncated close-delimited
   response was accepted as complete. The OpenSSL mTLS server rejected resumed sessions. All four are
   fixed, and both adapters' end-to-end suites now run in CI.
+- **The blocking HTTP client could wait forever on a server that stopped answering.** The sync client
+  (`kl_http_client_request[_s]`, `kl_http_client_request_pooled`) put the socket back into blocking
+  mode after connecting and then ran the TLS handshake, TLS reads and sends on it, so `timeout_ms`
+  bounded only the waits between those calls. A server that accepted and never sent a ServerHello,
+  sent part of a TLS record, or stopped reading a large upload blocked the caller with no limit. The
+  socket now stays non-blocking for the whole request, and every step (connect, handshake, send,
+  receive) waits only for the time left before the request deadline; running out of it fails the
+  request with `KL_ERR_TIMEOUT`.
 - **A TLS connection on a completion loop could be released twice, corrupting the connection
   pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
   completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that
@@ -393,6 +401,43 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   streamed compressed response of roughly 15 KiB of text or more could not be decoded. It now drains
   the deflater until the stream is done. Also, the decompressor no longer accepts bytes after the gzip
   trailer (trailing garbage, or a second member it does not read) as part of a verified body.
+- **The sync client's `timeout_ms` restarted with every read.** It was a per-wait timeout, so interim
+  1xx responses or a server trickling its response a byte at a time held the call open for as long
+  as the server kept it up. `timeout_ms` is now one deadline over the whole request, measured from
+  the call, as it already was for the async client. **Behavior change:** a sync download that keeps
+  moving but takes longer than `timeout_ms` in total now fails with `KL_ERR_TIMEOUT`; raise
+  `timeout_ms` for long transfers.
+- **The HTTP client tried only the first address a name resolved to.** The sync client always, and
+  the async client with `system_dns` (and on freestanding builds without a resolver), connected to
+  the first address alone, so a host whose first address refused or did not answer (often `::1` for
+  `localhost`, or a broken IPv6 route) failed with `KL_ERR_CONNECT` though another address would
+  have worked. The sync client now tries each address in turn, giving each an equal share of the
+  time left; the async client races the list with Happy Eyeballs, as it does for a resolver's.
+- **A custom resolver's socket type became the HTTP connection's.** The async client opened its
+  connection with the `ai_socktype` / `ai_protocol` from the resolver's result, so a resolver that
+  reported a datagram type got a UDP socket and a request that never completed. The connection is
+  now always TCP.
+- **The redirect API checked its arguments less than the client does.** `kl_http_redirect_request`
+  and `_pooled` accepted a negative header count or a NULL header array (and walked it), silently
+  dropped headers past `KL_HTTP_CLIENT_MAX_REQ_HEADERS`, and returned -1 for a bad allocator, URL,
+  method or pool without touching `*resp`, so its `error` was whatever the caller left there. The
+  header arguments are now checked as the client checks them, and every refusal leaves `*resp` zeroed
+  with `error` set (`KL_ERR_INVALID_ARG`, or `KL_ERR_URL` for a URL too long). `kl_http_redirect_start`
+  and `_start_pooled` return NULL for the same bad header arguments.
+- **URL parsing let a `?`, `#`, space or control byte through.** `kl_url_parse` ended the authority
+  only at `:` or `/`, so in `http://host?q` or `http://host#f` the query or fragment became part of
+  the host name; a fragment went out in the request target; a space, tab or other control byte in
+  the path reached the request line (only CR and LF were refused); and `HTTP://` was an unsupported
+  scheme. The authority now ends at `/`, `?` or `#`; the path stops at the fragment; a space or
+  control byte in the host or path is refused; and schemes match in any case (also in
+  `kl_url_resolve`). A query with no path before it (`http://host?q`) is refused, since its target
+  `/?q` is not a span of the caller's string. Relative references (`../x`) are still not resolved.
+- **The proxy CONNECT reply was checked by three digits.** Any reply whose bytes 9 to 11 were `200`
+  after `HTTP/1.` opened the tunnel, so `HTTP/1.1 2000` or `HTTP/1.1X200` passed, and a `2xx` other
+  than 200 failed. The reply now needs a whole status line (`HTTP/1.` digit, space, three-digit code,
+  then a space or the end of the line), and any 2xx opens the tunnel (RFC 9110 9.3.6).
+- **`kl_http_client_pool_free` left the pool's `capacity` over a freed table.** A later call on the
+  freed pool walked `capacity` slots of a NULL table. `capacity` is now 0 after a free.
 - **Completion loops: a finished rejection drain held its slot, and a graceful stop could cut queued
   TLS output.** A rejected client that sent the rest of its declared body and kept the connection
   open held its slot until the drain deadline on io_uring, IOCP and pollcomp; the drain now ends once

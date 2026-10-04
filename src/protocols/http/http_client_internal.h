@@ -103,7 +103,7 @@ struct KlHttpClient {
     KlTlsConfig       *tls_cfg;
     char               host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
 
-    /* Async DNS resolver (NULL = sync sync name resolution was used) */
+    /* Async DNS resolver (NULL = blocking name resolution was used; conn_addrs holds its list) */
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
@@ -118,11 +118,11 @@ struct KlHttpClient {
                                               * returns NULL with no user callback (see cli_co_on_done) */
 
     /* Happy Eyeballs: racing connect over the resolved address list (RFC 8305), driven by the
-     * KlConnectOp state machine (6C). Only active on the async resolver path (conn_racing=1); the
-     * UNIX and sync-name-resolution paths stay single-fd. The client owns the idx->fd map
-     * (conn_attempts) + the idx->addr map (conn_addrs); KlConnectOp owns the cursor / pending /
-     * per-attempt-active / terminal-once / detachment state (its old conn_next/conn_pending/
-     * conn_last_err duplicates are gone). The overall request deadline stays CLIENT-owned (it must
+     * KlConnectOp state machine (6C). Active on every TCP path (conn_racing=1), whether the list
+     * came from a resolver or from blocking name resolution; only the UNIX path stays single-fd.
+     * The client owns the idx->fd map (conn_attempts) + the idx->addr map (conn_addrs); KlConnectOp
+     * owns the cursor / pending / per-attempt-active / terminal-once / detachment state, and the
+     * error of an all-fail. The overall request deadline stays CLIENT-owned (it must
      * outlive the connect terminal to bound TLS/send/recv), so it is NOT a KlConnectOp timer. */
     KlConnectOp        connect_op;      /* outbound-connect state machine (async HE path) */
     KlHttpClientConnectAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];  /* idx -> racing fd */
@@ -134,7 +134,6 @@ struct KlHttpClient {
     int                done_deferred;   /* the deferred completion is running: do not defer again */
     int                timeout_ms;      /* overall deadline (0 = none) */
     int                connect_delay_ms;/* Connection Attempt Delay */
-    KlError            conn_last_err;   /* last connect error, for the all-fail case */
 
     /* Completion callback */
     KlHttpClientDoneFn     on_done;

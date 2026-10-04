@@ -134,6 +134,21 @@ static int should_drop_header(const char *name, int body_dropped, int cross_orig
     return 0;
 }
 
+/* The request headers as the client checks them (a count in [0, KL_HTTP_CLIENT_MAX_REQ_HEADERS],
+ * an array whenever the count is not zero), plus a name and value in every entry. Checked up front
+ * so a redirect never drops headers past the limit or walks a missing array. */
+static int redirect_headers_valid(const KlHttpClientHeader *headers, int num_headers)
+{
+    if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
+        return 0;
+    if (num_headers > 0 && !headers)
+        return 0;
+    for (int i = 0; i < num_headers; i++)
+        if (!headers[i].name || !headers[i].value)
+            return 0;
+    return 1;
+}
+
 /* ── Sync implementation ─────────────────────────────────────────── */
 
 static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
@@ -144,8 +159,15 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
                            const char *body, size_t body_len,
                            KlHttpClientResponse *resp)
 {
-    if (!kl_allocator_ops_valid(alloc) || !method || !url || !resp)
+    if (!resp)
         return -1;
+    /* Every refusal below leaves *resp zeroed with its error set, as the plain client's do. */
+    memset(resp, 0, sizeof(*resp));
+    if (!kl_allocator_ops_valid(alloc) || !method || !url ||
+        !redirect_headers_valid(headers, num_headers)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
 
     int max_redir = (redir && redir->max_redirects > 0)
                         ? redir->max_redirects
@@ -155,13 +177,17 @@ static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
     char cur_method[16];
 
     size_t url_len = strlen(url);
-    if (url_len >= sizeof(cur_url))
+    if (url_len >= sizeof(cur_url)) {
+        resp->error = KL_ERR_URL;
         return -1;
+    }
     memcpy(cur_url, url, url_len + 1);
 
     size_t mlen = strlen(method);
-    if (mlen >= sizeof(cur_method))
+    if (mlen >= sizeof(cur_method)) {
+        resp->error = KL_ERR_INVALID_ARG;
         return -1;
+    }
     memcpy(cur_method, method, mlen + 1);
 
     const char *cur_body = body;
@@ -286,8 +312,13 @@ int kl_http_redirect_request_pooled(KlHttpClientPool *pool,
                                const char *body, size_t body_len,
                                KlHttpClientResponse *resp)
 {
-    if (!pool)
+    if (!pool) {
+        if (resp) {   /* zeroed with its error set, as every other refusal leaves it */
+            memset(resp, 0, sizeof(*resp));
+            resp->error = KL_ERR_INVALID_ARG;
+        }
         return -1;
+    }
     return do_sync_request(pool, alloc, cfg, redir, method, url,
                            headers, num_headers, body, body_len, resp);
 }
@@ -577,7 +608,8 @@ KlHttpRedirectClient *kl_http_redirect_start(KlEventCtx *ev_ctx, KlAllocator *al
                                     const char *body, size_t body_len,
                                     KlHttpRedirectDoneFn on_done, void *user_data)
 {
-    if (!ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url)
+    if (!ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url ||
+        !redirect_headers_valid(headers, num_headers))
         return NULL;
 
     KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, NULL, redir,
@@ -603,7 +635,8 @@ KlHttpRedirectClient *kl_http_redirect_start_pooled(KlHttpClientPool *pool,
                                            const char *body, size_t body_len,
                                            KlHttpRedirectDoneFn on_done, void *user_data)
 {
-    if (!pool || !ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url)
+    if (!pool || !ev_ctx || !kl_allocator_ops_valid(alloc) || !method || !url ||
+        !redirect_headers_valid(headers, num_headers))
         return NULL;
 
     KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, pool, redir,

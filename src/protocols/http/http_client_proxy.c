@@ -50,11 +50,16 @@ int kl_proxy_connect_status(const char *buf, size_t len) {
      * a well-formed HTTP header block, so this is safe + len-bounded in practice. */
     if (!kl_strstr(buf, "\r\n\r\n"))
         return 0;
-    /* Headers complete; verify the status line is HTTP/1.x 200. len>=12 guarantees the
-     * fixed-offset reads below are in bounds. */
-    if (len < 12 ||
+    /* Headers complete; the reply must open with a whole status line (RFC 9112 4):
+     * "HTTP/1." DIGIT SP 3DIGIT, then SP (before a reason phrase) or the CR that ends the line.
+     * Any 2xx establishes the tunnel (RFC 9110 9.3.6). len>=13 guarantees the fixed-offset reads
+     * below are in bounds. */
+    if (len < 13 ||
         memcmp(buf, "HTTP/1.", 7) != 0 ||
-        buf[9] != '2' || buf[10] != '0' || buf[11] != '0')
+        buf[7] < '0' || buf[7] > '9' || buf[8] != ' ' ||
+        buf[9] != '2' ||
+        buf[10] < '0' || buf[10] > '9' || buf[11] < '0' || buf[11] > '9' ||
+        (buf[12] != ' ' && buf[12] != '\r'))
         return -1;
     return 1;
 }
