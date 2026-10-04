@@ -147,10 +147,20 @@ static void l_pump(KlListener *l) {
 
             if (l->inflight == before)        /* sync-completed this post: try to post more */
                 continue;
-            if (rc < 0) {                     /* hard post failure: never became a real accept */
+            if (rc < 0) {                     /* post failure: never became a real accept */
                 l->inflight = before;
                 l_release_credit(l);          /* return this post's credit */
                 l->last_error = rc;
+                if (rc == KL_LISTENER_ARM_RETRY) {
+                    /* Transient: hold what is posted. With nothing posted, pause until told a slot
+                     * is free (the adapter's next chance to post), exactly as for no credit. */
+                    if (l->inflight == 0 && l->state == KL_LISTENER_STATE_LISTENING) {
+                        l->state = KL_LISTENER_STATE_PAUSED;
+                        if (!l->completion_mode && l->disarm_accept)
+                            l->disarm_accept(l->ctx);
+                    }
+                    break;
+                }
                 l_begin_close(l);             /* listen fd broken → close */
                 break;
             }

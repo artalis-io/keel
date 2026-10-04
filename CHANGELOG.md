@@ -288,6 +288,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion server: a failed accept post no longer stops all accepts.** On a completion loop
+  (IOCP, io_uring, pollcomp), posting the next accept can fail for a moment: no memory for the op,
+  a full submission queue, a `WSASocketW` or AcceptEx call that fails, for example because a queued
+  connection was reset before AcceptEx took it. The listener treated any such failure as a broken
+  listen socket and closed. The server kept running and never accepted another connection. An arm
+  hook can now report a transient failure (`KL_LISTENER_ARM_RETRY`). The listener then returns the
+  credit and pauses, and the server's sweep posts again on its next tick.
 - **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
   streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
   of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any
