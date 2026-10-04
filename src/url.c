@@ -177,13 +177,34 @@ int kl_url_parse(const char *url, KlUrl *out)
         return url_path(url, out);
     }
 
-    /* Host (may include :port) */
+    /* Host (may include :port). The authority ends at the first '/', '?' or '#'. Userinfo
+     * (user[:password]@) is not supported in a request URL, so an '@' in it is an error rather
+     * than part of the host. */
     out->host = url;
+    const char *auth_end = url;
+    while (*auth_end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') {
+        if (*auth_end == '@')
+            return -1;
+        auth_end++;
+    }
 
-    /* Handle IPv6 addresses in brackets: [::1]:8080 */
+    /* Handle IPv6 addresses in brackets: [::1]:8080. The closing bracket must be inside the
+     * authority, and only an address may sit between the brackets: hex digits, ':' and '.', then
+     * an optional zone after '%' (unreserved characters or percent-encoding). */
     if (*url == '[') {
-        const char *bracket = kl_strchr(url, ']');
-        if (!bracket)
+        const char *bracket = url + 1;
+        int zone = 0;
+        while (bracket < auth_end && *bracket != ']') {
+            unsigned char c = (unsigned char)*bracket;
+            if (c == '%')
+                zone = 1;
+            else if (!(hex_val((char)c) >= 0 || c == ':' || c == '.' ||
+                       (zone && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                 c == '-' || c == '_' || c == '~'))))
+                return -1;
+            bracket++;
+        }
+        if (bracket >= auth_end)
             return -1;
         out->host = url + 1;
         out->host_len = (size_t)(bracket - url - 1);
@@ -282,9 +303,9 @@ int kl_url_resolve(const char *base_url, const char *location,
             return -1;
         auth += 3; /* past "://" */
 
-        /* Find end of authority (host[:port]): first / or end */
+        /* Find end of authority (host[:port]): the first '/', '?' or '#', or the end */
         const char *auth_end = auth;
-        while (*auth_end && *auth_end != '/')
+        while (*auth_end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#')
             auth_end++;
         size_t origin_len = (size_t)(auth_end - base_url);
 

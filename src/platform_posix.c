@@ -107,5 +107,8 @@ int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
     pfd.events = (short)(((events & KL_POLL_IN) ? POLLIN : 0) |
                          ((events & KL_POLL_OUT) ? POLLOUT : 0));
     pfd.revents = 0;
-    return poll(&pfd, 1, timeout_ms);
+    int r = poll(&pfd, 1, timeout_ms);
+    if (r < 0 && errno == EINTR)
+        return 0;   /* a signal cut the wait short (no SA_RESTART restarts poll): not ready yet */
+    return r;
 }

@@ -28,6 +28,12 @@
  *   tls->destroy(tls);
  *   kl_tls_mbedtls_ctx_destroy(ctx);
  *
+ * Write retries: when write() returns 0 (would block), retry with the same data from
+ * the same position and at least the length just attempted. More data may follow it
+ * (KlDrain appends behind a stalled write); only the attempted length is taken. A
+ * shorter retry fails the write (-1): the record already built holds the longer
+ * length and cannot be cut down.
+ *
  * SPDX-License-Identifier: MIT
  */
 
