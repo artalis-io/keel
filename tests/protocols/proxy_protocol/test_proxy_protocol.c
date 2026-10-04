@@ -133,6 +133,22 @@ UTEST(proxy_v1, port_must_be_plain_decimal) {
     ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 443 extra\r\n"));
 }
 
+/* The v1 header is exactly six fields separated by single spaces. Splitting on runs of spaces
+ * accepted doubled and trailing separators, and a NUL inside the line ended the parse early, so
+ * whatever followed it up to the CRLF was consumed unchecked. A port has no leading zero. */
+UTEST(proxy_v1, single_spaces_no_nul_no_leading_zero) {
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4  1.2.3.4 5.6.7.8 80 443\r\n"));   /* was: OK */
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 443 \r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY  TCP4 1.2.3.4 5.6.7.8 80 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 080 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 00443\r\n"));
+    ASSERT_EQ(KL_PROXY_OK,      v1("PROXY TCP4 1.2.3.4 5.6.7.8 0 443\r\n"));
+    static const char nul[] = "PROXY TCP4 1.2.3.4 5.6.7.8 80 443\0junk\r\n";
+    KlSockAddr peer; size_t consumed = 0;
+    ASSERT_EQ(KL_PROXY_INVALID,
+              kl_proxy_parse((const uint8_t *)nul, sizeof nul - 1, &consumed, &peer));
+}
+
 /* ── PROXY v2 ────────────────────────────────────────────────────────── */
 
 static size_t build_v2_inet(uint8_t *out, uint8_t cmd, const char *src_ip,
