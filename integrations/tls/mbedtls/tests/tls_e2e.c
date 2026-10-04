@@ -19,7 +19,7 @@
  *
  * This mirrors the OpenSSL suite (integrations/tls/openssl/tests/tls_e2e.c) in
  * structure and style, adapted to the mbedTLS adapter's PUBLIC API surface.
- * The mbedTLS adapter has NO client-cert setter, NO insecure ctor and NO
+ * The mbedTLS adapter has NO client-cert setter and NO
  * truncation toggle, so those OpenSSL scenarios are intentionally absent; see
  * the notes printed by main() and the comments at each omission.
  *
@@ -495,6 +495,16 @@ static void test_null_ca_fails_closed(KlAllocator *alloc)
         return;
     }
     printf("  PASS: a NULL CA path is refused\n");
+
+    /* The explicit opt-in still makes a working, unverified client. */
+    KlTlsCtx *ictx = kl_tls_mbedtls_client_ctx_create_insecure(alloc);
+    if (!ictx) {
+        printf("  FAIL: the insecure constructor made no context\n");
+        g_null_ca_fail = 1;
+        return;
+    }
+    kl_tls_mbedtls_ctx_destroy(ictx);
+    printf("  PASS: kl_tls_mbedtls_client_ctx_create_insecure makes a context\n");
 }
 
 /* mTLS REQUIRED but client presents no cert → handshake fails.
@@ -953,10 +963,9 @@ int main(void) {
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
      *   - client-cert mTLS SUCCESS: no client-cert setter on the adapter.
-     *   - insecure (verify-none) client ctx: no insecure ctor.
      *   - strict/lenient truncation toggle: no allow_truncation setter.
      *   - TLS 1.1 version-floor rejection: mbedTLS 3.x speaks only TLS 1.2/1.3. */
-    printf("\nNOTE: mTLS-success / insecure-ctx / truncation-toggle / TLS1.1-floor\n"
+    printf("\nNOTE: mTLS-success / truncation-toggle / TLS1.1-floor\n"
            "      omitted, not expressible via the mbedTLS adapter's public API.\n");
 
     mbedtls_pk_free(&ca_key);

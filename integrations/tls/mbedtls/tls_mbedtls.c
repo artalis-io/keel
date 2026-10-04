@@ -869,9 +869,8 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
         mbedtls_ssl_conf_ca_chain(&ctx->conf, &ctx->ca_cert, NULL);
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else {
-        /* WARNING: No CA provided; TLS certificate verification DISABLED.
-         * Connections are encrypted but vulnerable to MITM attacks.
-         * Production deployments MUST provide a CA bundle. */
+        /* Reached only through kl_tls_mbedtls_client_ctx_create_insecure: certificate
+         * verification DISABLED by request. Encrypted but open to impersonation. */
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
     }
 
@@ -891,12 +890,11 @@ fail:
 KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
                                               KlAllocator *alloc)
 {
-    if (!alloc)
+    /* No CA path is refused, never a client that verifies nothing: mbedTLS has no system trust
+     * store to fall back on (the OpenSSL adapter verifies against one), and an unauthenticated
+     * client must be asked for by name (kl_tls_mbedtls_client_ctx_create_insecure). */
+    if (!alloc || !ca_path)
         return NULL;
-
-    /* No CA path → no-verify client */
-    if (!ca_path)
-        return client_ctx_create_from_mem(NULL, 0, alloc);
 
     size_t ca_len;
     unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
@@ -906,6 +904,13 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
     KlTlsCtx *ctx = client_ctx_create_from_mem(ca_buf, ca_len, alloc);
     kl_free(alloc, ca_buf, ca_len);
     return ctx;
+}
+
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create_insecure(KlAllocator *alloc)
+{
+    if (!alloc)
+        return NULL;
+    return client_ctx_create_from_mem(NULL, 0, alloc);   /* no CA: MBEDTLS_SSL_VERIFY_NONE */
 }
 
 KlTlsCtx *kl_tls_mbedtls_client_ctx_create_from_buf(const unsigned char *ca_buf,

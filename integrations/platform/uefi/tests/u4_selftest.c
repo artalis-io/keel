@@ -22,7 +22,7 @@
  *   GO            (done && status == 200)   |   NO-GO-YET
  *
  * *** SPIKE SHORTCUTS (loud, deliberate, NOT production-safe): ***
- *   1. VERIFY-NONE: NULL CA => MBEDTLS_SSL_VERIFY_NONE. The self-signed test
+ *   1. VERIFY-NONE: kl_tls_mbedtls_client_ctx_create_insecure. The self-signed test
  *      server's certificate is NOT validated. This proves the TLS TRANSPORT, not
  *      trust. A real client MUST pass a CA bundle.
  *   2. NO CERT-TIME CHECK: the freestanding mbedTLS config has HAVE_TIME off, so
@@ -260,12 +260,9 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto park;
     }
 #else
-    /* Verify-none client TLS context. NOTE: the *_from_buf(NULL,0) entry point REJECTS
-     * a NULL buffer (it requires an in-memory CA bundle); the verify-none path is the
-     * FILE-path variant with a NULL path: kl_tls_mbedtls_client_ctx_create(NULL,...)
-     * short-circuits to client_ctx_create_from_mem(NULL,0,alloc) => MBEDTLS_SSL_VERIFY_NONE
-     * WITHOUT touching the filesystem (fopen is a fail-closed stub here anyway). */
-    KlTlsCtx *tctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+    /* Verify-none client TLS context, asked for by name (a NULL CA path is refused): no CA,
+     * MBEDTLS_SSL_VERIFY_NONE, and no filesystem access (fopen is a fail-closed stub here). */
+    KlTlsCtx *tctx = kl_tls_mbedtls_client_ctx_create_insecure(&alloc);
     if (!tctx) {
         print_line("U-4: TLS client ctx create failed (entropy seed / config)");
         kl_event_ctx_free(&ev);

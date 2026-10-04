@@ -7,6 +7,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **mbedTLS: a client context with no CA bundle no longer skips certificate verification
+  (behavior change).** `kl_tls_mbedtls_client_ctx_create(NULL, alloc)` built a client that accepted
+  any certificate, where the OpenSSL adapter's NULL means the system trust store. A caller that
+  forgot the CA path got a silently unauthenticated client, open to impersonation. mbedTLS has no
+  system store to fall back on, so a NULL path now returns NULL. A client that verifies nothing (for
+  tests against self-signed loopback servers, the equivalent of `curl -k`) must be asked for by name:
+  `kl_tls_mbedtls_client_ctx_create_insecure(alloc)`. Every in-tree caller that relied on NULL
+  (examples/tls_client.c, the nghttp2, lwIP and UEFI tests, the smoke tests) now uses it, and the
+  example verifies against a CA bundle when one is given.
 - **A 32-bit build truncated a large Content-Length, so a request body could be read as the next
   request.** The HTTP/1 parser counts Content-Length in 64 bits and stored it in the request's
   `size_t` field: on a 32-bit build `Content-Length: 4294967296` read as 0, so the server took the
