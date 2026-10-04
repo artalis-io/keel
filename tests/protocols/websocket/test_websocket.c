@@ -954,6 +954,188 @@ UTEST(auto_ping, not_before_deadline) {
     ASSERT_EQ(kl_ws_server_auto_ping(&conn, 500), 0);
 }
 
+/* Read from fd until `want` bytes arrived or nothing more comes within 200 ms. */
+static size_t read_upto(int fd, uint8_t *buf, size_t cap, size_t want) {
+    size_t got = 0;
+    while (got < want && got < cap && kl_test_poll1(fd, 0, 200) > 0) {
+        long n = kl_test_sockread(fd, buf + got, cap - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    return got;
+}
+
+/* A peer that sends nothing for a whole ping interval after a ping is gone (a dead peer behind a
+ * NAT never answers, and never resets the connection): the connection fails with Close 1001 and is
+ * due for closing at once. It used to be pinged forever, holding its slot. */
+UTEST(auto_ping, unanswered_ping_fails_the_connection) {
+    int fds[2];
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->next_ping_ms = 1000;
+    kl_ws_frame_init(&ws->frame);
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = fds[0];
+    conn.stream.alloc = &alloc;
+    conn.ws = ws;
+    ws->conn = &conn;
+
+    int pinged    = kl_ws_server_auto_ping(&conn, 1000);   /* the ping */
+    int early     = kl_ws_server_auto_ping(&conn, 1050);   /* inside the interval: nothing */
+    int open_mid  = !ws->close_sent;
+    (void)kl_ws_server_auto_ping(&conn, 1100);             /* a whole interval, nothing received */
+    int closing   = ws->close_sent;
+    int due       = kl_ws_server_check_close_timeout(&conn, 1100);
+
+    uint8_t buf[64];
+    size_t got = read_upto(fds[1], buf, sizeof buf, 6);    /* PING (2) + CLOSE 1001 (4) */
+
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+
+    ASSERT_EQ(pinged, 1);
+    ASSERT_EQ(early, 0);
+    ASSERT_EQ(open_mid, 1);
+    ASSERT_EQ(closing, 1);                 /* was 0: a second ping, and the slot held forever */
+    ASSERT_EQ(due, 1);
+    ASSERT_EQ(got, (size_t)6);
+    ASSERT_EQ(buf[0], 0x89);               /* PING */
+    ASSERT_EQ(buf[2], 0x88);               /* CLOSE */
+    ASSERT_EQ(buf[3], 0x02);
+    ASSERT_EQ((((unsigned)buf[4] << 8) | buf[5]), 1001u);
+}
+
+/* Any frame from the peer after a ping (a PONG here) shows it is alive: the next ping goes out as
+ * usual and the connection stays open. */
+UTEST(auto_ping, a_frame_after_the_ping_keeps_the_connection) {
+    int fds[2];
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->next_ping_ms = 1000;
+    kl_ws_frame_init(&ws->frame);
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = fds[0];
+    conn.stream.alloc = &alloc;
+    conn.ws = ws;
+    ws->conn = &conn;
+
+    static const uint8_t mask[4] = {0x11, 0x22, 0x33, 0x44};
+    uint8_t pong[16];
+    int r1 = kl_ws_server_auto_ping(&conn, 1000);
+    size_t fl = build_frame(pong, 1, 0xA, 1, mask, NULL, 0);
+    int st = kl_ws_server_on_readable_data(&conn, pong, fl);
+    int r2 = kl_ws_server_auto_ping(&conn, 1100);          /* answered: the next ping */
+    int open_after = !ws->close_sent;
+
+    uint8_t buf[16];
+    size_t got = read_upto(fds[1], buf, sizeof buf, 4);    /* two PINGs */
+
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+
+    ASSERT_EQ(r1, 1);
+    ASSERT_EQ(st, KL_HTTP_CONN_WEBSOCKET);
+    ASSERT_EQ(r2, 1);
+    ASSERT_EQ(open_after, 1);
+    ASSERT_EQ(got, (size_t)4);
+    ASSERT_EQ(buf[0], 0x89);
+    ASSERT_EQ(buf[2], 0x89);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Auto-pong under backpressure
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static int     g_wb_block;
+static uint8_t g_wb_cap[4096];
+static size_t  g_wb_len;
+static kl_ssize_t blockable_writer(const char *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (g_wb_block) return 0;                              /* would block */
+    size_t room = sizeof g_wb_cap - g_wb_len;
+    memcpy(g_wb_cap + g_wb_len, data, len < room ? len : room);
+    g_wb_len += len < room ? len : room;
+    return (kl_ssize_t)len;
+}
+
+/* A client that sends pings and never reads: with an unlimited drain, each ping queued another
+ * PONG behind the ones the socket would not take, so the server buffered without bound. While its
+ * output is backed up only the latest ping is answered (RFC 6455 5.5.3), once the output drains. */
+UTEST(auto_pong, pings_while_output_is_backed_up_queue_one_pong) {
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    kl_ws_frame_init(&ws->frame);
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = -1;
+    conn.stream.alloc = &alloc;
+    conn.ws = ws;
+    ws->conn = &conn;
+    kl_drain_init(&ws->drain, blockable_writer, NULL, &alloc);   /* max_size 0: unlimited */
+    ws->drain_enabled = 1;
+
+    g_wb_block = 1;
+    g_wb_len = 0;
+    static const uint8_t mask[4] = {0xA1, 0xB2, 0xC3, 0xD4};
+    int all_open = 1;
+    for (int i = 0; i < 1000; i++) {
+        uint8_t payload[100];
+        memset(payload, 'p', sizeof payload);
+        payload[0] = (uint8_t)(i >> 8);
+        payload[1] = (uint8_t)i;
+        uint8_t frame[128];
+        size_t fl = build_frame(frame, 1, 0x9, 1, mask, payload, sizeof payload);
+        if (kl_ws_server_on_readable_data(&conn, frame, fl) != KL_HTTP_CONN_WEBSOCKET) all_open = 0;
+    }
+    size_t buffered = ws->drain.buf_len;
+
+    g_wb_block = 0;                                        /* the client reads again */
+    int st = kl_ws_server_on_writable(&conn);
+    int pending = kl_ws_server_drain_pending(&conn);
+    size_t out = g_wb_len;
+
+    kl_drain_free(&ws->drain);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+
+    ASSERT_EQ(all_open, 1);
+    ASSERT_LE(buffered, (size_t)(2 + 125));                /* was 102000: a PONG per ping */
+    ASSERT_EQ(st, KL_HTTP_CONN_WEBSOCKET);
+    ASSERT_EQ(pending, 0);
+    ASSERT_EQ(out, (size_t)(2 * 102));                     /* the first PONG, then the latest */
+    ASSERT_EQ(g_wb_cap[0], 0x8A);
+    ASSERT_EQ(g_wb_cap[2], 0);
+    ASSERT_EQ(g_wb_cap[3], 0);                             /* answers ping 0 */
+    ASSERT_EQ(g_wb_cap[102], 0x8A);
+    ASSERT_EQ(g_wb_cap[103], 100);
+    ASSERT_EQ((((unsigned)g_wb_cap[104] << 8) | g_wb_cap[105]), 999u);   /* answers the latest */
+}
+
 UTEST(cleanup, rejects_unmasked_client_frame) {
     /* RFC 6455 §5.1: server MUST close on unmasked client frame */
     KlAllocator alloc = kl_allocator_default();
