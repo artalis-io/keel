@@ -816,4 +816,59 @@ UTEST(reject_drain, reader_rejection_in_the_leftover_answers_413) {
     ASSERT_TRUE(strstr(buf, "413") != NULL);
 }
 
+/* A drain whose framing is complete ends when the client has nothing more queued, not at the deadline.
+ * A rejected client that sent its whole declared body and then left the connection open was closed at
+ * the next sweep on readiness, but held its slot until the drain deadline on a completion loop (only the
+ * sweep's read applied that rule, and the sweep no longer reads a completion socket). With one slot and a
+ * 5 s deadline, a second client must be served well before that. */
+static KlHttpServer fr_srv;
+static void fr_thread(void *a) { (void)a; kl_http_server_run(&fr_srv); }
+
+UTEST(reject_drain, a_drain_with_its_framing_complete_frees_the_slot) {
+    rd_stop();
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 1,
+                               .reject_drain_max_bytes = 1024 * 1024,
+                               .reject_drain_timeout_ms = 5000 };
+    ASSERT_EQ(0, kl_http_server_init(&fr_srv, &cfg));
+    kl_http_server_route(&fr_srv, "POST", "/small", rd_echo,
+                         (void *)(size_t)1024, kl_http_body_reader_buffer);   /* a 1 KiB reader */
+    kl_http_server_route(&fr_srv, "POST", "/echo", rd_echo,
+                         (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    ASSERT_EQ(0, kl_plat_thread_create(&tid, fr_thread, NULL));
+    for (int i = 0; i < 400 && fr_srv.bound_port == 0; i++) kl_test_sleep_ms(5);
+    rd_port = fr_srv.bound_port;
+
+    int fd = rd_connect();
+    if (fd >= 0) {
+        const char *hdr = "POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 4096\r\n"
+                          "Connection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
+        char body[4096];
+        memset(body, 'B', sizeof body);
+        (void)kl_test_sockwrite(fd, body, 2048);             /* over the 1 KiB reader: 413, drain */
+        kl_test_sleep_ms(200);
+        (void)kl_test_sockwrite(fd, body + 2048, 2048);      /* the rest: the framing is complete */
+        /* ...and the connection left open */
+    }
+    kl_test_sleep_ms(1500);                                  /* past a sweep or two */
+
+    char buf[4096];
+    buf[0] = '\0';
+    int b = rd_connect();
+    if (b >= 0) {
+        kl_test_set_rcvtimeo(b, 2000);
+        const char *rq = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n"
+                         "Connection: close\r\n\r\nhi";
+        (void)kl_test_sockwrite(b, rq, strlen(rq));
+        (void)rd_read_all(b, buf, sizeof(buf));
+        kl_test_closesock(b);
+    }
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&fr_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&fr_srv);
+    ASSERT_TRUE(strstr(buf, "200") != NULL);    /* was (completion): the slot held to the 5 s deadline */
+}
+
 UTEST_MAIN();
