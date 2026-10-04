@@ -12,8 +12,9 @@ static const uint8_t V2SIG[12] = {
 };
 static const char V1SIG[6] = { 'P', 'R', 'O', 'X', 'Y', ' ' };
 
-/* A v1 port: 1 to 5 ASCII digits, value 0..65535. No sign, no whitespace, nothing after. strtol
- * would accept a leading '+', '-' or whitespace and any number of leading zeros. */
+/* A v1 port: 1 to 5 ASCII digits, value 0..65535, no leading zero ("0" itself is fine). No sign,
+ * no whitespace, nothing after. strtol would accept a leading '+', '-' or whitespace and any
+ * number of leading zeros. */
 static int v1_port(const char *s, uint16_t *out) {
     unsigned long v = 0;
     size_t n = 0;
@@ -21,9 +22,21 @@ static int v1_port(const char *s, uint16_t *out) {
         if (n >= 5 || s[n] < '0' || s[n] > '9') return -1;
         v = v * 10u + (unsigned long)(s[n] - '0');
     }
-    if (n == 0 || v > 65535u) return -1;
+    if (n == 0 || v > 65535u || (n > 1 && s[0] == '0')) return -1;
     *out = (uint16_t)v;
     return 0;
+}
+
+/* The next field of a v1 line: the bytes up to the next single space (or the end), which must be
+ * non-empty. Advances *p past that space. NULL for an empty field, which a doubled, leading or
+ * trailing separator produces. */
+static const char *v1_field(char **p) {
+    char *start = *p;
+    if (!start || *start == '\0' || *start == ' ') return NULL;
+    char *sp = strchr(start, ' ');
+    if (sp) { *sp = '\0'; *p = sp + 1; }
+    else    { *p = NULL; }
+    return start;
 }
 
 static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
@@ -38,19 +51,23 @@ static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
     if (!found)
         return (len >= 107) ? KL_PROXY_INVALID : KL_PROXY_NEED_MORE;
 
+    /* A NUL inside the line would end it early, and whatever follows up to the CRLF would be
+     * consumed unchecked. */
+    if (memchr(buf, '\0', nl) != NULL) return KL_PROXY_INVALID;
+
     char line[108];
     memcpy(line, buf, nl);
     line[nl] = '\0';
     *consumed = nl + 2;   /* include CRLF */
 
-    /* Tokens: PROXY <proto> <src> <dst> <sport> <dport> */
-    char *save = NULL;
-    const char *tok = strtok_r(line, " ", &save);      /* "PROXY" */
+    /* Fields: PROXY <proto> <src> <dst> <sport> <dport>, separated by exactly one space each. */
+    char *cur = line;
+    const char *tok = v1_field(&cur);                  /* "PROXY" */
     if (!tok) return KL_PROXY_INVALID;
-    const char *proto = strtok_r(NULL, " ", &save);
+    const char *proto = v1_field(&cur);
     if (!proto) return KL_PROXY_INVALID;
 
-    if (strcmp(proto, "UNKNOWN") == 0) {
+    if (strcmp(proto, "UNKNOWN") == 0) {             /* the rest of the line is ignored */
         memset(peer, 0, sizeof(*peer));   /* KL_AF_UNSPEC → keep the real socket address */
         return KL_PROXY_OK;
     }
@@ -59,13 +76,13 @@ static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
     else if (strcmp(proto, "TCP6") == 0) family = AF_INET6;
     else return KL_PROXY_INVALID;
 
-    const char *src = strtok_r(NULL, " ", &save);
-    const char *dst = strtok_r(NULL, " ", &save);
-    const char *sport = strtok_r(NULL, " ", &save);
-    const char *dport = strtok_r(NULL, " ", &save);
+    const char *src = v1_field(&cur);
+    const char *dst = v1_field(&cur);
+    const char *sport = v1_field(&cur);
+    const char *dport = v1_field(&cur);
     if (!src || !dst || !sport || !dport)
         return KL_PROXY_INVALID;
-    if (strtok_r(NULL, " ", &save) != NULL)           /* exactly six fields */
+    if (cur != NULL)                                  /* exactly six fields, no trailing space */
         return KL_PROXY_INVALID;
 
     /* Validate every field, the destination included, before trusting any of them: a header

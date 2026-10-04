@@ -534,4 +534,17 @@ UTEST(response, status_line_keeps_every_valid_code) {
     ASSERT_TRUE(status_line_is(99, "HTTP/1.1 500 Internal Server Error\r\n"));
 }
 
+/* A 1xx is interim: it can never be the final response this builder frames (Content-Length and a
+ * body). Sent as one, a client waits for the real final response or reads the body as the next
+ * status line. 100 Continue and 101 Switching Protocols are written by their own paths, so a
+ * handler that sets any 1xx still gets 500, as before the status table was widened. */
+UTEST(response, a_handler_set_1xx_is_not_sent_as_a_final_response) {
+    ASSERT_TRUE(status_line_is(100, "HTTP/1.1 500 Internal Server Error\r\n"));   /* was: 100 Continue */
+    ASSERT_TRUE(status_line_is(101, "HTTP/1.1 500 Internal Server Error\r\n"));
+    ASSERT_TRUE(status_line_is(103, "HTTP/1.1 500 Internal Server Error\r\n"));
+    ASSERT_TRUE(status_line_is(150, "HTTP/1.1 500 Internal Server Error\r\n"));
+    ASSERT_TRUE(status_line_is(199, "HTTP/1.1 500 Internal Server Error\r\n"));
+    ASSERT_TRUE(status_line_is(200, "HTTP/1.1 200 OK\r\n"));
+}
+
 UTEST_MAIN();

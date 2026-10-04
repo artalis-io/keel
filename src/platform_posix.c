@@ -17,7 +17,8 @@
 
 /* getrandom(2): Linux 3.17+, declared by glibc 2.25+ and musl 1.1.20+. Without the header the
  * entropy fill uses /dev/urandom alone. */
-#if defined(__linux__) && !defined(__COSMOPOLITAN__) && defined(__has_include)
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && defined(__has_include) && \
+    (!defined(__ANDROID__) || (defined(__ANDROID_API__) && __ANDROID_API__ >= 28))
 #  if __has_include(<sys/random.h>)
 #    include <sys/random.h>
 #    define KL_HAVE_GETRANDOM 1

@@ -69,10 +69,6 @@ static KlStatusLine status_line_for(int code) {
         case 502: return (KlStatusLine)SL("HTTP/1.1 502 Bad Gateway\r\n");
         case 503: return (KlStatusLine)SL("HTTP/1.1 503 Service Unavailable\r\n");
         case 504: return (KlStatusLine)SL("HTTP/1.1 504 Gateway Timeout\r\n");
-        case 100: return (KlStatusLine)SL("HTTP/1.1 100 Continue\r\n");
-        case 101: return (KlStatusLine)SL("HTTP/1.1 101 Switching Protocols\r\n");
-        case 102: return (KlStatusLine)SL("HTTP/1.1 102 Processing\r\n");
-        case 103: return (KlStatusLine)SL("HTTP/1.1 103 Early Hints\r\n");
         case 203: return (KlStatusLine)SL("HTTP/1.1 203 Non-Authoritative Information\r\n");
         case 205: return (KlStatusLine)SL("HTTP/1.1 205 Reset Content\r\n");
         case 207: return (KlStatusLine)SL("HTTP/1.1 207 Multi-Status\r\n");
@@ -106,10 +102,12 @@ static KlStatusLine status_line_for(int code) {
         case 511: return (KlStatusLine)SL("HTTP/1.1 511 Network Authentication Required\r\n");
         default:  break;
     }
-    /* Any other three-digit code goes out as itself with an empty reason phrase, which HTTP/1.1
-     * allows (status-line = HTTP-version SP status-code SP [ reason-phrase ]). Only a value that
-     * is not a status code at all is sent as 500. */
-    if (code >= 100 && code <= 599)
+    /* Any other final code goes out as itself with an empty reason phrase, which HTTP/1.1 allows
+     * (status-line = HTTP-version SP status-code SP [ reason-phrase ]). A 1xx is interim and can
+     * never be the final response this builder frames (100 Continue and 101 Switching Protocols
+     * are written by their own paths), so it is sent as 500, as is a value that is not a status
+     * code at all. */
+    if (code >= 200 && code <= 599)
         return (KlStatusLine){ status_line_bare[code - 100], KL_STATUS_LINE_BARE_LEN };
     return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
 }
