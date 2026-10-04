@@ -617,7 +617,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_
                    http1_parser_vtable http1_response_parser http2 http2_client http2_client_hostname_fail \
                    http2_client_vtable http2_overflow http_async http_body_reader http_body_reader_vtable \
                    http_client http_client_free_in_done http_client_happy_eyeballs http_client_hostname_fail http_client_pool \
-                   http_client_alloc_sizes http_client_eof http_client_proxy http_client_stream http_connection http_cors http_integration \
+                   http_client_alloc_sizes http_client_deadline http_client_eof http_client_proxy http_client_stream http_connection http_cors http_integration \
                    http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
                    http_response http_router http_server_integration http_server_state http_server_stats \
                    http_split_request http_sse http_tls io_status kl_cstr kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream \
@@ -656,7 +656,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_
                         http1_parser_vtable http1_response_parser http2 http2_client \
                         http2_client_hostname_fail http2_client_vtable http2_overflow http_async \
                         http_body_reader http_body_reader_vtable http_client http_client_free_in_done http_client_happy_eyeballs \
-                        http_client_hostname_fail http_client_pool http_client_alloc_sizes http_client_eof http_client_proxy http_client_stream \
+                        http_client_hostname_fail http_client_pool http_client_alloc_sizes http_client_deadline http_client_eof http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
                         http_server_state http_server_stats http_split_request http_sse http_tls io_status iocp_engine kl_cstr \

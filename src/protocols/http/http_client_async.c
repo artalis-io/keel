@@ -213,10 +213,18 @@ static int he_idx_of_fd(const KlHttpClient *c, KlSocketHandle fd)
  * (returns NULL, no inline completion), flag it so cli_co_on_done suppresses the request callback
  * for the resulting terminal FAILED; the setup then frees the client and returns NULL, preserving
  * the "no callback on a start failure" contract while the op still retires cleanly (terminal +
- * detach). */
+ * detach).
+ *
+ * With no resolver the name was resolved before the op started (blocking name resolution) and
+ * conn_addrs already holds the list: complete inline, as a sync-completion-capable resolver does. */
 static int cli_co_start_resolve(void *ctx)
 {
     KlHttpClient *c = ctx;
+    if (!c->resolver) {
+        KlResolveResult r = c->conn_addrs;
+        dns_resolved(NULL, &r, 0, c);
+        return 0;
+    }
     KlResolveReq *rq = c->resolver->resolve(c->resolver, c->ev_ctx,
                                             c->resolve_host, c->resolve_port,
                                             dns_resolved, c);
@@ -247,8 +255,8 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     const KlSockAddr *sa = &c->conn_addrs.addrs[idx];
     int fam = (kl_sockaddr_family(sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
-    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam,
-                                       c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
+    /* Always TCP: a resolver's socket type and protocol describe its lookup, not this connection. */
+    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd)) { *out_err = KL_ERR_CONNECT; return -1; }
     kl_sock_set_cloexec(c->ev_ctx->sockets, fd);   /* never inherited by an embedder's children */
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
@@ -503,9 +511,28 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
 #endif
 }
 
+/* Connect over an address list from blocking name resolution: the same KlConnectOp racing as the
+ * resolver path (cli_co_start_resolve hands the list over inline), so a refused or unreachable
+ * address moves on to the next one instead of failing the request. The request may complete
+ * (through on_done, deferred) before this returns. */
+static void client_connect_resolved(KlHttpClient *c, const KlSockAddr *addrs, int naddr)
+{
+    memset(&c->conn_addrs, 0, sizeof(c->conn_addrs));
+    if (naddr > KL_RESOLVE_MAX_ADDRS)
+        naddr = KL_RESOLVE_MAX_ADDRS;
+    for (int i = 0; i < naddr; i++)
+        c->conn_addrs.addrs[i] = addrs[i];
+    c->conn_addrs.naddrs = naddr;
+    c->conn_addrs.ai_socktype = SOCK_STREAM;
+    c->state = KL_HTTP_CLIENT_RESOLVING;
+    he_arm_deadline(c);
+    kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
+    kl_connect_op_start(&c->connect_op);
+}
+
 /* ── State: CONNECTING ───────────────────────────────────────────── */
 
-/* Single-fd connect completion (UNIX socket + sync sync name resolution paths). The
+/* Single-fd connect completion (the UNIX socket path). The
  * Happy Eyeballs path uses he_on_writable instead. */
 static void async_handle_connecting(KlHttpClient *c)
 {
@@ -520,7 +547,7 @@ static void async_handle_connecting(KlHttpClient *c)
 }
 
 /* Shared post-connect path: c->fd is a connected socket (Happy Eyeballs winner,
- * or the single-fd UNIX / sync-sync name resolution connect). Advances to the proxy /
+ * or the single-fd UNIX socket connect). Advances to the proxy /
  * TLS / sending state. */
 static void he_proceed_after_connect(KlHttpClient *c)
 {
@@ -994,7 +1021,7 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
         break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HTTP_CLIENT_CONNECTING:
         /* Happy Eyeballs races several fds; dispatch by the fd that fired.
-         * The single-fd UNIX / sync-sync name resolution path uses c->fd directly.
+         * The single-fd UNIX socket path uses c->fd directly.
          * On a completion loop the connect result is carried in `ready` (KL_EVENT_WRITE =
          * connected); the backend already resolved win/fail (SO_ERROR isn't preserved after a
          * failed io_uring connect), so trust the delivered result instead of re-reading it. */
@@ -1512,16 +1539,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
     }
 
-    if (start_connect(c, &addrs[0]) < 0) {
-        if (c->decomp_wrap)
-            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
-        c->parser->destroy(c->parser);
-        kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlHttpClient));
-        return NULL;
-    }
-
-    he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
+    client_connect_resolved(c, addrs, naddr);   /* tries each address in turn */
     return c;
 }
 
@@ -1855,15 +1873,6 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         return NULL;
     }
 
-    if (start_connect(c, &addrs[0]) < 0) {
-        if (c->decomp_wrap)
-            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
-        c->parser->destroy(c->parser);
-        kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlHttpClient));
-        return NULL;
-    }
-
-    he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
+    client_connect_resolved(c, addrs, naddr);   /* tries each address in turn */
     return c;
 }

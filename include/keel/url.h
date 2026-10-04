@@ -23,7 +23,7 @@ typedef struct {
     const char *host;       /**< Hostname (without brackets for IPv6); NULL for unix */
     size_t      host_len;
     int         port;       /**< Port number (default: 80 for http/ws, 443 for https/wss; 0 for unix) */
-    const char *path;       /**< Path including leading '/' and query string */
+    const char *path;       /**< Path including leading '/' and query string, up to any fragment (use path_len) */
     size_t      path_len;
     char        unix_path[KL_URL_UNIX_PATH_MAX]; /**< Decoded AF_UNIX socket path (when is_unix) */
 } KlUrl;
@@ -33,7 +33,10 @@ typedef struct {
  *
  * Supports http://, https://, ws://, and wss:// schemes, IPv6
  * addresses in brackets ([::1]:port), explicit ports, and
- * path+query. Rejects CRLF injection in hostname and path.
+ * path+query. Schemes match in any case. The authority ends at the first
+ * '/', '?' or '#'; a fragment is dropped from the path, and a query with no path
+ * before it is rejected. A space or control byte in the host or path is rejected
+ * (it would reach the request line).
  *
  * Also supports http+unix:// and https+unix://, where the authority is a
  * percent-encoded AF_UNIX socket path (e.g. http+unix://%2Frun%2Fapp.sock/v1).

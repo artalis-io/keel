@@ -262,4 +262,74 @@ UTEST(url, authority_brackets_ipv6_and_keeps_only_non_default_ports) {
     ASSERT_STREQ("(no fit)", authority_of("http://example.com:8080/", b, 8));
 }
 
+/* The authority ends at '?' and '#' as well as '/', so neither becomes part of the host. A fragment
+ * is the client's own and never reaches the request target. A query with no path in front of it
+ * has no origin-form target the parser can point at, so it is refused rather than sent wrong. */
+UTEST(url, authority_ends_at_query_and_fragment) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://example.com#top", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)11);
+    ASSERT_EQ(memcmp(u.host, "example.com", 11), 0);
+    ASSERT_EQ(u.path_len, (size_t)1);
+    ASSERT_EQ(memcmp(u.path, "/", 1), 0);
+
+    ASSERT_EQ(kl_url_parse("http://example.com:8080#top", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)11);
+    ASSERT_EQ(u.port, 8080);
+    ASSERT_EQ(u.path_len, (size_t)1);
+
+    ASSERT_EQ(kl_url_parse("http://[::1]#top", &u), 0);
+    ASSERT_EQ(u.host_len, (size_t)3);
+    ASSERT_EQ(u.path_len, (size_t)1);
+
+    ASSERT_EQ(kl_url_parse("http://example.com?q=1", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com:8080?q=1", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://[::1]?q=1", &u), -1);
+}
+
+UTEST(url, fragment_is_not_part_of_the_path) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://example.com/a/b?x=1#frag", &u), 0);
+    ASSERT_EQ(u.path_len, (size_t)8);
+    ASSERT_EQ(memcmp(u.path, "/a/b?x=1", 8), 0);
+    ASSERT_EQ(kl_url_parse("http+unix://%2Ftmp%2Fs.sock/v1#frag", &u), 0);
+    ASSERT_EQ(u.path_len, (size_t)3);
+    ASSERT_EQ(memcmp(u.path, "/v1", 3), 0);
+}
+
+/* A space or control byte would split or corrupt the request line. */
+UTEST(url, space_and_controls_rejected) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://example.com/a b", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com/a\tb", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com/a\x01" "b", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com/a\x7f", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://exa mple.com/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com\x01/", &u), -1);
+    ASSERT_EQ(kl_url_parse("http+unix://app.sock/a b", &u), -1);
+    ASSERT_EQ(kl_url_parse("http://example.com/a%20b", &u), 0);   /* encoded is fine */
+}
+
+/* RFC 3986 3.1: schemes are case-insensitive. */
+UTEST(url, scheme_is_case_insensitive) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("HTTP://example.com/", &u), 0);
+    ASSERT_EQ(u.is_https, 0);
+    ASSERT_EQ(u.port, 80);
+    ASSERT_EQ(kl_url_parse("HtTpS://example.com/", &u), 0);
+    ASSERT_EQ(u.is_https, 1);
+    ASSERT_EQ(u.port, 443);
+    ASSERT_EQ(kl_url_parse("WSS://example.com/", &u), 0);
+    ASSERT_EQ(u.is_ws, 1);
+    ASSERT_EQ(u.is_https, 1);
+    ASSERT_EQ(kl_url_parse("HTTP+UNIX://app.sock/", &u), 0);
+    ASSERT_EQ(u.is_unix, 1);
+}
+
+UTEST(url, resolve_absolute_location_scheme_is_case_insensitive) {
+    char out[KL_URL_MAX];
+    ASSERT_EQ(kl_url_resolve("http://a.example/x", "HTTPS://b.example/y#f", out, sizeof out), 0);
+    ASSERT_STREQ(out, "HTTPS://b.example/y");
+}
+
 UTEST_MAIN();

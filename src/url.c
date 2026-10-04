@@ -3,7 +3,7 @@
  *
  * Parses URLs into scheme, host, port, and path components.
  * All output pointers reference the original URL string (zero-copy).
- * Includes CRLF injection guard for hostname and path.
+ * Rejects a space or control byte in the host and path; a fragment is never part of the path.
  */
 
 #include <keel/url.h>
@@ -22,6 +22,33 @@ static int has_crlf(const char *s, size_t len)
             return 1;
     }
     return 0;
+}
+
+/* 1 if s[0..len) holds a space or a control byte (CR and LF included): any of them would split
+ * or corrupt the request line or the Host header. URLs carry these percent-encoded. */
+static int has_space_or_ctl(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c <= 0x20 || c == 0x7f)
+            return 1;
+    }
+    return 0;
+}
+
+/* Length of s up to its fragment ('#'), which belongs to the client and is never sent. */
+static size_t without_fragment(const char *s)
+{
+    size_t n = 0;
+    while (s[n] && s[n] != '#')
+        n++;
+    return n;
+}
+
+/* Case-insensitive scheme prefix (RFC 3986 3.1: schemes are case-insensitive). */
+static int scheme_is(const char *url, const char *prefix)
+{
+    return kl_ascii_strncasecmp(url, prefix, strlen(prefix)) == 0;
 }
 
 /* ── Percent-decoding (for http+unix:// socket paths) ─────────────── */
@@ -66,6 +93,26 @@ static int pct_decode(const char *src, size_t len, char *dst, size_t dstsz)
 
 /* ── URL parsing ─────────────────────────────────────────────────── */
 
+/* The path after the authority: up to any fragment, or "/" when there is none. A space or control
+ * byte anywhere in the rest of the URL would reach the request line, so it is rejected. A query
+ * straight after the authority is rejected too: its origin-form target would be "/?q", which is
+ * not a span of the caller's string for out->path to point at. */
+static int url_path(const char *url, KlUrl *out)
+{
+    if (has_space_or_ctl(url, strlen(url)))
+        return -1;
+    if (*url == '/') {
+        out->path = url;
+        out->path_len = without_fragment(url);
+    } else if (*url == '\0' || *url == '#') {
+        out->path = "/";
+        out->path_len = 1;
+    } else {
+        return -1;  /* a query with no path, or an unexpected character after the authority */
+    }
+    return 0;
+}
+
 int kl_url_parse(const char *url, KlUrl *out)
 {
     if (!url || !out)
@@ -74,32 +121,32 @@ int kl_url_parse(const char *url, KlUrl *out)
     memset(out, 0, sizeof(*out));
 
     /* Scheme (check the longer "+unix" variants before the plain ones) */
-    if (kl_str_startswith(url, "https+unix://")) {
+    if (scheme_is(url, "https+unix://")) {
         out->is_https = 1;
         out->is_unix = 1;
         url += 13;
-    } else if (kl_str_startswith(url, "http+unix://")) {
+    } else if (scheme_is(url, "http+unix://")) {
         out->is_unix = 1;
         url += 12;
-    } else if (kl_str_startswith(url, "https://")) {
+    } else if (scheme_is(url, "https://")) {
         out->is_https = 1;
         url += 8;
-    } else if (kl_str_startswith(url, "http://")) {
+    } else if (scheme_is(url, "http://")) {
         url += 7;
-    } else if (kl_str_startswith(url, "wss+unix://")) {
+    } else if (scheme_is(url, "wss+unix://")) {
         out->is_https = 1;
         out->is_ws = 1;
         out->is_unix = 1;
         url += 11;
-    } else if (kl_str_startswith(url, "ws+unix://")) {
+    } else if (scheme_is(url, "ws+unix://")) {
         out->is_ws = 1;
         out->is_unix = 1;
         url += 10;
-    } else if (kl_str_startswith(url, "wss://")) {
+    } else if (scheme_is(url, "wss://")) {
         out->is_https = 1;
         out->is_ws = 1;
         url += 6;
-    } else if (kl_str_startswith(url, "ws://")) {
+    } else if (scheme_is(url, "ws://")) {
         out->is_ws = 1;
         url += 5;
     } else {
@@ -107,11 +154,11 @@ int kl_url_parse(const char *url, KlUrl *out)
     }
 
     /* UNIX socket: authority is a percent-encoded socket path up to the
-     * first literal '/'.  There is no host/port; callers use "localhost"
-     * for the Host header. */
+     * first literal '/' (or '?' / '#').  There is no host/port; callers use
+     * "localhost" for the Host header. */
     if (out->is_unix) {
         const char *auth = url;
-        while (*url && *url != '/')
+        while (*url && *url != '/' && *url != '?' && *url != '#')
             url++;
         size_t enc_len = (size_t)(url - auth);
         if (enc_len == 0)
@@ -127,16 +174,7 @@ int kl_url_parse(const char *url, KlUrl *out)
         out->host_len = 0;
         out->port = 0;
 
-        if (*url == '/') {
-            out->path = url;
-            out->path_len = strlen(url);
-            if (has_crlf(out->path, out->path_len))
-                return -1;
-        } else {
-            out->path = "/";
-            out->path_len = 1;
-        }
-        return 0;
+        return url_path(url, out);
     }
 
     /* Host (may include :port) */
@@ -151,9 +189,9 @@ int kl_url_parse(const char *url, KlUrl *out)
         out->host_len = (size_t)(bracket - url - 1);
         url = bracket + 1;
     } else {
-        /* Find end of host (: or / or end) */
+        /* Find end of host (':', '/', '?', '#' or end) */
         const char *host_start = url;
-        while (*url && *url != ':' && *url != '/')
+        while (*url && *url != ':' && *url != '/' && *url != '?' && *url != '#')
             url++;
         out->host_len = (size_t)(url - host_start);
     }
@@ -161,8 +199,8 @@ int kl_url_parse(const char *url, KlUrl *out)
     if (out->host_len == 0)
         return -1;
 
-    /* Reject CRLF in hostname (header injection) */
-    if (has_crlf(out->host, out->host_len))
+    /* Reject a space or control byte in the hostname (header injection) */
+    if (has_space_or_ctl(out->host, out->host_len))
         return -1;
 
     /* Port (optional): bounded decimal, locale-free (no strtol) */
@@ -182,20 +220,7 @@ int kl_url_parse(const char *url, KlUrl *out)
         out->port = out->is_https ? 443 : 80;
     }
 
-    /* Path (rest of URL, or "/" if empty): reject CRLF (header injection) */
-    if (*url == '/') {
-        out->path = url;
-        out->path_len = strlen(url);
-        if (has_crlf(out->path, out->path_len))
-            return -1;
-    } else if (*url == '\0') {
-        out->path = "/";
-        out->path_len = 1;
-    } else {
-        return -1;  /* unexpected character after port */
-    }
-
-    return 0;
+    return url_path(url, out);
 }
 
 /* ── URL resolution ─────────────────────────────────────────────── */
@@ -222,9 +247,8 @@ int kl_url_resolve(const char *base_url, const char *location,
     if (loc_len == 0)
         return -1;
 
-    /* 1. Absolute URL: starts with http:// or https:// */
-    if (kl_str_startswith(location, "http://") ||
-        kl_str_startswith(location, "https://")) {
+    /* 1. Absolute URL: starts with http:// or https:// (scheme in any case) */
+    if (scheme_is(location, "http://") || scheme_is(location, "https://")) {
         size_t n = strip_fragment(location, loc_len);
         if (n >= out_size)
             return -1;

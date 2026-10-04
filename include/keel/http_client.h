@@ -92,7 +92,7 @@ typedef struct KlHttpClientResponse {
  * after sockets.
  */
 typedef struct {
-    int              timeout_ms;        /**< Connect/send/recv timeout (0 = default 30s) */
+    int              timeout_ms;        /**< Whole-request deadline: connect, TLS, send and receive together (0 = default 30s) */
     size_t           max_response_size;  /**< Max response body (0 = default 4 MB) */
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
     KlResolver      *resolver;          /**< Async DNS resolver: takes precedence over the default. */

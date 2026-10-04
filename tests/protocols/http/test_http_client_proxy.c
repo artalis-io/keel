@@ -14,6 +14,7 @@
 #include "net_compat.h"
 #include "platform_socket.h"   /* PAL gate: this TU calls socket() directly */
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "http_client_proxy.h" /* kl_proxy_connect_status: the shared CONNECT status check */
 #include <errno.h>
 #include <stdio.h>
 
@@ -590,6 +591,25 @@ UTEST(proxy, http_request_carries_proxy_authorization) {
     ASSERT_GE(client_fd, 0);
     ASSERT_TRUE(strstr(buf, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != NULL);
     ASSERT_EQ(rctx.status, 200);
+}
+
+/* The CONNECT reply must open with a whole status line: "HTTP/1." digit, a space, a three-digit 2xx
+ * code, then a space or the end of the line. Any 2xx establishes the tunnel (RFC 9110 9.3.6). */
+static int connect_status(const char *s) { return kl_proxy_connect_status(s, strlen(s)); }
+
+UTEST(proxy, connect_status_needs_a_full_2xx_status_line) {
+    ASSERT_EQ(connect_status("HTTP/1.1 200 Connection established\r\n\r\n"), 1);
+    ASSERT_EQ(connect_status("HTTP/1.0 200 OK\r\nVia: p\r\n\r\n"), 1);
+    ASSERT_EQ(connect_status("HTTP/1.1 200\r\n\r\n"), 1);
+    ASSERT_EQ(connect_status("HTTP/1.1 200 OK\r\n"), 0);             /* headers not complete */
+    ASSERT_EQ(connect_status("HTTP/1.1 2000 OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.1X200 OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.x 200 OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.1 20a OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.1 300 OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("XTTP/1.1 200 OK\r\n\r\n"), -1);
+    ASSERT_EQ(connect_status("HTTP/1.1 204 No Content\r\n\r\n"), 1);
 }
 
 UTEST_MAIN();

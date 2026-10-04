@@ -161,6 +161,7 @@ void kl_http_client_pool_free(KlHttpClientPool *pool)
     kl_free(pool->alloc, pool->entries,
             (size_t)pool->capacity * sizeof(KlHttpClientPoolEntry));
     pool->entries = NULL;
+    pool->capacity = 0;   /* no slots over a table that is gone */
     pool->active = 0;
 }
 

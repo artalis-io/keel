@@ -544,6 +544,81 @@ UTEST(redirect, sync_null_args) {
                                    NULL, 0, NULL, 0, &resp), -1);
 }
 
+/* Every refusal leaves *resp zeroed with its error set, as the plain client's do, and the redirect
+ * API checks the header arguments as the client does instead of truncating or skipping them. */
+UTEST(redirect, sync_bad_args_set_resp_error) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientResponse resp;
+    static KlHttpClientHeader many[KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1];
+    for (int i = 0; i < KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1; i++) {
+        many[i].name = "X-H";
+        many[i].value = "v";
+    }
+    static char long_url[KL_URL_MAX + 16];
+    memcpy(long_url, "http://127.0.0.1:1/", 19);
+    memset(long_url + 19, 'a', sizeof long_url - 20);
+    long_url[sizeof long_url - 1] = '\0';
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request(NULL, NULL, NULL, "GET", "http://127.0.0.1:1/",
+                                       NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_INVALID_ARG);
+    ASSERT_TRUE(resp.headers == NULL && resp.body == NULL);
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request(&a, NULL, NULL, "GET", "http://127.0.0.1:1/",
+                                       NULL, -1, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_INVALID_ARG);
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request(&a, NULL, NULL, "GET", "http://127.0.0.1:1/",
+                                       many, KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_INVALID_ARG);
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request(&a, NULL, NULL, "GET", long_url,
+                                       NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_URL);
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request(&a, NULL, NULL, "AVERYLONGMETHODNAME", "http://127.0.0.1:1/",
+                                       NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_INVALID_ARG);
+
+    memset(&resp, 0xAB, sizeof resp);
+    ASSERT_EQ(kl_http_redirect_request_pooled(NULL, &a, NULL, NULL, "GET", "http://127.0.0.1:1/",
+                                              NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(resp.error, KL_ERR_INVALID_ARG);
+}
+
+UTEST(redirect, async_bad_header_args_refused) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static KlHttpClientHeader many[KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1];
+    for (int i = 0; i < KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1; i++) {
+        many[i].name = "X-H";
+        many[i].value = "v";
+    }
+    KlHttpRedirectClient *r1 = kl_http_redirect_start(&ev, &a, NULL, NULL, "GET",
+                                                      "http://127.0.0.1:1/", NULL, 1, NULL, 0,
+                                                      NULL, NULL);
+    KlHttpRedirectClient *r2 = kl_http_redirect_start(&ev, &a, NULL, NULL, "GET",
+                                                      "http://127.0.0.1:1/", many,
+                                                      KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1, NULL, 0,
+                                                      NULL, NULL);
+    KlHttpRedirectClient *r3 = kl_http_redirect_start(&ev, &a, NULL, NULL, "GET",
+                                                      "http://127.0.0.1:1/", NULL, -1, NULL, 0,
+                                                      NULL, NULL);
+    kl_http_redirect_free(r1);
+    kl_http_redirect_free(r2);
+    kl_http_redirect_free(r3);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(r1 == NULL);
+    ASSERT_TRUE(r2 == NULL);
+    ASSERT_TRUE(r3 == NULL);
+}
+
 UTEST(redirect, sync_pooled) {
     ensure_servers();
 

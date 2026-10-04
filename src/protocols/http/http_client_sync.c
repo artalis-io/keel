@@ -32,10 +32,97 @@
 #include "http_client_internal.h"
 #include "http_client_proxy.h"   /* shared CONNECT serialization + status (no sync/async drift) */
 
+/* ── Request deadline ────────────────────────────────────────────── */
+
+/* The whole request runs against one deadline (cfg->timeout_ms from the start of the call): the
+ * connect, the TLS handshake, every send and every receive. The socket stays non-blocking
+ * throughout, so no single step can outlast it; each wait gets only the time that is left. */
+static uint64_t deadline_after(int timeout_ms)
+{
+    return kl_monotonic_ms() + (uint64_t)timeout_ms;
+}
+
+static int deadline_passed(uint64_t deadline)
+{
+    return kl_monotonic_ms() >= deadline;
+}
+
+/* Wait until fd is ready for events or the deadline passes. >0 ready, 0 deadline, -1 failure. */
+static int wait_ready(KlSocketHandle fd, int events, uint64_t deadline)
+{
+    for (;;) {
+        uint64_t now = kl_monotonic_ms();
+        if (now >= deadline)
+            return 0;
+        uint64_t left = deadline - now;
+        int pr = kl_plat_poll1(fd, events, left > (uint64_t)INT_MAX ? INT_MAX : (int)left);
+        if (pr != 0)
+            return pr;
+    }
+}
+
+/* The error for a step that failed: the deadline if it has passed, else the step's own. */
+static KlError step_error(uint64_t deadline, KlError err)
+{
+    return deadline_passed(deadline) ? KL_ERR_TIMEOUT : err;
+}
+
 /* ── Connect with timeout ────────────────────────────────────────── */
 
+/* One non-blocking connect to sa, bounded by attempt_deadline. The socket is returned
+ * non-blocking. */
+static KlSocketHandle connect_one(const KlSocketProvider *sockets, int family,
+                                  const KlSockAddr *sa, uint64_t attempt_deadline,
+                                  KlError *out_err)
+{
+    KlSocketHandle fd = kl_sock_socket(sockets, family, SOCK_STREAM, 0);
+    if (!kl_handle_valid(fd)) {
+        *out_err = KL_ERR_SOCKET;
+        return -1;
+    }
+    kl_sock_set_cloexec(sockets, fd);   /* never inherited by an embedder's children */
+
+    kl_sock_set_nosigpipe(sockets, fd);
+
+    if (kl_sock_set_nonblocking(sockets, fd) < 0) {
+        *out_err = KL_ERR_SOCKET;
+        kl_sock_close(sockets, fd);
+        return -1;
+    }
+
+    int rc = kl_sock_connect(sockets, fd, sa);
+
+    if (rc < 0 && kl_sock_io_status(sockets) != KL_IO_PENDING) {
+        *out_err = KL_ERR_CONNECT;
+        kl_sock_close(sockets, fd);
+        return -1;
+    }
+
+    if (rc < 0) {
+        int pr = wait_ready(fd, KL_POLL_OUT, attempt_deadline);
+        if (pr <= 0) {
+            *out_err = (pr == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
+            kl_sock_close(sockets, fd);
+            return -1;
+        }
+
+        int err = 0;
+        kl_sock_get_so_error(sockets, fd, &err);
+        if (err != 0) {
+            *out_err = KL_ERR_CONNECT;
+            kl_sock_close(sockets, fd);
+            return -1;
+        }
+    }
+
+    return fd;
+}
+
+/* Connect to host:port, trying each resolved address in turn until one connects. Every address but
+ * the last gets an equal share of the time left, so one that never answers cannot use up the whole
+ * request deadline. */
 static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
-                                 int port, int timeout_ms,
+                                 int port, uint64_t deadline,
                                  const KlSocketProvider *sockets,
                                  KlError *out_err)
 {
@@ -54,58 +141,27 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
         if (out_err) *out_err = KL_ERR_DNS;
         return -1;
     }
-    const KlSockAddr *csa = &addrs[0];
-    int family = (kl_sockaddr_family(csa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
-    KlSocketHandle fd = kl_sock_socket(sockets, family, SOCK_STREAM, 0);
-    if (!kl_handle_valid(fd)) {
-        if (out_err) *out_err = KL_ERR_SOCKET;
-        return -1;
-    }
-    kl_sock_set_cloexec(sockets, fd);   /* never inherited by an embedder's children */
-
-    kl_sock_set_nosigpipe(sockets, fd);
-
-    /* Nonblocking for the timed connect; restored to blocking below. */
-    if (kl_sock_set_nonblocking(sockets, fd) < 0) {
-        if (out_err) *out_err = KL_ERR_SOCKET;
-        kl_sock_close(sockets, fd);
-        return -1;
-    }
-
-    int rc = kl_sock_connect(sockets, fd, csa);
-
-    if (rc < 0 && kl_sock_io_status(sockets) != KL_IO_PENDING) {
-        if (out_err) *out_err = KL_ERR_CONNECT;
-        kl_sock_close(sockets, fd);
-        return -1;
-    }
-
-    if (rc < 0) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0) {
-            if (out_err) *out_err = (pr == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
-            kl_sock_close(sockets, fd);
-            return -1;
+    KlError err = KL_ERR_CONNECT;
+    for (int i = 0; i < naddr; i++) {
+        uint64_t now = kl_monotonic_ms();
+        if (now >= deadline) {
+            err = KL_ERR_TIMEOUT;
+            break;
         }
-
-        int err = 0;
-        kl_sock_get_so_error(sockets, fd, &err);
-        if (err != 0) {
-            if (out_err) *out_err = KL_ERR_CONNECT;
-            kl_sock_close(sockets, fd);
-            return -1;
-        }
+        uint64_t attempt_deadline = now + (deadline - now) / (uint64_t)(naddr - i);
+        int family = (kl_sockaddr_family(&addrs[i]) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+        KlSocketHandle fd = connect_one(sockets, family, &addrs[i], attempt_deadline, &err);
+        if (kl_handle_valid(fd))
+            return fd;
     }
-
-    kl_sock_set_blocking(sockets, fd);   /* restore blocking mode */
-
-    return fd;
+    if (out_err) *out_err = err;
+    return -1;
 }
 
 /* ── UNIX socket address + connect ───────────────────────────────── */
 
-static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms,
+static KlSocketHandle unix_connect_with_timeout(const char *path, uint64_t deadline,
                                      const KlSocketProvider *sockets,
                                      KlError *out_err)
 {
@@ -114,47 +170,10 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
         if (out_err) *out_err = KL_ERR_INVALID_ARG;
         return -1;
     }
-
-    KlSocketHandle fd = kl_sock_socket(sockets, AF_UNIX, SOCK_STREAM, 0);
-    if (!kl_handle_valid(fd)) {
-        if (out_err) *out_err = KL_ERR_SOCKET;
-        return -1;
-    }
-    kl_sock_set_cloexec(sockets, fd);   /* never inherited by an embedder's children */
-
-    kl_sock_set_nosigpipe(sockets, fd);
-
-    /* Nonblocking for the timed connect; restored to blocking below. */
-    if (kl_sock_set_nonblocking(sockets, fd) < 0) {
-        if (out_err) *out_err = KL_ERR_SOCKET;
-        kl_sock_close(sockets, fd);
-        return -1;
-    }
-
-    int rc = kl_sock_connect(sockets, fd, &usa);
-    if (rc < 0 && kl_sock_io_status(sockets) != KL_IO_PENDING) {
-        if (out_err) *out_err = KL_ERR_CONNECT;
-        kl_sock_close(sockets, fd);
-        return -1;
-    }
-
-    if (rc < 0) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0) {
-            if (out_err) *out_err = (pr == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
-            kl_sock_close(sockets, fd);
-            return -1;
-        }
-        int err = 0;
-        kl_sock_get_so_error(sockets, fd, &err);
-        if (err != 0) {
-            if (out_err) *out_err = KL_ERR_CONNECT;
-            kl_sock_close(sockets, fd);
-            return -1;
-        }
-    }
-
-    kl_sock_set_blocking(sockets, fd);   /* restore blocking mode */
+    KlError err = KL_ERR_CONNECT;
+    KlSocketHandle fd = connect_one(sockets, AF_UNIX, &usa, deadline, &err);
+    if (!kl_handle_valid(fd) && out_err)
+        *out_err = err;
     return fd;
 }
 
@@ -162,7 +181,7 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
 
 static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
                                  const char *host, size_t host_len,
-                                 int timeout_ms, KlAllocator *alloc,
+                                 uint64_t deadline, KlAllocator *alloc,
                                  const KlSocketProvider *sockets)
 {
     if (!tls_cfg || !tls_cfg->factory)
@@ -198,9 +217,6 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
         }
     }
 
-    int elapsed = 0;
-    int step = 100;
-
     for (;;) {
         KlTlsResult r = tls->handshake(tls, fd);
         if (r == KL_TLS_OK)
@@ -211,63 +227,75 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
         }
 
         int events = (r == KL_TLS_WANT_READ) ? KL_POLL_IN : KL_POLL_OUT;
-        int pr = kl_plat_poll1(fd, events, step);
-        if (pr < 0) {
-            tls->destroy(tls);
-            return NULL;
-        }
-
-        elapsed += step;
-        if (timeout_ms > 0 && elapsed >= timeout_ms) {
+        if (wait_ready(fd, events, deadline) <= 0) {
             tls->destroy(tls);
             return NULL;
         }
     }
 }
 
+/* ── Send all (sync) ─────────────────────────────────────────────── */
+
+/* Send len bytes, plain or through TLS, waiting for writable whenever the socket (or the TLS
+ * engine, with WANT_WRITE) cannot take more. 0 = all sent, -1 = failure or the deadline. */
+static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
+                         const char *data, size_t len, uint64_t deadline)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
+        if (w > 0) {
+            sent += (size_t)w;
+            continue;
+        }
+        if (tls ? w < 0 : w == 0)
+            return -1;   /* TLS: -1 is an error; plain: a send that moved nothing */
+        if (w < 0) {
+            KlIoStatus st = kl_sock_io_status(sockets);
+            if (st == KL_IO_INTERRUPTED)
+                continue;
+            if (st != KL_IO_WOULD_BLOCK)
+                return -1;
+        }
+        if (wait_ready(fd, KL_POLL_OUT, deadline) <= 0)
+            return -1;
+    }
+    return 0;
+}
+
 /* ── Proxy CONNECT handshake (sync) ──────────────────────────────── */
 
 static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
                                 const char *host, uint16_t port,
-                                const char *proxy_auth, int timeout_ms)
+                                const char *proxy_auth, uint64_t deadline)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t req_len = 0;
     /* Shared serialization (http_client_proxy.c): identical bytes to the async client. */
     if (kl_proxy_build_connect(buf, sizeof(buf), &req_len, host, port, proxy_auth) != 0)
         return -1;
-    int n = (int)req_len;
 
     /* Send CONNECT request */
-    size_t sent = 0;
-    while (sent < (size_t)n) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0)
-            return -1;
+    if (send_all_sync(sockets, fd, NULL, buf, req_len, deadline) != 0)
+        return -1;
 
-        kl_ssize_t w = kl_sock_send(sockets, fd, buf + sent, (size_t)n - sent);
-        if (w <= 0) {
-            if (w < 0 && kl_sock_io_status(sockets) == KL_IO_INTERRUPTED)
-                continue;
-            return -1;
-        }
-        sent += (size_t)w;
-    }
-
-    /* Read proxy response: look for "HTTP/1.x 200" */
+    /* Read proxy response: look for "HTTP/1.x 2xx" */
     size_t recv_len = 0;
     for (;;) {
         if (recv_len >= sizeof(buf) - 1)
             return -1;  /* response too large */
 
-        int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
+        int pr = wait_ready(fd, KL_POLL_IN, deadline);
         if (pr <= 0)
             return -1;
 
         kl_ssize_t r = kl_sock_recv(sockets, fd, buf + recv_len, sizeof(buf) - 1 - recv_len);
         if (r <= 0) {
-            if (r < 0 && kl_sock_io_status(sockets) == KL_IO_INTERRUPTED)
-                continue;
+            if (r < 0) {
+                KlIoStatus st = kl_sock_io_status(sockets);
+                if (st == KL_IO_INTERRUPTED || st == KL_IO_WOULD_BLOCK)
+                    continue;
+            }
             return -1;
         }
         recv_len += (size_t)r;
@@ -286,7 +314,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
                               const char *method, const KlUrl *url,
                               const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              int timeout_ms, int keep_alive,
+                              uint64_t deadline, int keep_alive,
                               const char *absolute_url)
 {
     if (kl_http_client_has_crlf(method, strlen(method)))
@@ -347,37 +375,12 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         return -1;
     off += n;
 
-    /* Send header block */
-    size_t sent = 0;
-    while (sent < (size_t)off) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
-        if (w == 0 && tls)
-            continue;   /* TLS WANT_WRITE: poll for writable again */
-        if (w <= 0)
-            return -1;
-        sent += (size_t)w;
-    }
-
-    /* Send body */
-    if (body && body_len > 0) {
-        sent = 0;
-        while (sent < body_len) {
-            int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-            if (pr <= 0)
-                return -1;
-
-            kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
-            if (w == 0 && tls)
-                continue;   /* TLS WANT_WRITE: poll for writable again */
-            if (w <= 0)
-                return -1;
-            sent += (size_t)w;
-        }
-    }
+    /* Send header block, then the body */
+    if (send_all_sync(sockets, fd, tls, buf, (size_t)off, deadline) != 0)
+        return -1;
+    if (body && body_len > 0 &&
+        send_all_sync(sockets, fd, tls, body, body_len, deadline) != 0)
+        return -1;
 
     return 0;
 }
@@ -387,7 +390,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
 static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
                                const char *method, const KlUrl *url,
                                const KlHttpClientHeader *headers, int num_headers,
-                               int timeout_ms, int keep_alive,
+                               uint64_t deadline, int keep_alive,
                                const char *absolute_url)
 {
     if (kl_http_client_has_crlf(method, strlen(method)))
@@ -439,47 +442,14 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         return -1;
     off += n;
 
-    size_t sent = 0;
-    while (sent < (size_t)off) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
-        if (w == 0 && tls)
-            continue;   /* TLS WANT_WRITE: poll for writable again */
-        if (w <= 0)
-            return -1;
-        sent += (size_t)w;
-    }
-
-    return 0;
+    return send_all_sync(sockets, fd, tls, buf, (size_t)off, deadline);
 }
 
 /* ── Send chunked body from body_read callback (sync) ────────────── */
 
-static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, const char *data, size_t len,
-                           int timeout_ms)
-{
-    size_t sent = 0;
-    while (sent < len) {
-        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        kl_ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
-        if (w == 0 && tls)
-            continue;   /* TLS WANT_WRITE: poll for writable again */
-        if (w <= 0)
-            return -1;
-        sent += (size_t)w;
-    }
-    return 0;
-}
-
 static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
                                     KlHttpClientReadFn body_read, void *user_data,
-                                    int timeout_ms)
+                                    uint64_t deadline)
 {
     char data_buf[KL_HTTP_CLIENT_CHUNK_BUF_SIZE];
     char hdr_buf[KL_HTTP_CLIENT_CHUNK_HDR_SIZE];
@@ -494,7 +464,7 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
         if (nread == 0) {
             /* Final chunk: 0\r\n\r\n */
             if (send_all_sync(sockets, fd, tls, "0\r\n\r\n",
-                               KL_HTTP_CLIENT_FINAL_CHUNK_LEN, timeout_ms) != 0)
+                               KL_HTTP_CLIENT_FINAL_CHUNK_LEN, deadline) != 0)
                 return -1;
             return 0;
         }
@@ -504,11 +474,11 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
         if (hdr_len < 0)
             return -1;
 
-        if (send_all_sync(sockets, fd, tls, hdr_buf, (size_t)hdr_len, timeout_ms) != 0)
+        if (send_all_sync(sockets, fd, tls, hdr_buf, (size_t)hdr_len, deadline) != 0)
             return -1;
-        if (send_all_sync(sockets, fd, tls, data_buf, (size_t)nread, timeout_ms) != 0)
+        if (send_all_sync(sockets, fd, tls, data_buf, (size_t)nread, deadline) != 0)
             return -1;
-        if (send_all_sync(sockets, fd, tls, "\r\n", sizeof("\r\n") - 1, timeout_ms) != 0)
+        if (send_all_sync(sockets, fd, tls, "\r\n", sizeof("\r\n") - 1, deadline) != 0)
             return -1;
     }
 }
@@ -530,7 +500,7 @@ static int response_complete_at_eof(KlHttp1ResponseParser *parser, KlHttpClientR
  * with nothing after it on the socket or in TLS, and not at end of stream: the only case in which a
  * pool may keep the connection. */
 static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlHttpClientResponse *resp,
-                               size_t max_response_size, int timeout_ms,
+                               size_t max_response_size, uint64_t deadline,
                                KlAllocator *alloc,
                                const KlHttpClientStreamCfg *stream, int is_head, int *reusable)
 {
@@ -565,12 +535,17 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
     for (;;) {
         /* Plaintext the TLS engine already holds will not make the socket readable: read it first. */
         if (!(tls && tls->pending && tls->pending(tls) > 0)) {
-            int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
+            int pr = wait_ready(fd, KL_POLL_IN, deadline);
             if (pr <= 0)
                 break;
         }
 
         kl_ssize_t nread = kl_http_client_io_read(sockets, fd, tls, buf, sizeof(buf));
+        if (nread < 0 && !tls) {
+            KlIoStatus st = kl_sock_io_status(sockets);
+            if (st == KL_IO_INTERRUPTED || st == KL_IO_WOULD_BLOCK)
+                continue;   /* readable reported with nothing to read yet: wait again */
+        }
         if (nread < 0) {
             /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
              * finalize a close-delimited response rather than failing it. */
@@ -642,6 +617,7 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
                                                     : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+    uint64_t deadline = deadline_after(timeout_ms);   /* bounds the whole request */
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
                                                             : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
@@ -682,13 +658,13 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     KlError conn_err = KL_ERR_NONE;
     KlSocketHandle fd;
     if (parsed.is_unix) {
-        fd = unix_connect_with_timeout(parsed.unix_path, timeout_ms, sockets, &conn_err);
+        fd = unix_connect_with_timeout(parsed.unix_path, deadline, sockets, &conn_err);
     } else if (is_proxied) {
         fd = connect_with_timeout(proxy->host, strlen(proxy->host),
-                                   proxy->port, timeout_ms, sockets, &conn_err);
+                                   proxy->port, deadline, sockets, &conn_err);
     } else {
         fd = connect_with_timeout(parsed.host, parsed.host_len,
-                                   parsed.port, timeout_ms, sockets, &conn_err);
+                                   parsed.port, deadline, sockets, &conn_err);
     }
     if (!kl_handle_valid(fd)) {
         resp->error = conn_err;
@@ -712,21 +688,21 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
         target_host[parsed.host_len] = '\0';
 
         if (proxy_connect_sync(sockets, fd, target_host, (uint16_t)parsed.port,
-                                 proxy->auth, timeout_ms) != 0) {
-            resp->error = KL_ERR_PROXY;
+                                 proxy->auth, deadline) != 0) {
+            resp->error = step_error(deadline, KL_ERR_PROXY);
             goto cleanup;
         }
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                timeout_ms, alloc, sockets);
+                                deadline, alloc, sockets);
         if (!tls) {
-            resp->error = KL_ERR_TLS_HANDSHAKE;
+            resp->error = step_error(deadline, KL_ERR_TLS_HANDSHAKE);
             goto cleanup;
         }
     } else if (parsed.is_https) {
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                timeout_ms, alloc, sockets);
+                                deadline, alloc, sockets);
         if (!tls) {
-            resp->error = KL_ERR_TLS_HANDSHAKE;
+            resp->error = step_error(deadline, KL_ERR_TLS_HANDSHAKE);
             goto cleanup;
         }
     }
@@ -803,28 +779,28 @@ int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(sockets, fd, tls, method, &parsed,
-                                hdrs, nh, timeout_ms, 0,
+                                hdrs, nh, deadline, 0,
                                 absolute_url) != 0) {
-            if (!resp->error) resp->error = KL_ERR_IO;
+            if (!resp->error) resp->error = step_error(deadline, KL_ERR_IO);
             goto cleanup;
         }
         if (send_body_chunked_sync(sockets, fd, tls, stream->body_read,
-                                     stream->user_data, timeout_ms) != 0) {
-            if (!resp->error) resp->error = KL_ERR_IO;
+                                     stream->user_data, deadline) != 0) {
+            if (!resp->error) resp->error = step_error(deadline, KL_ERR_IO);
             goto cleanup;
         }
     } else {
         if (send_request_sync(sockets, fd, tls, method, &parsed,
                                hdrs, nh, body, body_len,
-                               timeout_ms, 0, absolute_url) != 0) {
-            if (!resp->error) resp->error = KL_ERR_IO;
+                               deadline, 0, absolute_url) != 0) {
+            if (!resp->error) resp->error = step_error(deadline, KL_ERR_IO);
             goto cleanup;
         }
     }
 
-    if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
+    if (recv_response_sync(sockets, fd, tls, resp, max_resp, deadline, alloc,
                             actual_stream, strcmp(method, "HEAD") == 0, NULL) != 0) {
-        if (!resp->error) resp->error = KL_ERR_PARSE;
+        if (!resp->error) resp->error = step_error(deadline, KL_ERR_PARSE);
         goto cleanup;
     }
 
@@ -915,6 +891,7 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
                                                     : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+    uint64_t deadline = deadline_after(timeout_ms);   /* bounds the whole request */
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
                                                             : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
@@ -964,16 +941,14 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     int reusable = 0;
 
     if (acq == 0) {
-        /* Pool hit: reuse connection. The pool's liveness peek leaves it non-blocking; this client
-         * polls then does blocking I/O, so put it back (a non-blocking TLS read returns WANT_READ). */
+        /* Pool hit: reuse connection. It is non-blocking, as every connection of this client is. */
         fd = pconn.fd;
         tls = pconn.tls;
-        (void)kl_sock_set_blocking(sockets, fd);
     } else {
         /* Pool miss: connect fresh */
         KlError conn_err = KL_ERR_NONE;
         fd = connect_with_timeout(parsed.host, parsed.host_len,
-                                   parsed.port, timeout_ms, sockets, &conn_err);
+                                   parsed.port, deadline, sockets, &conn_err);
         if (!kl_handle_valid(fd)) {
             resp->error = conn_err;
             return -1;
@@ -981,9 +956,9 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
 
         if (is_tls) {
             tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                    timeout_ms, alloc, sockets);
+                                    deadline, alloc, sockets);
             if (!tls) {
-                resp->error = KL_ERR_TLS_HANDSHAKE;
+                resp->error = step_error(deadline, KL_ERR_TLS_HANDSHAKE);
                 kl_sock_close(sockets, fd);
                 return -1;
             }
@@ -997,14 +972,14 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     /* Send with keep-alive (direct only: a proxied request took the non-pooled path above) */
     if (send_request_sync(sockets, fd, tls, method, &parsed,
                            headers, num_headers, body, body_len,
-                           timeout_ms, 1, NULL) != 0) {
-        if (!resp->error) resp->error = KL_ERR_IO;
+                           deadline, 1, NULL) != 0) {
+        if (!resp->error) resp->error = step_error(deadline, KL_ERR_IO);
         goto cleanup;
     }
 
-    if (recv_response_sync(sockets, fd, tls, resp, max_resp, timeout_ms, alloc,
+    if (recv_response_sync(sockets, fd, tls, resp, max_resp, deadline, alloc,
                             NULL, strcmp(method, "HEAD") == 0, &reusable) != 0) {
-        if (!resp->error) resp->error = KL_ERR_PARSE;
+        if (!resp->error) resp->error = step_error(deadline, KL_ERR_PARSE);
         goto cleanup;
     }
 

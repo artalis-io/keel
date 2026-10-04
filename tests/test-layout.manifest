@@ -47,6 +47,7 @@ tests/protocols/http/test_timeout.c
 tests/protocols/http/test_tls_client_split.c
 tests/protocols/http/test_tls_integration.c
 tests/protocols/http/test_tls_vtable.c
+tests/protocols/http/test_http_client_deadline.c
 tests/protocols/http2/test_http2.c
 tests/protocols/http2/test_http2_client.c
 tests/protocols/http2/test_http2_client_hostname_fail.c
