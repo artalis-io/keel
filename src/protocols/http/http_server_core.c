@@ -687,7 +687,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             if (wsh) {
                 if (wsh->auto_ping) wsh->auto_ping(tc, now);
                 if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
-                    if (completion_loop) {
+                    if (completion_loop && tc->comp_driven) {
+                        /* Close once what is already queued is out, as a readiness close still
+                         * delivers what the kernel holds: cancelling would drop frames sent before
+                         * the one that ended the connection. A client that never reads is reaped by
+                         * the close-after-output timeout above. */
+                        kl_http_comp_tls_finish(s, tc, 0);
+                    } else if (completion_loop) {
                         kl_comp_cancel(&s->ev, tc->stream.fd);
                     } else {
                         kl_event_del(&s->ev.loop, tc->stream.fd);
