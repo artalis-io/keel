@@ -7,6 +7,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **A 32-bit build truncated a large Content-Length, so a request body could be read as the next
+  request.** The HTTP/1 parser counts Content-Length in 64 bits and stored it in the request's
+  `size_t` field: on a 32-bit build `Content-Length: 4294967296` read as 0, so the server took the
+  body for a pipelined request (a smuggling vector behind a 64-bit proxy that framed the message
+  correctly). A Content-Length that does not fit `size_t` is now a parse error, and the connection is
+  closed as for any malformed request. 64-bit builds are unchanged.
+- **A multipart parameter could be taken from inside a quoted value.** The multipart reader found
+  `name=`, `filename=` and `boundary=` anywhere after a `;` or a space, including inside a quoted
+  string, so `filename="x; name=evil"; name="real"` gave the field the name `evil` instead of `real`,
+  letting one part pose as another form field. Parameters are now recognised only outside quoted
+  strings, and a quoted string honours backslash escapes (`\"` does not end it), both when looking
+  for a parameter and when reading its value. A quoted value with no closing quote is malformed.
 - **HTTP/2: peer-driven resource limits, idle connections and graceful shutdown.** The nghttp2
   server adapter sent empty SETTINGS, so a peer could open streams without limit, and it copied every
   request header with no count or size cap: one HPACK table entry referenced again and again (an
@@ -295,6 +307,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   listen socket and closed. The server kept running and never accepted another connection. An arm
   hook can now report a transient failure (`KL_LISTENER_ARM_RETRY`). The listener then returns the
   credit and pauses, and the server's sweep posts again on its next tick.
+- **Status codes missing from the server's table were sent as 500.** The HTTP/1 status line came
+  from a fixed table of common codes, and any other code (412, 416, 426, 451, 501, ...) went out as
+  `500 Internal Server Error`. Every registered code now has its reason phrase, and any other code
+  from 100 to 599 is sent as itself with an empty reason phrase, which HTTP/1.1 allows. Only a value
+  outside 100-599 is still sent as 500.
+- **A route registered without a handler crashed the server on its first request.**
+  `kl_http_router_add` (and `kl_http_server_route` and the streaming variants built on it) accepted
+  a NULL handler, which the first matching request called. It now returns -1. WebSocket routes,
+  which carried a NULL handler, now carry one that answers 404 when the request is not upgraded (an
+  HTTP/2 stream on the route, as before, or a synthetic router dispatch, which crashed).
+- **A failed compression header append left Content-Encoding on an uncompressed body.**
+  `kl_http_response_body_compress` and `kl_http_compress_stream_begin` added `Content-Encoding` and
+  then `Vary`; when the `Vary` append failed (out of memory) they returned -1 with `Content-Encoding`
+  already in the header block, so a caller that then sent the body as is labelled plain bytes as
+  compressed. The two headers are now added as a pair: on failure the header block is left as it was
+  before the call.
 - **miniz: a streamed gzip response arrived corrupt once its last block passed 4 KiB.** The
   streaming compressor's finishing call ran the deflater once with a 4 KiB output buffer, so the rest
   of a larger final block stayed inside it and the gzip trailer followed an incomplete stream: any

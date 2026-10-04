@@ -406,6 +406,69 @@ UTEST(compress, null_response) {
     ASSERT_EQ(kl_http_response_body_compress(NULL, &cfg, "data", 4), -1);
 }
 
+/* An allocator whose realloc always fails: the header buffer cannot grow. */
+static void *grow_fail_malloc(void *ctx, size_t size) {
+    KlAllocator *d = ctx; return d->malloc(d->ctx, size);
+}
+static void *grow_fail_realloc(void *ctx, void *ptr, size_t old, size_t new_size) {
+    (void)ctx; (void)ptr; (void)old; (void)new_size; return NULL;
+}
+static void grow_fail_free(void *ctx, void *ptr, size_t size) {
+    KlAllocator *d = ctx; d->free(d->ctx, ptr, size);
+}
+
+/* Fill the header buffer so "Content-Encoding: mock\r\n" (24 bytes) still fits in its 512-byte
+ * initial capacity but "Vary: Accept-Encoding\r\n" (23 bytes) does not, and has to grow. */
+static int fill_headers_to(KlHttpResponse *res, size_t target) {
+    char v[600];
+    size_t base = res->hdr_len + 10;     /* "X-Fill: " + "\r\n" */
+    if (target < base || target - base >= sizeof(v)) return -1;
+    memset(v, 'f', target - base);
+    v[target - base] = '\0';
+    return kl_http_response_header(res, "X-Fill", v);
+}
+
+/* When the Vary header cannot be added, the call fails with the header block as it was before the
+ * call: no Content-Encoding is left behind to label a body that was never compressed. */
+UTEST(compress, buffer_header_failure_leaves_no_content_encoding) {
+    KlAllocator dflt = kl_allocator_default();
+    KlAllocator a = { .malloc = grow_fail_malloc, .realloc = grow_fail_realloc,
+                      .free = grow_fail_free, .ctx = &dflt };
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &a), 0);
+    ASSERT_EQ(res.hdr_cap, (size_t)512);
+    ASSERT_EQ(fill_headers_to(&res, 488), 0);
+    size_t before = res.hdr_len;
+    g_factory_fail = 0;
+
+    KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
+    const char *data = "Hello, World! This is a test body with enough data.";
+    int rc = kl_http_response_body_compress(&res, &cfg, data, strlen(data));
+    size_t after = res.hdr_len;
+    kl_http_response_free(&res);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(after, before);                    /* was before + 24: Content-Encoding stayed */
+}
+
+UTEST(compress, stream_header_failure_leaves_no_content_encoding) {
+    KlAllocator dflt = kl_allocator_default();
+    KlAllocator a = { .malloc = grow_fail_malloc, .realloc = grow_fail_realloc,
+                      .free = grow_fail_free, .ctx = &dflt };
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &a), 0);
+    ASSERT_EQ(fill_headers_to(&res, 488), 0);
+    size_t before = res.hdr_len;
+    g_factory_fail = 0;
+
+    KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
+    KlHttpCompressStream cs;
+    int rc = kl_http_compress_stream_begin(&res, &cfg, 200, &cs);
+    size_t after = res.hdr_len;
+    kl_http_response_free(&res);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(after, before);
+}
+
 UTEST(compress, stream_null_args) {
     ASSERT_EQ(kl_http_compress_stream_begin(NULL, NULL, 200, NULL), -1);
     ASSERT_EQ(kl_http_compress_stream_write(NULL, "data", 4), -1);

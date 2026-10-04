@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/http1_parser.h>
 #include <keel/http_body_reader.h>
+#include <stdint.h>
 #include <string.h>
 
 UTEST(parser, create_and_destroy) {
@@ -222,6 +223,33 @@ UTEST(parser, chunked_te_only) {
     ASSERT_EQ(req.content_length, (size_t)0);
 
     p->destroy(p);
+}
+
+/* A Content-Length that size_t cannot hold is refused, never truncated: 4294967296 would read as
+ * 0 on a 32-bit build, and the body would then be parsed as the next request. Where size_t is 64
+ * bits wide the value fits, and the parser reports it exactly. */
+UTEST(parser, content_length_wider_than_size_t_is_refused) {
+    KlAllocator a = kl_allocator_default();
+    KlHttp1Parser *p = kl_http1_parser_llhttp(&a);
+
+    const char *raw = "POST /data HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 4294967296\r\n"
+                      "\r\n";
+    size_t len = strlen(raw);
+
+    KlHttpRequest req;
+    memset(&req, 0, sizeof(req));
+    size_t consumed = 0;
+
+    KlHttp1ParseResult result = p->parse(p, &req, raw, len, &consumed);
+    p->destroy(p);
+    if ((uint64_t)SIZE_MAX < UINT64_C(4294967296)) {
+        ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
+    } else {
+        ASSERT_EQ(result, KL_HTTP1_PARSE_HEADERS_OK);
+        ASSERT_EQ((uint64_t)req.content_length, UINT64_C(4294967296));
+    }
 }
 
 UTEST_MAIN();

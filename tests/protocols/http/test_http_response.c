@@ -488,4 +488,50 @@ UTEST(response, end_stream_on_head_marks_the_stream_ended) {
     ASSERT_EQ(ended, 1);                         /* was 0 */
 }
 
+/* Send a response with `code` over a socket pair; return 1 if the wire starts with `expect`. */
+static int status_line_is(int code, const char *expect) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    if (kl_http_response_init(&res, &a) < 0) return 0;
+    int sv[2];
+    if (kl_test_socketpair(sv) != 0) { kl_http_response_free(&res); return 0; }
+    res.conn_fd = sv[1];
+    kl_http_response_status(&res, code);
+    kl_http_response_body_borrow(&res, "x", 1);
+    int rc = kl_http_response_send(&res);
+    kl_test_closesock(sv[1]);
+    char buf[512];
+    kl_ssize_t n = kl_test_sockread(sv[0], buf, sizeof(buf) - 1);
+    kl_test_closesock(sv[0]);
+    kl_http_response_free(&res);
+    if (rc != 0 || n <= 0) return 0;
+    buf[n] = '\0';
+    size_t el = strlen(expect);
+    int ok = ((size_t)n >= el && memcmp(buf, expect, el) == 0);
+    if (!ok) {
+        char *eol = strstr(buf, "\r\n");
+        if (eol) *eol = '\0';
+        printf("  status %d sent as \"%s\"\n", code, buf);
+    }
+    return ok;
+}
+
+/* A valid status code goes out as itself: with its reason phrase when it is a registered code,
+ * with an empty reason (allowed by HTTP/1.1) when it is not. Only a code outside 100-599 is
+ * replaced, by 500. */
+UTEST(response, status_line_keeps_every_valid_code) {
+    ASSERT_TRUE(status_line_is(200, "HTTP/1.1 200 OK\r\n"));
+    ASSERT_TRUE(status_line_is(404, "HTTP/1.1 404 Not Found\r\n"));
+    ASSERT_TRUE(status_line_is(412, "HTTP/1.1 412 Precondition Failed\r\n"));
+    ASSERT_TRUE(status_line_is(416, "HTTP/1.1 416 Range Not Satisfiable\r\n"));
+    ASSERT_TRUE(status_line_is(426, "HTTP/1.1 426 Upgrade Required\r\n"));
+    ASSERT_TRUE(status_line_is(451, "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"));
+    ASSERT_TRUE(status_line_is(501, "HTTP/1.1 501 Not Implemented\r\n"));
+    ASSERT_TRUE(status_line_is(299, "HTTP/1.1 299 \r\n"));
+    ASSERT_TRUE(status_line_is(499, "HTTP/1.1 499 \r\n"));
+    ASSERT_TRUE(status_line_is(599, "HTTP/1.1 599 \r\n"));
+    ASSERT_TRUE(status_line_is(600, "HTTP/1.1 500 Internal Server Error\r\n"));
+    ASSERT_TRUE(status_line_is(99, "HTTP/1.1 500 Internal Server Error\r\n"));
+}
+
 UTEST_MAIN();

@@ -11,6 +11,18 @@ static int compress_vtable_valid(const KlCompress *c) {
     return c && c->compress && c->feed && c->encoding && c->destroy;
 }
 
+/* Append Content-Encoding and Vary as a pair. If either append fails, the header block is cut
+ * back to where it was, so no Content-Encoding is left to label a body that is sent as is. */
+static int add_encoding_headers(KlHttpResponse *res, const char *enc) {
+    size_t mark = res->hdr_len;
+    if (kl_http_response_header(res, "Content-Encoding", enc) < 0 ||
+        kl_http_response_header(res, "Vary", "Accept-Encoding") < 0) {
+        res->hdr_len = mark;
+        return -1;
+    }
+    return 0;
+}
+
 int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
                                const char *data, size_t len) {
     if (!res || !cfg || !cfg->factory) return -1;
@@ -53,8 +65,7 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
 
     /* Set Content-Encoding and Vary headers */
     const char *enc = comp->encoding(comp);
-    if (kl_http_response_header(res, "Content-Encoding", enc) < 0 ||
-        kl_http_response_header(res, "Vary", "Accept-Encoding") < 0) {
+    if (add_encoding_headers(res, enc) < 0) {
         kl_free(alloc, out, out_len);
         comp->destroy(comp);
         return -1;
@@ -103,8 +114,7 @@ int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
 
     /* Set Content-Encoding and Vary headers */
     const char *enc = comp->encoding(comp);
-    if (kl_http_response_header(res, "Content-Encoding", enc) < 0 ||
-        kl_http_response_header(res, "Vary", "Accept-Encoding") < 0) {
+    if (add_encoding_headers(res, enc) < 0) {
         comp->destroy(comp);
         return -1;
     }

@@ -721,6 +721,24 @@ UTEST(router, streaming_and_regular_routes_independent) {
     kl_http_router_free(&r);
 }
 
+/* A route without a handler is refused at registration: once accepted, the first request it
+ * matched called through a NULL pointer. */
+UTEST(router, add_rejects_null_handler) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRouter r;
+    kl_http_router_init(&r, &a);
+    int plain = kl_http_router_add(&r, "GET", "/x", NULL, NULL, NULL);
+    int streaming = kl_http_router_add_streaming(&r, "POST", "/u", NULL, NULL, dummy_body_factory);
+    int streaming_async = kl_http_router_add_streaming_async(&r, "POST", "/v", NULL, NULL,
+                                                             dummy_body_factory);
+    int count = r.count;
+    kl_http_router_free(&r);
+    ASSERT_EQ(plain, -1);
+    ASSERT_EQ(streaming, -1);
+    ASSERT_EQ(streaming_async, -1);
+    ASSERT_EQ(count, 0);
+}
+
 UTEST_MAIN();
 
 /* ── synthetic dispatch: kl_http_router_dispatch_synthetic ─────────────────── */

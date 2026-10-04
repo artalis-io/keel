@@ -1,6 +1,7 @@
 #include <keel/http1_parser.h>
 #include <keel/http_body_reader.h>
 #include "../../allocator_validate.h"
+#include <stdint.h>
 #include <string.h>
 #include "llhttp.h"
 
@@ -132,7 +133,14 @@ static int on_headers_complete(llhttp_t *p) {
 
     req->version_major = (int)p->http_major;
     req->version_minor = (int)p->http_minor;
-    req->content_length = p->content_length;
+#if SIZE_MAX < UINT64_MAX
+    /* Where size_t is narrower than llhttp's 64-bit count, a larger Content-Length would be
+     * truncated (4294967296 reads as 0 on a 32-bit build) and the body parsed as the next
+     * request. Refuse it as a parse error instead. */
+    if (p->content_length > (uint64_t)SIZE_MAX)
+        return -1;
+#endif
+    req->content_length = (size_t)p->content_length;
     req->chunked = (p->flags & F_CHUNKED) ? 1 : 0;
     req->keep_alive = llhttp_should_keep_alive(p);
 
