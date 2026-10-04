@@ -108,6 +108,57 @@ UTEST(unix_node, zero_initialized_storage_is_a_safe_not_open_state) {
     ASSERT_EQ(KL_UNIX_NODE_OK, kl_unix_socket_node_teardown(&st, 1));  /* no close(0), no crash */
 }
 
+/* The umask is process-wide: changing it around bind() races every other thread creating a file.
+ * A provider whose bind records the umask in force shows whether the module touched it, and the
+ * node must still end with the configured mode. */
+static mode_t g_umask_at_bind;
+static int    g_bind_calls;
+static int umask_probe_bind(void *context, KlSocketHandle fd, const KlSockAddr *addr) {
+    (void)context;
+    mode_t cur = umask(0);
+    umask(cur);
+    g_umask_at_bind = cur;
+    g_bind_calls++;
+    return kl_sockdef_bind(fd, addr);
+}
+
+UTEST(unix_node, bind_leaves_umask_alone_and_sets_mode) {
+    NodeStore st;
+    kl_unix_socket_node_init(&st);
+    KlAllocator alloc = kl_allocator_default();
+    const KlSocketProvider *base = kl_socket_provider_posix();
+    KlSocketOps ops = *base->ops;
+    ops.bind = umask_probe_bind;
+    KlSocketProvider probe = *base;
+    probe.ops = &ops;
+
+    char path[108];
+    node_path(path, sizeof(path), "umask");
+    unlink(path);
+
+    mode_t saved = umask(022);
+    g_bind_calls = 0;
+    g_umask_at_bind = 0;
+    KlUnixNodePolicy pol = { .path = path, .unlink_stale = 1, .set_mode = 1, .mode = 0600 };
+    KlSocketHandle fd = KL_INVALID_SOCKET;
+    int err = -1;
+    KlUnixNodeStatus rc = kl_unix_socket_node_bind(&pol, &probe, &alloc, &st, &fd, &err);
+    mode_t after = umask(saved);
+
+    struct stat sb;
+    int stat_rc = stat(path, &sb);
+    if (kl_handle_valid(fd)) kl_sock_close(base, fd);
+    (void)kl_unix_socket_node_teardown(&st, 1);
+    unlink(path);
+
+    ASSERT_EQ(KL_UNIX_NODE_OK, rc);
+    ASSERT_EQ(1, g_bind_calls);
+    ASSERT_EQ((unsigned)022, (unsigned)g_umask_at_bind);   /* never changed around bind() */
+    ASSERT_EQ((unsigned)022, (unsigned)after);
+    ASSERT_EQ(0, stat_rc);
+    ASSERT_EQ((unsigned)0600, (unsigned)(sb.st_mode & 0777));
+}
+
 /* Recursively remove a test-owned directory tree (best-effort; operates only on our mkdtemp dir). */
 static void rm_rf(const char *path) {
     DIR *d = opendir(path);
