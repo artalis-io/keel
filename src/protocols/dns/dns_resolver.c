@@ -87,6 +87,7 @@ typedef struct {
     uint16_t         id;           /* current transaction id */
     int              tries_left;   /* transmits remaining for this leg */
     int              ns_idx;       /* nameserver rotation cursor */
+    int              sent_ns;      /* nameserver the current query went to (its only valid source), or -1 */
     int64_t          timer_id;     /* per-leg timeout OR send-admission guard (mutually exclusive), -1 if none */
     int              done;         /* 1 = settled (answered / empty / exhausted) */
     int              send_pending; /* 1 = a transient WOULD_BLOCK is pending re-send on the writable edge;
@@ -535,6 +536,7 @@ static DnsTxResult dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLe
      * response timeout. (question is recorded only now, so a would-blocked build isn't tracked.) */
     memcpy(leg->question, buf + q_off, q_len);
     leg->question_len = q_len;
+    leg->sent_ns = leg->ns_idx;
     leg->ns_idx = (leg->ns_idx + 1) % r->nns;
     leg->tries_left--;
     if (leg->timer_id >= 0)
@@ -637,6 +639,7 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
         leg->req = q;
         leg->tries_left = r->attempts * r->nns;
         leg->ns_idx = 0;
+        leg->sent_ns = -1;
         leg->timer_id = -1;
         leg->done = 0;
         leg->naddrs = 0;
@@ -660,14 +663,22 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
     return any ? 0 : -1;                            /* -1 = neither leg could transmit */
 }
 
-/* Move to the next candidate name (search expansion) or fail. */
-static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q) {
-    q->ci++;
-    if (q->ci < q->ncand) {
+/* Start the first candidate at or after index `ci` that can be queried. A candidate that cannot be
+ * sent (e.g. a search expansion that does not encode as a query name) is skipped, not fatal.
+ * Returns 0 once one is in flight, -1 when none is left. Never completes the request. */
+static int dns_start_from(KlDnsResolver *r, KlDnsReq *q, int ci) {
+    for (q->ci = ci; q->ci < q->ncand; q->ci++) {
         memcpy(q->host, q->cand[q->ci], DNS_NAME_MAX);
         if (dns_start_candidate(r, q) == 0)
-            return;
+            return 0;
     }
+    return -1;
+}
+
+/* Move to the next candidate name (search expansion) or fail. */
+static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q) {
+    if (dns_start_from(r, q, q->ci + 1) == 0)
+        return;
     dns_complete(r, q, NULL, KL_ERR_DNS);
 }
 
@@ -1158,6 +1169,10 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
     KlDnsLeg *leg = dns_find_leg(r, id);
     if (!leg)
         return;                                  /* stale or unknown id */
+    if (ns_idx != leg->sent_ns)
+        return;                                  /* not from the nameserver this query went to: a reply
+                                                  * forged from another nameserver's address must not
+                                                  * pass (nor be cookie-checked as that server's) */
     KlDnsReq *q = leg->req;
 
     /* Once the leg is recovering over TCP, its answer comes from TCP. A later UDP datagram for it (a
@@ -1242,10 +1257,20 @@ static void dns_on_recv(void *ud, const void *data, size_t len,
         return;
     }
     /* Parse failed: only act if the question is genuinely ours (else ignore the
-     * spoof and keep waiting). NXDOMAIN and no-record both settle the leg empty;
+     * spoof and keep waiting). SERVFAIL, NOTIMP and REFUSED say this server cannot
+     * answer, so the leg moves on to the next nameserver as on a timeout, and ends
+     * only once its tries are spent. NXDOMAIN and no-record settle the leg empty;
      * the other family runs concurrently, so there's no in-family fallback. */
     if (!dns_question_matches(pkt, len, leg->question, leg->question_len))
         return;
+    int rcode = pkt[3] & 0x0F;
+    if ((rcode == 2 || rcode == 4 || rcode == 5) && leg->tries_left > 0) {
+        DnsTxResult tr = dns_transmit_leg(r, q, leg);   /* rotates to the next nameserver */
+        if (tr == DNS_TX_SENT)
+            return;
+        if (tr == DNS_TX_WOULDBLOCK && dns_leg_mark_pending(r, leg) == 0)
+            return;                              /* transient backpressure → retry on the writable edge */
+    }
     leg->naddrs = 0;
     dns_leg_settle(r, q, leg);
 }
@@ -1460,9 +1485,7 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
         kl_free(r->alloc, q, sizeof(*q));
         return NULL;
     }
-    memcpy(q->host, q->cand[0], DNS_NAME_MAX);
-    q->ci = 0;
-    if (dns_start_candidate(r, q) != 0) {
+    if (dns_start_from(r, q, 0) != 0) {
         dns_cancel_timers(r, q);
         dns_unlink(r, q);
         kl_free(r->alloc, q, sizeof(*q));

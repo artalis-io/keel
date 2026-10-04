@@ -90,6 +90,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   connection that the session ends now sends its GOAWAY before closing (it was dropped), and over TLS
   a `100 Continue` is sent before the body is read (it stayed in the engine until the final
   response, so a client that waits for it before sending the body waited for nothing).
+- **DNS: an answer is accepted only from the nameserver its query was sent to.** With several
+  nameservers configured, a reply was matched to its query by transaction id and checked against
+  whichever nameserver its source address named, not the one the query went to. An off-path
+  spoofer could forge an answer from a second nameserver's address, one that had never sent a DNS
+  cookie, and so get past the cookie check that would have rejected it from the primary. A reply
+  from any other nameserver is now ignored, and the cookie check uses the state of the server the
+  query was sent to.
+
 - **A TLS connection on a completion loop could be released twice, corrupting the connection
   pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
   completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that
@@ -466,6 +474,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   then a space or the end of the line), and any 2xx opens the tunnel (RFC 9110 9.3.6).
 - **`kl_http_client_pool_free` left the pool's `capacity` over a freed table.** A later call on the
   freed pool walked `capacity` slots of a NULL table. `capacity` is now 0 after a free.
+- **DNS: SERVFAIL, NOTIMP and REFUSED now fail over to the next nameserver.** Such an answer ended
+  the query for that address family at once, as if the name had no address, so one broken or
+  misconfigured nameserver failed every lookup even when the next one in `resolv.conf` would have
+  answered. These rcodes now move the query on to the next nameserver, as a timeout does, and the
+  lookup fails only once every try is spent. NXDOMAIN still ends the lookup immediately.
+- **DNS: a search-list candidate that cannot be queried is skipped.** A candidate name that does not
+  encode as a query (for example, a search domain with a label over 63 bytes) stopped the whole
+  lookup: `resolve()` returned NULL when it came first, and the lookup failed when it was reached
+  later. The resolver now moves on to the next candidate and fails only when none can be queried.
 - **Completion loops: a finished rejection drain held its slot, and a graceful stop could cut queued
   TLS output.** A rejected client that sent the rest of its declared body and kept the connection
   open held its slot until the drain deadline on io_uring, IOCP and pollcomp; the drain now ends once
