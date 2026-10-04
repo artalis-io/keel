@@ -5,6 +5,120 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Eighteenth pass: comprehensive re-audit after the hardening round (2026-10-04)
+
+**Scope:** the whole `src/` tree, `include/keel/`, every integration (TLS backends, nghttp2, miniz,
+lwIP, UEFI) and the build, at `main` `d757d20`. That is after the hardening round (#415 to #436)
+closed. Six parallel read-only reviews covered:
+- the HTTP/1 server, readiness and completion;
+- the HTTP/1 client stack;
+- HTTP/2 and WebSocket, server and client, with the nghttp2 adapter;
+- the engines and the completion axis;
+- datagrams, DNS, PROXY, pipes and the platform layer;
+- the integrations and the build.
+
+Every High was then re-checked against the code by hand. Confidence: **C** means confirmed by
+reading the path end to end. **P** means plausible and needing a test. Two Highs were found by two
+reviews independently: S1 (also E1) and S2 (also E4).
+
+**Fixes since the seventeenth pass:** every hardening-round fix was traced in its area and holds.
+No Critical was found. The new findings fall in three groups:
+- **The plaintext twin of the completion TLS work:** S1 and W4. The round moved TLS output on
+  completion loops into an overlapped queue; plaintext streaming, WebSocket and the h2c upgrade
+  response still `send()` on the loop thread, on sockets that block on io_uring and IOCP.
+- **Peer-driven resource exhaustion on HTTP/2:** W1, W2, W3 and W6.
+- **Correctness of the integrations themselves,** which the core tests reach only through mocks: I1,
+  I2 and I3.
+
+### Mechanical scans and gates
+
+| Category | Result |
+|---|---|
+| Unsafe str/format, `atoi`/`atol`/`atof`, `alloca` | none in `src/` or `integrations/` (the UEFI libc shim defines `strcpy` for mbedTLS; a definition, not a use) |
+| Direct `malloc`/`free` | only the PAL thread trampolines (I6, unchanged) and the default allocator |
+| Unchecked allocations, VLAs | none found |
+| Local gates | pass on `main` (the round's PRs ran all of them) |
+| cppcheck, scan-build | green in CI at `d757d20` |
+
+### High
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S1 | `http_response.c:608-623` (`response_drain_writer`) via `drain.c:89-99`; `completion_http_server.c:218-237` (`comp_stream_pump`) | **Plaintext streaming on a completion loop sends synchronously on the loop thread** (also found as E1). `kl_drain_write` with an empty buffer calls `kl_sock_send` straight away, for the stream head and every chunk. io_uring and IOCP accepted sockets are blocking, so a client that stops reading an SSE, chunked or compressed stream blocks the whole server. On pollcomp (non-blocking) a direct send can overtake a queued pump op and reorder the chunked framing. | C (path) |
+| W4 | `completion_ws.c:51-58` → `http_server_ws.c:170-171` (`conn_write_all`); `http2_server.c:795-808` → `h2_out_conn_write` | **Plaintext WebSocket, and the h2c upgrade's stream 1, send synchronously on a completion loop.** The same class as S1, on the paths the TLS queue does not cover: a client that sends pings and never reads blocks the loop on the auto-pong. | C (path) |
+| E2 | `listener.c:150-155` (`l_pump`); `event_iocp.c:505-533` (`iocp_comp_post_accept`) | **One failed accept post closes the completion listener for good.** `arm_accept` returning -1 is treated as a broken listen socket. On IOCP that happens on a transient `WSASocketW` failure, or when a queued connection is reset before AcceptEx takes it. The server keeps running and never accepts again. | C (close path); P (Windows sync-failure codes) |
+| W1 | `integrations/http2/nghttp2/http2_nghttp2_server.c:160-193` (`ng_on_header_cb`), `:103-134` | **HPACK bomb: request headers are stored with no limit.** Each header is copied into the per-stream record, and the arrays grow without a count or byte cap (Keel clamps only later). One header in the dynamic table, referenced by one-byte indices across HEADERS and CONTINUATION frames, costs hundreds of MB per stream. | C |
+| W2 | `http2_nghttp2_server.c:484` (empty SETTINGS), `:310-315`; `http2_server.c:544-548` | **No limit on concurrent streams, or on response copies queued for a peer that does not read.** The adapter sends empty SETTINGS, so nghttp2's incoming stream limit stays unlimited; a Keel stream is freed once its response is submitted, while the adapter's copy of the body (up to 16 MiB) waits in nghttp2. `initial_window_size` is never read. | C |
+| W3 | `http_server_core.c:684-686` | **HTTP/2 connections never time out.** The sweep skips the HTTP2 state, and the session has no idle handling. A client that completes ALPN h2, or sends only the preface, and goes silent holds its slot forever. | C |
+| I1 | `integrations/codec/miniz/compress_miniz.c:146-165` (`miniz_feed`) | **The streaming gzip compressor truncates its final block.** On the finishing call `remaining` is 0, so one `tdefl_compress` runs; when the final block needs more than the 4 KiB output buffer, the trailer follows an incomplete deflate stream. Any streamed compressed response of roughly 15 KiB of text or more is corrupt. Reproduced against miniz. | C (run) |
+| I2 | `integrations/tls/openssl/tls_openssl.c:145-150` (`kl_bio_write`, completion mode) | **OpenSSL fails any completion-mode write past ~256 KiB.** A full output ring returns -1 with no retry flag, so `SSL_write` fails and the connection closes; the core expects WANT_WRITE and retries after absorbing the ring. Any buffered HTTPS response body over ~250 KiB on io_uring, IOCP, pollcomp, lwIP-raw or UEFI with OpenSSL, BoringSSL or LibreSSL is dropped. | C |
+| I3 | `tls_mbedtls.c:231-244`, `tls_openssl.c:354-371` via `drain.c:90-104` | **The drain breaks the TLS write-retry contract.** After WANT_WRITE the drain retries from its own buffer, with a different pointer and possibly a larger length. mbedTLS flushes the pending record and acknowledges the new length, so bytes are reported sent that were never encrypted (a wss frame stream or HTTPS SSE silently corrupts); OpenSSL fails with `BAD_WRITE_RETRY`. | C (code); library semantics cited |
+| T1 | `http_client_sync.c:101`, `:157`, `:971`; handshake `:205-224` | **The sync client runs TLS and sends on a blocking socket, so `timeout_ms` is not enforced there.** The fd is put back to blocking after connect; the handshake, `SSL_read` of a partial record and a large `send` then block with no limit. A server that accepts and never sends a ServerHello blocks the caller forever. | C |
+
+### Medium
+
+| # | Location | Finding | Conf |
+|---|---|---|---|
+| S2 | `http_connection.c:746-754`; `completion_http_server.c:155-163` | On completion with TLS, `100 Continue` stays in the engine's ring until the final response (also found as E4): `curl -T` stalls a second per upload, and a client that waits for it hits the body timeout. | C |
+| S3 | `http1_parser_llhttp.c:135`; `http_request.h:84` | On 32-bit builds Content-Length is truncated to `size_t`: `4294967296` reads as 0, so the body is parsed as the next request (smuggling behind a 64-bit proxy). | C (code); P (no 32-bit lane) |
+| E3 | sweep `http_server_core.c:668-720`; backends re-post partial sends without an event | The S13 fix is incomplete: a plaintext buffered or file response is one op until it finishes, so a long download never refreshes `last_active_ms` and is cancelled at `read_timeout_ms` (30 s by default). | C |
+| E5 | `event_iocp.c:1207-1226` | An IOCP WRITE completion ignores the operation status: a `CancelIoEx` abort that reports partial bytes is re-posted, so a closing connection whose client stopped reading can leak its slot. | P |
+| W5 | `http2_nghttp2_server.c:367-371` | "Graceful" shutdown calls `nghttp2_session_terminate_session`, which stops all output after its GOAWAY: in-flight responses are cut. | C |
+| W6 | `http2_nghttp2_client.c:92-116`, `:140-158` | The client side of W1: a malicious server can run the same HPACK amplification against the client. | C |
+| I4 | `tls_mbedtls.c:165-166`, `:212-214` | mbedTLS maps a bare TCP EOF to close_notify, so a truncated close-delimited HTTPS response is accepted as complete. | C |
+| I5 | `tls_openssl.c:1111-1122` | The OpenSSL mTLS server sets no session ID context, so resumption attempts are rejected with a fatal alert. | P |
+| X1 | `dns_resolver.c:1144`, `:1172-1180` | The DNS cookie check is keyed on the reply's source, not on the server the query went to: with several nameservers, a spoofer forging from a secondary bypasses the cookie. | C |
+| X2 | `dns_resolver.c:249`, `:1235-1241` | SERVFAIL, REFUSED and NOTIMP end the leg with no failover to the next nameserver. | C |
+| T2 | `http_client_sync.c:565-602` | The sync client has no overall deadline: interim 1xx responses or a trickle hold it forever. | C |
+| T3 | `http_client_sync.c:57`; `http_client_async.c:1515`, `:1858` | Only the first resolved address is tried (sync always; async on its non-Happy-Eyeballs paths). | C |
+
+### Low
+
+| # | Location | Finding |
+|---|---|---|
+| S4 | `http_response.c:31-60` | Status codes missing from the table (416, 412, 451, 501, ...) are sent as `500`. |
+| S5 | `completion_http_server.c:428-441` | Completion with TLS can complete a stream response its producer has not ended. |
+| S6 | `http_router.c:24-27` | A NULL route handler is accepted and crashes the first request. |
+| S7 | `http_body_reader_multipart.c:112-128` | Multipart parameter scanning looks inside quoted strings (field-name confusion). |
+| S8 | `http_compress.c:56-61` | A failed `Vary` append (OOM) leaves `Content-Encoding` on an uncompressed body. |
+| S9 | `file_io.c`; `http_connection.c:1161-1269` | The async file-I/O state machine is unreachable (`kl_file_io_create` returns NULL). |
+| T4 | `http_redirect.c:158-190`, `:350` | Redirect API argument checks are weaker than the client's; early returns leave `*resp` unset. |
+| T5 | `src/url.c:155-190` | The authority does not end at `?`/`#`; SP/CTL and fragments reach the request line; schemes are case-sensitive; relative references are not resolved. |
+| T6 | `http_client_async.c:248-251` | A custom resolver's `ai_socktype`/`ai_protocol` are used for the TCP socket. |
+| T7 | `http_client_proxy.c:55-58` | The CONNECT status check reads only the three digits. |
+| T8 | `http_client_pool.c:147-165` | `kl_http_client_pool_free` leaves `capacity` set over a NULL table. |
+| T9 | `http_client_internal.h:137` | `conn_last_err` is dead. |
+| E6 | `event_ctx.c:333-347` | `kl_event_ctx_run` returns -1 on EINTR on epoll, kqueue and poll. |
+| E7 | `event_pollcomp.c:500-505`; `event_iouring.c:865` | An accept EMFILE/ENFILE spins. |
+| E8 | `event_iocp.c:552-561` | The TransmitFile chunk test seam is read from the environment in production builds. |
+| W7 | `http2_nghttp2_server.c:221-224` | A failed response submit gets no RST. |
+| W8 | `completion_http2.c:79-83` | Plaintext h2 on completion drops the closing GOAWAY. |
+| W9 | `http_server_ws.c:716-723` | No WebSocket liveness check: auto-ping never expects a PONG. |
+| W10 | `http_server_ws.c:461-470` | With an unlimited drain, auto-pongs can grow it without bound. |
+| W11 | `http2_nghttp2_client.c:328` | The HTTP/2 client never refuses server push. |
+| W12 | `http_server_ws.c:36-38`, `:749-754` | Public WebSocket entry points lack NULL guards. |
+| W13 | `http2_server.c:458-521`; `http_server_ws.c:206` | Write-only fields; `initial_window_size` is never read. |
+| X3 | `dns_resolver.c:656-663` | One bad search candidate stops the whole resolve. |
+| X4 | `platform_posix.c:47-62` | Linux entropy falls back to the weak generator when `/dev/urandom` cannot be opened. |
+| X5 | `unix_socket_node_posix.c:212-218` | The process-wide `umask` is changed during an AF_UNIX bind. |
+| X6 | `proxy_protocol.c:48-58` | PROXY v1 validates only the source address and port. |
+| L1 | `tls_mbedtls.c:283` | `feed_input` lacks the overflow-safe length check (caller-only). |
+| L2 | `tls_mbedtls.c:845-876` | `kl_tls_mbedtls_client_ctx_create(NULL)` disables verification, unlike OpenSSL. |
+| L3 | `decompress_miniz.c:377-398` | Bytes after the gzip trailer are ignored. |
+| L4 | `integrations/*/Makefile` | The standalone integration builds lack FORTIFY and PIE. |
+
+Already recorded and still open: E7, W11, W18, X5, X6, X8, S10, S11 (seventeenth-pass IDs), and C4.
+
+### Recommended order
+
+1. **The integration Highs,** small and independent: I1 (one loop condition), I2 (a retry flag),
+   I3 (a moving-buffer mode and a pending-length guard).
+2. **HTTP/2 resource limits:** W1, W2, W6 (one adapter change: SETTINGS plus header caps), then W3
+   and W5.
+3. **Completion plaintext output:** S1 and W4, by routing plaintext output on completion loops
+   through the same per-connection queue the TLS work uses.
+4. **E2, T1,** then the Mediums by area, then the Lows.
+
 ## Seventeenth pass: re-audit after the sixteenth-pass fixes (2026-10-02)
 
 **Scope:** the whole `src/` tree, `include/keel/` and the nghttp2 and miniz integrations, at `main`
