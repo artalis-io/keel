@@ -25,6 +25,19 @@ UTEST(cpool, init_defaults) {
     kl_http_client_pool_free(&pool);
 }
 
+/* A freed pool is empty: no capacity over a table that is gone, so a later call finds nothing to
+ * walk and a second free is harmless. */
+UTEST(cpool, free_clears_capacity) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    kl_http_client_pool_free(&pool);
+    ASSERT_TRUE(pool.entries == NULL);
+    ASSERT_EQ(pool.capacity, 0);
+    ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 0);
+    kl_http_client_pool_free(&pool);
+}
+
 /* The pooled path must refuse an https request whose TLS config has no factory too: going ahead
  * would send it in plaintext and file the plain connection in the pool as a TLS one. */
 UTEST(cpool, pooled_https_tls_without_factory) {
