@@ -267,4 +267,72 @@ UTEST(gz_stream, long_distance_matches_round_trip) {
     ASSERT_TRUE(piece_ok);
 }
 
+/* ── Streaming compression ──────────────────────────────────────────────────────────────────
+ * The streaming compressor (feed) ends with feed(NULL, 0, 1). That call ran tdefl_compress once,
+ * with a 4 KiB output buffer: when the final block needs more, the rest stayed inside tdefl and the
+ * gzip trailer followed an incomplete deflate stream, so any streamed compressed response whose last
+ * block is larger than 4 KiB arrived corrupt. 200 KB of varied text, fed in 1000-byte pieces, must
+ * decompress back to itself. */
+static int stream_emit(void *ctx, const char *d, size_t n) { return big_emit(ctx, d, n); }
+
+UTEST(gz_stream, streamed_compression_round_trips) {
+    KlAllocator al = kl_allocator_default();
+    const size_t body_len = 200000;
+    char *body = malloc(body_len);
+    ASSERT_TRUE(body != NULL);
+    uint32_t x = 12345;                           /* words from an LCG: compressible, not trivially */
+    static const char *words[] = { "alpha ", "bravo ", "charlie ", "delta ", "echo ", "foxtrot ",
+                                   "golf ", "hotel ", "india ", "juliet ", "kilo ", "lima " };
+    size_t at = 0;
+    while (at < body_len) {
+        x = x * 1103515245u + 12345u;
+        const char *w = words[(x >> 16) % 12];
+        size_t wl = strlen(w);
+        if (wl > body_len - at) wl = body_len - at;
+        memcpy(body + at, w, wl);
+        at += wl;
+    }
+
+    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6, &al);
+    ASSERT_TRUE(cctx != NULL);
+    KlCompress *c = kl_compress_miniz_create(cctx, &al);
+    ASSERT_TRUE(c != NULL);
+    BigSink gz = { malloc(body_len * 2), 0, body_len * 2 };
+    int crc = 0;
+    for (size_t off = 0; off < body_len && crc == 0; off += 1000) {
+        size_t n = body_len - off < 1000 ? body_len - off : 1000;
+        crc = c->feed(c, body + off, n, 0, stream_emit, &gz);
+    }
+    if (crc == 0) crc = c->feed(c, NULL, 0, 1, stream_emit, &gz);
+    c->destroy(c);
+    kl_compress_miniz_ctx_destroy(cctx);
+
+    KlCompressCtx *dctx;
+    KlDecompress *d = mk(&dctx, &al);
+    BigSink out = { malloc(body_len + 1), 0, body_len + 1 };
+    int drc = d->dfeed(d, gz.buf, gz.len, 1, big_emit, &out);
+    done(d, dctx);
+    int same = drc == 0 && out.len == body_len && memcmp(out.buf, body, body_len) == 0;
+    free(out.buf);
+    free(gz.buf);
+    free(body);
+    ASSERT_EQ(crc, 0);
+    ASSERT_EQ(drc, 0);                            /* was -1: the deflate stream stopped short */
+    ASSERT_TRUE(same);
+}
+
+/* Bytes after the 8-byte trailer (trailing garbage, or a second gzip member this decoder does not
+ * read) were ignored, and the body still counted as verified. At end of input they fail. */
+UTEST(gz_trailer, bytes_after_the_trailer_flush_rejected) {
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    unsigned char buf[GZ_LEN + 3];
+    memcpy(buf, GZ, GZ_LEN);
+    memcpy(buf + GZ_LEN, "XYZ", 3);
+    int rc = d->dfeed(d, (const char *)buf, sizeof buf, 1, sink_emit, &s);
+    done(d, ctx);
+    ASSERT_EQ(rc, -1);                            /* was 0: the extra bytes were dropped */
+}
+
 UTEST_MAIN()
