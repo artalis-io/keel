@@ -609,7 +609,7 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec platform_random fd_type_convention compress compress_vtable connect_op cross_module \
+WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output platform_random fd_type_convention compress compress_vtable connect_op cross_module \
                    datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
