@@ -78,6 +78,7 @@ typedef struct {
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
     int                 reset_failed;  /* session_reset() failed → refuse next handshake */
+    size_t              wpend;     /* a write that would block: the length it was made with */
     /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
@@ -162,8 +163,10 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
         return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 
+    /* A bare TCP EOF is not a TLS close: report it as such (CONN_EOF), so a truncation is not
+     * mistaken for a clean shutdown; only a real close_notify makes at_eof() true. */
     if (ret == 0)
-        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+        return MBEDTLS_ERR_SSL_CONN_EOF;
 
     return (int)ret;
 }
@@ -233,13 +236,26 @@ static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, siz
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
 
-    int ret = mbedtls_ssl_write(&t->ssl, (const unsigned char *)buf, len);
+    /* After a WANT_WRITE, mbedtls_ssl_write must be called again with the same data; it then
+     * flushes the record it already built and reports the length it is called with. A caller that
+     * retries from its own buffer with more appended (KlDrain) would have that larger length
+     * acknowledged for bytes never encrypted: retry with the original length only. */
+    size_t n = len;
+    if (t->wpend && n > t->wpend)
+        n = t->wpend;
 
-    if (ret > 0)
+    int ret = mbedtls_ssl_write(&t->ssl, (const unsigned char *)buf, n);
+
+    if (ret > 0) {
+        t->wpend = 0;
         return ret;
-    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+    }
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        if (!t->wpend) t->wpend = n;
         return 0;   /* retry */
+    }
 
+    t->wpend = 0;
     return -1;  /* error */
 }
 
@@ -280,6 +296,8 @@ static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
     }
     if (len == 0)
         return 0;
+    if (len > KL_TLS_COMP_MAX - t->in_len)   /* before the add: in_len + len cannot wrap */
+        return -1;
     if (comp_ensure(&t->in_buf, &t->in_cap, t->in_len + len, t->alloc) < 0)
         return -1;
     memcpy(t->in_buf + t->in_len, cipher, len);
@@ -310,6 +328,7 @@ static void tls_reset(KlTls *self)
         t->reset_failed = 1;
     t->handshake_done = 0;
     t->eof_seen = 0;
+    t->wpend = 0;
     t->fd = KL_INVALID_SOCKET;
     /* Drop buffered ciphertext for the next request; keep the transport mode +
      * allocated rings for reuse across keep-alive. */
