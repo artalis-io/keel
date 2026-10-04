@@ -478,6 +478,25 @@ static void test_untrusted_ca(KlAllocator *alloc, Rng *rng, PemPair *server)
     pem_pair_free(&other_ca);
 }
 
+/* No CA bundle must not mean "no verification". kl_tls_mbedtls_client_ctx_create(NULL) built a
+ * client that accepted any certificate (VERIFY_NONE), where the OpenSSL adapter verifies against the
+ * system store: a caller that forgot the CA path got a silently unauthenticated client. mbedTLS has
+ * no system store to fall back on, so a NULL path is refused. The check records its result and the
+ * suite fails at the end, so every other test still reports. */
+static int g_null_ca_fail;
+static void test_null_ca_fails_closed(KlAllocator *alloc)
+{
+    printf("== NULL CA path -> no context (fail closed) ==\n");
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
+    if (cctx) {
+        printf("  FAIL: a NULL CA path made a client that verifies nothing\n");   /* was */
+        g_null_ca_fail = 1;
+        kl_tls_mbedtls_ctx_destroy(cctx);
+        return;
+    }
+    printf("  PASS: a NULL CA path is refused\n");
+}
+
 /* mTLS REQUIRED but client presents no cert → handshake fails.
  * The mbedTLS adapter has NO client-cert setter, so a client can never present
  * one; a REQUIRED server therefore must reject every client. We assert the
@@ -929,6 +948,7 @@ int main(void) {
     test_alloc_failure_injection(&ca, &server);
     test_drain_style_retry(&alloc, &ca, &server);
     test_truncation_is_not_eof(&alloc, &ca, &server);
+    test_null_ca_fails_closed(&alloc);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
@@ -945,6 +965,7 @@ int main(void) {
     rng_free(&rng);
 
     if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
+    if (g_null_ca_fail) { printf("\nFAIL: NULL CA path check\n"); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }
