@@ -14,8 +14,8 @@
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     /* Reference a ctor symbol so the linker must pull the adapter object in. */
-    KlTlsCtx *(*ctor)(const char *, KlAllocator *) = kl_tls_mbedtls_client_ctx_create;
-    KlTlsCtx *ctx = ctor(NULL, &alloc);           /* NULL CA → system defaults */
+    KlTlsCtx *(*ctor)(KlAllocator *) = kl_tls_mbedtls_client_ctx_create_insecure;
+    KlTlsCtx *ctx = ctor(&alloc);                 /* no CA needed: nothing connects */
     if (ctx) kl_tls_mbedtls_ctx_destroy(ctx);
     printf("mbedtls adapter linked (ctx=%s)\n", ctx ? "created" : "null-ok");
     return 0;

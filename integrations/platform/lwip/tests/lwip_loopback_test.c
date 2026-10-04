@@ -209,7 +209,7 @@ static int keel_https_on_lwip(void) {
     int ok = 0;
     if (kl_event_ctx_init_ex(&cev, &alloc, kl_event_provider_lwip()) == 0) {
         cev.sockets = kl_socket_provider_lwip();
-        KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
+        KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_insecure(&alloc);  /* self-signed loopback */
         if (cctx) {
             /* No explicit provider call: the client auto-wires it from KlHttpClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };

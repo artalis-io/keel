@@ -20,9 +20,12 @@ int main(int argc, char **argv) {
     const char *url = "https://localhost:8443/hello";
     if (argc > 1) url = argv[1];
 
-    /* Create client-side TLS context (NULL = skip CA verification) */
+    /* Client-side TLS context. With a CA bundle (argv[2]) the server's certificate is verified;
+     * without one this demo talks to its own self-signed server unverified, which is what the
+     * explicitly named insecure constructor is for (never do that for real traffic). */
     KlAllocator alloc = kl_allocator_default();
-    KlTlsCtx *tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+    KlTlsCtx *tls_ctx = argc > 2 ? kl_tls_mbedtls_client_ctx_create(argv[2], &alloc)
+                                 : kl_tls_mbedtls_client_ctx_create_insecure(&alloc);
     if (!tls_ctx) {
         fprintf(stderr, "TLS context creation failed\n");
         return 1;

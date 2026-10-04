@@ -19,7 +19,7 @@
  *
  * For client-side usage (e.g. Hull HTTP client):
  *   KlAllocator alloc = kl_allocator_default();
- *   KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+ *   KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create("/etc/ssl/certs/ca-certificates.crt", &alloc);
  *   KlTls *tls = kl_tls_mbedtls_create(ctx, &alloc);
  *   tls->handshake(tls, fd);
  *   tls->write(tls, fd, buf, len);
@@ -89,15 +89,28 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create_from_buf(const unsigned char *cert_buf, size
 /**
  * @brief Create a client-side TLS context (for outbound connections).
  *
- * @param ca_path  Path to PEM-encoded CA cert bundle for server verification.
- *                 NULL skips certificate verification; requires explicit
- *                 opt-in via --skip-ca-bundle flag. Production deployments
- *                 should always provide a valid CA bundle path.
+ * @param ca_path  Path to PEM-encoded CA cert bundle for server verification. Required:
+ *                 a NULL path returns NULL (mbedTLS has no system trust store to fall back
+ *                 on, and a client that verifies nothing must be asked for by name: see
+ *                 kl_tls_mbedtls_client_ctx_create_insecure()).
  * @param alloc    Allocator for context storage (borrowed, must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
                                               KlAllocator *alloc);
+
+/**
+ * @brief Create a client context that does NOT verify the server's certificate.
+ *
+ * Connections are encrypted but unauthenticated: anyone on the path can impersonate the
+ * server. For tests against self-signed loopback servers and for the equivalent of
+ * `curl -k`; never for production traffic. Use kl_tls_mbedtls_client_ctx_create() with a
+ * CA bundle instead.
+ *
+ * @param alloc  Allocator for context storage (borrowed, must outlive context).
+ * @return Opaque context, or NULL on error.
+ */
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create_insecure(KlAllocator *alloc);
 
 /**
  * @brief Create a TLS client context from an in-memory CA bundle.

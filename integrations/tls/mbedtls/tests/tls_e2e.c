@@ -19,7 +19,7 @@
  *
  * This mirrors the OpenSSL suite (integrations/tls/openssl/tests/tls_e2e.c) in
  * structure and style, adapted to the mbedTLS adapter's PUBLIC API surface.
- * The mbedTLS adapter has NO client-cert setter, NO insecure ctor and NO
+ * The mbedTLS adapter has NO client-cert setter and NO
  * truncation toggle, so those OpenSSL scenarios are intentionally absent; see
  * the notes printed by main() and the comments at each omission.
  *
@@ -478,6 +478,35 @@ static void test_untrusted_ca(KlAllocator *alloc, Rng *rng, PemPair *server)
     pem_pair_free(&other_ca);
 }
 
+/* No CA bundle must not mean "no verification". kl_tls_mbedtls_client_ctx_create(NULL) built a
+ * client that accepted any certificate (VERIFY_NONE), where the OpenSSL adapter verifies against the
+ * system store: a caller that forgot the CA path got a silently unauthenticated client. mbedTLS has
+ * no system store to fall back on, so a NULL path is refused. The check records its result and the
+ * suite fails at the end, so every other test still reports. */
+static int g_null_ca_fail;
+static void test_null_ca_fails_closed(KlAllocator *alloc)
+{
+    printf("== NULL CA path -> no context (fail closed) ==\n");
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
+    if (cctx) {
+        printf("  FAIL: a NULL CA path made a client that verifies nothing\n");   /* was */
+        g_null_ca_fail = 1;
+        kl_tls_mbedtls_ctx_destroy(cctx);
+        return;
+    }
+    printf("  PASS: a NULL CA path is refused\n");
+
+    /* The explicit opt-in still makes a working, unverified client. */
+    KlTlsCtx *ictx = kl_tls_mbedtls_client_ctx_create_insecure(alloc);
+    if (!ictx) {
+        printf("  FAIL: the insecure constructor made no context\n");
+        g_null_ca_fail = 1;
+        return;
+    }
+    kl_tls_mbedtls_ctx_destroy(ictx);
+    printf("  PASS: kl_tls_mbedtls_client_ctx_create_insecure makes a context\n");
+}
+
 /* mTLS REQUIRED but client presents no cert → handshake fails.
  * The mbedTLS adapter has NO client-cert setter, so a client can never present
  * one; a REQUIRED server therefore must reject every client. We assert the
@@ -929,14 +958,14 @@ int main(void) {
     test_alloc_failure_injection(&ca, &server);
     test_drain_style_retry(&alloc, &ca, &server);
     test_truncation_is_not_eof(&alloc, &ca, &server);
+    test_null_ca_fails_closed(&alloc);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
      *   - client-cert mTLS SUCCESS: no client-cert setter on the adapter.
-     *   - insecure (verify-none) client ctx: no insecure ctor.
      *   - strict/lenient truncation toggle: no allow_truncation setter.
      *   - TLS 1.1 version-floor rejection: mbedTLS 3.x speaks only TLS 1.2/1.3. */
-    printf("\nNOTE: mTLS-success / insecure-ctx / truncation-toggle / TLS1.1-floor\n"
+    printf("\nNOTE: mTLS-success / truncation-toggle / TLS1.1-floor\n"
            "      omitted, not expressible via the mbedTLS adapter's public API.\n");
 
     mbedtls_pk_free(&ca_key);
@@ -945,6 +974,7 @@ int main(void) {
     rng_free(&rng);
 
     if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
+    if (g_null_ca_fail) { printf("\nFAIL: NULL CA path check\n"); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }

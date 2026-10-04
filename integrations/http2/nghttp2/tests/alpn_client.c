@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
     KlAllocator alloc = kl_allocator_default();
 
     /* Client TLS ctx: no CA (skip verify, like curl -k) + offer ALPN. */
-    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create_insecure(&alloc);
     if (!ctx) { fprintf(stderr, "client tls ctx\n"); return 2; }
     const char *protos[] = { "h2", "http/1.1", NULL };
     if (kl_tls_mbedtls_ctx_set_alpn(ctx, protos) != 0) {

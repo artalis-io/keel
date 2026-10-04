@@ -119,12 +119,12 @@ int main(void) {
         return 1;
     }
 
-    /* Client-side TLS: NULL CA = skip verification (self-signed loopback). */
+    /* Client-side TLS without verification (self-signed loopback), asked for by name. */
     int ok = 0, last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);
-        KlTlsCtx *cli_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+        KlTlsCtx *cli_ctx = kl_tls_mbedtls_client_ctx_create_insecure(&alloc);
         if (!cli_ctx) continue;
         KlTlsConfig cli_tls = {
             .ctx = cli_ctx, .factory = kl_tls_mbedtls_create,

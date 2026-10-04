@@ -145,8 +145,8 @@ static void start_client(void *ud) {
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
     alloc = kl_allocator_default();
 
-    /* Client TLS ctx: NULL CA = skip verification (test self-signed cert). */
-    cc->client_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+    /* Client TLS ctx without verification (test self-signed cert), asked for by name. */
+    cc->client_ctx = kl_tls_mbedtls_client_ctx_create_insecure(&alloc);
     if (!cc->client_ctx) {
         atomic_store(&cc->pass, 0);
         atomic_store(&cc->done, 1);
