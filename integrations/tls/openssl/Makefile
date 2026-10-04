@@ -31,6 +31,11 @@ CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
           -fstack-protector-strong
 CFLAGS += -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I. $(OPENSSL_INC)
 
+# Hardening as the root build (FORTIFY needs optimisation; PIE for the binaries these link into).
+ifeq ($(shell uname -s),Linux)
+CFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE
+endif
+
 LIB = libkeel_openssl.a
 OBJ = tls_openssl.o
 

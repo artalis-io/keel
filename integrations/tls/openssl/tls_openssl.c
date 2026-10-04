@@ -144,8 +144,12 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
 
     if (t->comp_mode) {   /* memory BIO: append to the outgoing-ciphertext ring */
         /* Overflow-safe cap check BEFORE the add: n > MAX - out_len ⇒ over cap. */
-        if (n > KL_TLS_COMP_MAX - t->out_len)
-            return -1;   /* buffer full: fatal (no retry flag) */
+        if (n > KL_TLS_COMP_MAX - t->out_len) {
+            /* Ring full: retryable. SSL_write reports WANT_WRITE (write() returns 0), the caller
+             * moves the ring out (drain_output) and retries with the same buffer. */
+            BIO_set_retry_write(bio);
+            return -1;
+        }
         if (comp_ensure(&t->out_buf, &t->out_cap, t->out_len + n, t->alloc) < 0)
             return -1;   /* buffer full: fatal (no retry flag) */
         memcpy(t->out_buf + t->out_len, buf, n);
@@ -1089,6 +1093,13 @@ static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_
     ctx->ssl_ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx->ssl_ctx)
         goto fail;
+    /* A write that would block is retried by KlDrain from its own buffer (a moved pointer, the same
+     * bytes first): allow it, or OpenSSL fails the retry with BAD_WRITE_RETRY. */
+    SSL_CTX_set_mode(ctx->ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    /* Required for session resumption once peer verification is on (mTLS): without it OpenSSL
+     * rejects any resumed session with a fatal SESSION_ID_CONTEXT_UNINITIALIZED. */
+    if (SSL_CTX_set_session_id_context(ctx->ssl_ctx, (const unsigned char *)"keel", 4) != 1)
+        goto fail;
     ctx->bio_method = kl_bio_method_new();   /* ctx-owned; freed in ctx_destroy/fail */
     if (!ctx->bio_method)
         goto fail;
@@ -1201,6 +1212,7 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
     ctx->ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx->ssl_ctx)
         goto fail;
+    SSL_CTX_set_mode(ctx->ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);   /* as on the server */
     ctx->bio_method = kl_bio_method_new();   /* ctx-owned; freed in ctx_destroy/fail */
     if (!ctx->bio_method)
         goto fail;

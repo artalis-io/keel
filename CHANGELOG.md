@@ -52,6 +52,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `KlHttp2ServerCallbacks` gains `max_concurrent_streams`, `initial_window_size` and
   `max_header_list_size`, which KEEL fills from `KlHttp2ServerConfig` (whose `initial_window_size`
   was never used).
+- **TLS adapters: large completion-mode writes, drain retries, truncation and mTLS resumption.**
+  With the OpenSSL adapter (and BoringSSL, LibreSSL) on io_uring, IOCP, pollcomp, lwIP-raw or UEFI,
+  any write past the 256 KiB completion ring failed instead of waiting, so a buffered HTTPS response
+  body over about 250 KiB was dropped. A write retried the way the drain buffer retries it (from its
+  own copy, with more appended) failed with `BAD_WRITE_RETRY` on OpenSSL and, on mbedTLS, was
+  acknowledged for bytes never encrypted, silently corrupting a wss frame stream or an HTTPS SSE
+  stream. mbedTLS reported a bare TCP close as a clean TLS shutdown, so a truncated close-delimited
+  response was accepted as complete. The OpenSSL mTLS server rejected resumed sessions. All four are
+  fixed, and both adapters' end-to-end suites now run in CI.
 - **A TLS connection on a completion loop could be released twice, corrupting the connection
   pool.** The TLS output queue lets a connection hold a receive and a send at once, and each op's
   completion closed the connection: a peer reset with both in flight (a TLS WebSocket client that

@@ -711,7 +711,7 @@ jobs:
       - name: Install deps (nghttp2, tools, mbedTLS build prereqs)
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libnghttp2-dev \
+          sudo apt-get install -y build-essential pkg-config libnghttp2-dev libssl-dev \
             curl unzip openssl python3-jinja2 python3-jsonschema \
             nghttp2-client nghttp2-server
 
@@ -777,6 +777,16 @@ jobs:
         # Runs before the fold-into-libkeel.a step below: this test includes tls_mbedtls.c
         # via a test-only seam, so libkeel.a must still be plain core (no duplicate symbols).
         run: make -C integrations/tls/mbedtls cn-canon MBEDTLS_DIR="$HOME/mbedtls"
+
+      # The adapters' own end-to-end suites (both transport axes: socket and memory BIO), with
+      # ASan+UBSan. They link plain core libkeel.a, so they run before the fold step below.
+      - name: OpenSSL adapter, e2e suite (ASan+UBSan)
+        timeout-minutes: 5
+        run: make -C integrations/tls/openssl e2e
+
+      - name: mbedTLS adapter, e2e suite (ASan+UBSan)
+        timeout-minutes: 5
+        run: make -C integrations/tls/mbedtls e2e MBEDTLS_DIR="$HOME/mbedtls"
 
       - name: mbedTLS adapter, real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
