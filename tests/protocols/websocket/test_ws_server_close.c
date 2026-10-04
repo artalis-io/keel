@@ -38,7 +38,6 @@ UTEST(ws_server_close, emits_close_frame) {
 
     ASSERT_EQ(kl_ws_server_close(&ws, 1000, "bye", 3), 0);
     ASSERT_EQ(ws.close_sent, 1);
-    ASSERT_EQ((int)ws.close_code, 1000);
 
     /* Server frame, unmasked: 0x88 (FIN|CLOSE), len 5, [0x03,0xE8]=1000, "bye". */
     ASSERT_EQ(g_cap_len, (size_t)7);
@@ -51,7 +50,7 @@ UTEST(ws_server_close, emits_close_frame) {
     kl_drain_free(&ws.drain);
 }
 
-/* A second close is an idempotent no-op: returns 0, emits nothing, code unchanged. */
+/* A second close is an idempotent no-op: returns 0, emits nothing, only the first close is on the wire. */
 UTEST(ws_server_close, idempotent) {
     KlAllocator a = kl_allocator_default();
     KlWsServerConn ws; KlWsServerConfig cfg; ws_setup(&ws, &cfg, &a);
@@ -62,7 +61,7 @@ UTEST(ws_server_close, idempotent) {
 
     ASSERT_EQ(kl_ws_server_close(&ws, 1001, "y", 1), 0);  /* no-op */
     ASSERT_EQ(g_cap_len, after_first);                    /* nothing new emitted */
-    ASSERT_EQ((int)ws.close_code, 1000);                  /* first code preserved */
+    ASSERT_EQ(g_cap[3], (unsigned char)0xE8);             /* only the first close (1000) went out */
     ASSERT_EQ(ws.close_sent, 1);
 
     kl_drain_free(&ws.drain);

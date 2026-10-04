@@ -455,12 +455,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         req->body_reader = br;
     }
 
-    stream->headers_done = 1;
-
-    if (!has_body) {
-        stream->body_done = 1;
-    }
-
     return 0;
 }
 
@@ -517,8 +511,6 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     KlHttp2ServerConn *h2c = ud;
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return 0;                     /* already answered: see h2_cb_on_data */
-
-    stream->body_done = 1;
 
     if (stream->body_reader)
         stream->body_reader->on_complete(stream->body_reader);

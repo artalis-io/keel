@@ -31,9 +31,12 @@ struct KlWsServerConn {
     uint32_t utf8_state;         /* Incremental UTF-8 validator state */
     int close_sent;              /* Close frame sent flag */
     int close_received;          /* Close frame received flag */
-    uint16_t close_code;         /* Close status code */
     uint64_t close_deadline_ms;  /* Close handshake timeout deadline */
     uint64_t next_ping_ms;       /* 0 = auto-ping disabled */
+    int ping_unanswered;         /* an auto-ping went out and nothing has arrived since */
+    uint8_t pong_buf[125];       /* payload of the latest ping not yet answered (output backed up) */
+    size_t  pong_len;
+    int pong_owed;               /* a PONG for pong_buf goes out once the drain empties */
     KlHttpConn *conn;            /* Back-pointer for send functions */
     KlAllocator *alloc;          /* Allocator for message buffer */
     KlDrain drain;               /* Backpressure write buffer (opt-in) */
