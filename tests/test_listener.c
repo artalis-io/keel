@@ -35,6 +35,7 @@ typedef struct {
     /* reentrancy */
     int accept_reentrant_close, dispose_reentrant_close;
     int reserve_reentrant_close, release_reentrant_close;
+    int release_notifies;      /* release hook calls kl_listener_notify_slot_free (as the pool does) */
     int detached_at_accept, detached_at_dispose, detached_at_reserve, detached_at_release;
 } LT;
 
@@ -51,6 +52,7 @@ static void lt_release(void *ctx) {
     LT *m = ctx; m->release_calls++; m->slots++; m->reserved_now--;
     m->detached_at_release = kl_listener_is_detached(m->l);
     if (m->release_reentrant_close) { m->release_reentrant_close = 0; kl_listener_close(m->l); }
+    if (m->release_notifies) kl_listener_notify_slot_free(m->l);
 }
 static int lt_arm(void *ctx) {
     LT *m = ctx; m->arm_calls++;
@@ -381,6 +383,36 @@ UTEST(listener, transient_arm_failure_pauses_and_retries) {
     ASSERT_EQ(m.arm_calls, 2);
     ASSERT_EQ(m.reserved_now, 1);
     ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
+}
+
+/* The pool's release hook tells the listener a slot is free (the HTTP server's does). Returning a
+ * failed post's credit through it must not make the listener post again from inside that same
+ * pump: it re-entered the pump while still listening, posted, failed again, and recursed until the
+ * stack overflowed (a server whose accept posts kept failing crashed). The listener pauses, and the
+ * next notify from outside posts again. */
+UTEST(listener, a_failed_post_whose_release_notifies_does_not_repost_inline) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.release_notifies = 1;
+    m.retry_budget = 3;                                   /* enough to show a re-post loop */
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.arm_calls, 1);                            /* was: 4, re-posting inside the release */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
+    ASSERT_EQ(m.reserved_now, 0);
+    kl_listener_notify_slot_free(&l);                     /* the next tick: post again (fails) */
+    ASSERT_EQ(m.arm_calls, 2);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
+}
+
+/* The same for a hard post failure: returning its credit notified a free slot, which re-entered the
+ * pump and posted on a listener that was about to close. It must close after exactly one post. */
+UTEST(listener, a_hard_post_failure_whose_release_notifies_closes_once) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.release_notifies = 1;
+    m.hardfail = 1;
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.arm_calls, 1);                            /* was: re-posted (recursing) */
+    ASSERT_EQ(m.close_calls, 1);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
 }
 
 UTEST(listener, reserve_error_closes) {
