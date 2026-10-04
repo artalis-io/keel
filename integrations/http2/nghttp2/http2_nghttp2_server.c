@@ -15,6 +15,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "keel_http2_nghttp2.h"
+#include <keel/http2.h>          /* KL_HTTP2_DEFAULT_MAX_STREAMS, KL_HTTP2_MAX_HEADER_LIST_SIZE */
+#include <keel/http_request.h>   /* KL_MAX_HEADERS */
 
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>
@@ -49,6 +51,7 @@ struct NgServerStream {
     size_t       *value_lens;
     int           n, cap;
     int           delivered;         /* on_request already fired */
+    size_t        hlist;             /* header list so far (RFC 9113 6.5.2 accounting) */
     /* Response body copy (nghttp2 pulls DATA asynchronously). */
     char         *resp_body;
     size_t        resp_body_len, resp_body_off;
@@ -166,6 +169,16 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
     NgServerStream *st = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
     if (!st) return 0;
 
+    /* Bound what a request makes us hold: past KL_MAX_HEADERS fields (KEEL keeps no more) or the
+     * advertised header-list size, reset the stream. Each field is copied below, so an unbounded
+     * list (one HPACK table entry referenced again and again) was a peer-driven memory cost. */
+    NgServerSession *s = st->sess;
+    size_t cap = (s && s->cbs->max_header_list_size) ? s->cbs->max_header_list_size
+                                                     : KL_HTTP2_MAX_HEADER_LIST_SIZE;
+    st->hlist += namelen + valuelen + 32;
+    if (st->hlist > cap || (!(namelen > 0 && name[0] == ':') && st->n >= KL_MAX_HEADERS))
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+
     if (namelen > 0 && name[0] == ':') {           /* pseudo-header */
         char **slot = NULL; size_t *slen = NULL;
         if (namelen == 7 && memcmp(name, ":method", 7) == 0)   { slot = &st->method;    slen = &st->method_len; }
@@ -220,7 +233,8 @@ static int ng_on_frame_recv_cb(nghttp2_session *ng, const nghttp2_frame *frame,
     }
     if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
         (frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
-        s->cbs->on_stream_end(s->ud, (uint32_t)sid);
+        if (s->cbs->on_stream_end(s->ud, (uint32_t)sid) < 0)   /* no response could be made */
+            (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE, sid, NGHTTP2_INTERNAL_ERROR);
     }
     return 0;
 }
@@ -366,8 +380,15 @@ static int ng_server_flush(KlHttp2ServerSession *self) {
 
 static int ng_server_shutdown(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
-    /* Graceful GOAWAY carrying the last processed stream id. */
-    return nghttp2_session_terminate_session(s->ng, NGHTTP2_NO_ERROR) == 0 ? 0 : -1;
+    /* Graceful: a GOAWAY naming the last stream processed, after which no new stream is accepted
+     * but those already open run to completion (terminate_session would stop all output once its
+     * GOAWAY is out, cutting responses in flight). The session then wants neither read nor write
+     * once they are done, and KEEL closes the connection. */
+    if (nghttp2_submit_goaway(s->ng, NGHTTP2_FLAG_NONE,
+                              nghttp2_session_get_last_proc_stream_id(s->ng),
+                              NGHTTP2_NO_ERROR, NULL, 0) != 0)
+        return -1;
+    return 0;
 }
 
 /* HTTP2-Settings is a SETTINGS payload in base64url without padding (RFC 7540 3.2.1). Decodes
@@ -480,8 +501,21 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
         return NULL;
     }
 
-    /* Server connection preface: initial SETTINGS. */
-    if (nghttp2_submit_settings(s->ng, NGHTTP2_FLAG_NONE, NULL, 0) != 0) {
+    /* Server connection preface: SETTINGS with the limits KEEL enforces. Empty SETTINGS left
+     * nghttp2's incoming stream limit unlimited, so a peer could open streams without bound. */
+    nghttp2_settings_entry iv[3];
+    size_t niv = 0;
+    iv[niv].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
+    iv[niv++].value = callbacks->max_concurrent_streams ? callbacks->max_concurrent_streams
+                                                         : KL_HTTP2_DEFAULT_MAX_STREAMS;
+    iv[niv].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
+    iv[niv++].value = callbacks->max_header_list_size ? callbacks->max_header_list_size
+                                                       : KL_HTTP2_MAX_HEADER_LIST_SIZE;
+    if (callbacks->initial_window_size) {
+        iv[niv].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
+        iv[niv++].value = callbacks->initial_window_size;
+    }
+    if (nghttp2_submit_settings(s->ng, NGHTTP2_FLAG_NONE, iv, niv) != 0) {
         nghttp2_session_del(s->ng);
         kl_free(alloc, s, sizeof(*s));
         return NULL;
