@@ -29,9 +29,8 @@ int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
 int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
                           size_t *olen) {
     (void)data;
-    if (kl_uefi_have_entropy()) {
+    if (kl_uefi_have_entropy() && kl_plat_random(output, len) == 0) {
         /* Real EFI_RNG-backed randomness. */
-        kl_plat_random(output, len);
         if (olen) *olen = len;
         return 0;
     }

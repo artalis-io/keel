@@ -33,18 +33,13 @@
  * in the not-yet-Windows-ready http_connection.h. */
 #include <keel/clock.h>   /* kl_monotonic_ms: generic substrate clock */
 
-/* Fill @buf with @len secure-random bytes (best-effort: always fills the whole
- * buffer, degrading to a non-cryptographic last resort if the OS RNG is somehow
- * unavailable). POSIX: arc4random / /dev/urandom. Windows: BCryptGenRandom.
- * Callers use it for defense-in-depth (WS mask keys) and off-path spoof
- * resistance (DNS txn-id / 0x20 / cookies), not as a hard security boundary. */
-void kl_plat_random(void *buf, size_t len);
-
-/* The last resort kl_plat_random falls back to when the OS RNG fails. Not cryptographic, but it
- * mixes a high-resolution clock, the process id and the buffer address, so successive fills
- * differ: the old fallback depended on the buffer address alone, which made a resolver's DNS
- * transaction ids identical on every refill. Exposed for its test. */
-void kl_plat_random_weak(void *buf, size_t len);
+/* Fill @buf with @len bytes from the OS cryptographic RNG. Returns 0 on success, -1 when no OS
+ * entropy could be read; the buffer is then zeroed and must not be used. There is no weak
+ * fallback: a caller that cannot get entropy fails its operation instead. POSIX: arc4random_buf
+ * (macOS/BSD), else getrandom(2) then /dev/urandom. Windows: BCryptGenRandom. Freestanding: the
+ * embedder's hook (UEFI: EFI_RNG, fail-closed). Callers: WS mask keys and handshake key, DNS
+ * transaction ids / 0x20 / cookies. */
+int kl_plat_random(void *buf, size_t len);
 
 /* Open `path` read-only as a CRT file descriptor that a spawned child does not inherit (POSIX
  * O_CLOEXEC, Windows _O_NOINHERIT). -1 on failure. Pathname opens live in the substrate, not

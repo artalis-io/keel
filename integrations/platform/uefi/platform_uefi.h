@@ -4,7 +4,7 @@
  * The freestanding archive leaves two OS-specific hooks undefined (see
  * src/platform.h + tests/freestanding_symbol_gate.sh whitelist):
  *   uint64_t kl_monotonic_ms(void);
- *   void     kl_plat_random(void *buf, size_t len);
+ *   int      kl_plat_random(void *buf, size_t len);
  * platform_uefi.c DEFINES both over UEFI Boot Services / EFI_RNG_PROTOCOL.
  *
  * Because both are free functions with fixed C signatures (no ctx pointer), the

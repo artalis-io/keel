@@ -148,4 +148,46 @@ UTEST(event_ctx, loop_accessor) {
     kl_event_ctx_free(&ev);
 }
 
+#ifndef _WIN32
+#include <signal.h>
+#include <string.h>
+#include <sys/time.h>
+
+static volatile sig_atomic_t eintr_hits;
+static void eintr_handler(int sig) { (void)sig; eintr_hits++; }
+
+/* A signal that lands while the loop waits (SIGCHLD, a profiler's SIGPROF) interrupts the wait
+ * syscall. That is a tick with no events, not a loop failure: a caller's
+ * `while (kl_event_ctx_run(...) >= 0)` must keep running. The handler is installed WITHOUT
+ * SA_RESTART so the wait really returns EINTR. */
+UTEST(event_ctx, run_interrupted_by_signal_is_an_empty_tick) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = eintr_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    ASSERT_EQ(0, sigaction(SIGALRM, &sa, &old));
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+
+    eintr_hits = 0;
+    struct itimerval it;
+    memset(&it, 0, sizeof(it));
+    it.it_value.tv_usec = 50000;                  /* fires 50 ms into a 2 s wait */
+    ASSERT_EQ(0, setitimer(ITIMER_REAL, &it, NULL));
+    int rc = kl_event_ctx_run(&ev, 8, 2000);
+
+    struct itimerval off;
+    memset(&off, 0, sizeof(off));
+    (void)setitimer(ITIMER_REAL, &off, NULL);
+    (void)sigaction(SIGALRM, &old, NULL);
+    kl_event_ctx_free(&ev);
+
+    ASSERT_EQ(1, (int)eintr_hits);                /* the signal arrived during the wait */
+    ASSERT_GE(rc, 0);                             /* an interrupted wait is not an error */
+}
+#endif
+
 UTEST_MAIN();

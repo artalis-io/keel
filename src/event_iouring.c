@@ -862,7 +862,14 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
          * but a cancel that races a successful accept still yields a real fd (res>=0). Deliver that
          * fd even though op->aborted is set, so the completion listener disposes it on its CLOSING
          * path (total accepted-fd ownership during shutdown) instead of leaking it. */
-        if (res < 0) { ev->ok = 0; return 1; }
+        if (res < 0) {
+            ev->ok = 0;
+            /* Out of descriptors or kernel memory: the connection is still queued, so an accept
+             * posted again at once fails the same way. Flag it so the consumer waits first. */
+            ev->resource_exhausted = (res == -EMFILE || res == -ENFILE || res == -ENOBUFS ||
+                                      res == -ENOMEM);
+            return 1;
+        }
         ev->ok = 1;
         ev->accepted_fd = res;
         if (op->peer_len > 0)                    /* native → neutral once, at the seam */

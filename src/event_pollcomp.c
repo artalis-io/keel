@@ -502,7 +502,18 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
             int fdf = fcntl(a, F_GETFD, 0);
             if (fdf >= 0) (void)fcntl(a, F_SETFD, fdf | FD_CLOEXEC);
         }
-        if (a < 0) return 0;                 /* EAGAIN/spurious: keep the accept op */
+        if (a < 0) {
+            /* Out of descriptors or kernel memory: the connection stays queued and the listen fd
+             * stays readable, so keeping the op would complete it again on every poll (a busy
+             * loop). Fail it instead, flagged, so the consumer waits before posting another. */
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                ev->kind = KL_COMP_ACCEPT;
+                ev->ok = 0;
+                ev->resource_exhausted = 1;
+                return 1;
+            }
+            return 0;                        /* EAGAIN/spurious: keep the accept op */
+        }
         pc_set_nonblocking(a);
         ev->kind = KL_COMP_ACCEPT;
         ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch */

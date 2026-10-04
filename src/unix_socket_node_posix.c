@@ -195,9 +195,9 @@ static int leaf_is_bound_node(const KlUnixNodeState *ns) {
     return S_ISSOCK(st.st_mode) && st.st_dev == ns->node_dev && st.st_ino == ns->node_ino;
 }
 
-/* Create the AF_UNIX socket + bind it at @path through @sockets (umask-guarded when a mode is set).
+/* Create the AF_UNIX socket + bind it at @path through @sockets.
  * Sets *out_fd on success; closes it and returns -1 on failure (errno preserved). */
-static int create_and_bind(const KlSocketProvider *sockets, const KlUnixNodePolicy *policy,
+static int create_and_bind(const KlSocketProvider *sockets,
                            const char *path, size_t path_len, KlSocketHandle *out_fd) {
     KlSocketHandle fd = kl_sock_socket(sockets, AF_UNIX, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd)) return -1;
@@ -209,13 +209,16 @@ static int create_and_bind(const KlSocketProvider *sockets, const KlUnixNodePoli
     memcpy(addr.sun_path, path, path_len + 1);
     socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
 
-    mode_t old_umask = 0; int umask_set = 0;
-    if (policy->set_mode) { old_umask = umask(0777 & ~(mode_t)policy->mode); umask_set = 1; }
+    /* The node is created under the process umask; kl_unix_socket_node_bind then sets the exact
+     * mode with fchmodat. The umask is process-wide, so changing it here would race every other
+     * thread that creates a file. Until the fchmodat the node may be more permissive than the
+     * configured mode, but nothing can connect through it yet: connect() on a socket node that is
+     * not listening is refused, and listen() happens only after this module returns with the mode
+     * already set. */
     KlSockAddr bind_sa;
     kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
     int rc = kl_sock_bind(sockets, fd, &bind_sa);
     int saved = errno;
-    if (umask_set) umask(old_umask);
     if (rc < 0) { kl_sock_close(sockets, fd); errno = saved; return -1; }
     *out_fd = fd;
     return 0;
@@ -304,7 +307,7 @@ KlUnixNodeStatus kl_unix_socket_node_bind(const KlUnixNodePolicy *policy,
         }
     }
 
-    if (create_and_bind(sockets, policy, path, path_len, out_fd) < 0) {
+    if (create_and_bind(sockets, path, path_len, out_fd) < 0) {
         int saved = errno;
         close_dir(ns);
         if (out_errno) *out_errno = saved;

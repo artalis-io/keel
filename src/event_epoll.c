@@ -2,6 +2,7 @@
 #include "event_builtin.h"
 #include "event_caps.h"
 #include <sys/epoll.h>
+#include <errno.h>
 #include <unistd.h>
 
 #define KL_EVENT_BATCH 256  /* internal stack buffer for kernel events */
@@ -62,7 +63,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     struct epoll_event events[KL_EVENT_BATCH];
     int batch = max < KL_EVENT_BATCH ? max : KL_EVENT_BATCH;
     int n = epoll_wait(st->fd, events, batch, timeout_ms);
-    if (n < 0) return -1;
+    if (n < 0) return errno == EINTR ? 0 : -1;   /* a signal interrupted the wait: an empty tick */
 
     for (int i = 0; i < n; i++) {
         out[i].udata = events[i].data.ptr;

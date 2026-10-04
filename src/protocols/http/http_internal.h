@@ -100,6 +100,14 @@ void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 
+/* How long accepting pauses after an accept fails for lack of a descriptor or kernel memory. The
+ * connection stays queued in the kernel, so retrying at once fails the same way and spins the loop;
+ * retrying ten times a second costs nothing and resumes promptly once a descriptor frees. The pause
+ * is KlHttpServer.accept_backoff_until: the completion arm hook reports KL_LISTENER_ARM_RETRY until
+ * then (the sweep's per-tick notify resumes it), and the readiness loop restores the listen interest
+ * it dropped once it has passed. */
+#define KL_HTTP_ACCEPT_RETRY_MS 100
+
 /* Server logging helpers (defined in http_server.c; used by the per-platform
  * http_server_plat_*.c TUs too). */
 KL_PRINTF_FMT(3, 4)

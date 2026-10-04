@@ -104,6 +104,11 @@ typedef struct KlCompletionEvent {
      * dispatch handler (kl_datagram_comp_dispatch) release iff !retain_life.
      * MUST default 0; every backend zero-inits the event; only the EFI QUARANTINED branch sets it. */
     int            retain_life;
+    /* ACCEPT with ok == 0 only: 1 when the accept failed for lack of a descriptor or kernel memory
+     * (EMFILE / ENFILE / ENOBUFS / ENOMEM). The connection is still queued, so an accept posted again
+     * at once fails the same way; the consumer waits before it posts another. 0 for every other
+     * failure (a cancel, a reset peer). Defaults 0: every backend zero-inits the event. */
+    int            resource_exhausted;
 } KlCompletionEvent;
 
 struct KlEventCtx;

@@ -104,6 +104,35 @@ UTEST(proxy_v1, partial_and_invalid_and_none) {
                                             &consumed, &peer));
 }
 
+/* The destination address and both ports are validated like the source: a header with a bad
+ * field anywhere is rejected, not half-trusted. */
+static KlProxyResult v1(const char *h) {
+    KlSockAddr peer; size_t consumed = 0;
+    return kl_proxy_parse((const uint8_t *)h, strlen(h), &consumed, &peer);
+}
+
+UTEST(proxy_v1, bad_destination_rejected) {
+    ASSERT_EQ(KL_PROXY_OK, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 not-an-ip 80 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 2001:db8::2 80 443\r\n"));   /* wrong family */
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP6 2001:db8::1 5.6.7.8 80 443\r\n"));   /* wrong family */
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 65536\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 -1\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 x\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 44x\r\n"));
+}
+
+UTEST(proxy_v1, port_must_be_plain_decimal) {
+    ASSERT_EQ(KL_PROXY_OK, v1("PROXY TCP4 1.2.3.4 5.6.7.8 0 65535\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 +80 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 -0 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 +443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 000080 443\r\n"));  /* overlong */
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 0000443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 \t80 443\r\n"));
+    ASSERT_EQ(KL_PROXY_INVALID, v1("PROXY TCP4 1.2.3.4 5.6.7.8 80 443 extra\r\n"));
+}
+
 /* ── PROXY v2 ────────────────────────────────────────────────────────── */
 
 static size_t build_v2_inet(uint8_t *out, uint8_t cmd, const char *src_ip,

@@ -23,7 +23,7 @@
  * ── Randomness ─────────────────────────────────────────────────────────────
  * SOURCE: EFI_RNG_PROTOCOL->GetRNG (UEFI 2.10 §37.5), located once at init.
  * FAIL-CLOSED POLICY: if EFI_RNG_PROTOCOL is absent (or GetRNG fails at call
- * time), kl_plat_random ZEROES the output buffer and sets an internal
+ * time), kl_plat_random ZEROES the output buffer, returns -1, and sets an internal
  * "no entropy" flag queryable via kl_uefi_have_entropy() (returns 0). It does
  * NOT invent a weak address-/clock-derived fallback; a caller that needs real
  * entropy (TLS, later) must check kl_uefi_have_entropy() and refuse to proceed.
@@ -229,12 +229,12 @@ uint64_t kl_monotonic_ms(void) {
 }
 
 /* ── kl_plat_random (src/platform.h contract): fail-closed ─────────────── */
-void kl_plat_random(void *buf, size_t len) {
-    if (len == 0) return;
+int kl_plat_random(void *buf, size_t len) {
+    if (len == 0) return 0;
     if (g_rng != NULL) {
         /* RNGAlgorithm = NULL -> platform default algorithm (UEFI 2.10 §37.5). */
         EFI_STATUS s = g_rng->GetRNG(g_rng, NULL, (UINTN)len, (UINT8 *)buf);
-        if (!EFI_ERROR(s)) return;
+        if (!EFI_ERROR(s)) return 0;
         /* GetRNG failed at call time: fall through to fail-closed and forget
          * the source so kl_uefi_have_entropy() reports the degraded state. */
         g_rng = NULL;
@@ -244,4 +244,5 @@ void kl_plat_random(void *buf, size_t len) {
         volatile UINT8 *b = (volatile UINT8 *)buf;
         for (size_t i = 0; i < len; i++) b[i] = 0;
     }
+    return -1;
 }

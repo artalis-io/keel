@@ -239,6 +239,20 @@ static void server_accept_disarm(void *ctx) {
         s->listen_registered = 0;
     }
 }
+/* The accept back-off ended: restore the listen interest the exhaustion path dropped, unless the
+ * listener has since paused (it re-arms on its own when a slot frees) or closed. */
+static void server_accept_backoff_check(KlHttpServer *s) {
+    if (!s->accept_backoff_until || kl_monotonic_ms() < s->accept_backoff_until) return;
+    s->accept_backoff_until = 0;
+    if (kl_listener_state(&s->accept_listener) != KL_LISTENER_STATE_LISTENING) return;
+    if (server_accept_arm(s) < 0)
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "accept: cannot re-arm the listen socket");
+}
+/* 1 when an accept failed for lack of a descriptor or kernel memory: the connection stays queued
+ * and the listen socket stays readable, so an immediate retry fails the same way. */
+static int server_accept_exhausted(int err) {
+    return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
+}
 static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
     kl_sock_close(((KlHttpServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
 }
@@ -389,8 +403,11 @@ int kl_http_server_run(KlHttpServer *s) {
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
+        server_accept_backoff_check(s);
         uint64_t now = kl_monotonic_ms();
         int wait_timeout = KL_POLL_TIMEOUT_MS;
+        if (s->accept_backoff_until > now && s->accept_backoff_until - now < (uint64_t)wait_timeout)
+            wait_timeout = (int)(s->accept_backoff_until - now);   /* wake to restore accepting */
         for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
             if (aop->deadline_ms > 0) {
                 if (now >= aop->deadline_ms) {
@@ -478,7 +495,15 @@ int kl_http_server_run(KlHttpServer *s) {
                                                               &peer);
                     if (!kl_handle_valid(client_fd)) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        int aerr = errno;
                         kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "accept");
+                        /* Out of descriptors or memory: the level-triggered listen socket would
+                         * wake every tick and fail again (a busy loop). Drop its interest and
+                         * restore it once a short delay has passed (server_accept_backoff_check). */
+                        if (server_accept_exhausted(aerr)) {
+                            s->accept_backoff_until = kl_monotonic_ms() + KL_HTTP_ACCEPT_RETRY_MS;
+                            server_accept_disarm(s);
+                        }
                         break;
                     }
 
