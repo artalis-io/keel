@@ -376,6 +376,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A handler that set a 1xx status sent it as a final response.** Since the status table was
+  widened to every code, `kl_http_response_status(res, 103)` (or any 100-199) went out as a final
+  response with `Content-Length` and a body. A client takes a 1xx as interim, so it waited for a
+  final response that never came, or read the body as the next status line. A handler-set 1xx is
+  sent as 500 again; `100 Continue` and the WebSocket `101` are written by their own paths.
+- **PROXY protocol v1: fields must be separated by single spaces.** The header was split on runs of
+  spaces, so doubled, leading and trailing separators were accepted; a NUL inside the line ended
+  the parse early and whatever followed it up to the CRLF was consumed unchecked; and a port could
+  have leading zeros. Each of these is now refused.
+- **WebSocket client: a close that cannot be sent fails the connection.** When no Close frame could
+  be written (no entropy for the frame mask, or a write error), `kl_ws_client_close` still left the
+  client waiting in the closing state until the peer acted. It now fails the connection with an
+  error at once.
+- **Build: `getrandom` is not used on Android below API level 28,** where `<sys/random.h>` exists
+  but does not declare it (the build failed under `-Werror`).
 - **Completion server: a failed accept post could crash the server.** When the next accept could not
   be posted, the listener returned its credit through the pool's release hook. The HTTP server's
   release hook announces the free slot, and that re-entered the listener while it was still

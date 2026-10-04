@@ -1267,7 +1267,10 @@ void kl_ws_client_close(KlWsClientConn *ws, uint16_t code, const char *reason,
         }
     }
 
-    wsc_send_frame(ws, KL_WS_OP_CLOSE, (const char *)buf, plen);
+    /* No Close went out (no entropy for the mask, a write error): there is no closing handshake to
+     * wait for, so fail the connection now rather than sit in CLOSING until the peer acts. */
+    if (wsc_send_frame(ws, KL_WS_OP_CLOSE, (const char *)buf, plen) < 0)
+        wsc_error(ws, "close frame could not be sent");
 }
 
 void kl_ws_client_free(KlWsClientConn *ws)
