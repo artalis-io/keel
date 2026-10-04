@@ -149,16 +149,19 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
     if (frame->hd.type != NGHTTP2_HEADERS) return 0;
     NgClientStream *st = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
     if (!st || st->final_reported) return 0;       /* trailers after the final response: ignored */
+    /* Every field counts toward the header list, pseudo-header fields included (RFC 9113 6.5.2). */
+    st->hlist += namelen + valuelen + 32;
+    if (st->hlist > KL_HTTP2_MAX_HEADER_LIST_SIZE)
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     if (namelen == 7 && memcmp(name, ":status", 7) == 0) {
         st->status = ng_parse_status(value, valuelen);
         return 0;
     }
     if (namelen > 0 && name[0] == ':') return 0;   /* other pseudo-headers */
-    /* Bound what a response makes us hold (the client side of the HPACK bomb): past the field or
-     * header-list limit the stream fails. Responses legitimately carry more fields than requests
-     * (many Set-Cookie), hence twice KL_MAX_HEADERS. */
-    st->hlist += namelen + valuelen + 32;
-    if (st->n >= 2 * KL_MAX_HEADERS || st->hlist > KL_HTTP2_MAX_HEADER_LIST_SIZE)
+    /* Bound what a response makes us hold (the client side of the HPACK bomb): past the field
+     * limit, as past the header-list limit above, the stream fails. Responses legitimately carry
+     * more fields than requests (many Set-Cookie), hence twice KL_MAX_HEADERS. */
+    if (st->n >= 2 * KL_MAX_HEADERS)
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     /* A header that cannot be kept fails the stream (RST_STREAM) rather than reporting a response
      * with it silently missing. */

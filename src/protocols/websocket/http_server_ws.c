@@ -677,7 +677,10 @@ int kl_ws_server_on_writable(KlHttpConn *c) {
     if (!c->ws || !c->ws->drain_enabled)
         return KL_HTTP_CONN_WEBSOCKET;
     KlWsServerConn *ws = c->ws;
+    size_t before = kl_drain_buffered(&ws->drain);
     int r = kl_drain_flush(&ws->drain);
+    size_t after = kl_drain_buffered(&ws->drain);
+    if (after < before) ws->drain_moved += (uint64_t)(before - after);   /* the peer is reading */
     if (r < 0) return KL_HTTP_CONN_CLOSED;
     if (r == 0 && ws->pong_owed) {
         /* The output drained: answer the latest ping that arrived while it was backed up. A send
@@ -733,21 +736,45 @@ int kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now) {
 
 /* ── Auto-ping keep-alive ─────────────────────────────────────────── */
 
+/* Output this connection has moved so far: what a completion engine's posted sends have moved, plus
+ * what the drain has flushed onto a readiness socket. Both only grow. */
+static uint64_t ws_out_progress(const KlHttpConn *c) {
+    return c->stream.send_progress + c->ws->drain_moved;
+}
+
+/* Output still waiting to leave: on the completion output queue (posted or not yet), or held in
+ * the drain. A ping written now goes out behind it. */
+static int ws_out_pending(const KlHttpConn *c) {
+    return c->comp_tlsq_inflight || c->comp_tlsq_len > 0 ||
+           (c->ws->drain_enabled && kl_drain_pending(&c->ws->drain));
+}
+
 int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
     KlWsServerConn *ws = c->ws;
     if (!ws || ws->next_ping_ms == 0) return 0;
     if (ws->close_sent || ws->close_received) return 0;
     if (now < ws->next_ping_ms) return 0;
     if (ws->ping_unanswered) {
-        /* Nothing arrived for a whole interval after the last ping: the peer is gone (a dead peer
-         * behind a NAT never answers and never resets). Fail the connection: Close 1001 as a
-         * courtesy, with a deadline already passed so the sweep closes it now rather than waiting
-         * out the close handshake with a peer that will not answer. */
-        (void)kl_ws_server_close(ws, KL_WS_GOING_AWAY, NULL, 0);
-        ws->close_deadline_ms = now;
-        return 0;
+        if (ws->ping_behind && ws_out_progress(c) != ws->ping_progress) {
+            /* The ping went out behind a backlog, which the peer has been taking since: it cannot
+             * answer a ping it has not reached yet (and on a completion loop nothing is read while
+             * output is queued), so the backlog moving is the answer. Ping again. A backlog that
+             * stopped moving does not answer: the connection is failed below. The ping's own
+             * bytes never count, since nothing was ahead of a ping sent straight out. */
+            ws->ping_unanswered = 0;
+        } else {
+            /* Nothing arrived for a whole interval after the last ping: the peer is gone (a dead
+             * peer behind a NAT never answers and never resets). Fail the connection: Close 1001
+             * as a courtesy, with a deadline already passed so the sweep closes it now rather than
+             * waiting out the close handshake with a peer that will not answer. */
+            (void)kl_ws_server_close(ws, KL_WS_GOING_AWAY, NULL, 0);
+            ws->close_deadline_ms = now;
+            return 0;
+        }
     }
+    ws->ping_behind = ws_out_pending(c);
     kl_ws_server_send_ping(ws, NULL, 0);
+    ws->ping_progress = ws_out_progress(c);
     ws->ping_unanswered = 1;
     ws->next_ping_ms = now + (uint64_t)ws->config->ping_interval_ms;
     return 1;

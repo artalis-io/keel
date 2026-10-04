@@ -681,6 +681,15 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
+        /* Completion: a posted send that moved bytes since the last sweep is progress, as a
+         * completion would be. A response is one send op until all of it is out (the engine re-posts
+         * the rest of a partial send itself), so without this a long download that keeps moving was
+         * cut off at the read timeout. HTTP/2 included: KEEL forgets a stream once its response is
+         * submitted, so the connection looks idle while the session's DATA is still going out. */
+        if (completion_loop && tc->stream.send_progress != tc->comp_progress_seen) {
+            tc->comp_progress_seen = tc->stream.send_progress;
+            tc->last_active_ms = now;
+        }
         /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). */
         if (tc->state == KL_HTTP_CONN_WEBSOCKET) {
             const KlWsServerHooks *wsh = kl_ws_server_hooks();
@@ -704,16 +713,26 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             continue;
         }
         /* HTTP/2: streams in progress are the session's business, but a connection with none open
-         * and nothing to send is idle, and is timed out like any other idle connection. */
+         * and nothing to send is idle, and is timed out like any other idle connection; one whose
+         * session is done (a graceful GOAWAY out, no stream left) is closed now. */
         if (tc->state == KL_HTTP_CONN_HTTP2) {
             const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
-            if (h2h && h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout) {
-                if (completion_loop) {
-                    kl_http_server_conn_release(s, tc);   /* cancels the receive; released by it */
-                } else {
-                    kl_event_del(&s->ev.loop, tc->stream.fd);
-                    kl_http_server_conn_release(s, tc);
-                }
+            if (!h2h) continue;
+            int done = h2h->done && h2h->done(tc);
+            if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
+                continue;
+            /* An idle close says so first: a graceful GOAWAY (RFC 9113 6.8), flushed. A done
+             * session sent its GOAWAY already (a no-op here). */
+            if (!done && h2h->drain_shutdown) h2h->drain_shutdown(tc);
+            if (completion_loop && tc->comp_driven) {
+                /* The GOAWAY is on the output queue (with TLS, possibly still in the engine): send
+                 * it, then close once it is out. The receive still posted completes on its own. */
+                kl_http_comp_tls_finish(s, tc, 0);
+            } else if (completion_loop) {
+                kl_http_server_conn_release(s, tc);   /* cancels the receive; released by it */
+            } else {
+                kl_event_del(&s->ev.loop, tc->stream.fd);
+                kl_http_server_conn_release(s, tc);
             }
             continue;
         }

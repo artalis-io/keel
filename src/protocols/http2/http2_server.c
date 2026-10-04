@@ -271,8 +271,11 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
             break;
         }
     }
-    int inject_host = (authority && authority_len > 0 && !has_host &&
-                       num_headers < KL_MAX_HEADERS);
+    int inject_host = (authority && authority_len > 0 && !has_host);
+    /* The synthetic host field keeps a slot of its own: at the cap the last regular field gives
+     * way, rather than Host (which routing and handlers read) silently going missing. */
+    if (inject_host && num_headers >= KL_MAX_HEADERS)
+        num_headers = KL_MAX_HEADERS - 1;
 
     /* Calculate total header storage needed */
     size_t total = method_len + 1 + path_len + 1;
@@ -573,7 +576,12 @@ static kl_ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
 /* The session emits produced frame bytes here; route them through the output boundary. */
 static kl_ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
-    return h2c->out_write(h2c->out_ctx, data, len);
+    kl_ssize_t w = h2c->out_write(h2c->out_ctx, data, len);
+    /* Output that moves is activity, as a read is: KEEL forgets a stream once its response is
+     * submitted, so a connection whose download is still going out (flushed on write readiness)
+     * would otherwise look idle and be timed out under it. */
+    if (w > 0) h2c->conn->last_active_ms = kl_monotonic_ms();
+    return w;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -790,6 +798,15 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
     return KL_HTTP_CONN_HTTP2;
 }
 
+/* Session-done: once the session (if it can report readiness) wants neither read nor write, it
+ * has terminated: it sent a GOAWAY for a protocol violation, or finished a graceful shutdown (GOAWAY
+ * out, no stream left). want_read is optional (NULL: legacy, stay open until the peer closes). */
+static int h2_session_done(const KlHttp2ServerConn *h2c) {
+    return h2c->session->want_read &&
+           !h2c->session->want_read(h2c->session) &&
+           !h2c->session->want_write(h2c->session);
+}
+
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
  * frames + flush produced output). Shared by the readiness drive below and the
  * completion driver; see internal.h. */
@@ -807,14 +824,9 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
             return KL_HTTP_CONN_CLOSED;
     }
 
-    /* Session-done close: once the session (if it can report readiness) wants
-     * neither read nor write, it has terminated: e.g. it sent a GOAWAY for a
-     * protocol violation, or finished a graceful shutdown. Close now rather than
-     * lingering until the peer times out. Flushed above, so the GOAWAY is on the
-     * wire. want_read is optional (NULL → legacy: stay open until peer closes). */
-    if (h2c->session->want_read &&
-        !h2c->session->want_read(h2c->session) &&
-        !h2c->session->want_write(h2c->session))
+    /* Session done: close now rather than lingering until the peer times out. Flushed above, so
+     * the GOAWAY is on the wire. */
+    if (h2_session_done(h2c))
         return KL_HTTP_CONN_CLOSED;
 
     return KL_HTTP_CONN_HTTP2;
@@ -845,6 +857,10 @@ int kl_http2_server_on_writable(KlHttpConn *c) {
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
 
     if (h2c->session->flush(h2c->session) < 0)
+        return KL_HTTP_CONN_CLOSED;
+
+    /* The last response of a graceful shutdown can finish here rather than after a read. */
+    if (h2_session_done(h2c))
         return KL_HTTP_CONN_CLOSED;
 
     return KL_HTTP_CONN_HTTP2;
@@ -896,6 +912,12 @@ static int kl_http2_server_idle_hook(const KlHttpConn *c) {
            !(h2c->session && h2c->session->want_write(h2c->session));
 }
 
+/* Done: the session wants neither read nor write (a graceful GOAWAY with no stream left). The sweep
+ * closes such a connection at once, whatever its idle time. */
+static int kl_http2_server_done_hook(const KlHttpConn *c) {
+    return c->h2 && c->h2->session && h2_session_done(c->h2);
+}
+
 static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .upgrade         = kl_http2_server_upgrade,
     .upgrade_from_h1 = kl_http2_server_upgrade_from_h1,
@@ -905,6 +927,7 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .cleanup         = kl_http2_server_cleanup,
     .drain_shutdown  = kl_http2_server_drain_shutdown,
     .idle            = kl_http2_server_idle_hook,
+    .done            = kl_http2_server_done_hook,
 };
 
 /* No GCC constructor auto-installing this. kl_http_server_init() calls every installer
