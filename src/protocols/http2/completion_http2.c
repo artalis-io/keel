@@ -6,38 +6,11 @@
  */
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
-#include "http_internal.h"            /* kl_http2_server_feed / kl_http2_server_set_writer */
+#include "http_internal.h"            /* kl_http2_server_feed */
 #include "http2_internal.h"
 #include "completion_http.h"     /* kl_comp_post_send / post_recv (HTTP wrappers), pulls completion.h */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
 #include "http_proto_hooks.h"         /* completion-drive seam registration */
-#include <string.h>
-#include <stdint.h>              /* SIZE_MAX (h2 output capture growth guard) */
-
-/* Driver-owned h2 output capture: the completion driver installs this writer via
- * the h2 output seam (kl_http2_server_set_writer) around a feed, so the session's produced
- * frames land in one buffer the driver posts as a single overlapped send. The buffer +
- * grow logic live here, not the HTTP/2 server adapter (http2_server.c), which only exposes the generic writer seam. */
-typedef struct { KlAllocator *alloc; char *buf; size_t len, cap; int err; } CompH2Cap;
-static kl_ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
-    CompH2Cap *cp = ctx;
-    if (cp->err) return -1;
-    if (len > SIZE_MAX - cp->len) { cp->err = 1; return -1; }
-    if (cp->len + len > cp->cap) {
-        size_t ncap = cp->cap ? cp->cap : 4096;
-        while (ncap < cp->len + len) {
-            if (ncap > SIZE_MAX / 2) { cp->err = 1; return -1; }
-            ncap *= 2;
-        }
-        char *nb = kl_realloc(cp->alloc, cp->buf, cp->cap, ncap);
-        if (!nb) { cp->err = 1; return -1; }
-        cp->buf = nb;
-        cp->cap = ncap;
-    }
-    memcpy(cp->buf + cp->len, data, len);
-    cp->len += len;
-    return (kl_ssize_t)len;
-}
 
 /* Drive an established HTTP/2 connection over the completion loop. Feed received
  * plaintext to the h2 session via kl_http2_server_feed (which parses frames and flushes
@@ -69,30 +42,18 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
         kl_comp_recv_after_output(s, c);
         return;
     }
-    /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added
-     * this recv's bytes). Capture the session's output so all frames it produces
-     * this feed go out as ONE ordered overlapped send; defer the next recv until that
-     * send completes (comp_on_write) so at most one h2 send is ever in flight; frames
-     * must not reorder. */
-    CompH2Cap cap = { c->stream.alloc, NULL, 0, 0, 0 };
-    kl_http2_server_set_writer(c, comp_h2_capture_write, &cap);
+    /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added this recv's
+     * bytes). The session writes its frames through conn_write, which on a completion loop puts them
+     * on the connection's output queue (one ordered overlapped send at a time, so frames cannot
+     * reorder, and frames written between feeds, an upgrade's stream 1 or a drain's GOAWAY, join
+     * them in order). Read the next frames once that output is out. */
     KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, c->stream.read_len);
-    kl_http2_server_set_writer(c, NULL, NULL);       /* restore the default socket writer */
     c->stream.read_len = 0;
-    if (st != KL_HTTP_CONN_HTTP2 || cap.err) {
-        kl_free(c->stream.alloc, cap.buf, cap.cap);
-        kl_comp_close(s, c);
+    if (st != KL_HTTP_CONN_HTTP2) {                    /* send a GOAWAY the session queued, then close */
+        kl_comp_close_after_output(s, c);
         return;
     }
-    if (cap.len > 0) {
-        KlIoVec iov = { cap.buf, cap.len };
-        int rc = kl_comp_post_send(c, &iov, 1, cap.len);
-        kl_free(c->stream.alloc, cap.buf, cap.cap);
-        if (rc < 0) kl_comp_close(s, c);
-    } else {
-        kl_free(c->stream.alloc, cap.buf, cap.cap);
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);   /* no output: read more */
-    }
+    kl_comp_recv_after_output(s, c);
 }
 
 /* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches

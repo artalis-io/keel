@@ -47,8 +47,15 @@ static inline kl_ssize_t conn_read(KlHttpConn *c, void *buf, size_t len) {
     return kl_stream_recv(&c->stream, buf, len);
 }
 
+/* Append plaintext to a completion-driven connection's output queue and start sending it (one
+ * overlapped send at a time, in order; completion_http_server.c). Never blocks. len, or -1. */
+kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len);
+
 static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
     if (c->tls) return c->tls->write(c->tls, c->stream.fd, buf, len);
+    /* A completion loop: never a synchronous send on the loop thread (accepted sockets are blocking
+     * on io_uring), and never one that could overtake a posted send. */
+    if (c->comp_driven) return kl_comp_queue_write(c, buf, len);
     return kl_stream_send(&c->stream, buf, len);
 }
 

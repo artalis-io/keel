@@ -30,12 +30,10 @@
  * flush produced output. Returns the next KlHttpConnState. Defined in http2_server.c. */
 KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len);
 
-/* HTTP/2 output boundary seam: the h2 server writes produced frame bytes through a
- * per-connection writer; the default writes the socket (conn_write). A completion driver
- * installs its own buffering writer around a feed, then restores the default (fn == NULL).
- * Defined in http2_server.c. */
+/* HTTP/2 output boundary: the h2 server writes produced frame bytes through a per-connection
+ * writer, which writes the connection (conn_write: the socket on readiness, the output queue on a
+ * completion loop). Defined in http2_server.c. */
 typedef kl_ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
-void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
 
 /* ── Per-stream state ────────────────────────────────────────────── */
 
@@ -69,11 +67,9 @@ struct KlHttp2ServerConn {
     int goaway_sent;               /**< Non-zero after GOAWAY sent. */
     int upgrading;                 /**< h2c Upgrade: stream 1 is the HTTP/1.1 request, whose pre-body
                                         middleware already ran */
-    /* Output boundary seam. Produced frame bytes flow through out_write; the
-     * default writes the socket (conn_write). A completion driver installs a buffering
-     * writer (kl_http2_server_set_writer) to collect a feed's frames for one ordered
-     * overlapped send, symmetric with the WebSocket server's kl_drain boundary. The
-     * readiness path always uses the default writer, so it is unchanged. */
+    /* Output boundary. Produced frame bytes flow through out_write, which writes the connection
+     * (conn_write): on a completion loop that puts them on the connection's output queue, one
+     * ordered overlapped send at a time. */
     KlHttp2WriteFn out_write;         /**< Output sink for produced frames. */
     void       *out_ctx;           /**< Context for out_write. */
 };
