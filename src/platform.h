@@ -101,8 +101,9 @@ void kl_plat_file_close(int fd);
 
 /* Single-socket readiness wait (the blocking poll(&pfd,1,timeout) idiom used by
  * the sync client). @events is a mask of KL_POLL_IN / KL_POLL_OUT. Returns >0 if
- * ready (requested event or an error/hangup event), 0 on timeout, -1 on failure.
- * POSIX: poll(2). Windows: WSAPoll. */
+ * ready (requested event or an error/hangup event), 0 on timeout or when a signal
+ * interrupted the wait (the caller rechecks its deadline and waits again), -1 on
+ * failure. POSIX: poll(2). Windows: WSAPoll. */
 #define KL_POLL_IN   0x1
 #define KL_POLL_OUT  0x2
 int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms);

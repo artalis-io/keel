@@ -121,6 +121,8 @@ typedef struct KlDnsReq {
     KlResolveResult   result;      /* literal result / final merged result */
     int               in_done;     /* reentrancy guard */
     int               cancelled;   /* cancel() arrived during done */
+    int               no_entropy;  /* a query was refused for want of entropy: the request ends
+                                    * with this candidate, never moves on to the next one */
 } KlDnsReq;
 
 /* ── Resolver ────────────────────────────────────────────────────────── */
@@ -186,6 +188,7 @@ struct KlDnsResolver {
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
     int            rnd_failed;    /* a draw found no OS entropy; the query being built is refused */
+    int          (*rnd_fn)(void *buf, size_t len); /* entropy source; NULL = kl_plat_random */
 };
 
 /* ── Entropy (pooled OS RNG via the platform layer) ─────────────────────── */
@@ -196,7 +199,8 @@ struct KlDnsResolver {
  * next draw tries the OS again. */
 static unsigned char dns_rand_byte(KlDnsResolver *r) {
     if (r->rnd_off >= sizeof(r->rnd_pool)) {
-        if (kl_plat_random(r->rnd_pool, sizeof(r->rnd_pool)) != 0) {
+        int (*fill)(void *, size_t) = r->rnd_fn ? r->rnd_fn : kl_plat_random;
+        if (fill(r->rnd_pool, sizeof(r->rnd_pool)) != 0) {
             r->rnd_failed = 1;
             return 0;
         }
@@ -504,7 +508,7 @@ static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *se
 /* Transmit one leg's query (rotating nameserver). A try/timer is consumed ONLY on successful admission
  * (KL_DATAGRAM_ACCEPTED); on transient WOULD_BLOCK nothing is consumed and the leg stays on the same
  * nameserver/id-space for a writable-edge retry. Returns a 3-way DnsTxResult. */
-static DnsTxResult dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) {
+static DnsTxResult dns_transmit_leg(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg) {
     r->rnd_failed = 0;             /* dns_build_query refuses a query drawn without entropy */
     if (leg->tries_left <= 0)
         return DNS_TX_FAILED;
@@ -518,8 +522,11 @@ static DnsTxResult dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLe
     uint8_t buf[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
     if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
-                        leg->ns_idx, &qlen, &q_off, &q_len) != 0)
+                        leg->ns_idx, &qlen, &q_off, &q_len) != 0) {
+        if (r->rnd_failed)
+            q->no_entropy = 1;
         return DNS_TX_FAILED;
+    }
     if (q_len > sizeof(leg->question))
         return DNS_TX_FAILED;
 
@@ -664,10 +671,11 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
 }
 
 /* Start the first candidate at or after index `ci` that can be queried. A candidate that cannot be
- * sent (e.g. a search expansion that does not encode as a query name) is skipped, not fatal.
+ * sent (e.g. a search expansion that does not encode as a query name) is skipped, not fatal. A query
+ * refused for want of entropy is fatal: the next candidate is a different name, not a retry.
  * Returns 0 once one is in flight, -1 when none is left. Never completes the request. */
 static int dns_start_from(KlDnsResolver *r, KlDnsReq *q, int ci) {
-    for (q->ci = ci; q->ci < q->ncand; q->ci++) {
+    for (q->ci = ci; q->ci < q->ncand && !q->no_entropy; q->ci++) {
         memcpy(q->host, q->cand[q->ci], DNS_NAME_MAX);
         if (dns_start_candidate(r, q) == 0)
             return 0;
@@ -677,7 +685,7 @@ static int dns_start_from(KlDnsResolver *r, KlDnsReq *q, int ci) {
 
 /* Move to the next candidate name (search expansion) or fail. */
 static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q) {
-    if (dns_start_from(r, q, q->ci + 1) == 0)
+    if (!q->no_entropy && dns_start_from(r, q, q->ci + 1) == 0)
         return;
     dns_complete(r, q, NULL, KL_ERR_DNS);
 }
@@ -1116,6 +1124,8 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
     if (dns_build_query(r, qb, sizeof(qb), leg->id, q->host, leg->qtype,
                         ns_idx, &qlen, &q_off, &q_len) != 0 ||
         q_len > sizeof(leg->question) || qlen > DNS_TCP_MSG_MAX) {
+        if (r->rnd_failed)
+            q->no_entropy = 1;
         leg->naddrs = 0; dns_leg_settle(r, q, leg); return;
     }
     memcpy(leg->question, qb + q_off, q_len);
@@ -1610,7 +1620,9 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 #endif
     }
 
-    /* Parse; keep only nameservers of the first one's family (one socket). */
+    /* Parse; keep only nameservers of the first one's family (one socket). A nameserver listed
+     * twice is kept once: a reply is matched to its nameserver by source address, so two entries
+     * with one address could not be told apart (and a retry to the same server is no failover). */
     int nns = 0;
     KlAddrFamily fam = KL_AF_UNSPEC;
     for (int i = 0; i < count && nns < DNS_MAX_NS; i++) {
@@ -1621,6 +1633,11 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
         if (fam == KL_AF_UNSPEC)
             fam = f;
         else if (f != fam)
+            continue;
+        int dup = 0;
+        for (int j = 0; j < nns && !dup; j++)
+            dup = kl_sockaddr_equal(&ns, &r->ns[j]);
+        if (dup)
             continue;
         r->ns[nns] = ns;
         nns++;
@@ -1635,6 +1652,14 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 }
 
 /* ── Constructor ─────────────────────────────────────────────────────── */
+
+/* Internal TEST hook (NOT in the public header): replace the resolver's entropy source, so a test can
+ * make a draw fail deterministically. NULL restores kl_plat_random. */
+void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len));
+void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len)) {
+    if (self)
+        ((KlDnsResolver *)self)->rnd_fn = fn;
+}
 
 /* Internal creator with an explicit outbound-slot count (NOT in the public header). send_slots 0 = the
  * DNS_SEND_SLOTS default; a positive value is a TEST hook to force KL_DATAGRAM_WOULD_BLOCK deterministically

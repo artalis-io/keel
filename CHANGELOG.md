@@ -7,6 +7,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **The URL parser no longer takes a host from outside the authority or from userinfo (behavior
+  change).** The closing `]` of an IPv6 literal was searched for in the whole URL, so
+  `http://[a/b?c]` parsed with the host `a/b?c`, and anything could sit between the brackets. An `@`
+  was kept as part of the host, so `http://user@example.com/` asked DNS for `user@example.com`, and a
+  check of the parsed host saw a different name than a reader of the URL. The `]` is now looked for
+  inside the authority only (before the first `/`, `?` or `#`), and only an address may sit between
+  the brackets: hex digits, `:` and `.`, with an optional zone after `%`. Userinfo is not supported
+  in a request URL, so `kl_url_parse` now rejects an `@` in the authority; an `@` in the path or
+  query is unchanged. Proxy credentials are configured on `KlHttpProxyConfig`, not in the URL.
 - **mbedTLS: a client context with no CA bundle no longer skips certificate verification
   (behavior change).** `kl_tls_mbedtls_client_ctx_create(NULL, alloc)` built a client that accepted
   any certificate, where the OpenSSL adapter's NULL means the system trust store. A caller that
@@ -391,6 +400,33 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   error at once.
 - **Build: `getrandom` is not used on Android below API level 28,** where `<sys/random.h>` exists
   but does not declare it (the build failed under `-Werror`).
+- **A redirect to an absolute path from a URL with no path kept the base's query or fragment.**
+  `kl_url_resolve` ended the base URL's authority only at a `/`, so `/login` resolved against
+  `http://example.com#top` gave `http://example.com#top/login`, which parses as the path `/`. The
+  authority now ends at the first `/`, `?` or `#`, giving `http://example.com/login`.
+- **The sync HTTP client no longer fails a request when a signal interrupts its wait.** Its
+  readiness wait is a bare `poll()`, which returns EINTR when a signal lands (SIGCHLD, a profiler's
+  SIGPROF), even for a handler installed with SA_RESTART on Linux. The request failed. An
+  interrupted wait now counts as not ready yet: the client checks its deadline and waits again.
+  Windows (WSAPoll) is unchanged.
+- **DNS: a nameserver listed twice no longer drops its own answers.** A reply is matched to the
+  nameserver it came from by address, and the first entry with that address was taken. With
+  `nameserver 10.0.0.1` listed twice in resolv.conf, a retry sent to the second entry had its answer
+  dropped as coming from the wrong server, so each such try cost a full timeout. A repeated
+  nameserver is now kept once (a retry to the same server is no failover), and the attempt budget
+  counts distinct servers.
+- **DNS: a query that cannot get entropy ends the request instead of moving on to another name.**
+  A query whose id, case pattern or cookie could not be drawn from the OS RNG is refused, and that
+  refusal was taken like a search candidate that cannot be encoded: the resolver moved on to the
+  next candidate and could answer for a different name than the one asked. A refusal for want of
+  entropy now fails the request (`resolve()` returns NULL, or the callback gets `KL_ERR_DNS`); only
+  an unencodable candidate is skipped.
+- **mbedTLS: a write retried with a shorter length is refused.** After a write would block, mbedTLS
+  holds a record built from the length it was given, and a retry flushes that record and reports the
+  length it is called with. A retry with less would have only that much acknowledged, and the caller
+  would send the rest again, duplicating bytes in the stream. Such a retry now fails the write (-1).
+  A retry must pass at least the length just attempted, as KlDrain and every in-tree caller do;
+  equal and longer retries are unchanged. The contract is documented in `keel_tls_mbedtls.h`.
 - **Completion server: a failed accept post could crash the server.** When the next accept could not
   be posted, the listener returned its credit through the pool's release hook. The HTTP server's
   release hook announces the free slot, and that re-entered the listener while it was still

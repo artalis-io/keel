@@ -243,7 +243,13 @@ static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, siz
     /* After a WANT_WRITE, mbedtls_ssl_write must be called again with the same data; it then
      * flushes the record it already built and reports the length it is called with. A caller that
      * retries from its own buffer with more appended (KlDrain) would have that larger length
-     * acknowledged for bytes never encrypted: retry with the original length only. */
+     * acknowledged for bytes never encrypted: retry with the original length only. A shorter
+     * retry would have only its length acknowledged for a record holding more, and the caller
+     * would send the rest twice: that breaks the retry contract and fails the write. */
+    if (t->wpend && len < t->wpend) {
+        t->wpend = 0;
+        return -1;
+    }
     size_t n = len;
     if (t->wpend && n > t->wpend)
         n = t->wpend;

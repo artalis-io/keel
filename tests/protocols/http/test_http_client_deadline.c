@@ -31,7 +31,8 @@ enum {
     PEER_HOLD,       /* accept, then neither read nor write */
     PEER_PARTIAL,    /* read the request head, send three bytes, then nothing */
     PEER_TRICKLE,    /* read the request head, then one byte of a response every 50 ms */
-    PEER_REPLY       /* read the request head, send a complete 200 */
+    PEER_REPLY,      /* read the request head, send a complete 200 */
+    PEER_SLOW_REPLY  /* read the request head, wait 300 ms, send a complete 200 */
 };
 
 typedef struct {
@@ -96,7 +97,9 @@ static void peer_thread(void *arg) {
             if ((head_ok = peer_read_head(fd) == 0) != 0) break;
     }
     if (head_ok && p->mode == PEER_PARTIAL) (void)kl_test_sockwrite(fd, "abc", 3);
-    if (head_ok && p->mode == PEER_REPLY) (void)kl_test_sockwrite(fd, reply, sizeof reply - 1);
+    if (head_ok && p->mode == PEER_SLOW_REPLY) kl_test_sleep_ms(300);
+    if (head_ok && (p->mode == PEER_REPLY || p->mode == PEER_SLOW_REPLY))
+        (void)kl_test_sockwrite(fd, reply, sizeof reply - 1);
     for (int i = 0; i < 1000 && !p->release; i++) {   /* at most 10 s, then let go regardless */
         if (head_ok && p->mode == PEER_TRICKLE && sent < sizeof trickle - 1 && i % 5 == 0)
             sent += kl_test_sockwrite(fd, trickle + sent, 1) == 1 ? 1 : 0;
@@ -121,6 +124,7 @@ typedef struct {
     size_t body_len;
     KlHttpClientConfig cfg;
     int pooled;
+    int take_alarm;          /* POSIX: this thread alone takes SIGALRM */
     volatile int done;
     int rc;
     KlError err;
@@ -128,8 +132,22 @@ typedef struct {
     KlPlatThread t;
 } Run;
 
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/time.h>
+#include <pthread.h>
+#endif
+
 static void run_thread(void *arg) {
     Run *r = arg;
+#ifndef _WIN32
+    if (r->take_alarm) {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGALRM);
+        (void)pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    }
+#endif
     KlAllocator a = kl_allocator_default();
     KlHttpClientResponse resp;
     memset(&resp, 0, sizeof resp);
@@ -298,6 +316,54 @@ UTEST(client_deadline, sync_prompt_response_succeeds) {
     ASSERT_EQ(r.rc, 0);
     ASSERT_EQ(r.status, 200);
 }
+
+#ifndef _WIN32
+static volatile sig_atomic_t g_alarms;
+static void alarm_handler(int sig) { (void)sig; g_alarms++; }
+
+/* A signal that lands while the sync client waits for the socket (SIGCHLD, a profiler's SIGPROF)
+ * is not a failure. poll() returns EINTR for it even under SA_RESTART on Linux, and the request
+ * failed. A repeating SIGALRM, taken only by the requesting thread, interrupts every wait while the
+ * server takes 300 ms to answer. */
+UTEST(client_deadline, sync_wait_interrupted_by_signal_continues) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    ASSERT_EQ(0, sigaction(SIGALRM, &sa, &old));
+    sigset_t set, oldset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    ASSERT_EQ(0, pthread_sigmask(SIG_BLOCK, &set, &oldset));   /* threads made now inherit it */
+
+    static Peer p;
+    memset(&p, 0, sizeof p);
+    ASSERT_EQ(peer_listen(&p), 0);
+    p.mode = PEER_SLOW_REPLY;
+    static Run r;
+    run_init(&r, "http", p.port, 3000);
+    r.take_alarm = 1;
+    g_alarms = 0;
+    struct itimerval it;
+    memset(&it, 0, sizeof(it));
+    it.it_value.tv_usec = 20000;
+    it.it_interval.tv_usec = 20000;              /* every 20 ms */
+    ASSERT_EQ(0, setitimer(ITIMER_REAL, &it, NULL));
+    long took = run_watched(&r, &p, 5000);
+
+    struct itimerval off;
+    memset(&off, 0, sizeof(off));
+    (void)setitimer(ITIMER_REAL, &off, NULL);
+    (void)pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+    (void)sigaction(SIGALRM, &old, NULL);
+
+    ASSERT_GE(took, 0);
+    ASSERT_GT((int)g_alarms, 3);                 /* the waits really were interrupted */
+    ASSERT_EQ(r.rc, 0);                          /* was -1: the interrupted wait failed it */
+    ASSERT_EQ(r.status, 200);
+}
+#endif
 
 /* ── Resolved address list ──────────────────────────────────────────────────────────────────── */
 

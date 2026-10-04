@@ -869,6 +869,60 @@ static void test_truncation_is_not_eof(KlAllocator *alloc, PemPair *ca, PemPair 
     kl_tls_mbedtls_ctx_destroy(cctx);
 }
 
+/* ── A write retried with less than the blocked write's length ───────────────────────────────
+ * After a write would block, mbedTLS has a whole record built from the length it was given. A retry
+ * with a shorter length would flush that record and have only the shorter length acknowledged, so
+ * the caller would send the rest again. The adapter refuses such a retry (-1); a retry with the
+ * same length still just waits. */
+static int g_short_retry_fail;
+static void test_short_retry_rejected(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== write retry shorter than the blocked write ==\n");
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, pemlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, pemlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, pemlen(ca->cert_pem), alloc);
+    assert(sctx && cctx);
+    KlTls *srv = kl_tls_mbedtls_create(sctx, alloc);
+    KlTls *cli = kl_tls_mbedtls_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_mbedtls_set_hostname(cli, "server.local") == 0);
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    int small = 8192;
+    (void)setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    (void)setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    assert(drive_handshake(cli, cfd, srv, sfd) == 0);
+
+    enum { PIECE = 16 * 1024 };
+    static unsigned char data[PIECE];
+    memset(data, 'w', sizeof data);
+    kl_ssize_t w = 1;
+    for (int i = 0; i < 10000 && w > 0; i++)              /* nobody reads: fill until it blocks */
+        w = srv->write(srv, sfd, data, PIECE);
+    int blocked = w == 0;
+    kl_ssize_t same = blocked ? srv->write(srv, sfd, data, PIECE) : -2;
+    kl_ssize_t shorter = blocked ? srv->write(srv, sfd, data, 100) : -2;
+    printf("  blocked=%d same-length retry=%zd shorter retry=%zd\n", blocked,
+           (ssize_t)same, (ssize_t)shorter);
+    if (!blocked) { printf("  FAIL: the writes never blocked\n"); g_short_retry_fail++; }
+    if (same != 0) { printf("  FAIL: a same-length retry did not keep waiting\n"); g_short_retry_fail++; }
+    if (shorter != -1) {                                   /* was 0 or 100 */
+        printf("  FAIL: a shorter retry was accepted\n");
+        g_short_retry_fail++;
+    }
+    if (!g_short_retry_fail)
+        printf("  PASS: a shorter retry is refused\n");
+    cli->destroy(cli); srv->destroy(srv);
+    close(fds[0]); close(fds[1]);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+}
+
 static void test_alloc_failure_injection(PemPair *ca, PemPair *server)
 {
     printf("== allocation-failure injection (graceful, ASan-clean) ==\n");
@@ -958,6 +1012,7 @@ int main(void) {
     test_alloc_failure_injection(&ca, &server);
     test_drain_style_retry(&alloc, &ca, &server);
     test_truncation_is_not_eof(&alloc, &ca, &server);
+    test_short_retry_rejected(&alloc, &ca, &server);
     test_null_ca_fails_closed(&alloc);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
@@ -975,6 +1030,7 @@ int main(void) {
 
     if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
     if (g_null_ca_fail) { printf("\nFAIL: NULL CA path check\n"); return 1; }
+    if (g_short_retry_fail) { printf("\nFAIL: shorter write retry check\n"); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }

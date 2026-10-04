@@ -1123,6 +1123,63 @@ UTEST(dns, all_nameservers_silent_times_out) {
     unlink(rcpath);
 }
 
+/* A nameserver that drops the first query of each type and answers the rest normally (counted). */
+static int g_drop_seen_a, g_drop_seen_aaaa, g_drop_hits;
+static void drop_first_ns(void *ud, const void *data, size_t len,
+                          const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    int qtype = 0;
+    if (len < 12 || dns_q_parse(data, len, &qtype) == 0)
+        return;
+    g_drop_hits++;
+    int *seen = qtype == KL_DNS_TYPE_AAAA ? &g_drop_seen_aaaa : &g_drop_seen_a;
+    if ((*seen)++ == 0)
+        return;                                   /* the first one is lost */
+    mock_ns(ud, data, len, src, local, flags);
+}
+
+/* The same nameserver listed twice in resolv.conf. The retry after a lost query goes to the same
+ * address, and its answer must be taken. The answer was matched to the first matching list entry,
+ * not the one the retry was sent to, and dropped as coming from the wrong server, so every such try
+ * cost a full timeout. */
+UTEST(dns, duplicate_nameserver_entry_answer_accepted) {
+    reset_dns();
+    g_answer_a = 1;
+    g_drop_seen_a = g_drop_seen_aaaa = g_drop_hits = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlDatagram ns;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns, drop_first_ns, &ns));
+    uint16_t p = kl_datagram_local_port(&ns);
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n", p, p);
+    const char *rcpath = write_resolv(rc);
+    ASSERT_TRUE(rcpath != NULL);
+
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 100, .attempts = 2 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    uint64_t t0 = kl_monotonic_ms();
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 400);
+    uint64_t took = kl_monotonic_ms() - t0;
+    int done = g_done, err = g_err, naddrs = g_res.naddrs, hits = g_drop_hits;
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
+    ASSERT_EQ(1, done);
+    ASSERT_EQ(0, err);
+    ASSERT_EQ(1, naddrs);
+    ASSERT_EQ(4, hits);                  /* was 6: the first answered retry was dropped */
+    ASSERT_LT(took, (uint64_t)190);      /* one timeout, not two */
+}
+
 /* ── answers bound to the nameserver the query went to ─────────────── */
 
 /* A primary nameserver that answers normally until g_relay_spoof is set; from then on it never answers
@@ -1479,6 +1536,71 @@ UTEST(dns, unencodable_middle_search_candidate_skipped) {
     ASSERT_EQ(0, err);                       /* was: KL_ERR_DNS */
     ASSERT_EQ(1, naddrs);
     ASSERT_STREQ("myhost", g_last_qname);    /* the bare name was reached */
+}
+
+/* Internal test hook (not in the public header): replace a resolver's entropy source. */
+extern void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len));
+
+/* An entropy source whose first g_rnd_fail_left draws fail (as an OS RNG with nothing to give). */
+static int g_rnd_fail_left;
+static int g_rnd_calls;
+static uint32_t g_rnd_state = 0x2545F491u;
+static int flaky_random(void *buf, size_t len) {
+    g_rnd_calls++;
+    if (g_rnd_fail_left > 0) {
+        g_rnd_fail_left--;
+        memset(buf, 0, len);
+        return -1;
+    }
+    unsigned char *p = buf;
+    for (size_t i = 0; i < len; i++) {
+        g_rnd_state = g_rnd_state * 1664525u + 1013904223u;
+        p[i] = (unsigned char)(g_rnd_state >> 24);
+    }
+    return 0;
+}
+
+/* No entropy for the first search candidate: the request fails. It must not move on to the next
+ * candidate, which would answer for a different name than the one asked. That failure was taken for
+ * an unencodable candidate and skipped, and the bare name was resolved instead. The failing draws
+ * cover both families' queries for the first candidate (0x20 and cookies off, so each query draws
+ * only its id) and stop before the second candidate's. */
+UTEST(dns, entropy_failure_does_not_skip_to_next_candidate) {
+    reset_dns();
+    g_answer_a = 1;
+    g_answer_aaaa = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns, mock_ns, &ns));
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nsearch corp.example\n",
+             kl_datagram_local_port(&ns));
+    const char *rcpath = write_resolv(rc);
+    ASSERT_TRUE(rcpath != NULL);
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 200, .attempts = 1,
+                               .disable_0x20 = 1, .disable_cookies = 1 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+    kl_dns_resolver_set_random(r, flaky_random);
+    g_rnd_calls = 0;
+    g_rnd_fail_left = 19;
+
+    KlResolveReq *req = r->resolve(r, &ctx, "myhost", 80, on_done, NULL);
+    if (req)
+        pump(&ctx, &g_done, 100);
+    int done = g_done, err = g_err, queries = g_queries, calls = g_rnd_calls;
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
+    ASSERT_GE(calls, 18);                    /* both of the first candidate's queries failed */
+    ASSERT_EQ(0, queries);                   /* was 1+: "myhost" was queried and answered */
+    ASSERT_TRUE(req == NULL || (done == 1 && err != 0));
 }
 
 /* ── Real-response corpus (hermetic): wire formats the mock doesn't emit ── */
