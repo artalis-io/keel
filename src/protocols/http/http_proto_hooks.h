@@ -43,7 +43,7 @@ typedef struct KlWsServerHooks {
     int  (*on_writable)(KlHttpConn *c);
     int  (*drain_pending)(const KlHttpConn *c);           /* readiness: want WRITE interest? */
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
-    int  (*auto_ping)(KlHttpConn *c, uint64_t now);       /* idle-sweep keepalive */
+    int  (*auto_ping)(KlHttpConn *c, uint64_t now, uint64_t stall_ms);   /* idle-sweep keepalive */
     int  (*check_close_timeout)(const KlHttpConn *c, uint64_t now);
     void (*drain_close)(KlHttpConn *c);                   /* graceful-drain nudge */
 } KlWsServerHooks;
@@ -67,6 +67,7 @@ typedef struct KlHttp2ServerHooks {
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
     int  (*idle)(const KlHttpConn *c);                    /* no stream open, no output pending */
+    int  (*done)(const KlHttpConn *c);                    /* session wants neither read nor write */
 } KlHttp2ServerHooks;
 
 const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if http2_server.c absent */

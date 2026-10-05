@@ -192,11 +192,112 @@ static int case_graceful_shutdown(KlAllocator *a) {
     return 0;
 }
 
+/* A request whose header list is within the budget, then a trailer block that is too: each list is
+ * its own (RFC 9113 6.5.2), so the trailers are not charged against the request's headers. The two
+ * together were, and the stream was reset. */
+static int case_trailer_budget(KlAllocator *a) {
+    g_ss = server_session(a);
+    nghttp2_session *cs = raw_client();
+    g_requests = g_rst_seen = 0;
+    g_resp_body = 0;
+    g_resp_len = 10;
+    static char big1[40000], big2[30000];
+    memset(big1, 'h', sizeof big1);
+    memset(big2, 't', sizeof big2);
+    nghttp2_nv req[] = { NV(":method", "POST"), NV(":path", "/"), NV(":scheme", "http"),
+                         NV(":authority", "x"),
+                         { (uint8_t *)"x-big", (uint8_t *)big1, 5, sizeof big1, NGHTTP2_NV_FLAG_NONE } };
+    nghttp2_nv trl[] = { { (uint8_t *)"x-trailer", (uint8_t *)big2, 9, sizeof big2,
+                           NGHTTP2_NV_FLAG_NONE } };
+    int32_t sid = nghttp2_submit_headers(cs, NGHTTP2_FLAG_NONE, -1, NULL, req, 5, NULL);
+    if (sid < 0) return fail("submit request headers");
+    if (pump_server(cs) < 0) return fail("exchange");      /* the stream is open: trailers next */
+    if (nghttp2_submit_headers(cs, NGHTTP2_FLAG_END_STREAM, sid, NULL, trl, 1, NULL) != 0)
+        return fail("submit trailers");
+    for (int i = 0; i < 16; i++) if (pump_server(cs) < 0) return fail("exchange");
+    nghttp2_session_del(cs);
+    g_ss->destroy(g_ss);
+    g_resp_len = 0;
+    printf("  request list ~40 KB + trailer list ~30 KB: delivered=%d, RST seen=%d, body=%zu\n",
+           g_requests, g_rst_seen, g_resp_body);
+    if (g_requests != 1) return fail("the request was not delivered");
+    if (g_rst_seen) return fail("trailers were charged against the request's header list");
+    if (g_resp_body != 10) return fail("the request was not answered");
+    return 0;
+}
+
+/* The field-count cap is the request block's: a request with nearly KL_MAX_HEADERS fields and a
+ * few trailer fields is answered. The trailer fields were counted on top of the request's. */
+static int case_trailer_field_count(KlAllocator *a) {
+    g_ss = server_session(a);
+    nghttp2_session *cs = raw_client();
+    g_requests = g_rst_seen = 0;
+    g_resp_body = 0;
+    g_resp_len = 10;
+    enum { NREQ = KL_MAX_HEADERS - 2, NTRL = 8 };
+    static nghttp2_nv req[4 + NREQ], trl[NTRL];
+    static char rn[NREQ][16], tn[NTRL][16];
+    nghttp2_nv base[] = { NV(":method", "POST"), NV(":path", "/"), NV(":scheme", "http"),
+                          NV(":authority", "x") };
+    memcpy(req, base, sizeof base);
+    for (int i = 0; i < NREQ; i++) {
+        int l = snprintf(rn[i], sizeof rn[i], "x-r%d", i);
+        nghttp2_nv nv = { (uint8_t *)rn[i], (uint8_t *)"v", (size_t)l, 1, NGHTTP2_NV_FLAG_NONE };
+        req[4 + i] = nv;
+    }
+    for (int i = 0; i < NTRL; i++) {
+        int l = snprintf(tn[i], sizeof tn[i], "x-t%d", i);
+        nghttp2_nv nv = { (uint8_t *)tn[i], (uint8_t *)"v", (size_t)l, 1, NGHTTP2_NV_FLAG_NONE };
+        trl[i] = nv;
+    }
+    int32_t sid = nghttp2_submit_headers(cs, NGHTTP2_FLAG_NONE, -1, NULL, req, 4 + NREQ, NULL);
+    if (sid < 0) return fail("submit request headers");
+    if (pump_server(cs) < 0) return fail("exchange");      /* the stream is open: trailers next */
+    if (nghttp2_submit_headers(cs, NGHTTP2_FLAG_END_STREAM, sid, NULL, trl, NTRL, NULL) != 0)
+        return fail("submit trailers");
+    for (int i = 0; i < 16; i++) if (pump_server(cs) < 0) return fail("exchange");
+    nghttp2_session_del(cs);
+    g_ss->destroy(g_ss);
+    g_resp_len = 0;
+    printf("  %d request fields + %d trailer fields: delivered=%d, RST seen=%d, body=%zu\n",
+           (int)NREQ, (int)NTRL, g_requests, g_rst_seen, g_resp_body);
+    if (g_requests != 1) return fail("the request was not delivered");
+    if (g_rst_seen) return fail("trailer fields were counted against the request's field cap");
+    if (g_resp_body != 10) return fail("the request was not answered");
+    return 0;
+}
+
+/* nghttp2's own contract, which KEEL's session-done close relies on: after a graceful GOAWAY with
+ * no stream left, the session wants neither read nor write. */
+static int case_goaway_session_done(KlAllocator *a) {
+    g_ss = server_session(a);
+    nghttp2_session *cs = raw_client();
+    g_resp_body = 0;
+    g_resp_len = 10;
+    nghttp2_nv nva[] = { NV(":method", "GET"), NV(":path", "/"), NV(":scheme", "http"),
+                         NV(":authority", "x") };
+    if (nghttp2_submit_request(cs, NULL, nva, 4, NULL, NULL) < 0) return fail("submit");
+    for (int i = 0; i < 8; i++) if (pump_server(cs) < 0) return fail("exchange");
+    int before = g_ss->want_read(g_ss);
+    (void)g_ss->shutdown(g_ss);
+    for (int i = 0; i < 8; i++) if (pump_server(cs) < 0) return fail("exchange");
+    int rd = g_ss->want_read(g_ss), wr = g_ss->want_write(g_ss);
+    nghttp2_session_del(cs);
+    g_ss->destroy(g_ss);
+    g_resp_len = 0;
+    printf("  after GOAWAY, no stream open: want_read %d -> %d, want_write %d\n", before, rd, wr);
+    if (g_resp_body != 10) return fail("the request was not answered");
+    if (!before) return fail("a live session did not want to read");
+    if (rd || wr) return fail("a session done after GOAWAY still wants I/O");
+    return 0;
+}
+
 /* ════ Client adapter vs a raw nghttp2 server ════════════════════════════════════════════════ */
 
 static nghttp2_session *g_rs;
 static int g_cli_closed, g_cli_err, g_cli_responses;
 static int g_many_headers;
+static int g_near_budget;                  /* answer with a header list at the client's budget */
 
 static int cli_on_send2(KlHttp2ClientSession *s, const void *d, size_t n) {
     (void)s;
@@ -227,6 +328,18 @@ static ssize_t rs_send(nghttp2_session *ng, const uint8_t *d, size_t n, int f, v
 }
 static int rs_frame_recv(nghttp2_session *ng, const nghttp2_frame *fr, void *ud) {
     (void)ud;
+    if (g_near_budget && (fr->hd.type == NGHTTP2_HEADERS || fr->hd.type == NGHTTP2_DATA) &&
+        (fr->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
+        /* Regular fields that fill the budget to 20 octets short; :status (7 + 3 + 32) is over. */
+        static char va[32000], vb[33446];
+        memset(va, 'a', sizeof va);
+        memset(vb, 'b', sizeof vb);
+        nghttp2_nv nva[] = { NV(":status", "200"),
+                             { (uint8_t *)"x-a", (uint8_t *)va, 3, sizeof va, NGHTTP2_NV_FLAG_NONE },
+                             { (uint8_t *)"x-b", (uint8_t *)vb, 3, sizeof vb, NGHTTP2_NV_FLAG_NONE } };
+        nghttp2_submit_response(ng, fr->hd.stream_id, nva, 3, NULL);
+        return 0;
+    }
     if (!g_many_headers) return 0;
     if ((fr->hd.type == NGHTTP2_HEADERS || fr->hd.type == NGHTTP2_DATA) &&
         (fr->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
@@ -306,14 +419,37 @@ static int case_client_header_cap(KlAllocator *a) {
     return 0;
 }
 
+/* The client's header-list budget counts pseudo-header fields too (RFC 9113 6.5.2): a response
+ * whose regular fields alone fit, but not with :status, is over it. :status went uncounted. */
+static int case_client_counts_pseudo_headers(KlAllocator *a) {
+    g_near_budget = 1;
+    g_cli_closed = g_cli_err = g_cli_responses = 0;
+    KlHttp2ClientSession *cs = client_session(a);
+    if (!cs) return fail("client session");
+    if (cs->submit_request(cs, "GET", "/", "x", NULL, 0, NULL, 0) < 0) return fail("submit");
+    for (int i = 0; i < 16; i++) if (pump_client(cs) < 0) break;
+    cs->destroy(cs);
+    nghttp2_session_del(g_rs);
+    g_near_budget = 0;
+    printf("  response list at budget + :status: responses=%d closed=%d err=%d\n",
+           g_cli_responses, g_cli_closed, g_cli_err);
+    if (g_cli_responses != 0) return fail("a response over the client's list budget was stored");
+    if (!g_cli_closed || g_cli_err == 0) return fail("the stream was not failed");
+    return 0;
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     int failed = 0;                        /* every case runs, so each one's result is seen */
     failed += case_settings(&alloc);
     failed += case_too_many_headers(&alloc);
     failed += case_graceful_shutdown(&alloc);
+    failed += case_trailer_budget(&alloc);
+    failed += case_trailer_field_count(&alloc);
+    failed += case_goaway_session_done(&alloc);
     failed += case_client_refuses_push(&alloc);
     failed += case_client_header_cap(&alloc);
+    failed += case_client_counts_pseudo_headers(&alloc);
     if (failed) { fprintf(stderr, "FAIL: %d case(s)\n", failed); return 1; }
     printf("nghttp2 adapter limits OK\n");
     return 0;

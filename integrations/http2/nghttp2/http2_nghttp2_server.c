@@ -51,7 +51,7 @@ struct NgServerStream {
     size_t       *value_lens;
     int           n, cap;
     int           delivered;         /* on_request already fired */
-    size_t        hlist;             /* header list so far (RFC 9113 6.5.2 accounting) */
+    size_t        hlist;             /* this header block so far (RFC 9113 6.5.2 accounting) */
     /* Response body copy (nghttp2 pulls DATA asynchronously). */
     char         *resp_body;
     size_t        resp_body_len, resp_body_off;
@@ -151,9 +151,14 @@ static ssize_t ng_send_cb(nghttp2_session *ng, const uint8_t *data,
 static int ng_on_begin_headers_cb(nghttp2_session *ng, const nghttp2_frame *frame,
                                   void *user_data) {
     NgServerSession *s = user_data;
-    if (frame->hd.type != NGHTTP2_HEADERS ||
-        frame->headers.cat != NGHTTP2_HCAT_REQUEST)
+    if (frame->hd.type != NGHTTP2_HEADERS) return 0;
+    if (frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
+        /* A trailer block is a header list of its own (RFC 9113 6.5.2): its budget starts afresh
+         * rather than where the request's left off. */
+        NgServerStream *tr = nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+        if (tr) tr->hlist = 0;
         return 0;
+    }
     NgServerStream *st = ng_sstream_new(s);
     if (!st) return NGHTTP2_ERR_CALLBACK_FAILURE;
     nghttp2_session_set_stream_user_data(ng, frame->hd.stream_id, st);
@@ -176,7 +181,13 @@ static int ng_on_header_cb(nghttp2_session *ng, const nghttp2_frame *frame,
     size_t cap = (s && s->cbs->max_header_list_size) ? s->cbs->max_header_list_size
                                                      : KL_HTTP2_MAX_HEADER_LIST_SIZE;
     st->hlist += namelen + valuelen + 32;
-    if (st->hlist > cap || (!(namelen > 0 && name[0] == ':') && st->n >= KL_MAX_HEADERS))
+    if (st->hlist > cap)
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    /* After the request was delivered, a field belongs to a trailer block: counted against that
+     * block's own budget above, and not kept (KEEL takes no trailers), so the field cap below stays
+     * the request block's. */
+    if (st->delivered) return 0;
+    if (!(namelen > 0 && name[0] == ':') && st->n >= KL_MAX_HEADERS)
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
 
     if (namelen > 0 && name[0] == ':') {           /* pseudo-header */

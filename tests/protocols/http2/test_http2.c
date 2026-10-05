@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts */
+#include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
+#include <keel/clock.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
@@ -55,6 +58,13 @@ typedef struct {
     char upgrade_settings[64];
     int upgrade_head;
     int upgrade_fail;                 /* the upgrade op refuses the settings (a bad value, say) */
+
+    /* want_read: 1 = the factory installs it, returning want_read_return */
+    int with_want_read;
+    int want_read_return;
+
+    /* flush writes this many bytes through KEEL's send callback */
+    size_t flush_send_len;
 
     /* The first bytes fed to recv */
     char first_recv[64];
@@ -112,7 +122,16 @@ static int mock_want_write(KlHttp2ServerSession *self) {
 static int mock_flush(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->flush_count++;
+    if (m->flush_send_len > 0) {
+        static const char frames[64] = {0};
+        size_t n = m->flush_send_len < sizeof frames ? m->flush_send_len : sizeof frames;
+        (void)m->callbacks.send(m->cb_user_data, frames, n);
+    }
     return m->flush_return;
+}
+
+static int mock_want_read(KlHttp2ServerSession *self) {
+    return ((MockH2Session *)self)->want_read_return;
 }
 
 static int mock_shutdown(KlHttp2ServerSession *self) {
@@ -153,6 +172,7 @@ static KlHttp2ServerSession *mock_factory(KlAllocator *alloc,
         m->base.shutdown = mock_shutdown;
         m->base.destroy = mock_destroy;
         m->base.upgrade = m->with_upgrade ? mock_upgrade : NULL;
+        m->base.want_read = m->with_want_read ? mock_want_read : NULL;
     }
 
     /* Store callbacks so tests can invoke them */
@@ -578,6 +598,57 @@ UTEST(h2, cb_on_request_creates_stream) {
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
+}
+
+/* A request with as many fields as KEEL keeps, an :authority and no host field: the host field
+ * made from :authority has a slot of its own (the last field gives way), so a handler reading Host
+ * finds it. It was dropped silently. */
+UTEST(h2, synthetic_host_keeps_its_slot_at_the_header_cap) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
+
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    static char names[KL_MAX_HEADERS][16];
+    const char *hn[KL_MAX_HEADERS], *hv[KL_MAX_HEADERS];
+    size_t hnl[KL_MAX_HEADERS], hvl[KL_MAX_HEADERS];
+    for (int i = 0; i < KL_MAX_HEADERS; i++) {
+        int l = snprintf(names[i], sizeof names[i], "x-f%d", i);
+        hn[i] = names[i];
+        hnl[i] = (size_t)l;
+        hv[i] = "v";
+        hvl[i] = 1;
+    }
+    int rc = mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/hello", 6,
+                                       "example.com", 11, hn, hv, hnl, hvl, KL_MAX_HEADERS);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(conn.h2->num_streams, 1);
+    KlHttp2ServerStream *s = &conn.h2->streams[0];
+    /* Read everything before the cleanup frees the stream (and the header values with it). */
+    const char *host = kl_http_request_header(&s->req, "host");
+    int has_host = host != NULL;
+    int host_ok = host != NULL && strcmp(host, "example.com") == 0;
+    int num = s->req.num_headers;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+
+    ASSERT_TRUE(has_host);                                 /* was NULL: no slot left for it */
+    ASSERT_TRUE(host_ok);
+    ASSERT_EQ(num, KL_MAX_HEADERS);
 }
 
 UTEST(h2, cb_on_request_routes) {
@@ -1247,6 +1318,179 @@ UTEST(h2, goaway_shutdown) {
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
+}
+
+/* A graceful shutdown whose last response goes out on write readiness: once the session wants
+ * neither read nor write it is done, and the connection closes there, as it does after a read. It
+ * stayed open until the idle sweep or the drain deadline. */
+UTEST(h2, on_writable_closes_a_finished_session) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
+
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int open_st = kl_http2_server_on_writable(&conn);      /* still wants to read */
+    mock.want_read_return = 0;                             /* GOAWAY out, no stream left */
+    mock.want_write_return = 0;
+    int done_st = kl_http2_server_on_writable(&conn);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+
+    ASSERT_EQ(open_st, KL_HTTP_CONN_HTTP2);
+    ASSERT_EQ(done_st, KL_HTTP_CONN_CLOSED);               /* was KL_HTTP_CONN_HTTP2 */
+}
+
+/* Response DATA leaving on write readiness is activity: the connection's idle clock restarts, so a
+ * long download is not timed out (KEEL forgets a stream once its response is submitted, so such a
+ * connection otherwise looks idle as soon as the session has nothing left to write). */
+UTEST(h2, a_flush_that_moves_bytes_is_activity) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
+
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.last_active_ms = 0;
+    (void)kl_http2_server_on_writable(&conn);              /* moves nothing */
+    uint64_t after_empty = conn.last_active_ms;
+    mock.flush_send_len = 32;                              /* moves a DATA frame's worth */
+    (void)kl_http2_server_on_writable(&conn);
+    uint64_t after_data = conn.last_active_ms;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+
+    ASSERT_EQ(after_empty, (uint64_t)0);
+    ASSERT_GT(after_data, (uint64_t)0);                    /* was 0: only reads counted */
+}
+
+/* ── The idle sweep over an HTTP/2 connection ─────────────────────────────────────────────────── */
+
+static KlHttpServer h2_sweep_srv;
+
+/* A server whose pool holds one HTTP/2 connection over pfd[1], driven by the mock session. The
+ * sweep releases the connection (closing pfd[1]) or kl_http_server_free does. */
+static KlHttpConn *h2_sweep_setup(int pfd[2], int *completion_loop) {
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .h2 = &test_h2_cfg,
+                               .read_timeout_ms = 100, .max_connections = 2 };
+    if (kl_http_server_init(&h2_sweep_srv, &cfg) < 0) return NULL;
+    *completion_loop = (kl_event_caps(&h2_sweep_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    KlHttpConn *c = kl_http_conn_acquire(&h2_sweep_srv.pool, (KlSocketHandle)pfd[1]);
+    if (!c) return NULL;
+    if (kl_http2_server_upgrade(c, &test_router, &test_h2_cfg, NULL, 0) != KL_HTTP_CONN_HTTP2)
+        return NULL;
+    c->state = KL_HTTP_CONN_HTTP2;
+    return c;
+}
+
+/* An idle HTTP/2 connection the sweep closes is sent a GOAWAY first (RFC 9113 6.8), so the client
+ * knows no request it sent was processed rather than seeing the connection simply drop. */
+UTEST(h2, idle_sweep_sends_goaway_before_closing) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now - 1000;                        /* idle past read_timeout_ms */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int shutdowns = mock.shutdown_count, destroyed = mock.destroy_count;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(destroyed, 1);                               /* closed */
+    ASSERT_EQ(shutdowns, 1);                               /* was 0: closed without a GOAWAY */
+}
+
+/* After a graceful GOAWAY a session with no stream left wants neither read nor write: it is done,
+ * and the sweep closes the connection at once. It was left to the idle timeout or the drain
+ * deadline, so a draining server waited out its whole deadline. */
+UTEST(h2, sweep_closes_a_finished_session) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 0;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now;                               /* not idle long: only "done" closes it */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int destroyed = mock.destroy_count;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(destroyed, 1);                               /* was 0: held until a timeout */
+}
+
+/* Completion: response DATA a posted send keeps moving is activity for an HTTP/2 connection too.
+ * KEEL forgets a stream once its response is submitted, so the connection looked idle while its
+ * download was still going out, and was closed under it. */
+UTEST(h2, completion_sweep_counts_send_progress) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    if (!comp) {
+        kl_http_server_free(&h2_sweep_srv);
+        kl_test_closesock(pfd[0]);
+        test_teardown();
+        UTEST_SKIP("a readiness loop: send progress is a completion engine's");
+    }
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now - 1000;                        /* the last read was long ago */
+    c->stream.send_progress += 256 * 1024;                 /* ...but the download is moving */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int destroyed = mock.destroy_count;
+    uint64_t active = c->last_active_ms;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(destroyed, 0);                               /* was 1: timed out mid-download */
+    ASSERT_EQ(active, now);
 }
 
 UTEST(h2, cleanup_frees_all) {

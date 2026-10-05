@@ -445,6 +445,48 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   socket is on readiness: the WebSocket drain keeps the frame within its own limit, or the send fails.
 - **Completion loops: a failed send post no longer leaves its bytes queued, a graceful drain no
   longer resumes accepting, and an accept back-off wakes the loop on time.**
+- **WebSocket auto-ping: a client taking a large backlog is no longer failed as dead.** A ping
+  queued behind a backlog of frames cannot be answered until the client has read that far, and on
+  a completion loop the server posts no receive while the connection's output is queued, so even a
+  PONG it sent is not read. The auto-ping counted only bytes received as an answer: a live client
+  slowly reading a backlog longer than one interval was sent Close 1001 and closed. A ping sent
+  behind queued output now counts that output moving (bytes a completion engine's sends moved, or
+  the drain flushed onto a readiness socket) as the answer, and pings again. A backlog that does not
+  move is given the server's read timeout before the peer is taken for dead, since a slow reader can
+  spend seconds on what a full socket send buffer already holds, none of which shows as progress.
+  A ping sent with nothing ahead of it is still answered only by bytes received, as before (its own
+  send is never an answer). On IOCP an overlapped send completes whole, so its progress shows only
+  when it completes.
+- **HTTP/2 server: a long download is no longer timed out while its response is going out.** KEEL
+  forgets a stream once its response is submitted, so with no stream left and nothing the session
+  still wanted to write, the idle sweep took the connection for idle, and the idle clock moved only
+  on reads. A download that took longer than the read timeout was closed once its last bytes
+  reached the kernel (readiness), or as soon as the session had handed all its DATA to the output
+  queue (completion). Output the session moves is now activity: each send that moves bytes restarts
+  the idle clock, and on a completion loop the sweep counts send progress for HTTP/2 connections as
+  it does for HTTP/1.1 ones.
+- **HTTP/2 server: an idle connection is closed with a GOAWAY.** The idle sweep closed an idle
+  HTTP/2 connection without one, so the client could not tell the close from a failure (RFC 9113
+  6.8 says an endpoint SHOULD send GOAWAY before closing). The sweep now submits a graceful GOAWAY
+  and flushes it first; on a completion loop the connection closes once the GOAWAY is out.
+- **HTTP/2 server: a graceful shutdown closes each connection as soon as its session is done.**
+  After the drain's GOAWAY, a session with no stream left wants neither read nor write, and the
+  connection should close. That was checked only after a read, so a connection whose last response
+  finished on write readiness, or that was already idle, stayed open until the idle timeout or the
+  drain deadline, and the shutdown waited out its whole deadline. The check now also runs after a
+  write-readiness flush and in the sweep, which closes a done session at once.
+- **HTTP/2 server: the Host field made from `:authority` is no longer dropped at the field cap.** A
+  request with `KL_MAX_HEADERS` regular fields, an `:authority` and no `host` field lost the
+  synthetic `host` field the server adds for handlers, silently. It now keeps a slot of its own: at
+  the cap, the last regular field gives way.
+- **nghttp2 server adapter: request trailers are a header list of their own.** The header-list
+  budget (`SETTINGS_MAX_HEADER_LIST_SIZE`) and the field cap carried over from the request's
+  headers into its trailers, so a request whose headers and trailers each fit was reset. Each
+  header block now starts its own budget (RFC 9113 6.5.2); trailer fields are not stored (KEEL
+  takes no trailers), so the field cap stays the request block's.
+- **nghttp2 client adapter: pseudo-header fields count toward the response header-list budget.**
+  `:status` returned before it was counted, so a response could exceed the client's header-list
+  limit by its pseudo-header fields. Every field now counts (RFC 9113 6.5.2).
 - **Completion server: a failed accept post could crash the server.** When the next accept could not
   be posted, the listener returned its credit through the pool's release hook. The HTTP server's
   release hook announces the free slot, and that re-entered the listener while it was still
