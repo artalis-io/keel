@@ -298,4 +298,71 @@ UTEST(connection, response_accessor) {
     kl_http_conn_pool_free(&pool);
 }
 
+/* ── A posted send stays where it is until it completes ─────────────────────────────────────────
+ * A completion backend may read a posted send in place until it completes (completion.h permits it;
+ * the lwIP raw integration does). The output queue compacted and reallocated its buffer while such a
+ * send was in flight, so the backend then sent moved or freed memory. Growing the queue must leave
+ * the posted bytes exactly where they were. The allocator never really frees: it poisons a block
+ * when it is released (or moved by realloc), so a posted region that was moved or freed shows. */
+#ifndef KEEL_NO_COMPLETION
+kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len);
+
+#define PQ_MAX_BLOCKS 16
+static struct { void *p; size_t n; } pq_blocks[PQ_MAX_BLOCKS];
+static int pq_nblocks;
+
+static void *pq_malloc(void *ctx, size_t n) {
+    (void)ctx;
+    if (pq_nblocks == PQ_MAX_BLOCKS) return NULL;
+    void *p = malloc(n);
+    if (p) { pq_blocks[pq_nblocks].p = p; pq_blocks[pq_nblocks].n = n; pq_nblocks++; }
+    return p;
+}
+static void pq_free(void *ctx, void *p, size_t n) {
+    (void)ctx;
+    if (p) memset(p, 0xDD, n);                             /* released: poisoned, kept until the end */
+}
+static void *pq_realloc(void *ctx, void *p, size_t old_n, size_t n) {
+    void *q = pq_malloc(ctx, n);                           /* always moves, like a realloc may */
+    if (!q) return NULL;
+    if (p) { memcpy(q, p, old_n < n ? old_n : n); pq_free(ctx, p, old_n); }
+    return q;
+}
+
+UTEST(conn, a_posted_send_is_not_moved_while_the_queue_grows) {
+    KlAllocator pa = { pq_malloc, pq_realloc, pq_free, NULL };
+    pq_nblocks = 0;
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.stream.fd = KL_INVALID_SOCKET;
+    conn.stream.alloc = &pa;
+    conn.comp_driven = 1;
+    conn.state = KL_HTTP_CONN_PROCESSING;
+    const size_t posted = 16 * 1024;
+    unsigned char *region = kl_malloc(&pa, posted);
+    ASSERT_TRUE(region != NULL);
+    memset(region, 'A', posted);
+    conn.comp_tlsq = region;                               /* one send posted from the whole buffer */
+    conn.comp_tlsq_cap = conn.comp_tlsq_len = posted;
+    conn.comp_tlsq_head = 0;
+    conn.comp_tlsq_inflight = 1;
+    conn.comp_tlsq_inflight_len = posted;
+
+    static unsigned char more[64 * 1024];
+    memset(more, 'B', sizeof more);
+    kl_ssize_t n = kl_comp_queue_write(&conn, more, sizeof more);   /* must grow the queue */
+
+    size_t intact = 0;                                     /* the posted bytes, where they were */
+    while (intact < posted && region[intact] == 'A') intact++;
+    int tail_ok = conn.comp_tlsq != NULL && conn.comp_tlsq_len >= sizeof more &&
+                  memcmp(conn.comp_tlsq + conn.comp_tlsq_len - sizeof more, more, sizeof more) == 0;
+
+    for (int i = 0; i < pq_nblocks; i++) free(pq_blocks[i].p);
+    pq_nblocks = 0;
+    ASSERT_EQ(n, (kl_ssize_t)sizeof more);
+    ASSERT_TRUE(tail_ok);
+    ASSERT_EQ(intact, posted);                             /* was: moved, the old block released */
+}
+#endif /* !KEEL_NO_COMPLETION */
+
 UTEST_MAIN();

@@ -664,4 +664,132 @@ UTEST(completion_output, a_stream_after_a_response_reset_still_goes_out) {
     ASSERT_TRUE(strstr(buf, "streamed-after-reset") != NULL);   /* was (completion): no body */
 }
 
+/* ── A frame sent from on_close(1006) is refused ────────────────────────────────────────────────
+ * A WebSocket that dies without a Close (the client just goes) is released, and its on_close(1006)
+ * runs inside the release. A frame the application sent from there went to a connection being torn
+ * down: on a completion loop (since TLS output is queued at once) it was posted as a send whose
+ * completion then arrived for a slot already back in the pool, uncounted, and a failed one released
+ * that slot a second time. The connection is gone, so such a send now fails on every loop, and the
+ * pool stays consistent: no connection left counted, every slot still serving. */
+static int g_bye_sent, g_bye_closes;
+static void ws_bye_on_close(KlWsServerConn *ws, uint16_t code, const char *reason, size_t len,
+                            void *ud) {
+    (void)code; (void)reason; (void)len; (void)ud;
+    if (kl_ws_server_send_text(ws, "bye", 3) == 0) g_bye_sent++;
+    g_bye_closes++;
+}
+
+static KlHttpServer bc_srv;
+
+UTEST(completion_output, a_send_from_on_close_after_an_abnormal_closure_is_refused) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&bc_srv, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_close = ws_bye_on_close;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&bc_srv, "/ws", &wcfg));
+    kl_http_server_route(&bc_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &bc_srv);
+    wait_for_bind(&bc_srv);
+    int port = bc_srv.bound_port;
+    g_bye_sent = g_bye_closes = 0;
+
+    for (int round = 0; round < 4; round++) {             /* each one a dead client's release */
+        int fd = connect_rcvbuf(port, 0);
+        if (fd < 0) continue;
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        char head[512];
+        if (kl_test_poll1(fd, 0, 1000) > 0) (void)kl_test_sockread(fd, head, sizeof head);
+        kl_test_closesock(fd);                             /* gone, no Close */
+        kl_test_sleep_ms(100);
+    }
+    kl_test_sleep_ms(300);
+    KlHttpServerStats st;
+    kl_http_server_stats(&bc_srv, &st);
+    int served = 0;
+    for (int i = 0; i < 4; i++) served += hello_answered(port);
+    kl_http_server_stop(&bc_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&bc_srv);
+    ASSERT_EQ(g_bye_closes, 4);                            /* every dead client's on_close ran */
+    ASSERT_EQ(g_bye_sent, 0);                              /* was 4: the frame was taken */
+    ASSERT_EQ(st.active_connections, 0);
+    ASSERT_EQ(served, 4);
+}
+
+/* ── A TLS stream written while suspended goes out ──────────────────────────────────────────────
+ * A handler that starts a stream, suspends, and pushes chunks from a timer (an event feed): over TLS
+ * on a completion loop the chunks only reached the engine's ring, and nothing moved them onto the
+ * output queue until the connection resumed. Readiness and plaintext send them as written. */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+} SuspStream;
+static SuspStream g_ss;
+static KlHttpServer ss_srv;
+
+static void ss_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_ss.w(g_ss.wc, "end;", 4);
+    kl_http_response_end_stream(g_ss.res);
+}
+static void ss_push(void *ud) {
+    (void)ud;
+    g_ss.w(g_ss.wc, "pushed-while-suspended;", 23);
+}
+static void ss_finish(void *ud) {
+    (void)ud;
+    kl_async_complete(&ss_srv, &g_ss.op);
+}
+static void handle_suspended_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_ss, 0, sizeof g_ss);
+    g_ss.res = res;
+    if (kl_http_response_begin_stream(res, 200, &g_ss.w, &g_ss.wc) < 0) return;
+    g_ss.w(g_ss.wc, "first;", 6);
+    g_ss.op.on_resume = ss_resume;
+    if (kl_async_suspend(&ss_srv, kl_http_request_conn(req), &g_ss.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&ss_srv), 50, ss_push, NULL);
+    (void)kl_timer_add(kl_http_server_event_ctx(&ss_srv), 2000, ss_finish, NULL);
+}
+
+UTEST(completion_output, a_tls_stream_written_while_suspended_goes_out) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&ss_srv, &cfg));
+    kl_http_server_route(&ss_srv, "GET", "/feed", handle_suspended_stream, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ss_srv);
+    wait_for_bind(&ss_srv);
+    char buf[2048];
+    size_t have = 0;
+    buf[0] = '\0';
+    int fd = connect_rcvbuf(ss_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        uint64_t start = kl_monotonic_ms();
+        while (kl_monotonic_ms() - start < 1000 && !strstr(buf, "pushed-while-suspended")) {
+            if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, buf + have, sizeof buf - 1 - have);
+            if (n <= 0) break;
+            have += (size_t)n;
+            buf[have] = '\0';
+        }
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&ss_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ss_srv);
+    ASSERT_TRUE(strstr(buf, "first;") != NULL);
+    ASSERT_TRUE(strstr(buf, "pushed-while-suspended") != NULL);   /* was (completion): at resume */
+}
+
 UTEST_MAIN();

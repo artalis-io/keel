@@ -727,4 +727,74 @@ UTEST(tls_integration, tls_100_continue_survives_a_refused_write) {
     ASSERT_TRUE(strstr(interim, "100 Continue") != NULL);  /* was (readiness): dropped */
 }
 
+/* ── A failed 100 Continue tells the body reader ────────────────────────────────────────────────
+ * When the interim response cannot be written the connection closes with the body unread. Every
+ * other failure after the reader's factory ran calls the reader's on_error first; this one did not.
+ * The mock refuses every write (WANT_WRITE) until the server gives up. On a completion loop the
+ * write is queued and succeeds, so there the reader is simply not told of any error. */
+typedef struct {
+    KlHttpBodyReader base;
+    KlAllocator *alloc;
+} ErrReader;
+static int g_er_errors;
+static int er_on_data(KlHttpBodyReader *self, const char *d, size_t n) {
+    (void)self; (void)d; (void)n;
+    return 0;
+}
+static void er_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void er_on_error(KlHttpBodyReader *self) { (void)self; g_er_errors++; }
+static void er_destroy(KlHttpBodyReader *self) {
+    ErrReader *r = (ErrReader *)self;
+    kl_free(r->alloc, r, sizeof *r);
+}
+static KlHttpBodyReader *er_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)req; (void)ud;
+    ErrReader *r = kl_malloc(alloc, sizeof *r);
+    if (!r) return NULL;
+    memset(r, 0, sizeof *r);
+    r->base.on_data = er_on_data;
+    r->base.on_complete = er_on_complete;
+    r->base.on_error = er_on_error;
+    r->base.destroy = er_destroy;
+    r->alloc = alloc;
+    return &r->base;
+}
+static KlHttpServer ce_srv;
+
+UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&ce_srv, &cfg));
+    kl_http_server_route(&ce_srv, "POST", "/up", handle_up_ok, NULL, er_factory);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ce_srv);
+    wait_for_bind(&ce_srv);
+
+    g_er_errors = 0;
+    char interim[256];
+    interim[0] = '\0';
+    int fd = connect_to(ce_srv.bound_port);
+    if (fd >= 0) {
+        mock_tls_write_want = 100000;                      /* every write refused: the server gives up */
+        const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                         "Expect: 100-continue\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_ssize_t n = 0;
+        if (kl_test_poll1(fd, 0, 1000) > 0)
+            n = kl_test_sockread(fd, interim, sizeof interim - 1);
+        interim[n > 0 ? n : 0] = '\0';
+        mock_tls_write_want = 0;
+        (void)kl_test_sockwrite(fd, "hello", 5);
+        char rest[512];
+        (void)read_response(fd, rest, sizeof rest, 1000);
+        kl_test_closesock(fd);
+    }
+    mock_tls_write_want = 0;
+    kl_http_server_stop(&ce_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ce_srv);
+    int sent = strstr(interim, "100 Continue") != NULL;
+    ASSERT_EQ(g_er_errors, sent ? 0 : 1);                  /* was (readiness): closed, reader not told */
+}
+
 UTEST_MAIN();
