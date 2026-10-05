@@ -177,10 +177,11 @@ static void ws_open_backlog(KlWsServerConn *ws, void *ud) {
 }
 
 static uint64_t g_sw_closed_ms;                            /* when the server let the connection go */
+static int g_sw_close_code;                                /* and with which close code */
 static void ws_close_backlog(KlWsServerConn *ws, uint16_t code, const char *reason, size_t len,
                              void *ud) {
-    (void)ws; (void)code; (void)reason; (void)len; (void)ud;
-    if (g_sw_closed_ms == 0) g_sw_closed_ms = kl_monotonic_ms();
+    (void)ws; (void)reason; (void)len; (void)ud;
+    if (g_sw_closed_ms == 0) { g_sw_closed_ms = kl_monotonic_ms(); g_sw_close_code = code; }
 }
 
 /* The client's view of the server's frames: headers parsed incrementally, payloads skipped, PINGs
@@ -263,6 +264,8 @@ UTEST(completion_output, a_slow_websocket_reader_answering_pings_is_kept_alive) 
     wcfg.callbacks.on_close = ws_close_backlog;
     wcfg.ping_interval_ms = 100;
     g_sw_closed_ms = 0;
+    g_sw_close_code = 0;
+    uint64_t sw_start_ms = kl_monotonic_ms();
     ASSERT_EQ(0, kl_http_server_ws_upgrade(&sw_srv, "/ws", &wcfg));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &sw_srv);
@@ -305,8 +308,10 @@ UTEST(completion_output, a_slow_websocket_reader_answering_pings_is_kept_alive) 
     kl_plat_thread_join(&tid);
     kl_http_server_free(&sw_srv);
     int released_early = g_sw_closed_ms != 0 && g_sw_closed_ms < client_done_ms;
-    printf("  slow reader: %zu bytes in 4 s, pings answered %d, close %d, eof %d, released early %d\n",
-           got, rd.pings, rd.close_seen, closed, released_early);
+    printf("  slow reader: %zu bytes in 4 s, pings answered %d, close %d, eof %d, released early %d"
+           " (server close code %d at %d ms)\n",
+           got, rd.pings, rd.close_seen, closed, released_early, g_sw_close_code,
+           g_sw_closed_ms ? (int)(g_sw_closed_ms - sw_start_ms) : -1);
     ASSERT_TRUE(upgraded);
     ASSERT_GT(got, (size_t)0);
     ASSERT_LT(got, (size_t)SLOW_CHUNKS * BIG_CHUNK);       /* still going: the test covered it */
