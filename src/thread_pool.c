@@ -43,6 +43,9 @@ struct KlThreadPool {
     KlPlatMutex mutex;
     KlPlatCond work_avail;
     int shutdown;
+    int dispatching;     /* done callback stack still borrows the pool */
+    int free_requested;
+    int destroying;      /* teardown callbacks may request free again */
 
     /* Workers */
     KlPlatThread *threads;
@@ -94,6 +97,9 @@ static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user
     (void)ready;
     KlThreadPool *pool = user_data;
 
+    if (pool->dispatching) return;   /* a done callback may run a nested loop tick */
+    pool->dispatching = 1;
+
     /* Drain wakeup channel; exact count doesn't matter */
     kl_plat_wakeup_drain(fd);
 
@@ -107,9 +113,16 @@ static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user
 
         item.done_fn(item.user_data);
 
+        if (pool->free_requested) {
+            pool->dispatching = 0;
+            kl_thread_pool_free(pool);
+            return;                 /* destruction is the final pool access */
+        }
+
         kl_plat_mutex_lock(&pool->mutex);
     }
     kl_plat_mutex_unlock(&pool->mutex);
+    pool->dispatching = 0;
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -224,7 +237,7 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item)
 
     kl_plat_mutex_lock(&pool->mutex);
 
-    if (pool->inflight >= pool->done_cap) {
+    if (pool->shutdown || pool->free_requested || pool->inflight >= pool->done_cap) {
         kl_plat_mutex_unlock(&pool->mutex);
         return -1;
     }
@@ -243,6 +256,13 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item)
 void kl_thread_pool_free(KlThreadPool *pool)
 {
     if (!pool) return;
+    if (pool->destroying) return;
+    if (pool->dispatching) {
+        pool->free_requested = 1;
+        kl_watcher_del(pool->ev_ctx, pool->wakeup.rd);
+        return;
+    }
+    pool->destroying = 1;
 
     /* Signal shutdown */
     kl_plat_mutex_lock(&pool->mutex);

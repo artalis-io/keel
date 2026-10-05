@@ -7,6 +7,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- Thread-pool destruction from a `done_fn` now waits until the callback returns, preventing a
+  use-after-free in callback dispatch. Teardown callbacks may repeat the free request safely,
+  and submissions after destruction is requested are refused.
 - **Completion server: a posted send is never moved before it completes.** The output queue
   compacted and reallocated its buffer while a send posted from it was in flight. A backend that
   reads a posted send in place until it completes (the lwIP raw integration, which `completion.h`

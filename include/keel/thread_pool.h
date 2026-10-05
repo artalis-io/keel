@@ -63,6 +63,9 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
 
 /**
  * @brief Drain queue, join threads, remove watcher, free.
+ * May be called from done_fn: destruction is deferred until that callback returns.
+ * Once requested, the pool must not be used except that repeated free calls from
+ * teardown callbacks are harmless. The event context must outlive destruction.
  */
 void kl_thread_pool_free(KlThreadPool *pool);
 

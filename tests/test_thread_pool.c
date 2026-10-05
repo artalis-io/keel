@@ -542,4 +542,39 @@ UTEST(thread_pool, default_config) {
     cleanup_test_server(&s);
 }
 
+typedef struct {
+    KlThreadPool *pool;
+    int calls;
+    int refused;
+} FreeFromDone;
+
+static void free_from_done(void *ud) {
+    FreeFromDone *state = ud;
+    state->calls++;
+    kl_thread_pool_free(state->pool);
+    /* Repeated free requests from teardown callbacks must not recursively destroy the pool. */
+    kl_thread_pool_free(state->pool);
+    KlWorkItem item = { .work_fn = single_work_fn, .done_fn = noop_done_fn };
+    if (kl_thread_pool_submit(state->pool, &item) < 0) state->refused++;
+}
+
+UTEST(thread_pool, destruction_from_done_is_deferred_and_drains_remaining_work) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &alloc));
+    KlThreadPoolConfig cfg = { .num_workers = 1, .queue_capacity = 8 };
+    FreeFromDone state = {0};
+    state.pool = kl_thread_pool_create(&ev, &cfg);
+    ASSERT_TRUE(state.pool != NULL);
+    KlWorkItem item = { .work_fn = single_work_fn, .done_fn = free_from_done,
+                       .cancel_fn = free_from_done, .user_data = &state };
+    for (int i = 0; i < 4; i++) ASSERT_EQ(0, kl_thread_pool_submit(state.pool, &item));
+    for (int i = 0; i < 200 && state.calls == 0; i++) kl_event_ctx_run(&ev, 16, 10);
+    int calls = state.calls;
+    int refused = state.refused;
+    kl_event_ctx_free(&ev);
+    ASSERT_EQ(4, calls);
+    ASSERT_EQ(4, refused);
+}
+
 UTEST_MAIN();
