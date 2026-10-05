@@ -89,6 +89,11 @@ struct KlWsClientConn {
     int              ping_interval_ms;
     int64_t          ping_timer_id;     /* -1 = no timer */
 
+    /* An error found inside a public call (kl_ws_client_close) is reported from the loop, never
+     * from inside the call: the caller may free the connection right after it returns. */
+    int64_t          error_timer_id;    /* -1 = no report pending */
+    const char      *error_msg;         /* what that report says (a string literal) */
+
     /* Outbound backpressure: buffers unsent frame bytes on would-block and
      * flushes them on write-readiness.  Preserves frame integrity
      * on non-blocking sockets / TLS WANT_WRITE. */
@@ -121,6 +126,7 @@ static void wsc_close_connection(KlWsClientConn *ws);
 static int  wsc_process_frames(KlWsClientConn *ws, const uint8_t *data, size_t len);
 static void wsc_handle_open(KlWsClientConn *ws);
 static void wsc_ping_timer(void *user_data);
+static void wsc_error_timer(void *user_data);
 static void wsc_free_now(KlWsClientConn *ws);
 static void wsc_finish_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t len);
 static void wsc_fail(KlWsClientConn *ws, uint16_t code, const char *msg);
@@ -978,6 +984,25 @@ static void wsc_ping_timer(void *user_data) {
                                       wsc_ping_timer, ws);
 }
 
+/* A deferred error report (wsc_error_later). The connection is already closed; on_error is the last
+ * callback, and may free the connection: nothing touches it afterwards. */
+static void wsc_error_timer(void *user_data) {
+    KlWsClientConn *ws = user_data;
+    ws->error_timer_id = -1;
+    if (ws->cbs.on_error)
+        ws->cbs.on_error(ws, ws->error_msg, ws->user_data);
+}
+
+/* Fail the connection from inside a public call: close it now, and report the error from a 0 ms
+ * timer rather than call on_error under the caller. A free before the timer fires cancels it
+ * (wsc_close_connection). If the timer cannot be added the connection is still closed, unreported. */
+static void wsc_error_later(KlWsClientConn *ws, const char *msg) {
+    ws->state = WSC_CLOSED;
+    wsc_close_connection(ws);
+    ws->error_msg = msg;
+    ws->error_timer_id = kl_timer_add(ws->ev, 0, wsc_error_timer, ws);
+}
+
 /* Flush buffered outbound data on write-readiness. */
 static void wsc_handle_writable(KlWsClientConn *ws)
 {
@@ -1039,6 +1064,10 @@ static void wsc_close_connection(KlWsClientConn *ws)
     if (ws->ping_timer_id >= 0) {
         kl_timer_cancel(ws->ev, ws->ping_timer_id);
         ws->ping_timer_id = -1;
+    }
+    if (ws->error_timer_id >= 0) {
+        kl_timer_cancel(ws->ev, ws->error_timer_id);
+        ws->error_timer_id = -1;
     }
     if (kl_handle_valid(ws->fd)) {
         kl_watcher_del(ws->ev, ws->fd);
@@ -1195,6 +1224,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                                             : KL_WS_CLIENT_DEFAULT_MAX_FRAME;
     ws->ping_interval_ms = cfg ? cfg->ping_interval_ms : 0;
     ws->ping_timer_id = -1;
+    ws->error_timer_id = -1;
     if (cbs)
         ws->cbs = *cbs;
     ws->user_data = user_data;
@@ -1268,9 +1298,10 @@ void kl_ws_client_close(KlWsClientConn *ws, uint16_t code, const char *reason,
     }
 
     /* No Close went out (no entropy for the mask, a write error): there is no closing handshake to
-     * wait for, so fail the connection now rather than sit in CLOSING until the peer acts. */
+     * wait for, so fail the connection now rather than sit in CLOSING until the peer acts. The error
+     * is reported from the loop: on_error may free the connection, and the caller may be about to. */
     if (wsc_send_frame(ws, KL_WS_OP_CLOSE, (const char *)buf, plen) < 0)
-        wsc_error(ws, "close frame could not be sent");
+        wsc_error_later(ws, "close frame could not be sent");
 }
 
 void kl_ws_client_free(KlWsClientConn *ws)

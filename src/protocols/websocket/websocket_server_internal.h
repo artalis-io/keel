@@ -33,10 +33,10 @@ struct KlWsServerConn {
     int close_received;          /* Close frame received flag */
     uint64_t close_deadline_ms;  /* Close handshake timeout deadline */
     uint64_t next_ping_ms;       /* 0 = auto-ping disabled */
-    int ping_unanswered;         /* an auto-ping went out and nothing has arrived since */
-    int ping_behind;             /* that ping was queued behind output still waiting to leave */
-    uint64_t ping_progress;      /* output moved so far, as of that ping (ws_out_progress) */
-    uint64_t ping_sent_ms;       /* when that ping went out */
+    int ping_unanswered;         /* an auto-ping interval began and nothing has arrived since */
+    int ping_behind;             /* it began behind output still waiting to leave (no ping sent) */
+    uint64_t ping_progress;      /* output moved so far, as of then (ws_out_progress) */
+    uint64_t ping_sent_ms;       /* when it began */
     uint64_t drain_moved;        /* bytes the drain has flushed onto the socket (cumulative) */
     uint8_t pong_buf[125];       /* payload of the latest ping not yet answered (output backed up) */
     size_t  pong_len;

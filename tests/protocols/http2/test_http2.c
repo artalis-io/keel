@@ -601,9 +601,10 @@ UTEST(h2, cb_on_request_creates_stream) {
 }
 
 /* A request with as many fields as KEEL keeps, an :authority and no host field: the host field
- * made from :authority has a slot of its own (the last field gives way), so a handler reading Host
- * finds it. It was dropped silently. */
-UTEST(h2, synthetic_host_keeps_its_slot_at_the_header_cap) {
+ * made from :authority would be one field past the cap. The stream is refused with 431, as a
+ * request over the cap is, rather than a field the client sent being dropped silently to make room
+ * (the last one gave way). */
+UTEST(h2, synthetic_host_past_the_header_cap_refuses_the_stream) {
     test_setup();
     MockH2Session mock;
     mock_init(&mock);
@@ -632,23 +633,21 @@ UTEST(h2, synthetic_host_keeps_its_slot_at_the_header_cap) {
     }
     int rc = mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/hello", 6,
                                        "example.com", 11, hn, hv, hnl, hvl, KL_MAX_HEADERS);
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(conn.h2->num_streams, 1);
-    KlHttp2ServerStream *s = &conn.h2->streams[0];
-    /* Read everything before the cleanup frees the stream (and the header values with it). */
-    const char *host = kl_http_request_header(&s->req, "host");
-    int has_host = host != NULL;
-    int host_ok = host != NULL && strcmp(host, "example.com") == 0;
-    int num = s->req.num_headers;
+    int streams = conn.h2->num_streams;
+    int submits = mock.submit_count;
+    int status = mock.last_status;
+    uint32_t sid = mock.last_stream_id;
 
     kl_http2_server_cleanup(&conn);
     kl_test_closesock(pfd[0]);
     kl_test_closesock(pfd[1]);
     test_teardown();
 
-    ASSERT_TRUE(has_host);                                 /* was NULL: no slot left for it */
-    ASSERT_TRUE(host_ok);
-    ASSERT_EQ(num, KL_MAX_HEADERS);
+    ASSERT_EQ(rc, 0);                                      /* the stream, not the connection */
+    ASSERT_EQ(streams, 0);                                 /* was 1, its last field dropped */
+    ASSERT_EQ(submits, 1);
+    ASSERT_EQ(status, 431);
+    ASSERT_EQ(sid, (uint32_t)1);
 }
 
 UTEST(h2, cb_on_request_routes) {

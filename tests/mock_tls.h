@@ -46,6 +46,9 @@ static size_t mock_tls_split_after = 0;
 /* The next mock_tls_write_want socket-mode writes return 0 (WANT_WRITE) without sending, as a real
  * engine does when the socket's send buffer is full. Static-per-TU, default 0. */
 static int mock_tls_write_want = 0;
+/* Non-zero: every socket-mode write fails (-1), as a real engine's does once the connection is
+ * broken. Lets a test make a frame fail to send at a moment it chooses. Static-per-TU, default 0. */
+static int mock_tls_write_fail = 0;
 /* Completion mode: the most plaintext one read() returns (0 = no limit). A real engine returns one
  * record per read, so input that arrived together comes out over several reads. */
 static size_t mock_tls_read_max = 0;
@@ -115,6 +118,7 @@ static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf
         m->out_len += len;
         return (ssize_t)len;
     }
+    if (mock_tls_write_fail) return -1;                                 /* simulated broken link */
     if (mock_tls_write_want > 0) { mock_tls_write_want--; return 0; }   /* simulated WANT_WRITE */
     kl_ssize_t r = kl_sockdef_send(fd, buf, len);
     if (r >= 0) return r;

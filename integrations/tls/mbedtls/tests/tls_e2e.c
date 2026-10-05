@@ -915,8 +915,21 @@ static void test_short_retry_rejected(KlAllocator *alloc, PemPair *ca, PemPair *
         printf("  FAIL: a shorter retry was accepted\n");
         g_short_retry_fail++;
     }
+    /* The refused retry leaves the record built from the blocked write inside mbedTLS. A later write
+     * would flush it and be acknowledged for its own bytes, none of which went out: once refused,
+     * every later write fails. The peer's socket is emptied first, so the flush could succeed. */
+    if (shorter == -1) {
+        static unsigned char sink[64 * 1024];
+        while (read(cfd, sink, sizeof sink) > 0) {}
+    }
+    kl_ssize_t later = shorter == -1 ? srv->write(srv, sfd, data, PIECE) : -2;
+    printf("  write after the refused retry=%zd\n", (ssize_t)later);
+    if (later != -1) {                                     /* was the length, or 0 */
+        printf("  FAIL: a write after a refused retry was accepted\n");
+        g_short_retry_fail++;
+    }
     if (!g_short_retry_fail)
-        printf("  PASS: a shorter retry is refused\n");
+        printf("  PASS: a shorter retry is refused, and so is every write after it\n");
     cli->destroy(cli); srv->destroy(srv);
     close(fds[0]); close(fds[1]);
     kl_tls_mbedtls_ctx_destroy(sctx);

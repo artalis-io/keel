@@ -90,7 +90,9 @@ int   kl_ws_client_send_binary(KlWsClientConn *ws, const char *data, size_t len)
 /** @brief Send a ping frame. @return 0 on success, -1 on error. */
 int   kl_ws_client_send_ping(KlWsClientConn *ws, const char *data, size_t len);
 
-/** @brief Initiate close handshake. */
+/** @brief Initiate close handshake. Calls no callback itself: if the Close frame cannot be sent,
+ *  the connection is closed and on_error follows from the event loop (unless the connection is
+ *  freed first), so the caller may free it right after this returns. */
 void  kl_ws_client_close(KlWsClientConn *ws, uint16_t code,
                           const char *reason, size_t reason_len);
 
