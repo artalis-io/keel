@@ -128,6 +128,9 @@ void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
  * pending on it. The connection is being released (or reused): nothing it held can still be sent. */
 static void conn_comp_tlsq_reset(KlHttpConn *c) {
     if (c->comp_tlsq) kl_free(c->stream.alloc, c->comp_tlsq, c->comp_tlsq_cap);
+    if (c->comp_tlsq_old) kl_free(c->stream.alloc, c->comp_tlsq_old, c->comp_tlsq_old_cap);
+    c->comp_tlsq_old = NULL;
+    c->comp_tlsq_old_cap = 0;
     c->comp_tlsq = NULL;
     c->comp_tlsq_len = c->comp_tlsq_cap = c->comp_tlsq_inflight_len = c->comp_tlsq_head = 0;
     c->comp_tlsq_inflight = 0;
@@ -751,9 +754,15 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         const char *expect = kl_http_request_header_len(
             &c->req, "Expect", &expect_len);
         if (expect && expect_len == 12 &&
-            kl_ascii_strncasecmp(expect, "100-continue", 12) == 0) {
-            best_effort_conn_write(c, kl_100_continue,
-                                   sizeof(kl_100_continue) - 1);
+            kl_ascii_strncasecmp(expect, "100-continue", 12) == 0 &&
+            conn_write_all(c, kl_100_continue, sizeof(kl_100_continue) - 1) < 0) {
+            /* Not written in full: part of it may be on the wire, or (TLS) a record the engine
+             * still holds would go out ahead of the next write. The stream cannot carry a response
+             * any more: close. */
+            c->req.keep_alive = 0;
+            c->res.keep_alive = 0;
+            c->state = KL_HTTP_CONN_CLOSED;
+            return c->state;
         }
 
         /* v2.2.0+ ── streaming_async routes: invoke the handler BEFORE

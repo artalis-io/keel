@@ -1165,6 +1165,7 @@ static const KlCompletionOps iou_completion_ops = {
     iou_comp_post_dgram_recv, iou_comp_post_dgram_send,
     iou_comp_cancel_dgram, iou_comp_retire_dgram, iou_comp_post_connect,
     iou_shutdown_accepts,
+    0,      /* send_max: no limit (a post of any size is taken) */
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iou_completion_ops; }

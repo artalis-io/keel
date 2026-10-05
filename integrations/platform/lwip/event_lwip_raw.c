@@ -789,4 +789,5 @@ static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_post_dgram_recv, lwr_comp_post_dgram_send,
     lwr_comp_cancel_dgram, lwr_comp_retire_dgram, lwr_comp_post_connect,
     NULL,   /* shutdown_accepts: autonomous accept model (never installs a listener): no-op */
+    0,      /* send_max: no limit (a post of any size is taken) */
 };

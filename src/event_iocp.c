@@ -1484,6 +1484,7 @@ static const KlCompletionOps iocp_completion_ops = {
     iocp_comp_post_dgram_recv, iocp_comp_post_dgram_send,
     iocp_comp_cancel_dgram, iocp_comp_retire_dgram, iocp_comp_post_connect,
     iocp_shutdown_accepts,
+    0,      /* send_max: no limit (a post of any size is taken) */
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iocp_completion_ops; }

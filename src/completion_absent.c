@@ -52,6 +52,8 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
     (void)stream; (void)iov; (void)iovcnt; (void)total; abort();
 }
 
+size_t kl_comp_send_max_raw(const KlStream *stream) { (void)stream; abort(); }
+
 int kl_comp_post_accept_raw(struct KlEventCtx *ctx) { (void)ctx; abort(); }
 
 int kl_comp_post_sendfile_raw(KlStream *stream, const KlIoVec *head_iov, int head_n,

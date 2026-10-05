@@ -683,4 +683,48 @@ UTEST(tls_integration, a_graceful_stop_lets_queued_output_finish) {
     ASSERT_GT(total, (long)(16 * 1024 * 1024));            /* was (POSIX completion): cut short */
 }
 
+/* ── 100 Continue survives a write the socket refuses ───────────────────────────────────────────
+ * The interim response was written best-effort, its result ignored: a write the TLS engine (or a
+ * full socket) refused dropped it silently, and with a real engine the record it held then went
+ * out ahead of the next write, mis-acknowledged. It is now written in full or the connection is
+ * closed. The mock refuses the first write once (WANT_WRITE), as a full socket would. */
+static void handle_up_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
+}
+static KlHttpServer cw_srv;
+
+UTEST(tls_integration, tls_100_continue_survives_a_refused_write) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&cw_srv, &cfg));
+    kl_http_server_route(&cw_srv, "POST", "/up", handle_up_ok, NULL, kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &cw_srv);
+    wait_for_bind(&cw_srv);
+
+    char interim[256];
+    interim[0] = '\0';
+    int fd = connect_to(cw_srv.bound_port);
+    if (fd >= 0) {
+        mock_tls_write_want = 1;                           /* the server's next write is refused once */
+        const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                         "Expect: 100-continue\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_ssize_t n = 0;
+        if (kl_test_poll1(fd, 0, 1000) > 0)
+            n = kl_test_sockread(fd, interim, sizeof interim - 1);
+        interim[n > 0 ? n : 0] = '\0';
+        (void)kl_test_sockwrite(fd, "hello", 5);
+        char rest[512];
+        (void)read_response(fd, rest, sizeof rest, 1000);
+        kl_test_closesock(fd);
+    }
+    mock_tls_write_want = 0;
+    kl_http_server_stop(&cw_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&cw_srv);
+    ASSERT_TRUE(strstr(interim, "100 Continue") != NULL);  /* was (readiness): dropped */
+}
+
 UTEST_MAIN();

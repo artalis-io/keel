@@ -858,4 +858,52 @@ UTEST(server_integration, a_long_steady_download_is_not_timed_out) {
     ASSERT_TRUE(took > 400);                          /* the download did outlast the timeout */
 }
 
+/* ── No new connection is served while draining ─────────────────────────────────────────────────
+ * A graceful drain stops accepting: readiness leaves new connections in the kernel backlog. A
+ * completion loop kept posting accepts (a released slot re-armed the listener), so a client that
+ * connected during the drain was served and kept the drain going. An idle keep-alive connection
+ * holds the drain open here; a request on a connection made after the stop must get no answer. */
+static void handle_hi(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_json(res, 200, "{\"hi\":1}", 8);
+}
+
+UTEST(server_integration, no_new_connection_is_served_while_draining) {
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .drain_timeout_ms = 1500 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hi", handle_hi, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    int port = srv.bound_port;
+
+    int keep = connect_to(port);                           /* idle: keeps the drain open */
+    char buf[1024];
+    buf[0] = '\0';
+    if (keep >= 0) {
+        const char *rq = "GET /hi HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(keep, rq, strlen(rq));
+        (void)read_one_response(keep, buf, sizeof buf, 2000);   /* answered; stays open */
+    }
+    int first_ok = strstr(buf, "200 OK") != NULL;
+
+    kl_http_server_stop(&srv);                             /* the drain starts */
+    kl_test_sleep_ms(200);
+    char late[1024];
+    late[0] = '\0';
+    int fd = connect_to(port);                             /* may still connect (backlog) */
+    if (fd >= 0) {
+        const char *rq = "GET /hi HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_response(fd, late, sizeof late, 800);
+        kl_test_closesock(fd);
+    }
+    if (keep >= 0) kl_test_closesock(keep);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&srv);
+    ASSERT_TRUE(first_ok);
+    ASSERT_TRUE(strstr(late, "200 OK") == NULL);           /* was (completion): served */
+}
+
 UTEST_MAIN();
