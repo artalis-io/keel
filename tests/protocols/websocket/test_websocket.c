@@ -1195,7 +1195,9 @@ UTEST(auto_ping, send_progress_after_the_ping_keeps_the_connection) {
 /* On a completion loop a WebSocket without the drain has its output refused once 1 MiB of it is
  * unposted. A PING written into that full queue failed its send, and the failed send closed a slow
  * but live peer at once, before the stall bound ever applied. No PING goes behind pending output:
- * the connection stays open while the backlog moves, and is reaped only after it stalls. */
+ * the connection stays open while the backlog moves, and is reaped only after it stalls.
+ * Completion-only: the KEEL_NO_COMPLETION build stubs the completion queue to abort. */
+#ifndef KEEL_NO_COMPLETION
 UTEST(auto_ping, no_ping_into_a_full_completion_queue) {
     KlAllocator alloc = kl_allocator_default();
     KlWsServerConfig cfg;
@@ -1218,7 +1220,7 @@ UTEST(auto_ping, no_ping_into_a_full_completion_queue) {
     conn.comp_tlsq = kl_malloc(&alloc, posted + unposted);
     ASSERT_TRUE(conn.comp_tlsq != NULL);
     conn.comp_tlsq_cap = conn.comp_tlsq_len = posted + unposted;
-    conn.comp_tlsq_head = posted;
+    conn.comp_tlsq_head = 0;                               /* the posted send stays at the front */
     conn.comp_tlsq_inflight = 1;                           /* one send posted, the rest waiting */
     conn.comp_tlsq_inflight_len = posted;
     conn.ws = ws;
@@ -1244,6 +1246,7 @@ UTEST(auto_ping, no_ping_into_a_full_completion_queue) {
     ASSERT_EQ(closing, 1);
     ASSERT_EQ(queued, posted + unposted);                  /* nothing was appended to it */
 }
+#endif /* !KEEL_NO_COMPLETION */
 
 /* The ping's own send is not an answer: with nothing queued ahead of it, the ping goes straight out
  * (a completion engine counts its bytes as moved) and a peer that never answers is still failed. */

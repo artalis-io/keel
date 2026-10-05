@@ -407,7 +407,6 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   response.
 - **`kl_http_response_reset` keeps a pooled response's ownership mark.** A handler that reset its
   response and then streamed got a failed stream on a completion loop.
-
 - **WebSocket server: the auto-ping no longer closes a slow but live client on a completion loop.**
   Without the drain, a completion-driven WebSocket refuses output once 1 MiB of it is unposted.
   The auto-ping queued its PING behind that backlog anyway, the write failed, and the failed send
