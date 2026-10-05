@@ -635,7 +635,10 @@ UTEST(h2, synthetic_host_keeps_its_slot_at_the_header_cap) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(conn.h2->num_streams, 1);
     KlHttp2ServerStream *s = &conn.h2->streams[0];
+    /* Read everything before the cleanup frees the stream (and the header values with it). */
     const char *host = kl_http_request_header(&s->req, "host");
+    int has_host = host != NULL;
+    int host_ok = host != NULL && strcmp(host, "example.com") == 0;
     int num = s->req.num_headers;
 
     kl_http2_server_cleanup(&conn);
@@ -643,8 +646,8 @@ UTEST(h2, synthetic_host_keeps_its_slot_at_the_header_cap) {
     kl_test_closesock(pfd[1]);
     test_teardown();
 
-    ASSERT_TRUE(host != NULL);                             /* was NULL: no slot left for it */
-    ASSERT_STREQ(host, "example.com");
+    ASSERT_TRUE(has_host);                                 /* was NULL: no slot left for it */
+    ASSERT_TRUE(host_ok);
     ASSERT_EQ(num, KL_MAX_HEADERS);
 }
 
