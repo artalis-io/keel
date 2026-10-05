@@ -439,7 +439,7 @@ static KlHttpConn *comp_stream_tls_conn(KlHttpResponse *res) {
  * buffers it, itself bounded, and then the producer is told. Each send that completes moves the
  * drain on (comp_tls_on_write). */
 int kl_http_comp_stream_tls_full(KlHttpResponse *res) {
-    KlHttpConn *c = comp_stream_tls_conn(res);
+    const KlHttpConn *c = comp_stream_tls_conn(res);
     return c && c->state != KL_HTTP_CONN_PROCESSING &&
            comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX;
 }
