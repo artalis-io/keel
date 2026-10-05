@@ -92,7 +92,9 @@ int   kl_ws_client_send_ping(KlWsClientConn *ws, const char *data, size_t len);
 
 /** @brief Initiate close handshake. Calls no callback itself: if the Close frame cannot be sent,
  *  the connection is closed and on_error follows from the event loop (unless the connection is
- *  freed first), so the caller may free it right after this returns. */
+ *  freed first), so the caller may free it right after this returns. If the loop cannot schedule
+ *  that report (out of memory), the connection is closed with no callback at all: the caller
+ *  still owns it and frees it with kl_ws_client_free. */
 void  kl_ws_client_close(KlWsClientConn *ws, uint16_t code,
                           const char *reason, size_t reason_len);
 
