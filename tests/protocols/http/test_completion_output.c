@@ -13,6 +13,7 @@
 #include <keel/tls.h>
 #include "net_compat.h"
 #include "mock_tls.h"
+#include "event_caps.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -566,6 +567,10 @@ static KlHttpServer wso_srv;
 UTEST(completion_output, one_oversized_websocket_write_cannot_cross_the_queue_bound) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 2 };
     ASSERT_EQ(0, kl_http_server_init(&wso_srv, &cfg));
+    if (!(kl_event_caps(&wso_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_free(&wso_srv);
+        UTEST_SKIP("The transport queue allowance applies only to completion backends");
+    }
     KlWsServerConfig wcfg;
     kl_ws_server_config_init(&wcfg);
     wcfg.callbacks.on_open = ws_open_oversized_frame;
