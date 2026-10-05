@@ -763,6 +763,11 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
              * bytes never count, since nothing was ahead of a ping sent straight out. */
             ws->ping_unanswered = 0;
         } else {
+            fprintf(stderr, "PROBE liveness-fail t=%llu behind=%d prog=%llu ping_prog=%llu drain_buf=%zu sendprog=%llu moved=%llu\n",
+                    (unsigned long long)now, ws->ping_behind, (unsigned long long)ws_out_progress(c),
+                    (unsigned long long)ws->ping_progress,
+                    ws->drain_enabled ? kl_drain_buffered(&ws->drain) : (size_t)0,
+                    (unsigned long long)c->stream.send_progress, (unsigned long long)ws->drain_moved);
             /* Nothing arrived for a whole interval after the last ping: the peer is gone (a dead
              * peer behind a NAT never answers and never resets). Fail the connection: Close 1001
              * as a courtesy, with a deadline already passed so the sweep closes it now rather than
@@ -773,6 +778,9 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
         }
     }
     ws->ping_behind = ws_out_pending(c);
+    fprintf(stderr, "PROBE ping t=%llu behind=%d prog=%llu drain_buf=%zu\n", (unsigned long long)now,
+            ws->ping_behind, (unsigned long long)ws_out_progress(c),
+            ws->drain_enabled ? kl_drain_buffered(&ws->drain) : (size_t)0);
     kl_ws_server_send_ping(ws, NULL, 0);
     ws->ping_progress = ws_out_progress(c);
     ws->ping_unanswered = 1;
