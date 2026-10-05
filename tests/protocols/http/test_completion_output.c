@@ -792,4 +792,168 @@ UTEST(completion_output, a_tls_stream_written_while_suspended_goes_out) {
     ASSERT_TRUE(strstr(buf, "pushed-while-suspended") != NULL);   /* was (completion): at resume */
 }
 
+/* ── A suspended TLS stream to a client that stops reading is bounded ───────────────────────────
+ * The producer of a stream gets backpressure: once what the client has not taken reaches the
+ * stream's bounds, a write fails instead of memory growing. A TLS stream written from a timer while
+ * its connection is suspended had every chunk moved onto the connection's output queue, which grew
+ * without bound for a client that stopped reading. 8 MiB are offered; far less may be taken. */
+#define BP_CHUNKS 128
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int suspended, pushed, taken;
+} BpStream;
+static BpStream g_bp;
+static KlHttpServer bp_srv;
+
+static void bp_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    kl_http_response_end_stream(g_bp.res);
+}
+static void bp_push(void *ud) {
+    (void)ud;
+    g_bp.pushed = 1;
+    memset(g_big_chunk, 'P', sizeof g_big_chunk);
+    for (int i = 0; i < BP_CHUNKS; i++) {
+        if (g_bp.w(g_bp.wc, g_big_chunk, sizeof g_big_chunk) < 0) break;
+        g_bp.taken++;
+    }
+}
+static void bp_finish(void *ud) {
+    (void)ud;
+    kl_async_complete(&bp_srv, &g_bp.op);
+}
+static void handle_bp_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_bp, 0, sizeof g_bp);
+    g_bp.res = res;
+    if (kl_http_response_begin_stream(res, 200, &g_bp.w, &g_bp.wc) < 0) return;
+    g_bp.op.on_resume = bp_resume;
+    if (kl_async_suspend(&bp_srv, kl_http_request_conn(req), &g_bp.op) < 0) return;
+    g_bp.suspended = 1;
+    (void)kl_timer_add(kl_http_server_event_ctx(&bp_srv), 100, bp_push, NULL);
+    (void)kl_timer_add(kl_http_server_event_ctx(&bp_srv), 800, bp_finish, NULL);
+}
+
+UTEST(completion_output, a_suspended_tls_stream_to_a_stalled_client_is_bounded) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&bp_srv, &cfg));
+    kl_http_server_route(&bp_srv, "GET", "/bp", handle_bp_stream, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &bp_srv);
+    wait_for_bind(&bp_srv);
+    int fd = connect_rcvbuf(bp_srv.bound_port, 4096);    /* reads nothing */
+    if (fd >= 0) {
+        const char *rq = "GET /bp HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(1200);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&bp_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&bp_srv);
+    ASSERT_TRUE(g_bp.suspended);
+    ASSERT_TRUE(g_bp.pushed);
+    ASSERT_LT(g_bp.taken, BP_CHUNKS / 2);                  /* was (completion): all 8 MiB taken */
+}
+
+/* ── A suspended connection that dies is cancelled, not resumed ─────────────────────────────────
+ * A suspended streaming connection whose client resets: on a completion loop the failed send of a
+ * chunk written meanwhile released the connection but left its async op registered, so the later
+ * kl_async_complete resumed a slot already back in the pool (or a new client's). The op must end
+ * exactly once: on_cancel when the connection died first (completion), on_resume otherwise
+ * (readiness, which finds out at the resume); and the pool must stay consistent. */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int suspended, resumed, cancelled;
+} DeadStream;
+static DeadStream g_ds;
+static KlHttpServer ds_srv;
+
+static void ds_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_ds.resumed++;
+    g_ds.w(g_ds.wc, "end;", 4);
+    kl_http_response_end_stream(g_ds.res);
+}
+static void ds_cancel(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_ds.cancelled++;
+}
+static void ds_push(void *ud) {
+    (void)ud;
+    if (g_ds.cancelled) return;
+    (void)g_ds.w(g_ds.wc, "pushed;", 7);
+}
+static void ds_finish(void *ud) {
+    (void)ud;
+    kl_async_complete(&ds_srv, &g_ds.op);                  /* a no-op once cancelled */
+}
+static void handle_dead_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_ds, 0, sizeof g_ds);
+    g_ds.res = res;
+    if (kl_http_response_begin_stream(res, 200, &g_ds.w, &g_ds.wc) < 0) return;
+    g_ds.w(g_ds.wc, "first;", 6);
+    g_ds.op.on_resume = ds_resume;
+    g_ds.op.on_cancel = ds_cancel;
+    if (kl_async_suspend(&ds_srv, kl_http_request_conn(req), &g_ds.op) < 0) return;
+    g_ds.suspended = 1;
+    (void)kl_timer_add(kl_http_server_event_ctx(&ds_srv), 300, ds_push, NULL);
+    (void)kl_timer_add(kl_http_server_event_ctx(&ds_srv), 400, ds_push, NULL);
+    (void)kl_timer_add(kl_http_server_event_ctx(&ds_srv), 900, ds_finish, NULL);
+}
+
+UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resumed) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&ds_srv, &cfg));
+    kl_http_server_route(&ds_srv, "GET", "/ds", handle_dead_stream, NULL, NULL);
+    kl_http_server_route(&ds_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ds_srv);
+    wait_for_bind(&ds_srv);
+    int port = ds_srv.bound_port;
+    int fd = connect_rcvbuf(port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /ds HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        char got[1024];
+        size_t have = 0;
+        got[0] = '\0';
+        uint64_t start = kl_monotonic_ms();                /* the head and the first chunk, whole */
+        while (kl_monotonic_ms() - start < 1000 && !strstr(got, "first;")) {
+            if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, got + have, sizeof got - 1 - have);
+            if (n <= 0) break;
+            have += (size_t)n;
+            got[have] = '\0';
+        }
+        struct linger lg;
+        memset(&lg, 0, sizeof lg);
+        lg.l_onoff = 1;                                    /* then gone, with a reset */
+        lg.l_linger = 0;
+        (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(1300);                                /* the pushes, then the finish */
+    KlHttpServerStats st;
+    kl_http_server_stats(&ds_srv, &st);
+    int served = 0;
+    for (int i = 0; i < 4; i++) served += hello_answered(port);
+    kl_http_server_stop(&ds_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ds_srv);
+    ASSERT_TRUE(g_ds.suspended);
+    ASSERT_EQ(g_ds.resumed + g_ds.cancelled, 1);           /* exactly one end */
+    ASSERT_EQ(st.active_connections, 0);                   /* was (completion): released twice */
+    ASSERT_EQ(served, 4);
+}
+
 UTEST_MAIN();
