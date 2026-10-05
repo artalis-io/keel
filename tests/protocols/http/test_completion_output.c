@@ -548,4 +548,120 @@ UTEST(completion_output, a_websocket_backlog_to_a_stalled_reader_is_bounded) {
     ASSERT_LT(sent_ok, BIG_CHUNKS);                        /* was (completion): all 64 MiB accepted */
 }
 
+/* ── TLS output written outside a drive goes out ────────────────────────────────────────────────
+ * On a completion loop TLS writes land in the engine's output ring, which only a drive moved onto
+ * the output queue. Output written from elsewhere (the sweep's auto-ping, a frame sent from a
+ * timer, the drain's Close or GOAWAY) waited until the client sent something; a client answering
+ * pings never got one, so it looked dead and was closed. The ping must reach an idle client that
+ * answers it, and the connection must stay open. */
+static KlHttpServer tp_srv;
+
+UTEST(completion_output, a_tls_websocket_auto_ping_reaches_an_idle_client) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&tp_srv, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.ping_interval_ms = 150;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&tp_srv, "/ws", &wcfg));
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tp_srv);
+    wait_for_bind(&tp_srv);
+
+    int pings = 0, close_seen = 0, eof = 0;
+    int fd = connect_rcvbuf(tp_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        unsigned char b[512];
+        size_t have = 0;
+        int upgraded = 0;
+        uint64_t start = kl_monotonic_ms();
+        while (kl_monotonic_ms() - start < 3000 && !close_seen && !eof) {   /* sweeps run ~1/s */
+            if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, b + have, sizeof b - have);
+            if (n <= 0) { eof = 1; break; }
+            have += (size_t)n;
+            if (!upgraded) {                               /* skip the 101 head */
+                unsigned char *e = NULL;
+                for (size_t i = 0; i + 3 < have; i++)
+                    if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
+                        e = b + i + 4;
+                        break;
+                    }
+                if (!e) continue;
+                upgraded = 1;
+                have -= (size_t)(e - b);
+                memmove(b, e, have);
+            }
+            while (have >= 2) {                            /* server frames: unmasked, small */
+                size_t plen = b[1] & 0x7F;
+                if (plen > 125 || have < 2 + plen) break;
+                unsigned op = b[0] & 0x0F;
+                if (op == 0x9) {                           /* PING: answer with a masked PONG */
+                    pings++;
+                    unsigned char pong[2 + 4 + 125];
+                    pong[0] = 0x8A;
+                    pong[1] = (unsigned char)(0x80 | plen);
+                    memset(pong + 2, 0, 4);                /* zero mask: payload unchanged */
+                    memcpy(pong + 6, b + 2, plen);
+                    (void)kl_test_sockwrite(fd, pong, 6 + plen);
+                } else if (op == 0x8) {
+                    close_seen = 1;
+                }
+                have -= 2 + plen;
+                memmove(b, b + 2 + plen, have);
+            }
+        }
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&tp_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tp_srv);
+    ASSERT_GT(pings, 0);
+    ASSERT_FALSE(close_seen);                              /* was (completion): Close 1001 */
+    ASSERT_FALSE(eof);
+}
+
+/* ── A response reset by its handler still streams ──────────────────────────────────────────────
+ * kl_http_response_reset cleared the mark that the response is a pooled connection's own, so a
+ * handler that reset its response and then streamed got a failed stream on a completion loop. */
+static void handle_reset_then_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_header(res, "X-Discarded", "1");
+    kl_http_response_reset(res);
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    w(wc, "streamed-after-reset", 20);
+    kl_http_response_end_stream(res);
+}
+
+static KlHttpServer rs_srv;
+
+UTEST(completion_output, a_stream_after_a_response_reset_still_goes_out) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&rs_srv, &cfg));
+    kl_http_server_route(&rs_srv, "GET", "/rs", handle_reset_then_stream, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &rs_srv);
+    wait_for_bind(&rs_srv);
+    char buf[1024];
+    int closed = 0;
+    buf[0] = '\0';
+    int fd = connect_rcvbuf(rs_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /rs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_until_close(fd, buf, sizeof buf, 2000, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&rs_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&rs_srv);
+    ASSERT_TRUE(strstr(buf, "streamed-after-reset") != NULL);   /* was (completion): no body */
+}
+
 UTEST_MAIN();
