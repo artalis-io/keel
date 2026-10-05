@@ -251,6 +251,11 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	  -o tests/raw_datagram_test tests/raw_datagram_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o tests/raw_drain_test tests/raw_drain_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	./tests/raw_tick_test
 	./tests/raw_recv_test
 	./tests/raw_send_test
@@ -260,6 +265,7 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	./tests/raw_udp_test
 	./tests/raw_dns_test
 	./tests/raw_datagram_test
+	./tests/raw_drain_test
 	@echo "integrations/platform/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK (runtime injection on stock libkeel)"
 
 # ASan+UBSan+LSan variant: the lifetime/close/cancel + Stage-A receive/context cases need it.
@@ -323,6 +329,11 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	  -o tests/raw_datagram_test tests/raw_datagram_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o tests/raw_drain_test tests/raw_drain_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_tick_test
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_recv_test
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_send_test
@@ -332,6 +343,7 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_udp_test
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_dns_test
 	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_datagram_test
+	ASAN_OPTIONS=detect_leaks=1 ./tests/raw_drain_test
 	@echo "integrations/platform/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
 # ── LC-4: HTTPS (TLS) over the lwIP-raw COMPLETION backend (BYO mbedTLS, out of CI) ──
@@ -379,7 +391,7 @@ clean:
 	rm -f *.o *.a tests/*.o
 	rm -f tests/lwip_loopback_test tests/raw_tick_test tests/raw_recv_test tests/raw_send_test \
 	      tests/raw_caps_test tests/raw_client_test tests/raw_he_test tests/raw_udp_test \
-	      tests/raw_dns_test tests/raw_datagram_test tests/raw_tls_test
+	      tests/raw_dns_test tests/raw_datagram_test tests/raw_drain_test tests/raw_tls_test
 	rm -rf tests/*.dSYM $(RAW_BUILD)
 
 .PHONY: check loopback loopback-tls loopback-raw loopback-raw-asan loopback-raw-tls loopback-raw-tls-asan clean
