@@ -427,6 +427,24 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   would send the rest again, duplicating bytes in the stream. Such a retry now fails the write (-1).
   A retry must pass at least the length just attempted, as KlDrain and every in-tree caller do;
   equal and longer retries are unchanged. The contract is documented in `keel_tls_mbedtls.h`.
+- **Completion loops: a streamed response that is not a pooled connection's own is refused (memory
+  safety).** A streamed response's writer took any response bound to a completion engine for the one
+  embedded in a pooled connection and found "its" connection from the response's address. An HTTP/2
+  stream's response is not inside a connection, so a streamed HTTP/2 response (SSE, `begin_stream`)
+  on IOCP, io_uring or pollcomp read and wrote unrelated memory. The server now marks the response it
+  embeds (the otherwise unused `KlHttpResponse.stream_inflight` field), and any other response is
+  refused.
+- **Completion loops: long transfers that keep moving are no longer cut off.** A streamed response
+  closes once its queued output is out, and that close was timed against `read_timeout_ms` before
+  send progress was counted, so a long streamed download was released mid-transfer. The output queue
+  now posts at most 256 KiB per send (each part completes, so progress shows on every backend, and the
+  backend's copy stays small), and pollcomp and IOCP count file bytes sent zero-copy as progress.
+- **Completion loops: WebSocket output to a client that stops reading is bounded.** Every frame went
+  onto the connection's output queue, which took everything, so a client that never read its frames
+  grew server memory without bound. Past 1 MiB queued, a send is refused as would-block, as a full
+  socket is on readiness: the WebSocket drain keeps the frame within its own limit, or the send fails.
+- **Completion loops: a failed send post no longer leaves its bytes queued, a graceful drain no
+  longer resumes accepting, and an accept back-off wakes the loop on time.**
 - **Completion server: a failed accept post could crash the server.** When the next accept could not
   be posted, the listener returned its credit through the pool's release hook. The HTTP server's
   release hook announces the free slot, and that re-entered the listener while it was still

@@ -565,6 +565,8 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
             if (rem < (uint64_t)cwait) cwait = (int)rem;
         }
     }
+    if (s->accept_backoff_until > cnow && s->accept_backoff_until - cnow < (uint64_t)cwait)
+        cwait = (int)(s->accept_backoff_until - cnow);   /* wake to post the accept again */
     cwait = kl_timer_next_timeout(&s->ev, cwait);
     if (kl_http_comp_run(s, cwait) < 0)
         return -1;
@@ -635,10 +637,19 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     /* Completion: an accept post that failed for a moment left the listener paused with nothing
      * posted, and no connection may be left to free a slot and resume it. Try again every sweep
      * (a no-op while accepts are posted, or while the pool is full). */
-    if (completion_loop && s->accept_via_listener)
+    if (completion_loop && s->accept_via_listener && !kl_atomic_load_int(&s->draining))
         kl_listener_notify_slot_free(&s->accept_listener);
     for (int i = 0; i < s->pool.capacity; i++) {
         KlHttpConn *tc = &s->pool.conns[i];
+        /* Completion: a posted send that moved bytes since the last sweep is progress, as a
+         * completion would be. A response can be one send op until all of it is out (the engine
+         * re-posts the rest of a partial send itself), so without this a long download that keeps
+         * moving was cut off at the read timeout: checked first, so a connection closing once its
+         * output is out (a streamed response ends that way) is covered too. */
+        if (completion_loop && tc->stream.send_progress != tc->comp_progress_seen) {
+            tc->comp_progress_seen = tc->stream.send_progress;
+            tc->last_active_ms = now;
+        }
         /* Completion: a connection closing once its queued TLS output is out stays in the pool
          * until that output goes; a client that never reads must not hold the slot for good. */
         if (completion_loop && tc->state == KL_HTTP_CONN_CLOSED && tc->comp_tlsq_then_close &&
@@ -676,7 +687,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             if (wsh) {
                 if (wsh->auto_ping) wsh->auto_ping(tc, now);
                 if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
-                    if (completion_loop) {
+                    if (completion_loop && tc->comp_driven) {
+                        /* Close once what is already queued is out, as a readiness close still
+                         * delivers what the kernel holds: cancelling would drop frames sent before
+                         * the one that ended the connection. A client that never reads is reaped by
+                         * the close-after-output timeout above. */
+                        kl_http_comp_tls_finish(s, tc, 0);
+                    } else if (completion_loop) {
                         kl_comp_cancel(&s->ev, tc->stream.fd);
                     } else {
                         kl_event_del(&s->ev.loop, tc->stream.fd);
@@ -699,14 +716,6 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 }
             }
             continue;
-        }
-        /* Completion: a posted send that moved bytes since the last sweep is progress, as a
-         * completion would be. A response is one send op until all of it is out (the engine re-posts
-         * the rest of a partial send itself), so without this a long download that keeps moving was
-         * cut off at the read timeout. */
-        if (completion_loop && tc->stream.send_progress != tc->comp_progress_seen) {
-            tc->comp_progress_seen = tc->stream.send_progress;
-            tc->last_active_ms = now;
         }
         /* TLS handshake time counts against read timeout */
         int timed_out = (now - tc->last_active_ms > timeout);

@@ -234,6 +234,12 @@ static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 
 /* Make room for `add` more queued bytes. 0, or -1 on overflow / allocation failure. */
 static int comp_tlsq_reserve(KlHttpConn *c, size_t add) {
+    if (c->comp_tlsq_head > 0 && c->comp_tlsq_len + add > c->comp_tlsq_cap) {
+        /* Drop the already-posted front before growing (the backend copied it at post). */
+        memmove(c->comp_tlsq, c->comp_tlsq + c->comp_tlsq_head, c->comp_tlsq_len - c->comp_tlsq_head);
+        c->comp_tlsq_len -= c->comp_tlsq_head;
+        c->comp_tlsq_head = 0;
+    }
     if (add > SIZE_MAX / 2 - c->comp_tlsq_len) return -1;
     size_t need = c->comp_tlsq_len + add;
     if (need <= c->comp_tlsq_cap) return 0;
@@ -259,20 +265,34 @@ static int comp_tlsq_absorb_ring(KlHttpConn *c) {
     }
 }
 
-/* Post the queued bytes as one send, unless one is already in flight (its completion posts the
- * rest). 0, or -1 if the post failed. */
+/* One send carries at most this much of the queue. A long transfer then completes, and so shows
+ * progress, every so often on every backend (an overlapped send is otherwise reported only once all
+ * of it is out), and the backend's copy of a send stays small however long the queue grows. */
+#define KL_COMP_QUEUE_POST_MAX (256u * 1024u)
+
+/* Bytes queued and not yet posted. */
+static size_t comp_tlsq_unposted(const KlHttpConn *c) {
+    return c->comp_tlsq_len - c->comp_tlsq_head;
+}
+
+/* Post the next part of the queue as one send, unless one is already in flight (its completion
+ * posts the rest). 0, or -1 if the post failed. */
 static int comp_tlsq_kick(KlHttpConn *c) {
-    if (c->comp_tlsq_inflight || c->comp_tlsq_len == 0) return 0;
-    KlIoVec iov = { c->comp_tlsq, c->comp_tlsq_len };
-    if (kl_comp_post_send(c, &iov, 1, c->comp_tlsq_len) < 0) return -1;   /* the backend copies */
+    size_t n = comp_tlsq_unposted(c);
+    if (c->comp_tlsq_inflight || n == 0) return 0;
+    if (n > KL_COMP_QUEUE_POST_MAX) n = KL_COMP_QUEUE_POST_MAX;
+    KlIoVec iov = { c->comp_tlsq + c->comp_tlsq_head, n };
+    if (kl_comp_post_send(c, &iov, 1, n) < 0) return -1;   /* the backend copies */
     c->comp_tlsq_inflight = 1;
-    c->comp_tlsq_inflight_len = c->comp_tlsq_len;
-    c->comp_tlsq_len = 0;
+    c->comp_tlsq_inflight_len = n;
+    c->comp_tlsq_head += n;
+    if (c->comp_tlsq_head == c->comp_tlsq_len)              /* all posted: start over at the front */
+        c->comp_tlsq_head = c->comp_tlsq_len = 0;
     return 0;
 }
 
 static int comp_tlsq_idle(const KlHttpConn *c) {
-    return !c->comp_tlsq_inflight && c->comp_tlsq_len == 0;
+    return !c->comp_tlsq_inflight && comp_tlsq_unposted(c) == 0;
 }
 
 /* Run what waits for an empty queue: the drain's half-close, the deferred recv, a close, a plaintext
@@ -310,31 +330,45 @@ int kl_comp_tls_flush(KlHttpConn *c) {
 /* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
  * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
  * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
+/* Queued plaintext a producer may add to before its writes are refused as would-block: an async
+ * stream producer (outside the handler; its writes then stay in the response's outbound buffer,
+ * which bounds them) and a WebSocket connection (its frames, sent at any time, would otherwise pile
+ * up for a client that stops reading: the connection is exempt from the idle sweep). */
+#define KL_COMP_STREAM_QUEUE_MAX (1u << 20)
+
 kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     if (len == 0) return 0;
     if (c->comp_closing || len > (size_t)INTPTR_MAX) return -1;
+    /* A WebSocket client that does not read its frames: would-block, as a full socket is on
+     * readiness. The drain (if enabled) keeps the frame, bounded by its own size; without one the
+     * frame fails and the connection closes. */
+    if (c->state == KL_HTTP_CONN_WEBSOCKET && comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX)
+        return 0;
     if (comp_tlsq_reserve(c, len) < 0) return -1;
     memcpy(c->comp_tlsq + c->comp_tlsq_len, buf, len);
     c->comp_tlsq_len += len;
     c->comp_tlsq_appended += (uint64_t)len;
-    if (comp_tlsq_kick(c) < 0) return -1;
+    if (comp_tlsq_kick(c) < 0) {
+        /* Not taken after all: undo the append, so a caller that retries does not send it twice. */
+        c->comp_tlsq_len -= len;
+        c->comp_tlsq_appended -= (uint64_t)len;
+        return -1;
+    }
     return (kl_ssize_t)len;
 }
 
-/* Queued plaintext of a streamed response a producer may add to outside the handler (an async
- * producer): past this, its writes stay in the response's outbound buffer, which bounds them and
- * reports would-block (the streaming contract's backpressure). */
-#define KL_COMP_STREAM_QUEUE_MAX (1u << 20)
-
-/* http_response_internal.h: the streamed response's outbound-buffer writer on a completion loop. The
- * response is the one embedded in its connection (only a pooled connection binds an overlapped
- * provider to it). While the handler runs, or while the driver itself moves the buffer onto the
- * queue, everything is taken: nothing can drain meanwhile, and the outbound buffer bounds it. */
+/* http_response_internal.h: the streamed response's outbound-buffer writer on a completion loop. Only
+ * the response embedded in a pooled connection has a queue to go to (the server marks it: the
+ * stream_inflight field); any other response with an overlapped provider (an HTTP/2 stream's, a
+ * standalone one) is refused rather than taken for a connection it is not part of. While the handler
+ * runs, or while the driver itself moves the buffer onto the queue, everything is taken: nothing can
+ * drain meanwhile. */
 kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len) {
+    if (!res->stream_inflight) return -1;
     KlHttpConn *c = (KlHttpConn *)((char *)res - offsetof(KlHttpConn, res));
     if (!c->comp_driven) return -1;
     if (!c->comp_stream_flushing && c->state != KL_HTTP_CONN_PROCESSING &&
-        c->comp_tlsq_len >= KL_COMP_STREAM_QUEUE_MAX)
+        comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX)
         return 0;
     return kl_comp_queue_write(c, data, len);
 }
@@ -1045,6 +1079,17 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
         int fr = kl_drain_flush(&c->res.drain);
         c->comp_stream_flushing = 0;
         if (fr < 0 || (c->tls && comp_tlsq_absorb_ring(c) < 0)) { kl_comp_close(s, c); return; }
+    }
+    /* A WebSocket's frames held back while the queue was full: move them on now there is room. */
+    if (c->state == KL_HTTP_CONN_WEBSOCKET) {
+        const KlWsServerHooks *wsh = kl_ws_server_hooks();
+        if (wsh && wsh->drain_pending && wsh->on_writable && wsh->drain_pending(c) &&
+            wsh->on_writable(c) != KL_HTTP_CONN_WEBSOCKET) {
+            if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+            kl_comp_close_after_output(s, c);
+            return;
+        }
+        if (c->tls && comp_tlsq_absorb_ring(c) < 0) { kl_comp_close(s, c); return; }
     }
     if (comp_tlsq_kick(c) < 0) { kl_comp_close(s, c); return; }   /* anything queued since */
     if (c->comp_tlsq_resp_pending && c->comp_tlsq_sent >= c->comp_tlsq_resp_mark) {

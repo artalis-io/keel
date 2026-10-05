@@ -128,6 +128,7 @@ struct KlHttpConn {
     uint64_t       comp_progress_seen;     /* stream.send_progress at the last idle sweep */
     unsigned char *comp_tlsq;              /* output waiting to be posted */
     size_t         comp_tlsq_len, comp_tlsq_cap;
+    size_t         comp_tlsq_head;         /* bytes at the front already posted (below comp_tlsq_len) */
     int            comp_tlsq_inflight;     /* a queue send is posted */
     size_t         comp_tlsq_inflight_len;
     uint64_t       comp_tlsq_appended, comp_tlsq_sent;
