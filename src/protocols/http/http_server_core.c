@@ -681,16 +681,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
-        /* Completion: a posted send that moved bytes since the last sweep is progress, as a
-         * completion would be. A response is one send op until all of it is out (the engine re-posts
-         * the rest of a partial send itself), so without this a long download that keeps moving was
-         * cut off at the read timeout. HTTP/2 included: KEEL forgets a stream once its response is
-         * submitted, so the connection looks idle while the session's DATA is still going out. */
-        if (completion_loop && tc->stream.send_progress != tc->comp_progress_seen) {
-            tc->comp_progress_seen = tc->stream.send_progress;
-            tc->last_active_ms = now;
-        }
-        /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). */
+        /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). (Send progress,
+         * HTTP/2's included, was counted at the top of the loop.) */
         if (tc->state == KL_HTTP_CONN_WEBSOCKET) {
             const KlWsServerHooks *wsh = kl_ws_server_hooks();
             if (wsh) {
