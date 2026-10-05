@@ -62,7 +62,11 @@ static void query_on_resume(KlAsyncOp *op, void *user_data) {
     (void)op; (void)user_data;
 }
 
-/* Called if connection dies while work is in flight */
+/* Called when the op is cancelled. Here that is only kl_http_server_free, after the pool has
+ * finished its work: the handler sends a buffered response, so nothing is posted while suspended
+ * that could fail and cancel the op earlier. A handler that streams while suspended can see
+ * on_cancel while its job is still running, and must free the context only once the job is done
+ * (see docs/contracts/async_lifecycle.md). */
 static void query_on_cancel(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     free(op);
