@@ -384,6 +384,14 @@ int kl_comp_tls_flush(KlHttpConn *c) {
  * up for a client that stops reading: the connection is exempt from the idle sweep). */
 #define KL_COMP_STREAM_QUEUE_MAX (1u << 20)
 
+/* A producer write must fit in the remaining allowance. Checking only whether the queue is already
+ * full lets one large write jump arbitrarily far past the bound before backpressure starts. */
+static int comp_stream_queue_full(const KlHttpConn *c, size_t add) {
+    size_t queued = comp_tlsq_unposted(c);
+    return queued >= KL_COMP_STREAM_QUEUE_MAX ||
+           add > KL_COMP_STREAM_QUEUE_MAX - queued;
+}
+
 /* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
  * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
  * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
@@ -393,7 +401,7 @@ kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     /* A WebSocket client that does not read its frames: would-block, as a full socket is on
      * readiness. The drain (if enabled) keeps the frame, bounded by its own size; without one the
      * frame fails and the connection closes. */
-    if (c->state == KL_HTTP_CONN_WEBSOCKET && comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX)
+    if (c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, len))
         return 0;
     if (comp_tlsq_reserve(c, len) < 0) return -1;
     memcpy(c->comp_tlsq + c->comp_tlsq_len, buf, len);
@@ -419,7 +427,7 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
     KlHttpConn *c = (KlHttpConn *)((char *)res - offsetof(KlHttpConn, res));
     if (!c->comp_driven) return -1;
     if (!c->comp_stream_flushing && c->state != KL_HTTP_CONN_PROCESSING &&
-        comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX)
+        comp_stream_queue_full(c, len))
         return 0;
     return kl_comp_queue_write(c, data, len);
 }

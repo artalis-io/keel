@@ -548,6 +548,47 @@ UTEST(completion_output, a_websocket_backlog_to_a_stalled_reader_is_bounded) {
     ASSERT_LT(sent_ok, BIG_CHUNKS);                        /* was (completion): all 64 MiB accepted */
 }
 
+/* The bound applies to the proposed write, not only to bytes already queued. With an empty queue a
+ * single payload larger than 1 MiB used to be accepted in full before later writes saw backpressure. */
+#define OVERSIZED_FRAME_BYTES ((1024u * 1024u) + 1u)
+static char g_oversized_frame[OVERSIZED_FRAME_BYTES];
+static int g_oversized_frame_rc;
+
+static void ws_open_oversized_frame(KlWsServerConn *ws, void *ud) {
+    (void)ud;
+    memset(g_oversized_frame, 'O', sizeof g_oversized_frame);
+    g_oversized_frame_rc = kl_ws_server_send_binary(ws, g_oversized_frame,
+                                                     sizeof g_oversized_frame);
+}
+
+static KlHttpServer wso_srv;
+
+UTEST(completion_output, one_oversized_websocket_write_cannot_cross_the_queue_bound) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 2 };
+    ASSERT_EQ(0, kl_http_server_init(&wso_srv, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = ws_open_oversized_frame;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&wso_srv, "/ws", &wcfg));
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &wso_srv);
+    wait_for_bind(&wso_srv);
+    g_oversized_frame_rc = 1;
+    int fd = connect_rcvbuf(wso_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    }
+    for (int i = 0; i < 300 && g_oversized_frame_rc == 1; i++) kl_test_sleep_ms(10);
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&wso_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&wso_srv);
+    ASSERT_EQ(-1, g_oversized_frame_rc);
+}
+
 /* ── TLS output written outside a drive goes out ────────────────────────────────────────────────
  * On a completion loop TLS writes land in the engine's output ring, which only a drive moved onto
  * the output queue. Output written from elsewhere (the sweep's auto-ping, a frame sent from a
