@@ -232,6 +232,19 @@ static int h2_carry_upgrade_state(KlHttp2ServerStream *stream, const KlHttpReque
  * Callback implementations (wired into KlHttp2ServerCallbacks)
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* Answer a stream KEEL will not serve with a plain-text error, refusing that stream rather than the
+ * connection (a -1 from the request callback is fatal to every stream on it). No stream is created,
+ * so its DATA, if any, is ignored as for any finished stream. 0, or -1 if the session failed. */
+static int h2_refuse_stream(KlHttp2ServerConn *h2c, uint32_t stream_id, int status,
+                            const char *body, size_t body_len) {
+    static const char *const names[] = { "content-type" };
+    static const char *const values[] = { "text/plain" };
+    if (h2c->session->submit_response(h2c->session, stream_id, status, (const char **)names,
+                                      (const char **)values, 1, body, body_len) != 0)
+        return -1;
+    return 0;
+}
+
 static int h2_cb_on_request(void *ud, uint32_t stream_id,
                              const char *method, size_t method_len,
                              const char *path, size_t path_len,
@@ -242,27 +255,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                              int num_headers) {
     KlHttp2ServerConn *h2c = ud;
 
-    KlHttp2ServerStream *stream = h2_stream_create(h2c, stream_id);
-    if (!stream) {
-        /* Stream table full: refuse this stream, not the connection (a -1 here is fatal to every
-         * stream on it). Its DATA, if any, is then ignored as for any finished stream. */
-        static const char *const busy_names[] = { "content-type" };
-        static const char *const busy_values[] = { "text/plain" };
-        static const char busy_body[] = "Service Unavailable";
-        if (h2c->session->submit_response(h2c->session, stream_id, 503,
-                                          (const char **)busy_names, (const char **)busy_values,
-                                          1, busy_body, sizeof(busy_body) - 1) != 0)
-            return -1;
-        return 0;
-    }
-
-    /* Clamp to max headers (vtable may provide unchecked value) */
-    if (num_headers > KL_MAX_HEADERS)
-        num_headers = KL_MAX_HEADERS;
-
     /* Converge :authority (HTTP/2) with Host (HTTP/1.1): the shared request model
      * exposes authority via a "host" header, so handlers read it the same way over
-     * both protocols. Inject a synthetic host header from :authority unless the
+     * both protocols. Inject a synthetic host field from :authority unless the
      * peer already sent one (it should not, in HTTP/2). */
     int has_host = 0;
     for (int i = 0; i < num_headers; i++) {
@@ -272,10 +267,20 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         }
     }
     int inject_host = (authority && authority_len > 0 && !has_host);
-    /* The synthetic host field keeps a slot of its own: at the cap the last regular field gives
-     * way, rather than Host (which routing and handlers read) silently going missing. */
-    if (inject_host && num_headers >= KL_MAX_HEADERS)
-        num_headers = KL_MAX_HEADERS - 1;
+
+    /* More fields than KEEL keeps (a session that does not enforce the cap, or the synthetic host
+     * field one past it): refuse this stream with 431, not drop a field the client sent. */
+    if (num_headers > KL_MAX_HEADERS || (inject_host && num_headers >= KL_MAX_HEADERS)) {
+        static const char too_large_body[] = "Request Header Fields Too Large";
+        return h2_refuse_stream(h2c, stream_id, 431, too_large_body, sizeof(too_large_body) - 1);
+    }
+
+    KlHttp2ServerStream *stream = h2_stream_create(h2c, stream_id);
+    if (!stream) {
+        /* Stream table full: refuse this stream. */
+        static const char busy_body[] = "Service Unavailable";
+        return h2_refuse_stream(h2c, stream_id, 503, busy_body, sizeof(busy_body) - 1);
+    }
 
     /* Calculate total header storage needed */
     size_t total = method_len + 1 + path_len + 1;

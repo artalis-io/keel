@@ -1654,10 +1654,11 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 /* ── Constructor ─────────────────────────────────────────────────────── */
 
 /* Internal TEST hook (NOT in the public header): replace the resolver's entropy source, so a test can
- * make a draw fail deterministically. NULL restores kl_plat_random. */
+ * make a draw fail deterministically. NULL restores kl_plat_random. Only a DNS resolver (known by its
+ * resolve function) is changed: any other KlResolver is left alone. */
 void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len));
 void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t len)) {
-    if (self)
+    if (self && self->resolve == dns_resolve)
         ((KlDnsResolver *)self)->rnd_fn = fn;
 }
 

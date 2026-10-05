@@ -756,13 +756,13 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now, uint64_t stall_ms) {
     if (now < ws->next_ping_ms) return 0;
     if (ws->ping_unanswered) {
         if (ws->ping_behind && ws_out_progress(c) != ws->ping_progress) {
-            /* The ping went out behind a backlog, which the peer has been taking since: it cannot
-             * answer a ping it has not reached yet (and on a completion loop nothing is read while
-             * output is queued), so the backlog moving is the answer. Ping again. The ping's own
-             * bytes never count, since nothing was ahead of a ping sent straight out. */
+            /* The interval began behind a backlog, which the peer has been taking since: it cannot
+             * answer what it has not reached yet (and on a completion loop nothing is read while
+             * output is queued), so the backlog moving is the answer. Only a backlog counts: a ping
+             * is sent only with nothing ahead of it, and its own bytes never answer it. */
             ws->ping_unanswered = 0;
         } else if (ws->ping_behind && now - ws->ping_sent_ms < stall_ms) {
-            /* Behind a backlog that has not moved since the ping: the peer may still be reading what
+            /* Behind a backlog that has not moved since then: the peer may still be reading what
              * the kernel already took (a full socket send buffer can hold seconds of output for a
              * slow reader, and none of it shows as progress here). Give it the read timeout, the
              * bound a stalled send gets, before taking the peer for dead. */
@@ -778,13 +778,21 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now, uint64_t stall_ms) {
             return 0;
         }
     }
+    /* Output still waiting to leave: no ping goes behind it. Queued there it proves nothing until
+     * the backlog is out, and it can fail outright (a completion queue already at its cap refuses
+     * the write, and a failed send closes the connection, live peer or not). The interval stands in
+     * for the ping instead: the backlog moving answers it, and one that stalls for stall_ms fails. */
+    int sent = 0;
     ws->ping_behind = ws_out_pending(c);
-    kl_ws_server_send_ping(ws, NULL, 0);
+    if (!ws->ping_behind) {
+        (void)kl_ws_server_send_ping(ws, NULL, 0);
+        sent = 1;
+    }
     ws->ping_progress = ws_out_progress(c);
     ws->ping_sent_ms = now;
     ws->ping_unanswered = 1;
     ws->next_ping_ms = now + (uint64_t)ws->config->ping_interval_ms;
-    return 1;
+    return sent;
 }
 
 /* ── WebSocket server upgrade seam registration (http_proto_hooks.h) ──────────────

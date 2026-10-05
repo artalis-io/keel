@@ -79,6 +79,8 @@ typedef struct {
     int                 eof_seen;  /* set when read() hit a close_notify (at_eof); a bare EOF is not */
     int                 reset_failed;  /* session_reset() failed → refuse next handshake */
     size_t              wpend;     /* a write that would block: the length it was made with */
+    int                 wfail;     /* a retry was refused: mbedTLS still holds that record, so every
+                                    * later write fails (cleared by reset) */
     /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
@@ -246,8 +248,13 @@ static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, siz
      * acknowledged for bytes never encrypted: retry with the original length only. A shorter
      * retry would have only its length acknowledged for a record holding more, and the caller
      * would send the rest twice: that breaks the retry contract and fails the write. */
+    if (t->wfail)
+        return -1;
     if (t->wpend && len < t->wpend) {
+        /* The record built from the blocked write is still pending inside mbedTLS: a later write of
+         * any length would flush it and be acknowledged for its own bytes. Refuse those too. */
         t->wpend = 0;
+        t->wfail = 1;
         return -1;
     }
     size_t n = len;
@@ -339,6 +346,7 @@ static void tls_reset(KlTls *self)
     t->handshake_done = 0;
     t->eof_seen = 0;
     t->wpend = 0;
+    t->wfail = 0;
     t->fd = KL_INVALID_SOCKET;
     /* Drop buffered ciphertext for the next request; keep the transport mode +
      * allocated rings for reuse across keep-alive. */

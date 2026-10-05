@@ -408,6 +408,30 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **`kl_http_response_reset` keeps a pooled response's ownership mark.** A handler that reset its
   response and then streamed got a failed stream on a completion loop.
 
+- **WebSocket server: the auto-ping no longer closes a slow but live client on a completion loop.**
+  Without the drain, a completion-driven WebSocket refuses output once 1 MiB of it is unposted.
+  The auto-ping queued its PING behind that backlog anyway, the write failed, and the failed send
+  closed the connection at once, before the stall bound (the read timeout) could apply. No PING is
+  now queued behind pending output: the interval stands in for one, the backlog moving answers it,
+  and a backlog that does not move for the stall bound fails the connection as before. A PING goes
+  out only with nothing queued ahead of it, and only bytes received answer it.
+- **WebSocket client: `kl_ws_client_close` calls no callback.** When its Close frame could not be
+  sent, close called `on_error` from inside the public call. An `on_error` that freed the
+  connection freed it under the caller, and a caller doing `kl_ws_client_close(ws, ...)` then
+  `kl_ws_client_free(ws)` freed it twice. The connection is still closed at once, but the error is
+  now reported from the event loop (a 0 ms timer), which a free before it fires cancels.
+- **HTTP/2 server: a request one field past the header cap is refused, not truncated.** When a
+  request carried as many fields as KEEL keeps, an `:authority` and no `host` field, the last field
+  the client sent was dropped silently to make room for the synthetic `host`. Such a stream, and
+  one a session hands over with more fields than the cap, is now refused with 431, as an over-cap
+  request is.
+- **mbedTLS: every write fails after a refused shorter retry.** After a blocked write's retry with
+  a shorter length was refused, mbedTLS still held the record built from the blocked write, so a
+  later write flushed it and was acknowledged for bytes that never went out. The adapter now fails
+  every write after that refusal, until `reset`.
+- **DNS resolver: the internal entropy test hook checks the resolver's type.**
+  `kl_dns_resolver_set_random` cast any `KlResolver` to the DNS resolver and wrote past the end of
+  one that was not (a cache wrapper, a custom vtable). It now changes only a DNS resolver.
 - **A handler that set a 1xx status sent it as a final response.** Since the status table was
   widened to every code, `kl_http_response_status(res, 103)` (or any 100-199) went out as a final
   response with `Content-Length` and a body. A client takes a 1xx as interim, so it waited for a
