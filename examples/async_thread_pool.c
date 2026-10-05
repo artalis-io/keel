@@ -58,6 +58,8 @@ static void on_resume(KlAsyncOp *op, void *user_data) {
     (void)op; (void)user_data;
 }
 
+/* Only from kl_http_server_free here (a buffered response posts nothing while suspended); a handler
+ * that streams while suspended frees its context only once its job is done (async_lifecycle.md). */
 static void on_cancel(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     free(op);

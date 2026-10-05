@@ -31,4 +31,16 @@ int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
  * (backpressure), or -1. */
 kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len);
 
+/* A streamed TLS response: after the engine took a write, move its output onto a completion-driven
+ * connection's output queue and start sending it, as conn_write does (a chunk written from a timer
+ * while the connection is suspended would otherwise wait in the engine for the resume). 0 when
+ * there is nothing to do (readiness, a response that is not a pooled connection's, the driver
+ * already moving it), else 0 or -1 from the flush. */
+int kl_http_comp_stream_tls_flush(KlHttpResponse *res);
+
+/* Before a streamed TLS write on a completion loop: 1 when the connection's output queue holds as
+ * much as a producer may add (the write is then refused as would-block, and the response's drain
+ * buffers it), else 0. Always 0 on readiness. */
+int kl_http_comp_stream_tls_full(KlHttpResponse *res);
+
 #endif /* KEEL_SRC_HTTP_RESPONSE_INTERNAL_H */

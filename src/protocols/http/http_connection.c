@@ -276,6 +276,10 @@ static int body_reader_vtable_valid(const KlHttpBodyReader *br) {
 }
 
 void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
+    /* A completion loop: nothing may be posted from here on (a cleanup callback writing, the TLS
+     * close_notify). A send posted now would complete against a slot already back in the pool.
+     * The posts refuse a closing connection; the queue reset below clears the mark. */
+    c->comp_closing = 1;
     /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
      * module isn't linked, e.g. a freestanding HTTP/1.1 server). */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
@@ -320,6 +324,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
         const KlWsServerHooks *wsh = kl_ws_server_hooks();
         const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         for (int i = 0; i < pool->capacity; i++) {
+            pool->conns[i].comp_closing = 1;   /* nothing is posted while it is torn down */
             if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
             if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
             conn_cleanup_body_reader(&pool->conns[i]);   /* the reader and the head copy */
@@ -758,7 +763,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
             conn_write_all(c, kl_100_continue, sizeof(kl_100_continue) - 1) < 0) {
             /* Not written in full: part of it may be on the wire, or (TLS) a record the engine
              * still holds would go out ahead of the next write. The stream cannot carry a response
-             * any more: close. */
+             * any more: close, telling the reader its body will not come. */
+            if (c->req.body_reader) c->req.body_reader->on_error(c->req.body_reader);
             c->req.keep_alive = 0;
             c->res.keep_alive = 0;
             c->state = KL_HTTP_CONN_CLOSED;

@@ -663,8 +663,10 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
     KlHttpResponse *res = ctx;
     kl_ssize_t nw;
     if (res->tls) {
+        if (kl_http_comp_stream_tls_full(res)) return 0;      /* completion: backpressure */
         nw = res->tls->write(res->tls, res->conn_fd, data, len);
         if (nw < 0) return -1;
+        if (kl_http_comp_stream_tls_flush(res) < 0) return -1;   /* completion: send it now */
         return nw;  /* 0 = WANT_WRITE (would-block) */
     }
     /* A completion loop: the connection's output queue sends it, in order with everything else the

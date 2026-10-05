@@ -46,7 +46,7 @@ struct KlAsyncOp {
     uint64_t deadline_ms;      /**< Absolute deadline (0 = no deadline) */
     KlAsyncFn on_resume;       /**< Called by kl_async_complete */
     KlAsyncFn on_deadline;     /**< Called when deadline_ms reached */
-    KlAsyncFn on_cancel;       /**< Called if connection dies while suspended */
+    KlAsyncFn on_cancel;       /**< Called if connection dies while suspended (see below) */
     void *user_data;           /**< Opaque (e.g. HlAsyncCtx*) */
     struct KlAsyncOp *next;    /**< Active ops list (server-owned) */
     int _terminal;             /**< Internal: 1 once retired (do not set). */
@@ -81,6 +81,17 @@ int  kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op);
  * @param op Async op to complete (removed from active list).
  */
 void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
+
+/*
+ * **When on_cancel runs.** From kl_async_cancel (a deadline the caller fails, say), from
+ * kl_http_server_free for every op still pending, and when the suspended connection dies: on a
+ * completion loop a send posted meanwhile (a stream chunk) can fail because the client went, and
+ * the connection is released and its op cancelled from inside the loop's I/O processing. Work the
+ * caller started for the op (a thread-pool job, a timer) may then still be outstanding: on_cancel
+ * must not free what that work will still touch. Mark the context dead and free it once the work
+ * has finished (its done_fn sees the mark and does not complete the op). on_cancel must not write
+ * to the connection's response: the connection is being torn down.
+ */
 
 /**
  * @brief Cancel an async operation without resuming the connection.

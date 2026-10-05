@@ -41,7 +41,14 @@ one mechanism serve opposite semantics (see the `KlAsyncOp` doc in `async.h`).
    context is always cleaned up. This guarantee is specific to `KlAsyncOp`, which the server
    cancels explicitly **before** it frees its own loop. Freeing an event loop by itself delivers no
    callbacks to anything still attached (see `kl_event_ctx_free` in `event_ctx.h`).
-5. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the
+5. **A connection that dies cancels its op.** When a suspended connection is released because it
+   died (on a completion loop, a send posted while it was suspended, such as a stream chunk, failed
+   because the client went), its op is cancelled then: `on_cancel` runs from inside the loop's I/O
+   processing, and a later `kl_async_complete()` is a no-op. Work the caller started for the op (a
+   thread-pool job, a timer) may still be outstanding at that point, so `on_cancel` marks the
+   caller's context dead and frees it only once that work has finished; it does not write to the
+   response.
+6. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the
    same `KlAsyncOp` struct may back a fresh suspension after a prior terminal
    (e.g. a handler that yields repeatedly).
 
