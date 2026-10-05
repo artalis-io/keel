@@ -20,6 +20,7 @@
 
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -330,6 +331,11 @@ static int ng_server_submit_response(KlHttp2ServerSession *self, uint32_t stream
                                      const char **hdr_values, int num_headers,
                                      const void *body, size_t body_len) {
     NgServerSession *s = (NgServerSession *)self;
+    if (num_headers < 0 || num_headers > INT_MAX - 1 ||
+        (num_headers > 0 && (!hdr_names || !hdr_values)) ||
+        (body_len > 0 && !body)) return -1;
+    for (int i = 0; i < num_headers; i++)
+        if (!hdr_names[i] || !hdr_values[i]) return -1;
     NgServerStream *st = nghttp2_session_get_stream_user_data(s->ng, (int32_t)stream_id);
 
     if (st && body && body_len) {
@@ -339,7 +345,6 @@ static int ng_server_submit_response(KlHttp2ServerSession *self, uint32_t stream
         st->resp_body_len = body_len;
     }
 
-    if (num_headers < 0) num_headers = 0;
     int nv_cap = 1 + num_headers;
     if ((size_t)nv_cap > SIZE_MAX / sizeof(nghttp2_nv)) return -1;
     nghttp2_nv *nva = kl_malloc(s->alloc, (size_t)nv_cap * sizeof(nghttp2_nv));

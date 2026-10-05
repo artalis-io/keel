@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <limits.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Unit tests for the HTTP/2 client module.
@@ -708,6 +709,29 @@ UTEST(h2c_live, refused_request_is_not_sent) {
     ASSERT_EQ(id2, -1);                         /* refused: the one stream is in use */
     ASSERT_EQ(next, 2);                         /* was 3: /two was submitted anyway */
     ASSERT_EQ(strcmp(last_path, "/one"), 0);
+}
+
+UTEST(h2c_live, invalid_request_arguments_never_reach_the_session) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    Listener l;
+    ASSERT_EQ(0, live_listen(&l));
+    LiveResp lr = {0};
+    KlHttp2ClientConn *c = NULL;
+    ASSERT_GT(live_request(&ev, &a, &l, 0, &c, &lr), 0);
+    KlHttp2ClientHeader header = { .name = "x", .value = "v" };
+    int next = ((MockH2Session *)g_live_session)->next_stream_id;
+    ASSERT_EQ(-1, kl_http2_client_request(c, "GET", "/", &header, INT_MAX, NULL, 0, NULL, NULL));
+    ASSERT_EQ(-1, kl_http2_client_request(c, "GET", "/", NULL, -1, NULL, 0, NULL, NULL));
+    ASSERT_EQ(-1, kl_http2_client_request(c, "GET", "/", NULL, 1, NULL, 0, NULL, NULL));
+    ASSERT_EQ(-1, kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 1, NULL, NULL));
+    header.value = NULL;
+    ASSERT_EQ(-1, kl_http2_client_request(c, "GET", "/", &header, 1, NULL, 0, NULL, NULL));
+    ASSERT_EQ(next, ((MockH2Session *)g_live_session)->next_stream_id);
+    kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(l.fd);
 }
 
 /* A stream can carry a second response HEADERS (an interim 1xx, then the final response). Each

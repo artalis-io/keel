@@ -9,6 +9,7 @@
 #include <keel/allocator.h>
 
 #include <stdio.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/types.h>
 
@@ -127,6 +128,14 @@ int main(void) {
     KlHttp2ServerSession *ss = kl_http2_nghttp2_server_session(&alloc, &scb, &c);
     if (!ss) { cs->destroy(cs); return fail("server session create"); }
     c.ss = ss;
+
+    KlHttp2ClientHeader invalid = { .name = "x", .value = "v" };
+    if (cs->submit_request(cs, "GET", "/", "example.com", &invalid, INT_MAX, NULL, 0) != -1 ||
+        cs->submit_request(cs, "GET", "/", "example.com", NULL, -1, NULL, 0) != -1 ||
+        cs->submit_request(cs, "GET", "/", "example.com", NULL, 1, NULL, 0) != -1 ||
+        ss->submit_response(ss, 1, 200, NULL, NULL, INT_MAX, NULL, 0) != -1) {
+        cs->destroy(cs); ss->destroy(ss); return fail("invalid header counts accepted");
+    }
 
     /* GET / */
     int32_t sid = cs->submit_request(cs, "GET", "/", "example.com", NULL, 0, NULL, 0);

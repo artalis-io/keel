@@ -19,6 +19,7 @@
 
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/types.h>   /* ssize_t (classic nghttp2 callback return type) */
 
@@ -242,6 +243,10 @@ static int32_t ng_client_submit(KlHttp2ClientSession *self,
                                 const KlHttp2ClientHeader *hdrs, int n,
                                 const char *body, size_t body_len) {
     NgClientSession *s = (NgClientSession *)self;
+    if (n < 0 || n > INT_MAX - 4 || (n > 0 && !hdrs) ||
+        !method || !path || !authority || (body_len > 0 && !body)) return -1;
+    for (int i = 0; i < n; i++)
+        if (!hdrs[i].name || !hdrs[i].value) return -1;
 
     NgClientStream *st = kl_malloc(s->alloc, sizeof(*st));
     if (!st) return -1;

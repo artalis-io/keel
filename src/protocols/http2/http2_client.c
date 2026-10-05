@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -740,6 +741,10 @@ int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
         return -1;
     if (!method || !path)
         return -1;
+    if (n < 0 || n > INT_MAX - 4 || (n > 0 && !hdrs) || (body_len > 0 && !body))
+        return -1;
+    for (int i = 0; i < n; i++)
+        if (!hdrs[i].name || !hdrs[i].value) return -1;
 
     /* Make the client's stream record first: if that fails (the stream limit, or memory), nothing
      * has been submitted, so a refused request is never sent. Its id is known once submitted. */

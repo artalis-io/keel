@@ -7,6 +7,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- HTTP/2 client requests and nghttp2 adapter submissions reject invalid header counts and missing
+  header/body pointers before allocation, preventing signed overflow in header-array sizing.
+
 - Thread-pool destruction from a `done_fn` now waits until the callback returns, preventing a
   use-after-free in callback dispatch. Teardown callbacks may repeat the free request safely,
   and submissions after destruction is requested are refused.
