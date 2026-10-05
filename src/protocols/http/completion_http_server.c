@@ -378,15 +378,15 @@ int kl_comp_tls_flush(KlHttpConn *c) {
     return comp_tlsq_kick(c);
 }
 
-/* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
- * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
- * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
 /* Queued plaintext a producer may add to before its writes are refused as would-block: an async
  * stream producer (outside the handler; its writes then stay in the response's outbound buffer,
  * which bounds them) and a WebSocket connection (its frames, sent at any time, would otherwise pile
  * up for a client that stops reading: the connection is exempt from the idle sweep). */
 #define KL_COMP_STREAM_QUEUE_MAX (1u << 20)
 
+/* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
+ * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
+ * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
 kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     if (len == 0) return 0;
     if (c->comp_closing || len > (size_t)INTPTR_MAX) return -1;
@@ -422,6 +422,16 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
         comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX)
         return 0;
     return kl_comp_queue_write(c, data, len);
+}
+
+/* http_response_internal.h: after a streamed TLS write. The driver moves the output itself while it
+ * sends the stream (comp_stream_flushing); anywhere else (the handler, a timer while suspended) it
+ * goes onto the queue now. */
+int kl_http_comp_stream_tls_flush(KlHttpResponse *res) {
+    if (!res->stream_inflight) return 0;
+    KlHttpConn *c = (KlHttpConn *)((char *)res - offsetof(KlHttpConn, res));
+    if (!c->comp_driven || c->comp_stream_flushing || !c->tls) return 0;
+    return kl_comp_tls_flush(c);
 }
 
 /* Close once the queued output is out (a Close frame, an alert, a final response), or now when
@@ -985,6 +995,10 @@ static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) 
 
     /* Autonomous backend (EFI/lwip): the backend gates capacity itself (it does not accept into a
      * full pool), so commit directly with a zero lease and top the backlog up with one post. */
+    if (kl_atomic_load_int(&s->draining)) {   /* a drain serves no new connection, posts no more */
+        if (ev->ok && kl_handle_valid(ev->accepted_fd)) kl_sock_close(s->ev.sockets, ev->accepted_fd);
+        return;
+    }
     if (ev->ok && kl_handle_valid(ev->accepted_fd)) {
         KlSlotLease none = {0};
         comp_setup_accepted(s, ev->accepted_fd, &ev->peer, none);

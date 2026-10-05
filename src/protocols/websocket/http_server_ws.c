@@ -703,6 +703,11 @@ void kl_ws_server_cleanup(KlHttpConn *c) {
     if (!c->ws) return;
     KlWsServerConn *ws = c->ws;
 
+    /* The connection is going away under the WebSocket: nothing more can be sent on it, so a
+     * frame on_close tries to send fails (rather than being written, or on a completion loop posted,
+     * on a connection being torn down). */
+    ws->close_sent = 1;
+
     /* Notify on_close if we haven't received a close frame */
     if (!ws->close_received && ws->config->callbacks.on_close)
         ws->config->callbacks.on_close(ws, 1006, NULL, 0,

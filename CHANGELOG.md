@@ -11,8 +11,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   compacted and reallocated its buffer while a send posted from it was in flight. A backend that
   reads a posted send in place until it completes (the lwIP raw integration, which `completion.h`
   allows) then sent moved or freed memory. The posted bytes now stay where they are until their
-  completion. The queue also never posts more than a backend takes: the EFI integration, which
-  refused any send larger than its 16 KiB buffer, now gets its output in pieces it accepts.
+  completion. The queue also never posts more than a backend takes: on the EFI integration, which
+  refuses any send larger than its 16 KiB buffer, TLS, streamed and WebSocket output now goes out
+  in pieces it accepts (a buffered plaintext response is still one send there, as documented).
 
 - **The URL parser no longer takes a host from outside the authority or from userinfo (behavior
   change).** The closing `]` of an IPv6 literal was searched for in the whole URL, so
@@ -400,7 +401,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **Completion server: a graceful drain accepts no new connection.** A completion loop kept posting
   accepts during a drain, and served a client that connected after the stop (keeping the drain
   going). It now stops accepting when the drain begins, as readiness does, and closes a connection
-  whose accept was already posted.
+  whose accept was already posted. This includes the lwIP raw and EFI integrations, whose backends
+  accept on their own.
+- **Completion server: a TLS stream written while its connection is suspended goes out.** A handler
+  that started a stream, suspended, and wrote chunks from a timer (an event feed) had them held in
+  the TLS engine until the connection resumed; readiness and plaintext send them as written.
+- **WebSocket server: a frame sent from `on_close(1006)` fails (behavior change).** When a client
+  went without a Close, `on_close` runs as the connection is released, and a frame sent from it was
+  written to the connection being torn down. On a completion loop it was posted as a send whose
+  completion arrived for a slot already back in the pool, and a failed one released that slot a
+  second time. The connection is gone, so such a send now returns -1, and nothing is posted on a
+  connection while it is released.
+- **A failed `100 Continue` tells the body reader.** When the interim response could not be written
+  the connection closed without calling the reader's `on_error`, unlike every other failure after
+  the reader was created.
 - **HTTP server: `100 Continue` is written in full, or the connection closes.** The interim response
   was written best-effort and its result ignored, so a write the socket or TLS engine refused dropped
   it. The client then waited for it, and with a real TLS engine the held record went out ahead of the
