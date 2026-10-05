@@ -424,14 +424,32 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
     return kl_comp_queue_write(c, data, len);
 }
 
-/* http_response_internal.h: after a streamed TLS write. The driver moves the output itself while it
- * sends the stream (comp_stream_flushing); anywhere else (the handler, a timer while suspended) it
- * goes onto the queue now. */
-int kl_http_comp_stream_tls_flush(KlHttpResponse *res) {
-    if (!res->stream_inflight) return 0;
+/* The completion-driven TLS connection a streamed response belongs to, when its writes are the
+ * producer's own (not the driver moving them: comp_stream_flushing), else NULL. */
+static KlHttpConn *comp_stream_tls_conn(KlHttpResponse *res) {
+    if (!res->stream_inflight) return NULL;
     KlHttpConn *c = (KlHttpConn *)((char *)res - offsetof(KlHttpConn, res));
-    if (!c->comp_driven || c->comp_stream_flushing || !c->tls) return 0;
-    return kl_comp_tls_flush(c);
+    if (!c->comp_driven || c->comp_stream_flushing || !c->tls) return NULL;
+    return c;
+}
+
+/* http_response_internal.h: before a streamed TLS write. The producer gets the bound a plaintext one
+ * has (kl_http_comp_stream_write): past it the write is refused as would-block before it reaches the
+ * engine (whose ring is bounded and fails the connection when full), so the response's drain
+ * buffers it, itself bounded, and then the producer is told. Each send that completes moves the
+ * drain on (comp_tls_on_write). */
+int kl_http_comp_stream_tls_full(KlHttpResponse *res) {
+    KlHttpConn *c = comp_stream_tls_conn(res);
+    return c && c->state != KL_HTTP_CONN_PROCESSING &&
+           comp_tlsq_unposted(c) >= KL_COMP_STREAM_QUEUE_MAX;
+}
+
+/* http_response_internal.h: after a streamed TLS write the engine took. The driver moves the output
+ * itself while it sends the stream; anywhere else (the handler, a timer while suspended) it goes
+ * onto the queue now. */
+int kl_http_comp_stream_tls_flush(KlHttpResponse *res) {
+    KlHttpConn *c = comp_stream_tls_conn(res);
+    return c ? kl_comp_tls_flush(c) : 0;
 }
 
 /* Close once the queued output is out (a Close frame, an alert, a final response), or now when
@@ -1146,13 +1164,16 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
 static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
     c->comp_tlsq_sent += c->comp_tlsq_inflight_len;
     comp_tlsq_retire(c);
-    /* A streamed response's backlog (what an async producer wrote while the queue was full): move it
-     * onto the queue now there is room, which also tells the producer it may write more. */
-    if (c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&
-        kl_drain_pending(&c->res.drain)) {
-        c->comp_stream_flushing = 1;
-        int fr = kl_drain_flush(&c->res.drain);
-        c->comp_stream_flushing = 0;
+    /* A streamed response's backlog (what an async producer wrote while the queue was full, in the
+     * response's drain and, with TLS, in the engine's ring): move it onto the queue now there is
+     * room, which also tells the producer it may write more. */
+    if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
+        int fr = 0;
+        if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
+            c->comp_stream_flushing = 1;
+            fr = kl_drain_flush(&c->res.drain);
+            c->comp_stream_flushing = 0;
+        }
         if (fr < 0 || (c->tls && comp_tlsq_absorb_ring(c) < 0)) { kl_comp_close(s, c); return; }
     }
     /* A WebSocket's frames held back while the queue was full: move them on now there is room. */

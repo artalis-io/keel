@@ -69,3 +69,4 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
 
 /* Called on every streamed TLS write: with no completion loop there is nothing to flush. */
 int kl_http_comp_stream_tls_flush(KlHttpResponse *res) { (void)res; return 0; }
+int kl_http_comp_stream_tls_full(KlHttpResponse *res) { (void)res; return 0; }

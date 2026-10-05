@@ -600,6 +600,10 @@ void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
      * cannot go back to the pool yet. Cancel what is posted and let the last completion release it
      * (completion_http_server.c). A second release meanwhile is the same request: a no-op. */
     if (c->comp_closing) return;
+    /* A suspended connection that dies (its client reset, a send failed) ends its async op here:
+     * on_cancel, as the contract says, and the op leaves the server's list, so a later
+     * kl_async_complete is a no-op instead of resuming a slot already back in the pool. */
+    if (c->async_op) kl_async_cancel(s, c->async_op);
     if (c->comp_ops > 0) {
         c->comp_closing = 1;
         kl_comp_cancel(&s->ev, c->stream.fd);

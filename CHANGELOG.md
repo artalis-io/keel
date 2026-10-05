@@ -405,10 +405,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   accept on their own.
 - **Completion server: a TLS stream written while its connection is suspended goes out.** A handler
   that started a stream, suspended, and wrote chunks from a timer (an event feed) had them held in
-  the TLS engine until the connection resumed; readiness and plaintext send them as written.
+  the TLS engine until the connection resumed; readiness and plaintext send them as written, with
+  the same bound on what a client that stops reading can hold.
+- **A suspended connection that dies is cancelled.** On a completion loop a suspended connection
+  whose send failed (its client reset) was released with its async op still registered: the op's
+  `on_cancel` never ran, and the later `kl_async_complete` resumed a slot already back in the pool,
+  or a new client's connection. Releasing a suspended connection now cancels its op.
 - **WebSocket server: a frame sent from `on_close(1006)` fails (behavior change).** When a client
-  went without a Close, `on_close` runs as the connection is released, and a frame sent from it was
-  written to the connection being torn down. On a completion loop it was posted as a send whose
+  went without a Close, or the server was freed with the WebSocket still open, `on_close` runs as the
+  connection is released, and a frame sent from it was written to the connection being torn down. On a completion loop it was posted as a send whose
   completion arrived for a slot already back in the pool, and a failed one released that slot a
   second time. The connection is gone, so such a send now returns -1, and nothing is posted on a
   connection while it is released.
