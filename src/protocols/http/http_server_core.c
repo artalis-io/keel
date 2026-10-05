@@ -602,8 +602,11 @@ void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
     if (c->comp_closing) return;
     /* A suspended connection that dies (its client reset, a send failed) ends its async op here:
      * on_cancel, as the contract says, and the op leaves the server's list, so a later
-     * kl_async_complete is a no-op instead of resuming a slot already back in the pool. */
+     * kl_async_complete is a no-op instead of resuming a slot already back in the pool.
+     * Freestanding has no async suspend (async.c is not built there). */
+#ifndef KEEL_FREESTANDING
     if (c->async_op) kl_async_cancel(s, c->async_op);
+#endif
     if (c->comp_ops > 0) {
         c->comp_closing = 1;
         kl_comp_cancel(&s->ev, c->stream.fd);
