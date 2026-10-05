@@ -1603,6 +1603,27 @@ UTEST(dns, entropy_failure_does_not_skip_to_next_candidate) {
     ASSERT_TRUE(req == NULL || (done == 1 && err != 0));
 }
 
+/* The entropy hook takes any KlResolver: one that is not a DNS resolver (here a bare vtable inside
+ * a larger, canary-filled block) is left alone. It was cast to the DNS resolver's layout and a
+ * function pointer written past the end of the vtable. */
+static KlResolveReq *stub_resolve(KlResolver *self, KlEventCtx *ctx, const char *host, int port,
+                                  KlResolveDoneFn done_fn, void *user_data) {
+    (void)self; (void)ctx; (void)host; (void)port; (void)done_fn; (void)user_data;
+    return NULL;
+}
+UTEST(dns, set_random_ignores_a_resolver_that_is_not_dns) {
+    static struct { KlResolver base; unsigned char canary[1 << 16]; } stub;
+    memset(&stub, 0, sizeof stub);
+    stub.base.resolve = stub_resolve;
+    memset(stub.canary, 0xA5, sizeof stub.canary);
+    kl_dns_resolver_set_random(&stub.base, flaky_random);
+    size_t changed = 0;
+    for (size_t i = 0; i < sizeof stub.canary; i++)
+        if (stub.canary[i] != 0xA5) changed++;
+    ASSERT_EQ((size_t)0, changed);                 /* was: the hook's pointer written into it */
+    ASSERT_TRUE(stub.base.resolve == stub_resolve);
+}
+
 /* ── Real-response corpus (hermetic): wire formats the mock doesn't emit ── */
 
 /* CNAME chain: a.test CNAME b.test, then A 5.6.7.8 for b.test. Owner names use

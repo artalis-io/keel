@@ -191,8 +191,9 @@ static void c_close(KlWsClientConn *ws, uint16_t code, const char *r, size_t rl,
     if (c->free_in == 3) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 static void c_err(KlWsClientConn *ws, const char *msg, void *ud) {
-    (void)ws; (void)msg;
-    ((Cli *)ud)->errors++;
+    (void)msg;
+    Cli *c = ud; c->errors++;
+    if (c->free_in == 4) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 
 static void run_case(Peer *p, Cli *c) {
@@ -451,6 +452,86 @@ UTEST(wsc_peer, large_101_in_one_tls_record_completes_the_handshake) {
     mock_tls_split_record = 0;
     ASSERT_EQ(opened, 1);                                      /* was 0: the handshake hung */
     (void)quarantine_check_and_release();
+}
+
+/* ── A Close that cannot be sent ─────────────────────────────────────── */
+/* kl_ws_client_close fails the connection when its Close frame cannot be sent. It reported that by
+ * calling on_error from inside the public call: an on_error that frees the connection (the natural
+ * pattern) freed it under the caller, and a caller doing close() then free() freed it twice. No
+ * callback runs inside close: the error arrives from the loop, and a free before then cancels it.
+ * The mock TLS fails every write once the connection is open (a broken link). */
+static void open_over_mock_tls(Peer *p, Cli *c, KlEventCtx *ev) {
+    char url[64];
+    snprintf(url, sizeof url, "wss://127.0.0.1:%d/", p->port);
+    KlWsClientCallbacks cbs = { .on_open = c_open, .on_message = c_msg,
+                                .on_close = c_close, .on_error = c_err };
+    KlTlsConfig tls = { .ctx = NULL, .factory = mock_tls_create };
+    KlWsClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.tls = &tls;
+    kl_plat_thread_create(&p->tid, peer_thread, p);
+    c->ws = kl_ws_client_connect(ev, &g_qa, &cfg, url, &cbs, c);
+    uint64_t t0 = kl_monotonic_ms();
+    while (kl_monotonic_ms() - t0 < 2000 && c->ws && !c->opened && !c->closed && !c->errors)
+        (void)kl_event_ctx_run(ev, 16, 10);
+}
+
+UTEST(wsc_peer, close_then_free_with_an_unsendable_close_is_safe) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static Cli c; memset(&c, 0, sizeof c);
+    c.free_in = 4;                                             /* on_error frees the connection */
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    open_over_mock_tls(&p, &c, &ev);
+    int opened = c.opened;
+
+    mock_tls_write_fail = 1;
+    if (c.ws) kl_ws_client_close(c.ws, 1000, NULL, 0);
+    int inside = c.errors;                                     /* on_error ran inside close */
+    /* The caller frees right after close. Skipped only when on_error already freed it inside close
+     * (the defect itself): a second free would then be a double free. */
+    if (c.ws) { kl_ws_client_free(c.ws); c.ws = NULL; }
+    for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 1);
+    int after_free = c.errors - inside;                        /* a report after the free */
+    mock_tls_write_fail = 0;
+    kl_event_ctx_free(&ev);
+    peer_finish(&p);
+    int written = quarantine_check_and_release();
+
+    ASSERT_EQ(opened, 1);
+    ASSERT_EQ(inside, 0);                                      /* was 1: on_error freed it there */
+    ASSERT_EQ(after_free, 0);                                  /* the free cancelled the report */
+    ASSERT_EQ(written, 0);
+}
+
+UTEST(wsc_peer, unsendable_close_reports_the_error_from_the_loop) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static Cli c; memset(&c, 0, sizeof c);
+    c.free_in = 4;
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    open_over_mock_tls(&p, &c, &ev);
+    int opened = c.opened;
+
+    mock_tls_write_fail = 1;
+    if (c.ws) kl_ws_client_close(c.ws, 1000, NULL, 0);
+    int inside = c.errors;
+    for (int i = 0; i < 50 && c.ws && !c.errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    int errors = c.errors;
+    int freed = c.ws == NULL;                                  /* on_error freed it, from the loop */
+    if (c.ws) { kl_ws_client_free(c.ws); c.ws = NULL; }
+    mock_tls_write_fail = 0;
+    kl_event_ctx_free(&ev);
+    peer_finish(&p);
+    int written = quarantine_check_and_release();
+
+    ASSERT_EQ(opened, 1);
+    ASSERT_EQ(inside, 0);                                      /* was 1 */
+    ASSERT_EQ(errors, 1);
+    ASSERT_EQ(freed, 1);
+    ASSERT_EQ(written, 0);
 }
 
 UTEST_MAIN();

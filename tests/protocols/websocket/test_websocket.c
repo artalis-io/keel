@@ -1138,8 +1138,9 @@ UTEST(auto_pong, pings_while_output_is_backed_up_queue_one_pong) {
 
 /* A peer taking a backlog of frames is alive even if nothing it sent has been read: on a completion
  * loop no receive is posted while the connection's output is queued, so its PONG cannot arrive
- * until the backlog is out. Bytes a posted send moved since the ping count as the answer: the next
- * ping goes out and the connection stays open. It used to get Close 1001 at the next interval. */
+ * until the backlog is out. No PING is queued behind the backlog: the interval stands in for one,
+ * and bytes a posted send moved since then count as the answer, so the connection stays open. A
+ * backlog that stops moving for the stall bound is still reaped. */
 UTEST(auto_ping, send_progress_after_the_ping_keeps_the_connection) {
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -1163,35 +1164,85 @@ UTEST(auto_ping, send_progress_after_the_ping_keeps_the_connection) {
     conn.ws = ws;
     ws->conn = &conn;
 
-    int r1 = kl_ws_server_auto_ping(&conn, 1000, 1000);   /* the ping waits behind it */
+    (void)kl_ws_server_auto_ping(&conn, 1000, 1000);      /* the interval waits behind it */
+    int watching = ws->ping_unanswered && ws->ping_behind;
     conn.stream.send_progress += 64 * 1024;                /* the backlog keeps going out */
-    int r2 = kl_ws_server_auto_ping(&conn, 1100, 1000);   /* nothing read: progress answers it */
+    (void)kl_ws_server_auto_ping(&conn, 1100, 1000);      /* nothing read: progress answers it */
     int open_mid = !ws->close_sent;
-    /* No progress since that ping: the peer may still be reading what the kernel holds, so the
+    /* No progress since then: the peer may still be reading what the kernel holds, so the
      * backlog gets the stall bound (the server's read timeout) before the peer is taken for dead. */
-    int r3 = kl_ws_server_auto_ping(&conn, 1200, 1000);
+    (void)kl_ws_server_auto_ping(&conn, 1200, 1000);
     int open_stalled = !ws->close_sent;
-    int r4 = kl_ws_server_auto_ping(&conn, 2200, 1000);   /* stalled for the whole bound: gone */
+    (void)kl_ws_server_auto_ping(&conn, 2200, 1000);      /* stalled for the whole bound: gone */
     int closing = ws->close_sent;
 
     uint8_t buf[16];
-    size_t got = read_upto(fds[1], buf, sizeof buf, 8);    /* PING, PING, CLOSE 1001 */
+    size_t got = read_upto(fds[1], buf, sizeof buf, 8);    /* CLOSE 1001 only */
 
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
     kl_free(&alloc, ws, sizeof(KlWsServerConn));
 
-    ASSERT_EQ(r1, 1);
-    ASSERT_EQ(r2, 1);                                      /* was 0: Close 1001 instead */
+    ASSERT_EQ(watching, 1);
     ASSERT_EQ(open_mid, 1);
-    ASSERT_EQ(r3, 0);
     ASSERT_EQ(open_stalled, 1);                            /* inside the stall bound: still open */
-    ASSERT_EQ(r4, 0);
     ASSERT_EQ(closing, 1);                                 /* a send that stopped is still reaped */
-    ASSERT_EQ(got, (size_t)8);
-    ASSERT_EQ(buf[0], 0x89);
-    ASSERT_EQ(buf[2], 0x89);
-    ASSERT_EQ(buf[4], 0x88);
+    ASSERT_EQ(got, (size_t)4);                             /* was 8: a PING queued each interval */
+    ASSERT_EQ(buf[0], 0x88);
+    ASSERT_EQ((((unsigned)buf[2] << 8) | buf[3]), 1001u);
+}
+
+/* On a completion loop a WebSocket without the drain has its output refused once 1 MiB of it is
+ * unposted. A PING written into that full queue failed its send, and the failed send closed a slow
+ * but live peer at once, before the stall bound ever applied. No PING goes behind pending output:
+ * the connection stays open while the backlog moves, and is reaped only after it stalls. */
+UTEST(auto_ping, no_ping_into_a_full_completion_queue) {
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->next_ping_ms = 1000;
+    kl_ws_frame_init(&ws->frame);
+    KlHttpConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = -1;
+    conn.stream.alloc = &alloc;
+    conn.comp_driven = 1;
+    conn.state = KL_HTTP_CONN_WEBSOCKET;
+    const size_t posted = 64 * 1024, unposted = (size_t)1 << 20;   /* at the queue's cap */
+    conn.comp_tlsq = kl_malloc(&alloc, posted + unposted);
+    ASSERT_TRUE(conn.comp_tlsq != NULL);
+    conn.comp_tlsq_cap = conn.comp_tlsq_len = posted + unposted;
+    conn.comp_tlsq_head = posted;
+    conn.comp_tlsq_inflight = 1;                           /* one send posted, the rest waiting */
+    conn.comp_tlsq_inflight_len = posted;
+    conn.ws = ws;
+    ws->conn = &conn;
+
+    (void)kl_ws_server_auto_ping(&conn, 1000, 1000);
+    int open_first = !ws->close_sent;                      /* was 0: the PING's send failed */
+    conn.stream.send_progress += posted;                   /* the peer is reading, slowly */
+    (void)kl_ws_server_auto_ping(&conn, 1100, 1000);
+    int open_moving = !ws->close_sent;
+    (void)kl_ws_server_auto_ping(&conn, 1200, 1000);      /* stalled, inside the bound */
+    int open_stalled = !ws->close_sent;
+    (void)kl_ws_server_auto_ping(&conn, 2200, 1000);      /* stalled for the whole bound */
+    int closing = ws->close_sent;
+    size_t queued = conn.comp_tlsq_len;
+
+    kl_free(&alloc, conn.comp_tlsq, conn.comp_tlsq_cap);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+
+    ASSERT_EQ(open_first, 1);
+    ASSERT_EQ(open_moving, 1);
+    ASSERT_EQ(open_stalled, 1);
+    ASSERT_EQ(closing, 1);
+    ASSERT_EQ(queued, posted + unposted);                  /* nothing was appended to it */
 }
 
 /* The ping's own send is not an answer: with nothing queued ahead of it, the ping goes straight out
@@ -1231,8 +1282,9 @@ UTEST(auto_ping, the_pings_own_send_is_not_an_answer) {
     ASSERT_EQ(closing, 1);
 }
 
-/* The same on a readiness loop with the drain on: the ping waits in the drain behind the backlog,
- * and the drain moving bytes onto the socket shows the peer is reading. */
+/* The same on a readiness loop with the drain on: no PING is buffered behind the backlog, and the
+ * drain moving bytes onto the socket shows the peer is reading. Once the output is out, a real PING
+ * goes out, and only bytes received answer it. */
 UTEST(auto_ping, drain_progress_after_the_ping_keeps_the_connection) {
     KlAllocator alloc = kl_allocator_default();
     KlWsServerConfig cfg;
@@ -1259,20 +1311,29 @@ UTEST(auto_ping, drain_progress_after_the_ping_keeps_the_connection) {
     char backlog[1000];
     memset(backlog, 'b', sizeof backlog);
     int sent = kl_ws_server_send_binary(ws, backlog, sizeof backlog);   /* buffered */
-    int r1 = kl_ws_server_auto_ping(&conn, 1000, 30000);                        /* behind it */
+    (void)kl_ws_server_auto_ping(&conn, 1000, 30000);     /* behind it: no PING queued */
+    size_t held = ws->drain.buf_len;
     g_wb_block = 0;                                        /* the peer reads: the drain moves */
     int st = kl_ws_server_on_writable(&conn);
-    int r2 = kl_ws_server_auto_ping(&conn, 1100, 30000);
+    size_t out_backlog = g_wb_len;
+    int r2 = kl_ws_server_auto_ping(&conn, 1100, 30000);  /* answered; nothing pending: a PING */
     int open_after = !ws->close_sent;
+    size_t out_ping = g_wb_len;
+    (void)kl_ws_server_auto_ping(&conn, 1200, 30000);     /* that PING's own send is no answer */
+    int closing = ws->close_sent;
 
     kl_drain_free(&ws->drain);
     kl_free(&alloc, ws, sizeof(KlWsServerConn));
 
     ASSERT_EQ(sent, 0);
-    ASSERT_EQ(r1, 1);
+    ASSERT_EQ(held, (size_t)(4 + 1000));                   /* was 1006: a PING behind the frame */
     ASSERT_EQ(st, KL_HTTP_CONN_WEBSOCKET);
-    ASSERT_EQ(r2, 1);                                      /* was 0: Close 1001 instead */
+    ASSERT_EQ(out_backlog, (size_t)(4 + 1000));
+    ASSERT_EQ(r2, 1);
     ASSERT_EQ(open_after, 1);
+    ASSERT_EQ(out_ping, (size_t)(4 + 1000 + 2));
+    ASSERT_EQ(g_wb_cap[4 + 1000], 0x89);
+    ASSERT_EQ(closing, 1);
 }
 
 UTEST(cleanup, rejects_unmasked_client_frame) {
