@@ -589,6 +589,79 @@ UTEST(completion_output, one_oversized_websocket_write_cannot_cross_the_queue_bo
     ASSERT_EQ(-1, g_oversized_frame_rc);
 }
 
+static int g_large_drain_many, g_large_drain_rc;
+static void ws_open_large_drain(KlWsServerConn *ws, void *ud) {
+    (void)ud;
+    g_large_drain_rc = kl_ws_server_enable_drain(ws, 4u * 1024u * 1024u);
+    memset(g_oversized_frame, 'O', sizeof g_oversized_frame);
+    int count = g_large_drain_many ? 40 : 1;
+    size_t len = g_large_drain_many ? BIG_CHUNK : sizeof g_oversized_frame;
+    for (int i = 0; i < count && g_large_drain_rc == 0; i++)
+        g_large_drain_rc = kl_ws_server_send_binary(ws, g_oversized_frame, len);
+    if (g_large_drain_rc == 0) g_large_drain_rc = kl_ws_server_close(ws, 1000, NULL, 0);
+}
+
+static void large_ws_drain_case(int *utest_result, int many) {
+    KlHttpServer server;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 2 };
+    ASSERT_EQ(0, kl_http_server_init(&server, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = ws_open_large_drain;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&server, "/ws", &wcfg));
+    g_large_drain_many = many;
+    g_large_drain_rc = -1;
+    size_t cap = 3u * 1024u * 1024u;
+    char *buf = malloc(cap);
+    ASSERT_TRUE(buf != NULL);
+    buf[0] = '\0';
+    KlPlatThread thread;
+    ASSERT_EQ(0, kl_plat_thread_create(&thread, server_thread_fn, &server));
+    wait_for_bind(&server);
+    int fd = connect_rcvbuf(server.bound_port, 0);
+    size_t got = 0;
+    if (fd >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        int closed;
+        got = (size_t)read_until_close(fd, buf, cap, 2000, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&server);
+    kl_plat_thread_join(&thread);
+    kl_http_server_free(&server);
+    int rc = g_large_drain_rc;
+    char *head_end = strstr(buf, "\r\n\r\n");
+    size_t at = head_end ? (size_t)(head_end + 4 - buf) : got;
+    int intact = head_end != NULL;
+    int count = many ? 40 : 1;
+    size_t len = many ? BIG_CHUNK : sizeof g_oversized_frame;
+    for (int i = 0; i < count && intact; i++) {
+        if (got - at < 10 || (unsigned char)buf[at] != 0x82 ||
+            (unsigned char)buf[at + 1] != 127) { intact = 0; break; }
+        uint64_t frame_len = 0;
+        for (int j = 2; j < 10; j++) frame_len = (frame_len << 8) | (unsigned char)buf[at + j];
+        at += 10;
+        if (frame_len != len || got - at < len) { intact = 0; break; }
+        for (size_t j = 0; j < len; j++)
+            if (buf[at + j] != 'O') { intact = 0; break; }
+        at += len;
+    }
+    free(buf);
+    ASSERT_EQ(0, rc);
+    ASSERT_TRUE(intact);
+}
+
+UTEST(completion_output, an_oversized_frame_in_a_large_drain_makes_progress) {
+    large_ws_drain_case(utest_result, 0);
+}
+
+UTEST(completion_output, accumulated_small_frames_in_a_large_drain_make_progress) {
+    large_ws_drain_case(utest_result, 1);
+}
+
 /* ── TLS output written outside a drive goes out ────────────────────────────────────────────────
  * On a completion loop TLS writes land in the engine's output ring, which only a drive moved onto
  * the output queue. Output written from elsewhere (the sweep's auto-ping, a frame sent from a

@@ -7,6 +7,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- Plaintext completion WebSockets now flush large outbound drains in bounded pieces. A frame or
+  accumulated backlog larger than the 1 MiB transport-queue allowance previously stalled after
+  its header, even when the peer was reading. The queue allowance remains enforced.
+
 - HTTP/2 client requests and nghttp2 adapter submissions reject invalid header counts and missing
   header/body pointers before allocation, preventing signed overflow in header-array sizing.
 

@@ -85,6 +85,10 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
     KlHttpConn *c = ws->conn;
+    /* A completion queue has a bounded admission allowance. Flush a large drain in pieces so
+     * its complete buffered length cannot remain permanently larger than that allowance. */
+    if (c->comp_driven && !c->tls && len > 64u * 1024u)
+        len = 64u * 1024u;
     kl_ssize_t nw = conn_write(c, data, len);
     /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS
      * reports a full buffer as 0), and errno after it is whatever an earlier call left. */
@@ -841,4 +845,3 @@ int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerCo
     s->router.routes[s->router.count - 1].ws_config = config;
     return 0;
 }
-
