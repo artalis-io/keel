@@ -214,12 +214,14 @@ void kl_http_response_reset(KlHttpResponse *res) {
     KlSocketHandle conn_fd = res->conn_fd;   /* pointer-width: a Windows SOCKET does not fit an int */
     KlTls *tls = res->tls;
     struct KlEventCtx *ctx = res->ctx;
+    int own = res->stream_inflight;          /* the pooled-connection mark, like the bindings */
 
     memset(res, 0, sizeof(*res));
     res->alloc = alloc;
     res->conn_fd = conn_fd;
     res->tls = tls;
     res->ctx = ctx;
+    res->stream_inflight = own;
     res->status = 200;
     res->file_fd = -1;
     res->hdr_buf = buf;

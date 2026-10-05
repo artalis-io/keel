@@ -51,8 +51,19 @@ static inline kl_ssize_t conn_read(KlHttpConn *c, void *buf, size_t len) {
  * overlapped send at a time, in order; completion_http_server.c). Never blocks. len, or -1. */
 kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len);
 
+/* Move the TLS engine's output onto a completion-driven connection's output queue and start sending
+ * it (completion_http_server.c). 0, or -1 on error. */
+int kl_comp_tls_flush(KlHttpConn *c);
+
 static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
-    if (c->tls) return c->tls->write(c->tls, c->stream.fd, buf, len);
+    if (c->tls) {
+        kl_ssize_t n = c->tls->write(c->tls, c->stream.fd, buf, len);
+        /* A completion loop: the record is only in the engine's ring. Queue it now, as nothing else
+         * may do it soon (a frame or ping written outside a drive waited for the client to speak),
+         * which also makes room in the ring for a write that was refused for lack of it. */
+        if (n >= 0 && c->comp_driven && kl_comp_tls_flush(c) < 0) return -1;
+        return n;
+    }
     /* A completion loop: never a synchronous send on the loop thread (accepted sockets are blocking
      * on io_uring), and never one that could overtake a posted send. */
     if (c->comp_driven) return kl_comp_queue_write(c, buf, len);

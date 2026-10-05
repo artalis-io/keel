@@ -795,6 +795,7 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_post_dgram_recv, pc_comp_post_dgram_send,
     pc_comp_cancel_dgram, pc_comp_retire_dgram, pc_comp_post_connect,
     pc_shutdown_accepts,
+    0,      /* send_max: no limit (a post of any size is taken) */
 };
 
 /* ── Runtime event provider ────────────────────────────────────────

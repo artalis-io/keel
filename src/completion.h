@@ -189,6 +189,9 @@ typedef struct KlCompletionOps {
      * driven backends only; an autonomous backend (EFI/lwip) never installs a listener → NULL slot,
      * treated as success (0) by kl_comp_shutdown_accepts_raw. */
     int (*shutdown_accepts)(struct KlEventCtx *ctx);
+    /* The largest `total` post_send accepts (a backend with a bounded send buffer), or 0 for no
+     * limit. A caller that can split its output (the HTTP output queue) posts at most this much. */
+    size_t send_max;
 } KlCompletionOps;
 
 /* The compiled-in completion backend's vtable (one per completion backend TU). A
@@ -236,6 +239,9 @@ int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap);
  * segment (the stack Content-Length scratch) is tiny; a backend that references in place must
  * snapshot small segments itself. Copying backends are unaffected by this note. */
 int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total);
+
+/* The backend's largest post_send total (KlCompletionOps.send_max), or 0 for no limit. */
+size_t kl_comp_send_max_raw(const KlStream *stream);
 
 /* Post one async accept on the loop's latched listen socket (refill the backlog). Neutral:
  * the HTTP wrapper kl_comp_post_accept(KlHttpServer*) passes &s->ev. */

@@ -59,6 +59,10 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
     return kl_comp_ops(&stream->ctx->loop)->post_send(stream, iov, iovcnt, total);
 }
 
+size_t kl_comp_send_max_raw(const KlStream *stream) {
+    return kl_comp_ops(&stream->ctx->loop)->send_max;
+}
+
 int kl_comp_post_accept_raw(struct KlEventCtx *ctx) {
     return kl_comp_ops(&ctx->loop)->post_accept(ctx);
 }

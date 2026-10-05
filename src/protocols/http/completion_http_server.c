@@ -34,6 +34,7 @@
 #include "platform.h"            /* kl_plat_file_pread: TLS file body chunks */
 #include <keel/proxy_protocol.h> /* kl_cidr_match: PROXY-over-completion accept gate */
 #include "http_proto_hooks.h"         /* ws/h2 upgrade + completion-drive seams */
+#include "kl_atomic.h"         /* the draining flag */
 #include <string.h>
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
 #include <stdint.h>              /* SIZE_MAX */
@@ -233,23 +234,75 @@ static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
  * (backpressure), the rejection drain's half-close, and a close. See comp_tlsq_settle. */
 
 /* Make room for `add` more queued bytes. 0, or -1 on overflow / allocation failure. */
+/* The queue buffer holds [head, len): when a send is in flight from it, its first inflight_len bytes
+ * are that send's, then the unposted bytes. A backend may read a posted region in place until the
+ * send completes (completion.h permits it), so while it is in flight the region must not move: no
+ * compaction, no realloc, no reuse. Growing then moves only the unposted bytes to a new buffer and
+ * keeps the old one (comp_tlsq_old) until the send completes. */
+static int comp_tlsq_pinned(const KlHttpConn *c) {
+    return c->comp_tlsq_inflight && c->comp_tlsq_old == NULL;
+}
+
+/* Bytes queued and not yet posted. */
+static size_t comp_tlsq_unposted(const KlHttpConn *c) {
+    size_t n = c->comp_tlsq_len - c->comp_tlsq_head;
+    return comp_tlsq_pinned(c) ? n - c->comp_tlsq_inflight_len : n;
+}
+
+static size_t comp_tlsq_grow_cap(size_t cur, size_t need) {
+    size_t ncap = cur ? cur : KL_TLS_FLUSH_CHUNK;
+    while (ncap < need) ncap *= 2;
+    return ncap;
+}
+
 static int comp_tlsq_reserve(KlHttpConn *c, size_t add) {
-    if (c->comp_tlsq_head > 0 && c->comp_tlsq_len + add > c->comp_tlsq_cap) {
-        /* Drop the already-posted front before growing (the backend copied it at post). */
+    if (add > SIZE_MAX / 4 || c->comp_tlsq_len > SIZE_MAX / 4) return -1;
+    if (c->comp_tlsq_len + add <= c->comp_tlsq_cap) return 0;
+    if (comp_tlsq_pinned(c)) {
+        /* Move the unposted bytes to a new buffer; the posted ones stay put until their send
+         * completes (comp_tls_on_write frees the old buffer then). */
+        size_t from = c->comp_tlsq_head + c->comp_tlsq_inflight_len;
+        size_t keep = c->comp_tlsq_len - from;
+        size_t ncap = comp_tlsq_grow_cap(c->comp_tlsq_cap, keep + add);
+        unsigned char *nb = kl_malloc(c->stream.alloc, ncap);
+        if (!nb) return -1;
+        if (keep) memcpy(nb, c->comp_tlsq + from, keep);
+        c->comp_tlsq_old = c->comp_tlsq;
+        c->comp_tlsq_old_cap = c->comp_tlsq_cap;
+        c->comp_tlsq = nb;
+        c->comp_tlsq_cap = ncap;
+        c->comp_tlsq_head = 0;
+        c->comp_tlsq_len = keep;
+        return 0;
+    }
+    if (c->comp_tlsq_head > 0) {   /* nothing of this buffer is in flight: drop the sent front */
         memmove(c->comp_tlsq, c->comp_tlsq + c->comp_tlsq_head, c->comp_tlsq_len - c->comp_tlsq_head);
         c->comp_tlsq_len -= c->comp_tlsq_head;
         c->comp_tlsq_head = 0;
     }
-    if (add > SIZE_MAX / 2 - c->comp_tlsq_len) return -1;
     size_t need = c->comp_tlsq_len + add;
     if (need <= c->comp_tlsq_cap) return 0;
-    size_t ncap = c->comp_tlsq_cap ? c->comp_tlsq_cap : KL_TLS_FLUSH_CHUNK;
-    while (ncap < need) ncap *= 2;
+    size_t ncap = comp_tlsq_grow_cap(c->comp_tlsq_cap, need);
     unsigned char *nb = kl_realloc(c->stream.alloc, c->comp_tlsq, c->comp_tlsq_cap, ncap);
     if (!nb) return -1;
     c->comp_tlsq = nb;
     c->comp_tlsq_cap = ncap;
     return 0;
+}
+
+/* The send in flight completed: release its region (or the old buffer it lived in). */
+static void comp_tlsq_retire(KlHttpConn *c) {
+    if (c->comp_tlsq_old) {
+        kl_free(c->stream.alloc, c->comp_tlsq_old, c->comp_tlsq_old_cap);
+        c->comp_tlsq_old = NULL;
+        c->comp_tlsq_old_cap = 0;
+    } else {
+        c->comp_tlsq_head += c->comp_tlsq_inflight_len;
+        if (c->comp_tlsq_head == c->comp_tlsq_len)          /* all sent: start over at the front */
+            c->comp_tlsq_head = c->comp_tlsq_len = 0;
+    }
+    c->comp_tlsq_inflight = 0;
+    c->comp_tlsq_inflight_len = 0;
 }
 
 /* Move everything in the engine's output ring onto the queue. 0, or -1 on error. */
@@ -265,29 +318,27 @@ static int comp_tlsq_absorb_ring(KlHttpConn *c) {
     }
 }
 
-/* One send carries at most this much of the queue. A long transfer then completes, and so shows
- * progress, every so often on every backend (an overlapped send is otherwise reported only once all
- * of it is out), and the backend's copy of a send stays small however long the queue grows. */
+/* One send carries at most this much of the queue (and never more than the backend takes). A long
+ * transfer then completes, and so shows progress, every so often on every backend (an overlapped
+ * send is otherwise reported only once all of it is out), and a backend's copy of a send stays
+ * small however long the queue grows. */
 #define KL_COMP_QUEUE_POST_MAX (256u * 1024u)
 
-/* Bytes queued and not yet posted. */
-static size_t comp_tlsq_unposted(const KlHttpConn *c) {
-    return c->comp_tlsq_len - c->comp_tlsq_head;
-}
-
 /* Post the next part of the queue as one send, unless one is already in flight (its completion
- * posts the rest). 0, or -1 if the post failed. */
+ * posts the rest). The posted region stays where it is until that completion. 0, or -1 if the post
+ * failed (nothing changed then). */
 static int comp_tlsq_kick(KlHttpConn *c) {
+    if (c->comp_tlsq_inflight) return 0;
     size_t n = comp_tlsq_unposted(c);
-    if (c->comp_tlsq_inflight || n == 0) return 0;
-    if (n > KL_COMP_QUEUE_POST_MAX) n = KL_COMP_QUEUE_POST_MAX;
+    if (n == 0) return 0;
+    size_t cap = KL_COMP_QUEUE_POST_MAX;
+    size_t bmax = kl_comp_send_max_raw(&c->stream);
+    if (bmax && bmax < cap) cap = bmax;
+    if (n > cap) n = cap;
     KlIoVec iov = { c->comp_tlsq + c->comp_tlsq_head, n };
-    if (kl_comp_post_send(c, &iov, 1, n) < 0) return -1;   /* the backend copies */
+    if (kl_comp_post_send(c, &iov, 1, n) < 0) return -1;
     c->comp_tlsq_inflight = 1;
     c->comp_tlsq_inflight_len = n;
-    c->comp_tlsq_head += n;
-    if (c->comp_tlsq_head == c->comp_tlsq_len)              /* all posted: start over at the front */
-        c->comp_tlsq_head = c->comp_tlsq_len = 0;
     return 0;
 }
 
@@ -836,10 +887,14 @@ static int comp_accept_reserve(void *ctx) {
 static void comp_accept_release(void *ctx) {
     KlHttpServer *s = ctx;
     kl_http_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
-    kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
+    if (!kl_atomic_load_int(&s->draining))              /* a drain accepts nothing new */
+        kl_listener_notify_slot_free(&s->accept_listener);   /* ...then resume the accept if paused */
 }
 static int comp_accept_arm(void *ctx) {
     KlHttpServer *s = ctx;
+    /* A graceful drain accepts nothing new (readiness leaves new connections in the backlog):
+     * pause, and the drain's end closes the listener. */
+    if (kl_atomic_load_int(&s->draining)) return KL_LISTENER_ARM_RETRY;
     /* Out of descriptors or memory a moment ago: the connection is still queued, so an accept posted
      * now fails the same way at once (a busy loop). Pause until the back-off has passed; the sweep's
      * per-tick notify posts again then. */
@@ -913,6 +968,13 @@ static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) 
              * the arm hook then pauses the listener until it has passed (comp_accept_arm). */
             if (ev->resource_exhausted)
                 s->accept_backoff_until = kl_monotonic_ms() + KL_HTTP_ACCEPT_RETRY_MS;
+            kl_listener_on_accept_failed(&s->accept_listener, -1);
+            return;
+        }
+        /* An accept posted before the drain began and completing during it: a drain serves no new
+         * connection (readiness never accepts it), so close it and retire the accept. */
+        if (kl_atomic_load_int(&s->draining)) {
+            kl_sock_close(s->ev.sockets, ev->accepted_fd);
             kl_listener_on_accept_failed(&s->accept_listener, -1);
             return;
         }
@@ -1068,9 +1130,8 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
  * keep-alive / drain / close); otherwise post what queued up meanwhile and run what waits for an
  * empty queue (a deferred h2 recv, the drain's half-close, a close). */
 static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
-    c->comp_tlsq_inflight = 0;
     c->comp_tlsq_sent += c->comp_tlsq_inflight_len;
-    c->comp_tlsq_inflight_len = 0;
+    comp_tlsq_retire(c);
     /* A streamed response's backlog (what an async producer wrote while the queue was full): move it
      * onto the queue now there is room, which also tells the producer it may write more. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&

@@ -829,6 +829,7 @@ static const KlCompletionOps EFI_COMP_OPS = {
     .post_accept = el_post_accept,
     .post_recv = el_post_recv,           /* server completion-native recv */
     .post_send = el_post_send,           /* server completion-native send */
+    .send_max  = KL_EFI_SNDBUF,          /* el_post_send copies into a buffer of this size */
 #ifdef KEEL_UEFI_DATAGRAM
     .post_dgram_recv = el_post_dgram_recv,   /* datagram completion recv (EFI_UDP4 Receive) */
     .post_dgram_send = el_post_dgram_send,   /* datagram completion send (EFI_UDP4 Transmit) */

@@ -7,6 +7,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **Completion server: a posted send is never moved before it completes.** The output queue
+  compacted and reallocated its buffer while a send posted from it was in flight. A backend that
+  reads a posted send in place until it completes (the lwIP raw integration, which `completion.h`
+  allows) then sent moved or freed memory. The posted bytes now stay where they are until their
+  completion. The queue also never posts more than a backend takes: the EFI integration, which
+  refused any send larger than its 16 KiB buffer, now gets its output in pieces it accepts.
+
 - **The URL parser no longer takes a host from outside the authority or from userinfo (behavior
   change).** The closing `]` of an IPv6 literal was searched for in the whole URL, so
   `http://[a/b?c]` parsed with the host `a/b?c`, and anything could sit between the brackets. An `@`
@@ -384,6 +391,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   producer driven only by the edge over a real socket) and over a named pipe on IOCP.
 
 ### Fixed
+
+- **Completion server: TLS output written outside a request is sent at once.** On a completion
+  loop a TLS write only reached the engine's output ring, which was flushed when the connection was
+  next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or
+  GOAWAY then waited for the client to speak, so a client that only answered pings never got one and
+  was closed as dead. Every TLS write on a completion loop now queues and starts sending its output.
+- **Completion server: a graceful drain accepts no new connection.** A completion loop kept posting
+  accepts during a drain, and served a client that connected after the stop (keeping the drain
+  going). It now stops accepting when the drain begins, as readiness does, and closes a connection
+  whose accept was already posted.
+- **HTTP server: `100 Continue` is written in full, or the connection closes.** The interim response
+  was written best-effort and its result ignored, so a write the socket or TLS engine refused dropped
+  it. The client then waited for it, and with a real TLS engine the held record went out ahead of the
+  response.
+- **`kl_http_response_reset` keeps a pooled response's ownership mark.** A handler that reset its
+  response and then streamed got a failed stream on a completion loop.
 
 - **A handler that set a 1xx status sent it as a final response.** Since the status table was
   widened to every code, `kl_http_response_status(res, 103)` (or any 100-199) went out as a final
