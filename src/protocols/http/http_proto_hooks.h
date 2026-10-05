@@ -43,7 +43,7 @@ typedef struct KlWsServerHooks {
     int  (*on_writable)(KlHttpConn *c);
     int  (*drain_pending)(const KlHttpConn *c);           /* readiness: want WRITE interest? */
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
-    int  (*auto_ping)(KlHttpConn *c, uint64_t now);       /* idle-sweep keepalive */
+    int  (*auto_ping)(KlHttpConn *c, uint64_t now, uint64_t stall_ms);   /* idle-sweep keepalive */
     int  (*check_close_timeout)(const KlHttpConn *c, uint64_t now);
     void (*drain_close)(KlHttpConn *c);                   /* graceful-drain nudge */
 } KlWsServerHooks;

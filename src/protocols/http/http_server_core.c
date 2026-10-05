@@ -686,7 +686,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         if (tc->state == KL_HTTP_CONN_WEBSOCKET) {
             const KlWsServerHooks *wsh = kl_ws_server_hooks();
             if (wsh) {
-                if (wsh->auto_ping) wsh->auto_ping(tc, now);
+                if (wsh->auto_ping) wsh->auto_ping(tc, now, timeout);
                 if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
                     if (completion_loop && tc->comp_driven) {
                         /* Close once what is already queued is out, as a readiness close still

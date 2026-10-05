@@ -749,7 +749,7 @@ static int ws_out_pending(const KlHttpConn *c) {
            (c->ws->drain_enabled && kl_drain_pending(&c->ws->drain));
 }
 
-int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
+int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now, uint64_t stall_ms) {
     KlWsServerConn *ws = c->ws;
     if (!ws || ws->next_ping_ms == 0) return 0;
     if (ws->close_sent || ws->close_received) return 0;
@@ -758,10 +758,16 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
         if (ws->ping_behind && ws_out_progress(c) != ws->ping_progress) {
             /* The ping went out behind a backlog, which the peer has been taking since: it cannot
              * answer a ping it has not reached yet (and on a completion loop nothing is read while
-             * output is queued), so the backlog moving is the answer. Ping again. A backlog that
-             * stopped moving does not answer: the connection is failed below. The ping's own
+             * output is queued), so the backlog moving is the answer. Ping again. The ping's own
              * bytes never count, since nothing was ahead of a ping sent straight out. */
             ws->ping_unanswered = 0;
+        } else if (ws->ping_behind && now - ws->ping_sent_ms < stall_ms) {
+            /* Behind a backlog that has not moved since the ping: the peer may still be reading what
+             * the kernel already took (a full socket send buffer can hold seconds of output for a
+             * slow reader, and none of it shows as progress here). Give it the read timeout, the
+             * bound a stalled send gets, before taking the peer for dead. */
+            ws->next_ping_ms = now + (uint64_t)ws->config->ping_interval_ms;
+            return 0;
         } else {
             /* Nothing arrived for a whole interval after the last ping: the peer is gone (a dead
              * peer behind a NAT never answers and never resets). Fail the connection: Close 1001
@@ -775,6 +781,7 @@ int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
     ws->ping_behind = ws_out_pending(c);
     kl_ws_server_send_ping(ws, NULL, 0);
     ws->ping_progress = ws_out_progress(c);
+    ws->ping_sent_ms = now;
     ws->ping_unanswered = 1;
     ws->next_ping_ms = now + (uint64_t)ws->config->ping_interval_ms;
     return 1;

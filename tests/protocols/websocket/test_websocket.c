@@ -867,10 +867,10 @@ UTEST(auto_ping, sends_ping) {
     ws->conn = &conn;
 
     /* Before deadline → no ping */
-    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 999), 0);
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 999, 30000), 0);
 
     /* At deadline → sends ping */
-    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 1000), 1);
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 1000, 30000), 1);
 
     /* Read the ping frame from the other end */
     uint8_t buf[16];
@@ -906,7 +906,7 @@ UTEST(auto_ping, reschedules) {
     conn.ws = ws;
     ws->conn = &conn;
 
-    kl_ws_server_auto_ping(&conn, 1000);
+    kl_ws_server_auto_ping(&conn, 1000, 30000);
     /* next_ping_ms should advance by interval */
     ASSERT_EQ(ws->next_ping_ms, (uint64_t)1200);
 
@@ -934,7 +934,7 @@ UTEST(auto_ping, skips_closing) {
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
-    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 2000), 0);
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 2000, 30000), 0);
 }
 
 UTEST(auto_ping, not_before_deadline) {
@@ -951,7 +951,7 @@ UTEST(auto_ping, not_before_deadline) {
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
-    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 500), 0);
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 500, 30000), 0);
 }
 
 /* Read from fd until `want` bytes arrived or nothing more comes within 200 ms. */
@@ -989,10 +989,10 @@ UTEST(auto_ping, unanswered_ping_fails_the_connection) {
     conn.ws = ws;
     ws->conn = &conn;
 
-    int pinged    = kl_ws_server_auto_ping(&conn, 1000);   /* the ping */
-    int early     = kl_ws_server_auto_ping(&conn, 1050);   /* inside the interval: nothing */
+    int pinged    = kl_ws_server_auto_ping(&conn, 1000, 30000);   /* the ping */
+    int early     = kl_ws_server_auto_ping(&conn, 1050, 30000);   /* inside the interval: nothing */
     int open_mid  = !ws->close_sent;
-    (void)kl_ws_server_auto_ping(&conn, 1100);             /* a whole interval, nothing received */
+    (void)kl_ws_server_auto_ping(&conn, 1100, 30000);             /* a whole interval, nothing received */
     int closing   = ws->close_sent;
     int due       = kl_ws_server_check_close_timeout(&conn, 1100);
 
@@ -1040,10 +1040,10 @@ UTEST(auto_ping, a_frame_after_the_ping_keeps_the_connection) {
 
     static const uint8_t mask[4] = {0x11, 0x22, 0x33, 0x44};
     uint8_t pong[16];
-    int r1 = kl_ws_server_auto_ping(&conn, 1000);
+    int r1 = kl_ws_server_auto_ping(&conn, 1000, 30000);
     size_t fl = build_frame(pong, 1, 0xA, 1, mask, NULL, 0);
     int st = kl_ws_server_on_readable_data(&conn, pong, fl);
-    int r2 = kl_ws_server_auto_ping(&conn, 1100);          /* answered: the next ping */
+    int r2 = kl_ws_server_auto_ping(&conn, 1100, 30000);          /* answered: the next ping */
     int open_after = !ws->close_sent;
 
     uint8_t buf[16];
@@ -1163,11 +1163,15 @@ UTEST(auto_ping, send_progress_after_the_ping_keeps_the_connection) {
     conn.ws = ws;
     ws->conn = &conn;
 
-    int r1 = kl_ws_server_auto_ping(&conn, 1000);          /* the ping waits behind it */
+    int r1 = kl_ws_server_auto_ping(&conn, 1000, 1000);   /* the ping waits behind it */
     conn.stream.send_progress += 64 * 1024;                /* the backlog keeps going out */
-    int r2 = kl_ws_server_auto_ping(&conn, 1100);          /* nothing read: progress answers it */
+    int r2 = kl_ws_server_auto_ping(&conn, 1100, 1000);   /* nothing read: progress answers it */
     int open_mid = !ws->close_sent;
-    int r3 = kl_ws_server_auto_ping(&conn, 1200);          /* no progress since that ping: gone */
+    /* No progress since that ping: the peer may still be reading what the kernel holds, so the
+     * backlog gets the stall bound (the server's read timeout) before the peer is taken for dead. */
+    int r3 = kl_ws_server_auto_ping(&conn, 1200, 1000);
+    int open_stalled = !ws->close_sent;
+    int r4 = kl_ws_server_auto_ping(&conn, 2200, 1000);   /* stalled for the whole bound: gone */
     int closing = ws->close_sent;
 
     uint8_t buf[16];
@@ -1181,6 +1185,8 @@ UTEST(auto_ping, send_progress_after_the_ping_keeps_the_connection) {
     ASSERT_EQ(r2, 1);                                      /* was 0: Close 1001 instead */
     ASSERT_EQ(open_mid, 1);
     ASSERT_EQ(r3, 0);
+    ASSERT_EQ(open_stalled, 1);                            /* inside the stall bound: still open */
+    ASSERT_EQ(r4, 0);
     ASSERT_EQ(closing, 1);                                 /* a send that stopped is still reaped */
     ASSERT_EQ(got, (size_t)8);
     ASSERT_EQ(buf[0], 0x89);
@@ -1211,9 +1217,9 @@ UTEST(auto_ping, the_pings_own_send_is_not_an_answer) {
     conn.ws = ws;
     ws->conn = &conn;
 
-    int r1 = kl_ws_server_auto_ping(&conn, 1000);          /* nothing queued: the ping goes out */
+    int r1 = kl_ws_server_auto_ping(&conn, 1000, 30000);          /* nothing queued: the ping goes out */
     conn.stream.send_progress += 2;                        /* its own two bytes */
-    int r2 = kl_ws_server_auto_ping(&conn, 1100);
+    int r2 = kl_ws_server_auto_ping(&conn, 1100, 30000);
     int closing = ws->close_sent;
 
     kl_test_closesock(fds[0]);
@@ -1253,10 +1259,10 @@ UTEST(auto_ping, drain_progress_after_the_ping_keeps_the_connection) {
     char backlog[1000];
     memset(backlog, 'b', sizeof backlog);
     int sent = kl_ws_server_send_binary(ws, backlog, sizeof backlog);   /* buffered */
-    int r1 = kl_ws_server_auto_ping(&conn, 1000);                        /* behind it */
+    int r1 = kl_ws_server_auto_ping(&conn, 1000, 30000);                        /* behind it */
     g_wb_block = 0;                                        /* the peer reads: the drain moves */
     int st = kl_ws_server_on_writable(&conn);
-    int r2 = kl_ws_server_auto_ping(&conn, 1100);
+    int r2 = kl_ws_server_auto_ping(&conn, 1100, 30000);
     int open_after = !ws->close_sent;
 
     kl_drain_free(&ws->drain);

@@ -451,10 +451,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   PONG it sent is not read. The auto-ping counted only bytes received as an answer: a live client
   slowly reading a backlog longer than one interval was sent Close 1001 and closed. A ping sent
   behind queued output now counts that output moving (bytes a completion engine's sends moved, or
-  the drain flushed onto a readiness socket) as the answer, and pings again. A backlog that stops
-  moving still fails the connection, and a ping sent with nothing ahead of it is answered only by
-  bytes received, as before (its own send is never an answer). On IOCP an overlapped send
-  completes whole, so its progress shows only when it completes.
+  the drain flushed onto a readiness socket) as the answer, and pings again. A backlog that does not
+  move is given the server's read timeout before the peer is taken for dead, since a slow reader can
+  spend seconds on what a full socket send buffer already holds, none of which shows as progress.
+  A ping sent with nothing ahead of it is still answered only by bytes received, as before (its own
+  send is never an answer). On IOCP an overlapped send completes whole, so its progress shows only
+  when it completes.
 - **HTTP/2 server: a long download is no longer timed out while its response is going out.** KEEL
   forgets a stream once its response is submitted, so with no stream left and nothing the session
   still wanted to write, the idle sweep took the connection for idle, and the idle clock moved only
