@@ -2,7 +2,8 @@
  * test_event_provider_vtable.c: a runtime event backend (KlEventProvider.ops) whose table omits a
  * REQUIRED op must be rejected at the install boundary BEFORE any op is called, WITHOUT crashing.
  * The kl_event_* dispatch calls init/add/mod/del/wait/close/caps unconditionally when a provider is
- * installed (no builtin fallback); `native_provider` and `completion` are optional (NULL-safe).
+ * installed (no builtin fallback); native_provider is optional. completion may be NULL only
+ * for readiness: completion-advertising providers require a table with a drain operation.
  *
  * Failure semantics (reviewer ruling): a missing required op is malformed input (KL_ERR_INVALID_ARG);
  * a COMPLETE provider whose init() fails is a runtime init failure (KL_ERR_EVENT_INIT). A NULL ops
@@ -14,6 +15,7 @@
 #include <keel/event_ctx.h>
 #include <keel/event.h>
 #include <string.h>
+#include "completion.h"
 
 /* ── a configurable stub event backend (one required op omitted per test) ──────── */
 static int  g_init_ret;
@@ -22,7 +24,8 @@ static int  ev_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { 
 static int  ev_mod(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l;(void)fd;(void)m;(void)u; return 0; }
 static int  ev_del(KlEventLoop *l, KlSocketHandle fd) { (void)l;(void)fd; return 0; }
 static int  ev_wait(KlEventLoop *l, KlEvent *o, int mx, int to) { (void)l;(void)o;(void)mx;(void)to; return 0; }
-static void ev_close(KlEventLoop *l) { (void)l; }
+static int g_closed;
+static void ev_close(KlEventLoop *l) { (void)l; g_closed++; }
 static unsigned ev_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD; }
 static const struct KlSocketProvider *ev_native(const KlEventLoop *l) { (void)l; return NULL; }
 
@@ -106,5 +109,43 @@ UTEST(event_provider_vtable, null_ops_falls_back_to_builtin) {
     ASSERT_EQ(kl_event_ctx_init_ex(&ev, &alloc, &prov), 0);
     kl_event_ctx_free(&ev);
 }
+
+static unsigned completion_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_COMPLETION; }
+#ifndef KEEL_NO_COMPLETION
+static int completion_drain(KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout) {
+    (void)ctx; (void)out; (void)max; (void)timeout; return 0;
+}
+#endif
+
+UTEST(event_provider_vtable, completion_table_and_drain_required_after_init) {
+    KlAllocator alloc = kl_allocator_default();
+    KlCompletionOps comp = {0};
+    for (int missing_table = 0; missing_table < 2; missing_table++) {
+        KlEventOps ops; fill_ops(&ops, OMIT_NONE);
+        ops.caps = completion_caps;
+        ops.completion = missing_table ? NULL : &comp;
+        KlEventProvider prov = { &ops, "malformed-completion" };
+        KlEventCtx ctx; g_init_ret = 0; g_closed = 0;
+        ASSERT_EQ(-1, kl_event_ctx_init_ex(&ctx, &alloc, &prov));
+        ASSERT_EQ(KL_ERR_EVENT_INIT, ctx.last_error); /* model is known only after init */
+        ASSERT_EQ(1, g_closed);
+        ASSERT_TRUE(ctx.loop.ops == NULL);
+    }
+}
+
+#ifndef KEEL_NO_COMPLETION
+UTEST(event_provider_vtable, drain_only_completion_provider_can_drive_a_loop) {
+    KlAllocator alloc = kl_allocator_default();
+    KlCompletionOps comp = { .drain = completion_drain };
+    KlEventOps ops; fill_ops(&ops, OMIT_NONE);
+    ops.caps = completion_caps; ops.completion = &comp;
+    KlEventProvider prov = { &ops, "drain-only" };
+    KlEventCtx ctx; g_init_ret = 0; g_closed = 0;
+    ASSERT_EQ(0, kl_event_ctx_init_ex(&ctx, &alloc, &prov));
+    ASSERT_EQ(0, kl_event_ctx_run(&ctx, 1, 0));
+    kl_event_ctx_free(&ctx);
+    ASSERT_EQ(1, g_closed);
+}
+#endif
 
 UTEST_MAIN();

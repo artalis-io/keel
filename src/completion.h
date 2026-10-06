@@ -131,6 +131,8 @@ struct KlEventCtx;
  * vtable. Each completion backend renames its impls (static, e.g. iou_post_recv) and
  * exposes them via kl_comp_ops_builtin(). See docs/archive/designs/event_provider_design.md. */
 typedef struct KlCompletionOps {
+    /* Universal required entry: installing COMPLETION caps without drain is rejected.
+     * Other entries are feature-specific requirements of the caller using them. */
     int  (*drain)(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
     /* Accept ops are NEUTRAL: they take the event ctx + the listen fd, not any HTTP type. The
      * backend latches `listen_fd` on prime and reaches its state via ctx->loop._backend; the HTTP

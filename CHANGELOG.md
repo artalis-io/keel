@@ -7,6 +7,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- HTTP readiness reads preserve connections on would-block and retry interrupted reads instead of
+  reporting a terminal header/body failure. EOF and transport errors still close normally.
+- Protocol capability hooks are published atomically across independent server threads; completion
+  installation no longer uses an unsynchronized process-wide sentinel.
+- Runtime completion providers missing their completion table or required drain operation are
+  rejected at installation, with their initialized backend closed once.
+
 - Plaintext completion WebSockets now flush large outbound drains in bounded pieces. A frame or
   accumulated backlog larger than the 1 MiB transport-queue allowance previously stalled after
   its header, even when the peer was reading. The queue allowance remains enforced.
