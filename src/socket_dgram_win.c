@@ -125,7 +125,9 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     return n;
 }
 
-/* One receive attempt. On failure sets errno as the seam expects and *wsa_err to the Winsock code. */
+/* PAL-gate: dominated-by wdg_recv
+ * One receive attempt, called only from wdg_recv (which states the PAL invariant). On failure sets
+ * errno as the seam expects and *wsa_err to the Winsock code. */
 static kl_ssize_t wdg_recv_once(SOCKET s, void *buf, size_t buflen,
                                 KlSockAddr *src, KlDgramRxMeta *meta, int *wsa_err) {
     *wsa_err = 0;
