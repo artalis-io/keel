@@ -96,6 +96,7 @@ static KlResolveReq *fail_resolve(KlResolver *self, KlEventCtx *ctx, const char 
     r->base.resolver = self;
     r->ctx = ctx; r->done = done_fn; r->ud = user_data; r->timer = -1;
     if (fr->inline_fail) {
+        if (fr->inline_fail == 2) return &r->base; /* manually completed by the test */
         done_fn(&r->base, NULL, KL_ERR_DNS, user_data);
         return &r->base;
     }
@@ -135,6 +136,71 @@ static void dns_case(int *utest_result, int inline_fail) {
 
 UTEST(http_client_free_in_done, dns_failure_reported_inline) { dns_case(utest_result, 1); }
 UTEST(http_client_free_in_done, dns_failure_reported_async)  { dns_case(utest_result, 0); }
+
+typedef struct { KlAllocator base; int fail; int attempts; } TimerAlloc;
+static void *timer_malloc(void *ctx, size_t n) {
+    TimerAlloc *a = ctx;
+    return kl_malloc(&a->base, n);
+}
+static void *timer_realloc(void *ctx, void *p, size_t old, size_t n) {
+    TimerAlloc *a = ctx;
+    if (a->fail) { a->attempts++; return NULL; }
+    return kl_realloc(&a->base, p, old, n);
+}
+static void timer_free(void *ctx, void *p, size_t n) {
+    TimerAlloc *a = ctx;
+    kl_free(&a->base, p, n);
+}
+static void idle_timer(void *ud) { (void)ud; }
+
+static void timer_oom_case(int *utest_result, int pooled, int fail_start) {
+    TimerAlloc ta = {kl_allocator_default(), 0, 0};
+    KlAllocator a = {timer_malloc, timer_realloc, timer_free, &ta};
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    FailResolver fr = {0};
+    fr.base.resolve = fail_resolve; fr.base.cancel = fail_cancel; fr.base.destroy = fail_destroy;
+    fr.inline_fail = 2;
+    KlHttpClientConfig cfg = {.timeout_ms = 60000, .resolver = &fr.base};
+    Done d = {0, 0};
+    KlHttpClientPool pool;
+    if (pooled) ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &g_qa, &ev), 0);
+    ta.fail = fail_start;
+    KlHttpClient *c = pooled
+        ? kl_http_client_start_pooled(&pool, &ev, &g_qa, &cfg, "GET", "http://audit.test/",
+                                       NULL, 0, NULL, 0, free_in_done, &d)
+        : kl_http_client_start(&ev, &g_qa, &cfg, "GET", "http://audit.test/",
+                                NULL, 0, NULL, 0, free_in_done, &d);
+    if (fail_start) {
+        ASSERT_TRUE(c == NULL);
+        ASSERT_EQ(d.calls, 0);
+        ASSERT_TRUE(fr.req.done == NULL); /* no resolution starts without a deadline */
+        ASSERT_EQ(ta.attempts, 1);
+        if (pooled) kl_http_client_pool_free(&pool);
+        kl_event_ctx_free(&ev);
+        ASSERT_EQ(quarantine_check_and_release(), 0);
+        return;
+    }
+    ASSERT_TRUE(c != NULL);
+    /* Fill the timer heap without forcing growth; the client holds its deadline slot. */
+    while (ev.timer_count < ev.timer_cap)
+        ASSERT_GE(kl_timer_add(&ev, 60000, idle_timer, NULL), 0);
+    ta.fail = 1;
+    fail_fire(&fr.req);
+    ASSERT_EQ(d.calls, 0); /* never free from inside the connect terminal dispatch */
+    ASSERT_EQ(ta.attempts, 0); /* replacing the deadline needs no allocation */
+    run_until(&ev, &d, 100);
+    ASSERT_EQ(d.calls, 1);
+    ASSERT_NE(d.error, 0);
+    if (pooled) kl_http_client_pool_free(&pool);
+    kl_event_ctx_free(&ev);
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(http_client_free_in_done, full_timer_heap_oom_still_defers_dns_error) { timer_oom_case(utest_result, 0, 0); }
+UTEST(http_client_free_in_done, deadline_allocation_failure_rejects_start) { timer_oom_case(utest_result, 0, 1); }
+UTEST(http_client_free_in_done, pooled_full_timer_heap_oom_still_defers_dns_error) { timer_oom_case(utest_result, 1, 0); }
+UTEST(http_client_free_in_done, pooled_deadline_allocation_failure_rejects_start) { timer_oom_case(utest_result, 1, 1); }
 
 /* ── Connect refused ────────────────────────────────────────────────────────────────────────── */
 
