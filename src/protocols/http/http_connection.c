@@ -428,9 +428,12 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
     /* If handler suspended the connection for async I/O, don't transition */
     if (c->state == KL_HTTP_CONN_SUSPENDED)
         return KL_HTTP_CONN_SUSPENDED;
-    /* It suspended and then cancelled its op: the connection is done. */
-    if (c->state == KL_HTTP_CONN_CLOSED)
+    /* Its op ended inside it: cancelled (no response), or completed with a streamed response
+     * that is already out. Either way the connection is done. */
+    if (c->state == KL_HTTP_CONN_CLOSED) {
+        if (c->res.body_mode == KL_HTTP_BODY_STREAM) conn_log_access(c);
         return KL_HTTP_CONN_CLOSED;
+    }
 
     /* If streaming, the handler already sent everything, unless drain is pending */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
@@ -494,7 +497,10 @@ static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
 
     /* Yields keep the conn alive without transitioning to SENDING. */
     if (c->state == KL_HTTP_CONN_SUSPENDED) return KL_HTTP_CONN_SUSPENDED;
-    if (c->state == KL_HTTP_CONN_CLOSED) return KL_HTTP_CONN_CLOSED;   /* suspended, then cancelled */
+    if (c->state == KL_HTTP_CONN_CLOSED) {   /* its op ended inside it (cancelled, or streamed) */
+        if (c->res.body_mode == KL_HTTP_BODY_STREAM) conn_log_access(c);
+        return KL_HTTP_CONN_CLOSED;
+    }
     if (c->state == KL_HTTP_CONN_READING_BODY) return KL_HTTP_CONN_READING_BODY;
 
     /* Streaming response: handler already wrote chunks. */
@@ -659,9 +665,24 @@ static void conn_null_terminate_headers(KlHttpConn *c) {
  * Called from both HEADERS_OK (has_leftover=true with leftover data) and
  * PARSE_OK (has_leftover=false, complete request with no body).
  */
+static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *router,
+                                               const char *leftover_buf, size_t leftover_len);
+
+/* The dispatch calls the handler and feeds the body bytes read with the headers to the reader's
+ * on_data, either of which may end an async op: this frame then drives or closes the connection
+ * (see dispatch_depth). */
 static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                           const char *leftover_buf,
                                           size_t leftover_len) {
+    c->dispatch_depth++;
+    KlHttpConnState st = conn_dispatch_request_body(c, router, leftover_buf, leftover_len);
+    c->dispatch_depth--;
+    return st;
+}
+
+static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *router,
+                                               const char *leftover_buf,
+                                               size_t leftover_len) {
     /* Null-terminate the parsed request fields in read_buf so handlers get valid
      * C strings. Done here in the shared core (not at the call sites) so the
      * readiness and completion paths can't drift; the completion driver reaches
@@ -903,6 +924,18 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
             if (s != KL_HTTP_CONN_READING_BODY)
                 return s;
         }
+        /* An async handler resumed by on_data during the leftover feed chose its own state (it
+         * suspended, sent, or its op was cancelled): honour it, as conn_ingest_body does for
+         * later reads, rather than overwrite it with READING_BODY. */
+        if (c->route->streaming_async) {
+            if (c->state == KL_HTTP_CONN_SUSPENDED)
+                return c->state;
+            if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
+        }
 
         if (conn_preserve_head(c) < 0) {      /* the body is about to reuse read_buf */
             /* The reader (and a legacy streaming handler parked on it) ends with on_error, as on
@@ -1134,8 +1167,11 @@ read_more_body: ;
         if (nr == 0 && c->tls)
             return c->state;   /* TLS WANT_READ: part of a record arrived; wait for the rest */
         if (nr <= 0) {
-            if (c->req.body_reader)
+            if (c->req.body_reader) {
+                c->dispatch_depth++;            /* on_error may end an async op: closed below */
                 c->req.body_reader->on_error(c->req.body_reader);
+                c->dispatch_depth--;
+            }
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }

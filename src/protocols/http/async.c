@@ -59,6 +59,13 @@ static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
     return conn;
 }
 
+/* Register a resumed connection's fd for `mask`. A nested complete inside on_resume may already
+ * have registered it, and epoll refuses a second add: modify it instead. 0, or -1 if neither worked. */
+static int async_rearm(KlHttpServer *s, KlHttpConn *conn, KlEventMask mask) {
+    if (kl_event_add(&s->ev.loop, conn->stream.fd, mask, &conn->stream) == 0) return 0;
+    return kl_event_mod(&s->ev.loop, conn->stream.fd, mask, &conn->stream);
+}
+
 void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
@@ -132,7 +139,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
      * what DRAINING did before it was added). */
     switch (new_state) {
     case KL_HTTP_CONN_SENDING:
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_WRITE, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_WRITE) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_DRAINING:
@@ -140,11 +147,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
          * input still unread (#278). Arm READ so each readable tick discards one bounded chunk,
          * exactly as the main readiness transition does; the idle sweep enforces the byte and time
          * bounds and releases. */
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_READ) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_READING:
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_READ) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_SUSPENDED:
