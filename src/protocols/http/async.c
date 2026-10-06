@@ -70,24 +70,17 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     /* Transition back from SUSPENDED so on_resume can set the final state */
     conn->state = KL_HTTP_CONN_PROCESSING;
 
-    /* Call the resume callback */
-    if (op->on_resume)
+    /* Call the resume callback. It is a frame driving this connection: an op it starts and ends
+     * at once (a cancel because the work could not be started) is left to this function. */
+    if (op->on_resume) {
+        conn->dispatch_depth++;
         op->on_resume(op, op->user_data);
+        conn->dispatch_depth--;
+    }
 
     /* If the handler suspended again, a new op is active, nothing to do */
     if (conn->state == KL_HTTP_CONN_SUSPENDED)
         return;
-
-    /* Completed inside the handler that suspended it (the work could not be started, say): the
-     * dispatch that called the handler sends the response when it returns, exactly as if the
-     * handler had never suspended. Driving it here as well sent it twice, or released the slot
-     * twice. Readiness: the suspend took the fd out of the loop, and the dispatch's transition
-     * modifies the registration, so put it back. */
-    if (conn->in_handler) {
-        if (!(kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION))
-            (void)kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream);
-        return;
-    }
 
     /* Default the post-resume state the same way conn_process() defaults it after a
      * synchronous handler returns: a resume that only built the response (the common
@@ -103,6 +96,18 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
             conn->state = KL_HTTP_CONN_CLOSED;
         else
             conn->state = KL_HTTP_CONN_SENDING;
+    }
+
+    /* Completed inside a frame that is already driving this connection (the handler that
+     * suspended it, a body reader's on_data, an outer resume): that frame sends or closes it when
+     * it returns, exactly as if the op had never been started. Driving it here as well sent the
+     * response twice, or released the slot twice. Readiness: the suspend took the fd out of the
+     * loop, and the frame's transition modifies the registration, so put it back. */
+    if (conn->dispatch_depth > 0) {
+        if (conn->state != KL_HTTP_CONN_CLOSED &&
+            !(kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION))
+            (void)kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream);
+        return;
     }
 
     /* On a completion loop, drive the completion send path instead of re-arming the fd;
@@ -190,10 +195,10 @@ void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
     KlHttpConn *conn = async_cancel_op(s, op);
     /* The connection was waiting on the op and nothing else will end it: it is out of the
      * readiness loop, has nothing posted on a completion loop, and the sweep exempts a suspended
-     * connection. Close it (unless on_cancel suspended it again on a new op). Inside the handler
-     * that suspended it, the dispatch closes it when the handler returns. */
-    if (!conn || conn->state != KL_HTTP_CONN_SUSPENDED || conn->async_op) return;
+     * connection. Close it. Inside a frame already driving the connection (the handler, on_data,
+     * a resume), that frame closes it when it returns, so it is released once. */
+    if (!conn || conn->state != KL_HTTP_CONN_SUSPENDED) return;
     conn->state = KL_HTTP_CONN_CLOSED;
-    if (!conn->in_handler)
+    if (conn->dispatch_depth == 0)
         kl_http_server_conn_release(s, conn);
 }

@@ -420,11 +420,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **`kl_async_complete` inside the handler that suspended sends one response.** A handler that
   suspended and then completed before returning (the work could not be started, say) was driven
   twice: a second, empty response followed the real one on a keep-alive connection, and with
-  `Connection: close` the slot was released twice, so two later connections shared it.
+  `Connection: close` the slot was released twice, so two later connections shared it. The same
+  holds inside a body reader's `on_data` and inside another op's `on_resume`.
 - **`kl_async_cancel` closes the connection (behavior change).** Cancel, the documented way to fail
   a deadline, only retired the op: the connection stayed suspended, outside the loop and exempt from
   the idle sweep, until the server was freed, so each cancelled request leaked a slot and a socket
-  until the server stopped accepting. A cancelled op's connection is now closed without a response.
+  until the server stopped accepting. A cancelled op's connection is now closed without a response,
+  once, also when the cancel comes from inside the handler, `on_data` or another op's `on_resume`.
 - **Completion server: TLS output written outside a request is sent at once.** On a completion
   loop a TLS write only reached the engine's output ring, which was flushed when the connection was
   next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or

@@ -416,9 +416,9 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
     c->state = KL_HTTP_CONN_PROCESSING;
 
     if (c->route_result == 200 && c->route) {
-        c->in_handler = 1;
+        c->dispatch_depth++;
         c->route->handler(&c->req, &c->res, c->route->user_data);
-        c->in_handler = 0;
+        c->dispatch_depth--;
     } else if (c->route_result == 405) {
         kl_http_response_error(&c->res, 405, "Method Not Allowed");
     } else {
@@ -488,9 +488,9 @@ static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
         return c->state;
     }
     c->state = KL_HTTP_CONN_PROCESSING;
-    c->in_handler = 1;
+    c->dispatch_depth++;
     c->route->handler(&c->req, &c->res, c->route->user_data);
-    c->in_handler = 0;
+    c->dispatch_depth--;
 
     /* Yields keep the conn alive without transitioning to SENDING. */
     if (c->state == KL_HTTP_CONN_SUSPENDED) return KL_HTTP_CONN_SUSPENDED;
@@ -1545,7 +1545,18 @@ KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_
     return kl_http_conn_begin_drain(c);
 }
 
+static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread);
+
+/* The body reader's on_data may resume a streaming-async handler, which may end an op: this frame
+ * then drives or closes the connection (see dispatch_depth). */
 KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
+    c->dispatch_depth++;
+    KlHttpConnState st = conn_ingest_body(c, nread);
+    c->dispatch_depth--;
+    return st;
+}
+
+static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
     /* Account the bytes entering the body phase, so a drain that starts later (#278) knows where the
      * framing already is. For Content-Length this is the framing; for chunked the decoder below is,
      * and request_body_complete is set from ITS verdict, not from this tally. */

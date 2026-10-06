@@ -78,8 +78,8 @@ int  kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op);
  * the on_resume call.
  *
  * May be called from inside the handler that suspended the connection (the work
- * could not be started, say): on_resume runs, and the response is sent once the
- * handler returns, as if it had never suspended.
+ * could not be started, say), a body reader's on_data, or another op's on_resume:
+ * on_resume runs, and the response is sent once that callback returns.
  *
  * @param s  Server instance.
  * @param op Async op to complete (removed from active list).
@@ -102,9 +102,9 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
  *
  * The abnormal-termination terminal: fires op->on_cancel (so the caller can free
  * its async context), removes the op from the active list, clears the
- * connection's async_op, and closes the connection (no response is sent), unless
- * on_cancel suspended it again on a new op. Called from inside the handler that
- * suspended it, the connection closes when the handler returns. Idempotent: a
+ * connection's async_op, and closes the connection (no response is sent). Called
+ * from inside the handler that suspended it, a body reader's on_data, or another
+ * op's on_resume, the connection closes when that callback returns. Idempotent: a
  * no-op if the op was already retired by kl_async_complete() or a prior cancel.
  *
  * Use for deadline-as-failure (HTTP timeout) and connection-death paths.

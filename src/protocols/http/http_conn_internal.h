@@ -156,7 +156,10 @@ struct KlHttpConn {
 
     struct KlAsyncOp *async_op;
     uint64_t suspend_start_ms;
-    int in_handler;   /* the route handler is running: an op it ends is driven by the dispatch */
+    /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
+     * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,
+     * so the connection is never driven or released twice. */
+    int dispatch_depth;
 
     KlFileIO *file_io;
     int file_io_phase;
