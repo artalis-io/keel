@@ -50,4 +50,17 @@ int kl_udp_win_build_control(unsigned char *buf, size_t bufsz,
  * defaults to AF_INET. Returns AF_INET / AF_INET6, or -1 if undeterminable. */
 int kl_udp_win_send_family(SOCKET s, const struct sockaddr *dest, const struct sockaddr *src);
 
+/* ICMP error reports. Winsock surfaces an ICMP port-unreachable caused by an EARLIER send as
+ * WSAECONNRESET on the next receive (network-unreachable as WSAENETRESET), even on an unconnected UDP
+ * socket. That is news about a datagram this socket sent, not a failure of the receive, so a datagram
+ * receive that fails this way yielded nothing and must keep going. Shared by the readiness recv and
+ * the IOCP completion so both paths classify it identically. */
+static inline int kl_udp_win_is_icmp_report(int wsa_err) {
+    return wsa_err == WSAECONNRESET || wsa_err == WSAENETRESET;
+}
+
+/* Turn the reports off at the source (SIO_UDP_CONNRESET / SIO_UDP_NETRESET set to FALSE) on a UDP
+ * socket Keel configures. Best-effort: a failure leaves the receive-side skip as the backstop. */
+void kl_udp_win_disable_icmp_reports(SOCKET s);
+
 #endif /* KEEL_SRC_UDP_CMSG_WIN_H */

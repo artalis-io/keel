@@ -80,6 +80,23 @@ LPFN_WSASENDMSG kl_udp_win_get_sendmsg(SOCKET s) {
     return udp_fn_sendmsg;
 }
 
+/* Older SDK / MinGW headers may lack these vendor ioctls (documented values). */
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+#ifndef SIO_UDP_NETRESET
+#define SIO_UDP_NETRESET _WSAIOW(IOC_VENDOR, 15)
+#endif
+
+void kl_udp_win_disable_icmp_reports(SOCKET s) {
+    if (kl_plat_socket_runtime_init() != 0) return;   /* PAL invariant: WSAIoctl needs ws2_32 up */
+    BOOL off = FALSE;
+    DWORD bytes = 0;
+    (void)WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof(off), NULL, 0, &bytes, NULL, NULL);
+    bytes = 0;
+    (void)WSAIoctl(s, SIO_UDP_NETRESET, &off, sizeof(off), NULL, 0, &bytes, NULL, NULL);
+}
+
 /* Overflow-safe capacity check: does a `space`-byte cmsg record fit after `used` bytes in `bufsz`?
  * `used` is a parameter so the subtraction is guarded without a `0 > bufsz` comparison. */
 static int ctrl_fits(size_t used, size_t space, size_t bufsz) {

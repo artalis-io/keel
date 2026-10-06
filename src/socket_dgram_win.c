@@ -125,11 +125,10 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     return n;
 }
 
-static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
-                           KlSockAddr *src, KlDgramRxMeta *meta) {
-    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
-    (void)ctx;
-    SOCKET s = (SOCKET)fd;
+/* One receive attempt. On failure sets errno as the seam expects and *wsa_err to the Winsock code. */
+static kl_ssize_t wdg_recv_once(SOCKET s, void *buf, size_t buflen,
+                                KlSockAddr *src, KlDgramRxMeta *meta, int *wsa_err) {
+    *wsa_err = 0;
     memset(meta, 0, sizeof(*meta));
     meta->tos = -1;
     memset(src, 0, sizeof(*src));
@@ -157,6 +156,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
                     (void)kl_sockaddr_from_native(src, (struct sockaddr *)&from, (socklen_t)msg.namelen);
                 return (kl_ssize_t)buflen;
             }
+            *wsa_err = e;
             errno = (e == WSAEWOULDBLOCK) ? EWOULDBLOCK : EIO;
             return -1;
         }
@@ -182,12 +182,36 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
                 (void)kl_sockaddr_from_native(src, (struct sockaddr *)&from, (socklen_t)fromlen);
             return (kl_ssize_t)buflen;
         }
+        *wsa_err = e;
         errno = (e == WSAEWOULDBLOCK) ? EWOULDBLOCK : EIO;
         return -1;
     }
     if (fromlen > 0)
         (void)kl_sockaddr_from_native(src, (struct sockaddr *)&from, (socklen_t)fromlen);
     return r;
+}
+
+/* ICMP reports skipped per call before the receive yields as would-block (bounds the loop; a socket
+ * still flooded with reports is simply reported readable again). */
+#define WDG_ICMP_REPORT_SKIP_MAX 16
+
+static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
+                           KlSockAddr *src, KlDgramRxMeta *meta) {
+    if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
+    (void)ctx;
+    SOCKET s = (SOCKET)fd;
+    for (int skipped = 0;; skipped++) {
+        int e;
+        kl_ssize_t n = wdg_recv_once(s, buf, buflen, src, meta, &e);
+        if (n >= 0 || !kl_udp_win_is_icmp_report(e))
+            return n;
+        /* An ICMP report about an earlier send (a socket adopted without configure, or the ioctl
+         * refused): this receive yielded nothing, so take the next datagram instead of failing. */
+        if (skipped + 1 >= WDG_ICMP_REPORT_SKIP_MAX) {
+            errno = EWOULDBLOCK;
+            return -1;
+        }
+    }
 }
 
 static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, size_t len,
@@ -206,6 +230,10 @@ static uint32_t wdg_configure(void *ctx, KlSocketHandle fd, int family,
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     uint32_t caps = 0;
+
+    /* An ICMP unreachable answering one of our sends must not fail a later receive (it would stop
+     * the datagram for good). Best-effort; the receive paths also skip the report if it gets through. */
+    kl_udp_win_disable_icmp_reports(s);
 
     if (cfg->reuse_addr) { int o = 1; (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&o, sizeof(o)); }
     /* No SO_REUSEPORT on Winsock (SO_REUSEADDR already permits multiple binds). */

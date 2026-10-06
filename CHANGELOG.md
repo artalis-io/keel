@@ -427,6 +427,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the idle sweep, until the server was freed, so each cancelled request leaked a slot and a socket
   until the server stopped accepting. A cancelled op's connection is now closed without a response,
   once, also when the cancel comes from inside the handler, `on_data` or another op's `on_resume`.
+- **Windows: an ICMP unreachable no longer stops a datagram receiver.** Winsock reports an ICMP
+  port-unreachable caused by an earlier send as `WSAECONNRESET` on the next receive (and
+  network-unreachable as `WSAENETRESET`), even on an unconnected UDP socket. Keel took that as a
+  fatal receive error and stopped the `KlDatagram` for good, on WSAPoll and IOCP alike. One
+  unreachable nameserver (for example `127.0.0.1` with no local resolver) silenced the built-in DNS
+  resolver, and any datagram server could be stopped by a spoofed datagram that made it reply to a
+  closed port. A socket Keel prepares (`kl_datagram_socket_init`, and the resolver's own socket)
+  now has these reports turned off (`SIO_UDP_CONNRESET` / `SIO_UDP_NETRESET`), and a receive that still meets one, on a socket adopted
+  through `kl_datagram_init`, skips it and takes the next datagram (IOCP re-posts the receive). Any
+  other receive error is still terminal.
 - **Completion server: TLS output written outside a request is sent at once.** On a completion
   loop a TLS write only reached the engine's output ring, which was flushed when the connection was
   next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or
