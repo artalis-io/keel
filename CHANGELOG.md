@@ -437,6 +437,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   now has these reports turned off (`SIO_UDP_CONNRESET` / `SIO_UDP_NETRESET`), and a receive that still meets one, on a socket adopted
   through `kl_datagram_init`, skips it and takes the next datagram (IOCP re-posts the receive). Any
   other receive error is still terminal.
+- **EFI integration: a server connection closed with a receive or send posted is released.** The
+  EFI completion backend's cancel freed a connection's posted receive or send without completing it,
+  but the HTTP server releases a connection only from the completion of the last operation it
+  posted. Every connection closed while waiting for input (an idle keep-alive client timed out, a
+  TLS handshake timeout) therefore kept its connection and its EFI socket slot for good, and with
+  eight slots about seven idle clients left the firmware server unable to accept. A cancel now marks
+  the posted operation, and the next drain delivers it once as a failed read or write; an operation
+  left behind by an earlier connection on a reused handle is still dropped undelivered.
 - **Completion server: TLS output written outside a request is sent at once.** On a completion
   loop a TLS write only reached the engine's output ring, which was flushed when the connection was
   next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or
