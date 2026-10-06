@@ -25,9 +25,9 @@
  * create->destroy->create works (the guard clears on destroy).
  *
  * Completions are not a shared ring (which could silently drop). Each slot carries
- * its own pending-completion flags (accept / write / terminal); the drain SCANS all slots
- * and emits at most one KlLwrRecord per pending item, bounded by conn_cap, so it can
- * never overflow and a terminal is always deliverable. READs are surfaced from the per-slot
+ * its own pending-completion flags (accept / write); the drain SCANS all slots and emits at
+ * most one KlLwrRecord per pending item, bounded by conn_cap, so it can never overflow and a
+ * failed completion is always deliverable. READs are surfaced from the per-slot
  * retained-pbuf receive queue, not a flag.
  *
  * SPDX-License-Identifier: MIT
@@ -85,27 +85,41 @@ void kl_lwr_ctx_destroy(void *lwrctx);
 void kl_lwr_lwip_tick(void *loopif);
 
 /* ── completion kinds surfaced to the backend (neutral mirror of KlCompKind) ──
- * ACCEPT + WRITE + terminal are surfaced as completions the drain emits; READ is delivered
- * separately from the per-slot receive queue (kl_lwr_conn_status / kl_lwr_take_staged). */
+ * ACCEPT + WRITE are surfaced as completions the drain emits; READ is delivered separately from
+ * the per-slot receive queue (kl_lwr_next_readable / kl_lwr_take_staged).
+ *
+ * Every posted op on an accepted connection completes exactly once, also when the connection
+ * dies (peer reset, abort, cancel): a posted send with a WRITE (ok=0 if it could not finish), an
+ * armed recv with a READ (ok=0 once the peer closed and nothing is left to deliver, or the conn
+ * died). A connection with both posted gets both. Nothing completes for an op that was not
+ * posted.
+ *
+ * ── connection handles ──
+ * An accepted connection is named by an opaque slot handle (index + generation), never by its
+ * pcb: that is the KlSocketHandle the backend hands the driver (ACCEPT's `accepted`), and every
+ * server-connection entry point below takes it as `conn`. A handle that outlived its connection
+ * matches nothing, even after lwIP reused the pcb's address for a new accept. The listen pcb and
+ * client (outbound) pcbs are still passed as pcb pointers. */
 typedef enum {
     KL_LWR_ACCEPT,   /* a new connection was accepted */
-    KL_LWR_WRITE,    /* a posted send completed (ok=1) OR a terminal close (ok=0, nbytes=0) */
+    KL_LWR_WRITE,    /* a posted send completed (ok=1) or failed (ok=0, nbytes=0) */
     KL_LWR_CONNECT,  /* an outbound connect finished: ok=1 connected, ok=0 failed. `owner`
                       * carries the tagged KlWatcher udata the client registered (NOT a KlHttpConn*);
                       * the backend routes it to KL_COMP_CONNECT against that watcher, mask-encoded
                       * (KL_EVENT_WRITE = connected, 0 = failed). */
 } KlLwrKind;
 
-/* One finished ACCEPT/WRITE (or terminal) op, emitted by kl_lwr_drain and translated into a
- * KlCompletionEvent. `pcb`/`accepted` are opaque tcp_pcb*; `owner` is the KlHttpConn* the backend
- * stored via kl_lwr_set_owner. Addresses are raw IPv4 bytes + host-order port (peer). */
+/* One finished ACCEPT/WRITE/CONNECT op, emitted by kl_lwr_drain and translated into a
+ * KlCompletionEvent. `pcb`/`accepted` are connection handles for a server connection (a pcb for
+ * CONNECT); `owner` is the KlStream* the backend stored via kl_lwr_set_owner. Addresses are raw
+ * IPv4 bytes + host-order port (peer). */
 typedef struct {
     KlLwrKind kind;
-    void     *pcb;         /* the connection pcb (WRITE / terminal) */
-    void     *accepted;    /* ACCEPT: the newly accepted pcb */
-    void     *owner;       /* KlHttpConn* set via kl_lwr_set_owner (WRITE / terminal) */
+    void     *pcb;         /* WRITE: the connection handle; CONNECT: the client pcb */
+    void     *accepted;    /* ACCEPT: the new connection's handle */
+    void     *owner;       /* KlStream* set via kl_lwr_set_owner (WRITE) */
     size_t    nbytes;      /* WRITE: bytes acked */
-    int       ok;          /* WRITE ok flag (0 = terminal close) */
+    int       ok;          /* WRITE ok flag (0 = the send failed) */
     uint8_t   peer_ip[4];  /* ACCEPT: peer IPv4 (network order) */
     uint16_t  peer_port;   /* ACCEPT: peer port (host order) */
 } KlLwrRecord;
@@ -225,14 +239,12 @@ int kl_lwr_next_client_ready(void *lwrctx, int *cursor, void **watcher_udata, un
  *     no data yet (caller re-arms READ = EAGAIN). */
 long kl_lwr_client_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
 long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block);
-/* Synchronous send on a SERVER-accepted (non-client) live pcb: the completion-TLS handshake flush
- * (completion_http_server.c comp_tls_flush) pushes handshake ciphertext via the socket send op, which on
- * a completion loop with a real fd is a blocking send. The raw backend has no blocking send, so this
- * mirrors kl_lwr_client_send for an accepted pcb: tcp_write(COPY) bounded by tcp_sndbuf + tcp_output.
- * Returns bytes queued (> 0), 0 with *would_block=1 if no sndbuf headroom, or -1 on a hard error /
- * dead pcb / not a server slot. Used ONLY for the small handshake flush (the HTTP response body
- * rides the async completion send-pump). */
-long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
+/* Synchronous send on a SERVER-accepted live connection (`conn` is its handle): a socket send op on
+ * an accepted connection. The raw backend has no blocking send, so this mirrors kl_lwr_client_send:
+ * tcp_write(COPY) bounded by tcp_sndbuf + tcp_output. Returns bytes queued (> 0), 0 with
+ * *would_block=1 if no sndbuf headroom, or -1 on a hard error / dead or unknown connection / a send
+ * already posted (the HTTP response rides the async completion send-pump). */
+long kl_lwr_srv_sync_send(void *lwrctx, void *conn, const void *buf, size_t len, int *would_block);
 /* tcp_bind(pcb, ip4, port). ip4 NULL / all-zero = IP_ADDR_ANY. Returns 0 / -1. */
 int   kl_lwr_tcp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 /* tcp_listen(pcb) on `lwrctx`: returns the (possibly relocated) listen pcb, or NULL. Also
@@ -240,57 +252,52 @@ int   kl_lwr_tcp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
  * frees `pcb` and returns a smaller LISTEN pcb; the caller must adopt the returned handle
  * (the passed-in one is dangling afterwards). The ctx tracks the relocated listen pcb. */
 void *kl_lwr_tcp_listen(void *lwrctx, void *pcb);
-/* pcb->local_port (host order) for a bound pcb: server bound-port readback. */
+/* local_port (host order) of a bound pcb (listener / client) or of an accepted connection's
+ * handle (0 if that connection is gone): bound-port readback. */
 uint16_t kl_lwr_tcp_local_port(void *pcb);
 
 /* The ctx's current LISTEN pcb (the relocated handle from kl_lwr_tcp_listen), or NULL.
  * Lets the backend adopt the relocated listen handle after tcp_listen freed the original. */
 void *kl_lwr_listen_pcb(void *lwrctx);
-/* tcp_close(pcb) on `lwrctx`; best-effort tcp_abort on failure (data still queued). Frees the
- * slot's rx queue + owned send buffer + detaches callbacks first. If the pcb's slot was marked
- * `dead` by a prior tcp_err (lwIP already freed the pcb), this ONLY clears the slot and never
- * dereferences the freed pointer (no use-after-free on close-after-err). Safe on a NULL pcb. */
+/* Close an accepted connection's handle, the listen pcb, or a client pcb on `lwrctx`:
+ * tcp_close, with the tcp_abort fallback lwIP requires when it fails (data still queued). Frees
+ * the slot's rx queue and detaches the callbacks first. A dead connection (its pcb already freed
+ * by lwIP) only has its slot cleared, the freed pcb is never touched. A stale handle (its
+ * connection closed already, its slot possibly reused since) is a no-op. Safe on NULL. */
 void  kl_lwr_tcp_close(void *lwrctx, void *pcb);
 
-/* Forcibly abort a LIVE connection pcb (idle-timeout / kl_comp_cancel) on `lwrctx`. Detaches
- * callbacks first (so lwIP's internal tcp_err is not re-entered against the slot), frees the
- * slot's rx queue + owned send buffer, marks it closed so the backend surfaces the single
- * terminal completion, then tcp_abort. Idempotent + safe on an already-dead/closed/NULL pcb. */
+/* Forcibly abort a live connection (idle timeout / kl_comp_cancel) on `lwrctx`: an accepted
+ * connection's handle, or a client pcb. Marks the slot dead and detaches the callbacks first (so
+ * lwIP's err callback is not re-entered), then tcp_abort. The connection's posted ops complete as
+ * failures (the send's WRITE ok=0, an armed recv's READ ok=0). Idempotent: on a dead connection
+ * (whose ops already have their failed completions owed), a stale handle or NULL it does nothing. */
 void  kl_lwr_tcp_abort(void *lwrctx, void *pcb);
 
-/* Mark a conn's terminal (close) READ as already surfaced, so a subsequent status check cannot
- * yield a second terminal event (defence against a double comp_close). Idempotent. */
-void  kl_lwr_mark_terminated(void *lwrctx, void *pcb);
+/* Associate the backend's owner (the KlStream*) with an accepted connection; WRITE records and
+ * READs carry it as their target. The pcb's tcp_arg stays the slot. */
+void  kl_lwr_set_owner(void *lwrctx, void *conn, void *owner);
 
-/* Associate a KlHttpConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag their
- * completions with it, and (re)arm tcp_recv/tcp_sent/tcp_err on that pcb. */
-void  kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner);
+/* Arm a live connection for a single pending recv (the completion contract's one-in-flight
+ * recv). Returns 0, or non-zero if the handle names no live connection (the backend then fails
+ * the post and the driver closes it). Once armed, the recv completes exactly once: with data, or
+ * failed when the peer closed or the connection died. */
+int   kl_lwr_conn_arm(void *lwrctx, void *conn, void *buf, size_t cap);
+/* Disarm a connection (its READ was surfaced). Idempotent. */
+void  kl_lwr_conn_disarm(void *lwrctx, void *conn);
 
-/* Arm a conn for a single pending recv (the completion contract's one-in-flight recv). Returns
- * 0 on success, non-zero if the pcb has no slot (a slot-less conn must never be left
- * accepted-but-unable-to-receive; the backend closes it). A conn that HAS a slot always arms. */
-int   kl_lwr_conn_arm(void *lwrctx, void *pcb, void *buf, size_t cap);
-/* Disarm a conn (its READ was surfaced, or it is being torn down). Idempotent. */
-void  kl_lwr_conn_disarm(void *lwrctx, void *pcb);
-
-/* Report a pcb's receive status for the backend's armed READ gating: *has_data = retained
- * received bytes are waiting; *closed = the peer closed / errored (a zero-length READ the
- * driver turns into a close). Either output may be NULL. */
-void kl_lwr_conn_status(void *lwrctx, void *pcb, int *has_data, int *closed);
-
-/* Find the next ARMED conn that has data waiting or has closed (starting the scan at slot
- * index *cursor, which is advanced past the returned slot). Returns 1 and fills *owner / *pcb /
- * *closed for a ready conn, or 0 when none remain this pass. Lets the backend surface READs by
- * scanning the glue's per-conn slots without seeing any lwIP type; arm state lives in the slots
- * (fix #2, fix #4: bounded by conn_cap, cannot lose a READ). */
-int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb,
+/* Find the next ARMED connection whose recv can complete: data waiting, or the peer closed /
+ * the connection died (starting the scan at slot index *cursor, which is advanced past the
+ * returned slot). Returns 1 and fills *owner / *conn (the handle) / *closed for it, or 0 when
+ * none remain this pass. *closed = 1 means a failed, zero-length READ. Bounded by conn_cap,
+ * cannot lose a READ. */
+int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **conn,
                          void **recv_buf, size_t *recv_cap, int *closed);
 
-/* Copy up to `cap` received bytes for `pcb` into `dst` from the retained pbuf queue; returns
- * the count copied. tcp_recved() is issued HERE (as whole head pbufs are consumed, never
- * before delivery) and consumed pbufs are pbuf_free'd. The backend calls this while building
- * a READ event (rx queue → c->read_buf). */
-size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap);
+/* Copy up to `cap` received bytes for an accepted connection's handle (or a client pcb) into
+ * `dst` from the retained pbuf queue; returns the count copied. tcp_recved() is issued HERE (as
+ * whole head pbufs are consumed, never before delivery) and consumed pbufs are pbuf_free'd. The
+ * backend calls this while building a READ event (rx queue → c->read_buf). */
+size_t kl_lwr_take_staged(void *lwrctx, void *conn, void *dst, size_t cap);
 
 /* ── bounded, zero-allocation send with backpressure + file send ───────────
  * The completion contract (src/completion.h) surfaces a SINGLE fully-completed WRITE per send.
@@ -302,7 +309,8 @@ size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap);
  *   - The pump copies min(tcp_sndbuf, KL_LWR_TX_WIN, remaining) bytes into the window and
  *     tcp_write(COPY)s them; tcp_sent advances + re-pumps; ERR_MEM = backpressure.
  *   - A file send preads the file body chunk-by-chunk into the same window (never into memory
- *     whole); a file read error surfaces a FAILED terminal WRITE so the driver closes.
+ *     whole); a file read error aborts the connection, failing the WRITE (ok=0) so the driver
+ *     closes.
  * Transmit memory is bounded by conn_cap * KL_LWR_TX_WIN, INDEPENDENT of response/file size, so
  * response size is unbounded-by-design.
  *
@@ -313,21 +321,22 @@ size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap);
  * regardless, covering the driver's transient stack Content-Length scratch). */
 typedef struct { const void *base; size_t len; } KlLwrIoVec;
 
-/* Begin a buffered send: `iov`/`iovcnt` (<= 8) describe the already-serialized response. Returns
- * 0 on installed, -1 on failure (no slot / iov-count over the bound / snapshot overflow). */
-int   kl_lwr_send_begin(void *lwrctx, void *pcb, const KlLwrIoVec *iov, int iovcnt);
+/* Begin a buffered send on a live connection (`conn` is its handle): `iov`/`iovcnt` (<= 8)
+ * describe the already-serialized response. Returns 0 on posted (one WRITE follows), -1 on
+ * failure (no live connection / iov-count over the bound / snapshot overflow). */
+int   kl_lwr_send_begin(void *lwrctx, void *conn, const KlLwrIoVec *iov, int iovcnt);
 /* Begin a file send: `head`/`head_n` (<= 8) is the serialized response head; then `count` bytes
  * are pread from `file_fd` (borrowed; the response layer owns closing it). Returns 0 / -1. */
-int   kl_lwr_sendfile_begin(void *lwrctx, void *pcb, const KlLwrIoVec *head, int head_n,
+int   kl_lwr_sendfile_begin(void *lwrctx, void *conn, const KlLwrIoVec *head, int head_n,
                             int file_fd, uint64_t count);
-/* Reset any in-flight send offsets for `pcb` (idempotent). No heap to release. */
-void  kl_lwr_send_release(void *lwrctx, void *pcb);
+/* Reset any in-flight send offsets for `conn` (idempotent). No heap to release. */
+void  kl_lwr_send_release(void *lwrctx, void *conn);
 
 /* ── drain ─────────────────────────────────────────────────────────────────── */
 
-/* Scan the ctx's slots and emit up to `max` pending ACCEPT/WRITE/terminal completions into
+/* Scan the ctx's slots and emit up to `max` pending ACCEPT/WRITE/CONNECT completions into
  * `out`; returns the count (>= 0). Per-slot pending state is bounded by conn_cap, so this can
- * never lose a completion. READs are surfaced separately (kl_lwr_conn_status/take_staged). */
+ * never lose a completion. READs are surfaced separately (kl_lwr_next_readable/take_staged). */
 int   kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max);
 
 #endif /* KEEL_LWIP_RAW_GLUE_H */

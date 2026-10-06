@@ -164,7 +164,10 @@ For **IPv6** or the BSD-socket lwIP model, use the readiness integration above
 
 `conn_cap = KlHttpServerConfig.max_connections` is the **one authoritative capacity**, the same value
 sizes the `KlHttpConn` pool and the backend's raw slot table (`kl_lwr_ctx_ensure_cap` at prime).
-Over-capacity accepts are rejected (`tcp_abort`), never queued.
+Over-capacity accepts are rejected (`tcp_abort`), never queued. The raw backend takes at most 65535
+connections: an accepted connection's `KlSocketHandle` is a slot handle (slot index + generation),
+not its `tcp_pcb *`, because lwIP hands a freed pcb's address straight to the next accept and a
+pointer-keyed close or cancel of a dead connection would reach the new one.
 
 Per-connection backend memory is fixed and independent of response/request size:
 
