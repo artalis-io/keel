@@ -38,6 +38,7 @@
 #include "../../../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
 #include "../../../../src/completion.h"    /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 #include <keel/event.h>
+#include <keel/stream_detail.h>      /* KlStream layout (stack streams for the server io ops) */
 
 #include <stdio.h>
 #include <string.h>
@@ -1310,6 +1311,144 @@ static void t_accept_stale_generation(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════
+ * Server I/O op cancel: the KlCompletionOps contract says every posted op yields exactly one
+ * terminal completion, and a cancel yields a failed one. The HTTP server counts posted ops per
+ * connection (comp_ops) and, on release with ops posted, cancels and waits for the last failed
+ * completion to release the slot; a cancel that swallows the op leaks the connection.
+ * ══════════════════════════════════════════════════════════════════════════════════ */
+
+/* Count the events of @kind aimed at @target, and how many of those failed (ok == 0). */
+static int io_events(const KlCompletionEvent *evs, int n, KlCompKind kind,
+                     const void *target, int *failed) {
+    int hits = 0;
+    if (failed) *failed = 0;
+    for (int i = 0; i < n; i++) {
+        if (evs[i].kind != kind || evs[i].target != target) continue;
+        hits++;
+        if (failed && !evs[i].ok && evs[i].bytes == 0) (*failed)++;
+    }
+    return hits;
+}
+
+/* A posted recv, then cancel: the next drain yields exactly one failed KL_COMP_READ for it, and
+ * no drain after that yields another. */
+static void t_io_cancel_recv_completes(void) {
+    T_CASE("server io: cancel of a posted recv yields exactly one failed READ");
+    reset_counters();
+    g_tcp_receive_mode = TOK_HANG; g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(fd), "socket claimed");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char rbuf[64];
+    CHECK(COMP(ep)->post_recv(&st, rbuf, sizeof rbuf) == 0, "post_recv queued");
+    COMP(ep)->cancel(NULL, fd);
+
+    KlCompletionEvent evs[8];
+    int failed = 0;
+    int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, &failed) == 1,
+          "the drain after cancel yields exactly one READ for the stream");
+    CHECK(failed == 1, "that READ is failed (ok=0, bytes=0)");
+    dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, NULL) == 0, "no second READ on a later drain");
+
+    p->ops->close(p->context, fd);
+    kl_uefi_event_provider_reset();
+}
+
+/* The same for a posted send (KL_COMP_WRITE), plus a recv and a send posted together (a TLS
+ * connection can have both): one failed terminal each, never a repeat. */
+static void t_io_cancel_send_completes(void) {
+    T_CASE("server io: cancel of a posted send yields exactly one failed WRITE");
+    reset_counters();
+    g_tcp_receive_mode = TOK_HANG; g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(fd), "socket claimed");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    COMP(ep)->cancel(NULL, fd);
+
+    KlCompletionEvent evs[8];
+    int failed = 0;
+    int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, &failed) == 1,
+          "the drain after cancel yields exactly one WRITE for the stream");
+    CHECK(failed == 1, "that WRITE is failed (ok=0, bytes=0)");
+    dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "no second WRITE on a later drain");
+
+    /* Both directions posted on one connection, cancelled once (twice: idempotent). */
+    char rbuf[64];
+    CHECK(COMP(ep)->post_recv(&st, rbuf, sizeof rbuf) == 0, "post_recv queued");
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    COMP(ep)->cancel(NULL, fd);
+    COMP(ep)->cancel(NULL, fd);
+    int rfail = 0, wfail = 0;
+    dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, &rfail) == 1 && rfail == 1,
+          "recv + send cancelled: exactly one failed READ");
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, &wfail) == 1 && wfail == 1,
+          "recv + send cancelled: exactly one failed WRITE");
+    dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(dn == 0, "nothing more after both terminals");
+
+    p->ops->close(p->context, fd);
+    kl_uefi_event_provider_reset();
+}
+
+/* Stale generation: an op left posted on a connection that was closed WITHOUT a cancel, whose slot
+ * (and handle) a new connection then reuses, belongs to the dead connection. It must never be
+ * delivered, neither on its own nor when the new connection is cancelled; the new connection's own
+ * cancelled op still yields its one failed completion. */
+static void t_io_cancel_stale_generation(void) {
+    T_CASE("server io: a stale-generation op is never delivered, even via the reused handle's cancel");
+    reset_counters();
+    g_tcp_receive_mode = TOK_HANG; g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(fd), "socket claimed");
+
+    KlStream old_st; memset(&old_st, 0, sizeof old_st); old_st.fd = fd;
+    char rbuf[64];
+    CHECK(COMP(ep)->post_recv(&old_st, rbuf, sizeof rbuf) == 0, "post_recv on the first conn");
+    p->ops->close(p->context, fd);   /* closed with the op posted, no cancel */
+
+    KlSocketHandle fd2 = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(fd2), "second socket claimed");
+    CHECK(fd2 == fd, "the freed slot is reused under the same handle");
+
+    KlStream new_st; memset(&new_st, 0, sizeof new_st); new_st.fd = fd2;
+    char rbuf2[64];
+    CHECK(COMP(ep)->post_recv(&new_st, rbuf2, sizeof rbuf2) == 0, "post_recv on the reused slot");
+    COMP(ep)->cancel(NULL, fd2);
+
+    KlCompletionEvent evs[8];
+    int failed = 0;
+    int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &old_st, NULL) == 0,
+          "the dead connection's op is not delivered");
+    CHECK(io_events(evs, dn, KL_COMP_READ, &new_st, &failed) == 1 && failed == 1,
+          "the live connection's cancelled recv yields exactly one failed READ");
+    dn = COMP(ep)->drain(NULL, evs, 8, 0);
+    CHECK(dn == 0, "nothing more on a later drain");
+
+    p->ops->close(p->context, fd2);
+    kl_uefi_event_provider_reset();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════
  * EFI_UDP4 datagram provider (socket_efi_udp4.c) state-machine tests
  * ══════════════════════════════════════════════════════════════════════════════════ */
 static void mk_ipv4(KlSockAddr *a, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3, uint16_t port) {
@@ -2495,6 +2634,9 @@ int main(void) {
     t_accept_pool_full();
     t_accept_backpressure();
     t_accept_stale_generation();
+    t_io_cancel_recv_completes();
+    t_io_cancel_send_completes();
+    t_io_cancel_stale_generation();
     t_accept_cancel_fail_quarantine();   /* last: intentional permanent slot leak */
 
     printf(g_fail ? "\nmock-EFI harness: FAIL\n" : "\nmock-EFI harness: PASS\n");

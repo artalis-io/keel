@@ -588,6 +588,11 @@ jobs:
       - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
         run: make uefi-dgram-gate UEFI_GATE_STRICT=1
 
+      - name: "EFI provider mock-firmware harness (host: the real event_efi/socket_efi TUs against a scriptable fake EFI; ASan+UBSan+LSan)"
+        run: |
+          make -j4
+          bash integrations/platform/uefi/tests/build_mock_efi_test.sh
+
       - name: Self-contained client archive gate (client + completion only; both PE arches, selfcontained symbols)
         run: make freestanding-lib-selfcontained
 
