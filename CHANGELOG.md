@@ -412,6 +412,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion server: TLS WebSocket output to a client that stops reading is bounded.** Every TLS
+  write's ciphertext went from the engine's bounded ring onto the uncapped output queue at once, so
+  a TLS WebSocket send never saw a full buffer: a client that stopped reading grew server memory
+  without bound, and a single frame larger than the queue's bound was taken whole. A TLS WebSocket
+  now has the bound a plaintext one has, checked before the frame is encrypted.
+- **`kl_async_complete` inside the handler that suspended sends one response.** A handler that
+  suspended and then completed before returning (the work could not be started, say) was driven
+  twice: a second, empty response followed the real one on a keep-alive connection, and with
+  `Connection: close` the slot was released twice, so two later connections shared it. The same
+  holds inside a body reader's `on_data` and inside another op's `on_resume`.
+- **`kl_async_cancel` closes the connection (behavior change).** Cancel, the documented way to fail
+  a deadline, only retired the op: the connection stayed suspended, outside the loop and exempt from
+  the idle sweep, until the server was freed, so each cancelled request leaked a slot and a socket
+  until the server stopped accepting. A cancelled op's connection is now closed without a response,
+  once, also when the cancel comes from inside the handler, `on_data` or another op's `on_resume`.
 - **Completion server: TLS output written outside a request is sent at once.** On a completion
   loop a TLS write only reached the engine's output ring, which was flushed when the connection was
   next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or

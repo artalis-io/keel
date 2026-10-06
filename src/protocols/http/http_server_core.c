@@ -465,7 +465,7 @@ void kl_http_server_free(KlHttpServer *s) {
     /* Cancel all active async ops (idempotent terminal: fires on_cancel once, removes
      * each op from the list). Freestanding has no async suspend (no thread pool). */
     while (s->async_ops)
-        kl_async_cancel(s, s->async_ops);
+        kl_async_cancel_detached(s, s->async_ops);
 #endif
 
     if (s->file_io) {                 /* NULL on freestanding (kl_file_io_create guarded) */
@@ -605,7 +605,7 @@ void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
      * kl_async_complete is a no-op instead of resuming a slot already back in the pool.
      * Freestanding has no async suspend (async.c is not built there). */
 #ifndef KEEL_FREESTANDING
-    if (c->async_op) kl_async_cancel(s, c->async_op);
+    if (c->async_op) kl_async_cancel_detached(s, c->async_op);
 #endif
     if (c->comp_ops > 0) {
         c->comp_closing = 1;

@@ -55,8 +55,15 @@ kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len);
  * it (completion_http_server.c). 0, or -1 on error. */
 int kl_comp_tls_flush(KlHttpConn *c);
 
+/* A completion-driven TLS WebSocket whose output queue cannot take `add` more bytes: the write must
+ * wait, as a full socket makes it wait on readiness (completion_http_server.c). */
+int kl_comp_ws_queue_full(const KlHttpConn *c, size_t add);
+
 static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
     if (c->tls) {
+        /* A completion loop: the engine's output goes onto the queue at once (below), so it never
+         * fills; a WebSocket is held to the queue's producer bound here instead. */
+        if (c->comp_driven && kl_comp_ws_queue_full(c, len)) return 0;
         kl_ssize_t n = c->tls->write(c->tls, c->stream.fd, buf, len);
         /* A completion loop: the record is only in the engine's ring. Queue it now, as nothing else
          * may do it soon (a frame or ping written outside a drive waited for the client to speak),
@@ -107,6 +114,10 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
 
 /* Release a connection and resume listening if paused (defined in http_server.c) */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
+
+/* Cancel an async op (on_cancel, the op leaves the list) without releasing its connection: for the
+ * server's own teardown paths, which release the connection themselves (async.c). */
+void kl_async_cancel_detached(KlHttpServer *s, KlAsyncOp *op);
 
 /* The completion run-loop tick lives in the freestanding-safe
  * server core (http_server_core.c); the idle/drain sweeps stay in http_server.c (they own

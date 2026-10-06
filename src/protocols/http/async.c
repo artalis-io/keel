@@ -59,6 +59,13 @@ static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
     return conn;
 }
 
+/* Register a resumed connection's fd for `mask`. A nested complete inside on_resume may already
+ * have registered it, and epoll refuses a second add: modify it instead. 0, or -1 if neither worked. */
+static int async_rearm(KlHttpServer *s, KlHttpConn *conn, KlEventMask mask) {
+    if (kl_event_add(&s->ev.loop, conn->stream.fd, mask, &conn->stream) == 0) return 0;
+    return kl_event_mod(&s->ev.loop, conn->stream.fd, mask, &conn->stream);
+}
+
 void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
@@ -70,9 +77,13 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     /* Transition back from SUSPENDED so on_resume can set the final state */
     conn->state = KL_HTTP_CONN_PROCESSING;
 
-    /* Call the resume callback */
-    if (op->on_resume)
+    /* Call the resume callback. It is a frame driving this connection: an op it starts and ends
+     * at once (a cancel because the work could not be started) is left to this function. */
+    if (op->on_resume) {
+        conn->dispatch_depth++;
         op->on_resume(op, op->user_data);
+        conn->dispatch_depth--;
+    }
 
     /* If the handler suspended again, a new op is active, nothing to do */
     if (conn->state == KL_HTTP_CONN_SUSPENDED)
@@ -92,6 +103,18 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
             conn->state = KL_HTTP_CONN_CLOSED;
         else
             conn->state = KL_HTTP_CONN_SENDING;
+    }
+
+    /* Completed inside a frame that is already driving this connection (the handler that
+     * suspended it, a body reader's on_data, an outer resume): that frame sends or closes it when
+     * it returns, exactly as if the op had never been started. Driving it here as well sent the
+     * response twice, or released the slot twice. Readiness: the suspend took the fd out of the
+     * loop, and the frame's transition modifies the registration, so put it back. */
+    if (conn->dispatch_depth > 0) {
+        if (conn->state != KL_HTTP_CONN_CLOSED &&
+            !(kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION))
+            (void)kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream);
+        return;
     }
 
     /* On a completion loop, drive the completion send path instead of re-arming the fd;
@@ -116,7 +139,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
      * what DRAINING did before it was added). */
     switch (new_state) {
     case KL_HTTP_CONN_SENDING:
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_WRITE, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_WRITE) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_DRAINING:
@@ -124,11 +147,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
          * input still unread (#278). Arm READ so each readable tick discards one bounded chunk,
          * exactly as the main readiness transition does; the idle sweep enforces the byte and time
          * bounds and releases. */
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_READ) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_READING:
-        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
+        if (async_rearm(s, conn, KL_EVENT_READ) < 0)
             kl_http_server_conn_release(s, conn);
         break;
     case KL_HTTP_CONN_SUSPENDED:
@@ -156,13 +179,33 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     }
 }
 
-void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
-    if (!s || !op) return;
-
+/* Retire the op and fire on_cancel. The connection it was attached to (still SUSPENDED unless
+ * on_cancel suspended it again), or NULL if the op was already retired. on_cancel may free the op:
+ * nothing reads it afterwards. */
+static KlHttpConn *async_cancel_op(KlHttpServer *s, KlAsyncOp *op) {
     /* Exactly-one-terminal: a cancel racing a completion (or a double cancel) is
      * a no-op: on_cancel fires at most once, and never after on_resume. */
-    if (async_retire(s, op) == NULL) return;
-
+    KlHttpConn *conn = async_retire(s, op);
+    if (!conn) return NULL;
     if (op->on_cancel)
         op->on_cancel(op, op->user_data);
+    return conn;
+}
+
+void kl_async_cancel_detached(KlHttpServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+    (void)async_cancel_op(s, op);
+}
+
+void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+    KlHttpConn *conn = async_cancel_op(s, op);
+    /* The connection was waiting on the op and nothing else will end it: it is out of the
+     * readiness loop, has nothing posted on a completion loop, and the sweep exempts a suspended
+     * connection. Close it. Inside a frame already driving the connection (the handler, on_data,
+     * a resume), that frame closes it when it returns, so it is released once. */
+    if (!conn || conn->state != KL_HTTP_CONN_SUSPENDED) return;
+    conn->state = KL_HTTP_CONN_CLOSED;
+    if (conn->dispatch_depth == 0)
+        kl_http_server_conn_release(s, conn);
 }
