@@ -16,9 +16,11 @@
 #include "lwip_raw_testclient.h"
 
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"   /* tcp_active_pcbs / tcp_tw_pcbs: pcb liveness + server-pcb lookup */
 #include "lwip/ip_addr.h"
 #include "lwip/pbuf.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>   /* intptr_t (slot index carried in tcp_arg) */
@@ -69,8 +71,17 @@ static void lwr_cli_teardown(void) {
     struct tcp_pcb *p = g_cli_pcb;
     g_cli_pcb = NULL;
     tcp_recv(p, NULL);
+    tcp_err(p, NULL);
     tcp_arg(p, NULL);
     if (tcp_close(p) != ERR_OK) tcp_abort(p);
+}
+
+/* The server reset the connection (or the connect failed): lwIP has already freed the pcb, so
+ * forget it (a later teardown must not touch it) and resolve the roundtrip as closed. */
+static void lwr_cli_err(void *arg, err_t err) {
+    (void)arg; (void)err;
+    g_cli_pcb = NULL;
+    g_cli_closed = 1;
 }
 
 static err_t lwr_cli_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
@@ -78,9 +89,10 @@ static err_t lwr_cli_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     if (err != ERR_OK || p == NULL) {
         if (p) pbuf_free(p);
         tcp_recv(tpcb, NULL);
+        tcp_err(tpcb, NULL);
         if (g_cli_pcb == tpcb) g_cli_pcb = NULL;
         g_cli_closed = 1;            /* server FIN'd: this roundtrip's conn is fully done */
-        tcp_close(tpcb);
+        if (tcp_close(tpcb) != ERR_OK) { tcp_abort(tpcb); return ERR_ABRT; }
         return ERR_OK;
     }
     for (struct pbuf *q = p; q != NULL; q = q->next) {
@@ -119,10 +131,12 @@ int kl_lwr_client_start_cap(const uint8_t ip4[4], uint16_t port,
     g_cli_req_len = req_len;
     struct tcp_pcb *cli = tcp_new();
     if (!cli) return -1;
+    tcp_err(cli, lwr_cli_err);
     ip_addr_t dst;
     IP_ADDR4(&dst, ip4[0], ip4[1], ip4[2], ip4[3]);
     err_t rc = tcp_connect(cli, &dst, port, lwr_cli_connected);
     if (rc != ERR_OK) {
+        tcp_err(cli, NULL);
         tcp_abort(cli);
         return -1;
     }
@@ -207,16 +221,15 @@ static int             g_lc_completed;
 static char            g_lc_head[64];
 static size_t          g_lc_head_len;
 
-static void lc_teardown(struct tcp_pcb *tpcb, int abort_it) {
+/* Returns 1 if the pcb was aborted (freed): a recv callback must then return ERR_ABRT. */
+static int lc_teardown(struct tcp_pcb *tpcb, int abort_it) {
     tcp_recv(tpcb, NULL);
     tcp_err(tpcb, NULL);
     tcp_arg(tpcb, NULL);
-    if (abort_it) {
-        tcp_abort(tpcb);
-    } else {
-        if (tcp_close(tpcb) != ERR_OK) tcp_abort(tpcb);
-    }
     if (g_lc_pcb == tpcb) g_lc_pcb = NULL;
+    if (!abort_it && tcp_close(tpcb) == ERR_OK) return 0;
+    tcp_abort(tpcb);
+    return 1;
 }
 
 static void lc_err(void *arg, err_t err) {
@@ -229,9 +242,9 @@ static err_t lc_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
     (void)arg;
     if (err != ERR_OK || p == NULL) {
         if (p) pbuf_free(p);
-        lc_teardown(tpcb, 0);
+        int aborted = lc_teardown(tpcb, 0);
         if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
-        return ERR_OK;
+        return aborted ? ERR_ABRT : ERR_OK;
     }
     for (struct pbuf *q = p; q != NULL; q = q->next) {
         size_t room = sizeof(g_lc_head) - 1 - g_lc_head_len;
@@ -247,13 +260,14 @@ static err_t lc_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 
     if ((g_lc_mode == KLW_MODE_PARTIAL_ABORT || g_lc_mode == KLW_MODE_PARTIAL_CLOSE) &&
         g_lc_recv >= g_lc_abort_after) {
-        lc_teardown(tpcb, g_lc_mode == KLW_MODE_PARTIAL_ABORT);
+        int aborted = lc_teardown(tpcb, g_lc_mode == KLW_MODE_PARTIAL_ABORT);
         if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
-        return ERR_OK;
+        return aborted ? ERR_ABRT : ERR_OK;
     }
     if (g_lc_mode == KLW_MODE_FULL && g_lc_saw_200) {
-        lc_teardown(tpcb, 0);
+        int aborted = lc_teardown(tpcb, 0);
         if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
+        return aborted ? ERR_ABRT : ERR_OK;
     }
     return ERR_OK;
 }
@@ -307,6 +321,7 @@ typedef struct {
     int             saw_200;
     int             done;     /* full response arrived, or torn down */
     int             refused;  /* connect refused / error before any response */
+    const void     *srv_pcb;  /* the server-side pcb seen at connect (identity only, never deref'd) */
 } McSlot;
 
 static McSlot g_mc[KL_LWR_MC_MAX];
@@ -336,9 +351,9 @@ static err_t mc_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
         tcp_recv(tpcb, NULL);
         tcp_err(tpcb, NULL);
         tcp_arg(tpcb, NULL);
-        if (tcp_close(tpcb) != ERR_OK) tcp_abort(tpcb);
         if (s->pcb == tpcb) s->pcb = NULL;
         mc_resolve(s);
+        if (tcp_close(tpcb) != ERR_OK) { tcp_abort(tpcb); return ERR_ABRT; }
         return ERR_OK;
     }
     for (struct pbuf *q = p; q != NULL; q = q->next) {
@@ -369,6 +384,8 @@ static err_t mc_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     if (err != ERR_OK) return err;
     if (idx < 0 || idx >= KL_LWR_MC_MAX) return ERR_ABRT;
     McSlot *s = &g_mc[idx];
+    /* Loopback: the server's pcb for this connection already exists (SYN_RCVD or later). */
+    s->srv_pcb = kl_lwr_server_pcb_of(tpcb->remote_port, tpcb->local_port);
     tcp_recv(tpcb, mc_recv);
     tcp_err(tpcb, mc_err);
     err_t w = tcp_write(tpcb, s->req, (u16_t)s->req_len, TCP_WRITE_FLAG_COPY);
@@ -443,4 +460,203 @@ size_t kl_lwr_mc_body(int idx, size_t *out_checksum) {
         *out_checksum = sum;
     }
     return blen;
+}
+
+int kl_lwr_mc_abort(int idx) {
+    if (idx < 0 || idx >= KL_LWR_MC_MAX || !g_mc[idx].pcb) return -1;
+    McSlot *s = &g_mc[idx];
+    struct tcp_pcb *p = s->pcb;
+    s->pcb = NULL;
+    tcp_recv(p, NULL);
+    tcp_err(p, NULL);
+    tcp_arg(p, NULL);
+    tcp_abort(p);                       /* RST to the server; frees p */
+    s->done = 1;
+    return 0;
+}
+
+uint16_t kl_lwr_mc_local_port(int idx) {
+    if (idx < 0 || idx >= KL_LWR_MC_MAX || !g_mc[idx].pcb) return 0;
+    return g_mc[idx].pcb->local_port;
+}
+
+const void *kl_lwr_mc_server_pcb(int idx) {
+    if (idx < 0 || idx >= KL_LWR_MC_MAX) return NULL;
+    return g_mc[idx].srv_pcb;
+}
+
+const void *kl_lwr_server_pcb_of(uint16_t server_port, uint16_t client_port) {
+    for (struct tcp_pcb *q = tcp_active_pcbs; q != NULL; q = q->next)
+        if (q->local_port == server_port && q->remote_port == client_port) return q;
+    return NULL;
+}
+
+/* ── reset-on-first-data client ─────────────────────────────────────────────── */
+static struct tcp_pcb *g_rd_pcb;
+static const void     *g_rd_req;
+static size_t          g_rd_req_len;
+static int             g_rd_done, g_rd_reset;
+static char            g_rd_head[256];
+static size_t          g_rd_len;
+
+static void rd_err(void *arg, err_t err) {
+    (void)arg; (void)err;
+    g_rd_pcb = NULL;                    /* already freed by lwIP */
+    g_rd_done = 1;
+}
+
+static err_t rd_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    (void)arg;
+    tcp_recv(tpcb, NULL);
+    tcp_err(tpcb, NULL);
+    tcp_arg(tpcb, NULL);
+    g_rd_pcb = NULL;
+    g_rd_done = 1;
+    if (err != ERR_OK || p == NULL) {   /* the server closed first: no reset from us */
+        if (p) pbuf_free(p);
+        if (tcp_close(tpcb) != ERR_OK) { tcp_abort(tpcb); return ERR_ABRT; }
+        return ERR_OK;
+    }
+    size_t room = sizeof(g_rd_head) - 1 - g_rd_len;
+    u16_t want = (u16_t)(p->tot_len < room ? p->tot_len : room);
+    g_rd_len += pbuf_copy_partial(p, g_rd_head + g_rd_len, want, 0);
+    g_rd_head[g_rd_len] = '\0';
+    /* No tcp_recved and no ACK: lwIP delays the ACK of this segment until after the callback, and
+     * the abort below frees the pcb first, so the server's send that carried these bytes is never
+     * acknowledged. The RST's own ACK field is not processed by the receiver (RST is handled first). */
+    pbuf_free(p);
+    tcp_abort(tpcb);
+    g_rd_reset = 1;
+    return ERR_ABRT;                    /* the pcb is gone: lwIP must not touch it again */
+}
+
+static err_t rd_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    (void)arg;
+    if (err != ERR_OK) return err;
+    tcp_recv(tpcb, rd_recv);
+    if (tcp_write(tpcb, g_rd_req, (u16_t)g_rd_req_len, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+        tcp_err(tpcb, NULL);
+        g_rd_pcb = NULL;
+        g_rd_done = 1;
+        tcp_abort(tpcb);
+        return ERR_ABRT;
+    }
+    tcp_output(tpcb);
+    return ERR_OK;
+}
+
+int kl_lwr_rd_start(const uint8_t ip4[4], uint16_t port, const void *req, size_t req_len) {
+    if (req_len > 0xffffu) return -1;
+    g_rd_req = req; g_rd_req_len = req_len;
+    g_rd_done = g_rd_reset = 0;
+    g_rd_len = 0; g_rd_head[0] = '\0';
+    struct tcp_pcb *cli = tcp_new();
+    if (!cli) return -1;
+    tcp_err(cli, rd_err);
+    ip_addr_t dst;
+    IP_ADDR4(&dst, ip4[0], ip4[1], ip4[2], ip4[3]);
+    if (tcp_connect(cli, &dst, port, rd_connected) != ERR_OK) {
+        tcp_err(cli, NULL);
+        tcp_abort(cli);
+        return -1;
+    }
+    g_rd_pcb = cli;
+    return 0;
+}
+
+int kl_lwr_rd_done(void)       { return g_rd_done; }
+int kl_lwr_rd_reset_sent(void) { return g_rd_reset; }
+size_t kl_lwr_rd_head(char *dst, size_t cap) {
+    if (cap == 0) return 0;
+    size_t n = g_rd_len < cap - 1 ? g_rd_len : cap - 1;
+    memcpy(dst, g_rd_head, n);
+    dst[n] = '\0';
+    return n;
+}
+
+/* ── lwIP callback-contract guard ──────────────────────────────────────────── */
+#define KL_LWR_GUARD_MAX 16
+typedef struct {
+    struct tcp_pcb *pcb;     /* NULL = free entry */
+    tcp_recv_fn     recv;    /* the callbacks the code under test installed */
+    tcp_sent_fn     sent;
+} GuardEnt;
+
+static GuardEnt g_guard[KL_LWR_GUARD_MAX];
+static int g_guard_calls, g_guard_aborts, g_guard_violations;
+
+/* Still owned by lwIP (on the active or TIME-WAIT list), i.e. not freed. */
+static int guard_pcb_listed(const struct tcp_pcb *p) {
+    for (struct tcp_pcb *q = tcp_active_pcbs; q != NULL; q = q->next) if (q == p) return 1;
+    for (struct tcp_pcb *q = tcp_tw_pcbs; q != NULL; q = q->next) if (q == p) return 1;
+    return 0;
+}
+
+static GuardEnt *guard_find(const struct tcp_pcb *p) {
+    for (int i = 0; i < KL_LWR_GUARD_MAX; i++) if (g_guard[i].pcb == p) return &g_guard[i];
+    return NULL;
+}
+
+static err_t guard_verdict(GuardEnt *e, struct tcp_pcb *tpcb, err_t r, const char *which) {
+    int listed = guard_pcb_listed(tpcb);
+    if (r == ERR_ABRT) {
+        if (listed) {
+            g_guard_violations++;
+            printf("     guard: %s callback returned ERR_ABRT but its pcb was not freed\n", which);
+        } else {
+            g_guard_aborts++;
+        }
+        e->pcb = NULL;                  /* the address may now be reused by another pcb */
+        return r;
+    }
+    if (!listed) {
+        g_guard_violations++;
+        printf("     guard: %s callback freed its pcb but returned %d, not ERR_ABRT "
+               "(lwIP would keep using the freed pcb)\n", which, (int)r);
+        e->pcb = NULL;
+        return ERR_ABRT;                /* keep lwIP off the freed pcb; the count fails the test */
+    }
+    return r;
+}
+
+static err_t guard_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    GuardEnt *e = guard_find(tpcb);
+    if (!e || !e->recv) { if (p) pbuf_free(p); return ERR_OK; }   /* unreachable: wrapped pcbs only */
+    g_guard_calls++;
+    err_t r = e->recv(arg, tpcb, p, err);
+    return guard_verdict(e, tpcb, r, "recv");
+}
+
+static err_t guard_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
+    GuardEnt *e = guard_find(tpcb);
+    if (!e || !e->sent) return ERR_OK;
+    g_guard_calls++;
+    err_t r = e->sent(arg, tpcb, len);
+    return guard_verdict(e, tpcb, r, "sent");
+}
+
+int kl_lwr_guard_server_pcbs(uint16_t server_port) {
+    int n = 0;
+    for (struct tcp_pcb *q = tcp_active_pcbs; q != NULL; q = q->next) {
+        if (q->local_port != server_port) continue;            /* server side only */
+        if (q->recv == guard_recv || q->sent == guard_sent) continue;   /* already wrapped */
+        GuardEnt *e = guard_find(q);                           /* a stale entry for a reused address */
+        if (!e) e = guard_find(NULL);
+        if (!e) return -1;
+        e->pcb = q;
+        e->recv = q->recv;
+        e->sent = q->sent;
+        tcp_recv(q, guard_recv);
+        tcp_sent(q, guard_sent);
+        n++;
+    }
+    return n;
+}
+
+int  kl_lwr_guard_calls(void)      { return g_guard_calls; }
+int  kl_lwr_guard_aborts(void)     { return g_guard_aborts; }
+int  kl_lwr_guard_violations(void) { return g_guard_violations; }
+void kl_lwr_guard_reset(void) {
+    memset(g_guard, 0, sizeof(g_guard));
+    g_guard_calls = g_guard_aborts = g_guard_violations = 0;
 }

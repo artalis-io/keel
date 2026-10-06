@@ -228,16 +228,28 @@ static const KlEventProvider lwip_raw_event_provider = { &lwip_raw_event_ops, "l
 
 const KlEventProvider *kl_event_provider_lwip_raw(void) { return &lwip_raw_event_provider; }
 
-/* ── Overlapped socket provider (KlSocketHandle == tcp_pcb *) ───────────────────
- * SERVER-ONLY, IPv4-only. The socket lifecycle (tcp_new/bind/listen/close as
+/* ── Overlapped socket provider ─────────────────────────────────────────────────
+ * Handles: the listen socket and client sockets are their tcp_pcb * (udp_pcb * for datagram
+ * sockets) cast to KlSocketHandle. An ACCEPTED connection is a glue slot handle (index +
+ * generation, see lwip_raw_glue.h), never its pcb: lwIP reuses a freed pcb's address for the next
+ * accept, and a close or cancel by a dead connection's pcb pointer would reach the new one. Every
+ * op below routes a handle to the glue, which tells the kinds apart (a handle is odd, a pcb is
+ * not).
+ *
+ * IPv4-only. The socket lifecycle (tcp_new/bind/listen/close as
  * socket/bind/listen/close; get_local_addr for the bound-port readback) rides real tcp_pcb
  * handles via the glue. Data-plane I/O (recv/send) goes through the completion post path, not
  * these ops, so send/recv are no-op errors. Two ops fail EARLY + CLEARLY because this backend
  * cannot support them: `connect` (outbound client, server-only, returns -1/ENOTSUP) and a
  * non-IPv4 `bind` (the loopif is IPv4, returns -1). `accept` returns KL_INVALID_SOCKET because
  * accepts arrive via the tcp_accept callback → drain, not this pull op. Control-plane no-ops
- * (set_nonblocking etc.) succeed because a raw pcb needs no fcntl-style setup. The handle is a
- * `struct tcp_pcb *` cast to KlSocketHandle (intptr_t). */
+ * (set_nonblocking etc.) succeed because a raw pcb needs no fcntl-style setup. `shutdown` is
+ * unsupported (-1, best-effort by contract) rather than left NULL, which would fall back to the
+ * host shutdown() on a value that is not a host descriptor. */
+static int lwr_sock_shutdown(void *c, KlSocketHandle fd, KlShutdownHow how) {
+    (void)c; (void)fd; (void)how;
+    return -1;
+}
 static int lwr_sock_noop_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; return 0; }
 static void lwr_sock_void_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; }
 static int lwr_sock_opt(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return 0; }
@@ -409,6 +421,7 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .listen = lwr_sock_listen, .accept = lwr_sock_accept, .close = lwr_sock_close,
     .get_local_addr = lwr_sock_getaddr, .get_so_error = lwr_sock_soerror,
     .send = lwr_sock_send, .recv = lwr_sock_recv, .recv_peek = lwr_sock_io,
+    .shutdown = lwr_sock_shutdown,
     .writev = NULL, .sendfile = NULL, .destroy = NULL,
     .name = "lwip-raw",
 };
@@ -500,6 +513,7 @@ static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < iovcnt; i++) { lv[i].base = iov[i].base; lv[i].len = iov[i].len; }
     KlLwrState *st = stream->ctx->loop._backend;
+    kl_lwr_set_owner(st->lwrctx, (void *)stream->fd, stream);   /* the WRITE's target */
     return kl_lwr_send_begin(st->lwrctx, (void *)stream->fd, lv, iovcnt);
 }
 
@@ -508,7 +522,7 @@ static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
  * seam-neutrally (referenced in place / snapshotted like a buffered send) and the glue preads the
  * file body chunk-by-chunk into the same preallocated TX window (constant memory regardless of
  * file size). One KL_COMP_WRITE follows when the whole head+file is acked; a file read error
- * surfaces a FAILED terminal (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
+ * fails the WRITE (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
  * file_fd; the response layer closes res->file_fd (kl_http_response_reset/free), not here. */
 static int lwr_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
@@ -518,17 +532,18 @@ static int lwr_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, int
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < head_n; i++) { lv[i].base = head_iov[i].base; lv[i].len = head_iov[i].len; }
     KlLwrState *st = stream->ctx->loop._backend;
+    kl_lwr_set_owner(st->lwrctx, (void *)stream->fd, stream);   /* the WRITE's target */
     return kl_lwr_sendfile_begin(st->lwrctx, (void *)stream->fd, lv, head_n, file_fd, count);
 }
 
-/* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the
- * conn is released ONLY through a completion event, so we do NOT free the KlHttpConn here. Instead
- * we abort the underlying pcb (kl_lwr_tcp_abort: frees its owned send buffer + slot by owner,
- * detaches callbacks so lwIP's internal tcp_err isn't re-entered, RSTs the peer, and marks the
- * slot `closed`). The abort marks the slot closed, so the NEXT kl_comp_drain surfaces a single
- * terminal zero-length READ for this (armed) conn → the driver runs comp_close exactly once,
- * releasing the KlHttpConn through its normal completion path. Idempotent + safe if the conn
- * already closed (kl_lwr_tcp_abort is a no-op on a dead/free slot). */
+/* Cancel pending ops on `fd` (idle-timeout sweep, a deferred release). Semantics mirror
+ * event_pollcomp.c: the conn is released ONLY through completion events, so we do NOT free the
+ * KlHttpConn here. Instead we abort the connection (kl_lwr_tcp_abort: marks the slot dead,
+ * detaches callbacks so lwIP's internal tcp_err isn't re-entered, RSTs the peer). Every op posted
+ * on it then completes on the next kl_comp_drain: the send's WRITE fails, an armed recv's READ
+ * fails, so the driver, which releases the conn after the last of them, always gets there. On a
+ * connection that is already dead (or a stale handle) this is a no-op: its outstanding ops have
+ * their failed completions owed already. */
 static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlLwrState *st = ctx ? ctx->loop._backend : NULL;
     if (st && kl_handle_valid(fd)) kl_lwr_tcp_abort(st->lwrctx, (void *)fd);
@@ -588,10 +603,10 @@ static KlDgramRetireResult lwr_comp_retire_dgram(struct KlEventCtx *ctx, KlCompL
 
 /* ── drain: one lwIP tick, then translate per-slot pending state into completion events ──
  * fix #4: there is no global completion ring. First tick lwIP (so the tcp_* callbacks update
- * per-slot state), then (a) drain per-slot ACCEPT/WRITE/terminal completions via kl_lwr_drain,
- * and (b) surface READs by scanning armed-and-ready slots via kl_lwr_next_readable. Both are
- * bounded by conn_cap, so nothing can overflow / be silently dropped, and a terminal (a
- * per-slot flag) is always deliverable. */
+ * per-slot state), then (a) drain per-slot ACCEPT/WRITE completions via kl_lwr_drain, and (b)
+ * surface READs by scanning armed-and-ready slots via kl_lwr_next_readable. Both are bounded by
+ * conn_cap, so nothing can overflow / be silently dropped. A dead connection gets one failed
+ * completion per op it has posted: a WRITE in (a), a READ in (b). */
 static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlLwrState *st = ctx->loop._backend;
 
@@ -602,7 +617,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
     int count = 0;
 
-    /* (a) ACCEPT / WRITE / terminal completions from the per-slot scan. */
+    /* (a) ACCEPT / WRITE / CONNECT completions from the per-slot scan. */
     KlLwrRecord recs[KL_LWR_MAX_DRAIN];
     int rmax = max < KL_LWR_MAX_DRAIN ? max : KL_LWR_MAX_DRAIN;
     int nr = kl_lwr_drain(st->lwrctx, recs, rmax);
@@ -637,8 +652,8 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             continue;
         }
 
-        /* KL_LWR_WRITE: a completed send (ok=1) OR a terminal close (ok=0). The slot owner is the
-         * neutral KlStream transport target (set in lwr_comp_post_recv), matching the KL_COMP_READ
+        /* KL_LWR_WRITE: a completed send (ok=1) or a failed one (ok=0). The slot owner is the
+         * neutral KlStream transport target (set in lwr_comp_post_recv/send), matching the KL_COMP_READ
          * path below and the src/ backends (pollcomp sets ev->target = op->stream for READ+WRITE).
          * This TU never depends on the (opaque) KlHttpConn layout. */
         KlStream *stream = r->owner;
@@ -647,12 +662,10 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         ev->target = stream;
         ev->ok = r->ok;
         ev->bytes = r->nbytes;
-        /* Exactly-one-close: a terminal (ok=0) completion, surfaced by the glue on
-         * tcp_err / kl_comp_cancel / close-with-outstanding, drives the driver to release this
-         * stream (its owning conn). Disarm it NOW so the armed-READ scan below (and future drains)
-         * never touch the about-to-be-released stream (no dangling armed slot aliasing a freed
-         * or reused conn). */
-        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)stream->fd);
+        /* A failed WRITE (the conn died, or the peer closed under the send) completes the SEND
+         * only. A recv armed on the same conn is NOT disarmed: it completes with its own failed
+         * READ below (this drain or a later one). The driver releases a connection only once
+         * every op it posted has completed, so suppressing that READ would leak the conn. */
         count++;
     }
 
@@ -681,17 +694,14 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             size_t got = kl_lwr_take_staged(st->lwrctx, pcb, recv_buf, recv_cap);
             ev->ok = 1;
             ev->bytes = got;
-        } else {                       /* closed with no pending data: zero-length READ */
+        } else {                       /* closed / dead with no pending data: failed READ */
             ev->ok = 0;
             ev->bytes = 0;
-            /* Exactly-one-close: mark the terminal READ consumed so a re-check can never surface
-             * a second terminal event (which would drive a double comp_close). The driver's
-             * comp_on_read turns ok=0 into comp_close → conn release → sock.close →
-             * kl_lwr_tcp_close, freeing the slot (or, for a dead/tcp_err slot, just the slot,
-             * no UAF on the freed pcb). */
-            kl_lwr_mark_terminated(st->lwrctx, pcb);
+            /* The driver's comp_on_read turns ok=0 into a close → conn release (once its last
+             * posted op completed) → sock.close → kl_lwr_tcp_close, freeing the slot (for a dead
+             * slot just the slot, no UAF on the freed pcb). */
         }
-        kl_lwr_conn_disarm(st->lwrctx, pcb);   /* consumed the recv */
+        kl_lwr_conn_disarm(st->lwrctx, pcb);   /* consumed the recv: exactly one READ per arm */
         count++;
     }
 

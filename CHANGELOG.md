@@ -445,6 +445,27 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   eight slots about seven idle clients left the firmware server unable to accept. A cancel now marks
   the posted operation, and the next drain delivers it once as a failed read or write; an operation
   left behind by an earlier connection on a reused handle is still dropped undelivered.
+- **lwIP raw: an abort inside the send callback no longer leaves lwIP using the freed pcb.** When
+  a file response's file came up short mid-transfer (a truncated file), or `tcp_write` failed hard,
+  the send pump aborted the connection from inside lwIP's `tcp_sent` callback and the callback
+  then returned success. lwIP skips its post-callback work only on `ERR_ABRT`, so it went on to
+  touch the pcb it had just freed; lwIP's pools keep that memory mapped, so sanitizers did not
+  see it. The callback now returns `ERR_ABRT` whenever the pump aborted, and the client connect
+  callback that reported `ERR_ABRT` without aborting now aborts first.
+- **lwIP raw: a connection with a send and a receive posted is released when it dies.** A peer
+  reset (or a cancel) produced one failed completion per connection, reported as the send's, and
+  suppressed the receive that was also posted, as during a TLS handshake, on WebSocket and HTTP/2,
+  or with `Expect: 100-continue`. The server releases a connection only after its last posted op
+  completes, so such a connection and its backend slot were never freed. Every posted op on a dead
+  connection now completes on its own: the send with a failed write, the receive with a failed
+  read, also after a cancel of a connection that is already dead. Nothing completes for an op
+  that was not posted.
+- **lwIP raw: closing a dead connection no longer tears down a new one on the same pcb.** An
+  accepted connection's socket handle was its `tcp_pcb` pointer, and lwIP's pools give a freed
+  pcb's address to the next accept. Closing a reset connection then found the new connection by
+  that address and closed it, and the dead slot was never cleared. Accepted connections now get a
+  slot handle (index plus generation) as their socket handle, which a later connection can never
+  match. The raw backend's connection limit is 65535 as a result.
 - **Completion server: TLS output written outside a request is sent at once.** On a completion
   loop a TLS write only reached the engine's output ring, which was flushed when the connection was
   next driven by input. A WebSocket auto-ping, a frame sent from a timer, or the drain's Close or
