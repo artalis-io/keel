@@ -151,6 +151,8 @@ typedef struct KlIocpOp {
     HANDLE             op_handle;
     DWORD              pipe_err;
     int                pipe_cancelled;   /* cancel requested: finish, never re-issue */
+    int                dg_cancelled;     /* DGRAM_RECV: cancel requested; an ICMP report then
+                                          * completes the op instead of re-issuing it */
     struct KlIocpOp   *g_next;
     struct KlIocpOp  **g_link;
 } KlIocpOp;
@@ -637,6 +639,47 @@ static int iocp_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, in
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
  * KL_COMP_DGRAM_RECV event. */
+/* ICMP reports skipped per issue before the receive is reported as failed (bounds the re-issue loop). */
+#define KL_IOCP_ICMP_REPORT_SKIP_MAX 16
+
+/* Issue (or re-issue) the op's overlapped datagram receive on op->op_sock, from fresh op state.
+ * Returns 0 when a completion packet will follow, else the Winsock error the call failed with at
+ * issue (no packet queued). A failure that is an ICMP report about an earlier send (see
+ * kl_udp_win_is_icmp_report) yielded nothing, so the receive is simply issued again. */
+static int iocp_dgram_recv_issue(KlIocpOp *op) {
+    for (int skipped = 0;; skipped++) {
+        memset(&op->ov, 0, sizeof(op->ov));
+        op->src_len = (int)sizeof(op->src);
+        int rc;
+        if (op->via_recvmsg) {
+            LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg(op->op_sock);
+            if (!recvmsg) return WSAEINVAL;
+            op->ubuf.len = (ULONG)op->buflen;
+            op->ubuf.buf = (char *)op->buf;
+            op->umsg.name = (SOCKADDR *)&op->src;
+            op->umsg.namelen = (INT)sizeof(op->src);
+            op->umsg.lpBuffers = &op->ubuf;
+            op->umsg.dwBufferCount = 1;
+            op->umsg.Control.len = (ULONG)sizeof(op->uctrl);
+            op->umsg.Control.buf = op->uctrl;
+            op->umsg.dwFlags = 0;
+            DWORD recvd = 0;
+            rc = recvmsg(op->op_sock, &op->umsg, &recvd, &op->ov, NULL);
+        } else {
+            /* Fallback: no WSARecvMsg extension, source address only. The WSABUF array is
+             * captured by the call, so a stack WSABUF is fine here. */
+            WSABUF buf = { (ULONG)op->buflen, (char *)op->buf };
+            DWORD flags = 0, recvd = 0;
+            rc = WSARecvFrom(op->op_sock, &buf, 1, &recvd, &flags,
+                             (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
+        }
+        if (rc != SOCKET_ERROR) return 0;
+        int e = WSAGetLastError();
+        if (e == WSA_IO_PENDING) return 0;
+        if (!kl_udp_win_is_icmp_report(e) || skipped + 1 >= KL_IOCP_ICMP_REPORT_SKIP_MAX) return e;
+    }
+}
+
 static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
     KlIocpState *st = ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -644,42 +687,15 @@ static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_DGRAM_RECV;
     op->alloc = st->alloc;
-    op->src_len = (int)sizeof(op->src);
     /* The receive buffer + capture flags travel in the descriptor; the op never dereferences a transport.
      * The buffer stays valid because the token ref (transferred below) pins it past the op's lifetime. */
     op->buf        = rop->buf;
     op->buflen     = rop->cap;
     op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
     iocp_op_register(st, op, (SOCKET)rop->fd);
+    op->via_recvmsg = kl_udp_win_get_recvmsg((SOCKET)rop->fd) != NULL;
 
-    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)rop->fd);
-    if (recvmsg) {
-        op->via_recvmsg = 1;
-        op->ubuf.len = (ULONG)op->buflen;
-        op->ubuf.buf = (char *)op->buf;
-        op->umsg.name = (SOCKADDR *)&op->src;
-        op->umsg.namelen = (INT)sizeof(op->src);
-        op->umsg.lpBuffers = &op->ubuf;
-        op->umsg.dwBufferCount = 1;
-        op->umsg.Control.len = (ULONG)sizeof(op->uctrl);
-        op->umsg.Control.buf = op->uctrl;
-        op->umsg.dwFlags = 0;
-        DWORD recvd = 0;
-        int rc = recvmsg((SOCKET)rop->fd, &op->umsg, &recvd, &op->ov, NULL);
-        if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-            iocp_op_free(op);                  /* life unset → no release */
-            return -1;
-        }
-        op->life = rop->life;  /* TRANSFERRED into the op (no retain) */
-        return 0;
-    }
-
-    /* Fallback: no WSARecvMsg extension, source address only. */
-    WSABUF buf = { (ULONG)op->buflen, (char *)op->buf };
-    DWORD flags = 0, recvd = 0;
-    int rc = WSARecvFrom((SOCKET)rop->fd, &buf, 1, &recvd, &flags,
-                         (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+    if (iocp_dgram_recv_issue(op) != 0) {
         iocp_op_free(op);                      /* life unset → no release */
         return -1;
     }
@@ -759,8 +775,10 @@ static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDg
     KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;
     for (KlIocpOp *o = st->ops; o; o = o->g_next)
-        if (o->life == life && o->type == want)
+        if (o->life == life && o->type == want) {
+            o->dg_cancelled = 1;   /* a report completing now must finish the op, not re-issue it */
             CancelIoEx((HANDLE)(uintptr_t)o->op_sock, &o->ov);
+        }
     return 0;
 }
 
@@ -1251,6 +1269,21 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * socket that is about to be closed. */
             if (st->quiescing) { iocp_op_free(op); continue; }
 
+            /* An ICMP report about an earlier send (WSAECONNRESET / WSAENETRESET) completed this
+             * receive with no datagram. It is not a receive failure, so re-issue the same op (its
+             * token ref and buffer stay with it) and surface nothing; a cancelled op is not re-issued,
+             * and a re-issue that fails outright falls through as the failed receive it now is. */
+            int reissue_failed = 0;   /* the OVERLAPPED was reset by the attempt: never re-read it */
+            {
+                DWORD rx = 0, rf = 0;
+                if (!op->dg_cancelled &&
+                    !WSAGetOverlappedResult(op->op_sock, &op->ov, &rx, FALSE, &rf) &&
+                    kl_udp_win_is_icmp_report(WSAGetLastError())) {
+                    if (iocp_dgram_recv_issue(op) == 0) continue;
+                    reissue_failed = 1;
+                }
+            }
+
             /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op.
              * Transfer the token ref op → event (released after dispatch); NULL op->life so
              * iocp_op_free does not double-release. Never dereference the transport owner. */
@@ -1265,9 +1298,11 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * itself is platform-agnostic + unit-tested (dgram_recv_classify.h); here we supply the
              * Winsock result and then parse the metadata it says is valid. */
             DWORD xfer = 0, wflags = 0;
-            BOOL wok = WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &wflags);
+            BOOL wok = reissue_failed ? FALSE
+                                      : WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &wflags);
+            int werr = wok ? 0 : (reissue_failed ? WSAECONNRESET : WSAGetLastError());
             unsigned mflags = op->via_recvmsg ? op->umsg.dwFlags : wflags;
-            KlDgramRecvClass cl = kl_dgram_recv_classify(wok, wok ? 0 : WSAGetLastError(), WSAEMSGSIZE,
+            KlDgramRecvClass cl = kl_dgram_recv_classify(wok, werr, WSAEMSGSIZE,
                                                          (size_t)xfer, mflags, MSG_TRUNC,
                                                          op->buflen);
             out[count].ok = cl.ok;
