@@ -852,6 +852,10 @@ static void handle_end_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) 
 }
 
 static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ud);
+static void handle_nest(KlHttpRequest *req, KlHttpResponse *res, void *ud);
+static void handle_od(KlHttpRequest *req, KlHttpResponse *res, void *ud);
+static KlHttpBodyReader *od_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud);
+static KlHttpRequest *g_end_req;
 
 static void end_start(void) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
@@ -861,6 +865,8 @@ static void end_start(void) {
     kl_http_server_route(&end_srv, "GET", "/cancel-later", handle_suspend_cancel_later, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/hello", handle_end_hello, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/chain", handle_chain, NULL, NULL);
+    kl_http_server_route(&end_srv, "GET", "/nest", handle_nest, NULL, NULL);
+    kl_http_server_route_streaming_async(&end_srv, "POST", "/od", handle_od, NULL, od_factory);
     g_end_cancels = 0;
     kl_plat_thread_create(&end_tid, end_server_thread, NULL);
     for (int i = 0; i < 200 && end_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
@@ -1029,5 +1035,139 @@ UTEST(async, a_cancel_inside_on_resume_releases_once) {
     ASSERT_EQ(st.active_connections, 0);                   /* was: released twice */
     ASSERT_EQ(served, 4);
 }
+
+/* ── A nested complete inside on_resume keeps the connection ────────────────────────────────────
+ * A resume that suspends on a second op and completes it at once: the inner complete re-registered
+ * the fd, and the outer one registered it again. epoll refuses a second add, and that refusal
+ * released the live connection: the keep-alive connection was dropped after its response. */
+static KlAsyncOp g_nest_op2;
+
+static void nest_resume(KlAsyncOp *op, void *ud) {
+    (void)ud;
+    memset(&g_nest_op2, 0, sizeof g_nest_op2);
+    g_nest_op2.on_resume = end_noop_resume;
+    if (kl_async_suspend(&end_srv, op->conn, &g_nest_op2) < 0) return;
+    kl_http_response_json(kl_http_conn_response(op->conn), 200, "{\"nest\":1}", 10);
+    kl_async_complete(&end_srv, &g_nest_op2);             /* the second op finished at once */
+}
+static void handle_nest(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = nest_resume;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_end_op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 50, chain_complete_timer, NULL);
+}
+
+UTEST(async, a_nested_complete_inside_on_resume_keeps_the_connection) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[1024];
+    int closed = 0, first = 0, second = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {
+        const char *rq = "GET /nest HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1000, &closed);
+        first = strstr(buf, "{\"nest\":1}") != NULL;
+        if (!closed) {                                     /* keep-alive: a second request */
+            const char *rq2 = "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n";
+            (void)kl_test_sockwrite(fd, rq2, strlen(rq2));
+            (void)read_for(fd, buf, sizeof buf, 1000, &closed);
+            second = strstr(buf, "{\"hi\":1}") != NULL;
+        }
+        kl_test_closesock(fd);
+    }
+    end_stop();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);                                   /* was (epoll): the connection was released */
+}
+
+/* ── An op ended inside on_data, for body bytes read with the headers ───────────────────────────
+ * A streaming-async route feeds the body bytes that arrived with the headers to the reader's on_data
+ * from the dispatch itself. An op started and cancelled there released the connection under on_data
+ * (the reader was destroyed while it ran) and the dispatch then released it again. And an op left
+ * pending there was overwritten by the dispatch's READING_BODY, so the connection read while
+ * suspended (or, on epoll, was released). */
+typedef struct {
+    KlHttpBodyReader base;
+    KlAllocator *alloc;
+    int fired;
+} OdReader;
+static int g_od_cancel_now;
+static int od_on_data(KlHttpBodyReader *self, const char *d, size_t n) {
+    OdReader *r = (OdReader *)self;
+    (void)d; (void)n;
+    if (r->fired || !g_end_req) return 0;
+    r->fired = 1;
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = end_noop_resume;
+    g_end_op.on_cancel = end_count_cancel;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(g_end_req), &g_end_op) < 0) return 0;
+    if (g_od_cancel_now) {
+        kl_async_cancel(&end_srv, &g_end_op);              /* the work could not be started */
+    } else {
+        kl_http_response_json(kl_http_conn_response(kl_http_request_conn(g_end_req)), 200,
+                              "{\"od\":1}", 8);
+        (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 50, chain_complete_timer, NULL);
+    }
+    return 0;
+}
+static void od_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void od_on_error(KlHttpBodyReader *self) { (void)self; }
+static void od_destroy(KlHttpBodyReader *self) {
+    OdReader *r = (OdReader *)self;
+    kl_free(r->alloc, r, sizeof *r);
+}
+static KlHttpBodyReader *od_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)req; (void)ud;
+    OdReader *r = kl_malloc(alloc, sizeof *r);
+    if (!r) return NULL;
+    memset(r, 0, sizeof *r);
+    r->base.on_data = od_on_data;
+    r->base.on_complete = od_on_complete;
+    r->base.on_error = od_on_error;
+    r->base.destroy = od_destroy;
+    r->alloc = alloc;
+    return &r->base;
+}
+static void handle_od(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    g_end_req = req;
+    kl_http_request_await_body(req);                       /* on_data resumes "us" */
+}
+
+static void od_case(int *utest_result, int cancel_now) {
+    g_od_cancel_now = cancel_now;
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[1024];
+    int closed = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {                                         /* half the body arrives with the headers */
+        const char *rq = "POST /od HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n"
+                         "Connection: close\r\n\r\n01234";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(200);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int served = end_hellos(port);
+    int cancels = g_end_cancels;
+    end_stop();
+    g_end_req = NULL;
+    if (cancel_now) {
+        ASSERT_EQ(cancels, 1);
+        ASSERT_TRUE(closed);
+    } else {
+        ASSERT_TRUE(strstr(buf, "{\"od\":1}") != NULL);    /* was: overwritten by READING_BODY */
+    }
+    ASSERT_EQ(st.active_connections, 0);                   /* was (cancel): released twice */
+    ASSERT_EQ(served, 4);
+}
+
+UTEST(async, a_cancel_inside_on_data_for_leftover_body_releases_once) { od_case(utest_result, 1); }
+UTEST(async, an_op_left_pending_inside_on_data_is_not_overwritten) { od_case(utest_result, 0); }
 
 UTEST_MAIN();
