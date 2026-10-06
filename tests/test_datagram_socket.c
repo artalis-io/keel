@@ -656,4 +656,113 @@ UTEST(datagram_socket, socket_default_tos_reaches_the_provider) {
     kl_event_ctx_free(&ctx);
 }
 
+/* ── An ICMP port-unreachable must not stop the receiver ──────────────────────────────────────────
+ *
+ * On Windows an ICMP port-unreachable provoked by an earlier sendto surfaces on the NEXT receive as
+ * WSAECONNRESET (network-unreachable as WSAENETRESET), even on an unconnected UDP socket. That is a
+ * report about a datagram this socket SENT, not a receive failure, so it must never stop delivery:
+ * one unreachable nameserver would otherwise silence a resolver forever, and any server could be
+ * stopped by a spoofed datagram that makes it reply to a closed port.
+ *
+ * The receiver sends to a port that was just bound and closed (so the host answers port-unreachable),
+ * then a second socket sends it a real datagram, which must still arrive. Runs everywhere: off
+ * Windows an unconnected UDP socket gets no ICMP error, so the case passes trivially there. Two
+ * variants: a kl_datagram_socket_init socket (the configure path) and a plain socket() adopted
+ * through kl_datagram_init, which never went through configure. */
+
+/* A loopback UDP port with nothing bound to it: bind an ephemeral port, read it back, close. */
+static uint16_t closed_udp_port(void) {
+    KlSocketHandle s = (KlSocketHandle)socket(AF_INET, SOCK_DGRAM, 0);
+    if (!kl_handle_valid(s)) return 0;
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET; a.sin_port = 0;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    uint16_t port = 0;
+    if (bind(s, (struct sockaddr *)&a, (socklen_t)sizeof(a)) == 0) {
+        socklen_t l = (socklen_t)sizeof(a);
+        if (getsockname(s, (struct sockaddr *)&a, &l) == 0) port = ntohs(a.sin_port);
+    }
+    (void)kl_test_closesock(s);
+    return port;
+}
+
+/* A plain loopback UDP socket, bound and non-blocking, for the adopted-fd variant. */
+static KlSocketHandle plain_bound_udp(void) {
+    KlSocketHandle s = (KlSocketHandle)socket(AF_INET, SOCK_DGRAM, 0);
+    if (!kl_handle_valid(s)) return KL_INVALID_SOCKET;
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET; a.sin_port = 0;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (bind(s, (struct sockaddr *)&a, (socklen_t)sizeof(a)) != 0 || kl_test_set_nonblock(s) != 0) {
+        (void)kl_test_closesock(s);
+        return KL_INVALID_SOCKET;
+    }
+    return s;
+}
+
+/* Shared body. Returns the number of datagrams delivered to `rx` after the unreachable send. */
+static int unreachable_then_receive(KlEventCtx *ctx, KlDatagram *rx) {
+    uint16_t dead = closed_udp_port();
+    if (dead == 0) return -1;
+    g_recv_calls = 0;
+    if (kl_datagram_recv_start(rx, on_recv, NULL) != 0) return -1;
+
+    /* Two unreachable sends, each with time for its ICMP to come back and complete the pending
+     * receive (completion) or make the socket readable (readiness). */
+    KlSockAddr dead_addr; kl_sockaddr_parse(&dead_addr, "127.0.0.1", dead);
+    const char *probe = "nobody-home";
+    KlDatagramMessage pm = { .data = probe, .len = strlen(probe), .peer = &dead_addr, .tos = -1 };
+    for (int k = 0; k < 2; k++) {
+        if (kl_datagram_send(rx, &pm) != KL_DATAGRAM_ACCEPTED) return -1;
+        for (int i = 0; i < 10; i++) kl_event_ctx_run(ctx, 16, 20);
+    }
+
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = ctx, .alloc = &g_alloc };
+    if (kl_datagram_socket_init(&tx, &tc) != 0) return -1;
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", kl_datagram_local_port(rx));
+    const char *msg = "still-listening";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+    int sent = (kl_datagram_send(&tx, &m) == KL_DATAGRAM_ACCEPTED);
+    if (sent) pump_until(ctx, &g_recv_calls, 1, 100);
+    close_free(ctx, &tx);
+    return sent ? g_recv_calls : -1;
+}
+
+UTEST(datagram_socket, port_unreachable_does_not_stop_recv) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&rx, &rc));
+
+    int got = unreachable_then_receive(&ctx, &rx);
+    close_free(&ctx, &rx);
+    kl_event_ctx_free(&ctx);
+    EXPECT_EQ(1, got);
+    EXPECT_EQ(strlen("still-listening"), g_len);
+}
+
+UTEST(datagram_socket, port_unreachable_does_not_stop_recv_adopted_fd) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlSocketHandle fd = plain_bound_udp();
+    ASSERT_TRUE(kl_handle_valid(fd));
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig dc; memset(&dc, 0, sizeof(dc));
+    dc.ctx = &ctx; dc.alloc = &g_alloc; dc.fd = fd;
+    dc.send_slots = 4; dc.send_slot_cap = 1500; dc.recv_cap = 2048;
+    if (kl_datagram_init(&rx, &dc) != 0) {
+        (void)kl_test_closesock(fd);   /* not adopted: still ours */
+        kl_event_ctx_free(&ctx);
+        ASSERT_TRUE(0);
+    }
+
+    int got = unreachable_then_receive(&ctx, &rx);
+    close_free(&ctx, &rx);
+    kl_event_ctx_free(&ctx);
+    EXPECT_EQ(1, got);
+    EXPECT_EQ(strlen("still-listening"), g_len);
+}
+
 UTEST_MAIN();
