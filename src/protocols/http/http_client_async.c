@@ -446,12 +446,13 @@ static void he_on_deadline(void *user_data)
 
 /* ── Async DNS resolve callback ──────────────────────────────────── */
 
-/* Arm the overall request deadline (0 = none). */
-static void he_arm_deadline(KlHttpClient *c)
+/* Reserve the mandatory overall request deadline before starting asynchronous work. */
+static int he_arm_deadline(KlHttpClient *c)
 {
     if (c->timeout_ms > 0)
         c->deadline_timer = kl_timer_add(c->ev_ctx, (uint64_t)c->timeout_ms,
                                          he_on_deadline, c);
+    return c->deadline_timer >= 0 ? 0 : -1;
 }
 
 static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
@@ -477,10 +478,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     c->conn_racing = 1;
     c->state = KL_HTTP_CLIENT_CONNECTING;
 
-    /* The whole-request deadline (client-owned) is normally armed before resolution started; arm it
-     * here only if not, then hand the address count to the connect op, which drives the racing. */
-    if (c->deadline_timer < 0)
-        he_arm_deadline(c);
+    /* The whole-request deadline is required before resolution starts. */
     kl_connect_op_on_resolved(&c->connect_op, c->conn_addrs.naddrs);
 }
 
@@ -515,7 +513,7 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
  * resolver path (cli_co_start_resolve hands the list over inline), so a refused or unreachable
  * address moves on to the next one instead of failing the request. The request may complete
  * (through on_done, deferred) before this returns. */
-static void client_connect_resolved(KlHttpClient *c, const KlSockAddr *addrs, int naddr)
+static int client_connect_resolved(KlHttpClient *c, const KlSockAddr *addrs, int naddr)
 {
     memset(&c->conn_addrs, 0, sizeof(c->conn_addrs));
     if (naddr > KL_RESOLVE_MAX_ADDRS)
@@ -525,9 +523,10 @@ static void client_connect_resolved(KlHttpClient *c, const KlSockAddr *addrs, in
     c->conn_addrs.naddrs = naddr;
     c->conn_addrs.ai_socktype = SOCK_STREAM;
     c->state = KL_HTTP_CLIENT_RESOLVING;
-    he_arm_deadline(c);
+    if (he_arm_deadline(c) < 0) return -1;
     kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
     kl_connect_op_start(&c->connect_op);
+    return 0;
 }
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */
@@ -1150,15 +1149,15 @@ static void async_complete_error(KlHttpClient *c)
      * on the next loop tick instead, where nothing of the connect phase is on the stack. */
     if (!c->done_deferred &&
         kl_connect_op_state(&c->connect_op) == KL_CONNECT_OP_STATE_DONE) {
+        /* Retire the request deadline BEFORE scheduling its replacement. Every request reserves
+         * that timer before starting asynchronous work, so this releases a heap slot and the deferred completion
+         * needs no allocation, even when the heap is full and its allocator now fails. A fired
+         * deadline likewise already released its slot. Never invoke on_done from this frame: it
+         * may free the client and its connect op while co_terminal still borrows them. */
+        he_cancel_timers(c);
         if (c->done_timer < 0)
             c->done_timer = kl_timer_add(c->ev_ctx, 0, async_deferred_error, c);
-        if (c->done_timer >= 0) {
-            /* The request has failed: its deadline must not complete it a second time first
-             * (both can be due in the same timer pass when the loop runs late). */
-            he_cancel_timers(c);
-            return;
-        }
-        /* No timer (allocation failure): complete inline, as before. */
+        return;
     }
     he_cancel_timers(c);
     cli_cancel_done_timer(c);
@@ -1464,7 +1463,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
-        he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
+        if (he_arm_deadline(c) < 0) { kl_http_client_free(c); return NULL; }
         return c;
     }
 
@@ -1486,7 +1485,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). kl_connect_op_start runs start_resolve
          * synchronously (which kicks resolver->resolve); a sync-completion-capable resolver may drive
          * the whole request to terminal inline. init/start are infallible (valid static hook table). */
-        he_arm_deadline(c);   /* the request deadline covers name resolution too */
+        if (he_arm_deadline(c) < 0) { kl_http_client_free(c); return NULL; }
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
         if (c->connect_start_failed) {
@@ -1539,7 +1538,10 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
     }
 
-    client_connect_resolved(c, addrs, naddr);   /* tries each address in turn */
+    if (client_connect_resolved(c, addrs, naddr) < 0) {
+        kl_http_client_free(c);
+        return NULL;
+    }
     return c;
 }
 
@@ -1825,7 +1827,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
             kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
-        he_arm_deadline(c);   /* a reused connection to a silent server must still time out */
+        if (he_arm_deadline(c) < 0) { kl_http_client_free(c); return NULL; }
         return c;
     }
 
@@ -1841,7 +1843,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C), same as the non-streaming path:
          * kl_connect_op_start runs start_resolve (kicks resolver->resolve) synchronously; a
          * start failure retires cleanly + returns NULL, an inline completion advances the op. */
-        he_arm_deadline(c);   /* the request deadline covers name resolution too */
+        if (he_arm_deadline(c) < 0) { kl_http_client_free(c); return NULL; }
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
         if (c->connect_start_failed) {
@@ -1873,6 +1875,9 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         return NULL;
     }
 
-    client_connect_resolved(c, addrs, naddr);   /* tries each address in turn */
+    if (client_connect_resolved(c, addrs, naddr) < 0) {
+        kl_http_client_free(c);
+        return NULL;
+    }
     return c;
 }

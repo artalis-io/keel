@@ -7,6 +7,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- Async HTTP client errors remain deferred under allocation failure, so completion callbacks may
+  safely free the client. Requests fail to start if their deadline timer cannot be reserved.
 - HTTP readiness reads preserve connections on would-block and retry interrupted reads instead of
   reporting a terminal header/body failure. EOF and transport errors still close normally.
 - Protocol capability hooks are published atomically across independent server threads; completion

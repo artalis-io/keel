@@ -5,6 +5,34 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Final C-audit sweep and targeted fix (2026-10-06)
+
+**Revision:** `7878ef7` (merged #461; source-identical to local `5919644`).
+**Scope:** mechanical scans of core C sources and public headers; direct Clang analysis of
+applicable hosted POSIX core TUs; manual tracing of HTTP parsers, body readers, response framing,
+router/middleware, client connect/error callbacks, completion output, timers, thread pool and
+transport retirement. This is not an exhaustive proof of every backend or integration path.
+The user redirected discovery to implementation after the finding below; no additional broad
+review was pursued.
+
+| Finding | Severity | Location | Proof and resolution |
+|---|---|---|---|
+| Deferred client error fell back to inline completion when a full timer heap could not grow | High (memory safety; allocation-failure dependent) | `src/protocols/http/http_client_async.c`, `async_complete_error` | A caller freeing the client in its documented `on_done` callback left `co_terminal` reading the freed embedded connect op. A temporary public-API ASan reproducer reported heap-use-after-free in `co_request_cancels`. Fixed by retiring the mandatory request deadline before scheduling its replacement: the deferred callback reuses a heap slot without allocating. Failure to reserve the initial deadline rejects startup without callbacks. |
+
+Four new regressions cover full-heap allocation failure and initial deadline allocation failure
+for direct and pooled clients. The original reproducer is sanitizer-clean after the fix. Focused
+client free-in-done, deadline, Happy Eyeballs and pool suites passed under ASan/UBSan.
+The full post-fix readiness sanitizer suite passed, as did pollcomp sanitizer runs of the
+free-in-done and Happy Eyeballs suites (10 and 11 cases).
+
+The pre-fix full readiness ASan/UBSan suite and structural gates passed. Seven separately
+instrumented fuzz targets each completed 20,000 runs without a sanitizer finding. The local
+fuzzer link required selecting GCC 13's installed C++ runtime explicitly. Direct Clang analysis
+reported no diagnostics on the applicable core TUs or the changed client TU; this does not replace
+the unavailable `scan-build` and `cppcheck` wrappers. No fresh Windows, native io_uring, or optional
+integration execution is claimed. Generated fuzz corpus additions were moved to temporary storage.
+No commit or push was performed in this follow-up.
+
 ## Eighteenth pass: comprehensive re-audit after the hardening round (2026-10-04)
 
 **Scope:** the whole `src/` tree, `include/keel/`, every integration (TLS backends, nghttp2, miniz,
