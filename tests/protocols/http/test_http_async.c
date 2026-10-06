@@ -851,6 +851,8 @@ static void handle_end_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) 
     kl_http_response_json(res, 200, "{\"hi\":1}", 8);
 }
 
+static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ud);
+
 static void end_start(void) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
     kl_http_server_init(&end_srv, &cfg);
@@ -858,6 +860,7 @@ static void end_start(void) {
     kl_http_server_route(&end_srv, "GET", "/cancel-now", handle_suspend_then_cancel, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/cancel-later", handle_suspend_cancel_later, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/hello", handle_end_hello, NULL, NULL);
+    kl_http_server_route(&end_srv, "GET", "/chain", handle_chain, NULL, NULL);
     g_end_cancels = 0;
     kl_plat_thread_create(&end_tid, end_server_thread, NULL);
     for (int i = 0; i < 200 && end_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
@@ -975,6 +978,56 @@ UTEST(async, a_cancelled_op_releases_its_connection) {
     ASSERT_EQ(cancels, 1);
     ASSERT_TRUE(closed);                                   /* was: the slot and fd leaked */
     ASSERT_EQ(st.active_connections, 0);
+}
+
+/* ── A cancel inside on_resume releases the connection once ─────────────────────────────────────
+ * A resume may suspend again on a second op; when that op's work cannot be started it is cancelled
+ * at once. The cancel closed the connection, and then the kl_async_complete that called on_resume
+ * closed it again: the slot went onto the free list twice and two later connections shared it. */
+static KlAsyncOp g_chain_op2;
+
+static void chain_resume(KlAsyncOp *op, void *ud) {
+    (void)ud;
+    memset(&g_chain_op2, 0, sizeof g_chain_op2);
+    g_chain_op2.on_resume = end_noop_resume;
+    g_chain_op2.on_cancel = end_count_cancel;
+    if (kl_async_suspend(&end_srv, op->conn, &g_chain_op2) < 0) return;
+    kl_async_cancel(&end_srv, &g_chain_op2);              /* the second op could not be started */
+}
+static void chain_complete_timer(void *ud) {
+    (void)ud;
+    kl_async_complete(&end_srv, &g_end_op);
+}
+static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = chain_resume;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_end_op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 50, chain_complete_timer, NULL);
+}
+
+UTEST(async, a_cancel_inside_on_resume_releases_once) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[512];
+    int closed = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {
+        const char *rq = "GET /chain HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(200);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int served = end_hellos(port);
+    int cancels = g_end_cancels;
+    end_stop();
+    ASSERT_EQ(cancels, 1);
+    ASSERT_TRUE(closed);
+    ASSERT_EQ(st.active_connections, 0);                   /* was: released twice */
+    ASSERT_EQ(served, 4);
 }
 
 UTEST_MAIN();
