@@ -78,6 +78,17 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (conn->state == KL_HTTP_CONN_SUSPENDED)
         return;
 
+    /* Completed inside the handler that suspended it (the work could not be started, say): the
+     * dispatch that called the handler sends the response when it returns, exactly as if the
+     * handler had never suspended. Driving it here as well sent it twice, or released the slot
+     * twice. Readiness: the suspend took the fd out of the loop, and the dispatch's transition
+     * modifies the registration, so put it back. */
+    if (conn->in_handler) {
+        if (!(kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION))
+            (void)kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream);
+        return;
+    }
+
     /* Default the post-resume state the same way conn_process() defaults it after a
      * synchronous handler returns: a resume that only built the response (the common
      * shape, where done_fn writes it and on_resume has nothing left to do) leaves the
@@ -156,13 +167,33 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     }
 }
 
-void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
-    if (!s || !op) return;
-
+/* Retire the op and fire on_cancel. The connection it was attached to (still SUSPENDED unless
+ * on_cancel suspended it again), or NULL if the op was already retired. on_cancel may free the op:
+ * nothing reads it afterwards. */
+static KlHttpConn *async_cancel_op(KlHttpServer *s, KlAsyncOp *op) {
     /* Exactly-one-terminal: a cancel racing a completion (or a double cancel) is
      * a no-op: on_cancel fires at most once, and never after on_resume. */
-    if (async_retire(s, op) == NULL) return;
-
+    KlHttpConn *conn = async_retire(s, op);
+    if (!conn) return NULL;
     if (op->on_cancel)
         op->on_cancel(op, op->user_data);
+    return conn;
+}
+
+void kl_async_cancel_detached(KlHttpServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+    (void)async_cancel_op(s, op);
+}
+
+void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+    KlHttpConn *conn = async_cancel_op(s, op);
+    /* The connection was waiting on the op and nothing else will end it: it is out of the
+     * readiness loop, has nothing posted on a completion loop, and the sweep exempts a suspended
+     * connection. Close it (unless on_cancel suspended it again on a new op). Inside the handler
+     * that suspended it, the dispatch closes it when the handler returns. */
+    if (!conn || conn->state != KL_HTTP_CONN_SUSPENDED || conn->async_op) return;
+    conn->state = KL_HTTP_CONN_CLOSED;
+    if (!conn->in_handler)
+        kl_http_server_conn_release(s, conn);
 }

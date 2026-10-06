@@ -392,6 +392,13 @@ static int comp_stream_queue_full(const KlHttpConn *c, size_t add) {
            add > KL_COMP_STREAM_QUEUE_MAX - queued;
 }
 
+/* http_internal.h: a TLS WebSocket write of `add` bytes on a completion loop must wait (the producer
+ * bound a plaintext WebSocket has in kl_comp_queue_write). Checked before the engine encrypts it:
+ * the engine's output goes onto the queue at once, so the engine itself never refuses. */
+int kl_comp_ws_queue_full(const KlHttpConn *c, size_t add) {
+    return c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, add);
+}
+
 /* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
  * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
  * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */

@@ -156,6 +156,7 @@ struct KlHttpConn {
 
     struct KlAsyncOp *async_op;
     uint64_t suspend_start_ms;
+    int in_handler;   /* the route handler is running: an op it ends is driven by the dispatch */
 
     KlFileIO *file_io;
     int file_io_phase;

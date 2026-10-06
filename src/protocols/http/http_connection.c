@@ -416,7 +416,9 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
     c->state = KL_HTTP_CONN_PROCESSING;
 
     if (c->route_result == 200 && c->route) {
+        c->in_handler = 1;
         c->route->handler(&c->req, &c->res, c->route->user_data);
+        c->in_handler = 0;
     } else if (c->route_result == 405) {
         kl_http_response_error(&c->res, 405, "Method Not Allowed");
     } else {
@@ -426,6 +428,9 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
     /* If handler suspended the connection for async I/O, don't transition */
     if (c->state == KL_HTTP_CONN_SUSPENDED)
         return KL_HTTP_CONN_SUSPENDED;
+    /* It suspended and then cancelled its op: the connection is done. */
+    if (c->state == KL_HTTP_CONN_CLOSED)
+        return KL_HTTP_CONN_CLOSED;
 
     /* If streaming, the handler already sent everything, unless drain is pending */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
@@ -483,10 +488,13 @@ static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
         return c->state;
     }
     c->state = KL_HTTP_CONN_PROCESSING;
+    c->in_handler = 1;
     c->route->handler(&c->req, &c->res, c->route->user_data);
+    c->in_handler = 0;
 
     /* Yields keep the conn alive without transitioning to SENDING. */
     if (c->state == KL_HTTP_CONN_SUSPENDED) return KL_HTTP_CONN_SUSPENDED;
+    if (c->state == KL_HTTP_CONN_CLOSED) return KL_HTTP_CONN_CLOSED;   /* suspended, then cancelled */
     if (c->state == KL_HTTP_CONN_READING_BODY) return KL_HTTP_CONN_READING_BODY;
 
     /* Streaming response: handler already wrote chunks. */

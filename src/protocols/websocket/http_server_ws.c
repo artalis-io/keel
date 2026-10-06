@@ -87,7 +87,7 @@ static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlHttpConn *c = ws->conn;
     /* A completion queue has a bounded admission allowance. Flush a large drain in pieces so
      * its complete buffered length cannot remain permanently larger than that allowance. */
-    if (c->comp_driven && !c->tls && len > 64u * 1024u)
+    if (c->comp_driven && len > 64u * 1024u)
         len = 64u * 1024u;
     kl_ssize_t nw = conn_write(c, data, len);
     /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS

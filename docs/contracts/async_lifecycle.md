@@ -14,9 +14,15 @@ transition retires it. There are exactly two terminals:
 - **resume**: `kl_async_complete()` fires `on_resume`, re-arms the fd (readiness)
   or re-drives the completion send path, and advances the connection state
   machine. The success path.
-- **cancel**: `kl_async_cancel()` fires `on_cancel` and does *not* touch the fd
-  or state machine (the caller is tearing the connection down). The
-  abnormal-termination path.
+- **cancel**: `kl_async_cancel()` fires `on_cancel` and closes the connection
+  without a response (unless `on_cancel` suspended it again on a new op). The
+  abnormal-termination path. A connection the server itself tears down (it died,
+  or the server is freed) has its op cancelled the same way, minus the close the
+  server does anyway.
+
+Either terminal may be reached from inside the handler that suspended the
+connection: a completion then sends the response once the handler returns, a
+cancel closes the connection then.
 
 `on_deadline` is **not** a terminal; it is a *trigger*. When `deadline_ms` is
 reached the loop fires `on_deadline` exactly once; that callback must resolve the
