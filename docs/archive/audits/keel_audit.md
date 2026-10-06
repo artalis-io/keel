@@ -5,6 +5,120 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Nineteenth pass: final comprehensive audit after the re-audit loop (2026-10-06)
+
+**Revision:** `main` `03cef23` (after #459 to #462). Read-only.
+**Scope:** the whole `src/` tree, `include/keel/`, every integration (TLS backends, nghttp2, miniz,
+lwIP raw, UEFI) and the build, in five parallel reviews:
+- the HTTP/1 server, readiness and completion;
+- the HTTP/1 client stack;
+- HTTP/2 and WebSocket, server and client, with the nghttp2 adapter;
+- the event and completion axis and the substrate;
+- DNS, PROXY, the integrations and the build.
+
+The axis review ran alongside (seventeenth pass in `keel_axis_audit.md`); its High is listed here
+too, as N2. Every High below was re-checked against the code by hand. Confidence: **C** means the
+path was traced end to end; **P** means plausible and needing a test. Items recorded earlier as
+deliberately unfixed (S5, S9, E7, W11, X8 and the others listed in the eighteenth pass) were not
+re-reported.
+
+**Fixes since the eighteenth pass:** the re-audit fixes #452 to #459 and #461/#462 hold where they
+were traced (completion queue pinning, `send_max`, the stream backpressure gate, `comp_closing` at
+release, the async cancel at release, the WebSocket close and auto-ping changes, the mbedTLS sticky
+failure, the DNS hook, deferred client errors, atomic hook registries, the completion-table check).
+One of them introduced a High: N2, the TLS flush added to `conn_write` in #457.
+
+**Result:** no Critical. **8 High, 15 Medium**, and a set of Lows. The Highs fall in three groups:
+- **The async op lifecycle** (N3, N4): two call patterns the API allows corrupt or leak a
+  connection.
+- **Error and backpressure gaps on the main backends** (N1, N2).
+- **The lwIP raw and EFI completion providers** (N5 to N8), which the core suites reach only through
+  doubles: their cancel, terminal and handle semantics differ from what the HTTP driver relies on.
+
+### High
+
+| # | Area | Location | Defect | Failure scenario | Smallest fix |
+|---|---|---|---|---|---|
+| N1 | Substrate (C) | `src/socket_dgram_win.c:152-186`, `src/event_iocp.c:1267-1276`, `src/datagram_recv.c:210-247` | Windows reports an earlier `sendto`'s ICMP port-unreachable as WSAECONNRESET on the next receive, even on an unconnected UDP socket. It is mapped to EIO, and `recv_fail` stops the receiver for good. Nothing sets `SIO_UDP_CONNRESET`. | One unreachable nameserver (127.0.0.1 with no local resolver) and the built-in DNS resolver never receives again on Windows. A spoofed datagram that makes a `KlDatagram` server reply to a closed port stops it too. | `WSAIoctl(SIO_UDP_CONNRESET/NETRESET, FALSE)` in the configure path, and treat WSAECONNRESET/WSAENETRESET on a datagram receive as skip-and-continue (covers adopted fds). |
+| N2 | Completion (C) | `http_internal.h` `conn_write` (TLS branch), `completion_http_server.c` `comp_tlsq_absorb_ring` | Since #457 every TLS write is moved from the engine's bounded ring into the uncapped output queue at once, so `tls->write` never refuses. TLS WebSocket output has no admission bound: the plaintext WebSocket bound and the stream gate (`kl_http_comp_stream_tls_full`) do not cover it. | A wss client that stops reading while the server broadcasts: every send succeeds and memory grows without bound, on io_uring, IOCP, pollcomp, lwIP raw and EFI. | Check the WebSocket admission bound before `tls->write` (an exported helper beside `kl_http_comp_stream_tls_full`), so the frame goes to the drain or fails; TLS twins of the two WebSocket bound tests. |
+| N3 | Server (C) | `async.c:62-157`, `http_connection.c:415-443` `conn_process` | A handler may suspend and then complete in the same call (suspend, the thread-pool submit fails, write a 503, `kl_async_complete`). `kl_async_complete` drives the connection, then `conn_process` sets SENDING again. | Readiness with `Connection: close`: the slot is released twice and the free list self-loops (two accepts share one connection). Keep-alive: a phantom second response. Completion: the response is posted twice. | An `in_handler` flag set around the handler; `kl_async_complete` inside it runs `on_resume` and leaves the driving to the dispatch in progress. |
+| N4 | Server (C) | `async.c:159-168`, `http_server_core.c:670-671` | `kl_async_cancel`, documented for deadline-as-failure, only retires the op. The connection stays SUSPENDED, out of the loop, with nothing posted, and the sweep skips every SUSPENDED connection. | Each upstream timeout resolved with cancel leaks a slot and an fd; after `max_connections` of them the server stops accepting. | Release a SUSPENDED connection whose op was cancelled (from the sweep, or from `kl_async_cancel` with a guard for the call from release itself). |
+| N5 | lwIP raw (C) | `integrations/platform/lwip/lwip_raw_glue.c:752-780` | `lwr_srv_sent` runs the send pump, which can `tcp_abort` the pcb, and still returns `ERR_OK`; lwIP's `tcp_input` then keeps using the freed pcb. | A file response whose file is truncated mid-transfer: the next ACK aborts inside the sent callback, and lwIP writes to the freed `MEMP_TCP_PCB`. | The pump reports the abort and the callback returns `ERR_ABRT`. |
+| N6 | lwIP raw (C) | `lwip_raw_glue.c:447-451, 1393-1394, 1459-1462`, `event_lwip_raw.c:640-655` | One terminal completion per connection, while a connection can hold a send and a recv. The second op never completes, and the cancel cannot find the dead slot. | A peer reset during a TLS handshake (or on WebSocket/h2) with both ops posted: the connection and its glue slot are never released; repetition exhausts the pool. | Emit one failed completion per outstanding op; surface READ failure for an armed dead slot. |
+| N7 | EFI (C) | `integrations/platform/uefi/event_efi.c:297-301, 619-621` | `el_cancel` frees posted server recv/send ops without a completion. The driver releases a connection only at its last op's completion. | Every idle keep-alive connection the sweep times out leaks its slot; about seven idle clients take the firmware server down (`KL_EFI_MAX_CONNS` 8). | Mark cancelled I/O ops and have `el_drain` emit a failed READ/WRITE for each. |
+| N8 | lwIP raw (C) | `lwip_raw_glue.c:389-397, 1355-1360`, `event_lwip_raw.c:655` | The `tcp_pcb*` doubles as the socket handle, and lookup prefers a live slot, so a dead connection's close finds a new connection that reused the pcb address. | A connection is aborted; the next accept reuses its pcb from lwIP's LIFO pool; the old connection's close tears down the new one and disarms it. | A slot handle (index plus generation) as the server `KlSocketHandle`, as the EFI provider does. |
+
+### Medium
+
+| # | Area | Location | Defect and scenario | Fix |
+|---|---|---|---|---|
+| M1 | Substrate (C) | `socket_dgram_posix.c:~205`, `datagram.c` `dg_rdy_pull` | A connected POSIX UDP socket stops receiving for good after one ECONNREFUSED/EHOSTUNREACH (the peer restarted). | Treat ICMP-induced receive errors as consumed; same on the completion paths. |
+| M2 | Substrate (C) | `completion_dispatch.c`, `datagram.c` `kl_datagram_init_ex` | Optional `KlCompletionOps` slots are called without a NULL check; a provider without the datagram ops crashes at the first receive arm. | Refuse `kl_datagram_init_ex` with `KL_ERR_UNSUPPORTED` when a datagram slot is NULL (or make the routers fail on NULL). |
+| M3 | Substrate (C mechanism, P reach) | `timer.c:501-526` | A 0 ms timer re-added from a timer callback fires again in the same `kl_timer_fire`, without end; a retry loop through the deferred-error timers starves all I/O. | Fire only timers that existed at entry (an id watermark). |
+| M4 | Substrate (C) | `datagram.c` GSO path, `datagram_send.c:349` | A GSO group the kernel rejects (EINVAL above 64 segments, EMSGSIZE above 64 KiB) is dropped instead of sent per segment. | Force the per-segment path past the kernel limits; treat EINVAL/EMSGSIZE as unsupported for that group. |
+| M5 | io_uring (C mechanism, P reach) | `event_iouring.c:497-507` | `sqe->len` is 32-bit: a 4 GiB remainder becomes 0, and the copy-sendfile fallback re-posts it forever. | Cap a post at 0x7ffff000 and set `send_max` to it; a 0 result on a non-empty send fails. |
+| M6 | io_uring (P) | `event_iouring.c:1064-1066` | -EBUSY from submit (CQ overflow backlog on 5.5 to 5.18) is fatal to the loop. | Handle -EBUSY/-EAGAIN like -ETIME. |
+| M7 | Client (C) | `http_client_async.c:1354-1368, 1752-1766` | A refused async start leaves the caller's shared `KlEventCtx` switched to the incompatible socket provider. | Check compatibility on a local, write `ev_ctx->sockets` only after it passes. |
+| M8 | WebSocket (C) | `http_server_ws.c:158-169`, `http_server.c:650-659` | Readiness: a frame sent from outside the connection's own event lands in the drain with no WRITE interest and stalls; with auto-ping on, a healthy receive-only client is closed (1001). | Arm WRITE when the drain goes from empty to pending (or re-arm from the sweep). |
+| M9 | HTTP/2 client (P) | `http2_client.c:471-475, 518-521, 161-184` | `on_error` fires on a client the user freed or closed from `on_resp` during a flush. | `h2c_on_send` fails at once when closed; skip `h2c_error` when freeing or closed. |
+| M10 | Server (C) | `async.c:147-152`, `http_connection.c:795-811` | A streaming-async handler that suspends and then awaits the body: readiness never re-arms READ (408), and suspending at dispatch drops body bytes read with the headers and leaves the chunked decoder and body deadline unset. | A READING_BODY arm in the readiness resume; initialise body state before the handler; keep the leftover. |
+| M11 | Server (C) | `drain.c:82-87` | Readiness: once the drain holds bytes it only appends, and a suspended connection has no WRITE interest, so a stream written while suspended stops after one would-block. | Try one write of the backlog before appending. |
+| M12 | Server (P) | `http1_chunked.c:74-80, 157-166` | The chunked decoder accepts bare LF and control bytes in extensions and trailers, without a length cap: a framing mismatch with a front-end (the chunk-extension smuggling class). | Reject bare LF and control bytes; cap extension and trailer length. |
+| M13 | PROXY (C) | `proxy_protocol.c:226-239`, `http_server.c:68-69` | On a dual-stack listener IPv4 peers arrive as `::ffff:a.b.c.d`, and the CIDR match compares families strictly: an IPv4 trust list never matches (fails closed, every request 400). | Unmap `::ffff:0:0/96` before matching. |
+| M14 | miniz (C) | `decompress_miniz.c:316-340` | Streaming gzip needs the optional header fields in the same feed as the first 10 bytes; a split there fails a valid response (FNAME is gzip's default). | A small header state machine across feeds. |
+| M15 | DNS (P) | `dns_sys_win.c:58-64`, `dns_resolver.c:1623-1644` | Windows: an `fe80::` resolver listed first is used without its scope and locks the list to IPv6; DNS fails although IPv4 servers exist. | Skip link-local entries (or keep the scope) and prefer a usable family. |
+
+### Low (grouped)
+
+- **Substrate:** the thread pool's nested-tick early return skips the wakeup drain (a nested loop
+  spins); pollcomp leaks abort events' refs on an allocation failure (`return count ? count : -1`);
+  an io_uring splice stage returning 0 reports success with a short body; an io_uring watcher whose
+  poll fails goes silent; 32-bit length casts on Windows `writev`/IOCP posts; inheritable handles in
+  the window after `socket()` on Windows and `pipe()` on POSIX; a named-pipe listener re-arm after
+  every instance closed uses `first = 0`; datagram minor bounds (multicast `iface_index` ignored
+  off Linux, unguarded batch products, an unchecked GSO total); the timer heap's doubling is
+  signed-overflow-prone before its check.
+- **Client:** sync redirect consults the policy for a hop past the limit; size-limit failures are
+  reported as `KL_ERR_PARSE`; chunked trailers are merged into the response headers (a `Location`
+  trailer is followed); freeing or cancelling inside a streaming callback is unsafe and
+  undocumented; caller headers duplicating `Host`/`Content-Length`/`Transfer-Encoding` are sent and
+  names are not checked as tokens; the proxy port is not range-checked; a failed redirect hop start
+  always reports `KL_ERR_IO`; a stale pooled connection is not retried for idempotent methods.
+- **HTTP/2 and WebSocket:** readiness WebSocket and h2 reads treat would-block as close; the Close
+  echo is lost when the drain is pending; h2 cleanup destroys body readers without `on_error`; an
+  nghttp2 header copy failure drops the header silently and response headers past 64 are dropped;
+  the WebSocket client reports a Close-less EOF as 1001 (RFC: 1006) and fails some protocol errors
+  without a Close; would-block is read from `errno` instead of `kl_sock_io_status` in the h2 and
+  WebSocket clients; the documented nghttp2 floor (1.57) predates the CONTINUATION fix (1.61).
+- **Server:** a partial PROXY header from a trusted source busy-loops readiness until the timeout;
+  `max_header_size` below 8192 is not enforced; Windows listeners use `SO_REUSEADDR` rather than
+  `SO_EXCLUSIVEADDRUSE`; handler headers can duplicate the server's framing headers, and 204/304
+  get a Content-Length and body; a readiness stream drained but not ended spins on WRITE; graceful
+  stop waits out idle keep-alive connections; the readiness TLS rejection drain counts ciphertext.
+- **DNS, TLS, build:** a truncated (`KL_DGRAM_TRUNCATED`) DNS answer is used instead of falling back
+  to TCP; a retransmit that hits would-block replaces the leg id; a learned server cookie is never
+  forgotten; vendored llhttp builds without the stack protector and FORTIFY; OpenSSL ALPN
+  reconfiguration can read past its array on a failed update; mbedTLS maps an out-of-range
+  `client_auth` to none and accepts mTLS with no CA, `reset_failed` never clears, `write(0)`
+  returns -1; `PEM_read_bio_PrivateKey` can prompt on a TTY; `efi_sock_close` can block the loop
+  for a graceful close.
+
+### Verified clean
+
+Request parsing and CL/TE (llhttp strict, both rejected together), header limits, response header
+injection guards, router, CORS, body readers, the completion output queue, connection reuse and the
+drain teardown; the client URL parser, redirect method and credential rules, response parser caps,
+pool keying and reuse, proxy CONNECT, the #462 deadline path, Happy Eyeballs, decompression caps,
+`resolver_cache.c`; WebSocket framing, masking, fragmentation, UTF-8, size caps, close and liveness;
+the h2 stream table, upgrade and session-done close; the readiness backends, provider validation,
+watcher dispatch, listener credit, `KlCompLife`, backend op lifetimes on IOCP, io_uring and
+pollcomp, datagram queues and close; DNS parsing (pointers never followed), spoof checks, TCP
+framing; PROXY v1/v2 bounds; TLS verification defaults and adapters' rings; miniz bomb caps;
+production build flags.
+
+No source was changed by this pass. The fix order suggested: N1 to N4 first (main backends and the
+public async API), then N5 to N8 (integrations), then the Mediums.
+
 ## Final C-audit sweep and targeted fix (2026-10-06)
 
 **Revision:** `7878ef7` (merged #461; source-identical to local `5919644`).

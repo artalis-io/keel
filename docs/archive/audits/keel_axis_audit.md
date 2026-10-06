@@ -5,6 +5,134 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Seventeenth pass: separation holds; one backpressure gap above the axis (2026-10-06)
+
+**Revision:** `main` `03cef23`. Read-only; no source changed.
+**Scope:** the event, socket and protocol seams after the completion-queue and backpressure work
+(#457 to #459) and the sixteenth pass's fixes (#461). The sixteenth pass's F1 to F4 were re-checked
+and hold as described; its I1 (internal `src/socket.h` pulls `sockcompat.h`) is unchanged.
+
+**Verdict:** the three-axis separation holds, and no protocol TU calls an event engine. **One High**
+(F1, below), three Lows and three Informational notes. The High is a semantic gap above the axis,
+not a coupling: readiness and completion are no longer observably equivalent for TLS WebSocket
+backpressure.
+
+### 1. Architecture map (verified)
+
+- **Event axis:** `include/keel/event.h` (`KlEventOps`; a completion-capable provider must supply a
+  completion table with `drain`, enforced in `event_dispatch.c:kl_event_init_provider`). Readiness:
+  `event_epoll.c` (edge-triggered; every server transition re-arms with `kl_event_mod`),
+  `event_kqueue.c`, `event_poll.c`, `event_wsapoll.c`. Completion: `event_iouring.c`, `event_iocp.c`,
+  `event_pollcomp.c`. Seam: `src/completion.h` (`KlCompletionOps`, trailing `send_max`: 0 on the
+  in-tree backends, 16 KiB on EFI), `completion_dispatch.c`, `completion_core.c:kl_comp_run`.
+- **Socket axis:** public `include/keel/socket.h` (`KlSocketProvider`, `KlIoStatus`, optional
+  `io_status`); `socket_posix.c`, `socket_winsock.c` (WSA errors mapped to errno); overlapped
+  providers in their event TUs; negotiated by `event_ctx.c:kl_event_ctx_sockets_compatible`.
+- **Protocol layer:** `http_internal.h` `conn_read`/`conn_write` is the only TLS and transport mux;
+  `completion_http_server.c` is the HTTP completion adapter (op counting, the output queue with
+  pinned regions, 256 KiB posts, the 1 MiB producer bound, the stream gate); WebSocket and h2
+  completion drives come through the atomic hook tables in `http_proto_hooks.c`.
+
+### 2. Traces
+
+- **Readiness receive (epoll):** `kl_http_server_run` → `kl_event_wait` → `kl_event_dispatch` →
+  `kl_http_conn_on_readable` → `conn_read` → `kl_stream_recv`; a plaintext -1 is classified by
+  `kl_stream_io_status` (WOULD_BLOCK keeps state, INTERRUPTED retries); parse; the transition
+  re-arms with `kl_event_mod`.
+- **Completion receive (io_uring):** `kl_comp_post_recv` (`comp_ops++`, buffer by phase) →
+  `iou_comp_post_recv` → `iou_comp_drain`/`iou_complete` → `kl_comp_run` →
+  `comp_server_conn_dispatch` → `comp_on_read` (`comp_ops--`; TLS feeds the engine and drives) →
+  the next post, explicit or deferred.
+- **Accept:** readiness loops `kl_sock_accept` while the listener is LISTENING (EMFILE disarms with
+  back-off) → `kl_listener_on_accepted`; completion primes `comp_accept_listener_start`, posts
+  through `comp_accept_arm`, and `comp_on_accept` → `comp_setup_accepted`; a closing listener
+  disposes accepted handles.
+- **Send and backpressure:** readiness writes until would-block and re-arms WRITE; streams and
+  WebSocket buffer in a bounded `KlDrain`. Completion queues (`kl_comp_queue_write`, one send in
+  flight, at most min(256 KiB, `send_max`) per post, short writes finished inside the op), with the
+  1 MiB producer bound for plaintext streams and WebSocket and the stream gate for TLS streams.
+- **Close with outstanding work:** `kl_http_server_conn_release` cancels a suspended op, then (with
+  ops posted) sets `comp_closing`, cancels the backend ops and lets the last completion release;
+  `kl_http_conn_release` sets `comp_closing` first, runs the protocol cleanups, closes and resets.
+
+### 3. Findings
+
+**F1. High (C): TLS WebSocket output on completion loops is unbounded.** `http_internal.h`
+`conn_write` (TLS branch), `completion_http_server.c` `kl_comp_tls_flush`/`comp_tlsq_absorb_ring`.
+Principle: goal 8, equivalent backpressure above the axis. #457 made every TLS write move the
+engine's ciphertext into the uncapped queue, so `tls->write` never refuses and the WebSocket drain
+never buffers; the plaintext WebSocket bound and the TLS stream gate do not cover it. Readiness
+refuses at the socket. Scenario: a wss client stops reading during a broadcast and server memory
+grows per frame, on every completion backend. Fix: the WebSocket admission check before
+`tls->write`, and TLS twins of the WebSocket bound tests. (Also C-audit N2.)
+
+**F2. Low (C): protocol clients classify would-block through `errno`.** `websocket_client.c`,
+`http2_client.c`, the DNS TCP fallback. `socket.h` says a consumer never reads a hosted errno; a
+provider that implements only `io_status` would see would-block as failure. No in-tree provider is
+affected. Fix: `kl_sock_io_status`, with an errno-free mock-provider test.
+
+**F3. Low (C): `send_max` is honoured only by the output queue.** `comp_send_response` posts a
+buffered plaintext response directly; on EFI one above 16 KiB fails and closes the connection,
+though the same response over TLS succeeds. Fix: route it through the queue when `send_max` is set.
+
+**F4. Low (C): the WebSocket core reads completion-adapter internals** (`http_server_ws.c` reads
+`comp_tlsq_*` and chunks on `comp_driven && !tls`). Not engine leakage, but the coupling hid F1.
+Fix: exported accessors in the completion adapter.
+
+**Informational.** I1 unchanged. I2: `http_response.c` branches on `KL_SOCK_CAP_OVERLAPPED` to pick
+the completion writer (deliberate since #441; a driver-installed writer would remove it). I3: dead
+`file_io` writing path and unused `<fcntl.h>` includes in the h2 and WebSocket TUs.
+
+### 4. Protocol independence (mechanical)
+
+`grep -rnE '<sys/epoll\.h>|<sys/event\.h>|io_uring|WSA|OVERLAPPED|epoll_|kevent' src/protocols/`:
+24 matching lines, **all in comments, 0 code hits**; none in `http2/`, `websocket/`, `dns/` or
+`proxy_protocol/`. Native includes appear only in the platform-service TUs (`dns_sys_win.c`,
+`dns_sys_posix.c`, `http_server_plat_posix.c`, `http_server_plat_win.c`). The recent changes leaked
+no engine type or call upward; they added Keel-level flags (`comp_driven`, the overlapped capability,
+queue fields read by WebSocket).
+
+### 5. Compatibility matrix (CI lanes in `ci.yml` and `soak.yml`)
+
+| Pairing | Implemented | Tested in CI | Status |
+|---|---|---|---|
+| Linux sockets + epoll | yes | full `make test`, ASan/UBSan, soak | supported default |
+| Linux + poll | yes | full suite, soak | supported fallback |
+| Linux + io_uring | yes (liburing) | curated `test-iouring`, smokes, ASan smokes, soak | supported; subset; F1 applies |
+| Darwin + kqueue | yes | full `make test`, soak | supported |
+| Winsock + WSAPoll | yes (MinGW, MSVC) | `test-win` subset, smokes, `test-msvc`, soak | supported; subset |
+| Winsock + IOCP | yes (MinGW, MSVC) | `test-win-iocp` subset, smokes, soak | supported; subset; F1 applies |
+| pollcomp double | yes | `test-pollcomp`, ASan smokes, soak | test double by design |
+| lwIP raw | yes | `loopback-raw`, `loopback-raw-asan` | integration-tested; not production (C-audit N5, N6, N8) |
+| UEFI EFI_TCP4/UDP4 | yes | compile and symbol gates only; no firmware run | incomplete as a runtime claim (C-audit N7, F3) |
+
+### 6. Contract summary
+
+1. **Ownership:** an accept or connect transfers exactly one handle; physical close waits for the
+   last posted op.
+2. **Affinity:** connections, ops and timers belong to one loop thread; hook tables are atomically
+   published; cross-thread work goes through `KlWakeup` or the thread pool's `done_fn`.
+3. **Readiness:** a notification permits an attempt; WOULD_BLOCK keeps state, INTERRUPTED retries;
+   every transition re-arms.
+4. **Completion:** one post yields exactly one terminal event; a failed post owns nothing; cancel
+   yields a failed completion (the lwIP raw and EFI providers do not yet honour this: C-audit N6, N7).
+5. **Lifetime:** application bytes are copied on acceptance; a posted queue region stays pinned
+   until it retires.
+6. **Cancellation:** a logical close cancels the async op first, then the backend ops.
+7. **Timeouts:** timers and the sweep run on the loop thread, serialized with I/O.
+8. **Errors:** transient flow uses `KlIoStatus` (F2 lists the stragglers).
+9. **Close:** graceful close drains queued output; abortive close cancels.
+10. **Backpressure:** writers see would-block past the admission bound under both models; F1 is the
+    exception.
+
+### 7. Roadmap
+
+- **Immediate:** F1 (with C-audit N1 to N4).
+- **Next:** F2 (`kl_sock_io_status` in the clients), F3 (`send_max` for direct posts), and the lwIP
+  raw and EFI provider contract fixes (C-audit N5 to N8).
+- **Cleanup:** F4 accessors, I2's driver-installed writer, I3's dead code; I1 stays deferred.
+- **Deferred:** an EFI runtime lane; widening the io_uring and IOCP curated suites toward parity.
+
 ## Sixteenth pass: separation holds, but readiness error semantics and global installation need hardening (2026-10-06)
 
 ### Fix follow-up (2026-10-06, uncommitted)
