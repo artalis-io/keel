@@ -421,7 +421,12 @@ static KlLwrConn *lwr_client_by_fd(KlLwrCtx *ctx, const void *fd) {
 #define KL_LWR_H_GEN_MASK   ((uintptr_t)0x3fffu)
 #define KL_LWR_MAX_CONNS    0xffff
 
-static int lwr_is_handle(const void *h) { return ((uintptr_t)h & 1u) != 0; }
+/* A slot handle carries both tag bits (and nothing above bit 31): a pcb pointer is never odd, and
+ * a stray odd value without the high tag bit is not taken for a slot. */
+static int lwr_is_handle(const void *h) {
+    uintptr_t v = (uintptr_t)h;
+    return (v & KL_LWR_H_TAG) == KL_LWR_H_TAG && (v >> 31) == 1u;
+}
 
 static void *lwr_handle_of(KlLwrCtx *ctx, KlLwrConn *c) {
     uintptr_t idx = (uintptr_t)(c - ctx->conns);
@@ -1508,7 +1513,9 @@ void kl_lwr_tcp_abort(void *lwrctx, void *pcb) {
 
     /* A client pcb by pointer. */
     KlLwrConn *slot = lwr_conn_find(ctx, p);
-    if (!slot || slot->dead) return;   /* already gone: idempotent no-op */
+    /* Already gone: an idempotent no-op. A stale client pointer can name an accepted server pcb
+     * that reused the address (lwIP's pools are LIFO): only a client slot is aborted here. */
+    if (!slot || slot->dead || !slot->is_client) return;
     lwr_mark_dead(slot);               /* keeps a dead_fd copy for the client's close / EOF */
     tcp_arg(p, NULL);
     tcp_recv(p, NULL);
