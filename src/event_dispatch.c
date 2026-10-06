@@ -14,6 +14,7 @@
 #include "event_caps.h"
 #include "event_builtin.h"
 #include "completion_io.h"   /* kl_completion_axis_available (KEEL_NO_COMPLETION guard) */
+#include "completion.h"      /* completion providers require a drain entry point */
 
 int kl_event_init(KlEventLoop *loop) {
     /* Default entry: the compiled-in backend. Zero ops first so a stack-allocated
@@ -38,8 +39,12 @@ int kl_event_init_provider(KlEventLoop *loop, const KlEventProvider *provider) {
      * (KEEL_NO_COMPLETION): the driver/dispatch that would drive it are absent, so an
      * installed completion loop could only abort() later. Fail at install instead. The
      * axis TU reports its presence, keeping this build knob out of the shared code. */
+    const KlCompletionOps *comp = loop->ops->completion;
+    /* Only drain is universal. Client-only, datagram-only and autonomous providers need
+     * not implement unrelated HTTP accept/file operations. Check after init: caps may
+     * depend on the initialized backend. Unwind through that provider exactly once. */
     if ((loop->ops->caps(loop) & KL_EVENT_CAP_COMPLETION) &&
-        !kl_completion_axis_available()) {
+        (!kl_completion_axis_available() || !comp || !comp->drain)) {
         loop->ops->close(loop);
         loop->ops = NULL;
         return -1;

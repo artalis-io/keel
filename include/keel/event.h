@@ -66,7 +66,10 @@ struct KlEventOps {
     /** Reserved: the backend's internal KlCompletionOps* (src/completion.h), or NULL.
      *  Opaque here: no completion type appears in this public header (cf. the opaque
      *  KlEventLoop._backend). A completion backend points this at its completion vtable
-     *  so a runtime-injected provider carries the completion axis too; readiness
+     *  so a runtime-injected provider carries the completion axis too. Advertising
+     *  COMPLETION requires a non-NULL table with a drain op; installation otherwise
+     *  fails and closes the initialized backend. Other operations are required only
+     *  for the features the provider supports. Readiness
      *  backends leave it NULL. MUST stay the last member; no ABI shuffle. */
     const void *completion;
 };
@@ -75,7 +78,7 @@ struct KlEventOps {
  * describes how it reports work and what handles it can watch, so the wire-up can
  * check it against a socket provider. Two orthogonal axes:
  *   model:   KL_EVENT_CAP_READINESS (report readiness) / _COMPLETION (deliver
- *            completions; build-time backends only, not runtime-injectable today)
+ *            completions; built-in or runtime-supplied via the completion vtable)
  *   handle:  KL_EVENT_CAP_NATIVE_FD (watches OS descriptors) */
 #define KL_EVENT_CAP_READINESS  (1u << 0)
 #define KL_EVENT_CAP_NATIVE_FD  (1u << 1)

@@ -2,6 +2,70 @@
 #include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/clock.h>
 #include <keel/http_connection.h>
+#include <keel/event_ctx.h>
+#include <keel/socket.h>
+#include <errno.h>
+#include <string.h>
+
+static int transient_calls, transient_interrupt, transient_terminal, transient_errors;
+static kl_ssize_t transient_recv(void *ctx, KlSocketHandle fd, void *buf, size_t cap) {
+    (void)ctx; (void)fd; (void)buf; (void)cap;
+    transient_calls++;
+    if (transient_interrupt && transient_calls == 1) { errno = EINTR; return -1; }
+    if (transient_terminal == 1) return 0;
+    errno = transient_terminal == 2 ? ECONNRESET : EAGAIN;
+    return -1;
+}
+static KlIoStatus transient_status(void *ctx) {
+    (void)ctx;
+    if (errno == EINTR) return KL_IO_INTERRUPTED;
+    return errno == EAGAIN ? KL_IO_WOULD_BLOCK : KL_IO_RESET;
+}
+static void transient_body_error(KlHttpBodyReader *reader) { (void)reader; transient_errors++; }
+
+UTEST(connection, readiness_transient_recv_does_not_end_headers_or_body) {
+    const KlSocketOps ops = { .recv = transient_recv, .io_status = transient_status };
+    const KlSocketProvider provider = { .ops = &ops, .capabilities = KL_SOCK_CAP_NATIVE_FD };
+    KlEventCtx ev = { .sockets = &provider };
+    KlHttpBodyReader reader = { .on_error = transient_body_error };
+    char buf[256]; KlHttpRouter router = {0};
+    for (int body = 0; body < 2; body++) for (int interrupt = 0; interrupt < 2; interrupt++) {
+        KlHttpConn c; memset(&c, 0, sizeof(c));
+        c.stream.ctx = &ev; c.stream.fd = 42;
+        c.stream.read_buf = buf; c.stream.read_cap = sizeof(buf);
+        c.state = body ? KL_HTTP_CONN_READING_BODY : KL_HTTP_CONN_READING;
+        c.req.body_reader = body ? &reader : NULL;
+        c.max_header_size = sizeof(buf);
+        transient_calls = transient_errors = transient_terminal = 0;
+        transient_interrupt = interrupt;
+        KlHttpConnState state = c.state;
+        ASSERT_EQ(state, kl_http_conn_on_readable(&c, &router));
+        ASSERT_EQ(1 + interrupt, transient_calls); /* EINTR retried, would-block re-armed */
+        ASSERT_EQ(0, transient_errors);
+        ASSERT_EQ((size_t)0, c.stream.read_len);
+    }
+}
+
+UTEST(connection, readiness_eof_and_reset_still_end_headers_or_body) {
+    const KlSocketOps ops = { .recv = transient_recv, .io_status = transient_status };
+    const KlSocketProvider provider = { .ops = &ops, .capabilities = KL_SOCK_CAP_NATIVE_FD };
+    KlEventCtx ev = { .sockets = &provider };
+    KlHttpBodyReader reader = { .on_error = transient_body_error };
+    char buf[256]; KlHttpRouter router = {0};
+    for (int body = 0; body < 2; body++) for (int terminal = 1; terminal < 3; terminal++) {
+        KlHttpConn c; memset(&c, 0, sizeof(c));
+        c.stream.ctx = &ev; c.stream.fd = 42;
+        c.stream.read_buf = buf; c.stream.read_cap = sizeof(buf);
+        c.state = body ? KL_HTTP_CONN_READING_BODY : KL_HTTP_CONN_READING;
+        c.req.body_reader = body ? &reader : NULL;
+        c.max_header_size = sizeof(buf);
+        transient_calls = transient_errors = transient_interrupt = 0;
+        transient_terminal = terminal;
+        ASSERT_EQ(KL_HTTP_CONN_CLOSED, kl_http_conn_on_readable(&c, &router));
+        ASSERT_EQ(1, transient_calls);
+        ASSERT_EQ(body, transient_errors);
+    }
+}
 
 UTEST(connection, pool_init_and_free) {
     KlAllocator a = kl_allocator_default();

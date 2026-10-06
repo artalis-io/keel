@@ -978,19 +978,15 @@ static int comp_accept_listener_start(KlHttpServer *s, int window) {
 
 static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) {
 #ifndef KEEL_FREESTANDING
-    /* Register the completion-mode ws/h2 drive tables once, and (the reason this is
+    /* Register the completion-mode ws/h2 drive tables idempotently, and (the reason this is
      * an explicit installer call, not a constructor) pull completion_ws.o /
      * completion_h2.o out of the static archive; the seam's function-pointer
      * dispatch above references no completion-TU symbol, so nothing else would.
      * Guarded because a freestanding HTTP/1.1 archive links neither completion TU
      * (nor their installers); it never upgrades, so the dispatch sees NULL hooks.
      * This is the one irreducible build-axis line the pure seam can't absorb. */
-    static int comp_hooks_done = 0;
-    if (!comp_hooks_done) {
-        kl_ws_comp_hooks_install();
-        kl_http2_comp_hooks_install();
-        comp_hooks_done = 1;
-    }
+    kl_ws_comp_hooks_install();
+    kl_http2_comp_hooks_install();
 #endif
 
     if (s->accept_via_listener) {

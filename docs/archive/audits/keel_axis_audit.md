@@ -5,6 +5,372 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Sixteenth pass: separation holds, but readiness error semantics and global installation need hardening (2026-10-06)
+
+### Fix follow-up (2026-10-06, uncommitted)
+
+The discovery record below is preserved as evidence at `da62043`. At the user's subsequent
+request, F1-F4 were addressed without changing the architecture or public function signatures:
+
+- **F1:** `http_connection.c` uses the existing provider status seam for negative plaintext header
+  and body reads: WOULD_BLOCK retains state; INTERRUPTED retries; EOF/reset retain the terminal
+  behavior. `test_http_connection.c` covers both phases, interrupted-then-would-block, no spurious
+  body error callback, and terminal EOF/reset. TLS result handling remains unchanged.
+- **F2:** `http_proto_hooks.c` publishes/reads all five hook registries atomically, preserving the
+  first-table/idempotent/reset policy. `completion_http_server.c` drops the unsynchronized global
+  sentinel and uses the now-safe idempotent installers. `test_http_proto_hooks.c` covers concurrent
+  publication and reading of all five families. The original race reproducer and both hook tests
+  passed under Clang TSan; GCC TSan encountered host address-layout initialization failures.
+- **F3:** `event_dispatch.c` requires a completion table with a drain entry after provider init,
+  once runtime caps are known, and unwinds through the provider's close hook exactly once on
+  failure. Only drain is universal; other entries remain requirements of their consuming feature,
+  not a mandatory HTTP/datagram superset. `test_event_provider_vtable.c` covers missing table,
+  missing drain, exactly-once close, cleared provider routing, and a working drain-only loop.
+  Late model-validation failure is reported as `KL_ERR_EVENT_INIT`; existing pre-init missing
+  event-op failures remain `KL_ERR_INVALID_ARG`. The original ASan/UBSan crash probe now prints
+  `init=-1` with no sanitizer error (its exit 1 represents the expected rejected configuration).
+- **F4:** `streaming.md` distinguishes immediate application-byte copying from backend-owned
+  copies or pinned borrowed transport regions. `event.h` removes the obsolete runtime-injection
+  restriction and describes the completion install requirement; `completion.h` identifies the
+  universal drain requirement. `CHANGELOG.md` records the behavior changes.
+- **I1:** deferred informational header-firewall cleanup; no production defect was attributed to
+  it and no header-dependency refactor was performed.
+
+Verification: full native readiness `make test` passed; pollcomp ASan/UBSan focused suites
+`http_connection`, `http_proto_hooks`, `event_provider_vtable`, `event_provider`,
+`read_flow_control`, and `completion_output` passed. No-completion (`KEEL_NO_COMPLETION=1`)
+provider-validation and hook suites passed. The freestanding self-contained server archive and
+undefined-symbol gates passed for x86-64 and ARM64 using `FREESTANDING_NM=llvm-nm-18` (the host's
+default GNU nm cannot read ARM64 COFF). Structural Tier-1/substrate/protocol/integration/pipe seams
+and readiness identity gates passed. Windows and native io_uring were not rerun locally; static
+analysis tool availability remains as recorded below. No commit or push was performed.
+
+**Revision:** `da62043525e79095a95e05b2bedbe5931c176bde`, clean worktree at entry.
+**Scope:** current event/socket/transport/protocol seams, representative HTTP/TLS/WebSocket
+paths, native completion lifetime code, runtime provider installation, and existing axis tests.
+This is an architecture audit, not an exhaustive security certification or a new production-readiness claim.
+
+**Verdict:** the decomposition remains sound. Native event semantics are preserved and engines do
+not parse protocols. However, it is not a clean architectural pass: **two Medium findings, two Low
+findings, and one Informational boundary observation** remain. No Critical or High finding was
+established in this pass. No production source or test source was changed.
+
+### 1. Current architecture map
+
+- Event interface: `include/keel/event.h`, dispatch in `src/event_dispatch.c`, negotiation in
+  `src/event_ctx.c` (`kl_caps_compatible`, `kl_event_ctx_sockets_compatible`), internal queries in
+  `src/event_caps.h`. The loop owns opaque backend state and an optional runtime `KlEventOps`.
+- Readiness engines: `event_epoll.c`, `event_kqueue.c`, `event_poll.c`, `event_wsapoll.c`.
+  Completion engines: `event_iouring.c`, `event_iocp.c`, `event_pollcomp.c` with
+  `event_pollcomp_builtin.c` as the compile-time glue. `BACKEND=` selects the built-in engine;
+  `KEEL_NO_COMPLETION` selects explicit absent-axis stubs, not a readiness emulation of completion.
+- Completion seam: `completion.h` (`KlCompletionOps`, `KlCompletionEvent`),
+  `completion_dispatch.c` (per-loop vtable routing), `completion_core.c` (`kl_comp_run`). Generic
+  watchers/connects dispatch through the event context; HTTP accept/read/write use
+  `ctx->comp_conn_dispatch`; datagram/pipe work uses the per-owner `KlCompLife` dispatch token.
+- Socket seam: installed `include/keel/socket.h` (`KlSocketProvider`, `KlSocketOps`, `KlIoVec`,
+  `KlIoStatus`), internal `src/socket.h` dispatchers, `socket_posix.c` / `socket_winsock.c` and
+  datagram siblings. `KlSocketHandle` is pointer-width, not a universal POSIX `int`.
+  Native address/vector translation stays below the protocol layer. Missing socket ops intentionally
+  fall back to hosted defaults; a foreign-handle provider must supply the relevant ops.
+- Wire-up: `http_server_core.c` and `http_client_async.c` adopt the engine's native overlapped
+  provider when the configured pairing is incompatible, then reject any still-incompatible pair.
+  This fallback is explicit in code; capability bits establish event-model suitability, not proof
+  that arbitrary third-party handle domains agree. Provider authors must supply a coherent pair.
+- Transport: `stream.c`, `stream_read.c`, `stream_write.c`, `stream_close.c`, `listener.c`,
+  `connect_op.c`. Hooks keep readiness registration separate from completion submission. The write
+  facet captures copying versus borrowing with each in-flight operation. Pipe streams are not sockets;
+  `pipe_stream.c` reaches the pipe PAL and `completion_pipe.h`, not `KlSocketProvider`.
+- Protocols: `src/protocols/{http,http2,websocket,dns,proxy_protocol}`. HTTP owns the TLS-aware
+  `conn_read` / `conn_write` adapter and HTTP policy. `completion_http_server.c` selects raw receive
+  buffers and accounts for pending operations; engines see `KlStream` and raw buffers, not TLS or HTTP.
+  WebSocket and HTTP/2 completion adapters reuse the protocol cores through hook tables.
+  Platform services (`http_server_plat_*`, `dns_sys_*`) are intentionally separate implementation TUs.
+- Future stacks are not merely hypothetical: lwIP raw completion is standing-CI exercised and EFI
+  providers have strict compile gates. No AF_XDP/DPDK/QUIC support is claimed or proposed here.
+
+### 2. Execution-path traces
+
+**Readiness accept and receive (epoll).** `kl_http_server_run` installs the readiness
+`KlListener`; listen readiness has NULL event identity. `kl_event_wait_builtin` obtains epoll
+notifications; `kl_sock_accept` drains accepts until would-block or pool-credit pause.
+`kl_listener_on_accepted` hands ownership plus a `KlSlotLease` to `server_accept_on_accept`.
+Connection registration uses `&conn->stream`. A READ notification reaches
+`kl_http_conn_on_readable` -> `conn_read` -> `kl_stream_recv` -> provider `recv`.
+`kl_http_conn_parse_headers` feeds only bytes after `hdr_parsed`, then shares
+`conn_dispatch_request` / `kl_http_conn_ingest_body` with the completion adapter. A partial header
+stays READING and the server re-arms READ. **A negative transient receive instead closes: F1.**
+
+**Completion accept and receive (pollcomp; native io_uring corroboration by source).**
+`kl_http_comp_run` primes the backend and installs `comp_accept_listener_start` with its returned
+window. The listener reserves credit before `comp_accept_arm` posts one accept. Pollcomp tracks
+a `PC_ACCEPT`; io_uring submits an ACCEPT SQE. Drain produces a real accepted socket, not a
+readability claim. `kl_comp_run` -> `comp_server_conn_dispatch` -> `comp_on_accept` -> shared
+listener -> `comp_setup_accepted`. `kl_comp_post_recv` increments `comp_ops`, selects a stable
+plaintext window or `comp_cipher`, and rolls back the count if posting fails. Pollcomp keeps
+EAGAIN/EINTR pending; io_uring returns a READ completion from its CQE. `comp_on_read` retires the
+count, feeds ciphertext through `KlTls` if needed, and invokes shared parser/body functions.
+Pause stops the next post; the generic stream facet can hold one already-posted receive undelivered.
+
+**Send and backpressure.** On readiness, response `writev`/file output and WebSocket drain writers
+retain partial progress and return pending, and WRITE interest drives the remainder.
+`kl_stream_write` atomically reserves a bounded queue and opportunistically writes the prefix;
+`kl_stream_flush` drives the rest. Completion HTTP `conn_write` queues plaintext through
+`kl_comp_queue_write`, or absorbs TLS output, and `comp_tlsq_kick` posts at most 256 KiB (or the
+backend's smaller `send_max`) with at most one send in flight. Pollcomp's `send_done`, io_uring's
+`iou_prep_send_tail`, and IOCP's partial-send reissue finish the logical operation before reporting
+its WRITE completion. The producer queue/drain then progresses from `comp_tls_on_write`.
+The recent WebSocket fix chunks a large plaintext drain into 64 KiB writer calls, so an individual
+writer attempt cannot exceed the 1 MiB admission allowance. The generic stream counts both queued
+and copying-backend in-flight bytes and wakes a blocked producer only on physical progress.
+
+**Close with outstanding work.** Readiness drops registration before pool release; watcher batches
+are bracketed with `kl_event_ctx_dispatch_begin/end`, so deleted watcher nodes cannot be recycled
+into captured events. For HTTP completion, `kl_http_server_conn_release` cancels a suspended async
+op, marks `comp_closing` while `comp_ops > 0`, requests cancellation, and does not reuse the slot.
+`comp_on_read` / `comp_on_write` retire those counts; the last one performs physical release.
+The release returns the physical pool slot before releasing its admission lease. Generic stream
+close waits for both receive and send retirement; `KlCompLife` pins pipe/datagram memory past
+logical close. IOCP teardown cancels and dequeues kernel-owned `OVERLAPPED` records before freeing;
+io_uring maintains owned operation records and handles cancel/timeout sentinel CQEs separately.
+Timers run on the same loop thread, so timeout-versus-I/O ordering is serialized, not simultaneous.
+Loop destruction is not user callback delivery; owners must detach before destroying their loop.
+
+### 3. Findings
+
+#### F1 - Medium: readiness HTTP treats transient receive errors as terminal
+
+**Files/symbols:** `src/protocols/http/http_connection.c`, `kl_http_conn_on_readable`, header read
+near line 1045 and body read near line 1115. **Principles:** goals 2, 7, and 9.
+
+Both branches classify every plaintext `nr <= 0` as CLOSED, without consulting
+`kl_stream_io_status`. Header reads thus close on EAGAIN/EWOULDBLOCK or EINTR; body reads also invoke
+the reader's `on_error`. A readiness notification only permits an attempt, and can be stale/spurious;
+a signal can interrupt the read. Neither outcome means the peer died. The provider classification
+seam already exists, and completion pollcomp keeps these results pending, so observable lifecycle
+semantics differ above the event axis. This is connection loss, not an established memory-corruption
+or remote exploit claim.
+
+**Proof:** a no-socket mock `KlSocketOps.recv` returning -1, with `io_status` returning
+WOULD_BLOCK or INTERRUPTED, was passed through a real `KlHttpConn` to
+`kl_http_conn_on_readable`. Four cases gave:
+
+```text
+phase=headers result=EAGAIN before=2 after=10 CLOSED=10
+phase=headers result=EINTR  before=2 after=10 CLOSED=10
+phase=body    result=EAGAIN before=3 after=10 CLOSED=10
+phase=body    result=EINTR  before=3 after=10 CLOSED=10
+```
+
+Probe: `/tmp/keel-axis-spurious-read.c` (temporary evidence, not a committed test). It uses a
+256-byte read buffer, an otherwise zeroed connection/router, a provider-only receive/status pair,
+and both READING/READING_BODY states; no parser is reached on the negative result. Reproduce by
+compiling with `-Iinclude -Isrc -Isrc/protocols/http -L. -lkeel -lpthread`.
+**Smallest fix:** classify negative results at both sites; retain state for WOULD_BLOCK, retry
+INTERRUPTED, and preserve existing terminal/EOF and TLS-WANT semantics. Add mock-provider tests
+for both phases, including that a body reader gets no terminal callback for a transient result.
+Do not change the public API or rewrite the parser.
+
+#### F2 - Medium: protocol capability installation is not safe across independent loop threads
+
+**Files/symbols:** `http_proto_hooks.c` getters/setters and `hooks_set_once`,
+`http_server_core.c:155-157` initialization installers, `completion_http_server.c:988-992`
+`comp_hooks_done` and completion installers. **Principles:** goals 1 and 11 (loop-local operation
+versus process-wide mutable setup).
+
+The registry's same-table guard enforces identity but does not synchronize access. Setters always
+write plain global pointers, including an idempotent reinstall. Concurrent server initialization
+therefore races; initializing another server can also write while an existing loop reads a hook.
+Two completion loops accepting their first connections race on the plain process-wide
+`comp_hooks_done`, then on the completion hook pointers. Single-thread affinity of each individual
+loop does not synchronize different loops. Identical pointer values do not make concurrent C
+read/write or write/write access defined.
+
+**Proof:** the real `http_proto_hooks.c` was compiled under TSan with a pthread probe that starts
+two threads behind an atomic barrier and has each install the SAME static `KlWsCompHooks` table.
+The initial PIE run could not start TSan on this host; `-no-pie` outside the sandbox worked:
+
+```text
+WARNING: ThreadSanitizer: data race
+Write of size 8 ... kl_ws_comp_hooks_set ... http_proto_hooks.c:40
+Previous write of size 8 ... kl_ws_comp_hooks_set ... http_proto_hooks.c:40
+Location is global 'g_ws_comp_hooks'
+SUMMARY: ThreadSanitizer: data race ... kl_ws_comp_hooks_set
+```
+
+Probe: `/tmp/keel-axis-hooks-race.c`. Build: `cc -std=c11 -g -O1 -fsanitize=thread -no-pie
+-Iinclude -Isrc -Isrc/protocols/http /tmp/keel-axis-hooks-race.c
+src/protocols/http/http_proto_hooks.c -lpthread -o /tmp/keel-axis-hooks-race-nopie`.
+This is a sanitizer-confirmed setter race plus a source-traced public call path, not an observed
+two-server crash. Other hook families have the same implementation pattern.
+
+**Smallest fix:** preserve the existing compiled-in capability registry, but synchronize publication
+and reads (including same-table installs and resets), and remove or synchronize the completion
+install sentinel. Immutable tables need no broader registry redesign. Test two independent servers
+initializing/accepting concurrently under TSan; retain freestanding and static-link behavior.
+
+#### F3 - Low: completion provider installation validates only the readiness-shaped ops
+
+**Files/symbols:** `event_caps.h:kl_event_ops_required_valid`,
+`event_dispatch.c:kl_event_init_provider`, `completion_dispatch.c:kl_comp_drain`.
+**Principles:** goals 3 and 13.
+
+A runtime provider can supply all seven validated `KlEventOps` entries, advertise
+`KL_EVENT_CAP_COMPLETION`, and leave `completion == NULL`. Initialization returns success.
+The first `kl_event_ctx_run` then dereferences the absent completion table. A non-NULL table with
+a missing required `drain` slot has the analogous unchecked boundary. This is malformed trusted
+provider configuration, not network-triggerable with the shipped tables; severity is therefore Low.
+
+**Proof:** `/tmp/keel-axis-malformed-completion.c` installed a no-op event table with completion
+caps and no completion table into `kl_event_ctx_init_ex`, then called `kl_event_ctx_run(ctx, 1, 0)`
+against the ASan/UBSan pollcomp build:
+
+```text
+completion provider with NULL completion table: init=0
+completion_dispatch.c:35: runtime error: member access within null pointer ... KlCompletionOps
+AddressSanitizer: SEGV ... kl_comp_drain -> kl_comp_run -> kl_event_ctx_run
+```
+
+**Smallest fix:** after initialization reveals caps, reject a completion-advertising provider
+without its required completion subset and unwind through its close hook. Define conditional
+requirements carefully: datagram-only/client-only/autonomous providers must not be forced to
+implement unrelated accept/file operations. No public ABI change is needed.
+
+#### F4 - Low: authoritative streaming ownership text overpromises backend copies
+
+**Files:** `docs/contracts/streaming.md`, ownership paragraph; `include/keel/event.h`, completion
+capability comment. **Principles:** goals 6 and 14, authoring contract accuracy.
+
+The streaming contract says all three completion backends copy every posted send and no operation
+references `KlDrain` memory after return. The HTTP completion queue now explicitly supports a
+borrowing provider: `comp_tlsq_pinned`, `comp_tlsq_reserve`, and `comp_tlsq_retire` preserve the old
+posted region until its completion. Application bytes are still copied immediately, so the
+application lifetime guarantee holds, but the universal backend-copy claim does not. A future
+provider author could infer permission to retire queue storage too early. Separately, the event
+capability comment says completion is not runtime-injectable, contradicted by the completion
+vtable and the runtime-injection smoke.
+
+**Smallest fix:** distinguish immediate application-buffer copying from backend copying/borrowing;
+document that borrowed submitted storage is pinned until physical retirement. Correct the obsolete
+runtime-injection comment. No behavior change is indicated by this finding.
+
+#### I1 - Informational: protocol isolation is operationally strong, not a header-firewall proof
+
+The direct networking/engine grep found no native event-engine calls in protocol cores. Actual
+platform includes occur in `http_server_plat_win.c` and `dns_sys_win.c`: platform-services adapters,
+not protocol parsing or transport data-plane implementations. Those are justified exceptions.
+However, internal `src/socket.h` still includes `sockcompat.h`, which imports native networking
+headers transitively into consumers. The public authoring header remains neutral, and the structural
+gates prevent current direct violations, but a passing direct-include grep does not prove protocol
+TUs compile without any native header dependency. Consider trimming that transitive include only
+as a separately tested small cleanup; no speculative provider architecture is needed.
+
+### 4. Goal coverage and compatibility matrix
+
+| Goal | Assessment at this revision |
+|---|---|
+| 1. Independent axes | Per-loop vtable routing and separate providers preserved; F2 is unsafe global capability publication, not merged engines. |
+| 2. Honest native semantics | Production engines preserve their native model; F1 violates transient readiness semantics above them. |
+| 3. Public abstraction | Native engine types remain opaque; F3 weakens runtime completion install validation. |
+| 4. Protocol isolation | Core direct-call scans and structural gates pass; justified platform-service TUs and I1 qualify the header claim. |
+| 5. Neutral socket contract | Pointer-width handles, neutral addresses/vectors, Winsock error translation; optional native fallbacks are explicit. |
+| 6. Ownership/lifetime | Counted HTTP ops, pinned borrowed queues, life tokens, physical-detach close verified by trace and focused tests; F4 is contract drift. |
+| 7. Partial I/O | Backend tails/short writes and shared incremental parser checked; F1 is a concrete inconsistency. |
+| 8. Backpressure | Generic bounded atomic stream queue, HTTP admission bound/drain, paused receive limits and progress tests exercised. |
+| 9. Error normalization | Socket classification seam exists; F1 bypasses it. Completion bytes/ok intentionally coarsen terminal causes, so full native-detail equivalence is not claimed. |
+| 10. Cancellation/timeouts | Logical versus physical close and terminal-once discipline preserved; serialized timers and accept-cancel success disposal traced. |
+| 11. Thread affinity | Per-loop operations single-threaded; independent loops expose F2. Signal-handler server pointer remains an explicit platform exception. |
+| 12. Registration/submission | Distinct watcher registrations and per-op completion records; no artificial unification. |
+| 13. Feature/configuration | Backend/absent-axis gates and negotiated socket fallback preserved; F3 is the malformed-table gap. |
+| 14. Future providers | lwIP/EFI and non-socket pipes show practical replaceability; exotic data planes still need their own coherent adapters and contracts. |
+
+| Pairing | Implemented/buildable | Evidence | Production maturity |
+|---|---|---|---|
+| Linux sockets + epoll | Yes | Native focused tests in this pass; standing CI | Supported production backend; operational battle-testing not established here |
+| Linux sockets + poll | Yes | Source trace and standing CI; no fresh local poll run in this pass | Supported fallback; same F1 applies |
+| Linux sockets + io_uring | Yes with liburing and kernel support | Native op source review; standing CI on audited revision; no local liburing available | Supported production completion backend; fresh local execution not claimed |
+| Darwin sockets + kqueue | Yes on macOS | Source/gate coverage and standing CI, not locally rerun on Linux | Supported; platform execution evidence comes from CI |
+| Winsock + WSAPoll | Yes on Windows | Native handle/error seam review and standing MinGW/MSVC CI | Supported; F1 is shared above the provider |
+| Winsock + IOCP | Yes on Windows | Operation registry/retirement source review and standing CI | Supported; fresh local Windows execution not claimed |
+| POSIX sockets + pollcomp | Yes | Five ASan/UBSan smoke programs and focused sanitized tests in this pass | Test double only; not production-ready by design |
+| lwIP raw + injected completion | BYO | Standing integration CI, neutral backend/provider seam | Supported integration; not a claim about every embedded deployment |
+| EFI TCP/UDP + injected completion | BYO | Strict standing compile gates; prior local firmware execution | Compile-supported; no fresh firmware execution in this pass |
+| Named pipes + IOCP | Yes on Windows | Separate transport path and standing CI | Supported non-socket transport; readiness pipes on Windows explicitly unsupported |
+
+The preceding CI run for `da62043` passed all 24 CI jobs plus CodeQL, Benchmark, and Scorecard.
+That is existing evidence, not a fresh local execution of foreign platforms. Neither green CI nor
+code existence establishes long-running production reliability.
+
+### 5. Contract definition (existing design, no new API)
+
+1. A socket/stream/listener owner belongs to one loop thread. Cross-thread work posts through an
+   explicit wakeup/worker handoff; it does not mutate the transport. Global capability publication
+   must additionally be synchronized across independent loop threads (F2).
+2. Successful accept/connect transfers exactly one handle ownership capability; failure transfers
+   none. Admission leases return credits exactly once and only after the physical slot is reusable.
+3. READ/WRITE readiness is permission to attempt I/O, not an operation result. Negative transient
+   results retain/retry interest without delivering EOF or a terminal body callback (F1).
+4. A successful completion submission owns one operation until exactly one terminal delivery or
+   explicit teardown retirement. Failed submission owns nothing and emits no later result. Native
+   partial progress is internal to the backend's logical op.
+5. Caller write buffers may be reused immediately after acceptance; backend-borrowed transport
+   storage remains pinned until retirement. Queued and in-flight bytes count toward backpressure.
+6. Cancellation requests logical termination, not physical retirement. A success racing cancel is
+   still accounted for; successful accepted handles are disposed if the listener is closing.
+7. Timeout and completion callbacks serialize on the owner loop. State changes precede callbacks;
+   late work cannot resume a recycled slot. No recycling before the final outstanding operation.
+8. Read pause reduces readiness interest or stops completion posting, with at most one held posted
+   receive. Graceful close drains deliverable output; terminal send failure abandons delivery but
+   still waits for physical retirement. Abortive close requests cancellation.
+9. Errors use the socket provider classifier for transient control flow. Stream `ok == 0` is a
+   coarse terminal condition, not a promise of a detailed native error record. Preserve additional
+   native detail where that API actually carries it.
+10. Owners detach before loop teardown; freeing a loop is not terminal callback delivery. A runtime
+    provider is validated for its advertised event model before the loop is exposed as usable (F3).
+
+Authoritative contracts remain `docs/contracts/stream.md`, `streaming.md`, `async_lifecycle.md`,
+`datagram.md`, and the platform-support document; this section is an audit summary, not a replacement.
+
+### 6. Tests, evidence limits, and incremental roadmap
+
+**Fresh passing checks:** `check-sockaddr-neutral`, `check-tier1-boundary`,
+`check-substrate-purity`, `check-protocol-no-integration`, `check-integration-seam`,
+`check-protocol-home`, `check-pipe-seam`, `check-readiness-identity`, `check-state-dispatch`,
+`check-no-eventloop-fd`, `check-completion-lane-parity`, `check-pollcomp-suite-list`,
+`check-winsock-init`. All five `make smoke-pollcomp-asan` roundtrips passed (plain HTTP,
+TLS, WebSocket, async/thread pool, async client).
+
+Focused pollcomp ASan/UBSan suites passed: `stream_read`, `stream_transport`, `stream_close`,
+`stream_writable`, `stream_single_shot`, `listener`, `connect_op`, `read_flow_control`, and
+`completion_output` (17 cases). Native epoll suites: `event_ctx` (9 cases), `socket_provider`
+(26), `read_flow_control` (2), and `completion_output` (16 passed, one completion-only case skipped).
+
+**Test-selection correction:** a manually selected pollcomp `event_ctx` suite uses readiness-only
+`kl_event_wait`; its first assertion failed and early test exit leaked 112 fixture bytes. The
+Makefile already excludes this suite from the completion lane for that reason. This was not counted
+as a production leak or a passing completion test. Its native epoll execution passed. Socket tests
+also initially hit sandbox EPERM; rerunning outside the sandbox passed. Sanitizer runs outside the
+sandbox avoided LSan's ptrace restriction. The first TSan PIE probe could not initialize, but the
+non-PIE unsandboxed probe confirmed F2.
+
+**Unavailable locally:** `make analyze` could not run because `scan-build` is not installed;
+`make cppcheck` could not run because `cppcheck` is not installed. `pkg-config liburing` also
+failed, so no fresh local io_uring build/run is claimed. No Windows, macOS, or EFI execution was
+performed locally. Existing standing CI covers those supported axes at the audited revision.
+
+**Next incremental work:** fix F1 and F2 separately with narrowly targeted regression tests;
+add the conditional completion-provider gate/test for F3; reconcile F4's ownership and injection
+text. Prefer a concurrent two-loop TSan regression over another static-only hook review. Preserve
+the current transport architecture and consumer-facing contracts. Header-firewall trimming (I1)
+is deferred cleanup, not a prerequisite for consumer usage. No broad refactor is recommended.
+
+### 7. Changes made
+
+Only `docs/archive/audits/keel_axis_audit.md` was changed to prepend this evidence log. Temporary
+reproducers were created under `/tmp`; generated build/test artifacts were rebuilt. No production
+code, public API, committed test source, or build configuration was changed; nothing was committed
+or pushed by this audit.
+
 ## Fifteenth pass: the transport layer and pipe streams sit above the axes without bending them (2026-09-30)
 
 **Scope:** `d16956d..f0d9085` (18 commits, 95 files, +7991/-496) plus a whole-repo re-check. The

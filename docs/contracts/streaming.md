@@ -13,10 +13,11 @@ per-connection **outbound buffer** (`KlDrain`), never a
 socket or event engine.
 
 **Ownership: bytes are copied immediately.** A streaming write copies the supplied bytes before
-returning; the caller may pass transient/stack memory and reuse or free it at once. The completion
-backends copy again into the op at post time (`kl_comp_post_send` in all three backends), so no
-submitted completion op ever references caller or `KlDrain` memory after the call returns. Keel
-never borrows or takes ownership of the caller's write buffer.
+returning; the caller may pass transient/stack memory and reuse or free it at once. A completion
+backend may copy transport-owned bytes into its operation or borrow their submitted region until
+physical retirement. Keel pins a borrowed region until that completion; growing or compacting a
+queue must not move or release it. This backend policy does not change the immediate copying of
+application bytes: Keel never borrows or takes ownership of the caller's write buffer.
 
 **Backpressure: four outcomes** (via the drain, `KlDrain.max_size` bound):
 - *accepted*: buffered (and, on readiness, opportunistically sent inline);
