@@ -1075,4 +1075,74 @@ UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resum
     ASSERT_EQ(served, 4);
 }
 
+/* ── TLS WebSocket output to a client that stops reading is bounded ─────────────────────────────
+ * The TLS twins of the two tests above. Each TLS write's ciphertext was moved from the engine's
+ * bounded ring onto the uncapped output queue at once, so a TLS WebSocket send never saw a full
+ * buffer: a client that stopped reading grew server memory without bound, and one frame over the
+ * queue's bound was taken whole. */
+static KlHttpServer twsb_srv;
+
+UTEST(completion_output, a_tls_websocket_backlog_to_a_stalled_reader_is_bounded) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&twsb_srv, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = ws_open_flood;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&twsb_srv, "/ws", &wcfg));
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &twsb_srv);
+    wait_for_bind(&twsb_srv);
+    g_ws_sent_ok = -1;
+    int a = connect_rcvbuf(twsb_srv.bound_port, 4096);
+    if (a >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(a, rq, strlen(rq));
+    }
+    for (int i = 0; i < 300 && g_ws_sent_ok < 0; i++) kl_test_sleep_ms(10);
+    kl_test_sleep_ms(200);
+    int sent_ok = g_ws_sent_ok;
+    if (a >= 0) kl_test_closesock(a);
+    kl_http_server_stop(&twsb_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&twsb_srv);
+    ASSERT_TRUE(sent_ok >= 0);
+    ASSERT_LT(sent_ok, BIG_CHUNKS);                        /* was (completion): all 64 MiB accepted */
+}
+
+static KlHttpServer twso_srv;
+
+UTEST(completion_output, one_oversized_tls_websocket_write_cannot_cross_the_queue_bound) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .max_connections = 2 };
+    ASSERT_EQ(0, kl_http_server_init(&twso_srv, &cfg));
+    if (!(kl_event_caps(&twso_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_free(&twso_srv);
+        UTEST_SKIP("The transport queue allowance applies only to completion backends");
+    }
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = ws_open_oversized_frame;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&twso_srv, "/ws", &wcfg));
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &twso_srv);
+    wait_for_bind(&twso_srv);
+    g_oversized_frame_rc = 1;
+    int fd = connect_rcvbuf(twso_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    }
+    for (int i = 0; i < 300 && g_oversized_frame_rc == 1; i++) kl_test_sleep_ms(10);
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&twso_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&twso_srv);
+    ASSERT_EQ(-1, g_oversized_frame_rc);                   /* was (completion): taken whole */
+}
+
 UTEST_MAIN();

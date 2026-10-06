@@ -793,4 +793,188 @@ UTEST(async, resuspend_after_terminal_is_pending) {
     RFC_TERMINAL_TEARDOWN();
 }
 
+/* ── Ending an op inside the handler, or by cancel ──────────────────────────────────────────────
+ * Two call patterns the API allows. A handler may suspend and then end the op before it returns
+ * (the work could not be started, say): kl_async_complete drove the connection, and then the
+ * dispatch drove it again, which sent a second response (keep-alive) or released the slot twice
+ * (close). And kl_async_cancel, documented for deadline-as-failure, only retired the op: the
+ * connection stayed suspended, out of the loop, exempt from the sweep, until the server was freed. */
+static KlHttpServer end_srv;
+static KlPlatThread end_tid;
+static int g_end_cancels;
+
+static void end_server_thread(void *arg) {
+    (void)arg;
+    kl_http_server_run(&end_srv);
+}
+static void end_noop_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
+static void end_count_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_end_cancels++; }
+
+static KlAsyncOp g_end_op;
+
+/* Suspend, then complete before returning (the response is already built). */
+static void handle_suspend_then_complete(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)ud;
+    kl_http_response_json(res, 200, "{\"sc\":1}", 8);
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = end_noop_resume;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_end_op) < 0) return;
+    kl_async_complete(&end_srv, &g_end_op);
+}
+
+/* Suspend, then cancel before returning. */
+static void handle_suspend_then_cancel(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = end_noop_resume;
+    g_end_op.on_cancel = end_count_cancel;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_end_op) < 0) return;
+    kl_async_cancel(&end_srv, &g_end_op);
+}
+
+/* Suspend; a timer cancels it later (a deadline handled as failure). */
+static void end_cancel_timer(void *ud) {
+    (void)ud;
+    kl_async_cancel(&end_srv, &g_end_op);
+}
+static void handle_suspend_cancel_later(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    memset(&g_end_op, 0, sizeof g_end_op);
+    g_end_op.on_resume = end_noop_resume;
+    g_end_op.on_cancel = end_count_cancel;
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_end_op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 50, end_cancel_timer, NULL);
+}
+
+static void handle_end_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_json(res, 200, "{\"hi\":1}", 8);
+}
+
+static void end_start(void) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    kl_http_server_init(&end_srv, &cfg);
+    kl_http_server_route(&end_srv, "GET", "/sc", handle_suspend_then_complete, NULL, NULL);
+    kl_http_server_route(&end_srv, "GET", "/cancel-now", handle_suspend_then_cancel, NULL, NULL);
+    kl_http_server_route(&end_srv, "GET", "/cancel-later", handle_suspend_cancel_later, NULL, NULL);
+    kl_http_server_route(&end_srv, "GET", "/hello", handle_end_hello, NULL, NULL);
+    g_end_cancels = 0;
+    kl_plat_thread_create(&end_tid, end_server_thread, NULL);
+    for (int i = 0; i < 200 && end_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+}
+static void end_stop(void) {
+    kl_http_server_stop(&end_srv);
+    kl_plat_thread_join(&end_tid);
+    kl_http_server_free(&end_srv);
+}
+
+/* Read for up to `ms`, or until the peer closes. Returns the bytes; *closed on EOF. */
+static size_t read_for(int fd, char *buf, size_t cap, int ms, int *closed) {
+    size_t have = 0;
+    *closed = 0;
+    uint64_t start = kl_monotonic_ms();
+    while (kl_monotonic_ms() - start < (uint64_t)ms && have + 1 < cap) {
+        if (kl_test_poll1(fd, 0, 20) <= 0) continue;
+        kl_ssize_t n = kl_test_sockread(fd, buf + have, cap - 1 - have);
+        if (n <= 0) { *closed = 1; break; }
+        have += (size_t)n;
+    }
+    buf[have] = '\0';
+    return have;
+}
+static int count_of(const char *hay, const char *needle) {
+    int n = 0;
+    for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle)) n++;
+    return n;
+}
+static int end_hellos(int port) {
+    int ok = 0;
+    for (int i = 0; i < 4; i++) {
+        int fd = connect_to(port);
+        if (fd < 0) continue;
+        const char *rq = "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        char b[512];
+        int closed = 0;
+        (void)read_for(fd, b, sizeof b, 1000, &closed);
+        ok += strstr(b, "{\"hi\":1}") != NULL;
+        kl_test_closesock(fd);
+    }
+    return ok;
+}
+
+UTEST(async, complete_inside_the_handler_sends_one_response) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[2048];
+    int closed = 0, responses = -1;
+    int fd = connect_to(port);
+    if (fd >= 0) {                                         /* keep-alive: no phantom second response */
+        const char *rq = "GET /sc HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 500, &closed);
+        responses = count_of(buf, "HTTP/1.1 ");
+        kl_test_closesock(fd);
+    }
+    fd = connect_to(port);                                 /* close: the slot is released once */
+    if (fd >= 0) {
+        const char *rq = "GET /sc HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1000, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(200);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int served = end_hellos(port);
+    end_stop();
+    ASSERT_EQ(responses, 1);                               /* was 2 (keep-alive): a phantom response */
+    ASSERT_EQ(st.active_connections, 0);
+    ASSERT_EQ(served, 4);                                  /* was: two accepts shared one slot */
+}
+
+UTEST(async, cancel_inside_the_handler_closes_the_connection) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[512];
+    int closed = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {
+        const char *rq = "GET /cancel-now HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(200);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int cancels = g_end_cancels;
+    end_stop();
+    ASSERT_EQ(cancels, 1);
+    ASSERT_TRUE(closed);                                   /* was: left suspended, never closed */
+    ASSERT_EQ(st.active_connections, 0);
+}
+
+UTEST(async, a_cancelled_op_releases_its_connection) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[512];
+    int closed = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {
+        const char *rq = "GET /cancel-later HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_test_sleep_ms(200);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int cancels = g_end_cancels;
+    end_stop();
+    ASSERT_EQ(cancels, 1);
+    ASSERT_TRUE(closed);                                   /* was: the slot and fd leaked */
+    ASSERT_EQ(st.active_connections, 0);
+}
+
 UTEST_MAIN();
