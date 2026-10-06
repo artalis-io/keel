@@ -116,12 +116,16 @@ typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 /* A posted server-side recv or send on an accepted child. The client rides the
  * watcher relay; the SERVER completion driver (completion_http_server.c) posts recv/send as
  * completion-native ops. drain services each via the SYNC socket provider and
- * surfaces KL_COMP_READ / KL_COMP_WRITE. The captured generation is the stale guard: an
- * op for a child that closed (generation bumped) or whose slot was reused (magic
- * cleared) is dropped, never delivered, mirroring the connect-op discipline. No heap:
- * the send payload is copied into the inline `sndbuf` (see KL_EFI_SNDBUF). */
+ * surfaces KL_COMP_READ / KL_COMP_WRITE. Every posted op yields exactly one terminal
+ * completion: a cancelled op (el_cancel) is surfaced as a failed one, since the server
+ * releases a connection only once the last op it posted has completed. The captured
+ * generation is the stale guard for an op that was NOT cancelled: an op for a child that
+ * closed (generation bumped) or whose slot was reused (magic cleared) is dropped, never
+ * delivered, mirroring the connect-op discipline. No heap: the send payload is copied
+ * into the inline `sndbuf` (see KL_EFI_SNDBUF). */
 typedef struct {
     int             in_use;
+    int             cancelled;       /* el_cancel ran on the live conn: drain emits ok=0, then frees */
     EfiIoOpKind     kind;
     KlStream       *stream;          /* completion target (ev->target): raw transport */
     KlSocketHandle  fd;
@@ -294,11 +298,18 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)
         if (g_efi.watches[i].in_use && g_efi.watches[i].fd == fd)
             g_efi.watches[i].in_use = 0;
-    /* Drop any posted server recv/send ops on the fd so a completion cannot fire at an
-     * about-to-be-freed conn. No heap to release (inline snapshots). */
-    for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)
-        if (g_efi.io[i].in_use && g_efi.io[i].fd == fd)
-            io_op_free(&g_efi.io[i]);
+    /* Posted server recv/send ops on the fd: mark them cancelled, never free them here. The
+     * server counts each posted op and releases the conn only from the last op's completion
+     * (it cancels BEFORE it closes), so the next drain must surface each as a failed
+     * KL_COMP_READ / KL_COMP_WRITE; freeing it silently would leak the conn and its slot.
+     * An op whose generation is already stale belongs to an earlier conn on a reused
+     * handle (closed without a cancel): it is not this conn's, so drop it undelivered. */
+    for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++) {
+        EfiIoOp *op = &g_efi.io[i];
+        if (!op->in_use || op->fd != fd || op->cancelled) continue;
+        if (kl_uefi_conn_valid_h(op->fd, op->generation)) op->cancelled = 1;
+        else io_op_free(op);
+    }
 }
 
 /* prime_accepts: latch the server + its passive listen fd so drain can hand back
@@ -607,14 +618,26 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
     }
 
     /* Server I/O ops: service each posted recv/send on an accepted child via the
-     * SYNC socket provider and surface KL_COMP_READ / KL_COMP_WRITE. Stale-guarded
-     * (a child that closed mid-op is dropped, never delivered). RECV is gated on the
-     * non-blocking readiness probe (no blocking recv); SEND transmits synchronously in
-     * bounded fragments (a short Transmit), leaving the op pending on a
-     * would-block to retry next drain. */
+     * SYNC socket provider and surface KL_COMP_READ / KL_COMP_WRITE. A cancelled op is
+     * surfaced first as its one failed terminal (its conn is waiting for it, even if the
+     * conn has since closed), then freed. Otherwise stale-guarded (a child that closed
+     * mid-op is dropped, never delivered). RECV is gated on the non-blocking readiness
+     * probe (no blocking recv); SEND transmits synchronously in bounded fragments (a short
+     * Transmit), leaving the op pending on a would-block to retry next drain. */
     for (int i = 0; i < KL_EFI_MAX_IO_OPS && count < max; i++) {
         EfiIoOp *op = &g_efi.io[i];
         if (!op->in_use) continue;
+
+        if (op->cancelled) {
+            for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+            out[count].kind   = (op->kind == EFI_IO_RECV) ? KL_COMP_READ : KL_COMP_WRITE;
+            out[count].target = op->stream;
+            out[count].bytes  = 0;
+            out[count].ok     = 0;
+            count++;
+            io_op_free(op);        /* retire: exactly-once terminal result */
+            continue;
+        }
 
         if (!kl_uefi_conn_valid_h(op->fd, op->generation)) {
             io_op_free(op);        /* stale (closed / slot reused): drop, no event */
