@@ -71,7 +71,14 @@ int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len);
 int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
                         size_t reason_len);
 
-/** @brief Enable drain-based backpressure for WebSocket writes. */
+/**
+ * @brief Enable drain-based backpressure for WebSocket writes.
+ *
+ * On a completion loop (io_uring, IOCP) a connection takes at most 1 MiB of output not yet handed
+ * to the transport. Without the drain, a send that would cross that bound fails and closes the
+ * connection, so a single frame near or above 1 MiB always fails. With the drain, such a frame is
+ * buffered (up to `max_size`) and sent in pieces as the client reads.
+ */
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
 
 /**

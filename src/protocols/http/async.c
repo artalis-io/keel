@@ -66,6 +66,15 @@ static int async_rearm(KlHttpServer *s, KlHttpConn *conn, KlEventMask mask) {
     return kl_event_mod(&s->ev.loop, conn->stream.fd, mask, &conn->stream);
 }
 
+/* Release a resumed connection on a readiness loop. Its fd is not necessarily out of the loop: a
+ * nested complete inside on_resume registered it again. Deleting an fd that is not registered is
+ * harmless; leaving a closed one registered is not (poll and WSAPoll keep its entry, and poll
+ * reports it on every wait). */
+static void async_release(KlHttpServer *s, KlHttpConn *conn) {
+    kl_event_del(&s->ev.loop, conn->stream.fd);
+    kl_http_server_conn_release(s, conn);
+}
+
 void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
@@ -140,7 +149,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     switch (new_state) {
     case KL_HTTP_CONN_SENDING:
         if (async_rearm(s, conn, KL_EVENT_WRITE) < 0)
-            kl_http_server_conn_release(s, conn);
+            async_release(s, conn);
         break;
     case KL_HTTP_CONN_DRAINING:
         /* The handler answered without consuming the request body, so the response is flushed with
@@ -148,11 +157,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
          * exactly as the main readiness transition does; the idle sweep enforces the byte and time
          * bounds and releases. */
         if (async_rearm(s, conn, KL_EVENT_READ) < 0)
-            kl_http_server_conn_release(s, conn);
+            async_release(s, conn);
         break;
     case KL_HTTP_CONN_READING:
         if (async_rearm(s, conn, KL_EVENT_READ) < 0)
-            kl_http_server_conn_release(s, conn);
+            async_release(s, conn);
         break;
     case KL_HTTP_CONN_SUSPENDED:
         /* Suspended again by the resume callback (a handler chaining a second async op): it holds
@@ -174,7 +183,7 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     case KL_HTTP_CONN_HTTP2:
         break;
     case KL_HTTP_CONN_CLOSED:
-        kl_http_server_conn_release(s, conn);
+        async_release(s, conn);
         break;
     }
 }
