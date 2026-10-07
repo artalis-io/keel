@@ -14,8 +14,10 @@
 #include "utest.h"
 #include <keel/event_ctx.h>
 #include <keel/event.h>
+#include <keel/http_server.h>
 #include <string.h>
 #include "completion.h"
+#include "socket.h"   /* KL_SOCK_CAP_OVERLAPPED: a socket provider a completion loop accepts */
 
 /* ── a configurable stub event backend (one required op omitted per test) ──────── */
 static int  g_init_ret;
@@ -145,6 +147,76 @@ UTEST(event_provider_vtable, drain_only_completion_provider_can_drive_a_loop) {
     ASSERT_EQ(0, kl_event_ctx_run(&ctx, 1, 0));
     kl_event_ctx_free(&ctx);
     ASSERT_EQ(1, g_closed);
+}
+#endif
+
+/* ── A completion provider without the stream-server seam ──────────────────────────────────────────
+ *
+ * prime_accepts, post_accept, post_recv, post_send and cancel are optional in KlCompletionOps: a
+ * client-only or datagram-only provider leaves them NULL. The HTTP server drives every connection
+ * through all five on a completion loop, so it must refuse such a loop at init with
+ * KL_ERR_UNSUPPORTED, instead of calling a NULL post_recv at the first accept or never releasing a
+ * connection whose receive it cannot cancel. Each slot is dropped in turn; with all five present
+ * the same loop is accepted. The socket provider advertises KL_SOCK_CAP_OVERLAPPED so the
+ * event/socket negotiation passes and only the completion seam is in question. */
+#ifndef KEEL_NO_COMPLETION
+static int  srv_prime(KlEventCtx *c, KlSocketHandle l) { (void)c; (void)l; return 1; }
+static int  srv_post_accept(KlEventCtx *c) { (void)c; return -1; }
+static int  srv_post_recv(KlStream *st, void *b, size_t n) { (void)st; (void)b; (void)n; return -1; }
+static int  srv_post_send(KlStream *st, const KlIoVec *v, int n, size_t t) {
+    (void)st; (void)v; (void)n; (void)t; return -1;
+}
+static void srv_cancel(KlEventCtx *c, KlSocketHandle fd) { (void)c; (void)fd; }
+
+static const KlSocketOps g_ovl_sock_ops = { .name = "overlapped-stub" };
+static const KlSocketProvider g_ovl_sock = { &g_ovl_sock_ops, NULL, KL_SOCK_CAP_OVERLAPPED, NULL };
+static KlCompletionOps g_srv_comp;
+static KlEventOps      g_srv_ops;
+static KlHttpServer    g_srv;
+
+static int init_server_on_partial_completion(int drop, KlError *err) {
+    memset(&g_srv_comp, 0, sizeof(g_srv_comp));
+    g_srv_comp.drain = completion_drain;
+    g_srv_comp.prime_accepts = srv_prime;
+    g_srv_comp.post_accept = srv_post_accept;
+    g_srv_comp.post_recv = srv_post_recv;
+    g_srv_comp.post_send = srv_post_send;
+    g_srv_comp.cancel = srv_cancel;
+    switch (drop) {
+        case 0: g_srv_comp.prime_accepts = NULL; break;
+        case 1: g_srv_comp.post_accept = NULL; break;
+        case 2: g_srv_comp.post_recv = NULL; break;
+        case 3: g_srv_comp.post_send = NULL; break;
+        case 4: g_srv_comp.cancel = NULL; break;
+        default: break;              /* nothing dropped */
+    }
+    fill_ops(&g_srv_ops, OMIT_NONE);
+    g_srv_ops.caps = completion_caps;
+    g_srv_ops.completion = &g_srv_comp;
+    static KlEventProvider prov;
+    prov.ops = &g_srv_ops; prov.name = "partial-completion";
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.port = 0;
+    cfg.max_connections = 2;
+    cfg.event_provider = &prov;
+    cfg.sockets = &g_ovl_sock;
+    g_init_ret = 0;
+    int rc = kl_http_server_init(&g_srv, &cfg);
+    *err = g_srv.last_error;
+    if (rc == 0) kl_http_server_free(&g_srv);
+    return rc;
+}
+
+UTEST(event_provider_vtable, server_refuses_completion_loop_without_stream_seam) {
+    for (int drop = 0; drop < 5; drop++) {
+        KlError err = KL_ERR_NONE;
+        int rc = init_server_on_partial_completion(drop, &err);
+        ASSERT_EQ(-1, rc);                              /* was 0: accepted, a NULL slot later */
+        ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)err);
+    }
+    KlError err = KL_ERR_NONE;
+    ASSERT_EQ(0, init_server_on_partial_completion(-1, &err));   /* the whole seam: accepted */
 }
 #endif
 

@@ -63,8 +63,10 @@ typedef enum {
     KL_IO_CLOSED,        /* peer closed / EPIPE */
     KL_IO_RESET,         /* ECONNRESET: peer reset */
     KL_IO_FATAL,         /* any other error */
-    KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP: op unavailable on this fd (e.g. UDP GSO); caller may
+    KL_IO_UNSUPPORTED,   /* EOPNOTSUPP / ENOTSUP: op unavailable on this fd (e.g. UDP GSO); caller may
                           * fall back. (KlIoStatus is append-only: existing values are stable.) */
+    KL_IO_RESOURCE_EXHAUSTED /* EMFILE / ENFILE / ENOBUFS / ENOMEM: out of descriptors or kernel memory.
+                          * Retrying at once fails the same way: a server's accept loop backs off. */
 } KlIoStatus;
 
 /* Which half of a connection to shut down. A Keel enum rather than SHUT_WR / SD_SEND so the

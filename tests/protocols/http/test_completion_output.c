@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "platform_thread.h"
+#include "event_builtin.h"   /* the compiled-in backend, wrapped as a runtime provider */
+#include "completion.h"      /* kl_comp_ops_builtin, KlCompletionOps.send_max */
 #include <stdio.h>
 
 static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -1357,6 +1359,97 @@ UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
     ASSERT_EQ(resumed_ms, (uint64_t)0);                    /* all of it while still suspended */
     ASSERT_FALSE(failed);
     ASSERT_TRUE(seen_last);                                /* was (readiness): stuck until resume */
+}
+
+/* ── A buffered response larger than the backend's send_max ──────────────────────────────────────
+ *
+ * A completion backend may cap one post_send (KlCompletionOps.send_max): EFI copies a send into a
+ * buffer of that size and fails a longer post. The output queue honoured the cap, but a buffered
+ * plaintext response was posted whole, so on such a backend any response above the cap failed and
+ * the connection closed with nothing sent. The compiled-in completion backend is wrapped here as a
+ * runtime provider whose post_send enforces a 4 KiB cap the way EFI does; a 64 KiB buffered response
+ * must still arrive whole. Completion backends only. */
+#define SMAX_CAP  4096u
+#define SMAX_BODY (64 * 1024)
+static char g_smax_body[SMAX_BODY];
+static int  g_smax_oversized;     /* posts the wrapper refused */
+static KlCompletionOps g_smax_comp;
+static KlEventOps      g_smax_ops;
+static const KlEventProvider g_smax_prov = { &g_smax_ops, "send-max-cap" };
+
+static int  smax_init(KlEventLoop *l) { return kl_event_init_builtin(l); }
+static int  smax_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) {
+    return kl_event_add_builtin(l, fd, m, u);
+}
+static int  smax_mod(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) {
+    return kl_event_mod_builtin(l, fd, m, u);
+}
+static int  smax_del(KlEventLoop *l, KlSocketHandle fd) { return kl_event_del_builtin(l, fd); }
+static int  smax_wait(KlEventLoop *l, KlEvent *o, int mx, int to) {
+    return kl_event_wait_builtin(l, o, mx, to);
+}
+static void smax_close(KlEventLoop *l) { kl_event_close_builtin(l); }
+static unsigned smax_caps(const KlEventLoop *l) { return kl_event_caps_builtin(l); }
+static const struct KlSocketProvider *smax_native(const KlEventLoop *l) {
+    return kl_event_native_provider_builtin(l);
+}
+static int smax_post_send(KlStream *st, const KlIoVec *iov, int n, size_t total) {
+    if (total > SMAX_CAP) { g_smax_oversized++; return -1; }   /* as EFI's el_post_send */
+    return kl_comp_ops_builtin()->post_send(st, iov, n, total);
+}
+
+static void handle_smax(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    memset(g_smax_body, 'S', sizeof g_smax_body);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, g_smax_body, sizeof g_smax_body);
+}
+
+static KlHttpServer smax_srv;
+
+UTEST(completion_output, a_buffered_response_above_send_max_arrives_whole) {
+    KlEventLoop probe;
+    memset(&probe, 0, sizeof(probe));
+    if (!kl_comp_ops_builtin() || !(kl_event_caps_builtin(&probe) & KL_EVENT_CAP_COMPLETION))
+        UTEST_SKIP("send_max applies only to completion backends");
+    g_smax_comp = *kl_comp_ops_builtin();
+    g_smax_comp.post_send = smax_post_send;
+    g_smax_comp.send_max = SMAX_CAP;
+    memset(&g_smax_ops, 0, sizeof(g_smax_ops));
+    g_smax_ops.init = smax_init; g_smax_ops.add = smax_add; g_smax_ops.mod = smax_mod;
+    g_smax_ops.del = smax_del; g_smax_ops.wait = smax_wait; g_smax_ops.close = smax_close;
+    g_smax_ops.caps = smax_caps; g_smax_ops.native_provider = smax_native;
+    g_smax_ops.completion = &g_smax_comp;
+    g_smax_oversized = 0;
+
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    cfg.event_provider = &g_smax_prov;
+    ASSERT_EQ(0, kl_http_server_init(&smax_srv, &cfg));
+    kl_http_server_route(&smax_srv, "GET", "/big", handle_smax, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &smax_srv);
+    wait_for_bind(&smax_srv);
+
+    static char buf[SMAX_BODY + 1024];
+    int closed = 0;
+    kl_ssize_t got = 0;
+    int fd = connect_rcvbuf(smax_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        got = read_until_close(fd, buf, sizeof buf, 3000, &closed);
+        kl_test_closesock(fd);
+    }
+    int oversized = g_smax_oversized;
+    kl_http_server_stop(&smax_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&smax_srv);
+
+    const char *body = strstr(buf, "\r\n\r\n");
+    size_t body_len = body ? (size_t)(got - (body + 4 - buf)) : 0;
+    ASSERT_EQ(0, oversized);                         /* was 1: the whole response in one post */
+    ASSERT_TRUE(strncmp(buf, "HTTP/1.1 200", 12) == 0);
+    ASSERT_EQ((size_t)SMAX_BODY, body_len);
 }
 
 UTEST_MAIN();
