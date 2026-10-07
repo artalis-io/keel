@@ -467,6 +467,23 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   freed client, so a closed one was still reported to `on_error`. It now checks for a close too, as
   the flush paths do.
 
+- **A body sent after the request head reaches a resumed handler alone (completion loops).** A
+  streaming-async handler that suspended at dispatch before any body byte arrived (the head came on
+  its own, as from a client waiting for 100 Continue), and whose resume awaited the body and
+  un-paused the read, had the receive land behind the request head still counted in `read_buf`; the
+  request line and headers then went to the body reader as body (Content-Length echoed the head,
+  chunked failed with 413). The body window now starts empty whenever nothing is kept across the
+  suspend.
+- **TLS (readiness): a body the engine already holds after the header read is read on.** The header
+  read takes at most the free read buffer, so an engine (OpenSSL, mbedTLS) keeps the rest of a
+  record that carried headers and body decrypted (`pending() > 0`), which the socket never reports.
+  After the dispatch moved to the body phase, or a resumed async handler awaited the body, nothing
+  read it and the request ended in 408. Both now read on while the engine holds input and the body
+  read is not paused.
+- **A paused body read stays paused after a nested `kl_async_complete` inside `on_resume`
+  (kqueue).** The outer complete registered the paused read with an add for no interest, an empty
+  change list on kqueue, so the READ filter the nested complete had enabled stayed on and the body
+  was read while paused. The registration is now set explicitly.
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

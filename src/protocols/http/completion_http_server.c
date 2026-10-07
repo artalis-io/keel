@@ -1290,8 +1290,7 @@ void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
 
 /* Re-arm a body read after read-side flow control resumes (kl_http_request_resume_body → the
  * completion seam on a completion loop): post a fresh recv; on failure release via the normal
- * completion path. Mirrors comp_start_body_read's post (read_len was reset when the body read
- * started; the next recv appends into read_buf as usual). */
+ * completion path. Mirrors comp_start_body_read's post, window reset included. */
 void kl_http_comp_post_read(struct KlHttpConn *c) {
     /* Only a body read that is waiting for its next receive takes one. Not while the body core is
      * consuming read_buf (a resume from on_data: the drive posts once it is done), not when a
@@ -1303,6 +1302,11 @@ void kl_http_comp_post_read(struct KlHttpConn *c) {
     if (c->state != KL_HTTP_CONN_READING_BODY || c->comp_recv_posted || c->comp_in_body_drive ||
         c->body_kept)
         return;
+    /* Nothing in read_buf is waiting for the body core (kept bytes returned above, everything else
+     * was fed when it arrived), so the body window starts empty: the receive lands at read_buf[0],
+     * not behind whatever the buffer last held (the request head of a handler that suspended before
+     * the body). */
+    c->stream.read_len = 0;
     struct KlHttpServer *s = server_of_ctx(c->stream.ctx);
     /* With TLS, drive the engine first: records that arrived while paused may be held in it, and
      * pending() counts only the current record's decrypted remainder (mbedTLS, OpenSSL), not whole
