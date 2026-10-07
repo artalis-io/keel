@@ -696,6 +696,88 @@ UTEST(tls_integration, a_body_held_in_the_engine_is_read_on_after_an_async_resum
     ASSERT_TRUE(strstr(buf, "got=12000") != NULL);
 }
 
+/* A body read paused by on_data still takes the rest of the record the engine holds. The reader
+ * pauses on its first chunk (fed from the bytes read with the headers) and a timer resumes it
+ * later. The pause takes hold at the record boundary: the rest of the decrypted record is still
+ * delivered, since the socket will not report it again. Left in the engine, the resume re-armed
+ * READ on a socket with nothing to report and the request ended in 408. */
+static KlHttpServer tq_pause_srv;
+static const KlHttpRequest *tq_pause_req;
+static size_t tq_pause_got;
+static int tq_pause_paused;
+static int tq_pause_done;
+
+static void tq_pause_resume_timer(void *ud) {
+    (void)ud;
+    if (!tq_pause_done && tq_pause_req) kl_http_request_resume_body(tq_pause_req);
+}
+static int tq_pause_on_data(KlHttpBodyReader *self, const char *d, size_t n) {
+    (void)self; (void)d;
+    tq_pause_got += n;
+    if (!tq_pause_paused) {
+        tq_pause_paused = 1;
+        kl_http_request_pause_body(tq_pause_req);
+        (void)kl_timer_add(kl_http_server_event_ctx(&tq_pause_srv), 300, tq_pause_resume_timer,
+                           NULL);
+    }
+    return 0;
+}
+static void tq_pause_on_complete(KlHttpBodyReader *self) { (void)self; tq_pause_done = 1; }
+static KlHttpBodyReader *tq_pause_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)ud;
+    TqHoldReader *r = kl_malloc(alloc, sizeof *r);
+    if (!r) return NULL;
+    memset(r, 0, sizeof *r);
+    r->base.on_data = tq_pause_on_data;
+    r->base.on_complete = tq_pause_on_complete;
+    r->base.on_error = tq_hold_noop;
+    r->base.destroy = tq_hold_destroy;
+    r->alloc = alloc;
+    tq_pause_req = req;
+    tq_pause_got = 0;
+    tq_pause_paused = 0;
+    tq_pause_done = 0;
+    return &r->base;
+}
+static void handle_tq_pause(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    char out[64];
+    int n = snprintf(out, sizeof out, "got=%zu", tq_pause_got);
+    kl_http_response_status(res, 200);
+    (void)kl_http_response_body_copy(res, out, (size_t)n);
+}
+
+UTEST(tls_integration, a_body_paused_by_on_data_still_takes_the_record_held_in_the_engine) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .read_timeout_ms = 1000 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_pause_srv, &cfg));
+    kl_http_server_route(&tq_pause_srv, "POST", "/p", handle_tq_pause, NULL, tq_pause_factory);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_pause_srv);
+    wait_for_bind(&tq_pause_srv);
+
+    static char rq[16384];
+    static char buf[2048];
+    size_t len = 0;
+    tls_big_request(rq, sizeof rq, "/p", 12000, &len);
+    buf[0] = '\0';
+    mock_tls_split_after = 0;
+    mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
+    int fd = connect_to(tq_pause_srv.bound_port);
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, rq, len);
+        read_response(fd, buf, sizeof buf, 3000);
+        kl_test_closesock(fd);
+    }
+    mock_tls_split_record = 0;
+    kl_http_server_stop(&tq_pause_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_pause_srv);
+    tq_pause_req = NULL;
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (readiness): 408 */
+    ASSERT_TRUE(strstr(buf, "got=12000") != NULL);
+}
+
 /* A request that times out over TLS gets its 408. The sweep wrote it through the TLS engine (on a
  * completion loop, into its output ring) and nothing ever sent it. */
 static KlHttpServer tq_408_srv;
