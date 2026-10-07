@@ -6,6 +6,14 @@
 
 /* ── Min-heap helpers ──────────────────────────────────────────────── */
 
+/* Heap order: earlier deadline first, and on equal deadlines the older timer (smaller id) first, so
+ * timers due at the same millisecond fire in the order they were added, and a timer added during a
+ * kl_timer_fire never sorts ahead of an older one with the same deadline. */
+static int heap_before(const KlTimerEntry *a, const KlTimerEntry *b) {
+    if (a->deadline_ms != b->deadline_ms) return a->deadline_ms < b->deadline_ms;
+    return a->id < b->id;
+}
+
 static void heap_swap(KlTimerEntry *a, KlTimerEntry *b) {
     KlTimerEntry tmp = *a;
     *a = *b;
@@ -15,7 +23,7 @@ static void heap_swap(KlTimerEntry *a, KlTimerEntry *b) {
 static void heap_sift_up(KlTimerEntry *entries, int idx) {
     while (idx > 0) {
         int parent = (idx - 1) / 2;
-        if (entries[idx].deadline_ms >= entries[parent].deadline_ms)
+        if (!heap_before(&entries[idx], &entries[parent]))
             break;
         heap_swap(&entries[idx], &entries[parent]);
         idx = parent;
@@ -27,11 +35,9 @@ static void heap_sift_down(KlTimerEntry *entries, int count, int idx) {
         int smallest = idx;
         int left  = 2 * idx + 1;
         int right = 2 * idx + 2;
-        if (left < count &&
-            entries[left].deadline_ms < entries[smallest].deadline_ms)
+        if (left < count && heap_before(&entries[left], &entries[smallest]))
             smallest = left;
-        if (right < count &&
-            entries[right].deadline_ms < entries[smallest].deadline_ms)
+        if (right < count && heap_before(&entries[right], &entries[smallest]))
             smallest = right;
         if (smallest == idx)
             break;
@@ -128,8 +134,16 @@ int kl_timer_fire(KlEventCtx *ctx) {
 
     uint64_t now = kl_monotonic_ms();
     int fired = 0;
+    /* Fire only timers that existed on entry. A timer a callback adds gets an id at or above this
+     * watermark and waits for the next kl_timer_fire: a 0 ms timer re-added from its own callback
+     * was otherwise due again at once (deadline <= now), so one call fired it without end and a
+     * retry loop through a 0 ms deferred timer starved all I/O. Ids grow monotonically and the heap
+     * breaks deadline ties by id, so the first new timer at the top means every older due timer has
+     * fired (an older one with a later deadline that comes due meanwhile fires next call). */
+    const int64_t watermark = ctx->timer_next_id;
 
-    while (ctx->timer_count > 0 && ctx->timers[0].deadline_ms <= now) {
+    while (ctx->timer_count > 0 && ctx->timers[0].deadline_ms <= now &&
+           ctx->timers[0].id < watermark) {
         /* Pop the min entry */
         KlTimerFn cb = ctx->timers[0].cb;
         void *ud = ctx->timers[0].user_data;

@@ -40,6 +40,9 @@
  * is sent as several offset-advancing TransmitFile chunks capped at this size, re-posted from
  * the KL_IOCP_SENDFILE completion (iocp_post_transmitfile_chunk). */
 #define KL_IOCP_TRANSMITFILE_MAX 0x7FFFFFFEu
+/* The longest single WSASend: WSABUF.len is a ULONG, so a send of 4 GiB or more would be truncated
+ * (exactly 4 GiB to 0). A longer send goes out as several, by the partial-send re-post. */
+#define KL_IOCP_SEND_MAX         0x7FFFF000u
 
 struct KlIocpOp;
 /* A registered readiness watch. The completion port cannot readiness-watch an
@@ -492,7 +495,7 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
         off += iov[i].len;
     }
 
-    WSABUF buf = { (ULONG)total, op->sendbuf };
+    WSABUF buf = { (ULONG)(total > KL_IOCP_SEND_MAX ? KL_IOCP_SEND_MAX : total), op->sendbuf };
     DWORD sent = 0;
     int rc = WSASend((SOCKET)stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
@@ -1242,7 +1245,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             if (!failed && bytes > 0 && op->send_done < op->send_total) {
                 /* Partial send: re-post the remainder; do NOT surface an event
                  * until the whole response is out (the driver sees full writes). */
-                WSABUF buf = { (ULONG)(op->send_total - op->send_done),
+                size_t rest = op->send_total - op->send_done;
+                WSABUF buf = { (ULONG)(rest > KL_IOCP_SEND_MAX ? KL_IOCP_SEND_MAX : rest),
                                op->sendbuf + op->send_done };
                 DWORD sent = 0;
                 int rc = WSASend((SOCKET)op->stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);

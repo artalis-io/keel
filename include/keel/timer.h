@@ -24,7 +24,10 @@ typedef void (*KlTimerFn)(void *user_data);
  * Timers are one-shot: the callback can re-add itself via kl_timer_add
  * if repeating behavior is needed.
  *
- * Safe to call from within a timer callback.
+ * Safe to call from within a timer callback. A timer added from a callback
+ * never fires in the kl_timer_fire call that is running: even with delay 0 it
+ * waits for the next call (the next loop tick), so a callback that re-adds
+ * itself cannot keep one tick from returning.
  *
  * @param ctx      Event context (owns the timer heap).
  * @param delay_ms Delay in milliseconds (0 = fire on next kl_timer_fire).
@@ -63,8 +66,10 @@ int kl_timer_next_timeout(KlEventCtx *ctx, int max_ms);
 /**
  * @brief Fire all expired timers.
  *
- * Pops and invokes all timers whose deadline <= kl_monotonic_ms().
- * Safe for callbacks to add or cancel timers.
+ * Pops and invokes the timers that were pending when the call began and whose
+ * deadline <= kl_monotonic_ms(), earliest deadline first (order of addition on
+ * a tie). Safe for callbacks to add or cancel timers; a timer added by a
+ * callback waits for the next call.
  *
  * @param ctx Event context.
  * @return Number of timers fired.
