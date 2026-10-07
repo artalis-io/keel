@@ -73,28 +73,47 @@ int kl_comp_post_sendfile_raw(KlStream *stream, const KlIoVec *head_iov, int hea
                                                           file_fd, count);
 }
 
+/* The slots below are OPTIONAL in KlCompletionOps: a provider leaves out what it does not do (a
+ * stream-only provider has no datagram ops; a server-only one no connect). The routers never call a
+ * NULL slot: a post fails (-1, nothing taken), a cancel is a no-op, and a retire query reports
+ * RETIRED (no op of that kind can have been posted). The datagram facade refuses a loop without the
+ * whole datagram seam up front (kl_comp_dgram_available), so these guards are the backstop. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
-    kl_comp_ops(&ctx->loop)->cancel(ctx, fd);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    if (ops && ops->cancel) ops->cancel(ctx, fd);
+}
+
+int kl_comp_dgram_available(const struct KlEventCtx *ctx) {
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return ops && ops->post_dgram_recv && ops->post_dgram_send &&
+           ops->cancel_dgram && ops->retire_dgram;
 }
 
 int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) {
-    return kl_comp_ops(&ctx->loop)->post_dgram_recv(ctx, op);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return (ops && ops->post_dgram_recv) ? ops->post_dgram_recv(ctx, op) : -1;
 }
 
 int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
-    return kl_comp_ops(&ctx->loop)->post_dgram_send(ctx, op);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return (ops && ops->post_dgram_send) ? ops->post_dgram_send(ctx, op) : -1;
 }
 
 int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlCompLife *life, KlDgramOpKind kind) {
-    return kl_comp_ops(&ctx->loop)->cancel_dgram(ctx, life, kind);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return (ops && ops->cancel_dgram) ? ops->cancel_dgram(ctx, life, kind) : 0;
 }
 
 KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlCompLife *life,
                                          KlDgramOpKind kind, int *transport_err) {
-    return kl_comp_ops(&ctx->loop)->retire_dgram(ctx, life, kind, transport_err);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    if (ops && ops->retire_dgram) return ops->retire_dgram(ctx, life, kind, transport_err);
+    if (transport_err) *transport_err = 0;
+    return KL_DGRAM_RETIRE_RETIRED;
 }
 
 int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
                          const KlSockAddr *addr, void *watcher_udata) {
-    return kl_comp_ops(&ctx->loop)->post_connect(ctx, fd, addr, watcher_udata);
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return (ops && ops->post_connect) ? ops->post_connect(ctx, fd, addr, watcher_udata) : -1;
 }

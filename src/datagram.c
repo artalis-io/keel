@@ -383,6 +383,10 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     const KlDatagramOps *ops = cfg->sockets ? cfg->sockets->dgram : kl_sockdef_dgram();
     /* Neither a datagram-capable completion seam nor a readiness dgram provider → refuse pre-adoption. */
     if (!completion && (!ops || !ops->send || !ops->recv)) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
+    /* A completion loop must carry the whole datagram seam: those KlCompletionOps slots are optional
+     * (a stream-only provider leaves them NULL) and a datagram needs all four to receive, send, cancel
+     * and retire. Refuse pre-adoption, so the caller keeps the fd. */
+    if (completion && !kl_comp_dgram_available(cfg->ctx)) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
     dg->completion = completion;
 
     /* Derive the provider's capabilities for THIS fd, then fail-loud gate want_caps. A NULL caps op
@@ -465,6 +469,9 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     /* Validate the RESOLVED allocator (cfg->alloc, or the event context's when NULL)
      * before creating any fd; a malformed non-NULL allocator is rejected, not replaced. */
     if (!kl_allocator_ops_valid(alloc)) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
+    /* A completion loop without the datagram seam cannot carry a datagram (kl_datagram_init_ex
+     * refuses it): refuse here too, before creating an fd only to close it again. */
+    if (completion && !kl_comp_dgram_available(cfg->ctx)) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
     /* Resolve ONE effective provider. "NULL = ctx default" means the EVENT CONTEXT's provider
      * (cfg->ctx->sockets), not the built-in POSIX default; else a custom lwIP/EFI event context would be
      * mixed with POSIX datagram ops. Use it consistently for open, adoption, and every pre-adoption close. */
@@ -671,6 +678,12 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
 
 /* ── GSO ────────────────────────────────────────────────────────────────────────────────── */
 
+/* The largest group one UDP GSO send carries: Linux refuses more than 64 segments (UDP_MAX_SEGMENTS;
+ * newer kernels allow 128) with EINVAL, and more than the 65507-byte IPv4 UDP payload with EMSGSIZE.
+ * A larger group goes out per segment instead of being refused. */
+#define KL_DGRAM_GSO_MAX_SEGS  64u
+#define KL_DGRAM_GSO_MAX_BYTES 65507u
+
 /* KlDgramSubmitGsoFn: one whole-buffer provider send_gso (readiness). GSO carries no per-packet TOS
  * (the public API has none): the socket default applies; `owner`/`tos` are unused here. */
 static KlDgramSubmitResult dg_submit_gso(void *ctx, void *owner, const void *buf, size_t total,
@@ -685,7 +698,12 @@ static KlDgramSubmitResult dg_submit_gso(void *ctx, void *owner, const void *buf
     KlIoStatus st = kl_sock_io_status(dg->sockets);
     if (st == KL_IO_WOULD_BLOCK)  return KL_DGRAM_SUBMIT_WOULDBLOCK;
     if (st == KL_IO_UNSUPPORTED) { dg->core->gso_unsupported = 1; return KL_DGRAM_SUBMIT_UNSUPPORTED; }
-    return KL_DGRAM_SUBMIT_ERROR;
+    /* Any other failure refuses THIS group, not GSO on the socket: Linux answers EINVAL for a group
+     * past its segment limit or with a segment the path cannot carry, and EMSGSIZE past the UDP
+     * payload limit. Send the group per segment (no latch: the next group tries GSO again). A
+     * genuinely broken socket fails those sends too, and each segment is dropped and reported as a
+     * hard group error would have been. */
+    return KL_DGRAM_SUBMIT_UNSUPPORTED;
 }
 
 /* A GSO group's last segment retired → the batch group buffer is free (clears gso_busy). */
@@ -710,9 +728,11 @@ KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, co
     if (b->gso_busy)                               return KL_DATAGRAM_WOULD_BLOCK;/* one group per batch */
 
     if (total_len) memcpy(b->gso_buf, buf, total_len);   /* copy once into the group buffer */
-    /* GSO one-syscall only on a readiness datagram with a working, un-latched provider send_gso; else the
-     * group is FALLBACK (its segments drain as ordinary sends). */
-    int fallback = dg->completion || core->gso_unsupported || !(dg->provider_caps & KL_DGRAM_CAP_GSO);
+    /* GSO one-syscall only on a readiness datagram with a working, un-latched provider send_gso, and
+     * only for a group the kernel will take in one send (at most KL_DGRAM_GSO_MAX_SEGS segments and
+     * KL_DGRAM_GSO_MAX_BYTES bytes); else the group is FALLBACK (its segments drain as ordinary sends). */
+    int fallback = dg->completion || core->gso_unsupported || !(dg->provider_caps & KL_DGRAM_CAP_GSO) ||
+                   nseg > KL_DGRAM_GSO_MAX_SEGS || total_len > KL_DGRAM_GSO_MAX_BYTES;
 
     kl_dgram_core_dispatch_begin(core);   /* bracket the drain (may run a deferred teardown) */
     KlDatagramSendStatus st = kl_dgram_send_enqueue_gso(&core->send, b->gso_buf, total_len, segment_size,

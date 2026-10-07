@@ -1704,4 +1704,119 @@ UTEST(dgram_batch, recv_start_allows_active_gro_splitter) {
     kl_event_ctx_free(&ctx);
 }
 
+/* ── A GSO group the kernel rejects is sent per segment, never dropped ───────────────────────────
+ *
+ * Linux UDP_SEGMENT refuses a group with EINVAL past its segment limit (64, 128 on newer kernels) or
+ * a segment the path cannot carry, and with EMSGSIZE past the 65507-byte UDP payload limit. Those are
+ * limits of ONE send, not of the socket: the group must still go out as ordinary per-segment sends,
+ * and the next group may use GSO again. A kernel-faithful mock send_gso enforces the limits (a group
+ * within them is "sent" whole); the per-segment send counts and succeeds without a syscall, so the
+ * outcome is exact and identical on every platform. Readiness-only: GSO is a readiness fast path. */
+static KlDatagramOps    g_kgso_dg;
+static KlSocketProvider g_kgso_sp;
+static unsigned (*g_kgso_real_caps)(void *, KlSocketHandle);
+static int    g_kgso_calls;        /* send_gso invocations */
+static size_t g_kgso_segs;         /* segments a successful send_gso carried */
+static int    g_kgso_force_err;    /* nonzero: send_gso fails with this errno regardless of limits */
+static int    g_seg_sends;         /* ordinary per-segment sends */
+static unsigned kgso_caps(void *ctx, KlSocketHandle fd) {
+    return (g_kgso_real_caps ? g_kgso_real_caps(ctx, fd) : 0u) | KL_DGRAM_CAP_GSO;
+}
+static kl_ssize_t kgso_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
+                            const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    (void)ctx; (void)fd; (void)data; (void)dest; (void)src; (void)tos;
+    g_seg_sends++;
+    return (kl_ssize_t)len;
+}
+static kl_ssize_t kgso_send_gso(void *ctx, KlSocketHandle fd, const void *data, size_t len,
+                                uint16_t seg, const KlSockAddr *dest) {
+    (void)ctx; (void)fd; (void)data; (void)dest;
+    g_kgso_calls++;
+    if (g_kgso_force_err) { errno = g_kgso_force_err; return -1; }
+    size_t nseg = seg ? (len + seg - 1) / seg : 0;
+    if (nseg > 64)    { errno = EINVAL;   return -1; }   /* UDP_MAX_SEGMENTS */
+    if (len > 65507u) { errno = EMSGSIZE; return -1; }   /* past the UDP payload limit */
+    g_kgso_segs += nseg;
+    return (kl_ssize_t)len;
+}
+static const KlSocketProvider *kernel_gso_provider(void) {
+    g_kgso_sp = *(const KlSocketProvider *)kl_test_builtin_provider();
+    g_kgso_dg = *g_kgso_sp.dgram;
+    g_kgso_real_caps = g_kgso_dg.caps;
+    g_kgso_dg.caps = kgso_caps;
+    g_kgso_dg.send = kgso_send;
+    g_kgso_dg.send_gso = kgso_send_gso;
+    g_kgso_dg.send_batch = NULL; g_kgso_dg.tx_batch_new = NULL; g_kgso_dg.tx_batch_free = NULL;
+    g_kgso_sp.dgram = &g_kgso_dg;
+    g_kgso_calls = 0; g_kgso_segs = 0; g_kgso_force_err = 0; g_seg_sends = 0;
+    return &g_kgso_sp;
+}
+
+/* Send one group and report how many segments went out by either path. */
+static size_t kgso_send_group(KlEventCtx *ctx, KlDatagram *tx, KlDatagramBatch *b, const unsigned char *buf,
+                              size_t total, uint16_t seg, const KlSockAddr *dest, KlDatagramSendStatus *st) {
+    size_t before = g_kgso_segs + (size_t)g_seg_sends;
+    *st = kl_datagram_send_gso(tx, b, buf, total, seg, dest);
+    for (int i = 0; i < 20 && b->gso_busy; i++) kl_event_ctx_run(ctx, 8, 10);
+    return g_kgso_segs + (size_t)g_seg_sends - before;
+}
+
+UTEST(dgram_batch, gso_group_rejected_by_kernel_is_sent_per_segment) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }  /* readiness only */
+
+    const KlSocketProvider *sp = kernel_gso_provider();
+    KlSocketHandle txfd = prep_fd(sp);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 96, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 48, 1500);   /* 72000 B */
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ(1, kl_datagram_gso_active(&tx));
+
+    static unsigned char buf[72000];
+    memset(buf, 'g', sizeof(buf));
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", 9);
+    KlDatagramSendStatus st;
+
+    /* Past the segment limit (70 segments): every segment must go out. */
+    size_t out = kgso_send_group(&ctx, &tx, b, buf, 70u * 4u, 4, &dest, &st);
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    EXPECT_EQ(70, (int)out);
+
+    /* Past the payload limit (47 segments of 1400 = 65800 bytes): every segment must go out. */
+    out = kgso_send_group(&ctx, &tx, b, buf, 47u * 1400u, 1400, &dest, &st);
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    EXPECT_EQ(47, (int)out);
+
+    /* Within both limits but refused anyway (a segment the path cannot carry): EINVAL, then
+     * EMSGSIZE. Each group goes out per segment. */
+    g_kgso_force_err = EINVAL;
+    out = kgso_send_group(&ctx, &tx, b, buf, 3u * 100u, 100, &dest, &st);
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    EXPECT_EQ(3, (int)out);
+    g_kgso_force_err = EMSGSIZE;
+    out = kgso_send_group(&ctx, &tx, b, buf, 5u * 100u, 100, &dest, &st);
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    EXPECT_EQ(5, (int)out);
+    g_kgso_force_err = 0;
+
+    /* None of that latched GSO off for the socket: the next group within the limits is one send_gso. */
+    EXPECT_EQ(1, kl_datagram_gso_active(&tx));
+    int calls_before = g_kgso_calls;
+    size_t gso_before = g_kgso_segs;
+    out = kgso_send_group(&ctx, &tx, b, buf, 6u * 100u, 100, &dest, &st);
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);
+    EXPECT_EQ(6, (int)out);
+    EXPECT_EQ(calls_before + 1, g_kgso_calls);
+    EXPECT_EQ((int)gso_before + 6, (int)g_kgso_segs);
+
+    ASSERT_EQ(0, kl_datagram_batch_free(b));
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();

@@ -78,7 +78,9 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
 /**
  * @brief Send one UDP GSO datagram: @p total_len bytes segmented into @p segment_size chunks,
  *  transmitted in one send_gso syscall where the provider supports it, else the same segments sent
- *  individually (a transparent per-segment fallback).
+ *  individually (a transparent per-segment fallback). A group past what one GSO send carries (more than
+ *  64 segments or 65507 bytes) always takes the per-segment path, and so does a group the kernel refuses
+ *  (EINVAL / EMSGSIZE); neither turns GSO off for the next group.
  *
  * @p b must be a SEND/BOTH batch owned by @p dg; its storage is the copy-once group buffer (capacity
  * `n_slots * slot_bufsz`). The payload is copied into it once and referenced until the group retires, so

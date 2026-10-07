@@ -95,6 +95,12 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
  * completion_readiness_stub.c on readiness builds, where it is never called. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
+/* 1 when the loop's completion provider implements the whole datagram seam (post_dgram_recv,
+ * post_dgram_send, cancel_dgram and retire_dgram), else 0. Those slots are optional (a stream-only
+ * provider leaves them NULL), so a datagram must check this before it binds to a completion loop.
+ * Returns 0 on non-completion builds. */
+int kl_comp_dgram_available(const struct KlEventCtx *ctx);
+
 /* Post one overlapped datagram receive on a completion loop from a neutral descriptor. The
  * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in completion_absent.c on non-completion builds. */
 int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op);

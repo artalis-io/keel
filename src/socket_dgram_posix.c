@@ -202,7 +202,20 @@ static kl_ssize_t pdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
     msg.msg_controllen = sizeof(control.buf);
 
     kl_ssize_t n;
-    do { n = recvmsg((int)fd, &msg, 0); } while (n < 0 && errno == EINTR);
+    for (int skipped = 0;; skipped++) {
+        do { n = recvmsg((int)fd, &msg, 0); } while (n < 0 && errno == EINTR);
+        if (n >= 0 || !kl_dgram_is_icmp_report(errno))
+            break;
+        /* An ICMP report about an earlier send (connected socket): this receive consumed it and
+         * yielded nothing, so take the next datagram instead of failing. */
+        if (skipped + 1 >= KL_UDP_ICMP_REPORT_SKIP_MAX) {
+            errno = EAGAIN;
+            return -1;
+        }
+        msg.msg_namelen = sizeof(from);
+        msg.msg_controllen = sizeof(control.buf);
+        msg.msg_flags = 0;
+    }
     if (n < 0) return n;
 
     memset(src, 0, sizeof(*src));
@@ -486,22 +499,32 @@ static int pdg_recv_batch(void *ctx, KlSocketHandle fd, void *rx_batch,
     (void)ctx;
     DgramRxBatch *b = rx_batch;
     int n = b->n < max ? b->n : max;
-    for (int i = 0; i < n; i++) {
-        b->iov[i].iov_base = b->data + (size_t)i * b->bufsz;
-        b->iov[i].iov_len  = b->bufsz;
-        struct msghdr *m = &b->msgs[i].msg_hdr;
-        memset(m, 0, sizeof(*m));
-        m->msg_iov = &b->iov[i];
-        m->msg_iovlen = 1;
-        m->msg_name = &b->src[i];
-        m->msg_namelen = sizeof(struct sockaddr_storage);
-        m->msg_control = b->ctrl + (size_t)i * b->ctrl_sz;
-        m->msg_controllen = b->ctrl_sz;
-        b->msgs[i].msg_len = 0;
-    }
     int cnt;
-    do { cnt = recvmmsg((int)fd, b->msgs, (unsigned)n, 0, NULL); }
-    while (cnt < 0 && errno == EINTR);
+    for (int skipped = 0;; skipped++) {
+        for (int i = 0; i < n; i++) {
+            b->iov[i].iov_base = b->data + (size_t)i * b->bufsz;
+            b->iov[i].iov_len  = b->bufsz;
+            struct msghdr *m = &b->msgs[i].msg_hdr;
+            memset(m, 0, sizeof(*m));
+            m->msg_iov = &b->iov[i];
+            m->msg_iovlen = 1;
+            m->msg_name = &b->src[i];
+            m->msg_namelen = sizeof(struct sockaddr_storage);
+            m->msg_control = b->ctrl + (size_t)i * b->ctrl_sz;
+            m->msg_controllen = b->ctrl_sz;
+            b->msgs[i].msg_len = 0;
+        }
+        do { cnt = recvmmsg((int)fd, b->msgs, (unsigned)n, 0, NULL); }
+        while (cnt < 0 && errno == EINTR);
+        if (cnt >= 0 || !kl_dgram_is_icmp_report(errno))
+            break;
+        /* An ICMP report about an earlier send (connected socket): consumed, nothing received, so
+         * read again with fresh headers (as pdg_recv does). */
+        if (skipped + 1 >= KL_UDP_ICMP_REPORT_SKIP_MAX) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
     if (cnt <= 0) return cnt;
 
     for (int i = 0; i < cnt; i++) {
