@@ -115,13 +115,13 @@ typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 
 /* A posted server-side recv or send on an accepted child. The client rides the
  * watcher relay; the SERVER completion driver (completion_http_server.c) posts recv/send as
- * completion-native ops. drain services each via the SYNC socket provider and
- * surfaces KL_COMP_READ / KL_COMP_WRITE. Every posted op yields exactly one terminal
- * completion: a cancelled op (el_cancel) is surfaced as a failed one, since the server
- * releases a connection only once the last op it posted has completed. The captured
- * generation is the stale guard for an op that was NOT cancelled: an op for a child that
- * closed (generation bumped) or whose slot was reused (magic cleared) is dropped, never
- * delivered, mirroring the connect-op discipline. No heap: the send payload is copied
+ * completion-native ops. drain services each without blocking (the recv readiness probe,
+ * the non-blocking send step) and surfaces KL_COMP_READ / KL_COMP_WRITE. Every posted op
+ * yields exactly one terminal completion: a cancelled op (el_cancel), or one whose conn a
+ * quarantine marked dead, is surfaced as a failed one, since the server releases a
+ * connection only once the last op it posted has completed. The captured generation is the
+ * stale guard for an op that was NOT cancelled: an op for a child that closed (generation
+ * bumped) or whose slot was reused (magic cleared) is dropped, never delivered. No heap: the send payload is copied
  * into the inline `sndbuf` (see KL_EFI_SNDBUF). */
 typedef struct {
     int             in_use;
@@ -303,11 +303,13 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
      * (it cancels BEFORE it closes), so the next drain must surface each as a failed
      * KL_COMP_READ / KL_COMP_WRITE; freeing it silently would leak the conn and its slot.
      * An op whose generation is already stale belongs to an earlier conn on a reused
-     * handle (closed without a cancel): it is not this conn's, so drop it undelivered. */
+     * handle (closed without a cancel): it is not this conn's, so drop it undelivered. Only the
+     * generation decides that: a conn a quarantine marked dead keeps its generation, and its ops
+     * are still its own, so they too are cancelled (failed), never dropped. */
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++) {
         EfiIoOp *op = &g_efi.io[i];
         if (!op->in_use || op->fd != fd || op->cancelled) continue;
-        if (kl_uefi_conn_valid_h(op->fd, op->generation)) op->cancelled = 1;
+        if (kl_uefi_conn_same_gen_h(op->fd, op->generation)) op->cancelled = 1;
         else io_op_free(op);
     }
 }
@@ -617,18 +619,25 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         }
     }
 
-    /* Server I/O ops: service each posted recv/send on an accepted child via the
-     * SYNC socket provider and surface KL_COMP_READ / KL_COMP_WRITE. A cancelled op is
-     * surfaced first as its one failed terminal (its conn is waiting for it, even if the
-     * conn has since closed), then freed. Otherwise stale-guarded (a child that closed
-     * mid-op is dropped, never delivered). RECV is gated on the non-blocking readiness
-     * probe (no blocking recv); SEND transmits synchronously in bounded fragments (a short
-     * Transmit), leaving the op pending on a would-block to retry next drain. */
+    /* Server I/O ops: service each posted recv/send on an accepted child without blocking
+     * and surface KL_COMP_READ / KL_COMP_WRITE. A cancelled op is surfaced as its one failed
+     * terminal (its conn is waiting for it, even if the conn has since closed), then freed;
+     * so is an op whose conn a quarantine marked dead (same generation). An op of an earlier
+     * conn (closed, generation bumped, or slot reused) is dropped, never delivered. RECV is
+     * gated on the non-blocking readiness probe; SEND submits one Transmit fragment at a time
+     * and polls it (kl_uefi_socket_send_step), leaving the op pending while it is queued. */
     for (int i = 0; i < KL_EFI_MAX_IO_OPS && count < max; i++) {
         EfiIoOp *op = &g_efi.io[i];
         if (!op->in_use) continue;
 
-        if (op->cancelled) {
+        if (!op->cancelled && !kl_uefi_conn_same_gen_h(op->fd, op->generation)) {
+            io_op_free(op);        /* stale (closed / slot reused): drop, no event */
+            continue;
+        }
+
+        /* Cancelled, or posted on a conn a quarantine has since marked dead (same generation,
+         * no longer usable): the op is still this conn's, so it completes, as a failure. */
+        if (op->cancelled || !kl_uefi_conn_valid_h(op->fd, op->generation)) {
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind   = (op->kind == EFI_IO_RECV) ? KL_COMP_READ : KL_COMP_WRITE;
             out[count].target = op->stream;
@@ -636,11 +645,6 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             out[count].ok     = 0;
             count++;
             io_op_free(op);        /* retire: exactly-once terminal result */
-            continue;
-        }
-
-        if (!kl_uefi_conn_valid_h(op->fd, op->generation)) {
-            io_op_free(op);        /* stale (closed / slot reused): drop, no event */
             continue;
         }
 
@@ -660,19 +664,20 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             continue;
         }
 
-        /* SEND: transmit the remainder of sndbuf synchronously (bounded EFI fragments),
-         * from wherever the last drain left off (send_done). */
-        int fatal = 0, wouldblock = 0;
+        /* SEND: advance through sndbuf one EFI Transmit fragment at a time, from wherever the
+         * last drain left off (send_done). Never pumps: a Transmit the stack keeps queued (a
+         * peer that stopped reading) leaves the op pending, and a later drain polls it again,
+         * so one stuck peer cannot stall every other connection on the loop. */
+        int fatal = 0, pending = 0;
         while (op->send_done < op->send_total) {
-            ssize_t n = kl_sock_send(ctx->sockets, op->fd,
-                                     op->sndbuf + op->send_done,
-                                     op->send_total - op->send_done);
-            if (n > 0) { op->send_done += (size_t)n; continue; }
-            KlIoStatus st = kl_sock_io_status(ctx->sockets);
-            if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) { wouldblock = 1; break; }
+            size_t sent = 0;
+            int r = kl_uefi_socket_send_step(op->fd, op->sndbuf + op->send_done,
+                                             op->send_total - op->send_done, &sent);
+            if (r > 0 && sent > 0) { op->send_done += sent; continue; }
+            if (r >= 0) { pending = 1; break; }
             fatal = 1; break;
         }
-        if (wouldblock) continue;   /* retry the remainder on a later drain */
+        if (pending) continue;   /* the Transmit is still queued: poll it on a later drain */
         for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
         out[count].kind   = KL_COMP_WRITE;
         out[count].target = op->stream;

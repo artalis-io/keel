@@ -149,6 +149,7 @@ typedef struct KlUefiConn {
     int                       tx_posted;    /* a Transmit token is outstanding */
     int                       close_posted; /* a Close token is outstanding */
     /* Slot-owned Transmit staging (stable across a failed cancel-drain / quarantine). */
+    size_t                    tx_len;       /* bytes the outstanding Transmit carries */
     EFI_TCP4_TRANSMIT_DATA    tx_data;
     unsigned char             tx_buf[KL_EFI_TXBUF];
 
@@ -571,14 +572,25 @@ int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok) {
 
 /* Handle-based generation helpers for the completion backend's stale guard. */
 unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd) {
-    KlUefiConn *c = conn_of(fd);   /* live read: captured at post time */
-    return c ? (unsigned long long)c->generation : 0ULL;
+    /* Captured at post time. An open conn has an odd generation (close bumps it even), whether
+     * or not a quarantine has marked it dead: an op posted on a dead-but-open conn still belongs
+     * to it and must complete (as a failure), so it gets that conn's generation, not 0. */
+    const KlUefiConn *c = slot_of(fd);
+    if (!c || c->magic != KL_EFI_CONN_MAGIC || !(c->generation & 1)) return 0ULL;
+    return (unsigned long long)c->generation;
 }
 int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation) {
     /* Read the STABLE slot (slot_of, not conn_of) so a completion delivered after
      * the conn was closed + freed cannot deref freed memory; the slot storage is
      * static. The magic/generation/dead check inside kl_uefi_conn_valid rejects it. */
     return kl_uefi_conn_valid(slot_of(fd), (UINT64)generation);
+}
+int kl_uefi_conn_same_gen_h(KlSocketHandle fd, unsigned long long generation) {
+    /* Same slot tenant, dead or not: close bumps the generation and a reuse changes it, so a
+     * match means the op was posted on THIS conn, which is still open (possibly dead). */
+    const KlUefiConn *c = slot_of(fd);
+    return c && generation != 0 && c->magic == KL_EFI_CONN_MAGIC &&
+           c->generation == (UINT64)generation;
 }
 
 /*
@@ -628,11 +640,84 @@ static int send_errno(EFI_STATUS st) {
     }
 }
 
+/* Stage one fragment of @buf (at most KL_EFI_TXBUF bytes; *len is clamped to what was
+ * staged) and submit the conn's Transmit token. The data is COPIED into the SLOT-OWNED tx
+ * buffer so the token never references the caller's buffer (which it may reuse), and, on a
+ * failed cancel-drain, the token's storage stays valid in the quarantined slot. On success
+ * the token is outstanding (tx_posted) until its terminal event is observed. */
+static EFI_STATUS tx_submit(KlUefiConn *c, const void *buf, size_t *len) {
+    size_t n = *len;
+    if (n > KL_EFI_TXBUF) n = KL_EFI_TXBUF;
+    for (size_t i = 0; i < n; i++) c->tx_buf[i] = ((const unsigned char *)buf)[i];
+
+    EFI_TCP4_TRANSMIT_DATA *tx = &c->tx_data;
+    { unsigned char *p = (unsigned char *)tx; for (size_t i = 0; i < sizeof(*tx); i++) p[i] = 0; }
+    tx->Push = TRUE;
+    tx->DataLength = (UINT32)n;
+    tx->FragmentCount = 1;
+    tx->FragmentTable[0].FragmentLength = (UINT32)n;
+    tx->FragmentTable[0].FragmentBuffer = c->tx_buf;
+
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+    c->tx_tok.Packet.TxData = tx;
+    c->tx_tok.CompletionToken.Status = EFI_NOT_READY;
+    EFI_STATUS st = tcp->Transmit(tcp, &c->tx_tok);
+    if (EFI_ERROR(st)) return st;
+    c->tx_posted = 1;
+    c->tx_len = n;
+    *len = n;
+    return EFI_SUCCESS;
+}
+
+/*
+ * kl_uefi_socket_send_step: the completion drain's NON-BLOCKING send (see the header).
+ * A peer that stops reading (zero window) leaves the Transmit token queued in the stack for
+ * as long as it likes; pumping it here would stall every other connection on the loop, so
+ * the step submits at most one fragment, then only Polls once and tests the token, exactly
+ * as kl_uefi_socket_recv_ready does for a Receive. The token stays outstanding (tx_posted)
+ * across drains; close() cancels and drains it like any other posted token.
+ */
+int kl_uefi_socket_send_step(KlSocketHandle fd, const void *buf, size_t len, size_t *out_sent) {
+    if (out_sent) *out_sent = 0;
+    if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
+    KlUefiConn *c = conn_of(fd);
+    if (!c) return -1;                     /* closed or dead */
+    if (c->quarantined) { c->last_status = EFI_ABORTED; return -1; }
+    if (!c->connected) { c->last_status = EFI_NOT_READY; return 0; }
+
+    if (!c->tx_posted) {
+        if (len == 0) { c->last_status = EFI_SUCCESS; return 1; }
+        size_t n = len;
+        EFI_STATUS st = tx_submit(c, buf, &n);
+        if (EFI_ERROR(st)) {
+            c->last_status = st;
+            return kl_efi_status_to_io(st) == KL_IO_WOULD_BLOCK ? 0 : -1;
+        }
+    }
+
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+    tcp->Poll(tcp);
+    if (c->bs->CheckEvent(c->tx_tok.CompletionToken.Event) != EFI_SUCCESS) {
+        c->last_status = EFI_NOT_READY;
+        return 0;                          /* still queued in the stack */
+    }
+    c->tx_posted = 0;                      /* terminal observed */
+    EFI_STATUS st = c->tx_tok.CompletionToken.Status;
+    c->last_status = st;
+    if (EFI_ERROR(st)) return -1;
+    /* The caller passes the same remainder until completion, so the fragment never exceeds it. */
+    if (out_sent) *out_sent = c->tx_len < len ? c->tx_len : len;
+    return 1;
+}
+
 /*
  * send(): Transmit one fragment + pump. Returns bytes accepted (== len on success),
  * or -1 with last_status set. Mirrors lwr_sock_send: the emulated-readiness data
  * path driven by the pump. (EFI_TCP4 Transmit takes the whole buffer; the token
- * completes when the stack has queued it, treated as the full write.)
+ * completes when the stack has queued it, treated as the full write.) This is the
+ * SYNCHRONOUS path of the socket vtable (the client's watcher relay and the selftests): it
+ * pumps up to KL_EFI_PUMP_SPINS. The server completion drain never calls it; it uses the
+ * non-blocking kl_uefi_socket_send_step instead.
  */
 static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)cx;
@@ -642,29 +727,12 @@ static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, si
     if (!c || c->dead) { errno = EIO; return -1; }
     if (!c->connected) { c->last_status = EFI_NOT_READY; errno = EAGAIN; return -1; }  /* connect first */
     if (c->quarantined) { c->last_status = EFI_ABORTED; errno = EIO; return -1; }
+    /* A Transmit submitted by the non-blocking send step is still outstanding: it owns the
+     * slot's tx buffer and the conn's one Transmit token, so this send must wait. */
+    if (c->tx_posted) { c->last_status = EFI_NOT_READY; errno = EAGAIN; return -1; }
     if (len == 0) { c->last_status = EFI_SUCCESS; return 0; }
-    /* Copy into the SLOT-OWNED tx buffer so the Transmit token never references the
-     * caller's buffer (which it may reuse); and, on a failed cancel-drain, the token's
-     * storage stays valid in the quarantined slot. Bound to one KL_EFI_TXBUF fragment;
-     * the caller loops for the remainder (partial write). */
-    if (len > KL_EFI_TXBUF) len = KL_EFI_TXBUF;
-    for (size_t i = 0; i < len; i++) c->tx_buf[i] = ((const unsigned char *)buf)[i];
-
-    EFI_TCP4_TRANSMIT_DATA *tx = &c->tx_data;
-    { unsigned char *p = (unsigned char *)tx; for (size_t i = 0; i < sizeof(*tx); i++) p[i] = 0; }
-    tx->Push = TRUE;
-    tx->DataLength = (UINT32)len;
-    tx->FragmentCount = 1;
-    tx->FragmentTable[0].FragmentLength = (UINT32)len;
-    tx->FragmentTable[0].FragmentBuffer = c->tx_buf;
-
-    EFI_TCP4_PROTOCOL *tcp = c->tcp;
-    c->tx_tok.Packet.TxData = tx;
-    c->tx_tok.CompletionToken.Status = EFI_NOT_READY;
-
-    EFI_STATUS st = tcp->Transmit(tcp, &c->tx_tok);
+    EFI_STATUS st = tx_submit(c, buf, &len);
     if (EFI_ERROR(st)) { c->last_status = st; errno = send_errno(st); return -1; }
-    c->tx_posted = 1;
     /* On a pump timeout, Cancel+drain the tx token so the firmware no longer
      * references the slot's tx_data/tx_buf. */
     if (!pump_or_cancel(c, &c->tx_tok.CompletionToken)) {
@@ -918,7 +986,7 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
         if (!pump_until(c, c->conn_tok.CompletionToken.Event)) drained_ok = 0;
         c->conn_posted = 0;
     }
-    if (tcp && c->tx_posted) {   /* normally cleared by send; belt-and-suspenders */
+    if (tcp && c->tx_posted) {   /* a send step's Transmit still queued (peer not reading) */
         if (!pump_until(c, c->tx_tok.CompletionToken.Event)) drained_ok = 0;
         c->tx_posted = 0;
     }

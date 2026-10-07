@@ -424,6 +424,24 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **UEFI server: a client that stops reading no longer stalls the whole firmware event loop.**
+  The EFI completion drain sent server responses through the synchronous socket send, which pumps
+  a Transmit token for up to about 60 s. A peer with a zero window (its send buffer full, the
+  stack holding the Transmit queued) therefore froze every other connection for up to a minute per
+  attempt, and then the send failed. The drain now submits one Transmit fragment and polls it
+  (`kl_uefi_socket_send_step`), leaving the send pending while the token is queued; a later drain
+  finishes it once the firmware completes the Transmit. While it is pending the connection's tx
+  buffer belongs to it (a synchronous send on that connection is would-block), and close cancels
+  and drains it as before. The client's synchronous send is unchanged.
+- **UEFI server: posted ops of a quarantined connection complete.** A connection whose token a
+  cancel could not retire is marked dead but keeps its generation. The drain dropped its posted
+  recv/send as stale and a cancel freed them without a completion, so the server, which releases a
+  connection only after its last op completes, leaked it. They now complete as failures; only an
+  op of an earlier connection on a reused handle is dropped.
+- **lwIP raw: a client half-close no longer truncates the response.** A FIN from the peer while a
+  response was being sent failed the send, so a client that shut down its write side after the
+  request (`shutdown(SHUT_WR)`) got a cut-off response. A FIN now ends only the read side (the next
+  read sees EOF); the send fails only on an error delivery or a reset. (behavior change)
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept
