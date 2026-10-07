@@ -583,6 +583,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   this datagram" (behavior change).** It latched the datagram's send error like any other failure;
   it is now read as the ICMP report a UDP send can return, and only that datagram is dropped.
   `KL_IO_INTERRUPTED` retries the send. `KL_IO_FATAL` still latches.
+- **UEFI: a TCP reset from real firmware is reported as a reset, and a refused connection is
+  recognised.** The integration's `efi_min.h` numbered `EFI_CONNECTION_RESET` 102 and
+  `EFI_CONNECTION_REFUSED` 105; the UEFI specification (and EDK2) number them 105 and 106, with 102
+  being `EFI_PROTOCOL_UNREACHABLE`. So a reset (105) was mapped as a refused connection
+  (`KL_ERR_CONNECT`), a refusal (106) was unrecognised (a fatal I/O error), and a protocol-unreachable
+  (102) was taken for a reset. The values now follow the specification, and a UDP send that ends
+  `EFI_PROTOCOL_UNREACHABLE` is a per-datagram drop.
 - **IOCP: a datagram receive past many queued ICMP reports keeps going.** A receive that met more than
   16 ICMP reports in a row at issue (a socket adopted through `kl_datagram_init`, which keeps the
   Winsock reports on) failed, and the datagram stopped receiving for good. It now queues its own

@@ -517,7 +517,7 @@ int kl_uefi_udp_status_per_datagram(EFI_STATUS st) {
      * Ip4Route fails -> IpIoSend -> Udp4Transmit); EFI_BAD_BUFFER_SIZE is a datagram larger than
      * the path takes. Both concern this datagram only. */
     return st == EFI_ICMP_ERROR || st == EFI_NETWORK_UNREACHABLE || st == EFI_HOST_UNREACHABLE ||
-           st == EFI_PORT_UNREACHABLE || st == EFI_NO_MAPPING || st == EFI_OUT_OF_RESOURCES ||
+           st == EFI_PROTOCOL_UNREACHABLE || st == EFI_PORT_UNREACHABLE || st == EFI_NO_MAPPING || st == EFI_OUT_OF_RESOURCES ||
            st == EFI_NOT_FOUND || st == EFI_BAD_BUFFER_SIZE;
 }
 
