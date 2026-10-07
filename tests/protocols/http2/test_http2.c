@@ -70,6 +70,14 @@ typedef struct {
     char first_recv[64];
     size_t first_recv_len;
 
+    /* close_on_flush: flush reports a close (on_stream_reset) for every stream answered since the
+     * last flush, from inside the flush, as a real session does once a response's END_STREAM goes
+     * out on a stream the client has already half-closed. */
+    int close_on_flush;
+    uint32_t to_close[16];
+    int n_to_close;
+    int closes_reported;
+
     /* KEEL's callbacks (stored by factory) */
     KlHttp2ServerCallbacks callbacks;
     void *cb_user_data;
@@ -93,6 +101,8 @@ static int mock_submit_response(KlHttp2ServerSession *self, uint32_t stream_id,
                                  const void *body, size_t body_len) {
     MockH2Session *m = (MockH2Session *)self;
     m->submit_count++;
+    if (m->close_on_flush && m->n_to_close < 16)
+        m->to_close[m->n_to_close++] = stream_id;
     m->last_stream_id = stream_id;
     m->last_status = status;
     m->last_num_headers = num_headers;
@@ -126,6 +136,16 @@ static int mock_flush(KlHttp2ServerSession *self) {
         static const char frames[64] = {0};
         size_t n = m->flush_send_len < sizeof frames ? m->flush_send_len : sizeof frames;
         (void)m->callbacks.send(m->cb_user_data, frames, n);
+    }
+    if (m->close_on_flush) {
+        uint32_t ids[16];
+        int n = m->n_to_close;
+        memcpy(ids, m->to_close, sizeof(ids));
+        m->n_to_close = 0;
+        for (int i = 0; i < n; i++) {
+            m->closes_reported++;
+            m->callbacks.on_stream_reset(m->cb_user_data, ids[i], 0);
+        }
     }
     return m->flush_return;
 }
@@ -2088,6 +2108,133 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
     ASSERT_TRUE(ok);
     ASSERT_GT(got, (size_t)0);
     ASSERT_TRUE(whole);                          /* was: the session got SETTINGS, magic stripped */
+}
+
+/* ── A session whose flush reports the stream it just finished as closed ───────────────────── */
+/* A real session (nghttp2) closes a stream inside its send once the response's END_STREAM goes out
+ * on a stream the client has already half-closed, and reports that close (on_stream_reset) from
+ * inside the flush. Keel flushed while it still held the stream and destroyed it afterwards, so the
+ * close destroyed it first and Keel then destroyed the same slot again: num_streams went to -1, and
+ * the next stream was created at streams[-1], before the table. Stream 1 of an h2c upgrade is
+ * answered outside recv, where the nghttp2 adapter really does send on flush. */
+
+/* A GET on stream 3 after the first exchange: answered with 200, and leaves no stream behind.
+ * Only run when the table is sane (num_streams 0): on a corrupt table it would write before it. */
+static void second_get(MockH2Session *mock, int *status, uint32_t *sid, int *streams_after,
+                       const KlHttpConn *conn) {
+    *status = -1; *sid = 0; *streams_after = -99;
+    if (conn->h2->num_streams != 0) return;
+    mock->last_status = 0;
+    if (mock->callbacks.on_request(mock->cb_user_data, 3, "GET", 3, "/test", 5,
+                                   NULL, 0, NULL, NULL, NULL, NULL, 0) != 0) return;
+    if (mock->callbacks.on_stream_end(mock->cb_user_data, 3) != 0) return;
+    *status = mock->last_status;
+    *sid = mock->last_stream_id;
+    *streams_after = conn->h2->num_streams;
+}
+
+UTEST(h2, upgrade_stream_1_closed_by_its_own_flush_is_destroyed_once) {
+    test_setup();
+    kl_http_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
+    static MockH2Session mock;
+    mock_init(&mock); mock.with_upgrade = 1; mock.want_write_return = 1; mock.close_on_flush = 1;
+    g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    static KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    h2c_req(&conn, "AAMAAABk", 0);
+
+    int r = kl_http2_server_upgrade_from_h1(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int streams = conn.h2 ? conn.h2->num_streams : -99;
+    int status1 = mock.last_status, closes = mock.closes_reported;
+    int status3 = -1, streams3 = -99; uint32_t sid3 = 0;
+    if (conn.h2) second_get(&mock, &status3, &sid3, &streams3, &conn);
+    if (conn.h2 && conn.h2->num_streams < 0) conn.h2->num_streams = 0;   /* let cleanup run */
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_EQ(status1, 200);
+    ASSERT_GE(closes, 1);                         /* the flush did report stream 1 closed */
+    ASSERT_EQ(streams, 0);                        /* was -1: destroyed twice */
+    ASSERT_EQ(status3, 200);                      /* the next request is served */
+    ASSERT_EQ(sid3, 3u);
+    ASSERT_EQ(streams3, 0);
+}
+
+/* The same order on the ordinary answer path (a stream answered after END_STREAM), when the
+ * session's flush is not deferred. */
+UTEST(h2, answered_stream_closed_by_the_flush_is_destroyed_once) {
+    test_setup();
+    kl_http_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
+    static MockH2Session mock;
+    mock_init(&mock); mock.want_write_return = 1; mock.close_on_flush = 1;
+    g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    static KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    int ro = mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/test", 5,
+                                       NULL, 0, NULL, NULL, NULL, NULL, 0);
+    int re = mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+    int streams = conn.h2->num_streams;
+    int status3 = -1, streams3 = -99; uint32_t sid3 = 0;
+    second_get(&mock, &status3, &sid3, &streams3, &conn);
+    if (conn.h2->num_streams < 0) conn.h2->num_streams = 0;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(ro, 0);
+    ASSERT_EQ(re, 0);
+    ASSERT_EQ(streams, 0);                        /* was -1 */
+    ASSERT_EQ(status3, 200);
+    ASSERT_EQ(streams3, 0);
+}
+
+/* The early answers: a 413 for an over-limit body, and a pre-body middleware short-circuit. */
+UTEST(h2, early_answers_closed_by_the_flush_are_destroyed_once) {
+    test_setup();
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
+    static MockH2Session mock;
+    mock_init(&mock); mock.want_write_return = 1; mock.close_on_flush = 1;
+    g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    static KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    conn.max_body_size = 4;
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    /* 413 on stream 1 */
+    mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                              NULL, 0, NULL, NULL, NULL, NULL, 0);
+    int rd = mock.callbacks.on_data(mock.cb_user_data, 1, "0123456789", 10);
+    int status413 = mock.last_status;
+    int streams413 = conn.h2->num_streams;
+    if (conn.h2->num_streams < 0) conn.h2->num_streams = 0;
+
+    /* 403 from pre-body middleware on stream 5 */
+    kl_http_router_use(&test_router, "*", "/*", test_middleware, NULL);
+    middleware_return = 1;
+    int rm = mock.callbacks.on_request(mock.cb_user_data, 5, "GET", 3, "/test", 5,
+                                       NULL, 0, NULL, NULL, NULL, NULL, 0);
+    int status403 = mock.last_status;
+    int streams403 = conn.h2->num_streams;
+    if (conn.h2->num_streams < 0) conn.h2->num_streams = 0;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rd, 0);
+    ASSERT_EQ(status413, 413);
+    ASSERT_EQ(streams413, 0);                     /* was -1 */
+    ASSERT_EQ(rm, 0);
+    ASSERT_EQ(status403, 403);
+    ASSERT_EQ(streams403, 0);                     /* was -1 */
 }
 
 UTEST_MAIN();

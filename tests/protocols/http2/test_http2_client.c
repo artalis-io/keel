@@ -1055,4 +1055,75 @@ static void send_close_case(int *utest_result, int do_free) {
 UTEST(h2c_live, close_in_on_resp_during_send_reports_no_error) { send_close_case(utest_result, 0); }
 UTEST(h2c_live, free_in_on_resp_during_send_reports_no_error)  { send_close_case(utest_result, 1); }
 
+/* The same through a receive that fails after on_resp ran inside it: the session completes a stream
+ * (on_resp, which closes or frees the client) and then reports a later frame in the same batch as
+ * fatal. The recv-failure path checked only for a free, so a client closed from on_resp still got
+ * on_error. */
+static int32_t g_rfc_id;
+static int     g_rfc_resp, g_rfc_errors, g_rfc_free;
+static int rfc_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
+    (void)data; (void)len;
+    if (g_rfc_id <= 0) return 0;
+    int32_t id = g_rfc_id;
+    g_rfc_id = 0;
+    self->keel_cbs.on_response(self, id, 200, NULL, 0);
+    self->keel_cbs.on_stream_close(self, id, 0);         /* → on_resp, which closes or frees */
+    return -1;                                           /* then a fatal frame in the same batch */
+}
+static KlHttp2ClientSession *rfc_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) g_live_session->recv = rfc_recv;
+    return g_live_session;
+}
+static void rfc_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r, void *ud) {
+    (void)id; (void)r; (void)ud;
+    g_rfc_resp++;
+    if (g_rfc_free) kl_http2_client_free(c);
+    else           kl_http2_client_close(c);
+}
+static void rfc_on_error(KlHttp2ClientConn *c, const char *msg, void *ud) {
+    (void)c; (void)msg; (void)ud;
+    g_rfc_errors++;
+}
+
+static void recv_fail_close_case(int *utest_result, int do_free) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = rfc_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_rfc_resp = g_rfc_errors = 0;
+    g_rfc_free = do_free;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &g_h2qa, &cfg, url, rfc_on_error, NULL);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    ASSERT_TRUE(g_live_session != NULL);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+    ASSERT_TRUE(kl_handle_valid(peer));
+
+    g_rfc_id = kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, rfc_on_resp, NULL);
+    ASSERT_GT(g_rfc_id, 0);
+    (void)send((int)peer, "x", 1, 0);           /* readable: the recv that completes, then fails */
+    for (int i = 0; i < 100 && g_rfc_resp == 0; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    for (int i = 0; i < 10; i++) (void)kl_event_ctx_run(&ev, 16, 5);
+
+    int resp = g_rfc_resp, errors = g_rfc_errors;
+    if (!do_free) kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_EQ(resp, 1);
+    ASSERT_EQ(errors, 0);                        /* close: was 1, on_error after the user's close */
+    ASSERT_EQ(h2q_check_and_release(), 0);
+}
+
+UTEST(h2c_live, close_in_on_resp_before_a_failed_recv_reports_no_error) { recv_fail_close_case(utest_result, 0); }
+UTEST(h2c_live, free_in_on_resp_before_a_failed_recv_reports_no_error)  { recv_fail_close_case(utest_result, 1); }
+
 UTEST_MAIN();
