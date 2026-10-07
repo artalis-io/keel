@@ -986,14 +986,20 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
         if (!pump_until(c, c->conn_tok.CompletionToken.Event)) drained_ok = 0;
         c->conn_posted = 0;
     }
-    if (tcp && c->tx_posted) {   /* a send step's Transmit still queued (peer not reading) */
+    /* A send step's Transmit still queued means the peer stopped reading (zero window: the
+     * typical idle-sweep reap). Its data never left, and a graceful Close would wait behind it
+     * (the FIN cannot go out until the window opens), pumped for up to KL_EFI_PUMP_SPINS inside
+     * the loop. Such a close is abortive (RST), which completes at once. */
+    int abortive = 0;
+    if (tcp && c->tx_posted) {
         if (!pump_until(c, c->tx_tok.CompletionToken.Event)) drained_ok = 0;
         c->tx_posted = 0;
+        abortive = 1;
     }
 
-    /* Graceful Close: its token also needs a terminal path (the pump_or_cancel guard). */
+    /* Close: its token also needs a terminal path (the pump_or_cancel guard). */
     if (tcp && c->events_created && c->close_tok.CompletionToken.Event) {
-        c->close_tok.AbortOnClose = FALSE;
+        c->close_tok.AbortOnClose = abortive ? TRUE : FALSE;
         c->close_tok.CompletionToken.Status = EFI_NOT_READY;
         EFI_STATUS st = tcp->Close(tcp, &c->close_tok);
         if (!EFI_ERROR(st)) {

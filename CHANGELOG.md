@@ -430,9 +430,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   stack holding the Transmit queued) therefore froze every other connection for up to a minute per
   attempt, and then the send failed. The drain now submits one Transmit fragment and polls it
   (`kl_uefi_socket_send_step`), leaving the send pending while the token is queued; a later drain
-  finishes it once the firmware completes the Transmit. While it is pending the connection's tx
-  buffer belongs to it (a synchronous send on that connection is would-block), and close cancels
-  and drains it as before. The client's synchronous send is unchanged.
+  finishes it once the firmware completes the Transmit, counting each completed fragment as send
+  progress so the idle sweep does not reap a slow but moving reader. While it is pending the
+  connection's tx buffer belongs to it (a synchronous send on that connection is would-block).
+  Closing a connection whose Transmit is still queued (the idle sweep reaping a peer that stopped
+  reading) cancels it and then closes abortively (RST): a graceful close would wait behind the
+  unsent data and was pumped for up to the same 60 s. (behavior change) Other closes stay
+  graceful, and the client's synchronous send is unchanged.
 - **UEFI server: posted ops of a quarantined connection complete.** A connection whose token a
   cancel could not retire is marked dead but keeps its generation. The drain dropped its posted
   recv/send as stale and a cancel freed them without a completion, so the server, which releases a

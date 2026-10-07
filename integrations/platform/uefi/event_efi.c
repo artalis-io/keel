@@ -121,8 +121,8 @@ typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
  * quarantine marked dead, is surfaced as a failed one, since the server releases a
  * connection only once the last op it posted has completed. The captured generation is the
  * stale guard for an op that was NOT cancelled: an op for a child that closed (generation
- * bumped) or whose slot was reused (magic cleared) is dropped, never delivered. No heap: the send payload is copied
- * into the inline `sndbuf` (see KL_EFI_SNDBUF). */
+ * bumped) or whose slot was reused (magic cleared) is dropped, never delivered. No heap: the
+ * send payload is copied into the inline `sndbuf` (see KL_EFI_SNDBUF). */
 typedef struct {
     int             in_use;
     int             cancelled;       /* el_cancel ran on the live conn: drain emits ok=0, then frees */
@@ -575,9 +575,10 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         op->in_use = 0;   /* retire: exactly-once terminal result */
     }
 
-    /* Drain-driven readiness relay: for each armed watch, emit a
-     * KL_COMP_WATCHER ONLY when it is actually ready. WRITE stays always-ready;
-     * send is a short synchronous Transmit. READ is relayed only when the
+    /* Drain-driven readiness relay (the CLIENT path: tagged watchers; server I/O ops are
+     * serviced below): for each armed watch, emit a KL_COMP_WATCHER ONLY when it is actually
+     * ready. WRITE stays always-ready; the client's send is the provider's synchronous
+     * Transmit (the server never uses it). READ is relayed only when the
      * provider's non-blocking recv can return something now
      * (kl_uefi_socket_recv_ready posts/polls a Receive without pumping); no more
      * busy-relay that spun a blocking recv, and the loop is never stalled for a
@@ -673,7 +674,11 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             size_t sent = 0;
             int r = kl_uefi_socket_send_step(op->fd, op->sndbuf + op->send_done,
                                              op->send_total - op->send_done, &sent);
-            if (r > 0 && sent > 0) { op->send_done += sent; continue; }
+            if (r > 0 && sent > 0) {
+                op->send_done += sent;
+                op->stream->send_progress += (uint64_t)sent;   /* a long send that moves is not idle */
+                continue;
+            }
             if (r >= 0) { pending = 1; break; }
             fatal = 1; break;
         }

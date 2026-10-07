@@ -1744,9 +1744,10 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
             c->pend_accept = 0;
         }
         /* The posted send's single WRITE: ok=1 once fully acked, ok=0 if the conn died (reset,
-         * abort, error delivery) first; a plain FIN from the peer does not stop it. A failed WRITE completes the send op only: an armed recv on the
-         * same conn still gets its own (failed) READ, so the driver, which counts its posted
-         * ops, sees every one of them complete. */
+         * abort, error delivery) first; a plain FIN from the peer does not stop it. A failed
+         * WRITE completes the send op only: an armed recv on the same conn still gets its own
+         * (failed) READ, so the driver, which counts its posted ops, sees every one of them
+         * complete. */
         if (c->pend_write && n < max) {
 #ifndef NDEBUG
             assert(c->owner != NULL && "a posted send has an owner");
