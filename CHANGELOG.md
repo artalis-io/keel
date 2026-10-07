@@ -424,6 +424,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   socket, the flush failed, and `on_error` ran on a client the user had already closed or freed. The
   send callback now fails at once on a closed client, and a failed flush reports nothing once the
   client was closed or freed, as the receive path already did.
+- **A timer added from a timer callback waits for the next tick.** `kl_timer_fire` re-read the
+  clock after every callback, so a 0 ms timer added from a callback was already due and fired in the
+  same call; one that re-added itself (a retry through the 0 ms deferred-error timers of the HTTP
+  client, WebSocket client or DNS resolver) kept the call from returning and starved all I/O. It now
+  fires only the timers that existed when it was entered, and timers due at the same millisecond fire
+  in the order they were added.
+- **io_uring: a send of 4 GiB or more no longer loops forever.** A send SQE's length is 32 bits, so
+  a remainder of exactly 4 GiB was prepared as 0 bytes, the kernel sent nothing, and the send was
+  prepared again without end (reachable through the copy fallback for a file of 4 GiB or more on a
+  kernel without splice). Each send SQE now carries at most 0x7ffff000 bytes and the rest follows as
+  partial sends, the backend reports that as its `send_max`, and a send that completes with 0 bytes
+  of a non-empty remainder fails the write. IOCP's WSASend lengths are capped the same way.
+- **io_uring: -EBUSY from submit no longer stops the loop.** On kernels 5.5 to 5.18 a CQ overflow
+  backlog makes `io_uring_enter` return -EBUSY (or -EAGAIN) until completions are reaped; the drain
+  treated that as a fatal loop error. It now reaps, like a timeout or an interrupted wait, and the
+  waiting submissions go in on the next drain.
 - **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
   that suspended on a second op and completed it at once registered the connection's socket again;
   when the response then closed the connection, it was released while still registered. poll and

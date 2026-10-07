@@ -81,6 +81,10 @@
  * pinning would risk io_uring_queue_init ENOMEM across many loops; skip the pool instead. */
 #define KL_IOU_REGBUF_MIN_MEMLOCK  (64u * 1024u * 1024u)   /* 64 MiB */
 #define KL_IOU_SPLICE_CHUNK (64u * 1024u)     /* file→pipe splice chunk (default pipe capacity) */
+/* The longest single send SQE. sqe->len is 32 bits, so a remainder of 4 GiB or more would be
+ * truncated (exactly 4 GiB to 0); 0x7ffff000 is also the most one send(2) moves on Linux. A longer
+ * send goes out as several, by the partial-send re-prep. */
+#define KL_IOU_SEND_MAX     ((size_t)0x7ffff000u)
 
 /* Op kind. The FIRST field of both KlIouOp and KlIouWatch is this enum, so a CQE's
  * user_data can be discriminated by reading *(IouOpType*). IOU_WATCH tags a poll-add. */
@@ -164,6 +168,10 @@ typedef struct {
     int             has_splice;            /* IORING_OP_SPLICE supported; else pread+SEND */
 #ifdef KEEL_IOURING_TEST_HOOKS
     int             test_fail_next_sqe;    /* test-only: N forced iou_sqe()==NULL (SQ-exhaustion sim) */
+    size_t          test_send_cap;         /* test-only: per-SQE send length cap override (0 = none) */
+    size_t          test_send_prepared_max;/* test-only: largest send length prepared so far */
+    int             test_send_res0_next;   /* test-only: N forced 0 results on a send CQE */
+    int             test_submit_rc_next;   /* test-only: one forced submit return (0 = none) */
 #endif
 } KlIouState;
 
@@ -189,6 +197,33 @@ static struct io_uring_sqe *iou_sqe(KlIouState *st) {
 void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count) {
     KlIouState *st = ctx->loop._backend;
     st->test_fail_next_sqe = count;
+}
+
+/* Test-only: override the per-SQE send length cap (0 restores the production value), so a send far
+ * below 4 GiB exercises the same split a 4 GiB remainder takes; and read back the largest send
+ * length prepared since the override. */
+void kl_iou_test_send_cap(struct KlEventCtx *ctx, size_t cap) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_send_cap = cap;
+    st->test_send_prepared_max = 0;
+}
+size_t kl_iou_test_send_prepared_max(struct KlEventCtx *ctx) {
+    const KlIouState *st = ctx->loop._backend;
+    return st->test_send_prepared_max;
+}
+
+/* Test-only: report the next `count` send completions (that moved bytes) as 0 bytes, what the
+ * kernel returns for a send prepared with a length of 0. */
+void kl_iou_test_send_res0_next(struct KlEventCtx *ctx, int count) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_send_res0_next = count;
+}
+
+/* Test-only: make the next drain's submit report `rc` (e.g. -EBUSY, as a kernel with a CQ overflow
+ * backlog does) after it really submitted. */
+void kl_iou_test_submit_rc_next(struct KlEventCtx *ctx, int rc) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_submit_rc_next = rc;
 }
 #endif
 
@@ -499,6 +534,14 @@ static int iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     if (!sqe) { op->aborted = 1; return -1; }   /* no slot: nothing queued for this op */
     void *p = op->sendbuf + op->send_done;
     size_t n = op->send_total - op->send_done;
+    size_t cap = KL_IOU_SEND_MAX;
+#ifdef KEEL_IOURING_TEST_HOOKS
+    if (st->test_send_cap) cap = st->test_send_cap;
+#endif
+    if (n > cap) n = cap;                       /* the rest goes out after this part completes */
+#ifdef KEEL_IOURING_TEST_HOOKS
+    if (n > st->test_send_prepared_max) st->test_send_prepared_max = n;
+#endif
     if (op->reg_idx >= 0)
         io_uring_prep_write_fixed(sqe, op->fd, p, (unsigned)n, 0, op->reg_idx);
     else
@@ -891,6 +934,13 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
             return 1;
         }
+        if (res == 0 && op->send_done < op->send_total) {
+            /* No progress on a non-empty send (what a 0-length SQE returns): re-preparing it would
+             * loop forever, so fail the write. */
+            iou_send_release(st, op);
+            ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
+            return 1;
+        }
         op->send_done += (size_t)res;
         op->stream->send_progress += (uint64_t)res;   /* a long send that moves is not idle */
         if (op->send_done < op->send_total) {         /* short write: send the tail */
@@ -914,6 +964,11 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             return 1;
         }
         if (op->sf_stage == 0) {                      /* head SEND (partial-capable) */
+            if (res == 0 && op->send_done < op->send_total) {   /* no progress: fail, never loop */
+                iou_send_release(st, op);
+                ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
+                return 1;
+            }
             op->send_done += (size_t)res;
             op->stream->send_progress += (uint64_t)res;
             if (op->send_done < op->send_total) {
@@ -1062,7 +1117,13 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     /* Submit the queued SQEs and wait for at least one completion (or the timeout). */
     struct io_uring_cqe *cqe = NULL;
     int r = io_uring_submit_and_wait_timeout(&st->ring, &cqe, 1, tsp, NULL);
-    if (r < 0 && r != -ETIME && r != -EINTR)
+#ifdef KEEL_IOURING_TEST_HOOKS
+    if (st->test_submit_rc_next) { r = st->test_submit_rc_next; st->test_submit_rc_next = 0; }
+#endif
+    /* -EBUSY / -EAGAIN: the kernel holds a CQ overflow backlog (5.5 to 5.18 with NODROP) or is short
+     * of resources, and wants completions reaped before it takes more submissions. Not a loop
+     * failure: reap below, and the unsubmitted SQEs go in on the next drain. */
+    if (r < 0 && r != -ETIME && r != -EINTR && r != -EBUSY && r != -EAGAIN)
         return -1;
 
     int count = 0;
@@ -1113,6 +1174,13 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             iou_op_free(op);
             continue;
         }
+#ifdef KEEL_IOURING_TEST_HOOKS
+        if (st->test_send_res0_next > 0 && res > 0 &&
+            (op->type == IOU_WRITE || (op->type == IOU_SENDFILE && op->sf_stage == 0))) {
+            st->test_send_res0_next--;
+            res = 0;
+        }
+#endif
         if (iou_complete(st, op, res, &out[count])) {  /* op finished → emit + free */
             count++;
             iou_op_unlink(st, op);
@@ -1165,7 +1233,7 @@ static const KlCompletionOps iou_completion_ops = {
     iou_comp_post_dgram_recv, iou_comp_post_dgram_send,
     iou_comp_cancel_dgram, iou_comp_retire_dgram, iou_comp_post_connect,
     iou_shutdown_accepts,
-    0,      /* send_max: no limit (a post of any size is taken) */
+    KL_IOU_SEND_MAX,   /* send_max: one SQE's worth (a longer post is still taken, sent in parts) */
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iou_completion_ops; }

@@ -32,9 +32,14 @@
 #include "net_compat.h"
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 
 /* Defined in the -DKEEL_IOURING_TEST_HOOKS copy of event_iouring.c linked with this test. */
 void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count);
+void kl_iou_test_send_cap(struct KlEventCtx *ctx, size_t cap);
+size_t kl_iou_test_send_prepared_max(struct KlEventCtx *ctx);
+void kl_iou_test_send_res0_next(struct KlEventCtx *ctx, int count);
+void kl_iou_test_submit_rc_next(struct KlEventCtx *ctx, int rc);
 
 static int       g_writes, g_write_fails, g_reads, g_read_fails;
 static KlStream *g_target;
@@ -264,6 +269,131 @@ UTEST(iouring_sqe_fail, watcher_remove_without_an_sqe_is_retried) {
     kl_event_ctx_free(&ctx);
     ASSERT_EQ(n, 0L);                                    /* EOF; was: -1 (the file stayed open) */
     ASSERT_EQ(live, base);                               /* the watch was freed */
+}
+
+/* Shared setup for the send-length and submit-return tests: a completion loop, a loopback pair and
+ * a stream over one end. Returns 0, or 1 when this loop is not a completion loop (skip). */
+typedef struct {
+    KlAllocator    a;
+    KlEventCtx     ctx;
+    KlSocketHandle end, peer;
+    KlStream       st;
+} IouRig;
+
+static int rig_open(IouRig *r) {
+    r->a = kl_allocator_default();
+    if (kl_event_ctx_init(&r->ctx, &r->a) != 0) return -1;
+    if (!(kl_event_caps(&r->ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&r->ctx); return 1; }
+    r->ctx.comp_conn_dispatch = count_dispatch;
+    g_writes = g_write_fails = g_reads = g_read_fails = 0;
+    if (make_pair(&r->end, &r->peer) != 0) return -1;
+    if (kl_sockdef_set_nonblocking(r->end) != 0 || kl_sockdef_set_nonblocking(r->peer) != 0) return -1;
+    memset(&r->st, 0, sizeof(r->st));
+    r->st.fd = r->end; r->st.ctx = &r->ctx; r->st.alloc = &r->a;
+    g_target = &r->st;
+    return kl_event_add(&r->ctx.loop, r->st.fd, KL_EVENT_READ, &r->st) == 0 ? 0 : -1;
+}
+
+static void rig_close(IouRig *r) {
+    kl_event_del(&r->ctx.loop, r->st.fd);
+    kl_sockdef_close(r->end); kl_sockdef_close(r->peer);
+    kl_event_ctx_free(&r->ctx);
+}
+
+/* Drive the loop until the one WRITE completes, reading the peer as it goes. Returns bytes read. */
+static long rig_pump(IouRig *r, char *dst, long want) {
+    long got = 0;
+    for (int i = 0; i < 2000 && (g_writes == 0 || got < want); i++) {
+        long n = (long)kl_sockdef_recv(r->peer, dst + got, (size_t)(want - got));
+        if (n > 0) { got += n; continue; }
+        if (kl_event_ctx_run(&r->ctx, 16, 5) < 0) break;
+        if (g_writes && g_write_fails) break;
+    }
+    return got;
+}
+
+/* sqe->len is 32 bits: a send remainder of exactly 4 GiB was prepared as length 0, the kernel
+ * returned 0, and the send was re-prepared forever. Each prepared length is now capped and the
+ * rest goes out as further sends. The cap is lowered here so a 64 KiB send takes the split a 4 GiB
+ * one takes in production; the whole payload must arrive, in order, as one WRITE completion. */
+UTEST(iouring_sqe_fail, send_length_is_capped_per_sqe) {
+    IouRig r;
+    int rc = rig_open(&r);
+    if (rc == 1) return;
+    ASSERT_EQ(rc, 0);
+
+    /* The backend advertises the cap, so a caller that splits its output posts no more than it. */
+    size_t smax = kl_comp_send_max_raw(&r.st);
+    EXPECT_TRUE(smax > 0);                                    /* was 0: no limit */
+    EXPECT_TRUE(smax <= (size_t)0x7ffff000u);
+
+    static char big[65536], got_buf[65536];
+    for (size_t i = 0; i < sizeof(big); i++) big[i] = (char)(i * 7u + 3u);
+    KlIoVec iov = { .base = big, .len = sizeof(big) };
+    kl_iou_test_send_cap(&r.ctx, 1000);
+    ASSERT_EQ(kl_comp_post_send_raw(&r.st, &iov, 1, sizeof(big)), 0);
+    long got = rig_pump(&r, got_buf, (long)sizeof(big));
+    size_t prepared_max = kl_iou_test_send_prepared_max(&r.ctx);
+    rig_close(&r);
+
+    EXPECT_TRUE(prepared_max <= 1000u);                      /* was 65536: one uncapped SQE */
+    ASSERT_EQ(g_writes, 1);
+    ASSERT_EQ(g_write_fails, 0);
+    ASSERT_EQ(got, (long)sizeof(big));
+    ASSERT_EQ(memcmp(got_buf, big, sizeof(big)), 0);
+}
+
+/* A send of a non-empty remainder that completes with 0 bytes cannot make progress (it is what a
+ * 0-length SQE returns), so it fails the write instead of being re-prepared. */
+UTEST(iouring_sqe_fail, zero_result_on_a_nonempty_send_fails_the_write) {
+    IouRig r;
+    int rc = rig_open(&r);
+    if (rc == 1) return;
+    ASSERT_EQ(rc, 0);
+
+    static char big[65536], sink[65536];
+    memset(big, 'q', sizeof(big));
+    KlIoVec iov = { .base = big, .len = sizeof(big) };
+    kl_iou_test_send_res0_next(&r.ctx, 1);
+    ASSERT_EQ(kl_comp_post_send_raw(&r.st, &iov, 1, sizeof(big)), 0);
+    (void)rig_pump(&r, sink, (long)sizeof(sink));
+    rig_close(&r);
+
+    ASSERT_EQ(g_writes, 1);
+    ASSERT_EQ(g_write_fails, 1);                             /* was 0: re-prepared and resent */
+}
+
+/* io_uring_enter returns -EBUSY (or -EAGAIN) while a CQ overflow backlog is pending (kernels 5.5 to
+ * 5.18 with NODROP). That is a request to reap, not a loop failure: the drain must go on to reap
+ * the completions, and the loop keeps working. */
+static void submit_busy_case(int *ok_out, int errcode) {
+    IouRig r;
+    *ok_out = 0;
+    int rc = rig_open(&r);
+    if (rc == 1) { *ok_out = 1; return; }
+    if (rc != 0) return;
+
+    char wbuf[] = "ping", pbuf[16];
+    KlIoVec iov = { .base = wbuf, .len = 4 };
+    if (kl_comp_post_send_raw(&r.st, &iov, 1, 4) != 0) { rig_close(&r); return; }
+    kl_iou_test_submit_rc_next(&r.ctx, -errcode);
+    int run = kl_event_ctx_run(&r.ctx, 16, 25);              /* was -1: fatal to the loop */
+    long got = rig_pump(&r, pbuf, 4);
+    rig_close(&r);
+    *ok_out = run >= 0 && g_writes == 1 && g_write_fails == 0 && got == 4 &&
+              memcmp(pbuf, "ping", 4) == 0;
+}
+
+UTEST(iouring_sqe_fail, submit_ebusy_reaps_instead_of_failing) {
+    int ok = 0;
+    submit_busy_case(&ok, EBUSY);
+    ASSERT_TRUE(ok);
+}
+
+UTEST(iouring_sqe_fail, submit_eagain_reaps_instead_of_failing) {
+    int ok = 0;
+    submit_busy_case(&ok, EAGAIN);
+    ASSERT_TRUE(ok);
 }
 
 UTEST_MAIN()
