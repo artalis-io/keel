@@ -217,6 +217,7 @@ KlIoStatus kl_efi_status_to_io(EFI_STATUS st) {
         case EFI_CONNECTION_FIN:     return KL_IO_CLOSED;
         case EFI_CONNECTION_RESET:   return KL_IO_RESET;
         case EFI_CONNECTION_REFUSED: return KL_IO_RESET;
+        case EFI_OUT_OF_RESOURCES:   return KL_IO_RESOURCE_EXHAUSTED;
         default:
             /* Any other error bit set → fatal; any other success → OK. */
             return EFI_ERROR(st) ? KL_IO_FATAL : KL_IO_OK;

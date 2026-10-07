@@ -55,6 +55,7 @@
  *   EFI_CONNECTION_REFUSED → KL_IO_RESET         (connect refused, a reset-class
  *                                                  failure the client surfaces as
  *                                                  KL_ERR_CONNECT)
+ *   EFI_OUT_OF_RESOURCES   → KL_IO_RESOURCE_EXHAUSTED
  *   anything else (error)  → KL_IO_FATAL
  *   any other success      → KL_IO_OK
  */

@@ -21,7 +21,7 @@
 #include <keel/http_request.h>
 #include "http_internal.h"
 #include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
-#include "completion_io.h"    /* kl_comp_cancel (neutral completion seam) */
+#include "completion_io.h"    /* kl_comp_cancel, kl_comp_stream_server_available (neutral seam) */
 #include "completion_http.h" /* kl_http_comp_run / _quiesce_accepts / _post_read (HTTP orchestration) */
 #include "event_caps.h"   /* kl_event_caps: completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
@@ -379,6 +379,19 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * A configured event_provider (e.g. lwIP / EFI) installs its own backend. */
     if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
         s->last_error = KL_ERR_EVENT_INIT;
+        server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
+        kl_http_conn_pool_free(&s->pool);
+        kl_http_router_free(&s->router);
+        return -1;
+    }
+    /* A completion loop drives every connection through the provider's accept, receive, send and
+     * cancel operations. Those slots are optional in KlCompletionOps (a client-only or datagram-only
+     * provider leaves them out), so refuse a loop that lacks any of them here rather than call a NULL
+     * slot at the first accept, or never release a connection whose receive cannot be cancelled. */
+    if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
+        !kl_comp_stream_server_available(&s->ev)) {
+        s->last_error = KL_ERR_UNSUPPORTED;
+        kl_event_ctx_free(&s->ev);
         server_init_free_cidrs(s);   /* allocated above; only kl_http_server_free frees it */
         kl_http_conn_pool_free(&s->pool);
         kl_http_router_free(&s->router);

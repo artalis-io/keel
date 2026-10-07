@@ -10,7 +10,6 @@
 #ifndef KEEL_FREESTANDING
 #include <assert.h>            /* the live-slot precondition in h2_stream_destroy (hosted only) */
 #endif
-#include <fcntl.h>
 #include <sys/types.h>
 #include "http_internal.h"
 #include "socket.h"        /* kl_sock_io_status: would-block classification */

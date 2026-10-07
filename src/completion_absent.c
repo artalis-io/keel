@@ -64,8 +64,9 @@ int kl_comp_post_sendfile_raw(KlStream *stream, const KlIoVec *head_iov, int hea
 
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) { (void)ctx; (void)fd; abort(); }
 
-/* A query, not an operation: no datagram seam exists here, so report it absent rather than abort. */
+/* Queries, not operations: no completion seam exists here, so report it absent rather than abort. */
 int kl_comp_dgram_available(const struct KlEventCtx *ctx) { (void)ctx; return 0; }
+int kl_comp_stream_server_available(const struct KlEventCtx *ctx) { (void)ctx; return 0; }
 
 int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) { (void)ctx; (void)op; abort(); }
 

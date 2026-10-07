@@ -35,9 +35,6 @@
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
 
-#ifndef KEEL_FREESTANDING
-#include <errno.h>       /* hosted TCP fallback only (EINPROGRESS / EAGAIN / EWOULDBLOCK) */
-#endif
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -884,6 +881,11 @@ static kl_ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
         return t->tls->read(t->tls, t->fd, b, n);
     return kl_sock_recv(t->r->ctx->sockets, t->fd, b, n);
 }
+/* A -1 from dns_tcp_read/dns_tcp_write that only means "try again when ready", as the socket
+ * provider classifies it (kl_sock_io_status), never a hosted errno. A TLS -1 is an error or a close. */
+static int dns_tcp_would_block(const KlDnsTcp *t) {
+    return !t->tls && kl_sock_io_status(t->r->ctx->sockets) == KL_IO_WOULD_BLOCK;
+}
 
 /* Number of legs still awaiting a response on this nameserver's connection. */
 static int dns_tcp_pending_on(const KlDnsResolver *r, int ns_idx) {
@@ -982,7 +984,7 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     kl_sock_set_cloexec(r->ctx->sockets, fd);
 
     int rc = kl_sock_connect(r->ctx->sockets, fd, ns_ksa);
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && kl_sock_io_status(r->ctx->sockets) != KL_IO_PENDING) {
         kl_sock_close(r->ctx->sockets, fd); return -1;
     }
 
@@ -1043,7 +1045,7 @@ static void dns_tcp_flush(KlDnsResolver *r, KlDnsTcp *t) {
     while (t->wsent < t->wlen) {
         kl_ssize_t n = dns_tcp_write(t, t->wbuf + t->wsent, t->wlen - t->wsent);
         if (n > 0) { t->wsent += (size_t)n; continue; }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        if (n < 0 && dns_tcp_would_block(t))
             return;                                  /* keep WRITE interest */
         dns_tcp_fail(r, t);                          /* peer closed / hard error */
         return;
@@ -1100,7 +1102,7 @@ static void dns_tcp_on_event_body(KlDnsResolver *r, KlDnsTcp *t, KlEventMask mas
                 if (r->destroy_requested || !kl_handle_valid(t->fd)) return;
                 continue;
             }
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            if (n < 0 && dns_tcp_would_block(t))
                 break;
             dns_tcp_fail(r, t);                       /* EOF / error */
             return;
