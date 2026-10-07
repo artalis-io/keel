@@ -535,6 +535,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   provider). Code that relied
   on a client start setting `ctx.sockets` for other users of the ctx must set it itself. A
   caller-owned provider must outlive every pooled connection made through it.
+- **A datagram-capable socket provider no longer reads as an overlapped (completion) one.** The
+  internal `KL_SOCK_CAP_OVERLAPPED` and the public `KL_SOCK_CAP_DATAGRAM` were the same bit
+  (`1ull << 3`), so every provider that advertises datagram support (the built-in POSIX and Winsock
+  providers, the lwIP BSD provider, any custom provider with a datagram vtable) also read as
+  overlapped. Two effects: a streamed (chunked) response whose server or ctx named such a provider
+  explicitly (`KlHttpServerConfig.sockets = kl_socket_provider_posix()` / `_winsock()`) on a
+  readiness loop handed its bytes to the completion output queue, which refused them, so
+  `kl_http_response_begin_stream` and every SSE / streamed response failed; and on a completion
+  loop (IOCP, io_uring, pollcomp, lwIP raw) the capability negotiation accepted such a provider
+  instead of adopting the backend's own overlapped one. `KL_SOCK_CAP_OVERLAPPED` now sits at bit 63
+  (internal bits are allocated from the top, public ones from bit 0), and a compile-time check keeps
+  the two sets disjoint. (behavior change) On a completion loop, an explicitly configured built-in
+  or other datagram-capable readiness provider is now replaced by the backend's overlapped provider
+  (server and async client), or refused where the backend offers none, as the negotiation contract
+  already documented; it no longer negotiates by accident.
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

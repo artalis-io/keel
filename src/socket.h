@@ -25,13 +25,22 @@
 #include <keel/socket.h>      /* public: KlSocketProvider/KlSocketOps/KlIoVec/caps/... */
 #include "sockcompat.h"       /* struct sockaddr / socklen_t / KlIoVec layout on both platforms */
 
-/* Internal socket-provider capability, reserving bit 3 out of the
- * public KL_SOCK_CAP_* space (bits 0-2 in <keel/socket.h>). Kept OUT of the public
- * header on purpose: completion-mode I/O is an internal event-axis concern; the
- * provider's data plane is driven by the completion loop's overlapped submit path
- * (WSARecv/WSASend) rather than the synchronous send/recv ops. A completion event
- * loop negotiates against this bit (see kl_caps_compatible). No public API change. */
-#define KL_SOCK_CAP_OVERLAPPED (1ull << 3)
+/* Internal socket-provider capability. KlSocketProvider.capabilities holds public and
+ * internal bits in one uint64_t: public KL_SOCK_CAP_* bits (<keel/socket.h>) are
+ * allocated from bit 0 upwards, internal ones from bit 63 downwards, so the two never
+ * meet. Kept OUT of the public header on purpose: completion-mode I/O is an internal
+ * event-axis concern; the provider's data plane is driven by the completion loop's
+ * overlapped submit path (WSARecv/WSASend) rather than the synchronous send/recv ops.
+ * A completion event loop negotiates against this bit (see kl_caps_compatible), and a
+ * shared bit would make every provider advertising the public flag read as overlapped. */
+#define KL_SOCK_CAP_OVERLAPPED (1ull << 63)
+
+/* Every internal capability bit, and every public one: they must stay disjoint. */
+#define KL_SOCK_CAP_INTERNAL_MASK_ (KL_SOCK_CAP_OVERLAPPED)
+#define KL_SOCK_CAP_PUBLIC_MASK_   (KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | \
+                                    KL_SOCK_CAP_SENDFILE | KL_SOCK_CAP_DATAGRAM)
+_Static_assert((KL_SOCK_CAP_INTERNAL_MASK_ & KL_SOCK_CAP_PUBLIC_MASK_) == 0,
+               "an internal KL_SOCK_CAP_* bit collides with a public one");
 
 /* True iff a socket provider is usable: either NULL (the built-in POSIX default,
  * per KlSocketProvider's contract) or a non-NULL provider carrying a non-NULL ops
