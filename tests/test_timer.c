@@ -238,6 +238,91 @@ UTEST(timer, add_from_callback) {
     kl_event_ctx_free(&ctx);
 }
 
+/* A 0 ms timer that re-adds itself from its own callback fires once per kl_timer_fire, not again
+ * in the same call: a timer added during a fire waits for the next one. Re-reading the clock after
+ * each callback let the re-added timer (deadline <= now) fire in the same call without end, so a
+ * retry loop through a 0 ms deferred-error timer starved all I/O. The callback stops re-adding at
+ * a cap, so a regression fails the assertion instead of hanging the suite. */
+#define READD_CAP 64
+
+static void readd_cb(void *user_data) {
+    RefireCtx *r = user_data;
+    r->refires++;
+    if (r->refires < READD_CAP)
+        kl_timer_add(r->ctx, 0, readd_cb, r);
+}
+
+UTEST(timer, zero_delay_readd_fires_once_per_fire) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+
+    RefireCtx rctx = { .ctx = &ctx, .refires = 0 };
+    ASSERT_TRUE(kl_timer_add(&ctx, 0, readd_cb, &rctx) >= 0);
+
+    int fired[5];
+    int seen[5];
+    for (int i = 0; i < 5; i++) {
+        fired[i] = kl_timer_fire(&ctx);
+        seen[i] = rctx.refires;
+    }
+    kl_event_ctx_free(&ctx);
+
+    for (int i = 0; i < 5; i++) {
+        EXPECT_EQ(fired[i], 1);          /* was READD_CAP on the first call, then 0 */
+        EXPECT_EQ(seen[i], i + 1);
+    }
+}
+
+/* Timers that were due when kl_timer_fire was entered all fire in that call, in deadline order
+ * (insertion order on a tie); one added by a callback during the call waits for the next. */
+typedef struct {
+    KlEventCtx *ctx;
+    int         tag;
+} TagCtx;
+
+static int tag_log[8];
+static int tag_idx;
+
+static void tag_cb(void *user_data) {
+    TagCtx *t = user_data;
+    if (tag_idx < 8) tag_log[tag_idx++] = t->tag;
+}
+
+static TagCtx g_tag_c;
+
+static void tag_add_c_cb(void *user_data) {
+    tag_cb(user_data);
+    kl_timer_add(g_tag_c.ctx, 0, tag_cb, &g_tag_c);
+}
+
+UTEST(timer, added_during_fire_waits_for_next_fire) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+    tag_idx = 0;
+
+    TagCtx a = { &ctx, 1 }, b = { &ctx, 2 }, d = { &ctx, 4 };
+    g_tag_c.ctx = &ctx; g_tag_c.tag = 3;
+    ASSERT_TRUE(kl_timer_add(&ctx, 0, tag_add_c_cb, &a) >= 0);   /* A fires, then adds C */
+    ASSERT_TRUE(kl_timer_add(&ctx, 0, tag_cb, &b) >= 0);
+    ASSERT_TRUE(kl_timer_add(&ctx, 0, tag_cb, &d) >= 0);
+
+    int first  = kl_timer_fire(&ctx);
+    int after1 = tag_idx;
+    int second = kl_timer_fire(&ctx);
+    kl_event_ctx_free(&ctx);
+
+    EXPECT_EQ(first, 3);                 /* A, B, D: everything due at entry (was 4: C too) */
+    EXPECT_EQ(after1, 3);
+    EXPECT_EQ(second, 1);                /* C */
+    ASSERT_EQ(tag_idx, 4);
+    EXPECT_EQ(tag_log[0], 1);
+    EXPECT_EQ(tag_log[1], 2);
+    EXPECT_EQ(tag_log[2], 4);
+    EXPECT_EQ(tag_log[3], 3);
+}
+
 /* A delay meaning "effectively never" (near UINT64_MAX) must not wrap the deadline into the past:
  * now + delay overflowed, and the timer fired on the next tick. */
 UTEST(timer, huge_delay_does_not_fire_at_once) {
