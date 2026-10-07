@@ -570,6 +570,33 @@ UTEST(server_integration, explicit_builtin_provider_negotiated_by_event_model) {
     }
 }
 
+/* KlSocketProvider.dgram is present iff capabilities & KL_SOCK_CAP_DATAGRAM. Holds for the built-in
+ * provider and for the backend's own native provider (the overlapped one on IOCP, io_uring and
+ * pollcomp; none on a readiness backend), which the server and client adopt on a completion loop. */
+static int dgram_cap_matches_vtable(const KlSocketProvider *p) {
+    return kl_socket_provider_has_cap(p, KL_SOCK_CAP_DATAGRAM) == (p->dgram != NULL);
+}
+
+UTEST(server_integration, builtin_providers_advertise_datagram_iff_vtable) {
+#ifdef _WIN32
+    const KlSocketProvider *builtin = kl_socket_provider_winsock();
+#else
+    const KlSocketProvider *builtin = kl_socket_provider_posix();
+#endif
+    ASSERT_TRUE(dgram_cap_matches_vtable(builtin));
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &alloc), 0);
+    const KlSocketProvider *native = kl_event_native_provider(&ctx.loop);
+    int completion = (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    int native_ok = native ? dgram_cap_matches_vtable(native) : 1;
+    kl_event_ctx_free(&ctx);
+
+    if (completion) ASSERT_TRUE(native != NULL);   /* a completion backend brings its own */
+    ASSERT_TRUE(native_ok);
+}
+
 /* A provider without KL_SOCK_CAP_WRITEV makes http_response.c serialize its
  * vectored writes through kl_sock_send. The full 64 KB body must still arrive
  * byte-correct, proving the serialized writev fallback. */
