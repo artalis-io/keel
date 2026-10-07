@@ -22,6 +22,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   already does). `flush` may report a stream it closes while sending (`on_stream_reset`) from
   inside the call. Both rules are now stated in `<keel/http2_server.h>`.
 
+- **A protocol-relative redirect against a `+unix` base is refused (behavior change).**
+  `kl_url_resolve` copied the base scheme onto a `//host...` Location, so against an
+  `http+unix://` or `https+unix://` base the host became a socket path (`//name` resolved to
+  `http+unix://name`, a relative path), letting a redirect send the next request to a different
+  local socket. A protocol-relative Location against a `+unix` base now returns -1, which the
+  redirect client reports as a redirect failure, like any Location it cannot resolve.
 - **The chunked request decoder rejects bare LF and control bytes in extensions and trailers, and
   caps their length (behavior change).** It skipped a chunk extension up to the next CR and a trailer
   line up to its CRLF, accepting any byte on the way, with no length limit (those bytes reach no
@@ -513,6 +519,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   output queue, which posts it in pieces the backend accepts. The `send_max` contract is restated:
   a hard limit where the backend sets it as one (EFI), a hint on io_uring.
 
+- **The async client's socket provider is per client; the shared `KlEventCtx` is never modified
+  (behavior change).** `kl_http_client_start` and `kl_http_client_start_pooled` wrote the chosen
+  provider (`cfg->sockets`, or a completion backend's native one) into the caller's ctx, also when
+  the start failed after that point (DNS, allocation, connect, deadline). Every client and server
+  I/O call reads the provider at call time, so a handler that started a client with its own provider
+  on `kl_http_server_event_ctx(srv)` moved the server's I/O onto it, a client started earlier with
+  provider A did its later I/O (its close among it) through provider B, and the pool closed its
+  connections through whatever provider its ctx had last. The client now keeps the provider it
+  chose (the configured one, else the ctx's, else the backend's native one on a completion loop) and
+  uses it for all of its own socket calls; the ctx is only read. A pooled connection records the
+  provider it was made through: it is closed through it and reused only by a request on the same
+  provider (the public pool acquire/release/discard use the pool ctx's provider). Code that relied
+  on a client start setting `ctx.sockets` for other users of the ctx must set it itself.
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

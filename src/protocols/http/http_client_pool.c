@@ -9,6 +9,7 @@
 #include <keel/clock.h>
 #include <keel/http_client_pool.h>
 #include "http_client_pool_internal.h"
+#include "http_client_internal.h"   /* the provider-aware acquire/release/discard the clients use */
 #include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
@@ -17,7 +18,8 @@
 
 #include <string.h>
 
-/* Socket provider for pooled fds (NULL -> POSIX default close). */
+/* The provider of a connection handed in or asked for through the public acquire/release/discard,
+ * which carry none: the pool ctx's (NULL = the built-in default). The clients pass their own. */
 static inline const KlSocketProvider *cpool_sp(const KlHttpClientPool *pool) {
     return (pool && pool->ev_ctx) ? pool->ev_ctx->sockets : NULL;
 }
@@ -62,7 +64,7 @@ static void entry_close(KlHttpClientPoolEntry *e)
         e->tls = NULL;
     }
     if (kl_handle_valid(e->fd)) {
-        kl_sock_close(cpool_sp(e->pool), e->fd);
+        kl_sock_close(e->sockets, e->fd);   /* the provider the connection was made through */
         e->fd = KL_INVALID_SOCKET;
     }
 }
@@ -130,6 +132,7 @@ int kl_http_client_pool_init(KlHttpClientPool *pool, const KlHttpClientPoolConfi
         entries[i].proxy_host[0] = '\0';
         entries[i].proxy_port = 0;
         entries[i].pool = pool;
+        entries[i].sockets = NULL;
     }
 
     pool->entries = entries;
@@ -167,7 +170,8 @@ void kl_http_client_pool_free(KlHttpClientPool *pool)
 
 /* ── Acquire (test-on-borrow) ────────────────────────────────────── */
 
-static int pool_acquire(KlHttpClientPool *pool, const char *host, int port, int is_tls,
+static int pool_acquire(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                        const char *host, int port, int is_tls,
                         PoolTlsKey tk, const char *proxy_host, int proxy_port,
                         KlHttpClientPoolConn *conn)
 {
@@ -178,19 +182,21 @@ static int pool_acquire(KlHttpClientPool *pool, const char *host, int port, int 
         KlHttpClientPoolEntry *e = &pool->entries[i];
         if (!entry_matches(e, host, port, is_tls, tk, proxy_host, proxy_port))
             continue;
+        if (e->sockets != sp)
+            continue;                   /* made through another provider: its I/O is not ours */
 
         /* Test-on-borrow: peek for a peer close. Ensure the fd is non-blocking
          * first (it already is in production, the async client sets it) so the
          * MSG_PEEK returns EAGAIN on an idle connection instead of blocking. This
          * is the portable replacement for the old per-call MSG_DONTWAIT, which
          * Winsock lacks. */
-        (void)kl_sock_set_nonblocking(cpool_sp(pool), e->fd);
+        (void)kl_sock_set_nonblocking(e->sockets, e->fd);
         char peek;
-        kl_ssize_t r = kl_sock_recv_peek(cpool_sp(pool), e->fd, &peek, 1);
+        kl_ssize_t r = kl_sock_recv_peek(e->sockets, e->fd, &peek, 1);
         /* r==0 → peer closed; r<0 that is not would-block → real error; r>0 → the server sent
          * something unasked (a stray response, a 408 before closing), which the next request would
          * read as its own response: all stale. Classify via the seam (portable, no errno read). */
-        if (r >= 0 || kl_sock_io_status(cpool_sp(pool)) != KL_IO_WOULD_BLOCK) {
+        if (r >= 0 || kl_sock_io_status(e->sockets) != KL_IO_WOULD_BLOCK) {
             /* Stale connection: close and skip */
             if (pool->ev_ctx && e->timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, e->timer_id);
@@ -225,20 +231,31 @@ int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int po
                       int is_tls, const char *proxy_host, int proxy_port,
                       KlHttpClientPoolConn *conn)
 {
-    return pool_acquire(pool, host, port, is_tls, pool_tls_key(NULL), proxy_host, proxy_port, conn);
+    return pool_acquire(pool, cpool_sp(pool), host, port, is_tls, pool_tls_key(NULL), proxy_host,
+                        proxy_port, conn);
 }
 
 int kl_http_client_pool_acquire_tls(KlHttpClientPool *pool, const char *host, int port,
                                     const KlTlsConfig *tls, const char *proxy_host,
                                     int proxy_port, KlHttpClientPoolConn *conn)
 {
-    return pool_acquire(pool, host, port, tls != NULL, pool_tls_key(tls), proxy_host, proxy_port,
-                        conn);
+    return pool_acquire(pool, cpool_sp(pool), host, port, tls != NULL, pool_tls_key(tls), proxy_host,
+                        proxy_port, conn);
+}
+
+int kl_http_client_pool_acquire_sp(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                                   const char *host, int port, const KlTlsConfig *tls,
+                                   const char *proxy_host, int proxy_port,
+                                   KlHttpClientPoolConn *conn)
+{
+    return pool_acquire(pool, sp, host, port, tls != NULL, pool_tls_key(tls), proxy_host,
+                        proxy_port, conn);
 }
 
 /* ── Release ─────────────────────────────────────────────────────── */
 
-static int pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
+static int pool_release(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                        KlHttpClientPoolConn *conn,
                         const char *host, int port, int is_tls, PoolTlsKey tk,
                         const char *proxy_host, int proxy_port)
 {
@@ -248,13 +265,13 @@ static int pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
     size_t hlen = strlen(host);
     if (hlen >= KL_HTTP_CLIENT_HOSTNAME_MAX) {
         pool->last_error = KL_ERR_INVALID_ARG;
-        kl_http_client_pool_discard(pool, conn);
+        kl_http_client_pool_discard_sp(sp, conn);
         return -1;
     }
 
     if (proxy_host && strlen(proxy_host) >= KL_HTTP_CLIENT_HOSTNAME_MAX) {
         pool->last_error = KL_ERR_INVALID_ARG;
-        kl_http_client_pool_discard(pool, conn);
+        kl_http_client_pool_discard_sp(sp, conn);
         return -1;
     }
 
@@ -317,7 +334,7 @@ static int pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
 
     if (slot < 0) {
         /* Should not happen: pool is fully occupied with no evictable entry */
-        kl_http_client_pool_discard(pool, conn);
+        kl_http_client_pool_discard_sp(sp, conn);
         return -1;
     }
 
@@ -338,6 +355,7 @@ static int pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
     }
     e->fd = conn->fd;
     e->tls = conn->tls;
+    e->sockets = sp;
     e->idle_since_ms = kl_monotonic_ms();
     e->timer_id = -1;
 
@@ -363,22 +381,29 @@ int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *co
                       const char *host, int port, int is_tls,
                       const char *proxy_host, int proxy_port)
 {
-    return pool_release(pool, conn, host, port, is_tls, pool_tls_key(NULL), proxy_host, proxy_port);
+    return pool_release(pool, cpool_sp(pool), conn, host, port, is_tls, pool_tls_key(NULL),
+                        proxy_host, proxy_port);
 }
 
 int kl_http_client_pool_release_tls(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
                                     const char *host, int port, const KlTlsConfig *tls,
                                     const char *proxy_host, int proxy_port)
 {
-    return pool_release(pool, conn, host, port, tls != NULL, pool_tls_key(tls), proxy_host,
+    return pool_release(pool, cpool_sp(pool), conn, host, port, tls != NULL, pool_tls_key(tls),
+                        proxy_host, proxy_port);
+}
+
+int kl_http_client_pool_release_sp(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                                   KlHttpClientPoolConn *conn, const char *host, int port,
+                                   const KlTlsConfig *tls, const char *proxy_host, int proxy_port)
+{
+    return pool_release(pool, sp, conn, host, port, tls != NULL, pool_tls_key(tls), proxy_host,
                         proxy_port);
 }
 
 /* ── Discard ─────────────────────────────────────────────────────── */
 
-/* cppcheck-suppress constParameterPointer ; kept non-const for API symmetry
-   with the rest of the kl_http_client_pool_* family (which do mutate pool) */
-void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *conn)
+void kl_http_client_pool_discard_sp(const KlSocketProvider *sp, KlHttpClientPoolConn *conn)
 {
     if (!conn)
         return;
@@ -390,11 +415,18 @@ void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *c
         conn->tls = NULL;
     }
     if (kl_handle_valid(conn->fd)) {
-        kl_sock_close(cpool_sp(pool), conn->fd);
+        kl_sock_close(sp, conn->fd);
         conn->fd = KL_INVALID_SOCKET;
     }
     conn->reused = 0;
     conn->_entry = NULL;
+}
+
+/* cppcheck-suppress constParameterPointer ; kept non-const for API symmetry
+   with the rest of the kl_http_client_pool_* family (which do mutate pool) */
+void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *conn)
+{
+    kl_http_client_pool_discard_sp(cpool_sp(pool), conn);
 }
 
 /* ── Maintenance ─────────────────────────────────────────────────── */

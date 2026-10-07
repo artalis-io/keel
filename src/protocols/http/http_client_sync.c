@@ -932,8 +932,8 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
     KlHttpClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_http_client_pool_acquire_tls(pool, host_buf, parsed.port, tls_cfg,
-                                              NULL, 0, &pconn);
+    int acq = kl_http_client_pool_acquire_sp(pool, sockets, host_buf, parsed.port, tls_cfg,
+                                             NULL, 0, &pconn);
 
     KlSocketHandle fd;
     KlTls *tls = NULL;
@@ -997,14 +997,14 @@ int kl_http_client_request_pooled(KlHttpClientPool *pool,
 
 cleanup:
     if (ret != 0) {
-        kl_http_client_pool_discard(pool, &pconn);
+        kl_http_client_pool_discard_sp(sockets, &pconn);
         kl_http_client_response_free(resp);
     } else if (!reusable || kl_http_client_server_wants_close(resp)) {
         /* Not reusable: bytes followed the response, or it ended at end of stream. */
-        kl_http_client_pool_discard(pool, &pconn);
+        kl_http_client_pool_discard_sp(sockets, &pconn);
     } else {
-        kl_http_client_pool_release_tls(pool, &pconn, host_buf, parsed.port, tls_cfg,
-                                        NULL, 0);
+        kl_http_client_pool_release_sp(pool, sockets, &pconn, host_buf, parsed.port, tls_cfg,
+                                       NULL, 0);
     }
 
     return ret;
