@@ -605,7 +605,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         /* An ICMP report about an earlier send (connected socket): the recvmsg consumed it and
          * received nothing, so the op stays posted and waits for the next datagram (re-poll), as it
          * would on would-block. A cancelled op never gets here (pc_emit_abort completes it). */
-        if (n < 0 && kl_udp_is_icmp_report(errno))
+        if (n < 0 && kl_dgram_is_icmp_report(errno))
             return 0;
         ev->kind = KL_COMP_DGRAM_RECV;
         ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */

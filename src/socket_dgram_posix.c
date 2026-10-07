@@ -204,7 +204,7 @@ static kl_ssize_t pdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
     kl_ssize_t n;
     for (int skipped = 0;; skipped++) {
         do { n = recvmsg((int)fd, &msg, 0); } while (n < 0 && errno == EINTR);
-        if (n >= 0 || !kl_udp_is_icmp_report(errno))
+        if (n >= 0 || !kl_dgram_is_icmp_report(errno))
             break;
         /* An ICMP report about an earlier send (connected socket): this receive consumed it and
          * yielded nothing, so take the next datagram instead of failing. */
@@ -516,7 +516,7 @@ static int pdg_recv_batch(void *ctx, KlSocketHandle fd, void *rx_batch,
         }
         do { cnt = recvmmsg((int)fd, b->msgs, (unsigned)n, 0, NULL); }
         while (cnt < 0 && errno == EINTR);
-        if (cnt >= 0 || !kl_udp_is_icmp_report(errno))
+        if (cnt >= 0 || !kl_dgram_is_icmp_report(errno))
             break;
         /* An ICMP report about an earlier send (connected socket): consumed, nothing received, so
          * read again with fresh headers (as pdg_recv does). */

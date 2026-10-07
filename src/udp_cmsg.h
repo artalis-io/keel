@@ -14,7 +14,7 @@
 #ifndef KEEL_SRC_UDP_CMSG_H
 #define KEEL_SRC_UDP_CMSG_H
 
-#include <errno.h>           /* ECONNREFUSED / EHOSTUNREACH / ... (kl_udp_is_icmp_report) */
+#include <errno.h>           /* ECONNREFUSED / EHOSTUNREACH / ... (kl_dgram_is_icmp_report) */
 #include <sys/socket.h>      /* struct msghdr, struct sockaddr_storage, socklen_t */
 
 /* Control-message buffer size for a UDP recvmsg: generously sized for the RX cmsgs the
@@ -65,7 +65,7 @@ int kl_udp_send_family(int fd, const struct sockaddr *dest, const struct sockadd
  * nothing and the socket is fine: the caller takes the next datagram instead of failing. Any other
  * errno is a real receive error. Shared by the readiness recv and the POSIX completion backends,
  * the POSIX counterpart of kl_udp_win_is_icmp_report. */
-static inline int kl_udp_is_icmp_report(int err) {
+static inline int kl_dgram_is_icmp_report(int err) {
     switch (err) {
     case ECONNREFUSED:
     case EHOSTUNREACH:

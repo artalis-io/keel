@@ -1030,7 +1030,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
          * re-issue the same op on the same buffer and wait for the next datagram. Each such
          * completion needs a fresh report, so this cannot spin. A cancelled op completes as usual;
          * so does one that finds no SQE (a failed receive, as before). */
-        if (res < 0 && !op->aborted && kl_udp_is_icmp_report(-res)) {
+        if (res < 0 && !op->aborted && kl_dgram_is_icmp_report(-res)) {
             struct io_uring_sqe *rsqe = iou_sqe(st);
             if (rsqe) {
                 op->msgh.msg_namelen = sizeof(op->peer);
