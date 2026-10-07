@@ -1075,8 +1075,10 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
 }
 
 int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st) {
+    /* Paused or not: the pause takes hold at the record boundary (http_request.h), as in the body
+     * read loop, which drains while pending() > 0 and then stops. */
     return st == KL_HTTP_CONN_READING_BODY && c->state == KL_HTTP_CONN_READING_BODY && c->tls &&
-           !c->stream.read_paused && c->tls->pending(c->tls) > 0;
+           c->tls->pending(c->tls) > 0;
 }
 
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {

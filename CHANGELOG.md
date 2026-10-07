@@ -478,8 +478,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   read takes at most the free read buffer, so an engine (OpenSSL, mbedTLS) keeps the rest of a
   record that carried headers and body decrypted (`pending() > 0`), which the socket never reports.
   After the dispatch moved to the body phase, or a resumed async handler awaited the body, nothing
-  read it and the request ended in 408. Both now read on while the engine holds input and the body
-  read is not paused.
+  read it and the request ended in 408. Both now read on while the engine holds input, also when
+  the body read is paused (by `on_data` during the leftover feed, or before an async suspend): as
+  documented, a pause takes hold at the record boundary, so the rest of the decrypted record is
+  delivered and the read stops there.
 - **A paused body read stays paused after a nested `kl_async_complete` inside `on_resume`
   (kqueue).** The outer complete registered the paused read with an add for no interest, an empty
   change list on kqueue, so the READ filter the nested complete had enabled stayed on and the body
