@@ -367,14 +367,31 @@ static EFI_STATUS EFIAPI m_tcp_Accept(EFI_TCP4_PROTOCOL *This, VOID *t) {
     if (g_accept_tok_count < MAX_ACCEPT_TOKS) g_accept_toks[g_accept_tok_count++] = lt;
     return EFI_SUCCESS;
 }
+/* The last Transmit token left pending (TOK_HANG), so a test can complete it later
+ * (mock_complete_hung_tcp_tx), and the bytes every accepted Transmit carried. */
+static EFI_TCP4_IO_TOKEN *g_tcp_hung_tx;
+static size_t             g_tcp_tx_bytes;
 static EFI_STATUS EFIAPI m_tcp_Transmit(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->CompletionToken.Event;
     tok_submit(&t->CompletionToken, e);
+    if (t->Packet.TxData) g_tcp_tx_bytes += t->Packet.TxData->DataLength;
     if (g_tcp_transmit_mode == TOK_COMPLETE_OK) {
         t->CompletionToken.Status = EFI_SUCCESS; e->signaled = 1; tok_terminal(&t->CompletionToken);
+    } else {
+        g_tcp_hung_tx = t;
     }
     return EFI_SUCCESS;
+}
+/* The firmware finishes the pending Transmit: the peer opened its window again. */
+static int mock_complete_hung_tcp_tx(void) {
+    EFI_TCP4_IO_TOKEN *t = g_tcp_hung_tx;
+    if (!t) return 0;
+    g_tcp_hung_tx = NULL;
+    t->CompletionToken.Status = EFI_SUCCESS;
+    ((MockEvent *)t->CompletionToken.Event)->signaled = 1;
+    tok_terminal(&t->CompletionToken);
+    return 1;
 }
 static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKEN *t) {
     (void)This; FW();
@@ -598,6 +615,7 @@ static void reset_counters(void) {
     g_udp_configure_status = EFI_SUCCESS; g_udp_configure_calls = 0;
     g_udp_transmit_ret = EFI_SUCCESS; g_udp_transmit_status = EFI_SUCCESS;
     g_udp_tx_calls = 0; g_udp_tx_len = 0; g_udp_hung_tok = NULL;
+    g_tcp_hung_tx = NULL; g_tcp_tx_bytes = 0;
     tok_reset();
     accept_reset();
     g_event_count = 0;
@@ -1445,6 +1463,166 @@ static void t_io_cancel_stale_generation(void) {
     CHECK(dn == 0, "nothing more on a later drain");
 
     p->ops->close(p->context, fd2);
+    kl_uefi_event_provider_reset();
+}
+
+/* A server send whose Transmit the firmware holds pending (a peer that stopped reading: zero
+ * window, the stack queues the token) must not stall the loop. The drain returns at once with the
+ * send still pending, another connection's recv completes in the same drain, a synchronous send on
+ * the busy connection is refused as would-block (the token still references the slot's tx buffer),
+ * and once the firmware completes the Transmit a later drain finishes the whole send. */
+static void t_io_send_pending_nonblocking(void) {
+    T_CASE("server io: a pending Transmit never blocks the drain; the send completes once signaled");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_receive_mode = TOK_COMPLETE_OK;
+    g_tcp_transmit_mode = TOK_HANG; g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+
+    KlSocketHandle fa = p->ops->socket(p->context, 2, 1, 0);
+    KlSocketHandle fb = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(fa) && kl_handle_valid(fb), "two sockets claimed");
+    kl_uefi_socket_configure(fa, &a);
+    kl_uefi_socket_configure(fb, &a);
+    CHECK(kl_uefi_socket_connect_now(fa) == 0 && kl_uefi_socket_connect_now(fb) == 0, "both connected");
+
+    static unsigned char payload[10000];   /* more than one Transmit fragment */
+    for (size_t i = 0; i < sizeof payload; i++) payload[i] = (unsigned char)(i * 7u);
+    KlStream sa; memset(&sa, 0, sizeof sa); sa.fd = fa;
+    KlStream sb; memset(&sb, 0, sizeof sb); sb.fd = fb;
+    KlIoVec iov = { payload, sizeof payload };
+    char rbuf[64];
+    CHECK(COMP(ep)->post_send(&sa, &iov, 1, sizeof payload) == 0, "post_send queued on conn A");
+    CHECK(COMP(ep)->post_recv(&sb, rbuf, sizeof rbuf) == 0, "post_recv queued on conn B");
+
+    KlCompletionEvent evs[8];
+    int failed = 0;
+    g_tcp_poll_calls = 0;
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(g_tcp_poll_calls < 100, "the drain polled the pending Transmit instead of pumping it");
+    CHECK(g_tcp_cancel_calls == 0, "the pending Transmit was not cancelled");
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &sa, NULL) == 0, "no WRITE for A while its Transmit is pending");
+    CHECK(io_events(evs, dn, KL_COMP_READ, &sb, &failed) == 1 && failed == 0,
+          "conn B's recv completes in the same drain");
+
+    kl_ssize_t n = p->ops->send(p->context, fa, "x", 1);
+    CHECK(n == -1 && p->ops->io_status(p->context) == KL_IO_WOULD_BLOCK,
+          "a synchronous send on A is would-block while its Transmit is pending");
+
+    g_tcp_poll_calls = 0;
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(g_tcp_poll_calls < 100, "a second drain does not pump either");
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &sa, NULL) == 0, "still no WRITE for A");
+
+    CHECK(mock_complete_hung_tcp_tx() == 1, "the firmware completes the pending Transmit");
+    g_tcp_transmit_mode = TOK_COMPLETE_OK;   /* the rest goes out at once */
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    int wr = 0;
+    size_t wbytes = 0;
+    for (int i = 0; i < dn; i++)
+        if (evs[i].kind == KL_COMP_WRITE && evs[i].target == &sa) {
+            wr++;
+            wbytes = evs[i].ok ? evs[i].bytes : 0;
+        }
+    CHECK(wr == 1 && wbytes == sizeof payload, "A's send completes once, with every byte");
+    CHECK(g_tcp_tx_bytes == sizeof payload, "the firmware was handed each byte exactly once");
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &sa, NULL) == 0, "no second WRITE");
+
+    p->ops->close(p->context, fa);
+    p->ops->close(p->context, fb);
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    kl_uefi_event_provider_reset();
+}
+
+/* A connection closed while its server send's Transmit is still pending: the cancel yields one
+ * failed WRITE, and close() cancels and drains the Transmit token before the slot is released. */
+static void t_io_send_pending_cancel_close(void) {
+    T_CASE("server io: cancel + close with a pending Transmit drains the token");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending");
+    CHECK(outstanding_count() == 1, "its Transmit token is outstanding");
+
+    COMP(ep)->cancel(&ev, fd);
+    int failed = 0;
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, &failed) == 1 && failed == 1,
+          "the cancel yields exactly one failed WRITE");
+    int before = g_destroy_child_calls;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_cancel_all_calls >= 1, "close cancelled the pending Transmit");
+    CHECK(outstanding_count() == 0, "the Transmit token was drained by close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* A connection marked dead by a quarantine (a token its cancel could not retire) keeps its live
+ * generation. Its posted server ops are still this connection's: each must complete, as a failed
+ * completion, whether the drain finds it on its own or after a cancel. Dropping them as stale (or
+ * freeing them on cancel) leaves the server waiting forever for its last op. Leaks the quarantined
+ * slot by design. */
+static void t_io_dead_conn_ops_complete(void) {
+    T_CASE("server io: ops of a quarantined (dead, live-generation) conn complete as failures");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_receive_mode = TOK_HANG;
+    g_tcp_transmit_mode = TOK_HANG; g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+    unsigned long long gen = kl_uefi_conn_generation_h(fd);
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char rbuf[64];
+    CHECK(COMP(ep)->post_recv(&st, rbuf, sizeof rbuf) == 0, "post_recv queued");
+
+    g_cancel_signals = 0;   /* the Transmit hangs and its cancel cannot retire it */
+    kl_ssize_t n = p->ops->send(p->context, fd, "data", 4);
+    g_cancel_signals = 1;
+    CHECK(n == -1, "the synchronous send failed and quarantined the conn");
+    CHECK(!kl_uefi_conn_valid_h(fd, gen), "the conn is dead");
+
+    KlCompletionEvent evs[8];
+    int failed = 0;
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, &failed) == 1 && failed == 1,
+          "the drain completes the dead conn's recv as one failed READ");
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, NULL) == 0, "no second READ");
+
+    CHECK(COMP(ep)->post_recv(&st, rbuf, sizeof rbuf) == 0, "another recv posted on the dead conn");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_READ, &st, &failed) == 1 && failed == 1,
+          "a cancel on the dead conn still yields its one failed READ");
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(dn == 0, "nothing more on a later drain");
+
+    p->ops->close(p->context, fd);   /* a no-op on the quarantined conn (its slot stays leaked) */
     kl_uefi_event_provider_reset();
 }
 
@@ -2637,7 +2815,10 @@ int main(void) {
     t_io_cancel_recv_completes();
     t_io_cancel_send_completes();
     t_io_cancel_stale_generation();
-    t_accept_cancel_fail_quarantine();   /* last: intentional permanent slot leak */
+    t_io_send_pending_nonblocking();
+    t_io_send_pending_cancel_close();
+    t_accept_cancel_fail_quarantine();   /* intentional permanent slot leak */
+    t_io_dead_conn_ops_complete();       /* intentional permanent slot leak */
 
     printf(g_fail ? "\nmock-EFI harness: FAIL\n" : "\nmock-EFI harness: PASS\n");
     return g_fail;

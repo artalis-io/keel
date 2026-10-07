@@ -34,6 +34,8 @@ static size_t g_cli_req_len;
 static size_t g_cli_req_sent;       /* bytes of the request handed to tcp_write so far */
 static struct tcp_pcb *g_cli_pcb;   /* the live accumulating-client pcb (NULL = none live) */
 static int g_cli_closed;            /* the current roundtrip's connection fully closed */
+static int g_cli_shut_on_data;      /* half-close (shut TX) once the first response bytes arrive */
+static int g_cli_shut_done;         /* ...and that shutdown was issued */
 
 /* Send the request in tcp_sndbuf-sized chunks (a large POST body exceeds a single tcp_write's
  * capacity / the client's TCP_SND_BUF). Resumed from tcp_sent as the window opens. */
@@ -104,6 +106,10 @@ static err_t lwr_cli_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     if (g_cli_buf) g_cli_buf[g_cli_len] = '\0';
     tcp_recved(tpcb, p->tot_len);
     pbuf_free(p);
+    /* Half-close mode: the response has started, so the server's send is in flight. Send our FIN
+     * (no more requests) and keep reading the rest of the response. */
+    if (g_cli_shut_on_data && !g_cli_shut_done && tcp_shutdown(tpcb, 0, 1) == ERR_OK)
+        g_cli_shut_done = 1;
     return ERR_OK;
 }
 
@@ -126,6 +132,8 @@ int kl_lwr_client_start_cap(const uint8_t ip4[4], uint16_t port,
     g_cli_cap = cap ? cap : 1;
     g_cli_len = 0;
     g_cli_closed = 0;
+    g_cli_shut_on_data = 0;
+    g_cli_shut_done = 0;
     g_cli_buf[0] = '\0';
     g_cli_req = req;
     g_cli_req_len = req_len;
@@ -148,6 +156,15 @@ int kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
                         const void *req, size_t req_len) {
     return kl_lwr_client_start_cap(ip4, port, req, req_len, 1024);
 }
+
+int kl_lwr_client_start_halfclose(const uint8_t ip4[4], uint16_t port,
+                                  const void *req, size_t req_len, size_t cap) {
+    if (kl_lwr_client_start_cap(ip4, port, req, req_len, cap) != 0) return -1;
+    g_cli_shut_on_data = 1;   /* the connect completes on a later tick: no callback has run yet */
+    return 0;
+}
+
+int kl_lwr_client_halfclosed(void) { return g_cli_shut_done; }
 
 size_t kl_lwr_client_response(char *dst, size_t cap) {
     if (cap == 0) return 0;
