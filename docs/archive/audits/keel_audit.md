@@ -5,6 +5,116 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Twentieth pass: final audit after the audit-19 fixes (2026-10-07)
+
+**Revision:** `main` `cd17c9c` (after #464 to #474). Read-only.
+**Scope:** the whole `src/` tree, `include/keel/`, the integrations and the build, in five parallel
+reviews: the HTTP/1 server; the HTTP/1 client; HTTP/2 and WebSocket with the nghttp2 adapter; the
+event and completion substrate; DNS, PROXY, the integrations and the build. Each review first
+re-read the fix diffs #464 to #474 adversarially, then swept its area. The axis review ran alongside
+(eighteenth pass in `keel_axis_audit.md`). Every High and every Medium marked **C** was re-checked
+against the code by hand. **C** means the path was traced end to end; **P** means plausible and
+needing a test. Items recorded earlier as deliberately unfixed, and the nineteenth pass's Lows, were
+not re-reported.
+
+**Fixes since the nineteenth pass:** N1 to N8 and M1 to M15 hold where they were traced: the TLS
+WebSocket admission bound, `dispatch_depth` and the in-frame complete and cancel, the lwIP raw
+per-op terminals and slot handles, the EFI cancel completions, `SIO_UDP_CONNRESET`, the timer
+watermark, the io_uring send cap and -EBUSY reap, the drain push and the WebSocket WRITE arm, the
+kept body bytes, strict chunk metadata, v4-mapped PROXY trust, the split gzip header and the
+link-local nameserver skip. One of them introduced a Medium: M1, in the #473 kept-body change.
+
+**Result:** no Critical. **1 High, 4 Medium**, and a set of Lows. The High predates the audit-19
+fixes and sits in a path no test drives with a real HTTP/2 session.
+
+### High
+
+| # | Area | Location | Defect | Failure scenario | Smallest fix |
+|---|---|---|---|---|---|
+| H1 | HTTP/2 server (C in Keel; relies on nghttp2 closing a half-closed stream inside `session_send`) | `http2_server.c` `kl_http2_server_upgrade_from_h1` (~789), `h2_cb_on_stream_end` (528-548), `h2_cb_on_stream_reset` (552-564), `h2_stream_destroy` (44-64); `http2_nghttp2_server.c` `ng_on_stream_close_cb`, `ng_server_flush` | The h2c Upgrade answers stream 1 outside `session->recv`, so `in_recv == 0` and the flush really sends. Stream 1 is half-closed (remote) after `nghttp2_session_upgrade2`; END_STREAM closes it inside the send, and `on_stream_close` destroys it through `h2_cb_on_stream_reset`. `h2_cb_on_stream_end` then destroys the same pointer again, and `num_streams` becomes -1. | Unauthenticated, any plaintext server with h2 enabled: `GET /` with `Upgrade: h2c` and an empty `HTTP2-Settings`, then the preface and HEADERS for stream 3. `h2_stream_create` passes `-1 >= max` and memsets `streams[-1]`, several KiB before the heap block (heap corruption). The stream is never found again and the connection is never idle. | Destroy the stream before the flush at every submit-then-destroy site, and have `h2_stream_destroy` refuse a pointer outside `[0, num_streams)`. Add an nghttp2-backed test: upgrade, then a second request. |
+
+### Medium
+
+| # | Area | Location | Defect and scenario | Fix |
+|---|---|---|---|---|
+| M1 | Server, completion (C; introduced by #473) | `completion_http_server.c` `kl_http_comp_post_read` (~1295), `comp_post_recv_buf`; `http_connection.c` suspend at dispatch (~831) and the SUSPENDED return after the leftover feed (~944) | A streaming-async handler that suspends at dispatch with no body bytes read along with the headers (`leftover_len == 0`, typical with `Expect: 100-continue`) leaves `read_len` at the head length. A resume that awaits and un-pauses the body posts the plaintext receive at `read_buf + read_len`; `comp_start_body_read` returns on `comp_recv_posted` before its `read_len = 0`, and the body core is fed the request line and headers as body. Header values (auth tokens, cookies a front end injected) reach the body reader; chunked bodies fail with 413. IOCP, io_uring and pollcomp, plaintext only. | Reset `read_len` to 0 in `kl_http_comp_post_read` before posting (kept bytes are already guarded by `body_kept`), or in the dispatch whenever it suspends with nothing kept. Test: the #473 un-pause test with the whole body sent after the head, for Content-Length and chunked. |
+| M2 | Substrate, datagram (C) | `datagram_send.c` `kl_dgram_send` fast path (326), `send_pump` (232-235), `kl_dgram_send_on_complete` (484-485) | Any failure of an ordinary send other than would-block latches the sticky `s->err`, and every later send returns `KL_DATAGRAM_ERROR`. The nineteenth pass's M1 covered only receive. ENETUNREACH, EHOSTUNREACH, ECONNREFUSED (a connected peer's ICMP report, which Linux and the BSDs return from the next send), ENOBUFS and EPERM concern one datagram. One query sent while the host has no route (laptop offline, container network not up) makes the built-in DNS resolver, the async client's default, fail every later query with `DNS_TX_FAILED`, with no nameserver failover. | Classify per-datagram errors (the ICMP-report errnos plus ENOBUFS, EPERM, EACCES, EMSGSIZE, EHOSTDOWN and the Winsock equivalents) as a recoverable drop through `send_drop_head`/`on_drop`, or as a per-call error that is not latched on the fast path; keep `err` sticky for EBADF and ENOTSOCK. Completion backends carry the errno so `on_complete` can make the same split. |
+| M3 | Server, readiness TLS (P) | `http_connection.c` `HEADERS_OK` returning `conn_dispatch_request` (1160-1165), the pending drain only on INCOMPLETE (~1153); `async.c` READING_BODY arm (179-185) | The header read is capped at the free buffer (8 KiB). OpenSSL and mbedTLS hand back part of a record and keep the rest (`pending() > 0`). After dispatch returns READING_BODY nothing reads that remainder, and the socket never signals it. A client that sends 8.2 to 16 KiB of headers and body in one TLS write (Python `http.client` does) waits for the body timeout and gets a 408. The existing test uses a mock engine that leaves the bytes in the socket. | When the dispatch (or the async resume) lands in READING_BODY on TLS with `pending() > 0`, continue at `read_more_body`. Test with real OpenSSL on readiness and one 12 KiB write. |
+| M4 | EFI (P) | `integrations/platform/uefi/socket_efi_tcp4.c` `efi_sock_send` (640-686), `pump_or_cancel`/`pump_until` (`KL_EFI_PUMP_SPINS`, 60000 x 1 ms); `event_efi.c` `el_drain` SEND (662-670) | The drain sends synchronously, and `efi_sock_send` pumps the Transmit token for up to about 60 s. A timeout ends in EIO and quarantine, never would-block, so the drain's would-block arm is unreachable on this path. A client that pipelines and stops reading fills the send buffer and the window; if EDK2's TcpDxe queues the Transmit token, every other connection stalls for 60 s per attempt, and reconnecting repeats it. | Submit Transmit and return EAGAIN while the token is pending, polling it with CheckEvent on later drains (as `kl_uefi_socket_recv_ready` does for Receive). At minimum, a short pump bound for server sends. |
+
+### Low (grouped)
+
+- **Server:** kqueue keeps a READ filter enabled once after a nested complete inside `on_resume`.
+  `async_rearm` with mask 0 is an empty `kl_event_add` that succeeds (`async.c:64-67`); use
+  `kl_event_mod`.
+- **Client:**
+  - A successful async start writes `cfg->sockets` permanently into the shared `KlEventCtx`. A start
+    that fails after selection (DNS failure, allocation, connect) also leaves it switched. The server
+    and other clients then run their I/O through that provider. Fix: keep the provider on the client
+    and never write `ev_ctx->sockets`.
+  - A protocol-relative `Location: //name` against an `http+unix://` base becomes a relative socket
+    path (`url.c:282-296`); reject it.
+- **HTTP/2 and WebSocket:**
+  - The h2 client's recv-failure path still fires `on_error` after a close from `on_resp`
+    (`http2_client.c:515-517`); add the `H2C_CLOSED` guard.
+  - A completion TLS WebSocket without the drain retries `conn_write` 256 times before failing a
+    frame over the 1 MiB bound. This is intended since N2 and documented; checking once in
+    `ws_send_frame` would fail fast.
+- **Substrate:**
+  - IOCP fails a datagram receive for good after 16 immediate ICMP reports in a row, on a socket
+    adopted without configure; readiness returns would-block there instead.
+  - io_uring -EAGAIN from submit with an empty CQ ring returns at once, and the loop spins while the
+    kernel is short of memory. Wait for one CQE on -EAGAIN when nothing was reaped.
+- **Integrations:**
+  - The EFI N7 fix tells this connection's ops from an earlier one's with `kl_uefi_conn_valid_h`. That
+    is also false for a live-generation connection marked `dead` by a failed cancel-drain, so the
+    other op is freed without a completion and the connection leaks. Compare the generation only.
+  - lwIP raw fails an in-flight response on a peer FIN (`lwr_srv_recv`, `p == NULL`), so a client that
+    half-closes after its request gets a truncated response. Fail the send only on an error or a reset.
+
+### Verified clean
+
+The nineteenth pass's fixes as listed above, including:
+- `dispatch_depth` bookkeeping on every frame, and the nested-complete add/mod fallback on epoll,
+  poll and WSAPoll.
+- The kept-body accounting.
+- The chunked decoder caps: inclusive, kept across split feeds, obs-text allowed, bare LF and control
+  bytes rejected.
+- The TLS WebSocket bound on data, control, Close and pong frames and on drain flushes.
+- The WebSocket drain push ordering and the empty-to-pending WRITE arm.
+- The h2 client's close-during-send guard.
+- The timer watermark: int64 ids, ties broken by id, `kl_timer_next_timeout` 0 for a due new timer.
+- The io_uring send cap on every send SQE, and the zero-result rule.
+- The POSIX and Windows ICMP receive skips: bounded, no busy loop.
+- The datagram seam check and the per-segment GSO fallback.
+- v4-mapped PROXY trust: narrows, never widens.
+- The gzip optional-header state machine.
+- The link-local nameserver skip.
+- lwIP raw per-op terminals and slot generations.
+- EFI cancel completions, with no double completion.
+
+Whole-area sweeps:
+- **Client:** lifecycle, Happy Eyeballs, redirects and credential stripping, proxy CONNECT, the
+  response parser caps, pool keying and reuse, decompression caps, `resolver_cache.c`.
+- **WebSocket:** framing, masking, UTF-8, fragmentation and close.
+- **HTTP/2:** stream limits, header caps and adapter records.
+- **Substrate:** completion core, the IOCP, pollcomp and io_uring op lifetimes, pipe streams, thread
+  pool, wakeup.
+- **DNS, PROXY and integrations:** DNS parsing and spoof checks, TCP framing, PROXY v1/v2 bounds, TLS
+  verification defaults, miniz caps, production build flags.
+
+The mechanical scan found no `strcpy`, `sprintf`, `gets` or `atoi` in core: the one `strcpy`
+definition is the UEFI freestanding libc shim. There is no direct `malloc` or `free` outside the
+default allocator and the thread trampolines.
+
+**Local checks (Windows host, MinGW UCRT64 GCC):** the structural gates pass (check-no-milestones, check-no-em-dash, check-old-layout, check-test-layout, check-protocol-home, check-substrate-purity, check-protocol-no-integration, check-integration-seam, check-sockaddr-neutral, check-cloexec, check-no-dgram-life, check-pipe-seam, check-readiness-identity, check-no-kludp, check-no-httplegacy, check-msvc-parity, check-doc-refs, wx-guard, check-allocator-boundaries, check-backend-isolation, check-no-fsnode-in-protocols), and `test-win` (WSAPoll) and `test-win-iocp` are green. No POSIX, io_uring, sanitizer, cppcheck or scan-build run is claimed for this pass; those are CI lanes.
+
+No source was changed by this pass. Suggested fix order:
+1. H1.
+2. M1 (a regression in a fix) and M2.
+3. M3 and M4, which both need a real engine or firmware model to test.
+4. The Lows.
+
 ## Nineteenth pass: final comprehensive audit after the re-audit loop (2026-10-06)
 
 **Revision:** `main` `03cef23` (after #459 to #462). Read-only.
