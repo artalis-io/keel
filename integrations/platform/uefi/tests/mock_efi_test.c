@@ -2252,6 +2252,8 @@ static void t_dgram_send_unreachable_is_dropped(void) {
           "Tx token EFI_ICMP_ERROR → dropped=1");
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NETWORK_UNREACHABLE, &ok) == 1 && ok == 0,
           "Transmit CALL refused EFI_NETWORK_UNREACHABLE (post_failed) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFIERR(102), EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token spec 102 (EFI_PROTOCOL_UNREACHABLE) → dropped=1");
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NOT_FOUND, &ok) == 1 && ok == 0,
           "Transmit CALL refused EFI_NOT_FOUND (the EDK2 no-route result) → dropped=1");
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_BAD_BUFFER_SIZE, &ok) == 1 && ok == 0,
