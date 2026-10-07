@@ -346,6 +346,20 @@ UTEST(url, resolve_absolute_path_against_base_without_path) {
     ASSERT_STREQ(out, "http://example.com/login");
 }
 
+/* A protocol-relative Location names a network host. Against a "+unix" base the copied scheme
+ * would turn that host into a socket path ("//name" -> "http+unix://name", a relative path), so it
+ * is refused rather than reinterpreted. A plain base still resolves it. */
+UTEST(url, resolve_protocol_relative_against_unix_base_is_refused) {
+    char out[KL_URL_MAX];
+    ASSERT_EQ(kl_url_resolve("http+unix://%2Ftmp%2Fapp.sock/a", "//name/x", out, sizeof out), -1);
+    ASSERT_EQ(kl_url_resolve("https+unix://%2Ftmp%2Fapp.sock/a", "//name", out, sizeof out), -1);
+    ASSERT_EQ(kl_url_resolve("HTTP+UNIX://app.sock/a", "//name", out, sizeof out), -1);
+    ASSERT_EQ(kl_url_resolve("http://example.com/a", "//name/x", out, sizeof out), 0);
+    ASSERT_STREQ(out, "http://name/x");
+    ASSERT_EQ(kl_url_resolve("https://example.com/a", "//name", out, sizeof out), 0);
+    ASSERT_STREQ(out, "https://name");
+}
+
 /* The closing bracket of an IPv6 literal is looked for inside the authority only, and only an
  * address (hex digits, ':', '.', and a zone after '%') may sit between the brackets. */
 UTEST(url, ipv6_brackets_stay_inside_the_authority) {
