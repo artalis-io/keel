@@ -1879,6 +1879,7 @@ cppcheck:
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
 	     src/protocols/http/http_server.c src/protocols/http/async.c src/protocols/http/http_server_core.c src/protocols/http/completion_http_server.c \
+	     src/protocols/websocket/http_server_ws.c \
 	  && echo "readiness-identity: OK, all connection registrations use &conn->stream"
 
 # Exhaustiveness of KlHttpConnState dispatch. The compiler does the real work: -Wall enables

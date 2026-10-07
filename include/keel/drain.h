@@ -90,8 +90,11 @@ void kl_drain_on_drain(KlDrain *d, KlDrainCb cb, void *ctx);
 /**
  * @brief Write data through the drain.
  *
- * If buffer is non-empty, appends (preserves ordering). Otherwise writes
- * directly; buffers only the unaccepted remainder on partial/EAGAIN.
+ * If buffer is non-empty, first tries to write the buffered bytes (as a flush
+ * would, until would-block), then appends behind whatever is still pending
+ * (preserves ordering). Otherwise writes directly; buffers only the unaccepted
+ * remainder on partial/EAGAIN. Never fires on_drain (or any other callback),
+ * even when the buffered bytes go out here: the caller is the producer.
  *
  * @param d    Drain handle.
  * @param data Data to write.
