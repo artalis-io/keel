@@ -879,6 +879,21 @@ UTEST(dgram_batch, send_errno_classification) {
 #endif
 }
 
+/* Keel's OWN refusal inside the provider send (the TOS cmsg family cannot be determined because
+ * getsockname fails on a dead handle) is not a kernel verdict about one datagram: it must not
+ * classify as per-datagram, or every such send would be silently dropped forever. */
+UTEST(dgram_batch, provider_own_refusal_is_not_per_datagram) {
+    const KlDatagramOps *ops = kl_sockdef_dgram();
+    ASSERT_TRUE(ops != NULL && ops->send != NULL);
+    KlSocketHandle fd = prep_fd(NULL);
+    ASSERT_TRUE(kl_handle_valid(fd));
+    kl_test_closesock((int)fd);                       /* dead handle: getsockname fails */
+    errno = 0;
+    kl_ssize_t n = ops->send(NULL, fd, "x", 1, NULL, NULL, 0);   /* tos 0, no dest: family from getsockname */
+    ASSERT_EQ((kl_ssize_t)-1, n);
+    ASSERT_EQ(0, kl_sockdef_dgram_send_dropped());
+}
+
 /* A QUEUED datagram (it would-blocked first) that then fails with a per-datagram error on the writable
  * edge is dropped and reported (kl_datagram_dropped, last_error); the send side keeps working. */
 UTEST(dgram_batch, queued_send_unreachable_is_dropped_not_sticky) {

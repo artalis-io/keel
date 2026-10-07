@@ -2205,6 +2205,9 @@ static void t_dgram_deferred_post_failure_releases(void) {
 #ifndef EFI_PORT_UNREACHABLE
 #define EFI_PORT_UNREACHABLE    EFIERR(103)
 #endif
+#ifndef EFI_BAD_BUFFER_SIZE
+#define EFI_BAD_BUFFER_SIZE     EFIERR(4)
+#endif
 
 /* A Transmit that ends with an unreachable / ICMP status (or whose Transmit CALL is refused with one)
  * failed for that datagram only: the send completion is marked dropped. Any other failure status
@@ -2249,8 +2252,29 @@ static void t_dgram_send_unreachable_is_dropped(void) {
           "Tx token EFI_ICMP_ERROR → dropped=1");
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NETWORK_UNREACHABLE, &ok) == 1 && ok == 0,
           "Transmit CALL refused EFI_NETWORK_UNREACHABLE (post_failed) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NOT_FOUND, &ok) == 1 && ok == 0,
+          "Transmit CALL refused EFI_NOT_FOUND (the EDK2 no-route result) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_BAD_BUFFER_SIZE, &ok) == 1 && ok == 0,
+          "Transmit CALL refused EFI_BAD_BUFFER_SIZE (larger than the path takes) → dropped=1");
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_INVALID_PARAMETER, EFI_SUCCESS, &ok) == 0 && ok == 0,
           "Tx token EFI_INVALID_PARAMETER → dropped=0 (not per-datagram)");
+    {   /* an IPv6 peer on the IPv4-only EFI_UDP4 provider: a peer this socket cannot use, for this
+         * datagram only (the hosted providers report EAFNOSUPPORT, per-datagram) */
+        KlSockAddr d6;
+        CHECK(kl_sockaddr_parse(&d6, "::1", 53) == 0, "parse an IPv6 peer");
+        int tx_before = g_udp_tx_calls, dropped = -1;
+        CHECK(mock_post_dgram_send(ep, &dg, "AAAA", 4, &d6) == 0, "IPv6-peer send accepted (queued)");
+        KlCompletionEvent evs[8];
+        for (int k = 0; k < 3 && dropped < 0; k++) {
+            int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+            for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) {
+                dropped = evs[i].dropped;
+                kl_comp_life_release(evs[i].life);
+            }
+        }
+        CHECK(dropped == 1, "IPv6 peer on EFI_UDP4 → dropped=1 (not the sticky send error)");
+        CHECK(g_udp_tx_calls == tx_before, "no Transmit for the IPv6 peer");
+    }
     CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_SUCCESS, &ok) == 0 && ok == 1,
           "a successful send → ok=1, dropped=0");
     kl_comp_life_mark_dead(life); kl_comp_life_release(life);
