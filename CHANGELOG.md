@@ -528,10 +528,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   provider A did its later I/O (its close among it) through provider B, and the pool closed its
   connections through whatever provider its ctx had last. The client now keeps the provider it
   chose (the configured one, else the ctx's, else the backend's native one on a completion loop) and
-  uses it for all of its own socket calls; the ctx is only read. A pooled connection records the
-  provider it was made through: it is closed through it and reused only by a request on the same
-  provider (the public pool acquire/release/discard use the pool ctx's provider). Code that relied
-  on a client start setting `ctx.sockets` for other users of the ctx must set it itself.
+  uses it for all of its own socket calls, including those of the built-in DNS resolver it creates
+  when none is configured (its UDP socket and TCP fallback); the ctx is only read. A pooled
+  connection records the provider it was made through: it is closed through it and reused only by
+  a request on the same provider (the public pool acquire/release/discard use the pool ctx's
+  provider). Code that relied
+  on a client start setting `ctx.sockets` for other users of the ctx must set it itself. A
+  caller-owned provider must outlive every pooled connection made through it.
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

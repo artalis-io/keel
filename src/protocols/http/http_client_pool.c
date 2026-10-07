@@ -122,8 +122,8 @@ int kl_http_client_pool_init(KlHttpClientPool *pool, const KlHttpClientPoolConfi
     }
 
     /* Mark all slots free. The pool back-pointer is set here (not just on
-     * insert) so entry_close -> cpool_sp(e->pool) is always valid, even for a
-     * slot that never held a connection. */
+     * insert) so every slot's idle-timer callback can reach the pool; a slot's
+     * provider is recorded when a connection is released into it. */
     for (int i = 0; i < cap; i++) {
         entries[i].fd = KL_INVALID_SOCKET;
         entries[i].tls = NULL;

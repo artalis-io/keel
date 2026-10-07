@@ -399,7 +399,13 @@ static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlCompLi
  * 0 (immediate loopback success) the op still completes on the next drain (POLLOUT is
  * immediately ready), keeping the completion single + deferred. The result surfaces as
  * KL_COMP_CONNECT against the client's tagged watcher; the driver routes it to
- * he_on_writable, which re-reads SO_ERROR (0 → win, else fail). */
+ * he_on_writable, which re-reads SO_ERROR (0 → win, else fail).
+ *
+ * Known limit of this test double: the connect goes through ctx->sockets, because the completion
+ * seam's post_connect carries no provider, while the async client made the fd through its own
+ * provider (which it never writes into the ctx). With the built-in providers both resolve to the
+ * POSIX connect, so the result is the same; a wrapper provider's connect op is not consulted here.
+ * The native backends (IOCP ConnectEx, io_uring connect) take no provider op at all. */
 static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
                                 const KlSockAddr *addr, void *watcher_udata) {
     KlPcState *st = ctx->loop._backend;

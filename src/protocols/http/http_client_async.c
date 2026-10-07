@@ -31,6 +31,7 @@
 #include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel: completion connect */
 #include "watcher_internal.h" /* kl_watcher_add_detached: completion connect */
 #include "http_client_internal.h"
+#include "../dns/dns_resolver_internal.h" /* kl_dns_resolver_create_sp: the resolver on the client's provider */
 #include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
 
@@ -484,10 +485,12 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
 
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
  * (borrowed) → cfg->system_dns (NULL → blocking sync name resolution) → auto-created
- * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
- * sync name resolution (also on auto-create failure, better than failing the request). */
+ * built-in async resolver (owned; *owned = 1), whose sockets go through `sp` (the client's
+ * provider), so they share the handle domain of the client's connections. Returns NULL to fall back
+ * to sync name resolution (also on auto-create failure, better than failing the request). */
 static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
-                                        KlEventCtx *ev_ctx, int *owned) {
+                                        KlEventCtx *ev_ctx, const KlSocketProvider *sp,
+                                        int *owned) {
     *owned = 0;
     if (cfg && cfg->resolver)
         return cfg->resolver;
@@ -499,10 +502,10 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
      * (docs/archive/phases/phase10_uefi_feasibility_design.md §8, IPv4/numeric first).
      * A freestanding consumer supplies cfg->resolver or a numeric address; here we
      * fall back to sync name resolution (kl_resolve_sync), same as cfg->system_dns. */
-    (void)ev_ctx;
+    (void)ev_ctx; (void)sp;
     return NULL;
 #else
-    KlResolver *r = kl_dns_resolver_create(ev_ctx, NULL);
+    KlResolver *r = kl_dns_resolver_create_sp(ev_ctx, sp, NULL);   /* the client's provider, not the ctx's */
     if (r)
         *owned = 1;
     return r;
@@ -1485,7 +1488,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     /* Async DNS resolver path (explicit, built-in default, or sync name resolution). */
     int res_owned = 0;
-    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, c->sockets, &res_owned);
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
@@ -1835,7 +1838,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     /* Pool miss: normal connect flow */
     int res_owned = 0;
-    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, c->sockets, &res_owned);
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;

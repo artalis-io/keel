@@ -46,6 +46,7 @@
 #include "platform.h"
 #include "kl_cstr.h"     /* locale-free bounded string primitives (freestanding-safe) */
 #include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search); hosted-only uses */
+#include "dns_resolver_internal.h"   /* kl_dns_resolver_create_sp */
 
 #define DNS_NAME_MAX      256
 _Static_assert(DNS_NAME_MAX == KL_DNS_SYS_NAME_MAX,
@@ -160,6 +161,7 @@ typedef struct {
 struct KlDnsResolver {
     KlResolver     base;           /* MUST be first for upcast */
     KlEventCtx    *ctx;
+    const KlSocketProvider *sockets; /* every socket this resolver makes (UDP and TCP) goes through it */
     KlAllocator   *alloc;
     KlDatagram     sock;          /* Tier-1 datagram transport; prepared via kl_datagram_open */
     int            send_slots;    /* outbound slot count (burst sizing) */
@@ -874,17 +876,17 @@ static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud);
 static kl_ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
     if (t->tls)
         return t->tls->write(t->tls, t->fd, b, n);
-    return kl_sock_send(t->r->ctx->sockets, t->fd, b, n);
+    return kl_sock_send(t->r->sockets, t->fd, b, n);
 }
 static kl_ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
     if (t->tls)
         return t->tls->read(t->tls, t->fd, b, n);
-    return kl_sock_recv(t->r->ctx->sockets, t->fd, b, n);
+    return kl_sock_recv(t->r->sockets, t->fd, b, n);
 }
 /* A -1 from dns_tcp_read/dns_tcp_write that only means "try again when ready", as the socket
  * provider classifies it (kl_sock_io_status), never a hosted errno. A TLS -1 is an error or a close. */
 static int dns_tcp_would_block(const KlDnsTcp *t) {
-    return !t->tls && kl_sock_io_status(t->r->ctx->sockets) == KL_IO_WOULD_BLOCK;
+    return !t->tls && kl_sock_io_status(t->r->sockets) == KL_IO_WOULD_BLOCK;
 }
 
 /* Number of legs still awaiting a response on this nameserver's connection. */
@@ -901,7 +903,7 @@ static void dns_tcp_close(KlDnsResolver *r, KlDnsTcp *t) {
     if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
     if (t->watching)        { kl_watcher_del(r->ctx, t->fd); t->watching = 0; }
     if (t->tls)             { t->tls->destroy(t->tls); t->tls = NULL; }
-    if (kl_handle_valid(t->fd)) { kl_sock_close(r->ctx->sockets, t->fd); t->fd = KL_INVALID_SOCKET; }
+    if (kl_handle_valid(t->fd)) { kl_sock_close(r->sockets, t->fd); t->fd = KL_INVALID_SOCKET; }
     if (t->wbuf) { kl_free(r->alloc, t->wbuf, t->wcap); t->wbuf = NULL; t->wcap = 0; }
     if (t->rbuf) { kl_free(r->alloc, t->rbuf, t->rcap); t->rbuf = NULL; t->rcap = 0; }
     t->wlen = t->wsent = t->rlen = t->rneed = 0;
@@ -975,24 +977,24 @@ static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
 static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     const KlSockAddr *ns_ksa = &r->ns[ns_idx];
     int fam = (kl_sockaddr_family(ns_ksa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
-    KlSocketHandle fd = kl_sock_socket(r->ctx->sockets, fam, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(r->sockets, fam, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd))
         return -1;
-    if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) {
-        kl_sock_close(r->ctx->sockets, fd); return -1;
+    if (kl_sock_set_nonblocking(r->sockets, fd) < 0) {
+        kl_sock_close(r->sockets, fd); return -1;
     }
-    kl_sock_set_cloexec(r->ctx->sockets, fd);
+    kl_sock_set_cloexec(r->sockets, fd);
 
-    int rc = kl_sock_connect(r->ctx->sockets, fd, ns_ksa);
-    if (rc < 0 && kl_sock_io_status(r->ctx->sockets) != KL_IO_PENDING) {
-        kl_sock_close(r->ctx->sockets, fd); return -1;
+    int rc = kl_sock_connect(r->sockets, fd, ns_ksa);
+    if (rc < 0 && kl_sock_io_status(r->sockets) != KL_IO_PENDING) {
+        kl_sock_close(r->sockets, fd); return -1;
     }
 
     t->r = r; t->ns_idx = ns_idx; t->fd = fd;
     t->state = (rc == 0) ? DNS_TCP_READY : DNS_TCP_CONNECTING;
     t->want = KL_EVENT_READ | KL_EVENT_WRITE;
     if (kl_watcher_add(r->ctx, fd, t->want, dns_tcp_on_event, t) != 0) {
-        kl_sock_close(r->ctx->sockets, fd);
+        kl_sock_close(r->sockets, fd);
         t->fd = KL_INVALID_SOCKET; t->state = DNS_TCP_CLOSED; return -1;
     }
     t->watching = 1;
@@ -1074,7 +1076,7 @@ static void dns_tcp_on_event_body(KlDnsResolver *r, KlDnsTcp *t, KlEventMask mas
 
     if (t->state == DNS_TCP_CONNECTING) {
         int err = 0;
-        if (kl_sock_get_so_error(r->ctx->sockets, t->fd, &err) != 0 || err != 0) {
+        if (kl_sock_get_so_error(r->sockets, t->fd, &err) != 0 || err != 0) {
             dns_tcp_fail(r, t); return;
         }
         t->state = DNS_TCP_READY;
@@ -1696,7 +1698,8 @@ void kl_dns_resolver_set_random(KlResolver *self, int (*fn)(void *buf, size_t le
  * DNS_SEND_SLOTS default; a positive value is a TEST hook to force KL_DATAGRAM_WOULD_BLOCK deterministically
  * (the transient-burst size is an internal transport detail, not a public config knob). The public
  * kl_dns_resolver_create below delegates with 0. */
-KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg, int send_slots) {
+static KlResolver *dns_resolver_create(KlEventCtx *ctx, const KlSocketProvider *sp,
+                                      const KlDnsResolverConfig *cfg, int send_slots) {
     if (!ctx)
         return NULL;
     /* Validate the RESOLVED allocator (cfg->alloc, or the event context's when NULL);
@@ -1713,6 +1716,7 @@ KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverCon
     r->base.cancel  = dns_cancel;
     r->base.destroy = dns_destroy;
     r->ctx = ctx;
+    r->sockets = sp;
     r->alloc = alloc;
     r->timeout_ms = (cfg && cfg->timeout_ms) ? cfg->timeout_ms : 5000;
     r->attempts = (cfg && cfg->attempts) ? cfg->attempts : 2;
@@ -1749,17 +1753,17 @@ KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverCon
      * source port), no extensions (want_caps 0; the resolver reads neither `local` nor recv-TOS). */
     KlDatagramSocketConfig uc = { .family = family };
     KlDatagramPrep prep;
-    if (kl_datagram_open(ctx->sockets, &uc, &prep) != 0) {
+    if (kl_datagram_open(sp, &uc, &prep) != 0) {
         kl_free(alloc, r, sizeof(*r));
         return NULL;
     }
     KlDatagramConfig dc = {
-        .ctx = ctx, .alloc = alloc, .sockets = ctx->sockets, .fd = prep.fd,
+        .ctx = ctx, .alloc = alloc, .sockets = sp, .fd = prep.fd,
         .send_slots = (size_t)r->send_slots, .send_slot_cap = DNS_QUERY_MAX,
         .recv_cap = DNS_RECV_CAP, .want_caps = 0,
     };
     if (kl_datagram_init(&r->sock, &dc) != 0) {
-        kl_sock_close(ctx->sockets, prep.fd);   /* init failed → fd stays with the caller (open/init contract) */
+        kl_sock_close(sp, prep.fd);   /* init failed → fd stays with the caller (open/init contract) */
         kl_free(alloc, r, sizeof(*r));
         return NULL;
     }
@@ -1771,6 +1775,15 @@ KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverCon
         return NULL;
     }
     return &r->base;
+}
+
+KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg, int send_slots) {
+    return ctx ? dns_resolver_create(ctx, ctx->sockets, cfg, send_slots) : NULL;
+}
+
+KlResolver *kl_dns_resolver_create_sp(KlEventCtx *ctx, const KlSocketProvider *sp,
+                                      const KlDnsResolverConfig *cfg) {
+    return dns_resolver_create(ctx, sp, cfg, 0);
 }
 
 KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *cfg) {
