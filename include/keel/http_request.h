@@ -116,6 +116,10 @@ static inline KlHttpConn *kl_http_request_conn(const KlHttpRequest *req) {
  *    record boundary.
  *  - Completion: pause stops posting the next recv; the one already-submitted recv may still
  *    deliver a final chunk (bounded to ≤1 in flight); resume posts a fresh recv.
+ *  - Body bytes read with the headers and kept while a streaming-async handler that suspended at
+ *    dispatch waited are delivered on a resume that awaits the body even if a pause is in effect:
+ *    they are already off the connection, so the pause takes hold after them, as at a TLS record
+ *    boundary.
  *  - A conn that stays paused is NOT exempt from the idle-read timeout: an indefinitely paused
  *    consumer is eventually timed out (slowloris/backpressure defense).
  *  - Pausing before/outside KL_HTTP_CONN_READING_BODY is a no-op-safe state set; resume only re-arms

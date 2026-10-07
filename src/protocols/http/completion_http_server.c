@@ -1295,8 +1295,13 @@ void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
 void kl_http_comp_post_read(struct KlHttpConn *c) {
     /* Only a body read that is waiting for its next receive takes one. Not while the body core is
      * consuming read_buf (a resume from on_data: the drive posts once it is done), not when a
-     * receive is already posted, and not in any other state (a resume after the body completed). */
-    if (c->state != KL_HTTP_CONN_READING_BODY || c->comp_recv_posted || c->comp_in_body_drive)
+     * receive is already posted, and not in any other state (a resume after the body completed).
+     * Not while body bytes kept across a suspend are still waiting at read_buf[0] (a resume that
+     * un-pauses from on_resume runs before kl_http_comp_resume feeds them): a receive would land
+     * behind them and the body core would take them twice, and a TLS drive would read over them.
+     * kl_http_comp_resume feeds them, then posts the receive (or drives TLS) itself. */
+    if (c->state != KL_HTTP_CONN_READING_BODY || c->comp_recv_posted || c->comp_in_body_drive ||
+        c->body_kept)
         return;
     struct KlHttpServer *s = server_of_ctx(c->stream.ctx);
     /* With TLS, drive the engine first: records that arrived while paused may be held in it, and

@@ -1465,6 +1465,19 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     c->req.keep_alive = 0;
     c->res.keep_alive = 0;
 
+    /* Body bytes kept across a suspend that the resume never fed (it answered without awaiting the
+     * body) are already accounted, but the chunked decoder has not seen them: feed them first, so
+     * the drain's framing oracle continues from where the wire is rather than from a chunk-size
+     * line it never read. */
+    int kept_rc = 0;
+    if (c->body_kept) {
+        if (c->req.chunked) {
+            kept_rc = kl_http1_chunked_decode(&c->chunked_dec, c->stream.read_buf, c->body_kept, NULL);
+            if (kept_rc > 0) c->request_body_complete = 1;
+        }
+        c->body_kept = 0;
+    }
+
     size_t cap = c->reject_drain_max_bytes;
     uint32_t ms = c->reject_drain_timeout_ms;
     size_t remaining = conn_body_remaining_hint(c);
@@ -1534,7 +1547,7 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     c->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
     /* Assume the framing oracle is usable; the first decoder error clears this and the bounds take
      * over. Non-chunked framing needs no oracle: the declared length is the framing. */
-    c->drain_framing_usable = 1;
+    c->drain_framing_usable = (kept_rc >= 0);   /* kept bytes that broke the framing leave no oracle */
     c->state = KL_HTTP_CONN_DRAINING;
     DRAIN_TRACE(c, "enter");
     return c->state;
