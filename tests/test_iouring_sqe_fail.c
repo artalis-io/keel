@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <unistd.h>    /* alarm: bound a drain that would block forever */
 
 /* Defined in the -DKEEL_IOURING_TEST_HOOKS copy of event_iouring.c linked with this test. */
 void kl_iou_test_fail_next_sqe(struct KlEventCtx *ctx, int count);
@@ -416,6 +417,24 @@ UTEST(iouring_sqe_fail, submit_eagain_with_nothing_to_reap_waits_for_the_timeout
 
     ASSERT_TRUE(run >= 0);
     ASSERT_TRUE(waited >= 50);                               /* was ~0: returned at once, spun */
+}
+
+/* The same refusal on a drain with NO timeout (timeout_ms < 0) and nothing in flight: no SQE was
+ * submitted, so an unbounded wait for a completion could block forever. The drain must still return
+ * (a bounded wait) so the run loop can submit again. Guarded by alarm(): a drain that blocks is
+ * killed by SIGALRM, which fails the suite instead of hanging CI. */
+UTEST(iouring_sqe_fail, submit_eagain_with_no_timeout_does_not_block_forever) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }
+
+    kl_iou_test_submit_skip_next(&ctx, -EAGAIN);
+    alarm(5);                                                /* was: blocked forever */
+    int run = kl_event_ctx_run(&ctx, 16, -1);
+    alarm(0);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(run >= 0);
 }
 
 UTEST_MAIN()

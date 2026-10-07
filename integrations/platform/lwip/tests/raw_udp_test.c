@@ -52,6 +52,7 @@
 
 #include "keel_lwip_raw.h"
 #include "lwip_raw_glue.h"   /* T7 drives the datagram glue directly (kl_lwr_udp_* / kl_lwr_ctx_*) */
+#include "lwip/netif.h"      /* T8: netif_default / netif_set_default (no route to a destination) */
 
 #include <stdio.h>
 #include <stdint.h>
@@ -141,6 +142,44 @@ static int t1_single(KlEventCtx *ctx) {
     dg_close_free(ctx, &rx);
     if (rc2) return rc2;
     printf("PASS T1 (single datagram round-trip, src=127.0.0.1)\n");
+    return 0;
+}
+
+/* T8: a send lwIP cannot route (udp_sendto: ERR_RTE, no default netif and no netif for 10/8) fails
+ * for that datagram only. It is dropped and counted, and the next send to a routable destination is
+ * accepted and delivered: the failed post does not latch the datagram's send error. */
+static int t8_unroutable_send_is_dropped(KlEventCtx *ctx) {
+    reset_capture();
+    KlDatagram rx, tx;
+    KlDatagramSocketConfig rc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
+    KlDatagramSocketConfig tc = { .ctx = ctx };
+    if (kl_datagram_socket_init(&rx, &rc) != 0) return fail("T8 rx init");
+    if (kl_datagram_socket_init(&tx, &tc) != 0) { dg_close_free(ctx, &rx); return fail("T8 tx init"); }
+    if (kl_datagram_recv_start(&rx, on_recv, NULL) != 0) { dg_close_free(ctx, &tx); dg_close_free(ctx, &rx); return fail("T8 recv_start"); }
+
+    struct netif *saved = netif_default;
+    netif_set_default(NULL);                       /* 10.0.0.1 now has no route */
+    const uint8_t far_ip[4] = { 10, 0, 0, 1 };
+    KlSockAddr far; kl_sockaddr_from_ipv4(&far, far_ip, 9);
+    KlDatagramSendStatus s1 = kl_datagram_send(&tx, &(KlDatagramMessage){ .data = "x", .len = 1, .peer = &far, .tos = -1 });
+    netif_set_default(saved);
+    for (int i = 0; i < 5; i++) kl_event_ctx_run(ctx, 16, 5);
+
+    KlSockAddr dst; dest_v4(&dst, kl_datagram_local_port(&rx));
+    KlDatagramSendStatus s2 = kl_datagram_send(&tx, &(KlDatagramMessage){ .data = "after", .len = 5, .peer = &dst, .tos = -1 });
+    if (s2 == KL_DATAGRAM_ACCEPTED) pump_until(ctx, 1, 400);
+    uint64_t dropped = kl_datagram_dropped(&tx);
+
+    int rc2 = 0;
+    if (s1 != KL_DATAGRAM_ACCEPTED && s1 != KL_DATAGRAM_ERROR) rc2 = fail("T8: unexpected status for the unroutable send");
+    else if (dropped != 1) rc2 = fail("T8: the unroutable send was not counted as dropped");
+    else if (s2 != KL_DATAGRAM_ACCEPTED) rc2 = fail("T8: the next send was refused (the failure latched)");
+    else if (g_got != 1 || g_len != 5 || memcmp(g_buf, "after", 5) != 0) rc2 = fail("T8: the next datagram did not arrive");
+
+    dg_close_free(ctx, &tx);
+    dg_close_free(ctx, &rx);
+    if (rc2) return rc2;
+    printf("PASS T8 (an unroutable send is dropped, the next one goes out)\n");
     return 0;
 }
 
@@ -441,6 +480,7 @@ int main(void) {
     if (rc == 0) rc = t3_max(&ctx);
     if (rc == 0) rc = t4_close_with_armed_recv(&ctx);
     if (rc == 0) rc = t5_close_with_undrained_sends(&ctx);
+    if (rc == 0) rc = t8_unroutable_send_is_dropped(&ctx);
 
     kl_event_ctx_free(&ctx);   /* free the event ctx FIRST: the raw backend allows only one live ctx */
     if (rc != 0) return 1;
