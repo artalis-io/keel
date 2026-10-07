@@ -216,7 +216,7 @@ static kl_ssize_t cnt_send(void *ctx, KlSocketHandle fd, const void *buf, size_t
 static const KlSocketOps g_cnt_ops = {
     .socket = cnt_socket, .close = cnt_close, .send = cnt_send, .name = "counting",
 };
-static const KlSocketProvider g_cnt_prov[2] = {
+static KlSocketProvider g_cnt_prov[2] = {
     { &g_cnt_ops, &g_cnt[0], KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED, NULL },
     { &g_cnt_ops, &g_cnt[1], KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED, NULL },
 };
@@ -328,6 +328,56 @@ UTEST(client, failed_start_leaves_ctx_sockets_unchanged) {
     kl_event_ctx_free(&ev);
     ASSERT_TRUE(refused);
     ASSERT_TRUE(after == before);      /* was: the failed client's provider */
+}
+
+/* The built-in resolver a client creates for itself makes its sockets through the client's provider
+ * too, not through the ctx's: otherwise, on a ctx whose own provider is another handle domain (a
+ * bring-your-own stack with ctx.sockets left NULL), the resolver opened a host socket and adopted it
+ * into a loop that cannot drive it. A numeric target still creates the resolver (and its UDP
+ * socket), and makes exactly one connection: two sockets in all, both through the client's provider. */
+UTEST(client, default_resolver_uses_the_client_provider) {
+    KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&g_prov_srv, &scfg));
+    kl_http_server_route(&g_prov_srv, "GET", "/", prov_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_plat_thread_create(&g_prov_tid, prov_server_thread, &g_prov_srv));
+    for (int i = 0; i < 200 && g_prov_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    int port = g_prov_srv.bound_port;
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
+
+    memset(g_cnt, 0, sizeof g_cnt);
+    g_cnt_prov[0].dgram = kl_sockdef_dgram();   /* the resolver needs the datagram data plane */
+    KlAllocator a = kl_allocator_default();
+    static KlEventCtx ev;
+    int ev_ok = kl_event_ctx_init(&ev, &a) == 0;
+    const KlSocketProvider *before = ev.sockets;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_cnt_prov[0];   /* no resolver, no system_dns: the built-in resolver */
+    static ProvDone d;
+    memset(&d, 0, sizeof d);
+
+    KlHttpClient *cl = NULL;
+    if (ev_ok && port > 0) {
+        cl = kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0, prov_done, &d);
+        for (int i = 0; i < 300 && cl && !d.done; i++)
+            kl_event_ctx_run(&ev, 16, 10);
+    }
+    kl_http_client_free(cl);          /* also frees the client's own resolver */
+    const KlSocketProvider *after = ev.sockets;
+    if (ev_ok) kl_event_ctx_free(&ev);
+    g_cnt_prov[0].dgram = NULL;
+    kl_http_server_stop(&g_prov_srv);
+    kl_plat_thread_join(&g_prov_tid);
+    kl_http_server_free(&g_prov_srv);
+
+    ASSERT_TRUE(ev_ok);
+    ASSERT_TRUE(port > 0);
+    ASSERT_TRUE(cl != NULL);
+    ASSERT_EQ(200, d.status);
+    ASSERT_TRUE(after == before);
+    ASSERT_EQ(2, g_cnt[0].sockets);   /* was: 1, the resolver's UDP socket came from the ctx's provider */
+    ASSERT_EQ(2, g_cnt[0].closes);
 }
 
 /* ── kl_http_client_error/response on NULL ────────────────────────────── */
