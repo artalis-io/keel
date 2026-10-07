@@ -539,14 +539,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   internal `KL_SOCK_CAP_OVERLAPPED` and the public `KL_SOCK_CAP_DATAGRAM` were the same bit
   (`1ull << 3`), so every provider that advertises datagram support (the built-in POSIX and Winsock
   providers, the lwIP BSD provider, any custom provider with a datagram vtable) also read as
-  overlapped. Two effects: a streamed (chunked) response whose server or ctx named such a provider
+  overlapped. Effects: a streamed (chunked) response whose server or ctx named such a provider
   explicitly (`KlHttpServerConfig.sockets = kl_socket_provider_posix()` / `_winsock()`) on a
   readiness loop handed its bytes to the completion output queue, which refused them, so
-  `kl_http_response_begin_stream` and every SSE / streamed response failed; and on a completion
+  `kl_http_response_begin_stream` and every SSE / streamed response failed (and in a
+  `KEEL_NO_COMPLETION` build, where that queue is the `abort()` stub in `completion_http_absent.c`,
+  the process aborted); every overlapped provider read as datagram-capable, including a TCP-only
+  EFI provider built without `KEEL_UEFI_DATAGRAM`; and on a completion
   loop (IOCP, io_uring, pollcomp, lwIP raw) the capability negotiation accepted such a provider
   instead of adopting the backend's own overlapped one. `KL_SOCK_CAP_OVERLAPPED` now sits at bit 63
   (internal bits are allocated from the top, public ones from bit 0), and a compile-time check keeps
-  the two sets disjoint. (behavior change) On a completion loop, an explicitly configured built-in
+  the two sets disjoint. The IOCP overlapped provider, which carries the Winsock datagram ops but
+  had relied on the shared bit to advertise them, now sets `KL_SOCK_CAP_DATAGRAM` itself.
+  (behavior change) On a completion loop, an explicitly configured built-in
   or other datagram-capable readiness provider is now replaced by the backend's overlapped provider
   (server and async client), or refused where the backend offers none, as the negotiation contract
   already documented; it no longer negotiates by accident.
