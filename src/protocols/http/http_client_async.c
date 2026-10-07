@@ -1223,6 +1223,28 @@ static int client_resolver_valid(const KlResolver *r) {
     return r && r->resolve && r->cancel;
 }
 
+/* Choose the socket provider for a start on the caller's shared ctx: the configured one, else the
+ * ctx's own; on a completion loop the backend's native overlapped provider when that one is
+ * incompatible, so a completion backend is a drop-in for the client too (the event axis stays
+ * masked). The async client's loop must be able to drive the provider's handles: an incoherent
+ * pairing is refused up front, and the refusal puts back the provider the ctx had, so neither a
+ * later start that brings none of its own nor any other user of the ctx is left on the rejected
+ * one. Returns 0, or -1 when refused. */
+static int client_select_provider(KlEventCtx *ev_ctx, const KlHttpClientConfig *cfg)
+{
+    const struct KlSocketProvider *prev = ev_ctx->sockets;
+    if (cfg && cfg->sockets) ev_ctx->sockets = cfg->sockets;
+    if (!kl_event_ctx_sockets_compatible(ev_ctx)) {
+        const struct KlSocketProvider *np = kl_event_native_provider(&ev_ctx->loop);
+        if (np && kl_socket_provider_ops_valid(np)) ev_ctx->sockets = np;
+    }
+    if (!kl_event_ctx_sockets_compatible(ev_ctx)) {
+        ev_ctx->sockets = prev;
+        return -1;
+    }
+    return 0;
+}
+
 KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlHttpClientConfig *cfg,
                               const char *method, const char *url_str,
@@ -1351,17 +1373,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
-    if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
-    /* On a completion loop, adopt the backend's native overlapped provider when
-     * the configured one is incompatible, so a completion backend is a drop-in for the
-     * client too (the event axis stays masked). */
-    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
-        const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
-    }
-    /* The async client's readiness loop must be able to watch the
-     * provider's handles (native fds). Reject an incoherent pairing up front. */
-    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+    if (client_select_provider(ev_ctx, cfg) < 0) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
@@ -1749,17 +1761,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
-    if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
-    /* On a completion loop, adopt the backend's native overlapped provider when
-     * the configured one is incompatible, so a completion backend is a drop-in for the
-     * client too (the event axis stays masked). */
-    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
-        const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
-        if (np && kl_socket_provider_ops_valid(np)) c->ev_ctx->sockets = np;
-    }
-    /* The async client's readiness loop must be able to watch the
-     * provider's handles (native fds). Reject an incoherent pairing up front. */
-    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+    if (client_select_provider(ev_ctx, cfg) < 0) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;

@@ -412,6 +412,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
+  `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
+  before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept
+  the incompatible provider: every later start on it without a provider of its own was refused, and
+  every other user of the ctx (server, watchers, datagrams, WebSocket client) went through the wrong
+  provider. The provider is now put back on a refusal; a start that passes still sets it.
+- **HTTP/2 client: no `on_error` after the client is closed or freed from `on_resp` during a
+  send.** A send that closes a stream (an END_STREAM or RST_STREAM going out) runs `on_resp`; when
+  that closed or freed the client, the session went on sending its queued frames to the closed
+  socket, the flush failed, and `on_error` ran on a client the user had already closed or freed. The
+  send callback now fails at once on a closed client, and a failed flush reports nothing once the
+  client was closed or freed, as the receive path already did.
 - **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
   that suspended on a second op and completed it at once registered the connection's socket again;
   when the response then closed the connection, it was released while still registered. poll and
