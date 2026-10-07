@@ -172,6 +172,8 @@ typedef struct {
     size_t          test_send_prepared_max;/* test-only: largest send length prepared so far */
     int             test_send_res0_next;   /* test-only: N forced 0 results on a send CQE */
     int             test_submit_rc_next;   /* test-only: one forced submit return (0 = none) */
+    int             test_submit_skip_rc;   /* test-only: the next drain skips the kernel call and
+                                            * takes this as its result (0 = none) */
 #endif
 } KlIouState;
 
@@ -224,6 +226,12 @@ void kl_iou_test_send_res0_next(struct KlEventCtx *ctx, int count) {
 void kl_iou_test_submit_rc_next(struct KlEventCtx *ctx, int rc) {
     KlIouState *st = ctx->loop._backend;
     st->test_submit_rc_next = rc;
+}
+/* Test-only: the next drain does not enter the kernel at all and takes `rc` as the submit result, as
+ * a kernel that refuses at once (-EAGAIN while short of memory) would, with nothing waited for. */
+void kl_iou_test_submit_skip_next(struct KlEventCtx *ctx, int rc) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_submit_skip_rc = rc;
 }
 #endif
 
@@ -1132,7 +1140,12 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
     /* Submit the queued SQEs and wait for at least one completion (or the timeout). */
     struct io_uring_cqe *cqe = NULL;
-    int r = io_uring_submit_and_wait_timeout(&st->ring, &cqe, 1, tsp, NULL);
+    int r;
+#ifdef KEEL_IOURING_TEST_HOOKS
+    if (st->test_submit_skip_rc) { r = st->test_submit_skip_rc; st->test_submit_skip_rc = 0; }
+    else
+#endif
+    r = io_uring_submit_and_wait_timeout(&st->ring, &cqe, 1, tsp, NULL);
 #ifdef KEEL_IOURING_TEST_HOOKS
     if (st->test_submit_rc_next) { r = st->test_submit_rc_next; st->test_submit_rc_next = 0; }
 #endif

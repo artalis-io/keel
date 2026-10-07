@@ -2297,11 +2297,16 @@ UTEST(dns, concurrent_distinct_resolutions) {
  * deterministic vehicle (the gating provider is native-fd); on a completion backend the same
  * backend-neutral machine runs, so these skip there (the provider would fail overlapped negotiation). */
 static int g_block;
+static uint16_t g_unreach_port;   /* nonzero: sends to this port fail with ENETUNREACH */
 static kl_ssize_t (*g_real_dg_send)(void *, KlSocketHandle, const void *, size_t,
                                     const KlSockAddr *, const KlSockAddr *, int);
 static kl_ssize_t gate_dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                                const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     if (g_block) { errno = EAGAIN; return -1; }        /* force the kernel-refused path deterministically */
+    if (g_unreach_port && dest && kl_sockaddr_port(dest) == g_unreach_port) {
+        errno = ENETUNREACH;                            /* no route to this one nameserver */
+        return -1;
+    }
     return g_real_dg_send(ctx, fd, data, len, dest, src, tos);
 }
 static KlDatagramOps    g_gate_dg;
@@ -2393,6 +2398,52 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
     r->destroy(r);
     kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
+}
+
+/* (3) A nameserver the host has no route to: the send itself fails (ENETUNREACH), for that one
+ * destination only. The query must go to the next nameserver at once, and the socket must keep
+ * sending: a resolver whose first query met a missing route used to fail every later query too. */
+UTEST(dns, send_error_fails_over_to_next_nameserver) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    if (is_completion(&ctx)) { kl_event_ctx_free(&ctx); return; }   /* readiness-only vehicle */
+    ctx.sockets = gating_provider();
+    g_block = 0;
+
+    KlDatagram ns1, ns2;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns1, &sc));
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns2, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns2, mock_ns, &ns2));
+    uint16_t p1 = kl_datagram_local_port(&ns1);
+    uint16_t p2 = kl_datagram_local_port(&ns2);
+
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n", p1, p2);
+    const char *rcpath = write_resolv(rc);
+    ASSERT_TRUE(rcpath != NULL);
+
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 500, .attempts = 1 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    g_unreach_port = p1;                                /* the first nameserver is unroutable */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 40);                            /* well inside one 500 ms timeout */
+    g_unreach_port = 0;
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);                                /* resolved via the second nameserver */
+    ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
+
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns1);
+    kl_dg_close_free(&ctx, &ns2);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
 }
 
 UTEST_MAIN();
