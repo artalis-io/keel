@@ -110,6 +110,10 @@ struct KlHttpConn {
     int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
                                         * cleared on decoder error, after which only the bounds apply */
     uint64_t request_body_received;    /* body bytes accounted so far */
+    /* Body bytes read with the headers and kept at read_buf[0] while a streaming-async handler that
+     * suspended at dispatch waits on its op; fed to the body core when it resumes into READING_BODY
+     * (kl_http_conn_resume_body). 0 = none. */
+    size_t   body_kept;
     uint64_t drain_deadline_ms;   /* DRAINING: absolute deadline (0 = not draining) */
     size_t   drain_budget;        /* DRAINING: remaining byte budget */
     size_t   reject_drain_max_bytes;   /* per-conn copy of the server config */
@@ -237,6 +241,12 @@ KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router);
 /* Feed `nread` freshly-received request-body bytes (in read_buf[0..nread]) to the chunked decoder /
  * body reader. Returns the next state (KL_HTTP_CONN_READING_BODY = need more). */
 KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread);
+
+/* A suspended connection resumed (kl_async_complete) into READING_BODY: refresh its idle clock and
+ * feed the body bytes kept across the suspend (body_kept) to the body core before either axis reads
+ * or posts. Returns the next state; READING_BODY means read on. Any other entry state is returned
+ * unchanged. */
+KlHttpConnState kl_http_conn_resume_body(KlHttpConn *c);
 
 /* Post-rejection teardown (#278). ONE ownership point for a final response that intentionally
  * terminates a request: writes the response, then chooses between DRAINING (request input may

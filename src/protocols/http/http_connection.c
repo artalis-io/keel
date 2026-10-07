@@ -146,6 +146,7 @@ static void conn_request_body_reset(KlHttpConn *c) {
     c->request_body_received = 0;
     c->request_body_complete = 0;
     c->drain_framing_usable  = 0;
+    c->body_kept             = 0;   /* kept body bytes belong to the request that read them */
     c->stream.read_paused    = 0;   /* a pause belongs to the request that asked for it */
 }
 
@@ -170,6 +171,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->h2 = NULL;
     c->async_op = NULL;
     c->suspend_start_ms = 0;
+    c->body_start_ms = 0;          /* a reused slot's stale value would fire the body deadline */
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
@@ -821,7 +823,20 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                 c->req.body_reader->on_error(c->req.body_reader);
                 return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
             }
+            /* The body phase starts here, for a handler that suspends as much as for one that
+             * parks: a resume that awaits the body feeds this request's decoder, under this
+             * request's deadline (a reused slot holds the previous request's of both). */
+            if (c->req.chunked) kl_http1_chunked_init(&c->chunked_dec);
+            c->body_start_ms = kl_monotonic_ms();
             KlHttpConnState s = conn_invoke_streaming_handler(c);
+            if (s == KL_HTTP_CONN_SUSPENDED && leftover_len > 0) {
+                /* Suspended before any body byte reached the reader. Keep the bytes read with the
+                 * headers at the front of read_buf (the head was copied out above), so a resume
+                 * that awaits the body feeds them before reading on (kl_http_conn_resume_body). */
+                memmove(c->stream.read_buf, leftover_buf, leftover_len);
+                c->stream.read_len = leftover_len;
+                c->body_kept = leftover_len;
+            }
             if (s != KL_HTTP_CONN_READING_BODY) {
                 /* Handler completed synchronously (sent a response,
                  * suspended for async I/O, or emitted a streaming
@@ -1450,6 +1465,19 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     c->req.keep_alive = 0;
     c->res.keep_alive = 0;
 
+    /* Body bytes kept across a suspend that the resume never fed (it answered without awaiting the
+     * body) are already accounted, but the chunked decoder has not seen them: feed them first, so
+     * the drain's framing oracle continues from where the wire is rather than from a chunk-size
+     * line it never read. */
+    int kept_rc = 0;
+    if (c->body_kept) {
+        if (c->req.chunked) {
+            kept_rc = kl_http1_chunked_decode(&c->chunked_dec, c->stream.read_buf, c->body_kept, NULL);
+            if (kept_rc > 0) c->request_body_complete = 1;
+        }
+        c->body_kept = 0;
+    }
+
     size_t cap = c->reject_drain_max_bytes;
     uint32_t ms = c->reject_drain_timeout_ms;
     size_t remaining = conn_body_remaining_hint(c);
@@ -1519,7 +1547,7 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     c->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
     /* Assume the framing oracle is usable; the first decoder error clears this and the bounds take
      * over. Non-chunked framing needs no oracle: the declared length is the framing. */
-    c->drain_framing_usable = 1;
+    c->drain_framing_usable = (kept_rc >= 0);   /* kept bytes that broke the framing leave no oracle */
     c->state = KL_HTTP_CONN_DRAINING;
     DRAIN_TRACE(c, "enter");
     return c->state;
@@ -1594,6 +1622,18 @@ KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
     KlHttpConnState st = conn_ingest_body(c, nread);
     c->dispatch_depth--;
     return st;
+}
+
+KlHttpConnState kl_http_conn_resume_body(KlHttpConn *c) {
+    if (c->state != KL_HTTP_CONN_READING_BODY) return c->state;
+    c->last_active_ms = kl_monotonic_ms();   /* a suspension is exempt from the idle timeout */
+    size_t n = c->body_kept;
+    if (n == 0) return c->state;
+    c->body_kept = 0;
+    /* The dispatch already accounted these bytes; the body core accounts what it is fed. */
+    c->request_body_received -= (c->request_body_received >= n) ? (uint64_t)n : c->request_body_received;
+    c->stream.read_len = n;
+    return kl_http_conn_ingest_body(c, n);
 }
 
 static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {

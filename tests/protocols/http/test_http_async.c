@@ -855,11 +855,14 @@ static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ud);
 static void handle_nest(KlHttpRequest *req, KlHttpResponse *res, void *ud);
 static void handle_od(KlHttpRequest *req, KlHttpResponse *res, void *ud);
 static KlHttpBodyReader *od_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud);
+static void handle_aw(KlHttpRequest *req, KlHttpResponse *res, void *ud);
+static KlHttpBodyReader *aw_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud);
 static KlHttpRequest *g_end_req;
 
-static void end_start(void) {
-    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+static void end_start_with(int body_timeout_ms) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .body_timeout_ms = body_timeout_ms };
     kl_http_server_init(&end_srv, &cfg);
+    kl_http_server_route_streaming_async(&end_srv, "POST", "/aw", handle_aw, NULL, aw_factory);
     kl_http_server_route(&end_srv, "GET", "/sc", handle_suspend_then_complete, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/cancel-now", handle_suspend_then_cancel, NULL, NULL);
     kl_http_server_route(&end_srv, "GET", "/cancel-later", handle_suspend_cancel_later, NULL, NULL);
@@ -871,6 +874,7 @@ static void end_start(void) {
     kl_plat_thread_create(&end_tid, end_server_thread, NULL);
     for (int i = 0; i < 200 && end_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
 }
+static void end_start(void) { end_start_with(0); }
 static void end_stop(void) {
     kl_http_server_stop(&end_srv);
     kl_plat_thread_join(&end_tid);
@@ -1223,6 +1227,163 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     ASSERT_LT(used, (uint64_t)300);                        /* was (poll): ~800 ms spinning */
     ASSERT_EQ(st.active_connections, 0);
     ASSERT_EQ(served, 4);
+}
+
+/* ── A streaming-async handler that suspends at dispatch, then awaits the body on resume ─────────
+ * The handler suspends before any body byte reaches the reader; a timer completes the op and
+ * on_resume asks for the body (kl_http_request_await_body). Readiness never registered the fd again
+ * (kl_async_complete had no READING_BODY arm), so the body was never read and the request ended in
+ * 408. Both axes dropped the body bytes read with the headers, never initialised the chunked decoder
+ * for this request (it ran from the previous request's state), and counted the time spent suspended
+ * against the absolute body deadline. */
+#define AW_CAP 256
+static char g_aw_body[AW_CAP];
+static size_t g_aw_len;
+static int g_aw_delay_ms;
+static int g_aw_pause;                                   /* pause at dispatch, resume in on_resume */
+static KlAsyncOp g_aw_op;
+static KlHttpRequest *g_aw_req;
+
+static int aw_on_data(KlHttpBodyReader *self, const char *d, size_t n) {
+    (void)self;
+    if (n > AW_CAP - g_aw_len) return -1;
+    memcpy(g_aw_body + g_aw_len, d, n);
+    g_aw_len += n;
+    return 0;
+}
+static void aw_on_complete(KlHttpBodyReader *self) {
+    (void)self;
+    char out[AW_CAP + 2];
+    out[0] = '[';
+    memcpy(out + 1, g_aw_body, g_aw_len);
+    out[g_aw_len + 1] = ']';
+    KlHttpResponse *res = kl_http_conn_response(kl_http_request_conn(g_aw_req));
+    kl_http_response_status(res, 200);
+    (void)kl_http_response_body_copy(res, out, g_aw_len + 2);
+    kl_http_request_send_response(g_aw_req);
+}
+static void aw_noop(KlHttpBodyReader *self) { (void)self; }
+static void aw_destroy(KlHttpBodyReader *self) {
+    OdReader *r = (OdReader *)self;
+    kl_free(r->alloc, r, sizeof *r);
+}
+static KlHttpBodyReader *aw_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)req; (void)ud;
+    OdReader *r = kl_malloc(alloc, sizeof *r);
+    if (!r) return NULL;
+    memset(r, 0, sizeof *r);
+    r->base.on_data = aw_on_data;
+    r->base.on_complete = aw_on_complete;
+    r->base.on_error = aw_noop;
+    r->base.destroy = aw_destroy;
+    r->alloc = alloc;
+    return &r->base;
+}
+static void aw_tick(void *ud) { (void)ud; }              /* wakes the loop: the sweep runs */
+static void aw_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    kl_http_request_await_body(g_aw_req);
+    if (g_aw_pause) kl_http_request_resume_body(g_aw_req);
+    (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 100, aw_tick, NULL);
+}
+static void aw_complete_timer(void *ud) {
+    (void)ud;
+    kl_async_complete(&end_srv, &g_aw_op);
+}
+static void handle_aw(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    g_aw_req = req;
+    g_aw_len = 0;
+    memset(&g_aw_op, 0, sizeof g_aw_op);
+    g_aw_op.on_resume = aw_resume;
+    if (g_aw_pause) kl_http_request_pause_body(req);
+    if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_aw_op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), (uint64_t)g_aw_delay_ms,
+                       aw_complete_timer, NULL);
+}
+
+/* Send `head` (headers plus the start of the body), wait `gap_ms`, send `rest`; return 1 if the
+ * response echoes `want`. */
+static int aw_exchange(int port, const char *head, int gap_ms, const char *rest, const char *want,
+                       char *buf, size_t cap) {
+    buf[0] = '\0';
+    int fd = connect_to(port);
+    if (fd < 0) return 0;
+    (void)kl_test_sockwrite(fd, head, strlen(head));
+    kl_test_sleep_ms((unsigned)gap_ms);
+    (void)kl_test_sockwrite(fd, rest, strlen(rest));
+    int closed = 0;
+    (void)read_for(fd, buf, cap, 2000, &closed);
+    kl_test_closesock(fd);
+    return strstr(buf, want) != NULL;
+}
+
+UTEST(async, suspend_at_dispatch_then_await_body_reads_the_whole_body) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 0;
+    end_start();
+    char buf[1024];
+    int ok = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 300,
+                         " world", "[hello world]", buf, sizeof buf);
+    kl_test_sleep_ms(100);
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    end_stop();
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);           /* was (readiness): no response; 408 */
+    ASSERT_TRUE(ok);                                       /* was (completion): "hello" dropped */
+    ASSERT_EQ(st.active_connections, 0);
+}
+
+UTEST(async, suspend_at_dispatch_then_await_chunked_body) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 0;
+    end_start();
+    char buf[1024], buf2[1024];
+    const char *head = "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+    const char *rest = "6\r\n world\r\n0\r\n\r\n";
+    int first = aw_exchange(end_srv.bound_port, head, 300, rest, "[hello world]", buf, sizeof buf);
+    /* The slot is reused: its decoder ended the previous request DONE. */
+    int second = aw_exchange(end_srv.bound_port, head, 300, rest, "[hello world]", buf2, sizeof buf2);
+    end_stop();
+    ASSERT_TRUE(first);                                    /* was: "hello" dropped, or no response */
+    ASSERT_TRUE(second);                                   /* was: the decoder ran from DONE */
+}
+
+UTEST(async, time_suspended_is_not_charged_to_the_body_deadline) {
+    g_aw_delay_ms = 900;                                   /* suspended longer than the deadline */
+    g_aw_pause = 0;
+    end_start_with(600);
+    char buf[1024];
+    int ok = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 1150,
+                         " world", "[hello world]", buf, sizeof buf);
+    end_stop();
+    ASSERT_TRUE(strstr(buf, "408") == NULL);               /* was: 408 at the first sweep after resume */
+    ASSERT_TRUE(ok);
+}
+
+/* ── The kept body bytes are fed once when the resume un-pauses the body read ───────────────────
+ * The handler pauses the body read at dispatch and suspends; on_resume awaits the body and resumes
+ * the read. On a completion loop that resume posted a receive behind the kept bytes before they were
+ * fed (on_resume runs before the drive), so the receive appended to them and the body core took the
+ * kept bytes a second time: Content-Length echoed a duplicated prefix and lost the tail; chunked
+ * decoded the kept chunk twice. With TLS the drive read over them instead. */
+UTEST(async, kept_body_bytes_are_fed_once_when_the_resume_unpauses) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 1;
+    end_start();
+    char buf[1024], buf2[1024];
+    int cl = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 300,
+                         " world", "[hello world]", buf, sizeof buf);
+    int ch = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+                         300, "6\r\n world\r\n0\r\n\r\n", "[hello world]", buf2, sizeof buf2);
+    end_stop();
+    g_aw_pause = 0;
+    ASSERT_TRUE(cl);                                       /* was (completion): "[hellohello ]" */
+    ASSERT_TRUE(ch);                                       /* was (completion): "[hellohello world]" */
 }
 
 UTEST_MAIN();

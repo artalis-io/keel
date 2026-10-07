@@ -7,6 +7,15 @@
 extern "C" {
 #endif
 
+/* Chunk extensions and trailers are framing the decoder skips: they reach no body reader and count
+ * toward no body limit, so they are bounded here. Both are fixed caps (the decoder carries no server
+ * configuration); a request past either fails like any other malformed chunk. */
+
+/** @brief Cap on the bytes of one chunk-size line's extensions (after the ';', before the CR). */
+#define KL_HTTP1_CHUNK_EXT_MAX 4096
+
+/** @brief Cap on the bytes of the whole trailer section (every trailer line, its CRLF included). */
+#define KL_HTTP1_CHUNK_TRAILER_MAX 8192
 
 typedef enum {
     KL_HTTP1_CHUNK_SIZE,       /**< reading hex chunk-size */
@@ -27,6 +36,7 @@ typedef struct {
     size_t size_accum;       /**< hex accumulator for chunk size */
     int    size_digits;      /**< hex digits seen (max 16) */
     int    trailer_cr;       /**< saw CR on an empty trailer line (final CRLF) */
+    size_t meta_len;         /**< bytes of the current extension list, or of the trailer section */
 } KlHttp1ChunkedDecoder;
 
 /** @brief Initialize/reset decoder state. */
