@@ -856,7 +856,8 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                      * (see READING_BODY paths below for the twin). */
                     if (c->route->streaming_handler &&
                         (c->state == KL_HTTP_CONN_SENDING ||
-                         c->state == KL_HTTP_CONN_CLOSED)) {
+                         c->state == KL_HTTP_CONN_CLOSED ||
+                         c->state == KL_HTTP_CONN_SUSPENDED)) {
                         c->req.keep_alive = 0;
                         c->res.keep_alive = 0;
                         return c->state;
@@ -894,7 +895,8 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                  * chunked path. */
                 if (c->route->streaming_handler &&
                     (c->state == KL_HTTP_CONN_SENDING ||
-                     c->state == KL_HTTP_CONN_CLOSED)) {
+                     c->state == KL_HTTP_CONN_CLOSED ||
+                     c->state == KL_HTTP_CONN_SUSPENDED)) {
                     c->req.keep_alive = 0;
                     c->res.keep_alive = 0;
                     return c->state;
@@ -941,10 +943,12 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
             /* The reader (and a legacy streaming handler parked on it) ends with on_error, as on
              * any other failure mid-body, not with only destroy at release. */
             c->req.body_reader->on_error(c->req.body_reader);
-            /* The on_error chain may have resumed that handler into a response of its own: keep it
-             * (as every other on_error site does) rather than write a second response after it. */
+            /* The on_error chain may have resumed that handler into a response of its own (or into
+             * an async op): keep it (as every other on_error site does) rather than write a second
+             * response after it. */
             if (c->route->streaming_handler &&
-                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
+                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
+                 c->state == KL_HTTP_CONN_SUSPENDED)) {
                 c->req.keep_alive = 0;
                 c->res.keep_alive = 0;
                 return c->state;
@@ -1607,7 +1611,8 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
              * instead of clobbering it with 413. Force keep-alive off (unread body
              * would bleed into the next request). */
             if (c->route && c->route->streaming_handler &&
-                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
+                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
+                 c->state == KL_HTTP_CONN_SUSPENDED)) {
                 c->req.keep_alive = 0;
                 c->res.keep_alive = 0;
                 return c->state;
@@ -1650,7 +1655,8 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
         if (c->req.body_reader)
             c->req.body_reader->on_error(c->req.body_reader);
         if (c->route && c->route->streaming_handler &&
-            (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
+            (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
+             c->state == KL_HTTP_CONN_SUSPENDED)) {
             c->req.keep_alive = 0;
             c->res.keep_alive = 0;
             return c->state;

@@ -412,6 +412,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
+  that suspended on a second op and completed it at once registered the connection's socket again;
+  when the response then closed the connection, it was released while still registered. poll and
+  WSAPoll kept the closed socket's entry (poll reports it on every wait, so the idle server could
+  spin), and a reused descriptor number could reach the released slot. It is now taken out of the
+  loop before the release.
+- **A streaming handler that suspends from its body reader's `on_error` is not answered over.** When
+  a body error resumed the handler and it started an async op, the server still wrote its own 413 or
+  500 while the op was pending. That state is now honoured like a response the handler sent.
 - **Completion server: TLS WebSocket output to a client that stops reading is bounded.** Every TLS
   write's ciphertext went from the engine's bounded ring onto the uncapped output queue at once, so
   a TLS WebSocket send never saw a full buffer: a client that stopped reading grew server memory

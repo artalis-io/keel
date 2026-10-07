@@ -1173,10 +1173,10 @@ UTEST(async, an_op_left_pending_inside_on_data_is_not_overwritten) { od_case(ute
 /* ── A connection closed after a nested complete leaves the loop ────────────────────────────────
  * The nested complete inside on_resume re-registers the fd; when the response then closed the
  * connection, the outer complete released it without taking the fd out of the loop. poll and
- * WSAPoll keep an entry for a closed socket and report it at once on every wait, so the idle server
- * spun at full CPU (and an fd number reused by an unregistered descriptor could release the slot a
- * second time). epoll and kqueue drop a closed fd themselves. Measured as the process CPU time an
- * idle server uses after such a request. */
+ * WSAPoll keep an entry for a closed socket; poll reports it at once on every wait, so the idle
+ * server spun at full CPU (and an fd number reused by an unregistered descriptor could release the
+ * slot a second time). epoll and kqueue drop a closed fd themselves. Measured as the process CPU
+ * time an idle server uses after such a request, so it fails only where the stale entry spins. */
 #ifdef _WIN32
 static uint64_t process_cpu_ms(void) {
     FILETIME c, e, k, u;
@@ -1200,6 +1200,7 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     end_start();
     int port = end_srv.bound_port;
     char buf[1024];
+    buf[0] = '\0';
     int closed = 0;
     int fd = connect_to(port);
     if (fd >= 0) {
@@ -1219,7 +1220,7 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     end_stop();
     ASSERT_TRUE(answered);
     ASSERT_TRUE(closed);
-    ASSERT_LT(used, (uint64_t)300);                        /* was (poll, WSAPoll): ~800 ms spinning */
+    ASSERT_LT(used, (uint64_t)300);                        /* was (poll): ~800 ms spinning */
     ASSERT_EQ(st.active_connections, 0);
     ASSERT_EQ(served, 4);
 }
