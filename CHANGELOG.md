@@ -562,16 +562,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `ENETDOWN`, `EHOSTDOWN`), the ICMP report about an earlier datagram that Linux and the BSDs return
   from the next send on a connected socket (`ECONNREFUSED`), a full queue (`ENOBUFS`, `ENOMEM`), a
   firewall or broadcast refusal (`EPERM`, `EACCES`), a path MTU (`EMSGSIZE`), a pinned source that is
-  not local (`EADDRNOTAVAIL`), and their Winsock counterparts. One query sent while the host had no
-  route killed the built-in DNS resolver's socket for good. Such a failure now fails only its
-  datagram: a direct send returns `KL_DATAGRAM_ERROR` for that call, and a datagram already accepted
-  (queued, or posted on a completion backend, including an IOCP send refused at issue) is dropped and
-  counted by `kl_datagram_dropped` with `kl_datagram_last_error` set to `KL_ERR_IO`; the next send goes
-  out. Any other failure (a closed or invalid socket, an unknown error) is still sticky. The provider
-  classifies its own error (the hosted errno mapping, `io_status` for a provider that has one, each
-  completion backend for its native code). The DNS resolver now moves a query whose send fails
-  straight to the next nameserver. The Winsock datagram provider now keeps the send error's identity
-  instead of reporting every failure as `EIO`.
+  not local (`EADDRNOTAVAIL`), a peer the socket cannot use (`EINVAL` for an unscoped IPv6 link-local
+  peer, `EAFNOSUPPORT`, `EISCONN`, `EDESTADDRREQ`), and their Winsock counterparts. One query sent
+  while the host had no route killed the built-in DNS resolver's socket for good. Such a failure now
+  fails only its datagram: a direct send returns `KL_DATAGRAM_ERROR` for that call with
+  `kl_datagram_last_error` = `KL_ERR_IO`, and a datagram already accepted (queued, or posted on a
+  completion backend, including an IOCP send refused at issue) is dropped and counted by
+  `kl_datagram_dropped` with `kl_datagram_last_error` = `KL_ERR_IO`; the next send goes out. Any
+  other failure (a closed or invalid socket, an unknown error) is still sticky, and now reports
+  `KL_ERR_SOCKET` (a bad message reports `KL_ERR_INVALID_ARG`). Every backend classifies its own
+  error: the hosted errno mapping and the Winsock provider (which now keeps the error's identity
+  instead of reporting `EIO`, and maps `WSAEHOSTDOWN`), io_uring, pollcomp, IOCP, the EFI_UDP4
+  provider (a Transmit ending `EFI_ICMP_ERROR` / `EFI_*_UNREACHABLE` / `EFI_NO_MAPPING` /
+  `EFI_OUT_OF_RESOURCES`) and the lwIP raw provider (`udp_sendto` `ERR_RTE` / `ERR_MEM` /
+  `ERR_BUF`). An interrupted direct send (`EINTR`) is retried instead of failed. The DNS resolver
+  moves a query whose send fails straight to the next nameserver.
+- **A custom socket provider's `io_status` result `KL_IO_RESET` after a datagram send now means "drop
+  this datagram" (behavior change).** It latched the datagram's send error like any other failure;
+  it is now read as the ICMP report a UDP send can return, and only that datagram is dropped.
+  `KL_IO_INTERRUPTED` retries the send. `KL_IO_FATAL` still latches.
 - **IOCP: a datagram receive past many queued ICMP reports keeps going.** A receive that met more than
   16 ICMP reports in a row at issue (a socket adopted through `kl_datagram_init`, which keeps the
   Winsock reports on) failed, and the datagram stopped receiving for good. It now queues its own

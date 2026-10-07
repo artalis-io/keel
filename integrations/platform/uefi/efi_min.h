@@ -66,6 +66,19 @@ typedef VOID     *EFI_EVENT;
 #define EFI_ACCESS_DENIED      EFIERR(15)
 #define EFI_NO_MAPPING         EFIERR(17)
 #define EFI_ABORTED            EFIERR(21)
+/* Network results a UDP Transmit token can end with (UEFI 2.10 Appendix D). */
+#ifndef EFI_ICMP_ERROR
+#define EFI_ICMP_ERROR          EFIERR(22)
+#endif
+#ifndef EFI_NETWORK_UNREACHABLE
+#define EFI_NETWORK_UNREACHABLE EFIERR(100)
+#endif
+#ifndef EFI_HOST_UNREACHABLE
+#define EFI_HOST_UNREACHABLE    EFIERR(101)
+#endif
+#ifndef EFI_PORT_UNREACHABLE
+#define EFI_PORT_UNREACHABLE    EFIERR(103)
+#endif
 #define EFI_CONNECTION_FIN     EFIERR(104)
 #define EFI_CONNECTION_RESET   EFIERR(102)
 #define EFI_CONNECTION_REFUSED EFIERR(105)

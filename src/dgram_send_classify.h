@@ -44,8 +44,13 @@ static inline int kl_dgram_send_err_is_per_datagram(int err) {
         return 1;   /* larger than the path takes */
     if (err == EADDRNOTAVAIL)
         return 1;   /* a pinned source address that is not (or no longer) local */
-    if (err == EINTR)
+    /* A peer supplied for this one datagram that the socket cannot use: an unscoped IPv6 link-local
+     * address (EINVAL), an IPv6 peer on an IPv4 socket (EAFNOSUPPORT), a destination on a connected
+     * socket (EISCONN, macOS), none on an unconnected one (EDESTADDRREQ). The socket is intact. */
+    if (err == EINVAL || err == EAFNOSUPPORT || err == EISCONN || err == EDESTADDRREQ)
         return 1;
+    if (err == EINTR)
+        return 1;   /* reached only once the direct send's retries ran out */
     return 0;
 }
 

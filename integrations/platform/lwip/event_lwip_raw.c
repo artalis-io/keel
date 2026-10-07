@@ -576,6 +576,7 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     int rc = kl_lwr_udp_send(st->lwrctx, (void *)sop->fd, sop->life, sop->data, sop->len,
                              sop->dest->u.ip, kl_sockaddr_port(sop->dest));
     if (rc == 0) kl_comp_life_release(sop->life);      /* glue took its own ref → drop the transferred one */
+    if (rc == KL_LWR_UDP_SEND_DROPPED) return KL_COMP_POST_DROPPED;   /* this datagram only */
     return rc;
 }
 

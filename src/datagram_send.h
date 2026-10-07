@@ -133,6 +133,9 @@ typedef struct {
     int               pend_drain;    /* a retirement emptied the queue (re-checked before firing) */
     int               in_submit;     /* a submit() call is on the stack (inline-completion window) */
     int               submit_retired;/* an inline on_complete retired the in-flight op */
+    int               direct_dropped;/* the last kl_dgram_send returned ERROR because its direct send
+                                      * was refused for that datagram alone (not sticky, not a bad
+                                      * argument); the facade reports it as KL_ERR_IO */
     size_t            dropped;       /* datagrams dropped by the recoverable per-datagram send-error
                                       * policy (a per-datagram refusal of any queued datagram, or a hard
                                       * error on a batch head; NOT the sticky `err`).
@@ -231,5 +234,6 @@ static inline int    kl_dgram_send_connected(const KlDgramSend *s) { return s ? 
 static inline size_t kl_dgram_send_queued_bytes(const KlDgramSend *s) { return s ? s->bytes_used : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }
 static inline size_t kl_dgram_send_dropped(const KlDgramSend *s)  { return s ? s->dropped : 0; }
+static inline int    kl_dgram_send_direct_dropped(const KlDgramSend *s) { return s ? s->direct_dropped : 0; }
 
 #endif /* KEEL_SRC_DATAGRAM_SEND_H */

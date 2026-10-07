@@ -309,6 +309,7 @@ static KlDatagramSendStatus send_admit(KlDgramSend *s, const KlDatagramMessage *
 }
 
 KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
+    if (s) s->direct_dropped = 0;
     KlDatagramSendStatus v = send_validate(s, m);
     if (v != KL_DATAGRAM_ACCEPTED)
         return v;
@@ -330,7 +331,7 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         if (r == KL_DGRAM_SUBMIT_ERROR) { s->err = 1; status = KL_DATAGRAM_ERROR; goto leave; }
         /* Refused for a reason of this datagram alone (no route, ICMP report, full queue, ...): the
          * call fails, nothing was taken, and the socket keeps sending (no sticky error). */
-        if (r == KL_DGRAM_SUBMIT_DROPPED) { status = KL_DATAGRAM_ERROR; goto leave; }
+        if (r == KL_DGRAM_SUBMIT_DROPPED) { s->direct_dropped = 1; status = KL_DATAGRAM_ERROR; goto leave; }
         /* WOULD_BLOCK: queue it below, UNLESS the hook reentrantly errored / began closing (still
          * inside our frame, so detachment is deferred). NEVER enqueue after closing began. */
         if (s->err)     { status = KL_DATAGRAM_ERROR;  goto leave; }

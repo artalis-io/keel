@@ -167,6 +167,9 @@ uint16_t kl_lwr_udp_local_port(void *pcb);
 int   kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *life);
 /* Send one datagram out `pcb` to dest ip4:port (udp_sendto; ip4 NULL = ANY). Records a pending
  * KL_LWR_DGRAM_SEND (len bytes) the drain reports, taking a `life` token ref for it. Returns 0 / -1. */
+/* kl_lwr_udp_send's result for a datagram lwIP refused on its own account (no route: ERR_RTE; no
+ * pbuf / buffer: ERR_MEM / ERR_BUF): nothing was recorded and the pcb is fine. */
+#define KL_LWR_UDP_SEND_DROPPED (-2)
 int   kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_t len,
                       const uint8_t dest_ip[4], uint16_t dest_port);
 /* Close a udp pcb: detach the recv cb, udp_remove, free the slot. Idempotent on an unknown/NULL. */

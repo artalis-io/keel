@@ -66,6 +66,10 @@ void kl_wsa_set_errno(void) {
         case WSAESHUTDOWN:     errno = EPIPE;         break;
         case WSAEHOSTUNREACH:  errno = EHOSTUNREACH;  break;
         case WSAENETUNREACH:   errno = ENETUNREACH;   break;
+        case WSAEHOSTDOWN:     errno = EHOSTUNREACH;  break;   /* no EHOSTDOWN in the Windows CRT */
+        case WSAEAFNOSUPPORT:  errno = EAFNOSUPPORT;  break;
+        case WSAEDESTADDRREQ:  errno = EDESTADDRREQ;  break;
+        case WSAEISCONN:       errno = EISCONN;       break;
         case WSAENETDOWN:      errno = ENETDOWN;      break;
         case WSAENETRESET:     errno = ENETRESET;     break;
         case WSAEADDRINUSE:    errno = EADDRINUSE;    break;

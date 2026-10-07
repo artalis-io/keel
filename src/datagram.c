@@ -181,9 +181,15 @@ static KlDgramRetireResult dg_comp_retire(void *ctx, KlDgramOpKind kind, int *tr
 static KlDgramSubmitResult dg_rdy_submit(void *ctx, const void *data, size_t len,
                                          const KlSockAddr *peer, const KlSockAddr *local, int tos) {
     KlDatagram *dg = ctx;
-    kl_ssize_t n = dg_ops(dg)->send(dg_sp_ctx(dg), dg->fd, data, len, peer, local, tos);
-    if (n >= 0) return KL_DGRAM_SUBMIT_DONE;    /* UDP send is all-or-nothing */
-    if (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK) return KL_DGRAM_SUBMIT_WOULDBLOCK;
+    KlIoStatus st = KL_IO_OK;
+    /* An interrupted send lost nothing: try again at once (bounded), as the completion backends do. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        kl_ssize_t n = dg_ops(dg)->send(dg_sp_ctx(dg), dg->fd, data, len, peer, local, tos);
+        if (n >= 0) return KL_DGRAM_SUBMIT_DONE;    /* UDP send is all-or-nothing */
+        st = kl_sock_io_status(dg->sockets);
+        if (st != KL_IO_INTERRUPTED) break;
+    }
+    if (st == KL_IO_WOULD_BLOCK) return KL_DGRAM_SUBMIT_WOULDBLOCK;
     /* The provider seam (not this TU) decides whether the failure concerns only this datagram. */
     if (kl_sock_dgram_send_dropped(dg->sockets)) return KL_DGRAM_SUBMIT_DROPPED;
     return KL_DGRAM_SUBMIT_ERROR;
@@ -585,6 +591,13 @@ KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m
     KlDgramCore *core = dg->core;
     kl_dgram_core_dispatch_begin(core);
     KlDatagramSendStatus st = kl_dgram_core_send(core, m);
+    /* ERROR has three causes; last_error tells them apart: the send side failed for good (sticky),
+     * this one datagram was refused (the next send is attempted), or a bad message. */
+    if (st == KL_DATAGRAM_ERROR) {
+        if (kl_dgram_send_error(&core->send))                dg->last_error = KL_ERR_SOCKET;
+        else if (kl_dgram_send_direct_dropped(&core->send))  dg->last_error = KL_ERR_IO;
+        else                                                 dg->last_error = KL_ERR_INVALID_ARG;
+    }
     dg_reconcile_write(dg);   /* a queued (would-block) readiness send needs WRITE interest */
     kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core: may run the deferred teardown/free */
     return st;                          /* a local: safe even if dg/core were just freed */
