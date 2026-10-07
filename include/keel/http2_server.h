@@ -84,9 +84,15 @@ struct KlHttp2ServerSession {
                            int status, const char **hdr_names,
                            const char **hdr_values, int num_headers,
                            const void *body, size_t body_len);
-                                                   /**< Submit a response for a stream. */
+                                                   /**< Submit a response for a stream. The header
+                                                    *   fields and body are borrowed for the call
+                                                    *   only: the session copies what it keeps, as
+                                                    *   KEEL drops the stream before it flushes. */
     int (*want_write)(KlHttp2ServerSession *self);    /**< Returns non-zero if output is pending. */
-    int (*flush)(KlHttp2ServerSession *self);         /**< Flush pending output via send callback. */
+    int (*flush)(KlHttp2ServerSession *self);         /**< Flush pending output via send callback.
+                                                       *   May report a stream it closes while
+                                                       *   sending (on_stream_reset) from inside the
+                                                       *   call; KEEL holds no stream across it. */
     int (*shutdown)(KlHttp2ServerSession *self);      /**< Initiate graceful GOAWAY. */
     void (*destroy)(KlHttp2ServerSession *self);      /**< Free session resources. */
     /**

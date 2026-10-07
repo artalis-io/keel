@@ -513,7 +513,8 @@ read_more: ;
 
     /* Feed data to session */
     if (c->session->recv(c->session, buf, (size_t)nread) < 0) {
-        if (!c->free_requested) h2c_error(c, "session recv error");
+        /* Not when on_resp, run inside the recv, closed or freed the client: nothing more to say. */
+        if (!c->free_requested && c->state != H2C_CLOSED) h2c_error(c, "session recv error");
         return;
     }
     if (c->free_requested || c->state == H2C_CLOSED)

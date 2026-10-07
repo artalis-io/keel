@@ -42,6 +42,11 @@ static KlHttp2ServerStream *h2_stream_create(KlHttp2ServerConn *h2c,
 }
 
 static void h2_stream_destroy(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
+    /* Only a live slot: a stale pointer (a slot already released, or moved by a swap-remove) would
+     * otherwise drive num_streams below zero, and the next stream would be made before the table. */
+    if (!stream || h2c->num_streams <= 0 || stream < h2c->streams ||
+        stream >= h2c->streams + h2c->num_streams)
+        return;
     if (stream->body_reader) {
         stream->body_reader->destroy(stream->body_reader);
         stream->body_reader = NULL;
@@ -196,6 +201,21 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
         kl_free(h2c->alloc, file_buf, (size_t)res->file_size);
 
     return rc;
+}
+
+/* Submit a stream's response, release the stream, and only then flush. The session copies what it
+ * keeps at submit (the body and header fields), so the stream is not needed past it. And a flush
+ * that really sends (one outside the session's recv, such as stream 1 of an h2c upgrade) closes a
+ * stream whose END_STREAM goes out, and reports that close (on_stream_reset) from inside the flush:
+ * by then the stream must already be gone, or it is destroyed twice. Any other stream that close
+ * releases moves slots too, so no stream pointer is held across the flush. 0, or -1 if the
+ * session refused the response. */
+static int h2_answer_and_release(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
+    int rc = h2_submit_response(h2c, stream);
+    h2_stream_destroy(h2c, stream);
+    if (h2c->session->want_write(h2c->session))
+        h2c->session->flush(h2c->session);
+    return rc < 0 ? -1 : 0;
 }
 
 /* Stream 1 of an h2c upgrade: take over what the HTTP/1.1-phase middleware left on the connection's
@@ -432,13 +452,8 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
     /* Run middleware, except for the upgrading request's stream 1: it ran in its HTTP/1.1 phase. */
     if (!(h2c->upgrading && stream_id == 1) &&
-        kl_http_router_run_middleware(h2c->router, req, &stream->res) != 0) {
-        int rc = h2_submit_response(h2c, stream);
-        if (h2c->session->want_write(h2c->session))
-            h2c->session->flush(h2c->session);
-        h2_stream_destroy(h2c, stream);
-        return rc < 0 ? -1 : 0;
-    }
+        kl_http_router_run_middleware(h2c->router, req, &stream->res) != 0)
+        return h2_answer_and_release(h2c, stream);
 
     /* Create body reader if needed. HTTP/2 frames a body by END_STREAM, so content-length is
      * optional: without one, the route's reader is made on the first DATA frame (h2_cb_on_data). A
@@ -453,11 +468,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
             h2c->alloc, req, stream->route->user_data);
         if (!br) {
             kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
-            int rc = h2_submit_response(h2c, stream);
-            if (h2c->session->want_write(h2c->session))
-                h2c->session->flush(h2c->session);
-            h2_stream_destroy(h2c, stream);
-            return rc < 0 ? -1 : 0;
+            return h2_answer_and_release(h2c, stream);
         }
         stream->body_reader = br;
         req->body_reader = br;
@@ -480,11 +491,7 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
                                                           stream->route->user_data);
         if (!br) {                                          /* refused on this stream only */
             kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
-            int rc = h2_submit_response(h2c, stream);
-            if (h2c->session->want_write(h2c->session))
-                h2c->session->flush(h2c->session);
-            h2_stream_destroy(h2c, stream);
-            return rc < 0 ? -1 : 0;
+            return h2_answer_and_release(h2c, stream);
         }
         stream->body_reader = br;
         stream->req.body_reader = br;
@@ -506,11 +513,7 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
     if (refuse) {
         if (stream->body_reader) stream->body_reader->on_error(stream->body_reader);
         kl_http_response_error(&stream->res, 413, "Payload Too Large");
-        int rc = h2_submit_response(h2c, stream);
-        if (h2c->session->want_write(h2c->session))
-            h2c->session->flush(h2c->session);
-        h2_stream_destroy(h2c, stream);
-        return rc < 0 ? -1 : 0;
+        return h2_answer_and_release(h2c, stream);
     }
     return 0;
 }
@@ -524,13 +527,8 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
         stream->body_reader->on_complete(stream->body_reader);
 
     if (kl_http_router_run_post_middleware(h2c->router, &stream->req,
-                                      &stream->res) != 0) {
-        int rc = h2_submit_response(h2c, stream);
-        if (h2c->session->want_write(h2c->session))
-            h2c->session->flush(h2c->session);
-        h2_stream_destroy(h2c, stream);
-        return rc < 0 ? -1 : 0;
-    }
+                                      &stream->res) != 0)
+        return h2_answer_and_release(h2c, stream);
 
     if (stream->route_result == 200 && stream->route && stream->route->handler) {
         stream->route->handler(&stream->req, &stream->res,
@@ -541,12 +539,7 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
         kl_http_response_error(&stream->res, 404, "Not Found");
     }
 
-    int rc = h2_submit_response(h2c, stream);
-    if (h2c->session->want_write(h2c->session))
-        h2c->session->flush(h2c->session);
-
-    h2_stream_destroy(h2c, stream);
-    return rc < 0 ? -1 : 0;
+    return h2_answer_and_release(h2c, stream);
 }
 
 static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
