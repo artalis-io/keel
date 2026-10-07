@@ -1286,4 +1286,62 @@ UTEST(datagram_public, closed_datagram_multicast_is_refused_without_a_provider_c
     ASSERT_EQ((int)err, (int)KL_ERR_INVALID_ARG); /* was KL_ERR_IO */
 }
 
+/* ── A completion provider without the datagram seam ──────────────────────────────────────────────
+ *
+ * The datagram slots of KlCompletionOps (post_dgram_recv / post_dgram_send / cancel_dgram /
+ * retire_dgram) are optional: a stream-only completion provider leaves them NULL. A datagram bound
+ * to such a loop has no way to receive, send, cancel or retire, so init must refuse it with
+ * KL_ERR_UNSUPPORTED and leave the fd with the caller, instead of accepting it and calling a NULL
+ * slot at the first receive arm. Each slot is dropped in turn. */
+static KlCompletionOps g_nodg_comp;
+static KlEventOps      g_nodg_evops;
+static void mk_nodg_ctx(int drop) {
+    g_nodg_comp = MC_COMP;
+    switch (drop) {
+        case 0: g_nodg_comp.post_dgram_recv = NULL; break;
+        case 1: g_nodg_comp.post_dgram_send = NULL; break;
+        case 2: g_nodg_comp.cancel_dgram = NULL; break;
+        case 3: g_nodg_comp.retire_dgram = NULL; break;
+        default:
+            g_nodg_comp.post_dgram_recv = NULL; g_nodg_comp.post_dgram_send = NULL;
+            g_nodg_comp.cancel_dgram = NULL; g_nodg_comp.retire_dgram = NULL;
+            break;
+    }
+    g_nodg_evops = MC_EVOPS;
+    g_nodg_evops.completion = &g_nodg_comp;
+    memset(&g_ctx, 0, sizeof(g_ctx));
+    g_alloc = kl_allocator_default();
+    g_ctx.loop.ops = &g_nodg_evops;
+    g_ctx.alloc = &g_alloc;
+}
+
+UTEST(datagram_public, completion_without_dgram_seam_refuses_init) {
+    for (int drop = 0; drop <= 4; drop++) {
+        mk_nodg_ctx(drop); mc_reset();
+        KlDatagram dg; memset(&dg, 0, sizeof(dg));
+        KlSocketHandle fd = mk_fd();
+        ASSERT_TRUE(kl_handle_valid(fd));
+        KlDatagramConfig c = cfg_for(fd, 4, 1500);
+        int rc = kl_datagram_init(&dg, &c);
+        KlError err = kl_datagram_last_error(&dg);
+        /* Accepted (the defect) is left as is: closing it would reach the NULL slot. Refused: the fd
+         * was never adopted, so it is still the caller's. */
+        if (rc != 0) (void)kl_test_closesock((int)fd);
+        ASSERT_EQ(-1, rc);
+        ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)err);
+        ASSERT_EQ(0, g_mc.add_calls);        /* never registered with the loop */
+    }
+}
+
+UTEST(datagram_public, completion_without_dgram_seam_refuses_socket_init) {
+    mk_nodg_ctx(4); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramSocketConfig sc; memset(&sc, 0, sizeof(sc));
+    sc.ctx = &g_ctx; sc.alloc = &g_alloc; sc.bind_addr = "127.0.0.1";
+    int rc = kl_datagram_socket_init(&dg, &sc);
+    KlError err = kl_datagram_last_error(&dg);
+    ASSERT_EQ(-1, rc);                       /* accepted (the defect) is left as is, see above */
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)err);
+}
+
 UTEST_MAIN();

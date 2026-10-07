@@ -765,4 +765,57 @@ UTEST(datagram_socket, port_unreachable_does_not_stop_recv_adopted_fd) {
     EXPECT_EQ(strlen("still-listening"), g_len);
 }
 
+/* A CONNECTED socket gets the ICMP error on POSIX too: Linux and the BSDs queue ECONNREFUSED
+ * (EHOSTUNREACH / ENETUNREACH for the other unreachables) as the socket error after a send to a
+ * closed port, and the next receive returns it. That reports a datagram this socket sent, so the
+ * receiver must consume it and keep going: a client connected to a peer that restarted would
+ * otherwise stop receiving for good. The receiver connects to a closed port and sends there; then a
+ * socket bound to that same port (so the connected receiver accepts its datagrams) sends a real
+ * datagram, which must arrive. Runs on every backend: readiness, and the completion receives
+ * (io_uring / pollcomp / IOCP), which each surface the error through their own receive op. */
+UTEST(datagram_socket, connected_port_unreachable_does_not_stop_recv) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&rx, &rc));
+
+    uint16_t dead = closed_udp_port();
+    KlSockAddr dead_addr; kl_sockaddr_parse(&dead_addr, "127.0.0.1", dead);
+    int connected = (dead != 0 && kl_datagram_connect(&rx, &dead_addr) == 0);
+    g_recv_calls = 0; g_len = 0;
+    int started = connected && kl_datagram_recv_start(&rx, on_recv, NULL) == 0;
+
+    /* One probe to the closed port (peerless: the socket is connected), then time for its ICMP to
+     * come back and reach the receive (readable socket / completed receive op). */
+    const char *probe = "nobody-home";
+    KlDatagramMessage pm = { .data = probe, .len = strlen(probe), .peer = NULL, .tos = -1 };
+    int probed = started && kl_datagram_send(&rx, &pm) == KL_DATAGRAM_ACCEPTED;
+    if (probed)
+        for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 16, 20);
+
+    /* The "restarted peer": a socket now bound to the formerly closed port sends to the receiver. */
+    int got = -1;
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1",
+                                  .bind_port = dead };
+    if (probed && kl_datagram_socket_init(&tx, &tc) == 0) {
+        KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", kl_datagram_local_port(&rx));
+        const char *msg = "peer-is-back";
+        KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+        if (kl_datagram_send(&tx, &m) == KL_DATAGRAM_ACCEPTED) {
+            pump_until(&ctx, &g_recv_calls, 1, 100);
+            got = g_recv_calls;
+        }
+        close_free(&ctx, &tx);
+    }
+    close_free(&ctx, &rx);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(connected);
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(probed);
+    EXPECT_EQ(1, got);
+    EXPECT_EQ(strlen("peer-is-back"), g_len);
+}
+
 UTEST_MAIN();
