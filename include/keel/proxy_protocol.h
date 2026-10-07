@@ -53,6 +53,9 @@ typedef struct {
 /**
  * @brief Parse a comma-separated CIDR list ("10.0.0.0/8,::1/128").
  *
+ * A v4-mapped IPv6 CIDR with a prefix of at least 96 bits ("::ffff:10.0.0.0/104")
+ * is stored as the IPv4 CIDR it names ("10.0.0.0/8").
+ *
  * @param s    The list string.
  * @param out  Output array.
  * @param cap  Capacity of @p out.
@@ -62,6 +65,12 @@ int kl_cidr_parse_list(const char *s, KlCidr *out, int cap);
 
 /**
  * @brief Test whether a socket address falls within any CIDR in the list.
+ *
+ * An IPv4-mapped IPv6 address (::ffff:a.b.c.d, how a dual-stack listener bound to
+ * :: reports an IPv4 peer) is matched as the IPv4 address a.b.c.d, against the
+ * IPv4 entries only, so one IPv4 trust list works on v4-only and dual-stack
+ * listeners alike. Any other IPv6 address matches only IPv6 entries.
+ *
  * @return 1 if matched, 0 otherwise.
  */
 int kl_cidr_match(const KlCidr *list, int count, const KlSockAddr *sa);
