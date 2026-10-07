@@ -440,6 +440,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   backlog makes `io_uring_enter` return -EBUSY (or -EAGAIN) until completions are reaped; the drain
   treated that as a fatal loop error. It now reaps, like a timeout or an interrupted wait, and the
   waiting submissions go in on the next drain.
+- **Readiness: a WebSocket frame sent from outside its connection's event goes out.** With the drain
+  enabled, a frame the socket would not take went into the drain, but WRITE interest was set only in
+  the transition after that connection's own event. A frame sent from another connection's
+  `on_message`, a timer or a thread-pool `done_fn` had no such event behind it, so the backlog sat
+  until the peer sent something, and with `ping_interval_ms` set a healthy receive-only subscriber
+  was failed with Close 1001. A send that leaves the drain pending now arms READ|WRITE itself, and a
+  send that finds a backlog moves it first (counting it as the peer's progress, and answering a
+  PONG owed meanwhile). Completion loops already flushed the drain from their send completions.
+- **Readiness: a stream written while its connection is suspended keeps moving.** Once the drain
+  held bytes, `kl_drain_write` only appended, never trying the socket, and a suspended connection has
+  no WRITE interest, so a stream written from a timer (an SSE or event feed) stopped after one
+  would-block until the resume, or until the 1 MiB cap failed the stream. `kl_drain_write` now first
+  writes what is pending until the socket would block, then appends behind what is left, firing no
+  callback.
 - **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
   that suspended on a second op and completed it at once registered the connection's socket again;
   when the response then closed the connection, it was released while still registered. poll and

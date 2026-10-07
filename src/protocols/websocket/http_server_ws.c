@@ -125,6 +125,41 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
 
 /* ── Send frame ──────────────────────────────────────────────────── */
 
+/* Readiness: the drain just took bytes the socket would not, so WRITE interest must be on to flush
+ * them. The dispatch transition after this connection's own event sets it, but a frame sent from
+ * elsewhere (another connection's on_message, a timer, a thread-pool done_fn) has no such event
+ * behind it, and the backlog would sit until the peer sent something. Inside the connection's own
+ * event the transition recomputes the same mask afterwards. A completion loop flushes the drain from
+ * its send completions instead. */
+static void ws_arm_write(KlHttpConn *c) {
+    if (!c || c->comp_driven || !c->stream.ctx) return;
+    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
+                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
+}
+
+static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
+                         size_t len);
+
+/* Move the drain's backlog onto the socket: what the peer has taken counts as its progress (the
+ * auto-ping's answer while it is behind a backlog), and once the backlog is out the PONG owed for
+ * a ping that arrived meanwhile goes. Shared by write-readiness and by a send that finds a backlog,
+ * which moves it first so the backlog does not wait on WRITE interest alone. 0 = drained, 1 = more
+ * pending, -1 = error (the drain's error is sticky). */
+static int ws_drain_backlog(KlWsServerConn *ws) {
+    size_t before = kl_drain_buffered(&ws->drain);
+    int r = kl_drain_flush(&ws->drain);
+    size_t after = kl_drain_buffered(&ws->drain);
+    if (after < before) ws->drain_moved += (uint64_t)(before - after);   /* the peer is reading */
+    if (r == 0 && ws->pong_owed) {
+        /* The output drained: answer the latest ping that arrived while it was backed up. A send
+         * that fails marks the connection for closing (ws_send_frame). */
+        ws->pong_owed = 0;
+        if (!ws->close_sent)
+            (void)ws_send_frame(ws, KL_WS_OP_PONG, (const char *)ws->pong_buf, ws->pong_len);
+    }
+    return r;
+}
+
 static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
                          size_t len) {
     uint8_t hdr[10];
@@ -159,12 +194,22 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
         /* A refused write (over max_size, or a socket error) can leave part of the frame on the wire:
          * the stream is broken and the drain's error sticky. Stop sending and close at the next sweep,
          * as for a frame the direct path cuts short. */
+        if (kl_drain_pending(&ws->drain) && ws_drain_backlog(ws) < 0) {
+            ws->close_sent = 1;
+            ws->close_deadline_ms = kl_monotonic_ms();
+            return -1;
+        }
+        if (ws->close_sent && opcode != KL_WS_OP_CLOSE)
+            return -1;   /* the owed PONG just failed: nothing more goes behind it */
+        int was_pending = kl_drain_pending(&ws->drain);
         if (kl_drain_write(&ws->drain, (const char *)hdr, hdr_len) < 0 ||
             (len > 0 && kl_drain_write(&ws->drain, data, len) < 0)) {
             ws->close_sent = 1;
             ws->close_deadline_ms = kl_monotonic_ms();
             return -1;
         }
+        if (!was_pending && kl_drain_pending(&ws->drain))
+            ws_arm_write(ws->conn);
         return 0;
     }
 
@@ -680,19 +725,7 @@ read_more: ;
 int kl_ws_server_on_writable(KlHttpConn *c) {
     if (!c->ws || !c->ws->drain_enabled)
         return KL_HTTP_CONN_WEBSOCKET;
-    KlWsServerConn *ws = c->ws;
-    size_t before = kl_drain_buffered(&ws->drain);
-    int r = kl_drain_flush(&ws->drain);
-    size_t after = kl_drain_buffered(&ws->drain);
-    if (after < before) ws->drain_moved += (uint64_t)(before - after);   /* the peer is reading */
-    if (r < 0) return KL_HTTP_CONN_CLOSED;
-    if (r == 0 && ws->pong_owed) {
-        /* The output drained: answer the latest ping that arrived while it was backed up. A send
-         * that fails marks the connection for closing (ws_send_frame). */
-        ws->pong_owed = 0;
-        if (!ws->close_sent)
-            (void)ws_send_frame(ws, KL_WS_OP_PONG, (const char *)ws->pong_buf, ws->pong_len);
-    }
+    if (ws_drain_backlog(c->ws) < 0) return KL_HTTP_CONN_CLOSED;
     return KL_HTTP_CONN_WEBSOCKET;
 }
 

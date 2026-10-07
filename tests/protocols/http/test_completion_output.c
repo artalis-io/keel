@@ -6,7 +6,8 @@
  * queue. Plaintext output did not: a streamed response, WebSocket frames and HTTP/2 frames were sent
  * with a synchronous send on the loop thread, and io_uring and IOCP accepted sockets are blocking, so
  * a client that stops reading stalled every connection on the loop. Readiness loops use WRITE
- * interest and pass these tests either way; they exist for the completion lanes.
+ * interest and pass most of these tests either way; those exist for the completion lanes. The last
+ * two are readiness cases: output buffered while the connection had no WRITE interest.
  */
 #include "utest.h"
 #include <keel/keel.h>
@@ -14,6 +15,8 @@
 #include "net_compat.h"
 #include "mock_tls.h"
 #include "event_caps.h"
+#include "http_conn_internal.h"          /* white-box: the server-side socket, to shrink its send buffer */
+#include "websocket_server_internal.h"   /* white-box: the WebSocket's connection */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1143,6 +1146,217 @@ UTEST(completion_output, one_oversized_tls_websocket_write_cannot_cross_the_queu
     kl_plat_thread_join(&tid);
     kl_http_server_free(&twso_srv);
     ASSERT_EQ(-1, g_oversized_frame_rc);                   /* was (completion): taken whole */
+}
+
+/* A small send buffer on the server's side of an accepted connection, so a client that pauses or
+ * reads slowly makes the server's sends would-block (Windows loopback otherwise takes far more). */
+static void shrink_sndbuf(KlHttpConn *c) {
+    int sb = 4096;
+    int sfd = (int)c->stream.fd;
+    (void)setsockopt(sfd, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb);
+}
+
+/* ── A WebSocket backlog queued from another connection's event goes out ────────────────────────
+ * Readiness: connection A's on_message sends a backlog to connection B, whose client reads steadily
+ * and sends nothing. The frames that would-block went into B's drain, but WRITE interest was set only
+ * after B's own event, and B had none: the backlog sat until B's client sent something. */
+#define XW_FRAME  (32 * 1024)                              /* 4-byte frame header each */
+#define XW_FRAMES 64                                       /* 2 MiB */
+static char g_xw_frame[XW_FRAME];
+static KlWsServerConn *g_xw_conns[2];
+static int g_xw_opened, g_xw_sent;
+static KlHttpServer xw_srv;
+
+static void xw_open(KlWsServerConn *ws, void *ud) {
+    (void)ud;
+    (void)kl_ws_server_enable_drain(ws, 0);                /* unlimited: the whole backlog is kept */
+    shrink_sndbuf(ws->conn);
+    if (g_xw_opened < 2) g_xw_conns[g_xw_opened] = ws;
+    g_xw_opened++;
+}
+
+static void xw_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
+    (void)data; (void)len; (void)is_binary; (void)ud;
+    if (ws != g_xw_conns[1] || !g_xw_conns[0]) return;     /* A asks for B's backlog */
+    memset(g_xw_frame, 'X', sizeof g_xw_frame);
+    for (int i = 0; i < XW_FRAMES; i++) {
+        if (kl_ws_server_send_binary(g_xw_conns[0], g_xw_frame, sizeof g_xw_frame) < 0) break;
+        g_xw_sent++;
+    }
+}
+
+static void xw_close(KlWsServerConn *ws, uint16_t code, const char *reason, size_t len, void *ud) {
+    (void)code; (void)reason; (void)len; (void)ud;
+    for (int i = 0; i < 2; i++)
+        if (g_xw_conns[i] == ws) g_xw_conns[i] = NULL;
+}
+
+/* Upgrade on a fresh connection; the fd once the 101 is read (a byte at a time: nothing past it). */
+static int ws_connect_upgraded(int port, int rcvbuf) {
+    int fd = connect_rcvbuf(port, rcvbuf);
+    if (fd < 0) return -1;
+    const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                     "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                     "Sec-WebSocket-Version: 13\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    char head[1024];
+    size_t head_len = 0;
+    head[0] = '\0';
+    uint64_t start = kl_monotonic_ms();
+    while (kl_monotonic_ms() - start < 2000 && !strstr(head, "\r\n\r\n")) {
+        if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+        char ch;
+        if (kl_test_sockread(fd, &ch, 1) != 1) break;
+        if (head_len < sizeof head - 1) { head[head_len++] = ch; head[head_len] = '\0'; }
+    }
+    if (!strstr(head, " 101 ")) { kl_test_closesock(fd); return -1; }
+    return fd;
+}
+
+UTEST(completion_output, a_websocket_backlog_sent_from_another_connection_goes_out) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8 };
+    ASSERT_EQ(0, kl_http_server_init(&xw_srv, &cfg));
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = xw_open;
+    wcfg.callbacks.on_message = xw_message;
+    wcfg.callbacks.on_close = xw_close;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&xw_srv, "/ws", &wcfg));
+    g_xw_conns[0] = g_xw_conns[1] = NULL;
+    g_xw_opened = 0;
+    g_xw_sent = 0;
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &xw_srv);
+    wait_for_bind(&xw_srv);
+    int port = xw_srv.bound_port;
+
+    size_t want = (size_t)XW_FRAMES * (XW_FRAME + 4), got = 0;
+    int b = ws_connect_upgraded(port, 4096);               /* the subscriber: reads, never sends */
+    for (int i = 0; i < 200 && g_xw_opened < 1; i++) kl_test_sleep_ms(10);
+    int a = ws_connect_upgraded(port, 0);                  /* the publisher */
+    for (int i = 0; i < 200 && g_xw_opened < 2; i++) kl_test_sleep_ms(10);
+    if (a >= 0 && b >= 0) {
+        static const uint8_t go[] = { 0x81, 0x82, 1, 2, 3, 4, 'g' ^ 1, 'o' ^ 2 };   /* masked "go" */
+        (void)kl_test_sockwrite(a, (const char *)go, sizeof go);
+        static char buf[16 * 1024];
+        uint64_t start = kl_monotonic_ms(), last = start;
+        while (got < want && kl_monotonic_ms() - start < 10000 && kl_monotonic_ms() - last < 2000) {
+            if (kl_test_poll1(b, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(b, buf, sizeof buf);
+            if (n <= 0) break;
+            got += (size_t)n;
+            last = kl_monotonic_ms();
+            kl_test_sleep_ms(1);                           /* slow but steady */
+        }
+    }
+    if (a >= 0) kl_test_closesock(a);
+    if (b >= 0) kl_test_closesock(b);
+    kl_http_server_stop(&xw_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&xw_srv);
+    printf("  cross-connection backlog: %zu of %zu bytes, %d frames queued\n", got, want, g_xw_sent);
+    ASSERT_TRUE(a >= 0 && b >= 0);
+    ASSERT_EQ(g_xw_sent, XW_FRAMES);
+    ASSERT_EQ(got, want);                                  /* was (readiness): stalled in B's drain */
+}
+
+/* ── A plaintext stream written while suspended keeps moving ────────────────────────────────────
+ * Readiness: a handler starts a stream, suspends, and pushes chunks from a timer (an event feed).
+ * The client pauses reading, then reads steadily. Once a write would-block, the drain held bytes,
+ * and a later write only appended to it without trying the socket; the suspended connection has no
+ * WRITE interest, so nothing more went out until the resume (or the drain's cap failed the stream). */
+#define SF_CHUNK  2048
+#define SF_CHUNKS 60
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int next, done, failed;
+    uint64_t resumed_ms;
+} SfStream;
+static SfStream g_sf;
+static KlHttpServer sf_srv;
+
+static void sf_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_sf.resumed_ms = kl_monotonic_ms();
+    kl_http_response_end_stream(g_sf.res);
+}
+static void sf_push(void *ud) {
+    (void)ud;
+    if (g_sf.done || g_sf.failed) return;
+    if (g_sf.next < SF_CHUNKS) {                           /* a numbered chunk */
+        char chunk[SF_CHUNK];
+        memset(chunk, '.', sizeof chunk);
+        int hl = snprintf(chunk, sizeof chunk, "<D%03d>", g_sf.next);
+        chunk[hl] = '.';
+        if (g_sf.w(g_sf.wc, chunk, sizeof chunk) < 0) { g_sf.failed = 1; return; }
+        g_sf.next++;
+    } else if (g_sf.w(g_sf.wc, "h;", 2) < 0) {             /* then a heartbeat */
+        g_sf.failed = 1;
+        return;
+    }
+    (void)kl_timer_add(kl_http_server_event_ctx(&sf_srv), 20, sf_push, NULL);
+}
+static void sf_finish(void *ud) {
+    (void)ud;
+    g_sf.done = 1;
+    kl_async_complete(&sf_srv, &g_sf.op);
+}
+static void handle_suspended_feed(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_sf, 0, sizeof g_sf);
+    g_sf.res = res;
+    KlHttpConn *c = kl_http_request_conn(req);
+    shrink_sndbuf(c);
+    if (kl_http_response_begin_stream(res, 200, &g_sf.w, &g_sf.wc) < 0) return;
+    g_sf.op.on_resume = sf_resume;
+    if (kl_async_suspend(&sf_srv, c, &g_sf.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&sf_srv), 20, sf_push, NULL);
+    (void)kl_timer_add(kl_http_server_event_ctx(&sf_srv), 6000, sf_finish, NULL);
+}
+
+UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&sf_srv, &cfg));
+    kl_http_server_route(&sf_srv, "GET", "/feed", handle_suspended_feed, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &sf_srv);
+    wait_for_bind(&sf_srv);
+    char last[16];
+    snprintf(last, sizeof last, "<D%03d>", SF_CHUNKS - 1);
+    static char buf[256 * 1024];
+    size_t have = 0;
+    buf[0] = '\0';
+    int seen_last = 0;
+    int fd = connect_rcvbuf(sf_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(500);                             /* a pause: the server's sends block */
+        uint64_t start = kl_monotonic_ms();                /* then steady reading, well before */
+        while (kl_monotonic_ms() - start < 4000) {         /* the resume at 6 s */
+            if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, buf + have, sizeof buf - 1 - have);
+            if (n <= 0) break;
+            have += (size_t)n;
+            buf[have] = '\0';
+            if (strstr(buf, last)) { seen_last = 1; break; }
+            if (have > sizeof buf - 4096) break;
+        }
+        kl_test_closesock(fd);
+    }
+    uint64_t resumed_ms = g_sf.resumed_ms;
+    int pushed = g_sf.next, failed = g_sf.failed;
+    kl_http_server_stop(&sf_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&sf_srv);
+    printf("  suspended feed: %zu bytes read, %d of %d chunks pushed, failed %d\n",
+           have, pushed, SF_CHUNKS, failed);
+    ASSERT_EQ(resumed_ms, (uint64_t)0);                    /* all of it while still suspended */
+    ASSERT_FALSE(failed);
+    ASSERT_TRUE(seen_last);                                /* was (readiness): stuck until resume */
 }
 
 UTEST_MAIN();

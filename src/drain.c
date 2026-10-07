@@ -72,18 +72,48 @@ static int drain_ensure(KlDrain *d, size_t need) {
     return 0;
 }
 
+/* Write buffered bytes until the writer would block or the buffer is empty. Fires no callback:
+ * the caller decides whether to notify. Returns -1 on a writer error (sticky), else 0. */
+static int drain_push(KlDrain *d) {
+    while (d->buf_len > 0) {
+        kl_ssize_t n = d->write_fn(d->buf, d->buf_len, d->write_ctx);
+        if (n < 0) {
+            d->error = 1;
+            return -1;
+        }
+        if (n == 0) break;  /* would-block, more pending */
+
+        size_t written = (size_t)n;
+        if (written > d->buf_len) {
+            d->error = 1;
+            return -1;
+        }
+        d->buf_len -= written;
+        if (d->buf_len > 0)
+            memmove(d->buf, d->buf + written, d->buf_len);
+    }
+    return 0;
+}
+
 int kl_drain_write(KlDrain *d, const char *data, size_t len) {
     if (!d) return -1;
     if (d->error) return -1;
     if (len == 0) return 0;
     if (!data) return -1;
 
-    /* If buffer non-empty, must append to preserve ordering */
+    /* Bytes pending: try to move them first. Nothing else may be about to: a stream on a suspended
+     * connection, or a frame sent from outside its connection's own event, has no WRITE interest
+     * behind it, and a write that only appended would leave the backlog (and everything after it)
+     * waiting for an unrelated flush. No callback fires here: the caller is the producer, mid-write. */
     if (d->buf_len > 0) {
-        if (drain_ensure(d, len) < 0) return -1;
-        memcpy(d->buf + d->buf_len, data, len);
-        d->buf_len += len;
-        return 0;
+        if (drain_push(d) < 0) return -1;
+        if (d->buf_len > 0) {
+            /* Still pending: append behind it to preserve ordering */
+            if (drain_ensure(d, len) < 0) return -1;
+            memcpy(d->buf + d->buf_len, data, len);
+            d->buf_len += len;
+            return 0;
+        }
     }
 
     /* Try direct write */
@@ -137,23 +167,7 @@ int kl_drain_flush(KlDrain *d) {
     if (d->buf_len == 0) return 0;
 
     size_t prev_len = d->buf_len;
-    while (d->buf_len > 0) {
-        kl_ssize_t n = d->write_fn(d->buf, d->buf_len, d->write_ctx);
-        if (n < 0) {
-            d->error = 1;
-            return -1;
-        }
-        if (n == 0) break;  /* would-block, more pending */
-
-        size_t written = (size_t)n;
-        if (written > d->buf_len) {
-            d->error = 1;
-            return -1;
-        }
-        d->buf_len -= written;
-        if (d->buf_len > 0)
-            memmove(d->buf, d->buf + written, d->buf_len);
-    }
+    if (drain_push(d) < 0) return -1;
 
     /* State fully updated: now fire at most one callback (may refill on_writable). */
     return drain_notify(d, prev_len);

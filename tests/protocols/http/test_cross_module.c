@@ -264,11 +264,12 @@ UTEST(cross, compress_drain_pipeline) {
 UTEST(cross, compress_drain_backpressure) {
     KlAllocator alloc = kl_allocator_default();
 
-    /* Writer blocks on first 2 calls, then accepts */
+    /* Writer blocks until the flush below, then accepts. (A drain write that finds bytes pending
+     * tries them first, so a writer that came back mid-feed would take them there.) */
     MockWriter writer;
     memset(&writer, 0, sizeof(writer));
-    writer.mode = 2;          /* would-block initially */
-    writer.switch_after = 1;  /* accept after 1 blocked call */
+    writer.mode = 2;           /* would-block */
+    writer.switch_after = -1;
 
     KlDrain drain;
     kl_drain_init(&drain, mock_write, &writer, &alloc);
@@ -288,6 +289,7 @@ UTEST(cross, compress_drain_backpressure) {
     ASSERT_EQ(0, (int)writer.len);
 
     /* Flush when writer becomes available */
+    writer.mode = 0;
     int flush_rc = kl_drain_flush(&drain);
     ASSERT_EQ(0, flush_rc);
     ASSERT_EQ(0, kl_drain_pending(&drain));

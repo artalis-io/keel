@@ -247,6 +247,44 @@ UTEST(drain, write_while_pending) {
     kl_drain_free(&d);
 }
 
+/* A write while bytes are pending first tries to move them: a producer with no WRITE interest behind
+ * it (a stream on a suspended connection, a frame sent from another connection's event) would
+ * otherwise only ever append until something else flushed. Order is kept, and the write fires no
+ * callback (the producer is the one calling). */
+UTEST(drain, write_while_pending_tries_the_backlog_first) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block */
+
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    DrainCbCtx cb = {0};
+    kl_drain_on_drain(&d, drain_cb, &cb);
+
+    ASSERT_EQ(kl_drain_write(&d, "aaa", 3), 0);
+    ASSERT_EQ(d.buf_len, (size_t)3);
+
+    w.mode = 0;  /* the socket takes bytes again */
+    ASSERT_EQ(kl_drain_write(&d, "bbb", 3), 0);
+    ASSERT_EQ(w.len, (size_t)6);                 /* was 0: "bbb" appended behind "aaa", unsent */
+    ASSERT_EQ(memcmp(w.buf, "aaabbb", 6), 0);
+    ASSERT_EQ(d.buf_len, (size_t)0);
+    ASSERT_EQ(cb.count, 0);
+
+    /* Backlog moves only in part: the new bytes go behind what is left, nothing overtakes. */
+    w.mode = 2;
+    ASSERT_EQ(kl_drain_write(&d, "cccc", 4), 0);
+    w.mode = 1;  /* half of each write */
+    ASSERT_EQ(kl_drain_write(&d, "dd", 2), 0);
+    w.mode = 0;
+    ASSERT_EQ(kl_drain_flush(&d), 0);
+    ASSERT_EQ(w.len, (size_t)12);
+    ASSERT_EQ(memcmp(w.buf, "aaabbbccccdd", 12), 0);
+
+    kl_drain_free(&d);
+}
+
 UTEST(drain, pending_and_buffered) {
     KlAllocator a = kl_allocator_default();
     MockWriter w;
