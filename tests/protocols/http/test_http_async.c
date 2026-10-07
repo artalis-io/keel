@@ -1240,6 +1240,7 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
 static char g_aw_body[AW_CAP];
 static size_t g_aw_len;
 static int g_aw_delay_ms;
+static int g_aw_pause;                                   /* pause at dispatch, resume in on_resume */
 static KlAsyncOp g_aw_op;
 static KlHttpRequest *g_aw_req;
 
@@ -1282,6 +1283,7 @@ static void aw_tick(void *ud) { (void)ud; }              /* wakes the loop: the 
 static void aw_resume(KlAsyncOp *op, void *ud) {
     (void)op; (void)ud;
     kl_http_request_await_body(g_aw_req);
+    if (g_aw_pause) kl_http_request_resume_body(g_aw_req);
     (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 100, aw_tick, NULL);
 }
 static void aw_complete_timer(void *ud) {
@@ -1294,6 +1296,7 @@ static void handle_aw(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     g_aw_len = 0;
     memset(&g_aw_op, 0, sizeof g_aw_op);
     g_aw_op.on_resume = aw_resume;
+    if (g_aw_pause) kl_http_request_pause_body(req);
     if (kl_async_suspend(&end_srv, kl_http_request_conn(req), &g_aw_op) < 0) return;
     (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), (uint64_t)g_aw_delay_ms,
                        aw_complete_timer, NULL);
@@ -1317,6 +1320,7 @@ static int aw_exchange(int port, const char *head, int gap_ms, const char *rest,
 
 UTEST(async, suspend_at_dispatch_then_await_body_reads_the_whole_body) {
     g_aw_delay_ms = 50;
+    g_aw_pause = 0;
     end_start();
     char buf[1024];
     int ok = aw_exchange(end_srv.bound_port,
@@ -1333,6 +1337,7 @@ UTEST(async, suspend_at_dispatch_then_await_body_reads_the_whole_body) {
 
 UTEST(async, suspend_at_dispatch_then_await_chunked_body) {
     g_aw_delay_ms = 50;
+    g_aw_pause = 0;
     end_start();
     char buf[1024], buf2[1024];
     const char *head = "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
@@ -1347,6 +1352,7 @@ UTEST(async, suspend_at_dispatch_then_await_chunked_body) {
 
 UTEST(async, time_suspended_is_not_charged_to_the_body_deadline) {
     g_aw_delay_ms = 900;                                   /* suspended longer than the deadline */
+    g_aw_pause = 0;
     end_start_with(600);
     char buf[1024];
     int ok = aw_exchange(end_srv.bound_port,
@@ -1355,6 +1361,29 @@ UTEST(async, time_suspended_is_not_charged_to_the_body_deadline) {
     end_stop();
     ASSERT_TRUE(strstr(buf, "408") == NULL);               /* was: 408 at the first sweep after resume */
     ASSERT_TRUE(ok);
+}
+
+/* ── The kept body bytes are fed once when the resume un-pauses the body read ───────────────────
+ * The handler pauses the body read at dispatch and suspends; on_resume awaits the body and resumes
+ * the read. On a completion loop that resume posted a receive behind the kept bytes before they were
+ * fed (on_resume runs before the drive), so the receive appended to them and the body core took the
+ * kept bytes a second time: Content-Length echoed a duplicated prefix and lost the tail; chunked
+ * decoded the kept chunk twice. With TLS the drive read over them instead. */
+UTEST(async, kept_body_bytes_are_fed_once_when_the_resume_unpauses) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 1;
+    end_start();
+    char buf[1024], buf2[1024];
+    int cl = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 300,
+                         " world", "[hello world]", buf, sizeof buf);
+    int ch = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+                         300, "6\r\n world\r\n0\r\n\r\n", "[hello world]", buf2, sizeof buf2);
+    end_stop();
+    g_aw_pause = 0;
+    ASSERT_TRUE(cl);                                       /* was (completion): "[hellohello ]" */
+    ASSERT_TRUE(ch);                                       /* was (completion): "[hellohello world]" */
 }
 
 UTEST_MAIN();
