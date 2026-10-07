@@ -5,6 +5,7 @@
 #include <keel/allocator.h>
 #include <keel/http_server.h>
 #include <keel/event_ctx.h>
+#include <keel/socket.h>
 #include <string.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #if !defined(_MSC_VER)
@@ -152,6 +153,44 @@ UTEST(client, async_https_tls_without_factory) {
     kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     ASSERT_TRUE(refused);
+}
+
+/* A start whose configured provider the ctx's loop cannot drive is refused, and the refusal leaves
+ * the caller's shared ctx as it was. The provider was written to ctx->sockets before the check, so
+ * every later start on the ctx without a provider of its own was refused too (and every other ctx
+ * user went through the wrong provider). No NATIVE_FD: a readiness loop cannot watch its handles. */
+static const KlSocketOps g_unwatchable_ops = { .name = "unwatchable" };
+static const KlSocketProvider g_unwatchable_provider = {
+    &g_unwatchable_ops, NULL, KL_SOCK_CAP_WRITEV, NULL,
+};
+
+UTEST(client, refused_provider_leaves_ctx_sockets_unchanged) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    const KlSocketProvider *before = ev.sockets;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_unwatchable_provider;
+
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://127.0.0.1:1/",
+                                           NULL, 0, NULL, 0, NULL, NULL);
+    int refused = (c == NULL);
+    /* A completion loop adopts its native provider instead of refusing; only a refusal must leave
+     * the ctx untouched. */
+    const KlSocketProvider *after = ev.sockets;
+    kl_http_client_free(c);
+
+    /* A following start that brings no provider of its own runs on the ctx's provider. */
+    memset(&cfg, 0, sizeof cfg);
+    KlHttpClient *c2 = kl_http_client_start(&ev, &a, &cfg, "GET", "http://127.0.0.1:1/",
+                                            NULL, 0, NULL, 0, NULL, NULL);
+    int second_ok = (c2 != NULL);
+    kl_http_client_free(c2);
+    kl_event_ctx_free(&ev);
+    if (refused) ASSERT_TRUE(after == before);   /* was: the unwatchable provider */
+    ASSERT_TRUE(after != &g_unwatchable_provider);
+    ASSERT_TRUE(second_ok);                      /* was: refused, the ctx kept the bad provider */
 }
 
 /* ── kl_http_client_error/response on NULL ────────────────────────────── */

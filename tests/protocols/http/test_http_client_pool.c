@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/http_client_pool.h>
+#include <keel/socket.h>
 
 #include <limits.h>
 #include <string.h>
@@ -59,6 +60,45 @@ UTEST(cpool, pooled_https_tls_without_factory) {
     kl_http_client_pool_free(&pool);
     kl_event_ctx_free(&ev);
     ASSERT_TRUE(refused);
+}
+
+/* A pooled start whose configured provider the ctx's loop cannot drive is refused, and the refusal
+ * leaves the caller's shared ctx as it was: the provider was written to ctx->sockets before the
+ * check, so every later start on the ctx without a provider of its own was refused too. */
+static const KlSocketOps g_unwatchable_ops = { .name = "unwatchable" };
+static const KlSocketProvider g_unwatchable_provider = {
+    &g_unwatchable_ops, NULL, KL_SOCK_CAP_WRITEV, NULL,     /* no NATIVE_FD: not watchable */
+};
+
+UTEST(cpool, refused_provider_leaves_ctx_sockets_unchanged) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, &ev), 0);
+    const KlSocketProvider *before = ev.sockets;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_unwatchable_provider;
+
+    KlHttpClient *c = kl_http_client_start_pooled(&pool, &ev, &a, &cfg, "GET",
+                                                  "http://127.0.0.1:1/", NULL, 0, NULL, 0,
+                                                  NULL, NULL);
+    int refused = (c == NULL);
+    const KlSocketProvider *after = ev.sockets;  /* a completion loop adopts its native one */
+    kl_http_client_free(c);
+
+    memset(&cfg, 0, sizeof cfg);                 /* no provider of its own: the ctx's is used */
+    KlHttpClient *c2 = kl_http_client_start_pooled(&pool, &ev, &a, &cfg, "GET",
+                                                   "http://127.0.0.1:1/", NULL, 0, NULL, 0,
+                                                   NULL, NULL);
+    int second_ok = (c2 != NULL);
+    kl_http_client_free(c2);
+    kl_http_client_pool_free(&pool);
+    kl_event_ctx_free(&ev);
+    if (refused) ASSERT_TRUE(after == before);   /* was: the unwatchable provider */
+    ASSERT_TRUE(after != &g_unwatchable_provider);
+    ASSERT_TRUE(second_ok);                      /* was: refused, the ctx kept the bad provider */
 }
 
 UTEST(cpool, init_custom) {
