@@ -225,6 +225,10 @@ static int send_pump(KlDgramSend *s) {
         } else if (r == KL_DGRAM_SUBMIT_WOULDBLOCK) {
             s->inflight_n = 0;    /* un-arm; keep queued (a writable event resumes via flush) */
             return 0;
+        } else if (r == KL_DGRAM_SUBMIT_DROPPED) {
+            s->inflight_n = 0;    /* un-arm; this datagram was refused on its own account */
+            send_drop_head(s, 0); /* drop + report it, keep draining the rest */
+            continue;
         } else {                  /* KL_DGRAM_SUBMIT_ERROR */
             s->inflight_n = 0;    /* un-arm */
             if (s->ring[s->head]->recoverable) {
@@ -318,12 +322,15 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
 
     /* Readiness fast path: an empty queue tries a direct synchronous send with NO slot consumed, so
      * a synchronously-sent datagram never creates a transient non-empty→empty transition. A
-     * readiness provider returns DONE / WOULD_BLOCK / ERROR (never INFLIGHT). */
+     * readiness provider returns DONE / WOULD_BLOCK / DROPPED / ERROR (never INFLIGHT). */
     if (!s->completion && s->count == 0) {
         KlDgramSubmitResult r = s->submit(s->submit_ctx, m->data, m->len,
                                           addr_or_null(m->peer), addr_or_null(m->local), m->tos);
         if (r == KL_DGRAM_SUBMIT_DONE)  { status = KL_DATAGRAM_ACCEPTED; goto leave; }
         if (r == KL_DGRAM_SUBMIT_ERROR) { s->err = 1; status = KL_DATAGRAM_ERROR; goto leave; }
+        /* Refused for a reason of this datagram alone (no route, ICMP report, full queue, ...): the
+         * call fails, nothing was taken, and the socket keeps sending (no sticky error). */
+        if (r == KL_DGRAM_SUBMIT_DROPPED) { status = KL_DATAGRAM_ERROR; goto leave; }
         /* WOULD_BLOCK: queue it below, UNLESS the hook reentrantly errored / began closing (still
          * inside our frame, so detachment is deferred). NEVER enqueue after closing began. */
         if (s->err)     { status = KL_DATAGRAM_ERROR;  goto leave; }
@@ -455,7 +462,8 @@ int kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_ca
                 send_retire_head(s, 0);            /* the head was fine after all; retire, continue */
             } else if (r == KL_DGRAM_SUBMIT_WOULDBLOCK) {
                 break;                             /* head can't go now; retain, re-arm */
-            } else if (s->ring[s->head]->recoverable) {   /* hard error on a batch head → recoverable drop */
+            } else if (r == KL_DGRAM_SUBMIT_DROPPED || s->ring[s->head]->recoverable) {
+                /* refused on its own account, or a hard error on a batch head → recoverable drop */
                 send_drop_head(s, 0);              /* release the slot + edges + report, NOT sticky s->err */
             } else {                               /* non-recoverable head hard error → sticky (defensive) */
                 s->err = 1;
@@ -480,9 +488,10 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
         s->submit_retired = 1;                     /* inline: tell the pump the op retired */
     int recov = s->ring[s->head] ? s->ring[s->head]->recoverable : 0;   /* the in-flight head's provenance */
     send_retire_head(s, 1);                         /* inflight_n 1 → 0 (the op physically retired) */
-    if (!ok) {
-        if (recov) { s->dropped++; if (s->on_drop) s->on_drop(s->drop_ctx); }  /* batch: recoverable drop */
-        else       s->err = 1;                     /* ordinary send: sticky failure */
+    if (ok != KL_DGRAM_SEND_OK) {
+        /* A datagram refused on its own account, or any failure of a batch slot: a recoverable drop. */
+        if (recov || ok == KL_DGRAM_SEND_DROPPED) { s->dropped++; if (s->on_drop) s->on_drop(s->drop_ctx); }
+        else s->err = 1;                           /* ordinary send, the send side failed: sticky */
     }
     if (!s->err && !s->in_submit)
         (void)send_pump(s);                        /* async path pumps next; inline lets the outer pump continue */

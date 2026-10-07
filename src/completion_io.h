@@ -114,7 +114,11 @@ int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
 
 /* Post one overlapped datagram send on a completion loop from a neutral descriptor. The
  * backend COPIES the payload + dest/src/tos before a successful return; the completion surfaces a
- * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Stubbed in completion_absent.c on non-completion builds. */
+ * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Returns 0 (posted), -1 (failed: the send side is
+ * unusable), or KL_COMP_POST_DROPPED: the send failed at issue for a reason of that one datagram (no
+ * route, a refusal, a full queue, ...; the backend classifies its own error), nothing was taken and
+ * no completion follows, and the socket is fine. Stubbed in completion_absent.c on non-completion builds. */
+#define KL_COMP_POST_DROPPED 1
 int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op);
 
 /* Request cancellation of the outstanding datagram op(s) of `kind` belonging to `life`. The

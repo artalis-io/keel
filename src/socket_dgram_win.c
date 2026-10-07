@@ -15,6 +15,7 @@
 #include <keel/socket.h>
 #include "sockaddr_native.h"   /* KlSockAddr <-> Winsock sockaddr at the boundary */
 #include "udp_cmsg_win.h"
+#include "sockcompat.h"        /* kl_wsa_set_errno: the seam's Winsock errno translation */
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */      /* kl_udp_win_get_recvmsg / kl_udp_win_parse_local (shared w/ IOCP) */
 
 #include <windows.h>
@@ -37,10 +38,13 @@
 /* Shared with the IOCP backend (udp_cmsg_win.c): one cached WSASendMsg fetch, no drift. */
 static LPFN_WSASENDMSG dgram_get_sendmsg(SOCKET s) { return kl_udp_win_get_sendmsg(s); }
 
-/* WSAEWOULDBLOCK -> EWOULDBLOCK (the datagram core queues); anything else -> EIO (error path). */
+/* WSAEWOULDBLOCK -> EWOULDBLOCK (the datagram core queues); anything else through the seam's Winsock
+ * errno translation, so a send refused for one datagram (WSAENETUNREACH, WSAEACCES, WSAENOBUFS, ...)
+ * keeps its identity for the per-datagram classification; an unknown code becomes EIO (fatal). */
 static void dgram_set_errno_from_wsa(void) {
     int e = WSAGetLastError();
-    errno = (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) ? EWOULDBLOCK : EIO;
+    if (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) errno = EWOULDBLOCK;
+    else                                            kl_wsa_set_errno();
 }
 
 /* Delegates to the shared Winsock builder (udp_cmsg_win.c): one implementation shared with the

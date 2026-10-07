@@ -52,6 +52,7 @@ typedef struct {
     KlSockAddr          send_dest;
     int                 send_posted;        /* count of send posts */
     int                 send_fail;          /* 1 → next post_dgram_send returns -1 (took nothing) */
+    int                 send_post_rc;       /* nonzero → post_dgram_send returns it (took nothing) */
     /* last posted recv op */
     struct KlCompLife *recv_life;
     void               *recv_buf;
@@ -69,6 +70,7 @@ static MockComp g_mc;
 static int mc_post_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
     (void)ctx;
     if (g_mc.send_fail) return -1;   /* transfer-only-on-success: caller releases its ref */
+    if (g_mc.send_post_rc) return g_mc.send_post_rc;
     if (!g_mc.first_post_seq) g_mc.first_post_seq = ++g_mc.seq;
     g_mc.send_life = op->life;       /* the transferred ref rides the op */
     g_mc.send_len  = op->len < sizeof(g_mc.send_copy) ? op->len : sizeof(g_mc.send_copy);
@@ -121,6 +123,13 @@ static void drive_send(int ok) {
     struct KlCompLife *life = g_mc.send_life;
     KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
     ev.kind = KL_COMP_DGRAM_SEND; ev.ok = ok; ev.life = life;
+    kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
+}
+/* A failed send the backend judged a refusal of that one datagram (ev.dropped). */
+static void drive_send_dropped(void) {
+    struct KlCompLife *life = g_mc.send_life;
+    KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
+    ev.kind = KL_COMP_DGRAM_SEND; ev.ok = 0; ev.dropped = 1; ev.life = life;
     kl_comp_life_dispatch(life)(kl_comp_life_target(life), &ev);
 }
 static void drive_recv(const void *data, size_t len, const KlSockAddr *peer, int truncated) {
@@ -1342,6 +1351,64 @@ UTEST(datagram_public, completion_without_dgram_seam_refuses_socket_init) {
     KlError err = kl_datagram_last_error(&dg);
     ASSERT_EQ(-1, rc);                       /* accepted (the defect) is left as is, see above */
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)err);
+}
+
+/* ── A completion send refused for one datagram is dropped, not the send side ──────────────────── */
+
+/* The backend reports the posted send failed for a reason of that datagram (ev.dropped): it is counted
+ * as a drop with last_error set, the queued datagram behind it is posted, and later sends go out. */
+UTEST(datagram_public, completion_send_dropped_is_not_sticky) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m1 = { .data = "AAAA", .len = 4, .peer = &d, .tos = -1 };
+    KlDatagramMessage m2 = { .data = "BB",   .len = 2, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m1));
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m2));
+    ASSERT_EQ(1, g_mc.send_posted);
+
+    drive_send_dropped();
+    ASSERT_EQ((uint64_t)1, kl_datagram_dropped(&dg));
+    ASSERT_EQ((int)KL_ERR_IO, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(2, g_mc.send_posted);                          /* the next one was posted */
+    drive_send(1);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m1));
+    ASSERT_EQ(3, g_mc.send_posted);
+    drive_send(1);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* The backend refuses the datagram at the post (KL_COMP_POST_DROPPED: failed at issue for a reason of
+ * that datagram, nothing taken): the datagram is dropped and reported; the next send is posted. */
+UTEST(datagram_public, completion_post_dropped_is_not_sticky) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m = { .data = "AAAA", .len = 4, .peer = &d, .tos = -1 };
+
+    g_mc.send_post_rc = KL_COMP_POST_DROPPED;
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));   /* taken, then dropped */
+    ASSERT_EQ((uint64_t)1, kl_datagram_dropped(&dg));
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));
+    ASSERT_EQ(0, g_mc.send_posted);
+
+    g_mc.send_post_rc = 0;
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));
+    ASSERT_EQ(1, g_mc.send_posted);
+    drive_send(1);
+
+    g_mc.send_fail = 1;                                       /* -1: the send side itself failed */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&dg, &m));    /* sticky */
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
 UTEST_MAIN();

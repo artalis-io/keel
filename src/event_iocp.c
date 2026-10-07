@@ -156,6 +156,8 @@ typedef struct KlIocpOp {
     int                pipe_cancelled;   /* cancel requested: finish, never re-issue */
     int                dg_cancelled;     /* DGRAM_RECV: cancel requested; an ICMP report then
                                           * completes the op instead of re-issuing it */
+    int                dg_requeued;      /* DGRAM_RECV: no receive is outstanding; the op queued its
+                                          * own zero-byte packet so the drain issues it again */
     struct KlIocpOp   *g_next;
     struct KlIocpOp  **g_link;
 } KlIocpOp;
@@ -642,14 +644,19 @@ static int iocp_comp_post_sendfile(KlStream *stream, const KlIoVec *head_iov, in
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
  * KL_COMP_DGRAM_RECV event. */
-/* ICMP reports skipped per issue before the receive is reported as failed (bounds the re-issue loop). */
+/* ICMP reports skipped per issue before the receive yields to the rest of the loop (bounds the
+ * re-issue loop; the receive is issued again from the next drain, never failed for it). */
 #define KL_IOCP_ICMP_REPORT_SKIP_MAX 16
 
 /* Issue (or re-issue) the op's overlapped datagram receive on op->op_sock, from fresh op state.
  * Returns 0 when a completion packet will follow, else the Winsock error the call failed with at
  * issue (no packet queued). A failure that is an ICMP report about an earlier send (see
- * kl_udp_win_is_icmp_report) yielded nothing, so the receive is simply issued again. */
-static int iocp_dgram_recv_issue(KlIocpOp *op) {
+ * kl_udp_win_is_icmp_report) yielded nothing, so the receive is simply issued again. Past
+ * KL_IOCP_ICMP_REPORT_SKIP_MAX reports in one call the op posts its own zero-byte packet
+ * (dg_requeued) and returns 0: the drain then issues it again, after whatever else is ready, so a
+ * socket flooded with reports neither stalls the loop nor loses its receive (the readiness receive
+ * reports would-block at the same bound and is readable again next poll). */
+static int iocp_dgram_recv_issue(KlIocpState *st, KlIocpOp *op) {
     for (int skipped = 0;; skipped++) {
         memset(&op->ov, 0, sizeof(op->ov));
         op->src_len = (int)sizeof(op->src);
@@ -679,7 +686,14 @@ static int iocp_dgram_recv_issue(KlIocpOp *op) {
         if (rc != SOCKET_ERROR) return 0;
         int e = WSAGetLastError();
         if (e == WSA_IO_PENDING) return 0;
-        if (!kl_udp_win_is_icmp_report(e) || skipped + 1 >= KL_IOCP_ICMP_REPORT_SKIP_MAX) return e;
+        if (!kl_udp_win_is_icmp_report(e)) return e;
+        if (skipped + 1 >= KL_IOCP_ICMP_REPORT_SKIP_MAX) {
+            memset(&op->ov, 0, sizeof(op->ov));
+            op->dg_requeued = 1;
+            if (PostQueuedCompletionStatus(st->port, 0, 0, &op->ov)) return 0;
+            op->dg_requeued = 0;
+            return e;                    /* the port refused the packet: report the receive failed */
+        }
     }
 }
 
@@ -698,7 +712,7 @@ static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp
     iocp_op_register(st, op, (SOCKET)rop->fd);
     op->via_recvmsg = kl_udp_win_get_recvmsg((SOCKET)rop->fd) != NULL;
 
-    if (iocp_dgram_recv_issue(op) != 0) {
+    if (iocp_dgram_recv_issue(st, op) != 0) {
         iocp_op_free(op);                      /* life unset → no release */
         return -1;
     }
@@ -763,9 +777,14 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
         rc = WSASendTo((SOCKET)sop->fd, &op->ubuf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
     }
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        iocp_op_free(op);                      /* life unset → caller releases */
-        return -1;
+    if (rc == SOCKET_ERROR) {
+        int e = WSAGetLastError();
+        if (e != WSA_IO_PENDING) {
+            iocp_op_free(op);                  /* life unset → caller releases */
+            /* Failed at issue, so no packet follows. A refusal of this one datagram (no route, a
+             * broadcast without SO_BROADCAST, a full buffer, ...) leaves the socket usable. */
+            return kl_udp_win_send_err_is_per_datagram(e) ? KL_COMP_POST_DROPPED : -1;
+        }
     }
     op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     return 0;
@@ -1278,12 +1297,23 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * token ref and buffer stay with it) and surface nothing; a cancelled op is not re-issued,
              * and a re-issue that fails outright falls through as the failed receive it now is. */
             int reissue_failed = 0;   /* the OVERLAPPED was reset by the attempt: never re-read it */
-            {
+            int requeue_cancelled = 0;   /* the op's own packet, after a cancel: it ends here */
+            if (op->dg_requeued) {
+                /* The op's own zero-byte packet (no receive was outstanding): issue it now, unless
+                 * it was cancelled meanwhile, which ends it as the aborted receive it would have been. */
+                op->dg_requeued = 0;
+                if (op->dg_cancelled) {
+                    requeue_cancelled = 1;
+                } else {
+                    if (iocp_dgram_recv_issue(st, op) == 0) continue;
+                    reissue_failed = 1;
+                }
+            } else {
                 DWORD rx = 0, rf = 0;
                 if (!op->dg_cancelled &&
                     !WSAGetOverlappedResult(op->op_sock, &op->ov, &rx, FALSE, &rf) &&
                     kl_udp_win_is_icmp_report(WSAGetLastError())) {
-                    if (iocp_dgram_recv_issue(op) == 0) continue;
+                    if (iocp_dgram_recv_issue(st, op) == 0) continue;
                     reissue_failed = 1;
                 }
             }
@@ -1302,9 +1332,11 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * itself is platform-agnostic + unit-tested (dgram_recv_classify.h); here we supply the
              * Winsock result and then parse the metadata it says is valid. */
             DWORD xfer = 0, wflags = 0;
-            BOOL wok = reissue_failed ? FALSE
-                                      : WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &wflags);
-            int werr = wok ? 0 : (reissue_failed ? WSAECONNRESET : WSAGetLastError());
+            BOOL wok = (reissue_failed || requeue_cancelled)
+                           ? FALSE
+                           : WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &wflags);
+            int werr = wok ? 0 : reissue_failed ? WSAECONNRESET
+                               : requeue_cancelled ? WSA_OPERATION_ABORTED : WSAGetLastError();
             unsigned mflags = op->via_recvmsg ? op->umsg.dwFlags : wflags;
             KlDgramRecvClass cl = kl_dgram_recv_classify(wok, werr, WSAEMSGSIZE,
                                                          (size_t)xfer, mflags, MSG_TRUNC,
@@ -1336,6 +1368,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 DWORD xfer = 0, sflags = 0;
                 BOOL sok = WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &sflags);
                 out[count].ok = sok && (size_t)xfer == op->send_total;
+                /* A send that failed for a reason of that one datagram drops it, not the send side. */
+                if (!sok) out[count].dropped = kl_udp_win_send_err_is_per_datagram(WSAGetLastError());
             }
             count++;
             iocp_op_free(op);

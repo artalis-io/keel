@@ -33,6 +33,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend): neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
+#include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
@@ -656,10 +657,13 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
+        int send_err = (n < 0) ? errno : 0;
         ev->kind = KL_COMP_DGRAM_SEND;
         ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
+        /* Refused for a reason of this datagram alone (no route, an ICMP report, ...): drop it. */
+        ev->dropped = (n < 0) ? kl_dgram_send_err_is_per_datagram(send_err) : 0;
         return 1;
     }
     case PC_CONNECT: {

@@ -488,8 +488,9 @@ static void dns_leg_settle(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg);
 
 /* Outcome of one transmit attempt. A network attempt (tries_left) and the response timer are
  * consumed ONLY on DNS_TX_SENT; DNS_TX_WOULDBLOCK consumes nothing (the leg is retried on the writable
- * edge); DNS_TX_FAILED is a permanent send failure (build error / TOO_LARGE / UNSUPPORTED / CLOSED /
- * transport ERROR) handled like today (settle the leg). */
+ * edge); DNS_TX_FAILED is a permanent send failure (build error / TOO_LARGE / UNSUPPORTED / CLOSED, or
+ * a transport ERROR on every remaining try) handled by settling the leg. A transport ERROR on one
+ * send (no route to that nameserver, say) consumes that try and moves on to the next nameserver. */
 typedef enum { DNS_TX_SENT, DNS_TX_WOULDBLOCK, DNS_TX_FAILED } DnsTxResult;
 
 /* 1 if some other in-flight leg already carries this id. */
@@ -508,35 +509,46 @@ static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *se
  * (KL_DATAGRAM_ACCEPTED); on transient WOULD_BLOCK nothing is consumed and the leg stays on the same
  * nameserver/id-space for a writable-edge retry. Returns a 3-way DnsTxResult. */
 static DnsTxResult dns_transmit_leg(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg) {
-    r->rnd_failed = 0;             /* dns_build_query refuses a query drawn without entropy */
-    if (leg->tries_left <= 0)
-        return DNS_TX_FAILED;
-
-    for (int tries = 0; tries < 8; tries++) {
-        leg->id = dns_rand_u16(r);
-        if (!dns_id_in_use(r, leg->id, leg))
-            break;
-    }
-
     uint8_t buf[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
-    if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
-                        leg->ns_idx, &qlen, &q_off, &q_len) != 0) {
-        if (r->rnd_failed)
-            q->no_entropy = 1;
-        return DNS_TX_FAILED;
-    }
-    if (q_len > sizeof(leg->question))
-        return DNS_TX_FAILED;
+    KlDatagramSendStatus st;
+    for (;;) {                         /* one pass per nameserver tried: see the send ERROR below */
+        r->rnd_failed = 0;             /* dns_build_query refuses a query drawn without entropy */
+        if (leg->tries_left <= 0)
+            return DNS_TX_FAILED;
 
-    const KlSockAddr *ns_ksa = &r->ns[leg->ns_idx];
-    KlDatagramMessage msg = { .data = buf, .len = qlen, .peer = ns_ksa,
-                              .local = NULL, .tos = -1, .flags = 0 };
-    KlDatagramSendStatus st = kl_datagram_send(&r->sock, &msg);
+        for (int tries = 0; tries < 8; tries++) {
+            leg->id = dns_rand_u16(r);
+            if (!dns_id_in_use(r, leg->id, leg))
+                break;
+        }
+
+        if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
+                            leg->ns_idx, &qlen, &q_off, &q_len) != 0) {
+            if (r->rnd_failed)
+                q->no_entropy = 1;
+            return DNS_TX_FAILED;
+        }
+        if (q_len > sizeof(leg->question))
+            return DNS_TX_FAILED;
+
+        const KlSockAddr *ns_ksa = &r->ns[leg->ns_idx];
+        KlDatagramMessage msg = { .data = buf, .len = qlen, .peer = ns_ksa,
+                                  .local = NULL, .tos = -1, .flags = 0 };
+        st = kl_datagram_send(&r->sock, &msg);
+        if (st != KL_DATAGRAM_ERROR)
+            break;
+        /* The send failed for this nameserver (no route to it, an ICMP report from it, ...)
+         * while the socket still sends: spend this try and build the query again for the next
+         * nameserver (its cookie differs) rather than wait out a timeout. A socket whose send
+         * side failed for good errors on every try, and the leg settles once they run out. */
+        leg->ns_idx = (leg->ns_idx + 1) % r->nns;
+        leg->tries_left--;
+    }
     if (st == KL_DATAGRAM_WOULD_BLOCK)
         return DNS_TX_WOULDBLOCK;          /* transient: nothing consumed; retry on the writable edge */
     if (st != KL_DATAGRAM_ACCEPTED)
-        return DNS_TX_FAILED;              /* TOO_LARGE / UNSUPPORTED / CLOSED / ERROR: permanent */
+        return DNS_TX_FAILED;              /* TOO_LARGE / UNSUPPORTED / CLOSED: permanent */
 
     /* ACCEPTED, commit: record the sent question, rotate the nameserver, consume a try, arm the
      * response timeout. (question is recorded only now, so a would-blocked build isn't tracked.) */

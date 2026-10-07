@@ -114,6 +114,11 @@ kl_ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t
  * dispatcher below never reads errno itself, so this header stays freestanding.
  * Defined per-platform in the provider TU (socket_posix.c / socket_winsock.c). */
 KlIoStatus     kl_sockdef_io_status(void);
+/* The hosted default classifier for a failed DATAGRAM send: 1 when the current `errno` reports a
+ * condition of that one datagram (no route, an ICMP report, a full queue, a refusal, a path MTU;
+ * see dgram_send_classify.h), so the socket stays usable and the next send is attempted; 0 when the
+ * send side itself failed. Defined per-platform in the provider TU, next to kl_sockdef_io_status. */
+int            kl_sockdef_dgram_send_dropped(void);
 
 /*
  * Provider-aware wrappers. Inline dispatch: a non-NULL provider whose op is set
@@ -232,6 +237,19 @@ static inline int kl_sock_get_so_error(const KlSocketProvider *p, KlSocketHandle
 static inline KlIoStatus kl_sock_io_status(const KlSocketProvider *p) {
     if (p && p->ops->io_status) return p->ops->io_status(p->context);
     return kl_sockdef_io_status();
+}
+
+/* After a datagram send returned -1 and kl_sock_io_status did not say would-block: 1 when the failure
+ * concerns only that datagram (drop it, keep sending), 0 when the send side is unusable. A provider
+ * that supplies io_status has no errno to consult, so only its categories decide: a reset is the ICMP
+ * report a UDP send can return, an interrupted call lost nothing but that datagram; KL_IO_FATAL and the
+ * rest stay fatal. Otherwise the hosted errno mapping (kl_sockdef_dgram_send_dropped). */
+static inline int kl_sock_dgram_send_dropped(const KlSocketProvider *p) {
+    if (p && p->ops->io_status) {
+        KlIoStatus st = p->ops->io_status(p->context);
+        return st == KL_IO_RESET || st == KL_IO_INTERRUPTED;
+    }
+    return kl_sockdef_dgram_send_dropped();
 }
 
 static inline kl_ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandle fd,

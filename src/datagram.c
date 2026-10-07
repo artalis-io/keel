@@ -114,7 +114,11 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
         }
         break;
     case KL_COMP_DGRAM_SEND:
-        if (core) (void)kl_dgram_core_send_on_complete(core, ev->ok);
+        /* A failed send the backend judged a refusal of that one datagram (no route, an ICMP report,
+         * a full queue, ...) is dropped; any other failure ends the send side. */
+        if (core) (void)kl_dgram_core_send_on_complete(core, ev->ok ? KL_DGRAM_SEND_OK
+                                                       : ev->dropped ? KL_DGRAM_SEND_DROPPED
+                                                                     : KL_DGRAM_SEND_FAILED);
         break;
     default: break;
     }
@@ -132,9 +136,12 @@ static KlDgramSubmitResult dg_comp_submit(void *ctx, const void *data, size_t le
     KlDgramSendOp op = { .fd = dg->fd, .data = data, .len = len, .dest = peer,
                          .src = local, .tos = tos, .life = kl_dgram_core_life(dg->core) };
     kl_comp_life_retain(op.life);   /* transferred into the op on success */
-    if (kl_comp_post_dgram_send(dg->ctx, &op) < 0) {
+    int rc = kl_comp_post_dgram_send(dg->ctx, &op);
+    if (rc != 0) {
         kl_comp_life_release(op.life);   /* failure → caller releases; backend took nothing */
-        return KL_DGRAM_SUBMIT_ERROR;
+        /* The backend refused this datagram at the post for a reason of its own (IOCP: a send that
+         * failed at issue with no route, a refusal, ...): drop it, keep the send side. */
+        return rc == KL_COMP_POST_DROPPED ? KL_DGRAM_SUBMIT_DROPPED : KL_DGRAM_SUBMIT_ERROR;
     }
     return KL_DGRAM_SUBMIT_INFLIGHT;
 }
@@ -177,6 +184,8 @@ static KlDgramSubmitResult dg_rdy_submit(void *ctx, const void *data, size_t len
     kl_ssize_t n = dg_ops(dg)->send(dg_sp_ctx(dg), dg->fd, data, len, peer, local, tos);
     if (n >= 0) return KL_DGRAM_SUBMIT_DONE;    /* UDP send is all-or-nothing */
     if (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK) return KL_DGRAM_SUBMIT_WOULDBLOCK;
+    /* The provider seam (not this TU) decides whether the failure concerns only this datagram. */
+    if (kl_sock_dgram_send_dropped(dg->sockets)) return KL_DGRAM_SUBMIT_DROPPED;
     return KL_DGRAM_SUBMIT_ERROR;
 }
 static int dg_rdy_arm(void *ctx) {

@@ -46,6 +46,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend): neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
+#include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -1083,6 +1084,8 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
+        /* Refused for a reason of this datagram alone (no route, an ICMP report, ...): drop it. */
+        ev->dropped = (res < 0 && !op->aborted) ? kl_dgram_send_err_is_per_datagram(-res) : 0;
         return 1;
 
     case IOU_CONNECT:
@@ -1151,11 +1154,15 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 #endif
     /* -EBUSY / -EAGAIN: the kernel holds a CQ overflow backlog (5.5 to 5.18 with NODROP) or is short
      * of resources, and wants completions reaped before it takes more submissions. Not a loop
-     * failure: reap below, and the unsubmitted SQEs go in on the next drain. */
+     * failure: reap below, and the unsubmitted SQEs go in on the next drain. The kernel returned at
+     * once without waiting, so when there is nothing to reap the drain waits for one completion (or
+     * the timeout) below instead of returning straight to a run loop that would call it again. */
     if (r < 0 && r != -ETIME && r != -EINTR && r != -EBUSY && r != -EAGAIN)
         return -1;
+    int waited = 0;
 
     int count = 0;
+reap:;
     unsigned seen = 0, head;
     io_uring_for_each_cqe(&st->ring, head, cqe) {
         if (count >= max) break;                      /* leave the rest for the next drain */
@@ -1218,6 +1225,11 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         /* else: partial write re-prepared; op stays in-flight, no event */
     }
     io_uring_cq_advance(&st->ring, seen);
+    if ((r == -EAGAIN || r == -EBUSY) && seen == 0 && !waited && timeout_ms != 0) {
+        waited = 1;                                   /* once: a refused wait just returns */
+        if (io_uring_wait_cqe_timeout(&st->ring, &cqe, tsp) == 0)
+            goto reap;                                /* a completion arrived: reap it */
+    }
     return count;
 }
 
