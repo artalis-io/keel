@@ -411,11 +411,17 @@ static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKE
     }
     return EFI_SUCCESS;
 }
+/* A graceful Close against a peer with a zero window cannot finish (the FIN waits behind the
+ * unsent data), while an abortive one (AbortOnClose: RST) completes at once, as in EDK2 TcpDxe.
+ * g_tcp_graceful_close_hangs models that; g_tcp_close_aborts counts abortive Close calls. */
+static int g_tcp_graceful_close_hangs;
+static int g_tcp_close_aborts;
 static EFI_STATUS EFIAPI m_tcp_Close(EFI_TCP4_PROTOCOL *This, EFI_TCP4_CLOSE_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->CompletionToken.Event;
     tok_submit(&t->CompletionToken, e);
-    if (g_tcp_close_mode == TOK_COMPLETE_OK) {
+    if (t->AbortOnClose) g_tcp_close_aborts++;
+    if (g_tcp_close_mode == TOK_COMPLETE_OK && (t->AbortOnClose || !g_tcp_graceful_close_hangs)) {
         t->CompletionToken.Status = EFI_SUCCESS; e->signaled = 1; tok_terminal(&t->CompletionToken);
     }
     return EFI_SUCCESS;
@@ -616,6 +622,7 @@ static void reset_counters(void) {
     g_udp_transmit_ret = EFI_SUCCESS; g_udp_transmit_status = EFI_SUCCESS;
     g_udp_tx_calls = 0; g_udp_tx_len = 0; g_udp_hung_tok = NULL;
     g_tcp_hung_tx = NULL; g_tcp_tx_bytes = 0;
+    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0;
     tok_reset();
     accept_reset();
     g_event_count = 0;
@@ -1573,6 +1580,86 @@ static void t_io_send_pending_cancel_close(void) {
     CHECK(g_tcp_cancel_all_calls >= 1, "close cancelled the pending Transmit");
     CHECK(outstanding_count() == 0, "the Transmit token was drained by close");
     CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* The idle sweep reaps a connection whose peer stopped reading (zero window): its send's Transmit is
+ * still queued. A graceful Close cannot finish against that window (the FIN waits behind the unsent
+ * data), so close must not wait on one: it closes abortively, which completes at once, and the slot
+ * is torn down (not quarantined) after a small number of Polls. */
+static void t_io_reap_pending_send_closes_fast(void) {
+    T_CASE("server io: closing a conn with a queued Transmit is abortive and does not pump");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK; g_tcp_graceful_close_hangs = 1;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending (zero window)");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send");
+
+    int before = g_destroy_child_calls;
+    g_tcp_poll_calls = 0;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_poll_calls < 50, "close did not pump a graceful Close against the zero window");
+    CHECK(g_tcp_close_aborts == 1, "the Close was abortive (AbortOnClose)");
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* A long send whose Transmits keep completing must show progress on its stream while it is still
+ * pending, so the idle sweep does not reap a slow but moving reader mid-response. */
+static void t_io_send_progress_advances(void) {
+    T_CASE("server io: a pending multi-fragment send advances stream send_progress");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    static unsigned char payload[10000];   /* two Transmit fragments: 8192 + 1808 */
+    memset(payload, 'x', sizeof payload);
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    KlIoVec iov = { payload, sizeof payload };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, sizeof payload) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "first fragment pending");
+    CHECK(st.send_progress == 0, "no progress before any Transmit completes");
+
+    CHECK(mock_complete_hung_tcp_tx() == 1, "the first fragment's Transmit completes");
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);   /* the second fragment is submitted and hangs */
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "second fragment pending");
+    CHECK(st.send_progress == 8192, "send_progress counts the completed fragment");
+
+    CHECK(mock_complete_hung_tcp_tx() == 1, "the second fragment's Transmit completes");
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the send completes");
+    CHECK(st.send_progress == sizeof payload, "send_progress counts every byte");
+
+    p->ops->close(p->context, fd);
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
     kl_uefi_event_provider_reset();
 }
 
@@ -2817,6 +2904,8 @@ int main(void) {
     t_io_cancel_stale_generation();
     t_io_send_pending_nonblocking();
     t_io_send_pending_cancel_close();
+    t_io_reap_pending_send_closes_fast();
+    t_io_send_progress_advances();
     t_accept_cancel_fail_quarantine();   /* intentional permanent slot leak */
     t_io_dead_conn_ops_complete();       /* intentional permanent slot leak */
 
