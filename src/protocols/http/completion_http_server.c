@@ -1275,6 +1275,16 @@ void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
         if (kl_comp_post_recv(conn) < 0) kl_comp_close(s, conn);
         return;
     }
+    if (conn->state == KL_HTTP_CONN_READING_BODY) {
+        /* Resumed into the body phase: the body bytes kept across the suspend go to the body core
+         * before the next receive is posted (comp_start_body_read resets the window). As in
+         * comp_drive_body, a resume from on_data must not post a receive into read_buf meanwhile. */
+        conn->comp_in_body_drive = 1;
+        KlHttpConnState st = kl_http_conn_resume_body(conn);
+        conn->comp_in_body_drive = 0;
+        comp_after_state(s, conn, st);
+        return;
+    }
     comp_after_state(s, conn, conn->state);
 }
 

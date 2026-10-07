@@ -9,14 +9,24 @@ void kl_http1_chunked_init(KlHttp1ChunkedDecoder *dec) {
     dec->size_accum = 0;
     dec->size_digits = 0;
     dec->trailer_cr = 0;
+    dec->meta_len = 0;
+}
+
+/* A byte that may appear inside a chunk extension or a trailer line: HTAB, visible ASCII, SP and
+ * obs-text. Every other control byte (CR and LF included: they only end a line, and only as a pair)
+ * is an error. A decoder that skipped to the next CR let a bare LF end the line for a front end and
+ * not for us, which frames the body differently on the two sides (request smuggling). */
+static int chunk_field_byte(unsigned char ch) {
+    return ch == '\t' || (ch >= 0x20 && ch != 0x7F);
 }
 
 /*
- * RFC 7230 section 4.1 chunked transfer coding decoder.
+ * RFC 9112 section 7.1 chunked transfer coding decoder.
  *
  * State machine with fast-path memcpy for large chunks.
  * Security: max 16 hex digits, overflow check before shift,
- * strict CRLF enforcement, extensions/trailers skipped without buffering.
+ * strict CRLF enforcement, extensions/trailers skipped without buffering but validated (no bare
+ * LF, no control bytes) and capped (KL_HTTP1_CHUNK_EXT_MAX, KL_HTTP1_CHUNK_TRAILER_MAX).
  *
  * trailer_cr semantics:
  *   In TRAILER/TRAILER_CR states: 1 = at start of line (no content yet)
@@ -41,6 +51,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
                     return -1;
                 }
                 dec->state = KL_HTTP1_CHUNK_EXT;
+                dec->meta_len = 0;
                 i++;
                 break;
             } else if (ch == '\r') {
@@ -71,13 +82,19 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             break;
         }
 
-        case KL_HTTP1_CHUNK_EXT:
-            /* Skip extension bytes until CR */
-            if (data[i] == '\r') {
+        case KL_HTTP1_CHUNK_EXT: {
+            /* Skip extension bytes until CR (SIZE_CR then demands the LF), rejecting a bare LF or a
+             * control byte and an extension list past its cap. */
+            unsigned char ch = (unsigned char)data[i];
+            if (ch == '\r') {
                 dec->state = KL_HTTP1_CHUNK_SIZE_CR;
+            } else if (!chunk_field_byte(ch) || ++dec->meta_len > KL_HTTP1_CHUNK_EXT_MAX) {
+                dec->state = KL_HTTP1_CHUNK_ERROR;
+                return -1;
             }
             i++;
             break;
+        }
 
         case KL_HTTP1_CHUNK_SIZE_CR:
             if (data[i] != '\n') {
@@ -94,6 +111,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
                  * bytes are \r\n, it's the empty terminating line. */
                 dec->state = KL_HTTP1_CHUNK_TRAILER;
                 dec->trailer_cr = 1;
+                dec->meta_len = 0;
             } else {
                 dec->state = KL_HTTP1_CHUNK_DATA;
             }
@@ -154,19 +172,29 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             }
             break;
 
-        case KL_HTTP1_CHUNK_TRAILER:
-            /* trailer_cr: 1 = at start of line, 0 = mid-line */
-            if (data[i] == '\r') {
+        case KL_HTTP1_CHUNK_TRAILER: {
+            /* trailer_cr: 1 = at start of line, 0 = mid-line. Every byte of the section counts
+             * toward its cap; a bare LF or a control byte is an error, as in an extension. */
+            unsigned char ch = (unsigned char)data[i];
+            if (++dec->meta_len > KL_HTTP1_CHUNK_TRAILER_MAX) {
+                dec->state = KL_HTTP1_CHUNK_ERROR;
+                return -1;
+            }
+            if (ch == '\r') {
                 dec->state = KL_HTTP1_CHUNK_TRAILER_CR;
+            } else if (!chunk_field_byte(ch)) {
+                dec->state = KL_HTTP1_CHUNK_ERROR;
+                return -1;
             } else {
                 /* Non-CRLF content on this line */
                 dec->trailer_cr = 0;
             }
             i++;
             break;
+        }
 
         case KL_HTTP1_CHUNK_TRAILER_CR:
-            if (data[i] != '\n') {
+            if (data[i] != '\n' || ++dec->meta_len > KL_HTTP1_CHUNK_TRAILER_MAX) {
                 dec->state = KL_HTTP1_CHUNK_ERROR;
                 return -1;
             }

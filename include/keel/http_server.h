@@ -73,7 +73,8 @@ typedef struct KlHttpServerConfig {
     const char *bind_addr;      /**< default: "0.0.0.0" */
     int max_connections;        /**< default: KL_HTTP_SERVER_DEFAULT_MAX_CONNS */
     int read_timeout_ms;        /**< default: KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT */
-    int body_timeout_ms;        /**< total body deadline; 0 = use read_timeout_ms */
+    int body_timeout_ms;        /**< total body deadline (time suspended in a KlAsyncOp is not
+                                 *   counted); 0 = use read_timeout_ms */
     KlAllocator *alloc;         /**< default: stdlib */
     KlHttp1ParserFactory parser;     /**< default: kl_http1_parser_llhttp */
     KlHttpAccessLogFn access_log;   /**< default: NULL (disabled) */

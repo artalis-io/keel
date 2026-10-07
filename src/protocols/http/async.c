@@ -83,6 +83,14 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     KlHttpConn *conn = async_retire(s, op);
     if (!conn) return;
 
+    /* The absolute body deadline measures the client's upload, not the server's own work: move its
+     * start past the time spent suspended, so a resume that awaits the body is not 408'd for it. */
+    if (conn->body_start_ms > 0) {
+        uint64_t now = kl_monotonic_ms();
+        if (now > conn->suspend_start_ms) conn->body_start_ms += now - conn->suspend_start_ms;
+        if (conn->body_start_ms > now) conn->body_start_ms = now;
+    }
+
     /* Transition back from SUSPENDED so on_resume can set the final state */
     conn->state = KL_HTTP_CONN_PROCESSING;
 
@@ -139,6 +147,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     /* Handler completed: re-register FD and drive state machine */
     KlHttpConnState new_state = conn->state;
 
+    /* Resumed into the body phase (kl_http_request_await_body): the body bytes kept across the
+     * suspend go to the body core first; they may finish the body, or end the request. */
+    if (new_state == KL_HTTP_CONN_READING_BODY)
+        new_state = kl_http_conn_resume_body(conn);
+
     /* Try immediate send if response is ready */
     if (new_state == KL_HTTP_CONN_SENDING)
         new_state = kl_http_conn_on_writable(conn);
@@ -163,6 +176,13 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
         if (async_rearm(s, conn, KL_EVENT_READ) < 0)
             async_release(s, conn);
         break;
+    case KL_HTTP_CONN_READING_BODY:
+        /* The resume awaits (more of) the body: read on, as the main readiness transition does.
+         * A paused body read (kl_http_request_pause_body) is registered with no interest, so the
+         * resume's kl_event_mod finds it. */
+        if (async_rearm(s, conn, conn->stream.read_paused ? 0 : KL_EVENT_READ) < 0)
+            async_release(s, conn);
+        break;
     case KL_HTTP_CONN_SUSPENDED:
         /* Suspended again by the resume callback (a handler chaining a second async op): it holds
          * its own op and is exempt from the idle sweep, so leave it parked and unregistered. */
@@ -171,12 +191,9 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
         /* Normalised to SENDING or CLOSED a few lines above, precisely because no drive path acts
          * on it, so this is unreachable. */
         break;
-    /* These reach no arm, which is what the previous if-chain also did: no fd is registered and the
-     * idle sweep eventually reclaims the connection. That looks like a latent stall (a resume that
-     * leaves the conn awaiting more body would wait for the timeout rather than a readable event),
-     * but proving and changing it is a behaviour change, not this audit. Named here so the
-     * no-arm case is deliberate and visible rather than an accident of an if-chain. */
-    case KL_HTTP_CONN_READING_BODY:
+    /* No resume leaves a connection in these (they precede a request, or are entered only from the
+     * dispatch), so nothing is registered; named so the no-arm case is deliberate rather than an
+     * accident of an if-chain. */
     case KL_HTTP_CONN_PROXY_HEADER:
     case KL_HTTP_CONN_TLS_HANDSHAKE:
     case KL_HTTP_CONN_WEBSOCKET:

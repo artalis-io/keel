@@ -7,6 +7,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **The chunked request decoder rejects bare LF and control bytes in extensions and trailers, and
+  caps their length (behavior change).** It skipped a chunk extension up to the next CR and a trailer
+  line up to its CRLF, accepting any byte on the way, with no length limit (those bytes reach no
+  body reader and count toward no body limit, so only the body deadline bounded them). A front end
+  that ends a chunk-size line at a bare LF frames the body differently, the chunk-extension request
+  smuggling class. A bare LF or a control byte other than HTAB in an extension or a
+  trailer line is now a malformed chunk (413, as before for malformed framing), as is an extension
+  list longer than `KL_HTTP1_CHUNK_EXT_MAX` (4096 bytes) or a trailer section longer than
+  `KL_HTTP1_CHUNK_TRAILER_MAX` (8192 bytes). `KlHttp1ChunkedDecoder` gains a field (`meta_len`), so
+  code that embeds it must be rebuilt. The HTTP client parses responses with llhttp, not this
+  decoder, and is unchanged.
 - Async HTTP client errors remain deferred under allocation failure, so completion callbacks may
   safely free the client. Requests fail to start if their deadline timer cannot be reserved.
 - HTTP readiness reads preserve connections on would-block and retry interrupted reads instead of
@@ -473,6 +484,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   fail, although IPv4 servers were configured. Windows discovery now skips link-local servers, and
   the resolver picks its family from the first usable server, skipping any unscoped `fe80::/10`
   entry (falling back to `127.0.0.1` when discovery leaves none usable, as when it finds none).
+- **A streaming-async handler that suspends at dispatch and then awaits the body gets the whole
+  body.** The handler ran before any body byte was fed, and when it suspended the body bytes read
+  with the headers were left behind: a resume that asked for the body
+  (`kl_http_request_await_body`) lost them on the completion engines and, with chunked framing, fed
+  the next bytes to a decoder still holding the previous request's state. On the readiness engines
+  nothing read the body at all (the resume registered no interest for that state) and the request
+  ended in 408. The decoder and the body deadline now start before the handler runs; the bytes read
+  with the headers are kept across the suspend and fed before the next read; the readiness resume
+  registers the connection for reading (no interest while the body read is paused); and a reused
+  connection slot no longer carries the previous request's body start time. The absolute body
+  deadline (`body_timeout_ms`) no longer counts time spent suspended in a `KlAsyncOp`, which is the
+  server's own work, not the client's upload.
 - **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
   that suspended on a second op and completed it at once registered the connection's socket again;
   when the response then closed the connection, it was released while still registered. poll and
