@@ -1170,4 +1170,58 @@ static void od_case(int *utest_result, int cancel_now) {
 UTEST(async, a_cancel_inside_on_data_for_leftover_body_releases_once) { od_case(utest_result, 1); }
 UTEST(async, an_op_left_pending_inside_on_data_is_not_overwritten) { od_case(utest_result, 0); }
 
+/* ── A connection closed after a nested complete leaves the loop ────────────────────────────────
+ * The nested complete inside on_resume re-registers the fd; when the response then closed the
+ * connection, the outer complete released it without taking the fd out of the loop. poll and
+ * WSAPoll keep an entry for a closed socket and report it at once on every wait, so the idle server
+ * spun at full CPU (and an fd number reused by an unregistered descriptor could release the slot a
+ * second time). epoll and kqueue drop a closed fd themselves. Measured as the process CPU time an
+ * idle server uses after such a request. */
+#ifdef _WIN32
+static uint64_t process_cpu_ms(void) {
+    FILETIME c, e, k, u;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
+    ULARGE_INTEGER kk, uu;
+    kk.LowPart = k.dwLowDateTime; kk.HighPart = k.dwHighDateTime;
+    uu.LowPart = u.dwLowDateTime; uu.HighPart = u.dwHighDateTime;
+    return (uint64_t)((kk.QuadPart + uu.QuadPart) / 10000u);
+}
+#else
+#include <sys/resource.h>
+static uint64_t process_cpu_ms(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    return (uint64_t)ru.ru_utime.tv_sec * 1000u + (uint64_t)ru.ru_utime.tv_usec / 1000u +
+           (uint64_t)ru.ru_stime.tv_sec * 1000u + (uint64_t)ru.ru_stime.tv_usec / 1000u;
+}
+#endif
+
+UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
+    end_start();
+    int port = end_srv.bound_port;
+    char buf[1024];
+    int closed = 0;
+    int fd = connect_to(port);
+    if (fd >= 0) {
+        const char *rq = "GET /nest HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_for(fd, buf, sizeof buf, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    int answered = strstr(buf, "{\"nest\":1}") != NULL;
+    kl_test_sleep_ms(100);                                 /* the release has run */
+    uint64_t cpu0 = process_cpu_ms();
+    kl_test_sleep_ms(800);                                 /* idle: nothing should run */
+    uint64_t used = process_cpu_ms() - cpu0;
+    KlHttpServerStats st;
+    kl_http_server_stats(&end_srv, &st);
+    int served = end_hellos(port);
+    end_stop();
+    ASSERT_TRUE(answered);
+    ASSERT_TRUE(closed);
+    ASSERT_LT(used, (uint64_t)300);                        /* was (poll, WSAPoll): ~800 ms spinning */
+    ASSERT_EQ(st.active_connections, 0);
+    ASSERT_EQ(served, 4);
+}
+
 UTEST_MAIN();
