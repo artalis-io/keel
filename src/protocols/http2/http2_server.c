@@ -7,6 +7,9 @@
 #include <keel/tls.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef KEEL_FREESTANDING
+#include <assert.h>            /* the live-slot precondition in h2_stream_destroy (hosted only) */
+#endif
 #include <fcntl.h>
 #include <sys/types.h>
 #include "http_internal.h"
@@ -42,10 +45,18 @@ static KlHttp2ServerStream *h2_stream_create(KlHttp2ServerConn *h2c,
 }
 
 static void h2_stream_destroy(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
-    /* Only a live slot: a stale pointer (a slot already released, or moved by a swap-remove) would
-     * otherwise drive num_streams below zero, and the next stream would be made before the table. */
-    if (!stream || h2c->num_streams <= 0 || stream < h2c->streams ||
-        stream >= h2c->streams + h2c->num_streams)
+    /* Only a slot in the live range [0, num_streams). This catches a release of a slot past the end
+     * of the table (the last slot, already released) or of an empty table, which would drive
+     * num_streams below zero so that the next stream is made before the table. It cannot catch a
+     * stale pointer to a slot that is still in range (one a swap-remove refilled with another
+     * stream): callers must hold no stream pointer across anything that may release streams. A
+     * caller bug: loud where asserts are on, a no-op otherwise. */
+    int live = stream && h2c->num_streams > 0 && stream >= h2c->streams &&
+               stream < h2c->streams + h2c->num_streams;
+#ifndef KEEL_FREESTANDING
+    assert(live);
+#endif
+    if (!live)
         return;
     if (stream->body_reader) {
         stream->body_reader->destroy(stream->body_reader);

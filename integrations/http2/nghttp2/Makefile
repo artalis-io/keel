@@ -75,7 +75,8 @@ e2e: $(LIB)
 	$(CC) $(CFLAGS) -o tests/e2e_idle tests/e2e_idle.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/e2e_idle
-	$(CC) $(CFLAGS) -o tests/e2e_h2c_upgrade tests/e2e_h2c_upgrade.c 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o tests/e2e_h2c_upgrade tests/e2e_h2c_upgrade.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/e2e_h2c_upgrade
 	@echo "integrations/http2/nghttp2: e2e (real socket) OK"
 	$(CC) $(CFLAGS) -o tests/test_client_interim tests/test_client_interim.c \

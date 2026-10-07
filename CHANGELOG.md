@@ -15,8 +15,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   corruption). The nghttp2 adapter sends on that flush for stream 1 of an h2c `Upgrade`, so any
   plaintext client could trigger it with an upgrade followed by a second request. Each answer now
   releases the stream before it flushes (the session copies the response at submit), and releasing
-  a slot that is not live is refused. The `KlHttp2ServerSession` contract now states both: the
-  response is borrowed only for `submit_response`, and `flush` may report a close from inside it.
+  a slot that is not live is refused (and asserts where asserts are on).
+  **Behavior change for `KlHttp2ServerSession` implementations:** the header name/value and body
+  pointers passed to `submit_response` are borrowed for that call only and are freed before the
+  following `flush`, so a session must copy whatever it sends later (the bundled nghttp2 adapter
+  already does). `flush` may report a stream it closes while sending (`on_stream_reset`) from
+  inside the call. Both rules are now stated in `<keel/http2_server.h>`.
 
 - **The chunked request decoder rejects bare LF and control bytes in extensions and trailers, and
   caps their length (behavior change).** It skipped a chunk extension up to the next CR and a trailer
