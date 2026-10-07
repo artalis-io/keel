@@ -199,9 +199,13 @@ typedef enum {
     A provider with `io_status` reports these as `KL_IO_RESET` (or `KL_IO_INTERRUPTED` once
     retries run out). The completion backends classify their own results: io_uring and pollcomp by
     errno, IOCP by Winsock code (also for a send refused at issue), EFI_UDP4 by the Transmit status
-    (`EFI_ICMP_ERROR`, `EFI_NETWORK_UNREACHABLE`, `EFI_HOST_UNREACHABLE`, `EFI_PORT_UNREACHABLE`,
-    `EFI_NO_MAPPING`, `EFI_OUT_OF_RESOURCES`, for the token or the refused Transmit call), and
-    lwIP-raw by the `udp_sendto` result (`ERR_RTE`, `ERR_MEM`, `ERR_BUF`, or no pbuf).
+    (`EFI_NOT_FOUND`, the no-route result of the Transmit call; `EFI_ICMP_ERROR`,
+    `EFI_NETWORK_UNREACHABLE`, `EFI_HOST_UNREACHABLE`, `EFI_PROTOCOL_UNREACHABLE`,
+    `EFI_PORT_UNREACHABLE`, `EFI_BAD_BUFFER_SIZE`, `EFI_NO_MAPPING`, `EFI_OUT_OF_RESOURCES`, for the
+    token or the refused Transmit call), and lwIP-raw by the `udp_sendto` result (`ERR_RTE`,
+    `ERR_MEM`, `ERR_BUF`, or no pbuf). Both IPv4-only providers drop a datagram for an IPv6 peer, as
+    the hosted ones do (`EAFNOSUPPORT`). Keel's own refusals inside a provider send (a TOS family it
+    cannot determine, a control message it cannot build) are not per-datagram: they stay sticky.
   - *Interrupted* (`EINTR`, `KL_IO_INTERRUPTED`): nothing was lost, so the direct send is retried at
     once (a few times) before it counts as a per-datagram failure; pollcomp retries on its own.
   - *Sticky:* any other failure (a closed or invalid socket, a socket shut down for writing, an

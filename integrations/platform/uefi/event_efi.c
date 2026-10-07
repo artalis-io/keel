@@ -450,6 +450,13 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
         if (!op || c->seq < op->seq) op = c;
     }
     if (op) {
+        if (kl_sockaddr_family(&op->snd_dest) != KL_AF_INET) {
+            /* EFI_UDP4 is IPv4-only: a peer of another family is one this socket cannot use, for this
+             * datagram only (the hosted providers report EAFNOSUPPORT). Drop it, keep the send side. */
+            op->post_failed = 1;
+            op->post_dropped = 1;
+            return;
+        }
         if (kl_uefi_udp_post_send(fd, op->snd, op->snd_len, &op->snd_dest) == 0) {
             op->generation = kl_uefi_udp_generation_h(fd);   /* op identity captured at the real post */
             op->posted = 1;

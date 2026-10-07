@@ -160,11 +160,15 @@ static kl_ssize_t pdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
         memset(control, 0, sizeof(control));
         /* Family for the TOS cmsg level: dest, else src, else getsockname; never defaulted to v4. */
         int family = kl_udp_send_family(s, dsa, src_len ? (struct sockaddr *)&ss : NULL);
-        if (family < 0) { errno = EINVAL; return -1; }
+        /* Keel's own refusals below use codes outside the per-datagram set (dgram_send_classify.h):
+         * they are not a kernel verdict about one datagram, and repeating them would only drop every
+         * later send silently. A family that cannot be determined means getsockname failed (a dead
+         * handle); a control message that cannot be built is a missing platform facility. */
+        if (family < 0) { errno = EBADF; return -1; }
         size_t clen;
         if (dgram_build_control(control, sizeof(control),
                                 src_len ? (struct sockaddr *)&ss : NULL, tos, family, &clen) != 0) {
-            errno = EINVAL; return -1;   /* requested source-pin/TOS could not be built → fail the send */
+            errno = EOPNOTSUPP; return -1;   /* requested source-pin/TOS could not be built → fail */
         }
         struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
         struct msghdr msg;

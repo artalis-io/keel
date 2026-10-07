@@ -172,7 +172,8 @@ KlUefiUdpOpResult kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long ge
  * EFI_INVALID_PARAMETER for a handle that is not a datagram. */
 EFI_STATUS kl_uefi_udp_last_status(KlSocketHandle fd);
 /* 1 when a failed send's status concerns that datagram only (an ICMP report, an unreachable network,
- * host or port, no address mapping yet, firmware short of resources): the socket keeps sending, the
+ * host or port, no route (EFI_NOT_FOUND from the Transmit call), a datagram larger than the path
+ * takes (EFI_BAD_BUFFER_SIZE), no address mapping yet, firmware short of resources): the socket keeps sending, the
  * datagram machine drops the datagram. 0 for every other status (the send side failed). */
 int kl_uefi_udp_status_per_datagram(EFI_STATUS st);
 KlUefiUdpOpResult kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long generation);

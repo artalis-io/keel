@@ -572,7 +572,10 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     if (!st || !kl_handle_valid(sop->fd)) return -1;   /* caller releases its transferred ref */
     /* Dest → raw IPv4 bytes + host-order port. A connected send (dest UNSPEC) is not exercised on
      * this loopback path; reject an unspecified/non-IPv4 dest fail-early. */
-    if (!sop->dest || kl_sockaddr_family(sop->dest) != KL_AF_INET) return -1;
+    if (!sop->dest) return -1;
+    /* The raw provider is IPv4-only: a peer of another family is one this socket cannot use, for this
+     * datagram only (the hosted providers report EAFNOSUPPORT). Drop it, keep the send side. */
+    if (kl_sockaddr_family(sop->dest) != KL_AF_INET) return KL_COMP_POST_DROPPED;
     int rc = kl_lwr_udp_send(st->lwrctx, (void *)sop->fd, sop->life, sop->data, sop->len,
                              sop->dest->u.ip, kl_sockaddr_port(sop->dest));
     if (rc == 0) kl_comp_life_release(sop->life);      /* glue took its own ref → drop the transferred one */

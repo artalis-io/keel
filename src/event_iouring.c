@@ -1228,7 +1228,10 @@ reap:;
     if ((r == -EAGAIN || r == -EBUSY) && seen == 0 && !waited && timeout_ms != 0) {
         waited = 1;                                   /* once: a refused wait just returns */
         /* No timeout (tsp NULL) would make this an unbounded wait, and the refused submit may have
-         * left nothing in flight to complete: bound it so the run loop can submit again. */
+         * left nothing in flight to complete: bound it so the run loop can submit again. On a kernel
+         * without IORING_FEAT_EXT_ARG, liburing implements the timed wait with a timeout SQE: while
+         * the SQ is full it may return at once, so the loop spins (bounded per drain) until the
+         * kernel accepts submissions again. */
         struct __kernel_timespec bounded = { .tv_sec = 0, .tv_nsec = 10 * 1000000LL };
         if (io_uring_wait_cqe_timeout(&st->ring, &cqe, tsp ? tsp : &bounded) == 0)
             goto reap;                                /* a completion arrived: reap it */

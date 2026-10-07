@@ -573,9 +573,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `KL_ERR_SOCKET` (a bad message reports `KL_ERR_INVALID_ARG`). Every backend classifies its own
   error: the hosted errno mapping and the Winsock provider (which now keeps the error's identity
   instead of reporting `EIO`, and maps `WSAEHOSTDOWN`), io_uring, pollcomp, IOCP, the EFI_UDP4
-  provider (a Transmit ending `EFI_ICMP_ERROR` / `EFI_*_UNREACHABLE` / `EFI_NO_MAPPING` /
-  `EFI_OUT_OF_RESOURCES`) and the lwIP raw provider (`udp_sendto` `ERR_RTE` / `ERR_MEM` /
-  `ERR_BUF`). An interrupted direct send (`EINTR`) is retried instead of failed. The DNS resolver
+  provider (a Transmit call or token ending `EFI_NOT_FOUND` (no route) / `EFI_ICMP_ERROR` /
+  `EFI_*_UNREACHABLE` / `EFI_BAD_BUFFER_SIZE` / `EFI_NO_MAPPING` / `EFI_OUT_OF_RESOURCES`, or an IPv6
+  peer) and the lwIP raw provider (`udp_sendto` `ERR_RTE` / `ERR_MEM` / `ERR_BUF`, or an IPv6 peer).
+  Keel's own refusals inside the POSIX provider send (a TOS family it cannot determine, a control
+  message it cannot build) stay sticky. An interrupted direct send (`EINTR`) is retried instead of failed. The DNS resolver
   moves a query whose send fails straight to the next nameserver.
 - **A custom socket provider's `io_status` result `KL_IO_RESET` after a datagram send now means "drop
   this datagram" (behavior change).** It latched the datagram's send error like any other failure;
