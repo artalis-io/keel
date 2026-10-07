@@ -3,6 +3,7 @@
 #include <keel/clock.h>
 #include <keel/keel.h>
 #include "socket.h"   /* internal: exercise the socket-provider seam */
+#include "event_caps.h"   /* internal: kl_event_caps (which event model the server got) */
 #include "net_compat.h"
 #include <string.h>
 #include <stdio.h>
@@ -542,6 +543,32 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
     kl_http_server_free(&srv);
 }
 #endif /* !_WIN32 */
+
+/* The built-in provider named explicitly in the config (KlHttpServerConfig.sockets) is a
+ * synchronous send/recv provider. On a readiness loop the server keeps it; on a completion loop it
+ * is not compatible (the loop drives I/O through an overlapped submit path), so the server adopts the
+ * backend's own overlapped provider in its place. The built-in provider also advertises datagram
+ * support, which must not pass for the overlapped capability in that negotiation. */
+UTEST(server_integration, explicit_builtin_provider_negotiated_by_event_model) {
+#ifdef _WIN32
+    const KlSocketProvider *builtin = kl_socket_provider_winsock();
+#else
+    const KlSocketProvider *builtin = kl_socket_provider_posix();
+#endif
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .sockets = builtin };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    int completion = (kl_event_caps(&srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    const KlSocketProvider *chosen = srv.ev.sockets;
+    kl_http_server_free(&srv);
+
+    if (completion) {
+        ASSERT_TRUE(chosen != builtin);   /* substituted, not kept by accident */
+        ASSERT_TRUE(kl_socket_provider_has_cap(chosen, KL_SOCK_CAP_OVERLAPPED));
+    } else {
+        ASSERT_TRUE(chosen == builtin);
+    }
+}
 
 /* A provider without KL_SOCK_CAP_WRITEV makes http_response.c serialize its
  * vectored writes through kl_sock_send. The full 64 KB body must still arrive
