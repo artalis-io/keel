@@ -137,9 +137,27 @@ int kl_uefi_socket_accept_arm(KlSocketHandle fd, int want);
  * KlSocketHandle + a captured generation, not the opaque KlUefiConn*). A completion
  * delivered after the conn was closed (generation bumped) or its memory reused
  * (magic cleared) is rejected. kl_uefi_conn_generation_h reads the live generation
- * to capture at post time; 0 if @fd is not a live conn. */
+ * to capture at post time; 0 if @fd is not an open conn (a conn that is open but dead after a
+ * quarantine still reports its generation, so ops posted on it stay attributable to it).
+ * kl_uefi_conn_valid_h is true only for the live, usable conn of that generation.
+ * kl_uefi_conn_same_gen_h asks only "is this still the conn the op was posted on": true while
+ * the slot holds that generation, even if the conn has since been marked dead (a quarantine
+ * marks it dead without closing it). Its posted ops then complete as failures, never as stale. */
 unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd);
 int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation);
+int kl_uefi_conn_same_gen_h(KlSocketHandle fd, unsigned long long generation);
+
+/* ── Non-blocking send step (the completion drain's send path) ─────────────
+ * Never pumps. With no Transmit outstanding on @fd, copies up to one fragment of
+ * @buf/@len into the slot-owned tx buffer and submits it; then (and on every later call
+ * while it is outstanding) Polls once and tests its token:
+ *   1  = the Transmit completed: *out_sent = bytes it carried (the caller advances by that
+ *        and passes the next remainder),
+ *   0  = still pending (would-block): call again with the SAME remainder on a later drain,
+ *   -1 = failed (the conn is dead / quarantined, or the Transmit completed with an error).
+ * While a Transmit is outstanding the conn's tx buffer belongs to it: a synchronous send on
+ * the conn is refused as would-block, and close() cancels and drains the token. */
+int kl_uefi_socket_send_step(KlSocketHandle fd, const void *buf, size_t len, size_t *out_sent);
 
 /* ── Non-blocking-recv readiness probe ──────────────────────────────────
  * The completion drain's READ-readiness test: return 1 iff recv() on @fd can

@@ -22,6 +22,8 @@
  *   B11 no-send-path-allocation instrumentation: across a large-response roundtrip the peak
  *          live allocation does NOT scale with response size (proves zero send-path alloc /
  *          bounded transmit memory).
+ *   B12 half-close mid-response (the client FINs while the response streams) -> the whole
+ *          response arrives byte-exact, then the server sees EOF and closes.
  *
  * SINGLE-THREADED lwIP discipline (as in raw_recv_test.c): kl_http_server_run() blocks on a pthread
  * that owns the lwIP tick; every lwIP-touching client call is marshalled onto that thread via
@@ -720,12 +722,100 @@ static int run_file_bounded(void) {
     return atomic_load(&g_fb_fail) ? 1 : 0;
 }
 
+/* ═══════════════════════ HALF-CLOSE MID-RESPONSE (B12) ═════════════════════════ */
+/* A client that is done sending shuts down its write side (FIN) while the response is still
+ * streaming (here: on the first response bytes, so the multi-pump send is certainly in flight).
+ * A FIN only ends the peer's sending direction: the server must deliver the WHOLE response, then
+ * (keep-alive request) see EOF on its next receive and close. Byte-exact, and the connection must
+ * end (the server's EOF read completes and it closes). */
+#define HC_PORT 7815
+#define HC_BODY (4u * 1024u * 1024u)
+static KlHttpServer g_hcs;
+static atomic_int g_hc_finished, g_hc_fail;
+static int g_hc_started, g_hc_deadline;
+static char *g_hc_req;
+static size_t g_hc_req_len;
+
+static void hc_finish(KlHttpServer *s, int failed) {
+    if (failed) atomic_store(&g_hc_fail, 1);
+    atomic_store(&g_hc_finished, 1);
+    kl_http_server_stop(s);
+}
+
+static void hc_poll(void *ud) {
+    KlHttpServer *s = ud;
+    if (!g_hc_started) {
+        g_hc_started = 1;
+        g_resp_size = HC_BODY;
+        free(g_hc_req); g_hc_req = malloc(256);
+        /* No "Connection: close": after the response the server reads again and must see EOF. */
+        g_hc_req_len = (size_t)snprintf(g_hc_req, 256, "GET /s HTTP/1.1\r\nHost: x\r\n\r\n");
+        if (kl_lwr_client_start_halfclose(LO, HC_PORT, g_hc_req, g_hc_req_len, HC_BODY + 8192) != 0) {
+            printf("B FAIL (half-close): client start\n");
+            hc_finish(s, 1); return;
+        }
+        g_hc_deadline = 4000;
+        kl_timer_add(&s->ev, 5, hc_poll, s);
+        return;
+    }
+    size_t chk = 0, blen = kl_lwr_client_body(&chk, NULL, NULL);
+    if (kl_lwr_client_closed()) {
+        if (!kl_lwr_client_halfclosed()) {
+            printf("B FAIL (half-close): the client never half-closed (blen %zu)\n", blen);
+            hc_finish(s, 1); return;
+        }
+        if (blen == HC_BODY && chk == pat_checksum_of(HC_BODY)) {
+            printf("PASS B (half-close mid-response): %u bytes byte-exact, then closed on EOF\n",
+                   HC_BODY);
+            hc_finish(s, 0); return;
+        }
+        printf("B FAIL (half-close): response truncated after the client's FIN: %zu/%u bytes\n",
+               blen, HC_BODY);
+        hc_finish(s, 1); return;
+    }
+    if (--g_hc_deadline <= 0) {
+        printf("B FAIL (half-close): timed out (%zu/%u bytes, conn still open)\n", blen, HC_BODY);
+        hc_finish(s, 1); return;
+    }
+    kl_timer_add(&s->ev, 5, hc_poll, s);
+}
+
+static void *hc_thread(void *arg) {
+    (void)arg;
+    kl_timer_add(&g_hcs.ev, 20, hc_poll, &g_hcs);
+    kl_http_server_run(&g_hcs);
+    return NULL;
+}
+
+static int run_half_close(void) {
+    KlHttpServerConfig cfg = { .port = HC_PORT, .bind_addr = "127.0.0.1",
+                     .max_connections = 8,
+                     .event_provider = kl_event_provider_lwip_raw() };
+    if (kl_http_server_init(&g_hcs, &cfg) != 0) { printf("B FAIL: hc server_init\n"); return 1; }
+    kl_http_server_route(&g_hcs, "GET", "/s", handle_size, NULL, NULL);
+    atomic_store(&g_hc_finished, 0); atomic_store(&g_hc_fail, 0);
+    g_hc_started = 0;
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, hc_thread, NULL) != 0) {
+        printf("B FAIL: hc pthread_create\n"); kl_http_server_free(&g_hcs); return 1;
+    }
+    int in_time = run_watchdog(&g_hc_finished, &g_hcs, 6000);
+    pthread_join(th, NULL);
+    kl_http_server_free(&g_hcs);
+    kl_lwr_client_release();
+    free(g_hc_req); g_hc_req = NULL;
+    if (!in_time) { printf("B FAIL (half-close): watchdog expired\n"); return 1; }
+    return atomic_load(&g_hc_fail) ? 1 : 0;
+}
+
 int main(void) {
     int fails = 0;
     printf("── Stage B send tests (lwIP-raw) ──\n");
     fails += run_send_phases();
     fails += run_file_bounded();
     fails += run_lifetime();
+    fails += run_half_close();
     fails += run_file_error();
     fails += run_fail_alloc();
     if (fails) { printf("raw_send_test: %d FAILED\n", fails); return 1; }

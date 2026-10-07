@@ -502,7 +502,7 @@ static void lwr_slot_clear(KlLwrConn *c) {
     c->gen = gen;
 }
 
-/* The posted send can no longer finish (the conn died, or the peer closed under it): drop it and
+/* The posted send can no longer finish (the conn died, or an error was delivered): drop it and
  * owe its WRITE as a failure. A no-op without a posted send, or when its WRITE is already owed. */
 static void lwr_fail_send(KlLwrConn *c) {
     if (!c->send_posted || c->pend_write) return;
@@ -717,11 +717,15 @@ void kl_lwr_lwip_tick(void *loopif) {
 
 /* ── raw tcp_* callbacks → per-slot state ─────────────────────────────────────── */
 
-/* recv callback for an accepted (server-side) connection. A NULL pbuf / err = peer closed.
+/* recv callback for an accepted (server-side) connection. A NULL pbuf = the peer's FIN.
  * FLOW CONTROL (fix #1):
- *   - NULL p or err: mark closed; do NOT free a null p; keep the pcb (driver closes it). If a
- *     send is in flight (close-with-outstanding: client read part of a big body then FIN'd),
- *     drop it and fail its WRITE now; an armed recv fails once its retained bytes are out.
+ *   - NULL p (FIN): mark closed (read-side EOF only); do NOT free a null p; keep the pcb (driver
+ *     closes it). An armed recv fails once its retained bytes are out. A FIN ends only the peer's
+ *     sending direction: a client that half-closes after its request still reads the response,
+ *     so an in-flight send keeps pumping. A peer that is really gone resets the connection
+ *     (lwIP aborts a pcb whose application closed it when data arrives), and lwr_srv_err fails
+ *     the send then.
+ *   - err != ERR_OK: an error delivery: mark closed and fail an in-flight send.
  *   - at the per-conn bound (rx_queued + p->tot_len > KL_LWR_RX_MAX): return ERR_MEM WITHOUT
  *     freeing/queuing/acking p; lwIP retains p and re-delivers later (real backpressure).
  *   - else RETAIN p: append to rx_head (pbuf_cat, refcount-aware, NO copy, NO pbuf_free), add
@@ -736,7 +740,7 @@ static err_t lwr_srv_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         if (p) pbuf_free(p);
         if (cs) {
             cs->closed = 1;              /* an armed recv fails once rx drains (next_readable) */
-            if (cs->send_active)         /* close-with-outstanding: tear down promptly */
+            if (err != ERR_OK && cs->send_active)
                 lwr_fail_send(cs);       /* drop the in-flight send; its WRITE fails */
         }
         return ERR_OK;   /* keep the pcb; the driver's close tears it down */
@@ -1739,10 +1743,11 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
             r->peer_port = c->peer_port;
             c->pend_accept = 0;
         }
-        /* The posted send's single WRITE: ok=1 once fully acked, ok=0 if the conn died (or the
-         * peer closed) first. A failed WRITE completes the send op only: an armed recv on the
-         * same conn still gets its own (failed) READ, so the driver, which counts its posted
-         * ops, sees every one of them complete. */
+        /* The posted send's single WRITE: ok=1 once fully acked, ok=0 if the conn died (reset,
+         * abort, error delivery) first; a plain FIN from the peer does not stop it. A failed
+         * WRITE completes the send op only: an armed recv on the same conn still gets its own
+         * (failed) READ, so the driver, which counts its posted ops, sees every one of them
+         * complete. */
         if (c->pend_write && n < max) {
 #ifndef NDEBUG
             assert(c->owner != NULL && "a posted send has an owner");

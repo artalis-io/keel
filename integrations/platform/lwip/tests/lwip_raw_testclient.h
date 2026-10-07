@@ -28,6 +28,12 @@ int    kl_lwr_client_start_cap(const uint8_t ip4[4], uint16_t port,
 /* Convenience: small default accumulator (1 KB). */
 int    kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
                            const void *req, size_t req_len);
+/* As kl_lwr_client_start_cap, but the client half-closes (shuts down its sending side, a FIN)
+ * as soon as the first response bytes arrive, then keeps reading the whole response. */
+int    kl_lwr_client_start_halfclose(const uint8_t ip4[4], uint16_t port,
+                                     const void *req, size_t req_len, size_t cap);
+/* 1 once the half-close client actually sent its FIN. */
+int    kl_lwr_client_halfclosed(void);
 /* Copy the captured response so far into `dst` (NUL-terminated if room); returns the count. */
 size_t kl_lwr_client_response(char *dst, size_t cap);
 /* Total bytes accumulated so far (headers + body). */

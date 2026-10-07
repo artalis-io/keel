@@ -662,7 +662,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         ev->target = stream;
         ev->ok = r->ok;
         ev->bytes = r->nbytes;
-        /* A failed WRITE (the conn died, or the peer closed under the send) completes the SEND
+        /* A failed WRITE (the conn died under the send: reset, abort) completes the SEND
          * only. A recv armed on the same conn is NOT disarmed: it completes with its own failed
          * READ below (this drain or a later one). The driver releases a connection only once
          * every op it posted has completed, so suppressing that READ would leak the conn. */
