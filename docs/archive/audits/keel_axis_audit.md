@@ -5,6 +5,169 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Eighteenth pass: separation holds after the audit-19 fixes (2026-10-07)
+
+**Revision:** `main` `cd17c9c` (after #464 to #474). Read-only; no source changed.
+**Scope:** the event, socket and protocol seams after the audit-19 fixes, and a re-check of the
+seventeenth pass's F1 to F4 and I1 to I3.
+
+**Verdict:** the three-axis separation holds. No protocol TU calls an event engine or includes an
+engine header, and #464 to #474 added no engine-type branching. **No High or Medium.** The
+seventeenth pass's High (F1) is fixed. The lwIP raw and EFI providers now honour "cancel yields
+exactly one terminal completion" for server receive and send. There is one new Low (N1); F2 covers
+one more call site; F4 is slightly wider. The C audit's H1 (h2c Upgrade double destroy) and M1
+(completion kept-body window) are protocol-layer defects, not axis coupling.
+
+### 1. Architecture map (drift only)
+
+- **Unchanged since `03cef23`:** `event_epoll.c`, `event_kqueue.c`, `event_poll.c`,
+  `event_wsapoll.c`, `http_server.c`, `socket_posix.c`, `socket_winsock.c`, `event_ctx.c`.
+- **`completion.h` `send_max` now has two meanings:**
+  - io_uring advertises `KL_IOU_SEND_MAX` (0x7ffff000) as a hint, and a longer post is still sent
+    in parts.
+  - EFI (`KL_EFI_SNDBUF`) treats it as a hard limit.
+  - IOCP, pollcomp and lwIP raw advertise 0.
+  - The header comment describes only the EFI meaning.
+- **`completion_dispatch.c` (#471):** the optional-slot routers are NULL-safe, and
+  `kl_comp_dgram_available` gates the datagram facade. `post_recv`, `post_send`, `post_accept` and
+  `prime_accepts` remain unguarded and unchecked by the server (N1).
+- **New in the model-blind core:** `KlHttpConn.dispatch_depth`, `body_kept`, and
+  `kl_http_conn_resume_body`, shared by both drive paths. `kl_async_cancel_detached` is the server's
+  teardown cancel, and `kl_async_cancel` now releases a suspended connection.
+
+### 2. Traces (changes only)
+
+- **Readiness receive (epoll):** unchanged. `kl_async_complete` gained a READING_BODY arm: it calls
+  `kl_http_conn_resume_body`, then `async_rearm` (add, falling back to mod on EEXIST).
+- **Completion receive (io_uring):**
+  - `kl_http_comp_resume` feeds `body_kept` under `comp_in_body_drive`.
+  - `kl_http_comp_post_read` refuses while `body_kept != 0`.
+  - `iou_comp_drain` tolerates -EBUSY and -EAGAIN from submit.
+- **Accept:** unchanged on both models.
+- **Send and backpressure:**
+  - Readiness: `kl_drain_write` pushes the backlog before it appends. The WebSocket TU's
+    `ws_arm_write` arms READ|WRITE on the drain's empty-to-pending edge, only when not `comp_driven`.
+  - Completion: TLS `conn_write` refuses with 0 before `tls->write` when `kl_comp_ws_queue_full`
+    holds, the same 1 MiB bound plaintext gets. `ws_drain_writer` splits flushes into 64 KiB pieces
+    for TLS too. io_uring and IOCP split sends above 0x7ffff000.
+- **Close with outstanding work:**
+  - lwIP raw (#467): cancel aborts the connection and gives each posted op its own failed
+    completion.
+  - EFI (#466): `el_cancel` marks live-generation ops cancelled, and `el_drain` surfaces each once,
+    with ok=0, before its stale check.
+
+### 3. Findings
+
+**Seventeenth-pass re-check**
+- **F1 (High): FIXED (C).**
+  - `conn_write` checks `kl_comp_ws_queue_full` before encrypting.
+  - The drain buffers the refusal, as readiness buffers WANT_WRITE.
+  - Without a drain, a frame near or above 1 MiB fails on completion; this is documented in
+    `kl_ws_server_enable_drain`.
+  - Tests run in the io_uring and IOCP lanes.
+- **F2 (Low): UNCHANGED, and wider than listed.**
+  - `websocket_client.c`, `http2_client.c` and the DNS TCP path still read `errno`.
+  - So does the readiness accept loop: `http_server.c:497`, where EMFILE needs a category
+    `KlIoStatus` lacks.
+  - Fix: `kl_sock_io_status` at these sites, plus a resource-exhausted status (append-only enum).
+- **F3 (Low): UNCHANGED.**
+  - `comp_send_response` still posts a buffered response with no `send_max` cap, which affects only
+    EFI.
+  - The `send_max` comment should also say whether it is a limit or a hint.
+- **F4 (Low): SLIGHTLY WIDER.**
+  - `http_server_ws.c` still reads `comp_tlsq_*`.
+  - It now also branches on `comp_driven` for the 64 KiB split and for `ws_arm_write`, which calls
+    `kl_event_mod` itself. That is a Keel API, not an engine call, and `check-readiness-identity`
+    scans the TU.
+  - HTTP/2 does the same through a core-owned `want_write` hook.
+  - Fix: core accessors and a request-write hook.
+- **I1, I2, I3: UNCHANGED.**
+  - I1: `src/socket.h` pulls in `sockcompat.h`.
+  - I2: `http_response.c:676` branches on `KL_SOCK_CAP_OVERLAPPED`.
+  - I3: dead `file_io` paths, and unused `<fcntl.h>` in `http2_client.c`, `http2_server.c` and
+    `websocket_client.c`.
+
+**New**
+- **N1 (Low, C): the completion server does not check the stream seam it needs.** Goal 13.
+  - Where: `event_dispatch.c` requires only `drain`, and the server enters the completion path on
+    `KL_EVENT_CAP_COMPLETION` alone.
+  - Scenario 1: a datagram-only or client-only completion provider handed to `KlHttpServer` calls a
+    NULL `post_recv`.
+  - Scenario 2: a provider without `cancel` now makes `kl_comp_cancel` a silent no-op. A connection
+    released with a receive posted (the idle sweep) then never reaches `comp_ops == 0` and leaks.
+    Before #471 that case crashed loudly.
+  - No in-tree provider is affected.
+  - Fix: a `kl_comp_stream_server_available` check when the server starts (`prime_accepts`,
+    `post_accept`, `post_recv`, `post_send`, `cancel`), failing with `KL_ERR_UNSUPPORTED`, like
+    `kl_comp_dgram_available`.
+- **I4 (Info): lwIP raw cancel aborts.** An idle keep-alive timeout is visible to the peer as RST
+  rather than FIN. The contract is met: exactly one terminal per op.
+- **I5 (Info): the async client writes its provider into the shared `KlEventCtx`.** A successful
+  start leaves `cfg->sockets` installed for everything on that ctx (C audit, client Low). Per-request
+  config should not mutate shared loop state.
+- **Checked clean in #464 to #474:**
+  - `async.c` branches only on the Keel capability `KL_EVENT_CAP_COMPLETION`.
+  - ICMP-report handling stays in substrate TUs.
+  - The timer watermark is model-neutral.
+  - The DNS link-local change uses `KlSockAddr`, and its Windows half is in `dns_sys_win.c`.
+  - Readiness and completion behave equivalently for async complete and cancel and for the body
+    after a suspend (shared `kl_http_conn_resume_body`).
+  - The equivalence is broken only by the C audit's M1, a completion-only stale window.
+
+### 4. Protocol independence (mechanical)
+
+`grep -rnE '<sys/epoll\.h>|<sys/event\.h>|io_uring|WSA|OVERLAPPED|epoll_|kevent' src/protocols/`
+returns 26 lines:
+- 25 are in comments.
+- 1 is code: `KL_SOCK_CAP_OVERLAPPED` at `http_response.c:676`, a Keel capability constant (I2).
+- The only new line since `03cef23` is a comment in `async.c`.
+- No hits in `http2/`, `websocket/`, `dns/` or `proxy_protocol/`.
+
+Native networking includes appear only in the platform-service TUs: `dns_sys_posix.c`,
+`dns_sys_win.c`, `http_server_plat_posix.c` and `http_server_plat_win.c`. The three unused
+`<fcntl.h>` includes are the exception (I3).
+
+### 5. Compatibility matrix (`ci.yml`, `soak.yml` at `cd17c9c`)
+
+| Pairing | Implemented | Tested in CI | Status |
+|---|---|---|---|
+| Linux sockets + epoll | yes | full `make test`, ASan/UBSan, smoke, soak | supported default |
+| Linux + poll | yes | full suite, soak | supported fallback |
+| Linux, `KEEL_NO_COMPLETION=1` | yes | full suite | supported minimal build |
+| Linux + io_uring | yes (liburing) | curated `test-iouring` (now with `completion_output`, `http_async`), smokes, ASan smokes, `debug-iouring`, soak | supported; curated subset |
+| Darwin + kqueue | yes | full `make test`, soak | supported |
+| Winsock + WSAPoll | yes (MinGW, MSVC) | `test-win`, smokes, `test-msvc`, soak | supported; subset |
+| Winsock + IOCP | yes (MinGW, MSVC) | `test-win-iocp` (with `completion_output`, `http_async`), smokes, soak | supported; subset; F1 fixed |
+| pollcomp double | yes | `test-pollcomp`, ASan smokes, `debug-pollcomp`, lane parity, soak | test double by design |
+| lwIP raw | yes | `loopback-raw`, `loopback-raw-asan` (now with `raw_teardown_test`) | integration-tested; per-op terminals fixed |
+| UEFI EFI_TCP4/UDP4 | yes | PE compile and symbol gates, plus the mock-firmware harness under ASan/UBSan/LSan (#466) | host-tested against a fake EFI; no real-firmware run; C audit M4 |
+
+### 6. Contract deltas
+
+- **Completion:** cancel now yields exactly one failed terminal completion on lwIP raw (each op)
+  and on EFI (server receive and send). On EFI, cancelled connect ops and watches are still dropped;
+  this is documented as uncounted.
+- **Optional completion slots:** NULL slots now fail or no-op instead of crashing. Only the datagram
+  facade checks them before it starts (N1).
+- **Async:** `kl_async_complete` or `kl_async_cancel` inside a frame that drives the connection is
+  left to that frame. `kl_async_cancel` releases a suspended connection.
+- **Backpressure:** the F1 exception is closed. Every writer sees would-block past the admission
+  bound under both models.
+- **Errors:** the F2 stragglers remain. `KlIoStatus` lacks a resource-exhausted category.
+- **`send_max`:** needs restating as a hard limit (EFI) versus a hint (io_uring).
+
+### 7. Roadmap
+
+- **Immediate:** none at the axis level. The C audit's H1, M1 and M2 come first.
+- **Next:**
+  - N1: the stream-seam check when the server starts.
+  - F2: `kl_sock_io_status` everywhere, plus a resource-exhausted status.
+  - F3: `send_max` for direct posts, and restate the contract.
+- **Cleanup:** F4 accessors and a request-write hook; I2's driver-installed writer; I3's dead code;
+  document I5 (or fix it with the client Low). I1 stays deferred.
+- **Deferred:** a real-firmware EFI lane, and widening the io_uring and IOCP curated suites toward
+  parity.
+
 ## Seventeenth pass: separation holds; one backpressure gap above the axis (2026-10-06)
 
 **Revision:** `main` `03cef23`. Read-only; no source changed.
