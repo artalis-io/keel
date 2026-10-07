@@ -560,6 +560,142 @@ UTEST(tls_integration, a_body_that_came_with_its_headers_is_not_left_in_the_engi
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (completion + TLS): no answer */
 }
 
+/* A body the engine still holds after the header read is read on, without the socket. The header
+ * read takes at most the free read buffer, so a real engine (OpenSSL, mbedTLS) hands out part of a
+ * record that carried headers and body and keeps the rest decrypted (pending() > 0). The socket has
+ * nothing more to report, so after the dispatch moved to the body phase nothing read that rest and
+ * the request ended in 408. mock_tls_split_record gathers the whole request as one record, larger
+ * than the read buffer (socket mode: the readiness transport). */
+static KlHttpServer tq_hold_body_srv;
+
+static void tls_big_request(char *rq, size_t cap, const char *path, size_t body, size_t *len) {
+    int hl = snprintf(rq, cap, "POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n"
+                               "Connection: close\r\n\r\n", path, body);
+    memset(rq + hl, 'e', body);
+    *len = (size_t)hl + body;
+}
+
+UTEST(tls_integration, a_body_held_in_the_engine_after_the_header_read_is_read_on) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .read_timeout_ms = 800 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_hold_body_srv, &cfg));
+    kl_http_server_route(&tq_hold_body_srv, "POST", "/echo", handle_echo_body,
+                         (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_hold_body_srv);
+    wait_for_bind(&tq_hold_body_srv);
+
+    static char rq[16384];
+    static char buf[16384];
+    size_t len = 0;
+    tls_big_request(rq, sizeof rq, "/echo", 12000, &len);
+    buf[0] = '\0';
+    mock_tls_split_after = 0;
+    mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
+    int fd = connect_to(tq_hold_body_srv.bound_port);
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, rq, len);
+        read_one_response(fd, buf, sizeof buf, 2500);
+        kl_test_closesock(fd);
+    }
+    mock_tls_split_record = 0;
+    kl_http_server_stop(&tq_hold_body_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_hold_body_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (readiness): 408 */
+    ASSERT_TRUE(strstr(buf, "Content-Length: 12000") != NULL);
+}
+
+/* The same after a streaming-async handler suspended at dispatch and its resume awaits the body:
+ * the bytes read with the headers are fed, and the rest of the record, still in the engine, must be
+ * read on too rather than wait for a socket readiness that never comes. */
+static KlHttpServer tq_hold_async_srv;
+static KlAsyncOp tq_hold_op;
+static KlHttpRequest *tq_hold_req;
+static size_t tq_hold_got;
+
+typedef struct { KlHttpBodyReader base; KlAllocator *alloc; } TqHoldReader;
+
+static int tq_hold_on_data(KlHttpBodyReader *self, const char *d, size_t n) {
+    (void)self; (void)d;
+    tq_hold_got += n;
+    return 0;
+}
+static void tq_hold_on_complete(KlHttpBodyReader *self) {
+    (void)self;
+    char out[64];
+    int n = snprintf(out, sizeof out, "got=%zu", tq_hold_got);
+    KlHttpResponse *res = kl_http_conn_response(kl_http_request_conn(tq_hold_req));
+    kl_http_response_status(res, 200);
+    (void)kl_http_response_body_copy(res, out, (size_t)n);
+    kl_http_request_send_response(tq_hold_req);
+}
+static void tq_hold_noop(KlHttpBodyReader *self) { (void)self; }
+static void tq_hold_destroy(KlHttpBodyReader *self) {
+    TqHoldReader *r = (TqHoldReader *)self;
+    kl_free(r->alloc, r, sizeof *r);
+}
+static KlHttpBodyReader *tq_hold_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+    (void)req; (void)ud;
+    TqHoldReader *r = kl_malloc(alloc, sizeof *r);
+    if (!r) return NULL;
+    memset(r, 0, sizeof *r);
+    r->base.on_data = tq_hold_on_data;
+    r->base.on_complete = tq_hold_on_complete;
+    r->base.on_error = tq_hold_noop;
+    r->base.destroy = tq_hold_destroy;
+    r->alloc = alloc;
+    return &r->base;
+}
+static void tq_hold_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    kl_http_request_await_body(tq_hold_req);
+}
+static void tq_hold_timer(void *ud) {
+    (void)ud;
+    kl_async_complete(&tq_hold_async_srv, &tq_hold_op);
+}
+static void handle_tq_hold(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    tq_hold_req = req;
+    tq_hold_got = 0;
+    memset(&tq_hold_op, 0, sizeof tq_hold_op);
+    tq_hold_op.on_resume = tq_hold_resume;
+    if (kl_async_suspend(&tq_hold_async_srv, kl_http_request_conn(req), &tq_hold_op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&tq_hold_async_srv), 50, tq_hold_timer, NULL);
+}
+
+UTEST(tls_integration, a_body_held_in_the_engine_is_read_on_after_an_async_resume) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .read_timeout_ms = 800 };
+    ASSERT_EQ(0, kl_http_server_init(&tq_hold_async_srv, &cfg));
+    kl_http_server_route_streaming_async(&tq_hold_async_srv, "POST", "/aw", handle_tq_hold, NULL,
+                                         tq_hold_factory);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &tq_hold_async_srv);
+    wait_for_bind(&tq_hold_async_srv);
+
+    static char rq[16384];
+    static char buf[2048];
+    size_t len = 0;
+    tls_big_request(rq, sizeof rq, "/aw", 12000, &len);
+    buf[0] = '\0';
+    mock_tls_split_after = 0;
+    mock_tls_split_record = len;
+    int fd = connect_to(tq_hold_async_srv.bound_port);
+    if (fd >= 0) {
+        (void)kl_test_sockwrite(fd, rq, len);
+        read_response(fd, buf, sizeof buf, 2500);
+        kl_test_closesock(fd);
+    }
+    mock_tls_split_record = 0;
+    kl_http_server_stop(&tq_hold_async_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&tq_hold_async_srv);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);            /* was (readiness): 408 */
+    ASSERT_TRUE(strstr(buf, "got=12000") != NULL);
+}
+
 /* A request that times out over TLS gets its 408. The sweep wrote it through the TLS engine (on a
  * completion loop, into its output ring) and nothing ever sent it. */
 static KlHttpServer tq_408_srv;
