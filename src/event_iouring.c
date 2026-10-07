@@ -1025,6 +1025,22 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         return 1;
 
     case IOU_DGRAM_RECV:
+        /* An ICMP report about an earlier send (connected socket) completes the recvmsg with
+         * -ECONNREFUSED / -EHOSTUNREACH / ...: the kernel consumed it and nothing was received, so
+         * re-issue the same op on the same buffer and wait for the next datagram. Each such
+         * completion needs a fresh report, so this cannot spin. A cancelled op completes as usual;
+         * so does one that finds no SQE (a failed receive, as before). */
+        if (res < 0 && !op->aborted && kl_udp_is_icmp_report(-res)) {
+            struct io_uring_sqe *rsqe = iou_sqe(st);
+            if (rsqe) {
+                op->msgh.msg_namelen = sizeof(op->peer);
+                op->msgh.msg_controllen = sizeof(op->udp_ctrl);
+                op->msgh.msg_flags = 0;
+                io_uring_prep_recvmsg(rsqe, op->fd, &op->msgh, 0);
+                io_uring_sqe_set_data(rsqe, op);
+                return 0;                        /* op stays tracked and in flight; no event */
+            }
+        }
         /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
          * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
          * double-release. Never dereference the transport owner. */

@@ -488,6 +488,31 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   now has these reports turned off (`SIO_UDP_CONNRESET` / `SIO_UDP_NETRESET`), and a receive that still meets one, on a socket adopted
   through `kl_datagram_init`, skips it and takes the next datagram (IOCP re-posts the receive). Any
   other receive error is still terminal.
+- **POSIX: a connected datagram keeps receiving after an ICMP unreachable.** Linux and the BSDs queue
+  an ICMP port, host or network unreachable caused by a send on a connected UDP socket as the socket
+  error, and the next receive returns it (`ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`). The datagram
+  receiver took that as fatal on every POSIX backend (readiness, io_uring and pollcomp) and stopped for
+  good, so a client connected to a peer that restarted, or a resolver connected to a nameserver that was
+  briefly down, never heard from it again. The receive now consumes such a report and takes the next
+  datagram (`recvmsg` and `recvmmsg` read again, yielding would-block after a bounded number of
+  reports; io_uring re-posts the receive; pollcomp polls again). Any other receive error is still
+  terminal.
+- **A completion loop without datagram support refuses a `KlDatagram` instead of crashing.** The
+  datagram slots of a completion provider (`post_dgram_recv`, `post_dgram_send`, `cancel_dgram`,
+  `retire_dgram`) are optional, and a stream-only provider (the EFI integration built without
+  datagrams, a custom provider) leaves them NULL. `kl_datagram_init` accepted such a loop anyway and
+  called the NULL slot at the first receive. `kl_datagram_init`, `kl_datagram_init_ex` and
+  `kl_datagram_socket_init` now fail with `KL_ERR_UNSUPPORTED` before taking the descriptor (and
+  `kl_datagram_socket_init` before creating one), and the completion routers no longer call a missing
+  slot: a post fails, a cancel does nothing, and the async client's connect fails cleanly on a
+  provider without `post_connect`.
+- **A UDP GSO group the kernel refuses is sent per segment instead of dropped.** Linux refuses a GSO
+  send of more than 64 segments or a segment the path cannot carry with `EINVAL`, and one over the
+  65507-byte UDP payload with `EMSGSIZE`. `kl_datagram_send_gso` fell back to per-segment sends only on
+  `EOPNOTSUPP`; for these errors it dropped the whole group, so a large `kl_datagram_send_gso` call
+  could lose every segment while reporting it accepted. A group over 64 segments or 65507 bytes now
+  goes straight to per-segment sends, and any other refusal of one group sends that group per segment
+  without turning GSO off for the next.
 - **EFI integration: a server connection closed with a receive or send posted is released.** The
   EFI completion backend's cancel freed a connection's posted receive or send without completing it,
   but the HTTP server releases a connection only from the completion of the last operation it

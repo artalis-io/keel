@@ -14,6 +14,7 @@
 #ifndef KEEL_SRC_UDP_CMSG_H
 #define KEEL_SRC_UDP_CMSG_H
 
+#include <errno.h>           /* ECONNREFUSED / EHOSTUNREACH / ... (kl_udp_is_icmp_report) */
 #include <sys/socket.h>      /* struct msghdr, struct sockaddr_storage, socklen_t */
 
 /* Control-message buffer size for a UDP recvmsg: generously sized for the RX cmsgs the
@@ -55,5 +56,32 @@ int kl_udp_build_control(unsigned char *buf, size_t bufsz,
 /* Resolve the family for a send's TOS cmsg level: `dest` family, else `src` family, else the fd's own
  * family via getsockname. NEVER defaults to AF_INET. Returns AF_INET / AF_INET6, or -1 if undeterminable. */
 int kl_udp_send_family(int fd, const struct sockaddr *dest, const struct sockaddr *src);
+
+/* 1 when a failed UDP receive's errno is an ICMP error report about a datagram this socket SENT,
+ * not a receive failure: the kernel queues port / host / network unreachable as the socket error of
+ * a connected UDP socket (ECONNREFUSED / EHOSTUNREACH / ENETUNREACH) and the next receive returns it,
+ * consuming it. UDP has no connection to reset, so ECONNRESET / ENETRESET can only be the same report
+ * (the form Winsock gives it, which a POSIX layer over Winsock passes through). The receive yielded
+ * nothing and the socket is fine: the caller takes the next datagram instead of failing. Any other
+ * errno is a real receive error. Shared by the readiness recv and the POSIX completion backends,
+ * the POSIX counterpart of kl_udp_win_is_icmp_report. */
+static inline int kl_udp_is_icmp_report(int err) {
+    switch (err) {
+    case ECONNREFUSED:
+    case EHOSTUNREACH:
+    case ENETUNREACH:
+    case ECONNRESET:
+#ifdef ENETRESET
+    case ENETRESET:
+#endif
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* ICMP reports a receive skips per call before it yields as would-block (bounds the loop; a socket
+ * still flooded with reports is simply reported readable again). */
+#define KL_UDP_ICMP_REPORT_SKIP_MAX 16
 
 #endif /* KEEL_SRC_UDP_CMSG_H */
