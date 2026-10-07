@@ -976,4 +976,83 @@ UTEST(h2c_live, free_in_on_resp_during_request_is_safe) {
     ASSERT_EQ(h2q_check_and_release(), 0);       /* was: the session written after it was freed */
 }
 
+/* A send can close a stream (an END_STREAM or RST_STREAM going out), running on_resp from inside the
+ * session's flush; an on_resp that closes or frees the client ends it there. nghttp2 then goes on
+ * sending the frames still queued: those sends went to the closed socket, failed, the flush failed,
+ * and on_error ran on a client the user had already closed or freed. This session completes its
+ * stream between two sends of the flush that follows a read, as nghttp2 does. */
+static int     g_sc_armed;        /* the next flush is the one after a read */
+static int32_t g_sc_id;
+static int     g_sc_resp, g_sc_errors, g_sc_free;
+static int sc_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
+    (void)self; (void)data; (void)len;
+    g_sc_armed = 1;
+    return 0;
+}
+static int sc_flush(KlHttp2ClientSession *self) {
+    if (!g_sc_armed) return 0;
+    g_sc_armed = 0;
+    if (self->keel_cbs.on_send(self, "a", 1) < 0) return -1;
+    self->keel_cbs.on_response(self, g_sc_id, 200, NULL, 0);
+    self->keel_cbs.on_stream_close(self, g_sc_id, 0);    /* → on_resp, which closes or frees */
+    if (self->keel_cbs.on_send(self, "b", 1) < 0) return -1;   /* a frame still queued */
+    return 0;
+}
+static KlHttp2ClientSession *sc_factory(KlAllocator *alloc) {
+    g_live_session = mock_factory(alloc);
+    if (g_live_session) { g_live_session->recv = sc_recv; g_live_session->flush = sc_flush; }
+    return g_live_session;
+}
+static void sc_on_resp(KlHttp2ClientConn *c, int32_t id, const KlHttp2ClientResponse *r, void *ud) {
+    (void)id; (void)r; (void)ud;
+    g_sc_resp++;
+    if (g_sc_free) kl_http2_client_free(c);
+    else           kl_http2_client_close(c);
+}
+static void sc_on_error(KlHttp2ClientConn *c, const char *msg, void *ud) {
+    (void)c; (void)msg; (void)ud;
+    g_sc_errors++;
+}
+
+static void send_close_case(int *utest_result, int do_free) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    static Listener l;
+    ASSERT_EQ(live_listen(&l), 0);
+    KlHttp2ClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = sc_factory;
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/", l.port);
+    g_live_session = NULL;
+    g_sc_armed = 0;
+    g_sc_resp = g_sc_errors = 0;
+    g_sc_free = do_free;
+    KlHttp2ClientConn *c = kl_http2_client_connect(&ev, &g_h2qa, &cfg, url, sc_on_error, NULL);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 200 && !g_live_session; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    ASSERT_TRUE(g_live_session != NULL);
+    KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
+    ASSERT_TRUE(kl_handle_valid(peer));
+
+    g_sc_id = kl_http2_client_request(c, "GET", "/", NULL, 0, NULL, 0, sc_on_resp, NULL);
+    ASSERT_GT(g_sc_id, 0);
+    (void)send((int)peer, "x", 1, 0);           /* readable: recv, then the flush that closes */
+    for (int i = 0; i < 100 && g_sc_resp == 0; i++) (void)kl_event_ctx_run(&ev, 16, 10);
+    for (int i = 0; i < 10; i++) (void)kl_event_ctx_run(&ev, 16, 5);
+
+    int resp = g_sc_resp, errors = g_sc_errors;
+    if (!do_free) kl_http2_client_free(c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(peer);
+    kl_test_closesock(l.fd);
+    ASSERT_EQ(resp, 1);
+    ASSERT_EQ(errors, 0);                        /* was: 1, on_error after the close or free */
+    ASSERT_EQ(h2q_check_and_release(), 0);
+}
+
+UTEST(h2c_live, close_in_on_resp_during_send_reports_no_error) { send_close_case(utest_result, 0); }
+UTEST(h2c_live, free_in_on_resp_during_send_reports_no_error)  { send_close_case(utest_result, 1); }
+
 UTEST_MAIN();

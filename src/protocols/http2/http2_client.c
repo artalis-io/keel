@@ -161,6 +161,10 @@ static void h2c_stream_remove(KlHttp2ClientConn *c, int32_t stream_id)
 static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
 {
     KlHttp2ClientConn *c = s->keel_ctx;
+    /* A send that closed a stream ran on_resp, and that may have closed or freed the client: the
+     * socket is gone, so fail the frames the session still has queued rather than send them to it. */
+    if (c->state == H2C_CLOSED || c->free_requested)
+        return -1;
     const char *p = (const char *)data;
     size_t sent = 0;
     while (sent < len) {
@@ -470,7 +474,8 @@ static void h2c_handle_active(KlHttp2ClientConn *c, KlEventMask ready)
 
     if (ready & KL_EVENT_WRITE) {                /* room again for output the session kept */
         if (h2c_flush(c) < 0) {
-            h2c_error(c, "session flush error");
+            /* Not when on_resp, run by a send, closed or freed the client: it reports nothing more. */
+            if (!c->free_requested && c->state != H2C_CLOSED) h2c_error(c, "session flush error");
             return;
         }
         if (c->free_requested || c->state == H2C_CLOSED)
@@ -516,8 +521,8 @@ read_more: ;
 
     /* Flush any pending output */
     if (h2c_flush(c) < 0) {
-        h2c_error(c, "session flush error");
-        return;
+        if (!c->free_requested && c->state != H2C_CLOSED) h2c_error(c, "session flush error");
+        return;                              /* ...unless on_resp, run by a send, ended the client */
     }
     if (c->free_requested || c->state == H2C_CLOSED)
         return;                              /* a send closed a stream, and on_resp freed us */
