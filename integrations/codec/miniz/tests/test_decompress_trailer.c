@@ -335,4 +335,115 @@ UTEST(gz_trailer, bytes_after_the_trailer_flush_rejected) {
     ASSERT_EQ(rc, -1);                            /* was 0: the extra bytes were dropped */
 }
 
+/* ── Optional gzip header fields split across feeds ──────────────────────────────────────────
+ * The streaming header parser required FEXTRA / FNAME / FCOMMENT / FHCRC to arrive in the same
+ * dfeed call as the fixed 10 bytes, so a split there failed a valid body. FNAME is what gzip writes
+ * by default. The same "hello world" deflate data + trailer as GZ, behind a header carrying every
+ * optional field: FLG = FHCRC|FEXTRA|FNAME|FCOMMENT, XLEN 4 "XY\0\0", FNAME "hello.txt",
+ * FCOMMENT "c", and the header CRC16 (30 header bytes, 51 in all). */
+static const unsigned char GZ_OPT[] = {
+    0x1f,0x8b,0x08,0x1e,0x00,0x00,0x00,0x00,0x00,0x03,0x04,0x00,
+    0x58,0x59,0x00,0x00,0x68,0x65,0x6c,0x6c,0x6f,0x2e,0x74,0x78,
+    0x74,0x00,0x63,0x00,0xd8,0xbb,0xcb,0x48,0xcd,0xc9,0xc9,0x57,
+    0x28,0xcf,0x2f,0xca,0x49,0x01,0x00,0x85,0x11,0x4a,0x0d,0x0b,
+    0x00,0x00,0x00
+};
+#define GZ_OPT_LEN (sizeof(GZ_OPT))
+#define GZ_OPT_HDR 30
+
+/* Baseline: fed whole, the optional fields are skipped and the body decodes. */
+UTEST(gz_header, optional_fields_whole_ok) {
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int rc = d->dfeed(d, (const char *)GZ_OPT, GZ_OPT_LEN, 1, sink_emit, &s);
+    done(d, ctx);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ((size_t)11, s.len);
+    ASSERT_EQ(0, memcmp(s.buf, "hello world", 11));
+}
+
+/* Every byte in its own feed: each optional field is split at every possible point. */
+UTEST(gz_header, optional_fields_byte_by_byte_ok) {
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int rc = 0;
+    for (size_t i = 0; i < GZ_OPT_LEN && rc == 0; i++)
+        rc = d->dfeed(d, (const char *)GZ_OPT + i, 1, 0, sink_emit, &s);
+    if (rc == 0) rc = d->dfeed(d, NULL, 0, 1, sink_emit, &s);
+    done(d, ctx);
+    ASSERT_EQ(rc, 0);                             /* was -1: the header fields had to be in one feed */
+    ASSERT_EQ((size_t)11, s.len);
+    ASSERT_EQ(0, memcmp(s.buf, "hello world", 11));
+}
+
+/* gzip's default shape: FNAME only, with the cut right after the fixed 10 bytes. */
+UTEST(gz_header, fname_split_after_fixed_header_ok) {
+    static const unsigned char g[] = {
+        0x1f,0x8b,0x08,0x08,0x00,0x00,0x00,0x00,0x00,0x03,
+        'h','e','l','l','o','.','t','x','t',0x00,
+        0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,0x49,0x01,0x00,
+        0x85,0x11,0x4a,0x0d,0x0b,0x00,0x00,0x00
+    };
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int a = d->dfeed(d, (const char *)g, 10, 0, sink_emit, &s);
+    int b = d->dfeed(d, (const char *)g + 10, 4, 0, sink_emit, &s);       /* inside FNAME */
+    int c = d->dfeed(d, (const char *)g + 14, sizeof g - 14, 1, sink_emit, &s);
+    done(d, ctx);
+    ASSERT_EQ(a, 0);
+    ASSERT_EQ(b, 0);                              /* was -1: FNAME was not terminated in this feed */
+    ASSERT_EQ(c, 0);
+    ASSERT_EQ((size_t)11, s.len);
+    ASSERT_EQ(0, memcmp(s.buf, "hello world", 11));
+}
+
+/* FEXTRA's length is honoured across feeds: a 300-byte extra field (bytes that would be a valid
+ * deflate prefix are not mistaken for data) arrives in pieces, and the body still decodes. */
+UTEST(gz_header, long_fextra_across_feeds_ok) {
+    enum { XLEN = 300 };
+    static const unsigned char tail[] = {
+        0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,0x49,0x01,0x00,
+        0x85,0x11,0x4a,0x0d,0x0b,0x00,0x00,0x00
+    };
+    unsigned char g[10 + 2 + XLEN + sizeof tail];
+    static const unsigned char fixed[10] = { 0x1f,0x8b,0x08,0x04,0,0,0,0,0,0x03 };
+    memcpy(g, fixed, 10);
+    g[10] = (unsigned char)(XLEN & 0xff);
+    g[11] = (unsigned char)(XLEN >> 8);
+    memset(g + 12, 0xcb, XLEN);
+    memcpy(g + 12 + XLEN, tail, sizeof tail);
+    KlAllocator al = kl_allocator_default();
+    KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+    Sink s = {0};
+    int rc = 0;
+    for (size_t off = 0; off < sizeof g && rc == 0; off += 7) {
+        size_t n = sizeof g - off < 7 ? sizeof g - off : 7;
+        rc = d->dfeed(d, (const char *)g + off, n, 0, sink_emit, &s);
+    }
+    if (rc == 0) rc = d->dfeed(d, NULL, 0, 1, sink_emit, &s);
+    done(d, ctx);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ((size_t)11, s.len);
+    ASSERT_EQ(0, memcmp(s.buf, "hello world", 11));
+}
+
+/* A body that ends inside the optional fields is truncated: no error mid-stream, but the final
+ * (flush) call fails, at every cut point inside them. */
+UTEST(gz_header, truncated_in_optional_fields_flush_rejected) {
+    for (size_t cut = 10; cut < GZ_OPT_HDR; cut++) {
+        KlAllocator al = kl_allocator_default();
+        KlCompressCtx *ctx; KlDecompress *d = mk(&ctx, &al);
+        Sink s = {0};
+        int fed = d->dfeed(d, (const char *)GZ_OPT, cut, 0, sink_emit, &s);
+        int fin = d->dfeed(d, NULL, 0, 1, sink_emit, &s);
+        done(d, ctx);
+        ASSERT_EQ(fed, 0);
+        ASSERT_EQ(fin, -1);
+        ASSERT_EQ((size_t)0, s.len);
+    }
+}
+
 UTEST_MAIN()

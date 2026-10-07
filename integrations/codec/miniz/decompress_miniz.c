@@ -34,6 +34,11 @@ typedef struct {
     int                 trailing;   /* bytes arrived after the 8-byte trailer */
     unsigned char       hdr_buf[10];
     size_t              hdr_len;
+    /* Optional header fields (FEXTRA, FNAME, FCOMMENT, FHCRC) parsed across feeds: the field
+     * being skipped and, for the counted ones (XLEN, the extra data, the CRC16), bytes left. */
+    int                 hdr_field;
+    size_t              hdr_need;
+    size_t              hdr_xlen;
     /* Trailer accumulation for streaming */
     unsigned char       trail_buf[8];
     size_t              trail_len;
@@ -256,6 +261,62 @@ static int miniz_decompress_fn(KlDecompress *self,
 
 /* ── Vtable: dfeed (streaming) ───────────────────────────────────── */
 
+/* Streaming gzip header fields after the fixed 10 bytes, in their RFC 1952 order. */
+enum { HF_XLEN, HF_EXTRA, HF_NAME, HF_COMMENT, HF_HCRC, HF_DONE };
+
+/* Advance from field `f` to the next one the FLG byte says is present (HF_DONE when none). */
+static void gz_hdr_next(KlMinizDecompSession *s, int f) {
+    unsigned char flg = s->hdr_buf[3];
+    for (;; f++) {
+        if (f == HF_XLEN    && (flg & FEXTRA))   { s->hdr_need = 2; s->hdr_xlen = 0; break; }
+        if (f == HF_NAME    && (flg & FNAME))    break;
+        if (f == HF_COMMENT && (flg & FCOMMENT)) break;
+        if (f == HF_HCRC    && (flg & FHCRC))    { s->hdr_need = 2; break; }
+        if (f >= HF_DONE) { f = HF_DONE; break; }
+    }
+    s->hdr_field = f;
+}
+
+/* Consume optional header bytes from (*p, *remaining), carrying the position across feeds. The
+ * zero-terminated FNAME / FCOMMENT are skipped whatever their length, FEXTRA by its XLEN, the
+ * header CRC16 as two bytes (not checked). Returns 1 once the header is complete, 0 if it needs
+ * more input. */
+static int gz_hdr_skip(KlMinizDecompSession *s, const unsigned char **p, size_t *remaining) {
+    while (s->hdr_field != HF_DONE) {
+        if (*remaining == 0)
+            return 0;
+        switch (s->hdr_field) {
+        case HF_XLEN:                           /* 2-byte little-endian length */
+            s->hdr_xlen |= (size_t)**p << (8 * (2 - s->hdr_need));
+            (*p)++; (*remaining)--;
+            if (--s->hdr_need == 0) {
+                s->hdr_need = s->hdr_xlen;
+                s->hdr_field = HF_EXTRA;
+                if (s->hdr_need == 0) gz_hdr_next(s, HF_NAME);
+            }
+            break;
+        case HF_EXTRA:
+        case HF_HCRC: {                         /* counted bytes */
+            size_t take = *remaining < s->hdr_need ? *remaining : s->hdr_need;
+            *p += take; *remaining -= take;
+            s->hdr_need -= take;
+            if (s->hdr_need == 0)
+                gz_hdr_next(s, s->hdr_field == HF_EXTRA ? HF_NAME : HF_DONE);
+            break;
+        }
+        default: {                              /* HF_NAME / HF_COMMENT: up to and with the NUL */
+            const unsigned char *nul = memchr(*p, 0, *remaining);
+            size_t take = nul ? (size_t)(nul - *p) + 1 : *remaining;
+            *p += take; *remaining -= take;
+            if (nul)
+                gz_hdr_next(s, s->hdr_field + 1);
+            break;
+        }
+        }
+    }
+    return 1;
+}
+
 static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
                            int flush,
                            int (*emit)(void *ctx, const char *data, size_t len),
@@ -296,7 +357,8 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
 
     /* Parse gzip header on first call */
     if (!s->started) {
-        /* Accumulate header bytes */
+        /* Accumulate the fixed 10 header bytes */
+        size_t had = s->hdr_len;
         while (s->hdr_len < 10 && remaining > 0) {
             s->hdr_buf[s->hdr_len++] = *p++;
             remaining--;
@@ -306,38 +368,18 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         if (s->hdr_len < 10)
             return (flush && s->hdr_len > 0) ? -1 : 0;
 
-        /* Validate header */
-        if (s->hdr_buf[0] != 0x1f || s->hdr_buf[1] != 0x8b ||
-            s->hdr_buf[2] != 0x08)
-            return -1;
+        if (had < 10) {
+            /* Validate header */
+            if (s->hdr_buf[0] != 0x1f || s->hdr_buf[1] != 0x8b ||
+                s->hdr_buf[2] != 0x08)
+                return -1;
+            gz_hdr_next(s, HF_XLEN);            /* the first optional field present, if any */
+        }
 
-        unsigned char flg = s->hdr_buf[3];
-
-        /* Skip optional fields from the remaining input */
-        if (flg & FEXTRA) {
-            if (remaining < 2) return -1;
-            size_t xlen = (size_t)p[0] | ((size_t)p[1] << 8);
-            p += 2;
-            remaining -= 2;
-            if (remaining < xlen) return -1;
-            p += xlen;
-            remaining -= xlen;
-        }
-        if (flg & FNAME) {
-            while (remaining > 0 && *p != 0) { p++; remaining--; }
-            if (remaining == 0) return -1;
-            p++; remaining--;
-        }
-        if (flg & FCOMMENT) {
-            while (remaining > 0 && *p != 0) { p++; remaining--; }
-            if (remaining == 0) return -1;
-            p++; remaining--;
-        }
-        if (flg & FHCRC) {
-            if (remaining < 2) return -1;
-            p += 2;
-            remaining -= 2;
-        }
+        /* Skip the optional fields, which may arrive split over any number of feeds (FNAME is
+         * gzip's default). At end of input a header still inside them is truncated. */
+        if (!gz_hdr_skip(s, &p, &remaining))
+            return flush ? -1 : 0;
 
         tinfl_init(&s->decomp);
         s->dict_ofs = 0;
@@ -444,6 +486,9 @@ static void miniz_decomp_reset(KlDecompress *self) {
     s->done = 0;
     s->verified = 0;
     s->hdr_len = 0;
+    s->hdr_field = HF_DONE;
+    s->hdr_need = 0;
+    s->hdr_xlen = 0;
     s->trail_len = 0;
 }
 

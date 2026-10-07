@@ -1591,6 +1591,43 @@ static int dns_parse_ns(const char *s, uint16_t defport, KlSockAddr *out) {
     return kl_sockaddr_parse(out, buf, port);
 }
 
+/* Internal TEST hook too (NOT in the public header): the pure selection over the candidate strings. */
+int kl_dns_select_ns(const char *const *ns, int count, uint16_t defport,
+                     KlSockAddr *out, int max, KlAddrFamily *family);
+int kl_dns_select_ns(const char *const *ns, int count, uint16_t defport,
+                     KlSockAddr *out, int max, KlAddrFamily *family) {
+    /* Parse; keep only nameservers of the first USABLE one's family (one socket). A link-local
+     * IPv6 address (fe80::/10) with no scope id cannot be reached (it needs its interface), and a
+     * nameserver string carries no scope: such an entry is skipped rather than allowed to pick the
+     * family, or a router-advertised fe80:: resolver listed first would lock out every IPv4 server.
+     * A nameserver listed twice is kept once: a reply is matched to its nameserver by source
+     * address, so two entries with one address could not be told apart (and a retry to the same
+     * server is no failover). */
+    int nns = 0;
+    KlAddrFamily fam = KL_AF_UNSPEC;
+    for (int i = 0; i < count && nns < max; i++) {
+        KlSockAddr a;
+        if (dns_parse_ns(ns[i], defport, &a) != 0)
+            continue;
+        KlAddrFamily f = kl_sockaddr_family(&a);
+        if (f == KL_AF_INET6 && a.scope_id == 0 && a.u.ip[0] == 0xfe && (a.u.ip[1] & 0xc0) == 0x80)
+            continue;                           /* unscoped link-local: unreachable */
+        if (fam == KL_AF_UNSPEC)
+            fam = f;
+        else if (f != fam)
+            continue;
+        int dup = 0;
+        for (int j = 0; j < nns && !dup; j++)
+            dup = kl_sockaddr_equal(&a, &out[j]);
+        if (dup)
+            continue;
+        out[nns] = a;
+        nns++;
+    }
+    *family = fam;
+    return nns;
+}
+
 /* Fill the resolver's nameserver list; returns the (single) socket family. */
 static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, int *family) {
     char nsbuf[DNS_MAX_NS][KL_DNS_SYS_NS_STRMAX];
@@ -1620,28 +1657,19 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 #endif
     }
 
-    /* Parse; keep only nameservers of the first one's family (one socket). A nameserver listed
-     * twice is kept once: a reply is matched to its nameserver by source address, so two entries
-     * with one address could not be told apart (and a retry to the same server is no failover). */
-    int nns = 0;
+    const char *nsp[DNS_MAX_NS];
+    for (int i = 0; i < count; i++)
+        nsp[i] = nsbuf[i];
     KlAddrFamily fam = KL_AF_UNSPEC;
-    for (int i = 0; i < count && nns < DNS_MAX_NS; i++) {
-        KlSockAddr ns;
-        if (dns_parse_ns(nsbuf[i], defport, &ns) != 0)
-            continue;
-        KlAddrFamily f = kl_sockaddr_family(&ns);
-        if (fam == KL_AF_UNSPEC)
-            fam = f;
-        else if (f != fam)
-            continue;
-        int dup = 0;
-        for (int j = 0; j < nns && !dup; j++)
-            dup = kl_sockaddr_equal(&ns, &r->ns[j]);
-        if (dup)
-            continue;
-        r->ns[nns] = ns;
-        nns++;
+    int nns = kl_dns_select_ns(nsp, count, defport, r->ns, DNS_MAX_NS, &fam);
+#ifndef KEEL_FREESTANDING
+    if (nns == 0 && !(cfg && cfg->nameserver)) {
+        /* Discovery listed servers but none usable (e.g. only unscoped link-local ones): the
+         * same local fallback as a discovery that found none. */
+        static const char *const loopback[1] = { "127.0.0.1" };
+        nns = kl_dns_select_ns(loopback, 1, defport, r->ns, DNS_MAX_NS, &fam);
     }
+#endif
     if (nns == 0)
         return -1;
     r->nns = nns;

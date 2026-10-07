@@ -47,6 +47,45 @@ UTEST(cidr, parse_and_match_v6) {
     ASSERT_EQ(0, kl_cidr_match(list, n, &a4));
 }
 
+/* A dual-stack listener (bound to :: with IPV6_V6ONLY=0) sees an IPv4 peer as the v4-mapped
+ * ::ffff:a.b.c.d. An IPv4 trust list must still match it (and only by its IPv4 address). */
+UTEST(cidr, v4_mapped_peer_matches_v4_list) {
+    KlCidr list[4];
+    int n = kl_cidr_parse_list("10.0.0.0/8", list, 4);
+    ASSERT_EQ(1, n);
+    KlSockAddr a;
+    a = v6("::ffff:10.1.2.3");  ASSERT_EQ(1, kl_cidr_match(list, n, &a));
+    a = v6("::ffff:11.1.2.3");  ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+
+    n = kl_cidr_parse_list("11.0.0.0/8", list, 4);
+    ASSERT_EQ(1, n);
+    a = v6("::ffff:10.1.2.3");  ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+
+    /* A real IPv6 peer is not unmapped: it never matches an IPv4 CIDR... */
+    n = kl_cidr_parse_list("0.0.0.0/0", list, 4);
+    ASSERT_EQ(1, n);
+    a = v6("2001:db8::a01:203"); ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+    a = v6("::10.1.2.3");        ASSERT_EQ(0, kl_cidr_match(list, n, &a));   /* v4-compatible */
+    /* ...and still needs an IPv6 CIDR. */
+    n = kl_cidr_parse_list("2001:db8::/32", list, 4);
+    ASSERT_EQ(1, n);
+    a = v6("2001:db8::a01:203"); ASSERT_EQ(1, kl_cidr_match(list, n, &a));
+    a = v6("::ffff:10.1.2.3");   ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+}
+
+/* A v4-mapped CIDR in the trust list names IPv4 addresses: it matches a plain IPv4 peer
+ * (a v4-only listener) and a v4-mapped one (a dual-stack listener) alike. */
+UTEST(cidr, v4_mapped_cidr_matches_v4_peer) {
+    KlCidr list[4];
+    int n = kl_cidr_parse_list("::ffff:10.0.0.0/104", list, 4);
+    ASSERT_EQ(1, n);
+    KlSockAddr a;
+    a = v4("10.1.2.3");         ASSERT_EQ(1, kl_cidr_match(list, n, &a));
+    a = v4("11.1.2.3");         ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+    a = v6("::ffff:10.1.2.3");  ASSERT_EQ(1, kl_cidr_match(list, n, &a));
+    a = v6("::ffff:11.1.2.3");  ASSERT_EQ(0, kl_cidr_match(list, n, &a));
+}
+
 UTEST(cidr, malformed) {
     KlCidr list[4];
     ASSERT_EQ(-1, kl_cidr_parse_list("10.0.0.0/33", list, 4));    /* bits too big */

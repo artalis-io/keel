@@ -1,4 +1,5 @@
 tests/protocols/dns/smoke_dns.c
+tests/protocols/dns/test_dns_ns_select.c
 tests/protocols/dns/test_dns_resolver.c
 tests/protocols/http/smoke_tcp.c
 tests/protocols/http/test_alpn.c

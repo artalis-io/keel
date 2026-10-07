@@ -166,6 +166,12 @@ KlProxyResult kl_proxy_parse(const uint8_t *buf, size_t len, size_t *consumed,
 
 /* ── CIDR trust list ─────────────────────────────────────────────────── */
 
+/* ::ffff:0:0/96, the IPv4-mapped IPv6 prefix (RFC 4291 2.5.5.2). */
+static int is_v4_mapped(const uint8_t a[16]) {
+    static const uint8_t pfx[12] = { 0,0,0,0, 0,0,0,0, 0,0,0xff,0xff };
+    return memcmp(a, pfx, sizeof(pfx)) == 0;
+}
+
 int kl_cidr_parse_list(const char *s, KlCidr *out, int cap) {
     if (!s)
         return 0;
@@ -203,6 +209,14 @@ int kl_cidr_parse_list(const char *s, KlCidr *out, int cap) {
         }
 
         if (n >= cap) return -1;
+        /* A v4-mapped CIDR (::ffff:a.b.c.d/96..128) names IPv4 addresses: store it as the IPv4
+         * CIDR it is, so it matches IPv4 peers whether they arrive plain or v4-mapped. */
+        if (family == AF_INET6 && bits >= 96 && is_v4_mapped(abuf)) {
+            memmove(abuf, abuf + 12, 4);
+            memset(abuf + 4, 0, 12);
+            family = AF_INET;
+            bits -= 96;
+        }
         out[n].family = family;
         out[n].bits = bits;
         memset(out[n].addr, 0, sizeof(out[n].addr));
@@ -232,6 +246,13 @@ int kl_cidr_match(const KlCidr *list, int count, const KlSockAddr *sa) {
     else return 0;
 
     const uint8_t *a = sa->u.ip;   /* network-order address bytes */
+    /* A dual-stack listener (:: with IPV6_V6ONLY off) reports an IPv4 peer as ::ffff:a.b.c.d:
+     * match it as the IPv4 address it is, against the IPv4 entries only. */
+    if (fam == AF_INET6 && is_v4_mapped(a)) {
+        fam = AF_INET;
+        alen = 4;
+        a += 12;
+    }
     for (int i = 0; i < count; i++) {
         if (list[i].family != fam) continue;
         if (prefix_match(a, list[i].addr, list[i].bits, alen)) return 1;

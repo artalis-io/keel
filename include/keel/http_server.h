@@ -143,7 +143,10 @@ typedef struct KlHttpServerConfig {
                                     *   Applied before listen(), so no exposure window. */
     const char *proxy_trusted_cidrs; /**< accept PROXY protocol (v1/v2) headers only from
                                       *   sources in this comma-separated CIDR allowlist
-                                      *   ("10.0.0.0/8,::1/128"); NULL = disabled. */
+                                      *   ("10.0.0.0/8,::1/128"); NULL = disabled. On a
+                                      *   dual-stack (::) listener an IPv4 peer arrives
+                                      *   v4-mapped (::ffff:a.b.c.d) and is matched against
+                                      *   the IPv4 entries (see kl_cidr_match). */
     KlSocketHandle listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
                                  *   0 = disabled (KEEL creates its own socket). Transport is
                                  *   auto-detected from the fd; KEEL never unlinks an adopted

@@ -454,6 +454,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   would-block until the resume, or until the 1 MiB cap failed the stream. `kl_drain_write` now first
   writes what is pending until the socket would block, then appends behind what is left, firing no
   callback.
+- **A dual-stack server trusts PROXY headers from an IPv4 load balancer.** A server bound to `::`
+  (dual-stack) sees an IPv4 peer as `::ffff:a.b.c.d`, and the `proxy_trusted_cidrs` match compared
+  families strictly, so an IPv4 trust list (`10.0.0.0/8`) never matched: every request from behind
+  the load balancer was refused with 400. `kl_cidr_match` now matches a v4-mapped peer as its IPv4
+  address against the IPv4 entries, and a v4-mapped CIDR (`::ffff:10.0.0.0/104`) is stored as the
+  IPv4 CIDR it names. Any other IPv6 peer still needs an IPv6 entry.
+- **miniz: a streamed gzip body whose optional header fields arrive in pieces decodes.** The
+  streaming decoder required FEXTRA, FNAME, FCOMMENT and FHCRC to arrive in the same `dfeed` call as
+  the fixed 10 header bytes, so a valid response split there (FNAME is what gzip writes by default)
+  failed with a decode error. The header is now parsed by a small state machine carried across
+  feeds: the name and comment are skipped whatever their length, the extra field by its XLEN, the
+  header CRC as two bytes, and a body that ends inside them still fails at end of input.
+- **Windows DNS: a link-local IPv6 resolver listed first no longer breaks resolution.** The system
+  nameserver list was formatted without scope ids and kept `fe80::` entries (only `fec0::`
+  placeholders were dropped), and the resolver locked its server list to the first entry's family.
+  A router-advertised `fe80::` resolver listed first therefore made every query go to scope 0 and
+  fail, although IPv4 servers were configured. Windows discovery now skips link-local servers, and
+  the resolver picks its family from the first usable server, skipping any unscoped `fe80::/10`
+  entry (falling back to `127.0.0.1` when discovery leaves none usable, as when it finds none).
 - **A connection closed right after a nested `kl_async_complete` leaves the event loop.** A resume
   that suspended on a second op and completed it at once registered the connection's socket again;
   when the response then closed the connection, it was released while still registered. poll and

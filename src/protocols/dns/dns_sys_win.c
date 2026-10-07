@@ -42,11 +42,16 @@ static IP_ADAPTER_ADDRESSES *dns_win_fetch_adapters(KlAllocator *alloc, ULONG *o
     return NULL;
 }
 
-/* Windows returns deprecated fec0::/10 site-local placeholder addresses as DNS
- * servers on adapters with no real IPv6 resolver, not usable; skip them. */
-static int dns_win_is_placeholder_v6(const struct sockaddr_in6 *s6) {
+/* IPv6 DNS servers this seam cannot hand on usably; skip them:
+ *  - fec0::/10: Windows returns deprecated site-local placeholder addresses as DNS
+ *    servers on adapters with no real IPv6 resolver.
+ *  - fe80::/10: a link-local resolver (often router-advertised, RDNSS) is reachable
+ *    only through its interface, and the nameserver string carries no scope id. Sent
+ *    with scope 0 the queries go nowhere, and a skipped entry also keeps one of the
+ *    few nameserver slots free for a usable server. */
+static int dns_win_is_unusable_v6(const struct sockaddr_in6 *s6) {
     const uint8_t *b = s6->sin6_addr.s6_addr;
-    return b[0] == 0xfe && (b[1] & 0xc0) == 0xc0;
+    return b[0] == 0xfe && ((b[1] & 0xc0) == 0xc0 || (b[1] & 0xc0) == 0x80);
 }
 
 /* Format a nameserver sockaddr to a numeric string (no port, no scope), or
@@ -58,7 +63,7 @@ static int dns_win_ns_str(const struct sockaddr *sa, char *out, size_t cap) {
     }
     if (sa->sa_family == AF_INET6) {
         const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
-        if (dns_win_is_placeholder_v6(s6))
+        if (dns_win_is_unusable_v6(s6))
             return 0;
         return inet_ntop(AF_INET6, (void *)&s6->sin6_addr, out, cap) != NULL;
     }
