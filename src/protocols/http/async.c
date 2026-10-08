@@ -60,9 +60,16 @@ static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
 }
 
 /* Register a resumed connection's fd for `mask`. A nested complete inside on_resume may already
- * have registered it, and epoll refuses a second add: modify it instead. 0, or -1 if neither worked. */
+ * have registered it, and epoll refuses a second add: modify it instead. An add for no interest
+ * (a paused body read) need not clear what that nested complete registered (on kqueue it is an
+ * empty change list, leaving READ enabled), so set it explicitly with a modify as well. 0, or -1
+ * if neither worked. */
 static int async_rearm(KlHttpServer *s, KlHttpConn *conn, KlEventMask mask) {
-    if (kl_event_add(&s->ev.loop, conn->stream.fd, mask, &conn->stream) == 0) return 0;
+    if (kl_event_add(&s->ev.loop, conn->stream.fd, mask, &conn->stream) == 0) {
+        if (mask == 0)
+            return kl_event_mod(&s->ev.loop, conn->stream.fd, mask, &conn->stream);
+        return 0;
+    }
     return kl_event_mod(&s->ev.loop, conn->stream.fd, mask, &conn->stream);
 }
 
@@ -151,6 +158,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
      * suspend go to the body core first; they may finish the body, or end the request. */
     if (new_state == KL_HTTP_CONN_READING_BODY)
         new_state = kl_http_conn_resume_body(conn);
+
+    /* With TLS, the rest of the record the headers came in may be held decrypted in the engine,
+     * where no socket readiness will report it: read it on now. */
+    if (kl_http_conn_tls_body_pending(conn, new_state))
+        new_state = kl_http_conn_on_readable(conn, &s->router);
 
     /* Try immediate send if response is ready */
     if (new_state == KL_HTTP_CONN_SENDING)

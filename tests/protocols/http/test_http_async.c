@@ -1280,10 +1280,30 @@ static KlHttpBodyReader *aw_factory(KlAllocator *alloc, const KlHttpRequest *req
     return &r->base;
 }
 static void aw_tick(void *ud) { (void)ud; }              /* wakes the loop: the sweep runs */
+static int g_aw_nest;                                    /* on_resume completes a second op inside */
+static int g_aw_hold_ms;                                 /* >0: keep the read paused this long */
+static size_t g_aw_len_at_unpause;                       /* what the reader had when it un-paused */
+static KlAsyncOp g_aw_op2;
+static void aw_noop_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
+static void aw_unpause(void *ud) {
+    (void)ud;
+    g_aw_len_at_unpause = g_aw_len;
+    kl_http_request_resume_body(g_aw_req);
+}
 static void aw_resume(KlAsyncOp *op, void *ud) {
-    (void)op; (void)ud;
+    (void)ud;
+    if (g_aw_nest) {                                     /* a second op that finishes at once */
+        memset(&g_aw_op2, 0, sizeof g_aw_op2);
+        g_aw_op2.on_resume = aw_noop_resume;
+        if (kl_async_suspend(&end_srv, op->conn, &g_aw_op2) == 0)
+            kl_async_complete(&end_srv, &g_aw_op2);
+    }
     kl_http_request_await_body(g_aw_req);
-    if (g_aw_pause) kl_http_request_resume_body(g_aw_req);
+    if (g_aw_pause && g_aw_hold_ms > 0)
+        (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), (uint64_t)g_aw_hold_ms, aw_unpause,
+                           NULL);
+    else if (g_aw_pause)
+        kl_http_request_resume_body(g_aw_req);
     (void)kl_timer_add(kl_http_server_event_ctx(&end_srv), 100, aw_tick, NULL);
 }
 static void aw_complete_timer(void *ud) {
@@ -1384,6 +1404,56 @@ UTEST(async, kept_body_bytes_are_fed_once_when_the_resume_unpauses) {
     g_aw_pause = 0;
     ASSERT_TRUE(cl);                                       /* was (completion): "[hellohello ]" */
     ASSERT_TRUE(ch);                                       /* was (completion): "[hellohello world]" */
+}
+
+/* ── A body read un-paused on resume starts at the front of read_buf ─────────────────────────────
+ * As above, but the client sends only the request head first (as one waiting for 100 Continue
+ * does), so nothing is kept across the suspend. On a completion loop the receive the un-pause
+ * posted landed behind the request head still counted in read_buf, and the body core then fed the
+ * request line and headers to the body reader: Content-Length echoed the head, chunked failed on
+ * it with a 413. */
+UTEST(async, a_body_sent_after_the_head_is_read_alone_when_the_resume_unpauses) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 1;
+    end_start();
+    char buf[1024], buf2[1024];
+    int cl = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\n", 300,
+                         "hello world", "[hello world]", buf, sizeof buf);
+    int ch = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", 300,
+                         "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", "[hello world]", buf2,
+                         sizeof buf2);
+    end_stop();
+    g_aw_pause = 0;
+    ASSERT_TRUE(cl);                                       /* was (completion): the head echoed */
+    ASSERT_TRUE(ch);                                       /* was (completion): 413 */
+}
+
+/* ── A paused body read stays paused after a nested complete inside the resume ──────────────────
+ * on_resume completes a second op of its own (which registers the fd for READ), then awaits the
+ * body with the read still paused; a timer un-pauses it later. The outer complete registered the
+ * paused read with an add for no interest, which on kqueue is an empty change list: the READ filter
+ * the nested complete added stayed enabled, and the body was read while paused. (Shows on kqueue;
+ * epoll, poll and WSAPoll set the registration exactly either way.) */
+UTEST(async, a_paused_body_read_stays_paused_after_a_nested_complete) {
+    g_aw_delay_ms = 50;
+    g_aw_pause = 1;
+    g_aw_nest = 1;
+    g_aw_hold_ms = 400;
+    g_aw_len_at_unpause = (size_t)-1;
+    end_start();
+    char buf[1024];
+    int ok = aw_exchange(end_srv.bound_port,
+                         "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\n", 200,
+                         "hello world", "[hello world]", buf, sizeof buf);
+    end_stop();
+    size_t at_unpause = g_aw_len_at_unpause;
+    g_aw_pause = 0;
+    g_aw_nest = 0;
+    g_aw_hold_ms = 0;
+    ASSERT_EQ(at_unpause, (size_t)0);                      /* was (kqueue): 11, read while paused */
+    ASSERT_TRUE(ok);
 }
 
 UTEST_MAIN();

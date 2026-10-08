@@ -248,6 +248,12 @@ KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread);
  * unchanged. */
 KlHttpConnState kl_http_conn_resume_body(KlHttpConn *c);
 
+/* Readiness: 1 if `st` (just returned by a dispatch or a resume) leaves a TLS connection reading a
+ * body whose engine already holds decrypted input (pending() > 0). The socket will not report
+ * those bytes, so the caller reads on (kl_http_conn_on_readable) instead of waiting for readiness.
+ * A paused read too: the pause takes hold at the record boundary, where that read stops. */
+int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st);
+
 /* Post-rejection teardown (#278). ONE ownership point for a final response that intentionally
  * terminates a request: writes the response, then chooses between DRAINING (request input may
  * still be unread, so closing now would RST the response away) and CLOSED. Ordinary keep-alive

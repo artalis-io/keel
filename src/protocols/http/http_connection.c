@@ -829,11 +829,13 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
             if (c->req.chunked) kl_http1_chunked_init(&c->chunked_dec);
             c->body_start_ms = kl_monotonic_ms();
             KlHttpConnState s = conn_invoke_streaming_handler(c);
-            if (s == KL_HTTP_CONN_SUSPENDED && leftover_len > 0) {
+            if (s == KL_HTTP_CONN_SUSPENDED) {
                 /* Suspended before any body byte reached the reader. Keep the bytes read with the
                  * headers at the front of read_buf (the head was copied out above), so a resume
-                 * that awaits the body feeds them before reading on (kl_http_conn_resume_body). */
-                memmove(c->stream.read_buf, leftover_buf, leftover_len);
+                 * that awaits the body feeds them before reading on (kl_http_conn_resume_body).
+                 * With none, the body window is empty: a receive the resume posts lands at
+                 * read_buf[0], not behind the request head. */
+                if (leftover_len > 0) memmove(c->stream.read_buf, leftover_buf, leftover_len);
                 c->stream.read_len = leftover_len;
                 c->body_kept = leftover_len;
             }
@@ -945,8 +947,12 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
          * suspended, sent, or its op was cancelled): honour it, as conn_ingest_body does for
          * later reads, rather than overwrite it with READING_BODY. */
         if (c->route->streaming_async) {
-            if (c->state == KL_HTTP_CONN_SUSPENDED)
+            if (c->state == KL_HTTP_CONN_SUSPENDED) {
+                /* Every byte read with the headers went to the reader (the head is preserved):
+                 * the body window a resume reads into starts empty. */
+                c->stream.read_len = 0;
                 return c->state;
+            }
             if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
                 c->req.keep_alive = 0;
                 c->res.keep_alive = 0;
@@ -1068,6 +1074,13 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
     return pr;
 }
 
+int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st) {
+    /* Paused or not: the pause takes hold at the record boundary (http_request.h), as in the body
+     * read loop, which drains while pending() > 0 and then stops. */
+    return st == KL_HTTP_CONN_READING_BODY && c->state == KL_HTTP_CONN_READING_BODY && c->tls &&
+           c->tls->pending(c->tls) > 0;
+}
+
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
@@ -1161,7 +1174,13 @@ read_more_headers: ;
         }
 
         if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
-            return conn_dispatch_request(c, router, rest, rest_len);
+            KlHttpConnState st = conn_dispatch_request(c, router, rest, rest_len);
+            /* The header read stopped at the free buffer, so the engine may still hold the rest
+             * of the record (the body's start) decrypted. The socket will not report it again:
+             * read the body on now. */
+            if (kl_http_conn_tls_body_pending(c, st))
+                return kl_http_conn_on_readable(c, router);
+            return st;
         }
 
         if (pr == KL_HTTP1_PARSE_OK) {
