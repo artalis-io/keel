@@ -26,6 +26,7 @@
 #include <keel/sockaddr.h>
 #include <keel/handle.h>
 #include <keel/datagram.h>
+#include <keel/datagram_detail.h>   /* KlDatagram by value (the datagram send case) */
 #include <keel/clock.h>   /* kl_monotonic_ms: the EAGAIN drain wait */
 #include "../src/socket.h"
 #include "../src/completion.h"
