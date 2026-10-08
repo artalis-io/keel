@@ -33,6 +33,15 @@ it flushes on writability.
 Both surface the same "buffer drained, resume producing" signal; no parallel callbacks with
 divergent meaning.
 
+**Producing later: suspend.** A stream belongs to its producer only while the handler runs or the
+connection is suspended (`kl_async_suspend`). To push events later (an SSE feed driven by a timer,
+a watcher or another connection), begin the stream, suspend, write while suspended, and end the
+stream from the resume (`on_resume`). A suspended connection is out of the event loop and exempt
+from the idle timeout, so a quiet stream costs nothing and is not cut off at `read_timeout_ms`. A
+handler or resume that returns without suspending gives the response up: what it wrote is flushed
+(the outbound buffer, if anything is still in it) and the connection then ends, on both axes. A
+stream that was never ended (no terminating chunk) is never kept alive for another request.
+
 ## Read side (request-body streaming / inbound)
 
 A body reader (`KlHttpBodyReader`: `on_data` / `on_complete` / `on_error` / `destroy`) receives body
