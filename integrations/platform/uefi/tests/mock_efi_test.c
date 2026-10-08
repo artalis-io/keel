@@ -2054,7 +2054,7 @@ static int mock_post_dgram_send(const KlEventProvider *ep, MockDgramXport *dg,
                          .src = NULL, .tos = -1, .life = (KlCompLife *)dg->rx_life };
     kl_comp_life_retain(op.life);
     int rc = COMP(ep)->post_dgram_send(NULL, &op);
-    if (rc < 0) kl_comp_life_release(op.life);   /* failure → caller releases; backend took nothing */
+    if (rc != 0) kl_comp_life_release(op.life);  /* failure or drop → caller releases; backend took nothing */
     return rc;
 }
 static int mock_post_dgram_recv(const KlEventProvider *ep, MockDgramXport *dg) {
@@ -2207,6 +2207,75 @@ static void t_udp_e2e_unsupported_send_not_queued(void) {
     CHECK(r != KL_DATAGRAM_ACCEPTED, "TOS send REJECTED: NOT queued (an accepted send is KL_DATAGRAM_ACCEPTED)");
     CHECK(g_udp_tx_calls == 0, "no EFI Transmit for a rejected send");
     /* Public close lifecycle: abortive close → pump until CLOSED → free. */
+    (void)kl_datagram_close_cancel(&udp);
+    for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
+    kl_datagram_free(&udp);
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset();
+}
+
+/* The EFI datagram op pool is a small static array. A send that finds it full is a passing
+ * shortage of that one datagram: the post refuses it as a per-datagram drop (nothing taken, the
+ * caller keeps its life ref), the public send counts the drop, and once ops free up the next send
+ * is accepted and goes out. A plain post failure would latch the send side instead. */
+static void t_udp_e2e_op_pool_full_drops_one_send(void) {
+    T_CASE("dgram e2e: a send that finds the op pool full is dropped and counted, not latched");
+    reset_counters();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlDatagram udp;
+    KlDatagramSocketConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_datagram_socket_init(&udp, &uc) == 0, "kl_datagram_socket_init over EFI_UDP4 (completion)");
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+
+    /* Fill every op slot with sends of another owner on the same socket: the first holds the one
+     * Tx token (hung), the rest queue behind it. */
+    int owner = 0; g_on_final_ran = 0;
+    KlCompLife *filler = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
+    MockDgramXport fx; memset(&fx, 0, sizeof(fx)); fx.fd = kl_datagram_fd(&udp); fx.rx_life = filler;
+    g_udp_transmit_mode = TOK_HANG;
+    int filled = 0;
+    for (int i = 0; i < 64 && mock_post_dgram_send(ep, &fx, "f", 1, &dest) == 0; i++) filled++;
+    CHECK(filled > 0, "the op pool accepted some filler sends");
+    CHECK(mock_post_dgram_send(ep, &fx, "f", 1, &dest) == KL_COMP_POST_DROPPED,
+          "a post into a full op pool is a per-datagram drop");
+    int tx_before = g_udp_tx_calls;
+
+    KlDatagramSendStatus r1 = kl_datagram_send(
+        &udp, &(KlDatagramMessage){ .data = "lost", .len = 4, .peer = &dest, .tos = -1 });
+    CHECK(r1 == KL_DATAGRAM_ACCEPTED, "the send is accepted (then dropped at the post)");
+    CHECK(kl_datagram_dropped(&udp) == 1, "the dropped datagram is counted");
+    CHECK(kl_datagram_send_queued(&udp) == 0, "nothing stays queued");
+
+    /* Free the pool: the hung Transmit completes and the queued filler sends then go out. */
+    mock_complete_hung_tx();
+    g_udp_transmit_mode = TOK_COMPLETE_OK;
+    int retired = 0;
+    for (int round = 0; round < 64 && retired < filled; round++) {
+        KlCompletionEvent evs[8];
+        int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+        for (int i = 0; i < dn; i++)
+            if (evs[i].kind == KL_COMP_DGRAM_SEND && evs[i].life == filler) {
+                retired++;
+                kl_comp_life_release(evs[i].life);
+            }
+    }
+    CHECK(retired == filled, "every filler send retired (op pool free again)");
+
+    KlDatagramSendStatus r2 = kl_datagram_send(
+        &udp, &(KlDatagramMessage){ .data = "after", .len = 5, .peer = &dest, .tos = -1 });
+    CHECK(r2 == KL_DATAGRAM_ACCEPTED, "a later send is accepted (the send side did not latch)");
+    for (int i = 0; i < 4 && kl_datagram_send_queued(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_udp_tx_calls > tx_before + filled - 1, "the later send reached the firmware");
+    CHECK(g_udp_tx_len == 5, "the last Transmit carried the later datagram");
+    CHECK(kl_datagram_dropped(&udp) == 1, "no further drop");
+
+    kl_comp_life_mark_dead(filler); kl_comp_life_release(filler);
+    CHECK(g_on_final_ran == 1, "the filler owner's life was released exactly (no ref leaked by the drop)");
     (void)kl_datagram_close_cancel(&udp);
     for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
     CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
@@ -3078,6 +3147,7 @@ int main(void) {
     t_dgram_two_concurrent_sends();
     t_udp_e2e_unsupported_send_not_queued();
     t_udp_e2e_failed_send_releases_queue();
+    t_udp_e2e_op_pool_full_drops_one_send();
     t_dgram_deferred_post_failure_releases();
     t_dgram_send_unreachable_is_dropped();
     t_udp_e2e_unreachable_send_keeps_sending();
