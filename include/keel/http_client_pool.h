@@ -170,6 +170,9 @@ int  kl_http_client_pool_idle_count(const KlHttpClientPool *pool);
 
 /**
  * @brief Count idle connections for a specific host tuple.
+ *
+ * The count covers every socket provider. `max_per_host` is a budget per provider, so with
+ * clients on more than one provider sharing the pool this can exceed `max_per_host`.
  */
 int  kl_http_client_pool_host_count(const KlHttpClientPool *pool, const char *host,
                          int port, int is_tls,
