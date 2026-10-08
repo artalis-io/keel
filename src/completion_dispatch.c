@@ -77,10 +77,17 @@ int kl_comp_post_sendfile_raw(KlStream *stream, const KlIoVec *head_iov, int hea
  * stream-only provider has no datagram ops; a server-only one no connect). The routers never call a
  * NULL slot: a post fails (-1, nothing taken), a cancel is a no-op, and a retire query reports
  * RETIRED (no op of that kind can have been posted). The datagram facade refuses a loop without the
- * whole datagram seam up front (kl_comp_dgram_available), so these guards are the backstop. */
+ * whole datagram seam up front (kl_comp_dgram_available), and the HTTP server one without the
+ * stream-server seam (kl_comp_stream_server_available), so these guards are the backstop. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
     if (ops && ops->cancel) ops->cancel(ctx, fd);
+}
+
+int kl_comp_stream_server_available(const struct KlEventCtx *ctx) {
+    const KlCompletionOps *ops = kl_comp_ops(&ctx->loop);
+    return ops && ops->prime_accepts && ops->post_accept && ops->post_recv &&
+           ops->post_send && ops->cancel;
 }
 
 int kl_comp_dgram_available(const struct KlEventCtx *ctx) {

@@ -248,11 +248,6 @@ static void server_accept_backoff_check(KlHttpServer *s) {
     if (server_accept_arm(s) < 0)
         kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "accept: cannot re-arm the listen socket");
 }
-/* 1 when an accept failed for lack of a descriptor or kernel memory: the connection stays queued
- * and the listen socket stays readable, so an immediate retry fails the same way. */
-static int server_accept_exhausted(int err) {
-    return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
-}
 static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
     kl_sock_close(((KlHttpServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
 }
@@ -494,15 +489,20 @@ int kl_http_server_run(KlHttpServer *s) {
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
                                                               &peer);
                     if (!kl_handle_valid(client_fd)) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        int aerr = errno;
-                        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "accept");
+                        /* Classified by the socket provider, not a hosted errno: a provider that
+                         * reports by status alone is read correctly. */
+                        KlIoStatus ast = kl_sock_io_status(s->ev.sockets);
+                        if (ast == KL_IO_WOULD_BLOCK) break;
                         /* Out of descriptors or memory: the level-triggered listen socket would
                          * wake every tick and fail again (a busy loop). Drop its interest and
                          * restore it once a short delay has passed (server_accept_backoff_check). */
-                        if (server_accept_exhausted(aerr)) {
+                        if (ast == KL_IO_RESOURCE_EXHAUSTED) {
+                            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                                               "accept: out of descriptors or memory, backing off");
                             s->accept_backoff_until = kl_monotonic_ms() + KL_HTTP_ACCEPT_RETRY_MS;
                             server_accept_disarm(s);
+                        } else {
+                            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "accept");
                         }
                         break;
                     }

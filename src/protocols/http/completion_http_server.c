@@ -132,9 +132,13 @@ int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
     return r;
 }
 
+static int comp_queue_response(KlHttpConn *c, const KlIoVec *iov, int n, size_t total);
+
 /* Serialize the response head and post it: buffered body inline via WSASend, or a
  * file body via the backend's zero-copy file send (TransmitFile) after the head.
- * The backend copies + owns the head bytes for the op's lifetime. */
+ * The backend copies + owns the head bytes for the op's lifetime. A buffered response larger than
+ * the backend takes in one send (send_max, a hard limit on EFI) goes out through the output queue
+ * instead, which posts it in pieces the backend accepts. */
 static int comp_send_response(KlHttpConn *c) {
     char cl_buf[48];
     KlIoVec iov[7];
@@ -146,6 +150,9 @@ static int comp_send_response(KlHttpConn *c) {
     if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request)
         return kl_comp_post_sendfile(c, iov, n, total,
                                      c->res.file_fd, (uint64_t)c->res.file_size);
+    size_t smax = kl_comp_send_max_raw(&c->stream);
+    if (smax && total > smax)
+        return comp_queue_response(c, iov, n, total);
     return kl_comp_post_send(c, iov, n, total);
 }
 
@@ -495,6 +502,22 @@ void kl_http_comp_tls_finish(struct KlHttpServer *s, KlHttpConn *c, int draining
     if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
     if (draining) { (void)comp_tlsq_settle(s, c); return; }
     kl_comp_close_after_output(s, c);
+}
+
+/* Copy a plaintext response onto the (idle) output queue and mark its end: the queue posts it in
+ * pieces no larger than the backend takes, and comp_on_write completes the response once every byte
+ * up to the mark is out (comp_tls_on_write). 0, or -1 on allocation or post failure (caller closes). */
+static int comp_queue_response(KlHttpConn *c, const KlIoVec *iov, int n, size_t total) {
+    if (comp_tlsq_reserve(c, total) < 0) return -1;
+    for (int i = 0; i < n; i++) {
+        if (iov[i].len == 0) continue;
+        memcpy(c->comp_tlsq + c->comp_tlsq_len, iov[i].base, iov[i].len);
+        c->comp_tlsq_len += iov[i].len;
+        c->comp_tlsq_appended += (uint64_t)iov[i].len;
+    }
+    c->comp_tlsq_resp_mark = c->comp_tlsq_appended;
+    c->comp_tlsq_resp_pending = 1;
+    return comp_tlsq_kick(c);
 }
 
 /* Encrypt plaintext through the TLS engine onto the output queue, absorbing the engine's ring as it

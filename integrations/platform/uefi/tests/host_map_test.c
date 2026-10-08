@@ -45,6 +45,8 @@ static const char *io_name(KlIoStatus s) {
         case KL_IO_CLOSED:      return "CLOSED";
         case KL_IO_RESET:       return "RESET";
         case KL_IO_FATAL:       return "FATAL";
+        case KL_IO_UNSUPPORTED: return "UNSUPPORTED";
+        case KL_IO_RESOURCE_EXHAUSTED: return "RESOURCE_EXHAUSTED";
         default:                return "?";
     }
 }
@@ -64,7 +66,7 @@ int main(void) {
         { EFI_INVALID_PARAMETER,  KL_IO_FATAL,       "EFI_INVALID_PARAMETER -> FATAL" },
         { EFI_UNSUPPORTED,        KL_IO_FATAL,       "EFI_UNSUPPORTED -> FATAL" },
         { EFI_DEVICE_ERROR,       KL_IO_FATAL,       "EFI_DEVICE_ERROR -> FATAL" },
-        { EFI_OUT_OF_RESOURCES,   KL_IO_FATAL,       "EFI_OUT_OF_RESOURCES -> FATAL" },
+        { EFI_OUT_OF_RESOURCES,   KL_IO_RESOURCE_EXHAUSTED, "EFI_OUT_OF_RESOURCES -> RESOURCE_EXHAUSTED" },
         { EFI_ACCESS_DENIED,      KL_IO_FATAL,       "EFI_ACCESS_DENIED -> FATAL" },
         { EFI_ABORTED,            KL_IO_FATAL,       "EFI_ABORTED -> FATAL" },
         { EFI_LOAD_ERROR,         KL_IO_FATAL,       "EFI_LOAD_ERROR -> FATAL" },

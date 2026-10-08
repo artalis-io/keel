@@ -377,6 +377,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Added
 
+- **`KL_IO_RESOURCE_EXHAUSTED` in `KlIoStatus`.** Appended (existing values unchanged, a minor,
+  additive change): a provider reports an operation that failed for lack of descriptors or memory.
+  The built-in POSIX and Winsock fallback maps `EMFILE`, `ENFILE`, `ENOBUFS` and `ENOMEM` (Winsock's
+  `WSAEMFILE` / `WSAENOBUFS` arrive as those), the EFI provider maps `EFI_OUT_OF_RESOURCES` (it
+  reported `KL_IO_FATAL` before). A provider that never returns it is unaffected. Code that switches
+  over `KlIoStatus` without a `default` sees one more value.
+
 - **Anonymous pipe pairs on POSIX.** `kl_anon_pipe_create` now works on every POSIX engine that
   watches native descriptors: epoll, kqueue, poll, and io_uring / pollcomp through their watcher relay.
   - The pair is an ordinary pipe: `pipe2(O_CLOEXEC)`, or `pipe` + `FD_CLOEXEC` on macOS. Only the
@@ -486,6 +493,26 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   (kqueue).** The outer complete registered the paused read with an add for no interest, an empty
   change list on kqueue, so the READ filter the nested complete had enabled stayed on and the body
   was read while paused. The registration is now set explicitly.
+- **The HTTP server refuses a completion loop that lacks the stream-server operations (behavior
+  change).** `prime_accepts`, `post_accept`, `post_recv`, `post_send` and `cancel` are optional in a
+  runtime completion provider (a client-only or datagram-only one leaves them out), but the server
+  drives every connection through them: it called a NULL `post_recv` at the first accept, and without
+  `cancel` a connection released with a receive posted was never returned to the pool.
+  `kl_http_server_init` now fails with `KL_ERR_UNSUPPORTED` on such a loop. Every in-tree completion
+  backend (IOCP, io_uring, pollcomp, lwIP raw, EFI) implements all five.
+- **WebSocket client, HTTP/2 client, the DNS resolver's TCP fallback and the readiness accept loop
+  classify a failed socket call through the provider (`kl_sock_io_status`), not `errno`.** A provider
+  that reports by status and leaves `errno` alone (the documented contract for a freestanding one)
+  had every nonblocking connect of the WebSocket and HTTP/2 clients refused, a would-block read or
+  write treated as a hard error, and the accept loop never backing off when out of descriptors (it
+  retried on every wake of the listen socket). The accept loop backs off on
+  `KL_IO_RESOURCE_EXHAUSTED`; with the built-in providers the result is the same as before.
+- **A buffered plaintext response larger than the completion backend's `send_max` goes out whole.**
+  It was posted in one send with no regard to the cap, so on EFI (a 16 KiB send buffer, a hard
+  limit) any buffered response above it failed and closed the connection. It now goes through the
+  output queue, which posts it in pieces the backend accepts. The `send_max` contract is restated:
+  a hard limit where the backend sets it as one (EFI), a hint on io_uring.
+
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

@@ -478,6 +478,11 @@ KlIoStatus kl_sockdef_io_status(void) {
         case ENOTSUP:
 #endif
             return KL_IO_UNSUPPORTED;   /* datagram: e.g. UDP GSO unavailable → caller falls back */
+        case EMFILE:
+        case ENFILE:
+        case ENOBUFS:
+        case ENOMEM:
+            return KL_IO_RESOURCE_EXHAUSTED;   /* out of descriptors / kernel memory: back off */
         default:
             return KL_IO_FATAL;
     }

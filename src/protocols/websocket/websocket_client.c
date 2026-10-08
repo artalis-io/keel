@@ -14,8 +14,6 @@
 #include "../../allocator_validate.h"
 #include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +145,15 @@ static kl_ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
     return kl_sock_recv(ws->ev->sockets, ws->fd, buf, len);
 }
 
+/* A -1 from wsc_read/wsc_write that only means "try again when ready". Only a plaintext socket
+ * call can be: a TLS -1 is an error or a close (TLS reports WANT_READ/WANT_WRITE as 0). The
+ * provider classifies it (kl_sock_io_status), so a provider that reports by status rather than
+ * through a hosted errno is read correctly. */
+static int wsc_would_block(const KlWsClientConn *ws)
+{
+    return !ws->tls && kl_sock_io_status(ws->ev ? ws->ev->sockets : NULL) == KL_IO_WOULD_BLOCK;
+}
+
 /* KlDrain writer: adapts wsc_write's kl_ssize_t contract to the drain's
  * (>0 bytes written, 0 would-block, -1 error).  Both plain-socket EAGAIN
  * and TLS WANT_READ/WANT_WRITE (which wsc_write returns as 0) map to
@@ -161,7 +168,7 @@ static kl_ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
     /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS reports
      * a full buffer as 0), and errno after it is whatever an earlier call left. Ask the provider,
      * which also covers one that reports would-block by status rather than errno. */
-    if (!ws->tls && kl_sock_io_status(ws->ev ? ws->ev->sockets : NULL) == KL_IO_WOULD_BLOCK)
+    if (wsc_would_block(ws))
         return 0;
     return -1;
 }
@@ -571,8 +578,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
             return;
         }
         if (w < 0) {
-            /* A TLS -1 is an error or a close (WANT_WRITE is 0): never consult a stale errno. */
-            if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (wsc_would_block(ws)) {
                 kl_watcher_rearm(ws->ev, ws->fd);
                 return;
             }
@@ -636,7 +642,7 @@ hs_read_more:
         return;
     }
     if (nread < 0) {
-        if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (wsc_would_block(ws)) {
             kl_watcher_rearm(ws->ev, ws->fd);
             return;
         }
@@ -940,7 +946,7 @@ read_more: ;
         return;
     }
     if (nread < 0) {
-        if (!ws->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (wsc_would_block(ws)) {
             kl_watcher_rearm(ws->ev, ws->fd);
             return;
         }
@@ -1170,7 +1176,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
         rc = kl_sock_connect(ev->sockets, fd, &usa);
-        if (rc < 0 && errno != EINPROGRESS) {
+        if (rc < 0 && kl_sock_io_status(ev->sockets) != KL_IO_PENDING) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }
@@ -1198,7 +1204,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
 
         rc = kl_sock_connect(ev->sockets, fd, csa);
 
-        if (rc < 0 && errno != EINPROGRESS) {
+        if (rc < 0 && kl_sock_io_status(ev->sockets) != KL_IO_PENDING) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }

@@ -12,8 +12,6 @@
 #include <keel/url.h>
 #include "../../allocator_validate.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -104,6 +102,14 @@ static kl_ssize_t h2c_read(KlHttp2ClientConn *c, void *buf, size_t len)
     return kl_sock_recv(c->ev->sockets, c->fd, buf, len);
 }
 
+/* A -1 from h2c_read/h2c_write that only means "try again when ready". Only a plaintext socket call
+ * can be: a TLS -1 is an error or a close (TLS reports WANT_READ/WANT_WRITE as 0). The provider
+ * classifies it (kl_sock_io_status), never a hosted errno. */
+static int h2c_would_block(const KlHttp2ClientConn *c)
+{
+    return !c->tls && kl_sock_io_status(c->ev->sockets) == KL_IO_WOULD_BLOCK;
+}
+
 /* ── Stream tracking ────────────────────────────────────────────── */
 
 static KlHttp2ClientStream *h2c_stream_find(KlHttp2ClientConn *c, int32_t stream_id)
@@ -174,8 +180,7 @@ static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
             return (int)sent;
         }
         if (w < 0) {
-            /* A TLS -1 is an error or a close (WANT_WRITE is 0): never consult a stale errno. */
-            if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (h2c_would_block(c)) {
                 c->out_blocked = 1;   /* partial send; the rest goes on writable */
                 return (int)sent;
             }
@@ -494,7 +499,7 @@ read_more: ;
         return;
     }
     if (nread < 0) {
-        if (!c->tls && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (h2c_would_block(c)) {
             h2c_arm(c);
             return;
         }
@@ -644,7 +649,7 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
         rc = kl_sock_connect(ev->sockets, fd, &usa);
-        if (rc < 0 && errno != EINPROGRESS) {
+        if (rc < 0 && kl_sock_io_status(ev->sockets) != KL_IO_PENDING) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }
@@ -671,7 +676,7 @@ KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
 
         rc = kl_sock_connect(ev->sockets, fd, csa);
 
-        if (rc < 0 && errno != EINPROGRESS) {
+        if (rc < 0 && kl_sock_io_status(ev->sockets) != KL_IO_PENDING) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }

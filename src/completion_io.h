@@ -95,6 +95,13 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
  * completion_readiness_stub.c on readiness builds, where it is never called. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
+/* 1 when the loop's completion provider implements what a completion-driven server needs:
+ * prime_accepts, post_accept, post_recv, post_send and cancel (the idle sweep and release abort a
+ * posted receive through cancel; without it the connection could never be released). Those slots
+ * are optional (a client-only or datagram-only provider leaves them NULL), so the HTTP server
+ * checks this before it runs on a completion loop. Returns 0 on non-completion builds. */
+int kl_comp_stream_server_available(const struct KlEventCtx *ctx);
+
 /* 1 when the loop's completion provider implements the whole datagram seam (post_dgram_recv,
  * post_dgram_send, cancel_dgram and retire_dgram), else 0. Those slots are optional (a stream-only
  * provider leaves them NULL), so a datagram must check this before it binds to a completion loop.
