@@ -5,6 +5,168 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+## [3.3.0]
+
+Minor release. No release date here (the tag and publish are a separately authorized step).
+
+Headline: **anonymous pipe pairs for process I/O, and six rounds of audit hardening.**
+`kl_anon_pipe_create` (new `<keel/anon_pipe.h>`, with native accessors in `<keel/anon_pipe_native.h>`)
+gives an embedder's process spawner a one-directional pipe. The parent end is an ordinary
+`KlPipeStream`. On Windows it is a private overlapped named pipe on IOCP; on POSIX it works on every
+engine that watches native descriptors. Keel still spawns nothing. Supporting it, `KlStream` gained a
+writable-again edge (`kl_stream_on_writable`), a graceful close no longer hangs after a write failure,
+and every descriptor or handle Keel creates is now close-on-exec.
+
+The rest of the release is the fixes from the fifteenth through twentieth C audit passes and their
+re-reviews. They cover:
+
+- **Request framing and parsing:** split requests, chunk extensions and trailers, 32-bit
+  Content-Length, multipart parameters, URL authority.
+- **Client lifetime:** freeing a client from its callbacks, and errors deferred to the loop.
+- **TLS:** records split across reads, large writes in completion mode, and mbedTLS without a CA
+  bundle.
+- **Completion loops:** ordered and bounded output, and connection release.
+- **Datagram errors:** per-datagram send errors and ICMP reports.
+- **DNS:** spoofing resistance and nameserver failover.
+- **HTTP/2:** resource limits, h2c upgrade, and graceful shutdown.
+
+New public functions, appended struct fields and vtable ops, and two appended enum values are why
+this is a minor release. Everything is source-compatible. No public function, field, enum value or
+vtable slot was removed, renamed or reordered. Existing builds need only the recompile every 3.x
+update already requires (`docs/contracts/compatibility.md`). Keel promises source compatibility, not
+ABI compatibility, so do not link 3.2.0 objects against 3.3.0. The behavior changes listed below are
+what an existing program can observe after that recompile.
+
+### Upgrade notes
+
+- **Build requirements are unchanged.** No new toolchain, library or link flag is needed. `keel.pc`
+  and the libraries it lists are the same as in 3.2.0.
+
+- **New public API:**
+  - Headers: `<keel/anon_pipe.h>`, which `<keel/keel.h>` now includes, and
+    `<keel/anon_pipe_native.h>`, which it does not, because it is platform-specific.
+  - Anonymous pipes: `kl_anon_pipe_create`, `kl_anon_pipe_end_close`, `kl_anon_pipe_end_handle`,
+    `kl_anon_pipe_end_fd`, with the types `KlAnonPipeDir` and `KlAnonPipeEnd`.
+  - Streams: `kl_stream_on_writable` and `KlStreamWritableFn`.
+  - Connection pool: `kl_http_client_pool_acquire_tls` and `kl_http_client_pool_release_tls`.
+  - Redirects: the `KlHttpRedirectCheckFn` type.
+  - mbedTLS integration: `kl_tls_mbedtls_client_ctx_create_insecure`.
+  - Macros: `KL_HTTP1_CHUNK_EXT_MAX`, `KL_HTTP1_CHUNK_TRAILER_MAX`, `KL_HTTP2_MAX_HEADER_LIST_SIZE`,
+    `KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE`, `KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE`,
+    `KL_HTTP2_UPGRADE_DECLINED`, `KL_LISTENER_ARM_RETRY`.
+
+- **Appended enum values:**
+  - `KL_ERR_REDIRECT_REFUSED` in `KlError`. `KL_ERR__COUNT` goes up by one.
+  - `KL_IO_RESOURCE_EXHAUSTED` in `KlIoStatus`.
+
+  A `switch` over either enum without a `default` now sees one more value. Under `-Wswitch -Werror`
+  that warning is an error.
+
+- **Appended struct members and vtable ops.** A zero or NULL value keeps the 3.2.0 behavior, except
+  where the item says otherwise.
+  - `KlHttpClientResponse.closes`, set by Keel.
+  - `KlHttpRedirectConfig.on_redirect` and `on_redirect_data`.
+  - `KlHttp2ClientConfig.max_response_size`. **0 now means a 16 MiB cap; it used to mean no cap.**
+    See the behavior changes below.
+  - `KlHttp2ClientResponse.error`.
+  - `KlHttp2ClientSession.keel_cleartext`, managed by Keel.
+  - `KlHttp2ServerCallbacks.max_concurrent_streams`, `initial_window_size` and
+    `max_header_list_size`. Keel fills these from `KlHttp2ServerConfig`.
+  - `KlHttp2ServerSession.upgrade`, an optional op. A session without it declines an h2c `Upgrade`,
+    and the request is answered over HTTP/1.1.
+  - `KlHttp1ResponseParser.finish` and `expect_no_body`, both optional. A parser without them keeps
+    the old end-of-stream rule.
+  - `KlHttp1ChunkedDecoder.meta_len`. The struct's size changed, so rebuild any code that embeds the
+    decoder or allocates it by size.
+
+- **Layout-only changes (no source edit):**
+  - `KlHttpServer` gained a trailing internal field, `accept_backoff_until`. Its size changed, so
+    rebuild code that declares a server by value (the usual 3.x recompile).
+  - `KlStream` gained fields. Its layout lives in the opt-in `<keel/stream_detail.h>`, which is not
+    layout-stable.
+  - `KlHttpResponse.stream_inflight` now marks the response embedded in a pooled server connection.
+    It is internal; do not touch it.
+
+- **Behavior changes:**
+  - `KlHttp2ServerSession` implementations: the header and body pointers passed to
+    `submit_response` are borrowed for that call only. `flush` may report a stream it closes
+    (`on_stream_reset`) from inside the call.
+  - `kl_url_resolve`: a protocol-relative Location against an `http+unix` / `https+unix` base returns
+    -1, which the redirect client reports as a redirect failure.
+  - Chunked request decoder: a bare LF or a control byte in a chunk extension or trailer, an
+    extension list over 4096 bytes, or a trailer section over 8192 bytes is a malformed chunk (413).
+  - `kl_url_parse`: rejects an `@` in the authority, and accepts only an address between `[` and `]`.
+  - `kl_tls_mbedtls_client_ctx_create(NULL, alloc)` returns NULL. For a client that verifies
+    nothing, use `kl_tls_mbedtls_client_ctx_create_insecure`.
+  - `kl_http_router_use_post` / `kl_http_server_use_post` refuse more than 64 entries per router.
+    Post-body middleware is matched at header time.
+  - Exact middleware patterns match the way route patterns do: a trailing slash is tolerated, and
+    `:name` segments match any value.
+  - A caller-supplied `KlResolver` must provide `cancel`.
+  - `kl_http_client_start`: a failure found while starting reaches `on_done` on the next loop tick,
+    never from inside `start`.
+  - HTTP server: a streamed response that the handler leaves unended ends once its buffer is out,
+    and the connection is not reused.
+  - `KlHttpClientPoolConfig.max_per_host` is a budget per socket provider.
+    `kl_http_client_pool_host_count` counts every provider.
+  - Completion datagram sends: a passing resource shortage at post time drops one datagram, counted
+    by `kl_datagram_dropped`, instead of failing the send side.
+  - Completion loops: a streamed response that is not a pooled connection's own is refused,
+    whatever its provider.
+  - UEFI server: closing a connection whose Transmit is still queued closes abortively (RST).
+  - lwIP raw: a peer FIN ends only the read side. The response still goes out.
+  - `kl_http_server_init` fails with `KL_ERR_UNSUPPORTED` on a completion loop without the
+    stream-server ops (`prime_accepts`, `post_accept`, `post_recv`, `post_send`, `cancel`).
+  - `kl_http_client_start` / `_start_pooled`: the socket provider belongs to the client.
+    `KlEventCtx.sockets` is only read, never written. A pooled connection is reused only on its own
+    provider.
+  - Socket capability bits: `KL_SOCK_CAP_DATAGRAM` no longer reads as overlapped. On a completion
+    loop, a configured datagram-capable readiness provider is replaced by the backend's provider, or
+    refused.
+  - `kl_datagram_send`: a failure that concerns one datagram returns `KL_DATAGRAM_ERROR` for that call
+    only (`kl_datagram_last_error` = `KL_ERR_IO`). The send side stays open.
+  - Custom socket providers: after a datagram send, `KL_IO_RESET` / `KL_IO_RESOURCE_EXHAUSTED` from
+    `io_status` drop that datagram, and `KL_IO_INTERRUPTED` retries it.
+  - `kl_async_cancel` closes the connection, without a response.
+  - WebSocket server: a frame sent from `on_close` during release returns -1.
+  - Sync HTTP client: `timeout_ms` is one deadline for the whole request.
+  - Resolver cache: `resolve()` returns NULL after a synchronous completion. Do not cancel that
+    handle.
+  - HTTP/2 client: with `max_response_size` = 0, a body past 16 MiB fails the stream with
+    `KL_ERR_TOO_LARGE`.
+  - Completion loops without a WebSocket drain: a single frame that would take more than 1 MiB of
+    unsent output fails, and the connection closes. Enable the drain
+    (`kl_ws_server_enable_drain`) to send larger frames.
+
+- **Contracts now stated in the headers (no signature change):**
+  - `kl_free(NULL, ...)` is a no-op.
+  - `kl_event_wait` / `kl_event_ctx_run` return 0, not -1, for a wait a signal interrupts.
+  - The loop-teardown rule is stated on `kl_event_ctx_free`.
+  - On io_uring, a thread that submits to a loop must retry EINTR on its own blocking calls.
+  - A timer added from a timer callback waits for the next tick.
+  - `kl_http_router_add` returns -1 for a NULL handler.
+  - `kl_drain_write` first flushes what is pending.
+  - `KlThreadPoolConfig.queue_capacity` is defined by what admission allows, and
+    `kl_thread_pool_free` may be called from `done_fn`.
+  - `kl_wakeup_signal` never blocks.
+  - `KlResolver` handles are dead once `done_fn` has run.
+  - `KlHttpServerConfig.body_timeout_ms` excludes time spent suspended.
+  - `kl_cidr_match` matches a v4-mapped peer against the IPv4 entries.
+  - `kl_http_response_file` needs a binary-mode descriptor on Windows.
+  - `kl_ws_client_close` calls no callback.
+  - `KlWsServerConfig.ping_interval_ms` also enables a liveness check.
+  - A `KlStreamSubmitFn` may complete inline.
+
+- **Out-of-tree code that includes the internal substrate seam** (`src/`, as the in-tree lwIP and UEFI
+  integrations do):
+  - The freestanding platform hook `kl_plat_random` now returns `int`: 0 on success, -1 when no
+    entropy is available, which callers treat as a refusal. A custom freestanding platform port must
+    change its definition.
+  - `KlCompletionOps` gains a trailing `send_max` (0 = no limit).
+  - A runtime completion provider that advertises `KL_EVENT_CAP_COMPLETION` needs a non-NULL
+    completion table with a drain op.
+  - The internal `KL_SOCK_CAP_OVERLAPPED` moved to bit 63.
+
 ### Security
 
 - **An HTTP/2 stream closed by the flush that sends its response is released once.** The HTTP/2
@@ -467,7 +629,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **HTTP client pool: `max_per_host` is a budget per socket provider.** Release counted, and could
   evict, idle connections another provider made for the same host, though acquire never hands one
   provider's connection to another. Clients on two providers sharing a pool now each get their own
-  `max_per_host` idle connections per host key (behavior change).
+  `max_per_host` idle connections per host key (behavior change). `kl_http_client_pool_host_count`
+  still counts every provider, so with clients on more than one provider it can exceed `max_per_host`.
 - **Completion server: the output queue gives back a buffer grown for one large response.** A
   buffered response above the backend's `send_max` (EFI: 16 KiB) is copied onto the output queue,
   and the queue kept that buffer at its peak size until the connection's slot was released, so a
@@ -944,6 +1107,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   onto the connection's output queue, which took everything, so a client that never read its frames
   grew server memory without bound. Past 1 MiB queued, a send is refused as would-block, as a full
   socket is on readiness: the WebSocket drain keeps the frame within its own limit, or the send fails.
+  Without a drain, a single frame that would take more than 1 MiB of unsent output now fails and the
+  connection closes, where it used to be queued whole (behavior change); enable the drain
+  (`kl_ws_server_enable_drain`) to send larger frames.
 - **Completion loops: a failed send post no longer leaves its bytes queued, a graceful drain no
   longer resumes accepting, and an accept back-off wakes the loop on time.**
 - **WebSocket auto-ping: a client taking a large backlog is no longer failed as dead.** A ping
@@ -1548,7 +1714,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   - `KlHttp2ClientResponse` gains a trailing `error` field: `KL_ERR_IO` (reset), `KL_ERR_TOO_LARGE`
     or `KL_ERR_ALLOC`, with 0 meaning the stream completed.
   - `KlHttp2ClientConfig` gains a trailing `max_response_size` (0 = 16 MiB,
-    `KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE`). Both are additive, zero-default trailing fields.
+    `KL_HTTP2_CLIENT_DEFAULT_MAX_RESPONSE`). Both are trailing fields. `max_response_size` = 0 now caps
+    a body at 16 MiB, where it used to mean no cap (behavior change).
   - `test_http2_client` adds three cases on a live connection driven through the mock session.
     Without the fix, the reset and over-cap cases fail.
 
@@ -1765,6 +1932,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Documentation
 
+- **io_uring: a thread that submits work to a loop can see EINTR on its own blocking calls.** A
+  completion's task work is delivered to the submitting thread, which includes a thread that ran
+  the loop or called `kl_http_server_free`; its blocking calls can return EINTR and must retry. Now
+  stated on `kl_event_ctx_run`.
 - `KlHttp2ServerSession.submit_response` must not report a stream close (`on_stream_reset`) from
   inside the call; only `flush` may (KEEL releases the stream right after submit returns).
 - `kl_dns_resolver_create` captures `ctx->sockets` at creation; its UDP socket and TCP fallback both
@@ -1848,7 +2019,7 @@ no edit, only the recompile every 3.x update already requires (`docs/contracts/c
     exactly once, to the owner or to `dispose_obj`.
   - **Unchanged:** the socket (fd) family and every existing listener user, including the HTTP server.
     (#338)
-- **`KEEL_VENDOR_OPT`: an optimization level for the vendored TUs, separate from Keel's own.** The: an optimization level for the vendored TUs, separate from Keel's own.** The
+- **`KEEL_VENDOR_OPT`: an optimization level for the vendored TUs, separate from Keel's own.** The
   embedder hooks added in 3.1.0 made `KEEL_OPT` reach every TU at once, which is what an embedder
   wanting its own flags asked for. It had a consequence nobody asked for. The toolchain wedge that
   motivated the hook (cosmocc's GCC hanging indefinitely at `-O2` on Windows) is in the **vendored**
