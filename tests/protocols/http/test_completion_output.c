@@ -1596,6 +1596,87 @@ UTEST(completion_output, a_buffered_response_above_send_max_arrives_whole) {
     ASSERT_TRUE(strncmp(buf, "HTTP/1.1 200", 12) == 0);
     ASSERT_EQ((size_t)SMAX_BODY, body_len);
 }
+
+/* The output queue a buffered response above send_max is copied onto grows to the response's size.
+ * Once that response is out on a kept-alive connection the queue gives the buffer back, rather than
+ * holding a second copy of the connection's largest response until the slot is released. A second
+ * request on the same connection reports the queue capacity from its handler (on the loop thread). */
+static void handle_smax_cap(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    const KlHttpConn *c = kl_http_request_conn(req);
+    char out[32];
+    int n = snprintf(out, sizeof out, "cap=%lu", (unsigned long)c->comp_tlsq_cap);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_copy(res, out, (size_t)n);
+}
+
+/* Read one response of `body_len` body bytes (headers end with the blank line). Bytes read. */
+static kl_ssize_t read_response_of(int fd, char *buf, size_t buflen, size_t body_len) {
+    kl_ssize_t total = 0;
+    while (total < (kl_ssize_t)buflen - 1) {
+        buf[total] = '\0';
+        const char *hdr_end = strstr(buf, "\r\n\r\n");
+        if (hdr_end && (size_t)(total - (hdr_end + 4 - buf)) >= body_len) break;
+        if (kl_test_poll1(fd, 0, 3000) <= 0) break;
+        kl_ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
+        if (n <= 0) break;
+        total += n;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+UTEST(completion_output, the_queue_gives_back_a_large_response_buffer_at_keep_alive) {
+    KlEventLoop probe;
+    memset(&probe, 0, sizeof(probe));
+    if (!kl_comp_ops_builtin() || !(kl_event_caps_builtin(&probe) & KL_EVENT_CAP_COMPLETION))
+        UTEST_SKIP("send_max applies only to completion backends");
+    g_smax_comp = *kl_comp_ops_builtin();
+    g_smax_comp.post_send = smax_post_send;
+    g_smax_comp.send_max = SMAX_CAP;
+    memset(&g_smax_ops, 0, sizeof(g_smax_ops));
+    g_smax_ops.init = smax_init; g_smax_ops.add = smax_add; g_smax_ops.mod = smax_mod;
+    g_smax_ops.del = smax_del; g_smax_ops.wait = smax_wait; g_smax_ops.close = smax_close;
+    g_smax_ops.caps = smax_caps; g_smax_ops.native_provider = smax_native;
+    g_smax_ops.completion = &g_smax_comp;
+    g_smax_oversized = 0;
+
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    cfg.event_provider = &g_smax_prov;
+    ASSERT_EQ(0, kl_http_server_init(&smax_srv, &cfg));
+    kl_http_server_route(&smax_srv, "GET", "/big", handle_smax, NULL, NULL);
+    kl_http_server_route(&smax_srv, "GET", "/cap", handle_smax_cap, NULL, NULL);
+    static KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &smax_srv);
+    wait_for_bind(&smax_srv);
+
+    static char buf[SMAX_BODY + 1024];
+    static char buf2[1024];
+    int closed = 0;
+    kl_ssize_t got = 0;
+    buf[0] = buf2[0] = '\0';
+    int fd = connect_rcvbuf(smax_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        got = read_response_of(fd, buf, sizeof buf, SMAX_BODY);
+        const char *rq2 = "GET /cap HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq2, strlen(rq2));
+        (void)read_until_close(fd, buf2, sizeof buf2, 3000, &closed);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&smax_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&smax_srv);
+
+    const char *body = strstr(buf, "\r\n\r\n");
+    size_t body_len = body ? (size_t)(got - (body + 4 - buf)) : 0;
+    ASSERT_EQ((size_t)SMAX_BODY, body_len);
+    const char *capp = strstr(buf2, "cap=");
+    ASSERT_TRUE(capp != NULL);
+    unsigned long cap = strtoul(capp + 4, NULL, 10);
+    ASSERT_LE(cap, 32768ul);                     /* was >= 64 KiB: kept until the slot's release */
+}
 #endif /* !KEEL_NO_COMPLETION */
 
 UTEST_MAIN();

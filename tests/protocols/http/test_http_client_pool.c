@@ -9,6 +9,7 @@
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "mock_tls.h"
+#include "http_client_internal.h"   /* kl_http_client_pool_release_sp / _acquire_sp */
 #include <errno.h>
 
 /* ── Unit tests: pool init/free ──────────────────────────────────── */
@@ -886,6 +887,42 @@ UTEST(cpool, idle_connection_with_pending_bytes_is_not_reused) {
     kl_test_closesock(fds[1]);
     ASSERT_EQ(r, 1);               /* was 0: handed out with the stray bytes queued */
     ASSERT_EQ(idle, 0);            /* and discarded, not left in the pool */
+}
+
+/* max_per_host is a budget per (host key, provider), as acquire matches: a release through one
+ * provider must not count, or evict, an idle connection another provider made for the same host. */
+UTEST(cpool, max_per_host_is_per_provider) {
+    KlAllocator a = kl_allocator_default();
+    static KlHttpClientPool pool;
+    KlHttpClientPoolConfig cfg = { .capacity = 4, .max_per_host = 1, .idle_ms = 60000 };
+    ASSERT_EQ(kl_http_client_pool_init(&pool, &cfg, &a, NULL), 0);
+    memset(&g_pcnt, 0, sizeof g_pcnt);
+    int fa[2], fb[2];
+    ASSERT_EQ(kl_test_socketpair(fb), 0);
+    ASSERT_EQ(kl_test_socketpair(fa), 0);
+
+    /* B: the default provider (the pool has no ctx); A: the counting wrapper. */
+    KlHttpClientPoolConn cb = { .fd = fb[0], .tls = NULL, .reused = 0, ._entry = NULL };
+    int rb = kl_http_client_pool_release_sp(&pool, NULL, &cb, "example.com", 80, NULL, NULL, 0);
+    KlHttpClientPoolConn ca = { .fd = fa[0], .tls = NULL, .reused = 0, ._entry = NULL };
+    int ra = kl_http_client_pool_release_sp(&pool, &g_pcnt_prov, &ca, "example.com", 80, NULL,
+                                            NULL, 0);
+    int idle = kl_http_client_pool_idle_count(&pool);
+    KlHttpClientPoolConn acq;
+    int hit_b = kl_http_client_pool_acquire_sp(&pool, NULL, "example.com", 80, NULL, NULL, 0, &acq);
+    KlSocketHandle got_b = hit_b == 0 ? acq.fd : KL_INVALID_SOCKET;
+    if (hit_b == 0)
+        kl_test_closesock((int)acq.fd);
+    kl_http_client_pool_free(&pool);
+    kl_test_closesock(fa[1]);
+    kl_test_closesock(fb[1]);
+
+    ASSERT_EQ(rb, 0);
+    ASSERT_EQ(ra, 0);
+    ASSERT_EQ(idle, 2);                  /* was 1: A's release evicted B's idle connection */
+    ASSERT_EQ(hit_b, 0);                 /* was 1: B's connection was gone */
+    ASSERT_TRUE(got_b == (KlSocketHandle)fb[0]);
+    ASSERT_EQ(g_pcnt.closes, 1);         /* A's connection, closed through its provider at free */
 }
 
 UTEST_MAIN();
