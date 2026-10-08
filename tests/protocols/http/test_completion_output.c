@@ -1369,6 +1369,7 @@ UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
  * the connection closed with nothing sent. The compiled-in completion backend is wrapped here as a
  * runtime provider whose post_send enforces a 4 KiB cap the way EFI does; a 64 KiB buffered response
  * must still arrive whole. Completion backends only. */
+#ifndef KEEL_NO_COMPLETION   /* kl_comp_ops_builtin exists only with the completion axis */
 #define SMAX_CAP  4096u
 #define SMAX_BODY (64 * 1024)
 static char g_smax_body[SMAX_BODY];
@@ -1451,5 +1452,6 @@ UTEST(completion_output, a_buffered_response_above_send_max_arrives_whole) {
     ASSERT_TRUE(strncmp(buf, "HTTP/1.1 200", 12) == 0);
     ASSERT_EQ((size_t)SMAX_BODY, body_len);
 }
+#endif /* !KEEL_NO_COMPLETION */
 
 UTEST_MAIN();
