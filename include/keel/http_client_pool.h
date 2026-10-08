@@ -46,7 +46,7 @@ typedef struct KlHttpClientPool KlHttpClientPool;
  */
 typedef struct {
     int         capacity;       /**< Total pool slots (0 = default 32) */
-    int         max_per_host;   /**< Max idle per (host,port,tls) (0 = default 4) */
+    int         max_per_host;   /**< Max idle per (host,port,tls) and socket provider (0 = default 4) */
     uint64_t    idle_ms;        /**< Idle timeout ms (0 = default 60s) */
 } KlHttpClientPoolConfig;
 

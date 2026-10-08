@@ -49,7 +49,9 @@ static void h2_stream_destroy(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
      * num_streams below zero so that the next stream is made before the table. It cannot catch a
      * stale pointer to a slot that is still in range (one a swap-remove refilled with another
      * stream): callers must hold no stream pointer across anything that may release streams. A
-     * caller bug: loud where asserts are on, a no-op otherwise. */
+     * caller bug. The assert is live in every default hosted build (no build sets NDEBUG): it is
+     * compiled out only when the embedder defines NDEBUG, or under KEEL_FREESTANDING; there the
+     * release is refused silently. */
     int live = stream && h2c->num_streams > 0 && stream >= h2c->streams &&
                stream < h2c->streams + h2c->num_streams;
 #ifndef KEEL_FREESTANDING

@@ -275,14 +275,16 @@ static int pool_release(KlHttpClientPool *pool, const KlSocketProvider *sp,
         return -1;
     }
 
-    /* Enforce max_per_host: evict oldest for this host if at limit */
+    /* Enforce max_per_host: evict oldest for this host if at limit. The budget is per (host key,
+     * provider), as acquire matches: another provider's idle connection is not counted or evicted. */
     int host_count = 0;
     int oldest_idx = -1;
     uint64_t oldest_time = UINT64_MAX;
 
     for (int i = 0; i < pool->capacity; i++) {
         const KlHttpClientPoolEntry *e = &pool->entries[i];
-        if (entry_matches(e, host, port, is_tls, tk, proxy_host, proxy_port)) {
+        if (e->sockets == sp &&
+            entry_matches(e, host, port, is_tls, tk, proxy_host, proxy_port)) {
             host_count++;
             if (e->idle_since_ms < oldest_time) {
                 oldest_time = e->idle_since_ms;

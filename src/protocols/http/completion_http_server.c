@@ -354,6 +354,21 @@ static int comp_tlsq_idle(const KlHttpConn *c) {
     return !c->comp_tlsq_inflight && comp_tlsq_unposted(c) == 0;
 }
 
+/* A queue buffer up to this size is kept between responses (what the TLS engine's output normally
+ * needs: one absorbed chunk beside what is still queued); a larger one was grown for one large
+ * response (a buffered body above the backend's send_max, a big TLS record run). */
+#define KL_COMP_TLSQ_KEEP (2u * KL_TLS_FLUSH_CHUNK)
+
+/* A response is fully out: give back a buffer grown past the normal size, so a kept-alive
+ * connection does not hold a copy of its largest response until its slot is released. Only when
+ * the queue is idle (no send in flight reads it in place, nothing unposted). */
+static void comp_tlsq_shrink_idle(KlHttpConn *c) {
+    if (!comp_tlsq_idle(c) || c->comp_tlsq_old || c->comp_tlsq_cap <= KL_COMP_TLSQ_KEEP) return;
+    kl_free(c->stream.alloc, c->comp_tlsq, c->comp_tlsq_cap);
+    c->comp_tlsq = NULL;
+    c->comp_tlsq_cap = c->comp_tlsq_len = c->comp_tlsq_head = 0;
+}
+
 /* Run what waits for an empty queue: the drain's half-close, the deferred recv, a close, a plaintext
  * response held back behind interim output. Returns 1 if the connection was closed (the caller must
  * not touch it), else 0. */
@@ -1239,6 +1254,7 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
             if (r < 0) { kl_comp_close(s, c); return; }
             if (r == 1) return;                /* another chunk queued, with its own mark */
         }
+        comp_tlsq_shrink_idle(c);
         comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
         return;
     }

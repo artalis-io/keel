@@ -452,6 +452,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **HTTP client pool: `max_per_host` is a budget per socket provider.** Release counted, and could
+  evict, idle connections another provider made for the same host, though acquire never hands one
+  provider's connection to another. Clients on two providers sharing a pool now each get their own
+  `max_per_host` idle connections per host key (behavior change).
+- **Completion server: the output queue gives back a buffer grown for one large response.** A
+  buffered response above the backend's `send_max` (EFI: 16 KiB) is copied onto the output queue,
+  and the queue kept that buffer at its peak size until the connection's slot was released, so a
+  kept-alive connection could hold a second copy of its largest response. Once a response is fully
+  out and the queue is idle, a buffer above 32 KiB is now freed.
+- **HTTP server: an accept failure on a custom socket provider no longer logs a stale `errno`.** It
+  logs the provider's I/O status; the default provider still logs `strerror(errno)`.
+
 - **Completion server: a streamed response picks its writer by the loop's drive model, not a
   provider bit.** The streamed response's outbound writer sent through the connection's output
   queue only when the context's socket provider advertised the internal OVERLAPPED capability. A
@@ -1721,6 +1733,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   whose peer resets, and a named pipe whose server disconnects under a pending write.
 
 ### Documentation
+
+- `KlHttp2ServerSession.submit_response` must not report a stream close (`on_stream_reset`) from
+  inside the call; only `flush` may (KEEL releases the stream right after submit returns).
+- `kl_dns_resolver_create` captures `ctx->sockets` at creation; its UDP socket and TCP fallback both
+  use that provider, and a later change to `ctx->sockets` does not affect the resolver.
+- `KlHttpClientConfig.sockets`: on a completion loop the client uses the backend's own (overlapped)
+  provider; a configured provider is replaced unless it is that provider (the overlapped capability
+  is internal and a custom provider cannot set it).
+- The HTTP/2 stream-release assert is described accurately: it is live in default hosted builds and
+  compiled out only under `NDEBUG` or `KEEL_FREESTANDING`.
 
 - **The event-loop teardown rule is now stated** on `kl_event_ctx_free` (`<keel/event_ctx.h>`). Freeing
   a loop delivers no further callback to anything still attached:
