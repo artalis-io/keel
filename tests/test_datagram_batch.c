@@ -810,6 +810,40 @@ UTEST(dgram_batch, send_unreachable_once_then_next_send_succeeds) {
 }
 
 /* A dead handle is not about one datagram: EBADF still latches the error for every later send. */
+/* A provider that classifies by io_status (no hosted errno) and reports KL_IO_RESOURCE_EXHAUSTED for a
+ * failed datagram send (ENOBUFS / ENOMEM: a full queue or a short buffer) failed THAT datagram only:
+ * the call reports ERROR with KL_ERR_IO, and the next send goes out. */
+static KlSocketOps g_status_ops;
+static KlIoStatus  g_status_next;
+static KlIoStatus  status_io(void *c) { (void)c; return g_status_next; }
+UTEST(dgram_batch, provider_status_resource_exhausted_is_per_datagram) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+    const KlSocketOps *saved_ops = g_gate_sp.ops;          /* tx holds &g_gate_sp: patch it in place */
+    g_status_ops = *saved_ops;
+    g_status_ops.io_status = status_io;
+    g_gate_sp.ops = &g_status_ops;
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_status_next = KL_IO_RESOURCE_EXHAUSTED;
+    g_fail_errno = ENOBUFS; g_fail_n = 1;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&tx, &m));
+    ASSERT_EQ((int)KL_ERR_IO, (int)kl_datagram_last_error(&tx));        /* was KL_ERR_SOCKET: sticky */
+    KlDatagramMessage m2 = { .data = "two", .len = 3, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m2));
+    int got = 0; size_t bytes = 0;
+    for (int i = 0; i < 50 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &bytes); }
+    ASSERT_EQ(1, got);
+
+    g_gate_sp.ops = saved_ops;
+    kl_test_closesock(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST(dgram_batch, send_bad_handle_error_stays_sticky) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
