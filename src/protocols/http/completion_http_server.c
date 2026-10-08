@@ -30,6 +30,7 @@
 #include "completion_internal.h" /* the cross-TU h2/ws drives + exported server helpers */
 #include "completion_io.h"           /* kl_comp_run (the neutral generic tick) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
+#include "event_caps.h"          /* kl_event_caps: a response's loop drive model */
 #include <keel/sockaddr.h>       /* kl_sockaddr_family: neutral accept addrs from the event */
 #include "platform.h"            /* kl_plat_file_pread: TLS file body chunks */
 #include <keel/proxy_protocol.h> /* kl_cidr_match: PROXY-over-completion accept gate */
@@ -432,9 +433,14 @@ kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     return (kl_ssize_t)len;
 }
 
+/* http_response_internal.h: the response's loop drives its connections by completion. */
+int kl_http_comp_stream_driven(const KlHttpResponse *res) {
+    return res->ctx && (kl_event_caps(&res->ctx->loop) & KL_EVENT_CAP_COMPLETION) != 0;
+}
+
 /* http_response_internal.h: the streamed response's outbound-buffer writer on a completion loop. Only
  * the response embedded in a pooled connection has a queue to go to (the server marks it: the
- * stream_inflight field); any other response with an overlapped provider (an HTTP/2 stream's, a
+ * stream_inflight field); any other response on a completion loop (an HTTP/2 stream's, a
  * standalone one) is refused rather than taken for a connection it is not part of. While the handler
  * runs, or while the driver itself moves the buffer onto the queue, everything is taken: nothing can
  * drain meanwhile. */

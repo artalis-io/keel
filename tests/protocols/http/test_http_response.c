@@ -2,6 +2,7 @@
 #include <keel/http_response.h>
 #include <keel/event_ctx.h>
 #include <keel/socket.h>
+#include "event_caps.h"   /* kl_event_caps: the loop's drive model decides the stream writer */
 #include "net_compat.h"
 #include <string.h>
 #include <fcntl.h>
@@ -215,15 +216,19 @@ UTEST(response, streaming_chunked) {
     kl_http_response_free(&res);
 }
 
-/* A streamed response whose event ctx names the built-in socket provider explicitly (as
- * KlHttpServerConfig.sockets = kl_socket_provider_posix() / _winsock() does) is a synchronous
- * send/recv provider: its chunks go out through kl_sock_send. The provider also advertises
- * datagram support, which must not make the stream writer take it for an overlapped (completion)
- * provider and hand the chunks to a completion output queue the response does not have. */
+/* A standalone streamed response whose event ctx names the built-in socket provider explicitly (as
+ * KlHttpServerConfig.sockets = kl_socket_provider_posix() / _winsock() does). The stream writer
+ * follows the loop's drive model, never the provider's capability bits (the provider advertises
+ * datagram support, which must not be read as anything else):
+ *   - readiness: a synchronous send/recv provider, so the chunks go out through kl_sock_send;
+ *   - completion: output goes only through a pooled connection's output queue, which a standalone
+ *     response does not have, so the stream is refused whatever the provider (as
+ *     completion_output.a_streamed_response_outside_a_pooled_connection_is_refused). */
 UTEST(response, streaming_chunked_explicit_builtin_provider) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ectx;
     ASSERT_EQ(kl_event_ctx_init(&ectx, &a), 0);
+    int completion = (kl_event_caps(&ectx.loop) & KL_EVENT_CAP_COMPLETION) != 0;
 #ifdef _WIN32
     ectx.sockets = kl_socket_provider_winsock();
 #else
@@ -257,6 +262,12 @@ UTEST(response, streaming_chunked_explicit_builtin_provider) {
     kl_http_response_free(&res);
     kl_event_ctx_free(&ectx);
 
+    if (completion) {
+        ASSERT_EQ(begin, -1);   /* the status line already goes through the stream writer: refused */
+        ASSERT_EQ(st_err, 1);
+        ASSERT_TRUE(n <= 0);    /* nothing was sent synchronously on the loop thread */
+        return;
+    }
     ASSERT_EQ(begin, 0);   /* the status line and headers already go through the stream writer */
     ASSERT_EQ(w1, 0);
     ASSERT_EQ(w2, 0);
