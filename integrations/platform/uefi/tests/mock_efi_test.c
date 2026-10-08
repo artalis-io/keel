@@ -416,11 +416,26 @@ static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKE
  * g_tcp_graceful_close_hangs models that; g_tcp_close_aborts counts abortive Close calls. */
 static int g_tcp_graceful_close_hangs;
 static int g_tcp_close_aborts;
+/* EDK2 TcpDxe keeps a Transmit whose data fit the send buffer on its processing list until the
+ * peer ACKs it, and Cancel (any token, or NULL) never looks at that list: such a Transmit is not
+ * retired by Cancel. Only an abortive Close (SOCK_ABORT, which flushes the connection) completes it,
+ * with EFI_ABORTED. g_tcp_tx_processing models that for the pending (g_tcp_hung_tx) Transmit. */
+static int g_tcp_tx_processing;
+static int tx_is_processing(const void *t) {
+    return g_tcp_tx_processing && g_tcp_hung_tx && t == (const void *)&g_tcp_hung_tx->CompletionToken;
+}
 static EFI_STATUS EFIAPI m_tcp_Close(EFI_TCP4_PROTOCOL *This, EFI_TCP4_CLOSE_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->CompletionToken.Event;
     tok_submit(&t->CompletionToken, e);
     if (t->AbortOnClose) g_tcp_close_aborts++;
+    if (t->AbortOnClose && g_tcp_tx_processing && g_tcp_hung_tx) {   /* the abort flushes it */
+        EFI_TCP4_IO_TOKEN *tx = g_tcp_hung_tx;
+        g_tcp_hung_tx = NULL;
+        tx->CompletionToken.Status = EFI_ABORTED;
+        ((MockEvent *)tx->CompletionToken.Event)->signaled = 1;
+        tok_terminal(&tx->CompletionToken);
+    }
     if (g_tcp_close_mode == TOK_COMPLETE_OK && (t->AbortOnClose || !g_tcp_graceful_close_hangs)) {
         t->CompletionToken.Status = EFI_SUCCESS; e->signaled = 1; tok_terminal(&t->CompletionToken);
     }
@@ -433,6 +448,7 @@ static EFI_STATUS EFIAPI m_tcp_Cancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETI
         if (!g_cancel_signals) return EFI_SUCCESS;   /* firmware can't cancel: leaves tokens live */
         for (int i = 0; i < g_tok_count; i++)
             if (g_toks[i].outstanding && g_toks[i].ev) {
+                if (tx_is_processing(g_toks[i].token)) continue;   /* not on a list Cancel walks */
                 g_toks[i].ev->signaled = 1;          /* firmware signals the event */
                 g_toks[i].outstanding = 0;
             }
@@ -440,6 +456,7 @@ static EFI_STATUS EFIAPI m_tcp_Cancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETI
     }
     g_tcp_cancel_calls++;
     if (!g_cancel_signals) return EFI_NOT_FOUND;     /* token not retired → drain will fail */
+    if (tx_is_processing(t)) return EFI_NOT_FOUND;   /* processing Transmit: Cancel cannot see it */
     MockEvent *e = (MockEvent *)t->Event;
     if (e) e->signaled = 1;
     t->Status = EFI_ABORTED;
@@ -622,7 +639,7 @@ static void reset_counters(void) {
     g_udp_transmit_ret = EFI_SUCCESS; g_udp_transmit_status = EFI_SUCCESS;
     g_udp_tx_calls = 0; g_udp_tx_len = 0; g_udp_hung_tok = NULL;
     g_tcp_hung_tx = NULL; g_tcp_tx_bytes = 0;
-    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0;
+    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0; g_tcp_tx_processing = 0;
     tok_reset();
     accept_reset();
     g_event_count = 0;
@@ -1617,6 +1634,83 @@ static void t_io_reap_pending_send_closes_fast(void) {
     p->ops->close(p->context, fd);
     CHECK(g_tcp_poll_calls < 50, "close did not pump a graceful Close against the zero window");
     CHECK(g_tcp_close_aborts == 1, "the Close was abortive (AbortOnClose)");
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* As above, but with the EDK2 TcpDxe behaviour: the queued Transmit sits on the processing list,
+ * which Cancel(NULL) does not walk, so only the abortive Close's connection flush retires it (with
+ * EFI_ABORTED). close must post that abortive Close before it waits for the Transmit; waiting first
+ * pumps the full per-op bound and then quarantines a slot whose tokens the abort did retire. */
+static void t_io_reap_processing_send_aborts_before_drain(void) {
+    T_CASE("server io: a queued Transmit Cancel cannot retire is flushed by an abortive Close, promptly");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK; g_tcp_graceful_close_hangs = 1; g_tcp_tx_processing = 1;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending (zero window)");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send op");
+
+    int before = g_destroy_child_calls;
+    g_tcp_poll_calls = 0;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_poll_calls < 50, "close did not pump the Transmit that Cancel cannot retire");
+    CHECK(g_tcp_close_aborts == 1, "the Close was abortive (AbortOnClose)");
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* A Transmit that already completed (its event is signaled) but whose completion no drain has
+ * observed yet is not queued data: nothing is lost by a FIN, so close stays graceful (no RST). */
+static void t_io_close_completed_send_is_graceful(void) {
+    T_CASE("server io: closing a conn whose Transmit already completed is graceful, not abortive");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending (zero window)");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send op");
+    CHECK(mock_complete_hung_tcp_tx() == 1, "the firmware completes the Transmit before close");
+
+    int before = g_destroy_child_calls;
+    g_tcp_poll_calls = 0;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_close_aborts == 0, "the Close was graceful (no AbortOnClose)");
+    CHECK(g_tcp_poll_calls < 50, "close did not pump");
     CHECK(outstanding_count() == 0, "no token outstanding after close");
     CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
     kl_uefi_event_provider_reset();
@@ -3035,6 +3129,8 @@ int main(void) {
     t_io_send_pending_nonblocking();
     t_io_send_pending_cancel_close();
     t_io_reap_pending_send_closes_fast();
+    t_io_reap_processing_send_aborts_before_drain();
+    t_io_close_completed_send_is_graceful();
     t_io_send_progress_advances();
     t_accept_cancel_fail_quarantine();   /* intentional permanent slot leak */
     t_io_dead_conn_ops_complete();       /* intentional permanent slot leak */

@@ -25,6 +25,7 @@
 #include <keel/socket.h>
 #include <keel/sockaddr.h>
 #include <keel/handle.h>
+#include <keel/datagram.h>
 #include <keel/clock.h>   /* kl_monotonic_ms: the EAGAIN drain wait */
 #include "../src/socket.h"
 #include "../src/completion.h"
@@ -435,6 +436,59 @@ UTEST(iouring_sqe_fail, submit_eagain_with_no_timeout_does_not_block_forever) {
     alarm(0);
     kl_event_ctx_free(&ctx);
     ASSERT_TRUE(run >= 0);
+}
+
+/* A datagram send whose post finds no SQE (the ring stays full even after a submit, e.g. the
+ * kernel answers -EBUSY under CQ overflow) is a passing shortage, not a failed socket: that one
+ * datagram is dropped and counted, and the next send goes out. A plain post failure would latch
+ * the send side for good (every later send KL_DATAGRAM_ERROR). */
+static int g_dg_recvs; static char g_dg_buf[64]; static size_t g_dg_len;
+static void dg_on_recv(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                       const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)peer; (void)local; (void)flags;
+    g_dg_recvs++; g_dg_len = len < sizeof(g_dg_buf) ? len : sizeof(g_dg_buf);
+    memcpy(g_dg_buf, data, g_dg_len);
+}
+UTEST(iouring_sqe_fail, datagram_send_without_an_sqe_drops_only_that_datagram) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(kl_event_ctx_init(&ctx, &a), 0);
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }
+
+    KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig sc; memset(&sc, 0, sizeof(sc));
+    sc.ctx = &ctx; sc.alloc = &a; sc.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_datagram_socket_init(&rx, &sc), 0);
+    ASSERT_EQ(kl_datagram_socket_init(&tx, &sc), 0);
+    KlSockAddr dest;
+    ASSERT_EQ(kl_sockdef_get_local_addr(kl_datagram_fd(&rx), &dest), 0);
+    g_dg_recvs = 0;
+    ASSERT_EQ(kl_datagram_recv_start(&rx, dg_on_recv, NULL), 0);
+
+    KlDatagramMessage m1 = { .data = "lost", .len = 4, .peer = &dest, .tos = -1 };
+    kl_iou_test_fail_next_sqe(&ctx, 1);                      /* the send's post finds no SQE */
+    int s1 = (int)kl_datagram_send(&tx, &m1);
+    uint64_t dropped = kl_datagram_dropped(&tx);
+    KlDatagramMessage m2 = { .data = "after", .len = 5, .peer = &dest, .tos = -1 };
+    int s2 = (int)kl_datagram_send(&tx, &m2);               /* a latched send side: KL_DATAGRAM_ERROR */
+    for (int i = 0; i < 40 && g_dg_recvs == 0; i++) (void)kl_event_ctx_run(&ctx, 16, 25);
+    int recvs = g_dg_recvs;
+
+    (void)kl_datagram_close_cancel(&rx);
+    (void)kl_datagram_close_cancel(&tx);
+    for (int i = 0; i < 40 && (kl_datagram_close_state(&rx) != KL_DGRAM_CLOSE_CLOSED ||
+                               kl_datagram_close_state(&tx) != KL_DGRAM_CLOSE_CLOSED); i++)
+        (void)kl_event_ctx_run(&ctx, 16, 10);
+    (void)kl_datagram_free(&rx);
+    (void)kl_datagram_free(&tx);
+    kl_event_ctx_free(&ctx);
+
+    ASSERT_EQ(s1, (int)KL_DATAGRAM_ACCEPTED);                 /* taken, then dropped at the post */
+    ASSERT_EQ(dropped, (uint64_t)1);
+    ASSERT_EQ(s2, (int)KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(recvs, 1);
+    ASSERT_EQ(g_dg_len, (size_t)5);
+    ASSERT_EQ(memcmp(g_dg_buf, "after", 5), 0);
 }
 
 UTEST_MAIN()
