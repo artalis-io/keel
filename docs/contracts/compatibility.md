@@ -23,8 +23,8 @@ and avoids the ABI-freezing complexity that a plugin/shared-object model demands
 
 ## Versioning (SemVer)
 
-`KL_VERSION_MAJOR.MINOR.PATCH` (currently **2.9.0**), also as the packed
-`KL_VERSION_NUMBER` (e.g. `20900`) for `#if` gating, and at runtime via
+`KL_VERSION_MAJOR.MINOR.PATCH` (the current value is in the root `VERSION` file), also as the
+packed `KL_VERSION_NUMBER` (e.g. `30300` for 3.3.0) for `#if` gating, and at runtime via
 `kl_version()` / `kl_version_number()`, which report the *linked library*, so a
 consumer that relinks a newer Keel can verify it at runtime.
 
