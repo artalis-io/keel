@@ -338,15 +338,19 @@ static int pc_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *
 
 static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
     KlPcState *st = ctx->loop._backend;
+    /* No memory for the op or its payload copy is a passing shortage that concerns this datagram
+     * only: KL_COMP_POST_DROPPED drops it and keeps the send side. */
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
-    if (!op) return -1;                 /* nothing taken → caller releases its ref */
+    if (!op) return KL_COMP_POST_DROPPED;   /* nothing taken → caller releases its ref */
     memset(op, 0, sizeof(*op));
     op->type = PC_DGRAM_SEND;
     op->alloc = st->alloc;
     op->fd = sop->fd;
     op->send_total = sop->len;
     op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
-    if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → caller releases */
+    if (!op->sendbuf) {                     /* life unset → caller releases */
+        op->send_total = 0; pc_op_free(op); return KL_COMP_POST_DROPPED;
+    }
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a host sockaddr for the send at drain time. */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)

@@ -899,8 +899,10 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
  *   Connect (configured && !connected). The graceful Close token itself rides the
  *   timeout guard (pump_or_cancel), not a bare pump; the ignored close-token timeout
  *   would otherwise leak.
- * Order: Cancel(NULL) → drain rx/connect → graceful Close → pump_or_cancel(close) →
+ * Order: Cancel(NULL) → drain rx/connect/tx → graceful Close → pump_or_cancel(close) →
  *        close_events → Configure(NULL) → CloseProtocol → DestroyChild → free slot.
+ *        With a Transmit still queued, the Close is abortive and is posted right after the
+ *        Cancel, before the drains (its connection flush is what retires that Transmit).
  *
  * After ExitBootServices the EFI protocols are GONE: do NOT call
  * Cancel/Close/CloseEvent/CloseProtocol/DestroyChild; just mark the slot dead+free.
@@ -976,8 +978,33 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
     /* Cancel ALL pending tokens at once, then drain ONLY the tokens that are
      * actually posted (explicit *_posted flags, NEVER a token whose terminal signal was
      * already consumed, which would spin forever on an event that never fires again).
-     * Check EACH drain: if one cannot be confirmed retired, the token is still live. */
+     * Check EACH drain: if one cannot be confirmed retired, the token is still live.
+     *
+     * A send step's Transmit still queued means the peer stopped reading (zero window: the
+     * typical idle-sweep reap). Its data never left, and a graceful Close would wait behind it
+     * (the FIN cannot go out until the window opens). Such a close is abortive (RST). Decide it
+     * BEFORE the Cancel: a Transmit whose event already fired is not queued data, so it keeps the
+     * graceful Close. CheckEvent consumes that signal, so the token is retired here (tx_posted
+     * cleared) and nothing below waits on its event again. */
+    int abortive = 0;
+    if (tcp && c->tx_posted) {
+        if (bs->CheckEvent(c->tx_tok.CompletionToken.Event) == EFI_SUCCESS) c->tx_posted = 0;
+        else abortive = 1;
+    }
+
     if (tcp) tcp->Cancel(tcp, NULL);
+
+    /* An abortive Close goes out right after the Cancel, before any drain. Cancel does not reach
+     * a Transmit the stack is still holding for an ACK (EDK2 keeps it on a processing list that
+     * Cancel never walks); the abort flushes the connection, which completes that Transmit (and
+     * any other pending token) with EFI_ABORTED. Draining the Transmit first would pump it for
+     * the whole bound and then quarantine the slot. */
+    int close_posted = 0;
+    if (abortive && c->events_created && c->close_tok.CompletionToken.Event) {
+        c->close_tok.AbortOnClose = TRUE;
+        c->close_tok.CompletionToken.Status = EFI_NOT_READY;
+        if (!EFI_ERROR(tcp->Close(tcp, &c->close_tok))) { c->close_posted = 1; close_posted = 1; }
+    }
 
     if (tcp && c->rx_posted) {
         if (!pump_until(c, c->rx_tok.CompletionToken.Event)) drained_ok = 0;
@@ -987,27 +1014,21 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
         if (!pump_until(c, c->conn_tok.CompletionToken.Event)) drained_ok = 0;
         c->conn_posted = 0;
     }
-    /* A send step's Transmit still queued means the peer stopped reading (zero window: the
-     * typical idle-sweep reap). Its data never left, and a graceful Close would wait behind it
-     * (the FIN cannot go out until the window opens), pumped for up to KL_EFI_PUMP_SPINS inside
-     * the loop. Such a close is abortive (RST), which completes at once. */
-    int abortive = 0;
     if (tcp && c->tx_posted) {
         if (!pump_until(c, c->tx_tok.CompletionToken.Event)) drained_ok = 0;
         c->tx_posted = 0;
-        abortive = 1;
     }
 
-    /* Close: its token also needs a terminal path (the pump_or_cancel guard). */
-    if (tcp && c->events_created && c->close_tok.CompletionToken.Event) {
-        c->close_tok.AbortOnClose = abortive ? TRUE : FALSE;
+    /* The graceful Close, once every other token is retired. */
+    if (tcp && !abortive && c->events_created && c->close_tok.CompletionToken.Event) {
+        c->close_tok.AbortOnClose = FALSE;
         c->close_tok.CompletionToken.Status = EFI_NOT_READY;
-        EFI_STATUS st = tcp->Close(tcp, &c->close_tok);
-        if (!EFI_ERROR(st)) {
-            c->close_posted = 1;
-            if (!pump_or_cancel(c, &c->close_tok.CompletionToken)) drained_ok = 0;
-            c->close_posted = 0;
-        }
+        if (!EFI_ERROR(tcp->Close(tcp, &c->close_tok))) { c->close_posted = 1; close_posted = 1; }
+    }
+    /* Close: its token also needs a terminal path (the pump_or_cancel guard). */
+    if (close_posted) {
+        if (!pump_or_cancel(c, &c->close_tok.CompletionToken)) drained_ok = 0;
+        c->close_posted = 0;
     }
 
     /* If ANY token could not be confirmed retired, the firmware may still own this

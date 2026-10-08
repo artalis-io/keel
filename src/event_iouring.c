@@ -763,14 +763,18 @@ static int iou_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp 
 
 static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
     KlIouState *st = ctx->loop._backend;
+    /* A passing shortage at the post (no memory for the op or its payload copy, no SQE even after a
+     * submit) concerns this datagram only: KL_COMP_POST_DROPPED drops it and keeps the send side. */
     KlIouOp *op = iou_op_alloc(st->alloc);
-    if (!op) return -1;                 /* nothing taken → caller releases its ref */
+    if (!op) return KL_COMP_POST_DROPPED;   /* nothing taken → caller releases its ref */
     op->type = IOU_DGRAM_SEND;
     op->fd = sop->fd;
     op->send_total = sop->len;
     op->sendcap = sop->len ? sop->len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
-    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }   /* life unset → caller releases */
+    if (!op->sendbuf) {                     /* life unset → caller releases */
+        op->sendcap = 0; iou_op_free(op); return KL_COMP_POST_DROPPED;
+    }
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a host sockaddr for the overlapped sendmsg. */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC) {
@@ -802,7 +806,7 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
         if (clen) { op->msgh.msg_control = op->udp_ctrl; op->msgh.msg_controllen = clen; }
     }
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { iou_op_free(op); return -1; }       /* life unset → caller releases */
+    if (!sqe) { iou_op_free(op); return KL_COMP_POST_DROPPED; }   /* life unset → caller releases */
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
     op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
