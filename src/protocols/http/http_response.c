@@ -577,7 +577,9 @@ int kl_http_response_send(KlHttpResponse *res) {
         if (r == 1) return 1;  /* more pending */
         /* Fully drained; if stream ended, we're done */
         if (res->stream_ended) return 0;
-        return 1;  /* handler may produce more data */
+        /* Not ended: a producer may write more. The server's driver knows whether one can (a
+         * connection that is SENDING has none left) and ends the response itself. */
+        return 1;
     }
 
     /* Send file body (already skipped above for HEAD) */
@@ -803,5 +805,6 @@ int kl_http_response_end_stream(KlHttpResponse *res) {
         res->stream_error = 1;
         return -1;
     }
+    res->stream_ended = 1;
     return 0;
 }

@@ -24,7 +24,7 @@ One Low is a defect any consumer of a documented feature hits, so it is not left
 
 | Item | Location | Why |
 |---|---|---|
-| A readiness streamed response that is drained but not ended spins on WRITE | `http_response.c` `kl_http_response_send` (returns 1 for a drained, unended stream), `http_server.c` SENDING arms WRITE, `http_connection.c` `kl_http_conn_on_writable` refreshes `last_active_ms` | An SSE or chunked handler that pushes data later (from a timer or another source) keeps the connection writable-armed with nothing to send: the loop wakes on every tick, and the idle sweep never ends it because each wakeup refreshes the activity time. Every idle SSE client on epoll, kqueue, poll or WSAPoll costs a busy loop. |
+| A readiness streamed response that is drained but not ended spins on WRITE | `http_response.c` `kl_http_response_send` (returns 1 for a drained, unended stream), `http_server.c` SENDING arms WRITE, `http_connection.c` `kl_http_conn_on_writable` refreshes `last_active_ms` | A streamed (SSE or chunked) response left unended by a handler, or an async resume, that returned without suspending while some of its output was still buffered keeps the connection writable-armed once that buffer is out, with nothing to send: on epoll, kqueue, poll or WSAPoll the loop wakes on every tick, and the idle sweep never ends it because each wakeup refreshes the activity time. The documented push-later pattern (suspend, write from a timer or watcher, end in the resume) never spun: a suspended connection is out of the loop. Fixed in #487. |
 
 ### Fix if a consumer hits it
 

@@ -452,6 +452,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **HTTP server: a streamed response left unended no longer spins or lingers once its backlog is
+  out.** A chunked or SSE handler (or an async resume) that returned without ending the stream and
+  without suspending, while part of its output was still buffered, kept the connection SENDING on
+  readiness backends (epoll, kqueue, poll, WSAPoll) with WRITE armed and nothing to send: the loop
+  woke on every tick, a full core per such client, and the idle sweep never ended it because each
+  wakeup counted as activity. On completion backends the same response was treated as complete and
+  the connection kept alive for another request after a chunked body with no terminating chunk.
+  Such a response is now over once its buffer is flushed and the connection ends, as it already did
+  when everything went out before the handler returned. A connection whose streamed body was never
+  terminated is never reused (behavior change). To push events later, suspend the connection
+  (`kl_async_suspend`), write from a timer or watcher, and end the stream from the resume: a
+  suspended stream is not in the loop and is exempt from the idle timeout, unchanged.
 - **HTTP client pool: `max_per_host` is a budget per socket provider.** Release counted, and could
   evict, idle connections another provider made for the same host, though acquire never hands one
   provider's connection to another. Clients on two providers sharing a pool now each get their own

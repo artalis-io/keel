@@ -1254,8 +1254,25 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     return c->state;
 }
 
+/* A streamed response that is SENDING belongs to the connection driver alone: the handler (or the
+ * resume of its async op) returned without suspending, so no producer is left to write more or to
+ * end the stream. Once its outbound buffer is empty the response is over, as it is when everything
+ * went out inline before the handler returned (conn_process closes it then). Waiting on for more
+ * kept WRITE interest on a socket with nothing to send: a busy loop on every readiness engine, never
+ * idle-timed out because each wakeup counted as activity. */
+static int conn_stream_given_up(const KlHttpConn *c) {
+    return c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&
+           !c->res.stream_ended && !kl_drain_pending(&c->res.drain);
+}
+
 static KlHttpConnState conn_send_complete(KlHttpConn *c) {
     conn_log_access(c);
+    /* A chunked body that never got its terminating chunk has no end the client can see but the
+     * connection's: never reuse it for another request. HEAD carries no body, so it is complete. */
+    if (c->res.body_mode == KL_HTTP_BODY_STREAM && !c->res.stream_ended && !c->res.head_request) {
+        c->req.keep_alive = 0;
+        c->res.keep_alive = 0;
+    }
     if (c->req.keep_alive)
         return conn_keepalive_reset(c);
     /* Response fully flushed and the connection is ending. If request input may still be unread
@@ -1381,7 +1398,7 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
     int r = kl_http_response_send(&c->res);
     if (r < 0) {
         c->state = KL_HTTP_CONN_CLOSED;
-    } else if (r == 0) {
+    } else if (r == 0 || conn_stream_given_up(c)) {
         return conn_send_complete(c);
     }
     /* r > 0: more to send, stay in SENDING state */

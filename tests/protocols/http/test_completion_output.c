@@ -1679,4 +1679,220 @@ UTEST(completion_output, the_queue_gives_back_a_large_response_buffer_at_keep_al
 }
 #endif /* !KEEL_NO_COMPLETION */
 
+/* ── A streamed response left unended once its backlog is out ───────────────────────────────────
+ * A handler that streams more than the socket takes at once and returns without ending the stream
+ * (and without suspending) has given the response up: what it wrote is all there is. Had all of it
+ * gone out inline, the connection would have closed at once; with a backlog it is flushed first and
+ * must then end the same way. Readiness kept the drained connection SENDING with WRITE armed and
+ * nothing to send: a busy loop on every tick, and the activity time each wakeup refreshed kept the
+ * idle sweep from ever ending it. Completion treated the drained response as complete and kept the
+ * connection for another request after a chunked body with no terminating chunk. Either way the
+ * client saw no end within its read window, which is what these tests check.
+ *
+ * Which model each test discriminates: the two handler-return tests fail only on readiness (on a
+ * completion loop the queue takes every write while the handler runs, so nothing is buffered at its
+ * return and the connection already closed); the resume test fails on both. */
+#define UE_CHUNKS 15                                       /* 960 KiB: fits the outbound buffer */
+static KlHttpServer ue_srv;
+static int g_ue_written;
+
+static void handle_unended(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    shrink_sndbuf(kl_http_request_conn(req));
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    memset(g_big_chunk, 'U', sizeof g_big_chunk);
+    for (int i = 0; i < UE_CHUNKS; i++)
+        if (w(wc, g_big_chunk, sizeof g_big_chunk) == 0) g_ue_written++;
+}
+
+/* Read until the peer closes or `idle_ms` pass with nothing to read. Counts the bytes. The servers
+ * here use a read timeout well past the read window, so only the response itself can end it. */
+static size_t read_count_until_close(int fd, int idle_ms, int *closed) {
+    static char chunk[64 * 1024];
+    size_t total = 0;
+    *closed = 0;
+    for (;;) {
+        if (kl_test_poll1(fd, 0, idle_ms) <= 0) break;
+        kl_ssize_t n = kl_test_sockread(fd, chunk, sizeof chunk);
+        if (n == 0) { *closed = 1; break; }
+        if (n < 0) break;
+        total += (size_t)n;
+    }
+    return total;
+}
+
+static void run_unended_stream(int use_tls, size_t *got, int *closed) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .read_timeout_ms = 5000 };
+    if (use_tls) cfg.tls = &tls_cfg;
+    *got = 0;
+    *closed = 0;
+    g_ue_written = 0;
+    if (kl_http_server_init(&ue_srv, &cfg) < 0) return;
+    kl_http_server_route(&ue_srv, "GET", "/unended", handle_unended, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ue_srv);
+    wait_for_bind(&ue_srv);
+    int fd = connect_rcvbuf(ue_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /unended HTTP/1.1\r\nHost: x\r\n\r\n";   /* keep-alive */
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(300);                             /* the server's sends block meanwhile */
+        *got = read_count_until_close(fd, 1500, closed);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&ue_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ue_srv);
+}
+
+UTEST(completion_output, a_drained_stream_left_unended_ends_the_connection) {
+    size_t got = 0;
+    int closed = 0;
+    run_unended_stream(0, &got, &closed);
+    printf("  unended stream: %zu bytes, closed %d\n", got, closed);
+    ASSERT_EQ(g_ue_written, UE_CHUNKS);
+    ASSERT_TRUE(got > (size_t)UE_CHUNKS * BIG_CHUNK);      /* everything written arrived */
+    ASSERT_TRUE(closed);                                   /* was (readiness): spun on WRITE */
+}
+
+UTEST(completion_output, a_drained_tls_stream_left_unended_ends_the_connection) {
+    size_t got = 0;
+    int closed = 0;
+    run_unended_stream(1, &got, &closed);
+    printf("  unended TLS stream: %zu bytes, closed %d\n", got, closed);
+    ASSERT_EQ(g_ue_written, UE_CHUNKS);
+    ASSERT_TRUE(got > (size_t)UE_CHUNKS * BIG_CHUNK);
+    ASSERT_TRUE(closed);                                   /* was (readiness): spun on WRITE */
+}
+
+/* The same once a suspension ends: a producer that wrote a backlog while suspended (to a client
+ * reading slowly) and resumes without ending the stream. On a completion loop this is how a drain
+ * is still pending at the resume (while the handler runs, the queue takes everything). */
+#define UR_CHUNKS 24                                       /* 1.5 MiB: past the completion queue */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int accepted, resumed;
+} UnendedResume;
+static UnendedResume g_ur;
+static KlHttpServer ur_srv;
+
+static void ur_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_ur.resumed = 1;                                      /* and does not end the stream */
+}
+static void ur_push(void *ud) {
+    (void)ud;
+    memset(g_big_chunk, 'R', sizeof g_big_chunk);
+    for (int i = 0; i < UR_CHUNKS; i++)
+        if (g_ur.w(g_ur.wc, g_big_chunk, sizeof g_big_chunk) == 0) g_ur.accepted++;
+    kl_async_complete(&ur_srv, &g_ur.op);
+}
+static void handle_unended_resume(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_ur, 0, sizeof g_ur);
+    KlHttpConn *c = kl_http_request_conn(req);
+    shrink_sndbuf(c);
+    /* An outbound buffer that holds the whole push, so no write fails on either model. */
+    if (kl_http_response_enable_drain(res, res->alloc, 4u << 20) < 0) return;
+    if (kl_http_response_begin_stream(res, 200, &g_ur.w, &g_ur.wc) < 0) return;
+    g_ur.op.on_resume = ur_resume;
+    if (kl_async_suspend(&ur_srv, c, &g_ur.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&ur_srv), 50, ur_push, NULL);
+}
+
+UTEST(completion_output, a_stream_resumed_unended_with_a_backlog_ends_the_connection) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .read_timeout_ms = 5000 };
+    ASSERT_EQ(0, kl_http_server_init(&ur_srv, &cfg));
+    kl_http_server_route(&ur_srv, "GET", "/resume", handle_unended_resume, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ur_srv);
+    wait_for_bind(&ur_srv);
+    size_t got = 0;
+    int closed = 0;
+    int fd = connect_rcvbuf(ur_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /resume HTTP/1.1\r\nHost: x\r\n\r\n";     /* keep-alive */
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(400);                             /* pushed and resumed meanwhile */
+        got = read_count_until_close(fd, 1500, &closed);
+        kl_test_closesock(fd);
+    }
+    int accepted = g_ur.accepted, resumed = g_ur.resumed;
+    kl_http_server_stop(&ur_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ur_srv);
+    printf("  resumed unended: %d chunks taken, %zu bytes, closed %d\n", accepted, got, closed);
+    ASSERT_TRUE(resumed);
+    ASSERT_EQ(accepted, UR_CHUNKS);
+    ASSERT_TRUE(got > (size_t)accepted * BIG_CHUNK);       /* everything taken arrived */
+    ASSERT_TRUE(closed);              /* was: readiness spun on WRITE, completion kept it alive */
+}
+
+/* ── An idle event stream waits for its producer past the read timeout ──────────────────────────
+ * The way to push events later: start the stream, suspend, write from a timer (or a watcher, or
+ * another connection's event), and end it from the resume. A suspended connection is exempt from
+ * the idle timeout and is not in the loop, so an event stream quiet for longer than read_timeout_ms
+ * is neither cut off nor woken, on either model. */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpSse sse;
+    int resumed;
+} IdleSse;
+static IdleSse g_is;
+static KlHttpServer is_srv;
+
+static void is_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    g_is.resumed = 1;
+    (void)kl_http_sse_end(&g_is.sse);
+}
+static void is_push(void *ud) {
+    (void)ud;
+    (void)kl_http_sse_event(&g_is.sse, NULL, "two", 3, NULL);
+    kl_async_complete(&is_srv, &g_is.op);
+}
+static void handle_idle_sse(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_is, 0, sizeof g_is);
+    if (kl_http_sse_begin(res, &g_is.sse) < 0) return;
+    (void)kl_http_sse_event(&g_is.sse, NULL, "one", 3, NULL);
+    g_is.op.on_resume = is_resume;
+    if (kl_async_suspend(&is_srv, kl_http_request_conn(req), &g_is.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&is_srv), 600, is_push, NULL);   /* 3x the timeout */
+}
+
+UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeout) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .read_timeout_ms = 200 };
+    ASSERT_EQ(0, kl_http_server_init(&is_srv, &cfg));
+    kl_http_server_route(&is_srv, "GET", "/events", handle_idle_sse, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &is_srv);
+    wait_for_bind(&is_srv);
+    static char buf[4096];
+    int closed = 0;
+    buf[0] = '\0';
+    int fd = connect_rcvbuf(is_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /events HTTP/1.1\r\nHost: x\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)read_until_close(fd, buf, sizeof buf, 2000, &closed);
+        kl_test_closesock(fd);
+    }
+    int resumed = g_is.resumed;
+    kl_http_server_stop(&is_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&is_srv);
+    ASSERT_TRUE(resumed);
+    ASSERT_TRUE(strstr(buf, "\r\none\r\n") != NULL);      /* each field part is its own chunk */
+    ASSERT_TRUE(strstr(buf, "\r\ntwo\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "0\r\n\r\n") != NULL);        /* the stream's end */
+    ASSERT_TRUE(strstr(buf, " 408 ") == NULL);
+    ASSERT_TRUE(closed);
+}
+
 UTEST_MAIN();
