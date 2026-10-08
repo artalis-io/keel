@@ -25,7 +25,8 @@ application bytes: Keel never borrows or takes ownership of the caller's write b
 - *stream closed*: the peer/connection is gone;
 - *error*: allocation or transport failure.
 
-There is **one** writable/drain notification: the drain empties → the producer may write more. On
+There is **one** writable/drain notification: the drain empties → the producer may write more (a
+producer that still owns the stream: see "Producing later" below). On
 the completion axis the bytes go onto the connection's output queue (the one TLS, WebSocket and HTTP/2
 output use), which keeps ≤1 send in flight and moves a producer's backlog onto the queue from the WRITE
 completion (`comp_tls_on_write`); nothing is ever sent synchronously on the loop thread. On readiness
@@ -40,7 +41,10 @@ stream from the resume (`on_resume`). A suspended connection is out of the event
 from the idle timeout, so a quiet stream costs nothing and is not cut off at `read_timeout_ms`. A
 handler or resume that returns without suspending gives the response up: what it wrote is flushed
 (the outbound buffer, if anything is still in it) and the connection then ends, on both axes. A
-stream that was never ended (no terminating chunk) is never kept alive for another request.
+stream that was never ended (no terminating chunk) is never kept alive for another request. A
+drain callback registered on the response (`kl_drain_on_drain` on `res->drain`) does not keep an
+unsuspended stream open: once the drain empties with the stream unended and the connection not
+suspended, the response is over.
 
 ## Read side (request-body streaming / inbound)
 

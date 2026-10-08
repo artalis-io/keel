@@ -1686,9 +1686,12 @@ UTEST(completion_output, the_queue_gives_back_a_large_response_buffer_at_keep_al
  * must then end the same way. Readiness kept the drained connection SENDING with WRITE armed and
  * nothing to send: a busy loop on every tick, and the activity time each wakeup refreshed kept the
  * idle sweep from ever ending it. Completion treated the drained response as complete and kept the
- * connection for another request after a chunked body with no terminating chunk, so the client
- * waited for the rest until the read timeout's 408 arrived instead. Either way the client saw no
- * end. */
+ * connection for another request after a chunked body with no terminating chunk. Either way the
+ * client saw no end within its read window, which is what these tests check.
+ *
+ * Which model each test discriminates: the two handler-return tests fail only on readiness (on a
+ * completion loop the queue takes every write while the handler runs, so nothing is buffered at its
+ * return and the connection already closed); the resume test fails on both. */
 #define UE_CHUNKS 15                                       /* 960 KiB: fits the outbound buffer */
 static KlHttpServer ue_srv;
 static int g_ue_written;
@@ -1704,32 +1707,28 @@ static void handle_unended(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
         if (w(wc, g_big_chunk, sizeof g_big_chunk) == 0) g_ue_written++;
 }
 
-/* Read until the peer closes or `idle_ms` pass with nothing to read. Counts the bytes; *saw_408
- * when a 408 response arrived on the connection. */
-static size_t read_count_until_close(int fd, int idle_ms, int *closed, int *saw_408) {
-    static char chunk[64 * 1024 + 1];
+/* Read until the peer closes or `idle_ms` pass with nothing to read. Counts the bytes. The servers
+ * here use a read timeout well past the read window, so only the response itself can end it. */
+static size_t read_count_until_close(int fd, int idle_ms, int *closed) {
+    static char chunk[64 * 1024];
     size_t total = 0;
     *closed = 0;
-    *saw_408 = 0;
     for (;;) {
         if (kl_test_poll1(fd, 0, idle_ms) <= 0) break;
-        kl_ssize_t n = kl_test_sockread(fd, chunk, sizeof chunk - 1);
+        kl_ssize_t n = kl_test_sockread(fd, chunk, sizeof chunk);
         if (n == 0) { *closed = 1; break; }
         if (n < 0) break;
-        chunk[n] = '\0';
-        if (strstr(chunk, " 408 ")) *saw_408 = 1;
         total += (size_t)n;
     }
     return total;
 }
 
-static void run_unended_stream(int use_tls, size_t *got, int *closed, int *saw_408) {
+static void run_unended_stream(int use_tls, size_t *got, int *closed) {
     KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .read_timeout_ms = 5000 };
     if (use_tls) cfg.tls = &tls_cfg;
     *got = 0;
     *closed = 0;
-    *saw_408 = 0;
     g_ue_written = 0;
     if (kl_http_server_init(&ue_srv, &cfg) < 0) return;
     kl_http_server_route(&ue_srv, "GET", "/unended", handle_unended, NULL, NULL);
@@ -1741,7 +1740,7 @@ static void run_unended_stream(int use_tls, size_t *got, int *closed, int *saw_4
         const char *rq = "GET /unended HTTP/1.1\r\nHost: x\r\n\r\n";   /* keep-alive */
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
         kl_test_sleep_ms(300);                             /* the server's sends block meanwhile */
-        *got = read_count_until_close(fd, 1500, closed, saw_408);
+        *got = read_count_until_close(fd, 1500, closed);
         kl_test_closesock(fd);
     }
     kl_http_server_stop(&ue_srv);
@@ -1751,24 +1750,22 @@ static void run_unended_stream(int use_tls, size_t *got, int *closed, int *saw_4
 
 UTEST(completion_output, a_drained_stream_left_unended_ends_the_connection) {
     size_t got = 0;
-    int closed = 0, saw_408 = 0;
-    run_unended_stream(0, &got, &closed, &saw_408);
-    printf("  unended stream: %zu bytes, closed %d, 408 %d\n", got, closed, saw_408);
+    int closed = 0;
+    run_unended_stream(0, &got, &closed);
+    printf("  unended stream: %zu bytes, closed %d\n", got, closed);
     ASSERT_EQ(g_ue_written, UE_CHUNKS);
     ASSERT_TRUE(got > (size_t)UE_CHUNKS * BIG_CHUNK);      /* everything written arrived */
-    ASSERT_TRUE(closed);              /* was: readiness spun on WRITE, completion kept it alive */
-    ASSERT_FALSE(saw_408);
+    ASSERT_TRUE(closed);                                   /* was (readiness): spun on WRITE */
 }
 
 UTEST(completion_output, a_drained_tls_stream_left_unended_ends_the_connection) {
     size_t got = 0;
-    int closed = 0, saw_408 = 0;
-    run_unended_stream(1, &got, &closed, &saw_408);
-    printf("  unended TLS stream: %zu bytes, closed %d, 408 %d\n", got, closed, saw_408);
+    int closed = 0;
+    run_unended_stream(1, &got, &closed);
+    printf("  unended TLS stream: %zu bytes, closed %d\n", got, closed);
     ASSERT_EQ(g_ue_written, UE_CHUNKS);
     ASSERT_TRUE(got > (size_t)UE_CHUNKS * BIG_CHUNK);
-    ASSERT_TRUE(closed);
-    ASSERT_FALSE(saw_408);
+    ASSERT_TRUE(closed);                                   /* was (readiness): spun on WRITE */
 }
 
 /* The same once a suspension ends: a producer that wrote a backlog while suspended (to a client
@@ -1816,26 +1813,24 @@ UTEST(completion_output, a_stream_resumed_unended_with_a_backlog_ends_the_connec
     kl_plat_thread_create(&tid, server_thread_fn, &ur_srv);
     wait_for_bind(&ur_srv);
     size_t got = 0;
-    int closed = 0, saw_408 = 0;
+    int closed = 0;
     int fd = connect_rcvbuf(ur_srv.bound_port, 4096);
     if (fd >= 0) {
         const char *rq = "GET /resume HTTP/1.1\r\nHost: x\r\n\r\n";     /* keep-alive */
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
         kl_test_sleep_ms(400);                             /* pushed and resumed meanwhile */
-        got = read_count_until_close(fd, 1500, &closed, &saw_408);
+        got = read_count_until_close(fd, 1500, &closed);
         kl_test_closesock(fd);
     }
     int accepted = g_ur.accepted, resumed = g_ur.resumed;
     kl_http_server_stop(&ur_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&ur_srv);
-    printf("  resumed unended: %d chunks taken, %zu bytes, closed %d, 408 %d\n",
-           accepted, got, closed, saw_408);
+    printf("  resumed unended: %d chunks taken, %zu bytes, closed %d\n", accepted, got, closed);
     ASSERT_TRUE(resumed);
     ASSERT_EQ(accepted, UR_CHUNKS);
     ASSERT_TRUE(got > (size_t)accepted * BIG_CHUNK);       /* everything taken arrived */
     ASSERT_TRUE(closed);              /* was: readiness spun on WRITE, completion kept it alive */
-    ASSERT_FALSE(saw_408);
 }
 
 /* ── An idle event stream waits for its producer past the read timeout ──────────────────────────
