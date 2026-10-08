@@ -579,9 +579,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   Keel's own refusals inside the POSIX provider send (a TOS family it cannot determine, a control
   message it cannot build) stay sticky. An interrupted direct send (`EINTR`) is retried instead of failed. The DNS resolver
   moves a query whose send fails straight to the next nameserver.
-- **A custom socket provider's `io_status` result `KL_IO_RESET` after a datagram send now means "drop
-  this datagram" (behavior change).** It latched the datagram's send error like any other failure;
-  it is now read as the ICMP report a UDP send can return, and only that datagram is dropped.
+- **A custom socket provider's `io_status` result `KL_IO_RESET` or `KL_IO_RESOURCE_EXHAUSTED` after a
+  datagram send now means "drop this datagram" (behavior change).** It latched the datagram's send
+  error like any other failure; a reset is now read as the ICMP report a UDP send can return, and
+  resource exhaustion as a full queue or short buffer, and only that datagram is dropped.
   `KL_IO_INTERRUPTED` retries the send. `KL_IO_FATAL` still latches.
 - **UEFI: a TCP reset from real firmware is reported as a reset, and a refused connection is
   recognised.** The integration's `efi_min.h` numbered `EFI_CONNECTION_RESET` 102 and

@@ -196,8 +196,8 @@ typedef enum {
       address (`EINVAL`), an IPv6 peer on an IPv4 socket (`EAFNOSUPPORT`), a destination on a
       connected socket (`EISCONN`, macOS), none on an unconnected one (`EDESTADDRREQ`);
     - and the Winsock equivalents (`WSAEHOSTDOWN` included).
-    A provider with `io_status` reports these as `KL_IO_RESET` (or `KL_IO_INTERRUPTED` once
-    retries run out). The completion backends classify their own results: io_uring and pollcomp by
+    A provider with `io_status` reports these as `KL_IO_RESET`, `KL_IO_RESOURCE_EXHAUSTED` (a full
+    queue or short buffer), or `KL_IO_INTERRUPTED` once retries run out. The completion backends classify their own results: io_uring and pollcomp by
     errno, IOCP by Winsock code (also for a send refused at issue), EFI_UDP4 by the Transmit status
     (`EFI_NOT_FOUND`, the no-route result of the Transmit call; `EFI_ICMP_ERROR`,
     `EFI_NETWORK_UNREACHABLE`, `EFI_HOST_UNREACHABLE`, `EFI_PROTOCOL_UNREACHABLE`,

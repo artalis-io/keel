@@ -242,12 +242,14 @@ static inline KlIoStatus kl_sock_io_status(const KlSocketProvider *p) {
 /* After a datagram send returned -1 and kl_sock_io_status did not say would-block: 1 when the failure
  * concerns only that datagram (drop it, keep sending), 0 when the send side is unusable. A provider
  * that supplies io_status has no errno to consult, so only its categories decide: a reset is the ICMP
- * report a UDP send can return, an interrupted call lost nothing but that datagram; KL_IO_FATAL and the
- * rest stay fatal. Otherwise the hosted errno mapping (kl_sockdef_dgram_send_dropped). */
+ * report a UDP send can return, resource exhaustion (ENOBUFS / ENOMEM: a full queue, a short buffer)
+ * refused this datagram, an interrupted call (once its retries ran out) lost nothing but this
+ * datagram; KL_IO_FATAL and the rest stay fatal. Otherwise the hosted errno mapping
+ * (kl_sockdef_dgram_send_dropped). */
 static inline int kl_sock_dgram_send_dropped(const KlSocketProvider *p) {
     if (p && p->ops->io_status) {
         KlIoStatus st = p->ops->io_status(p->context);
-        return st == KL_IO_RESET || st == KL_IO_INTERRUPTED;
+        return st == KL_IO_RESET || st == KL_IO_RESOURCE_EXHAUSTED || st == KL_IO_INTERRUPTED;
     }
     return kl_sockdef_dgram_send_dropped();
 }
