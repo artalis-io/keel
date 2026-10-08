@@ -23,7 +23,7 @@ of symbols undefined (see `tests/freestanding_symbol_gate.sh`). U-1 supplies the
 |----------------|--------------|
 | `KlAllocator` (explicit, no global) | `kl_uefi_allocator(bs)`, `allocator_uefi.c` |
 | `uint64_t kl_monotonic_ms(void)` | periodic-timer tick counter, `platform_uefi.c` |
-| `void kl_plat_random(void*, size_t)` | `EFI_RNG_PROTOCOL`, fail-closed, `platform_uefi.c` |
+| `int kl_plat_random(void*, size_t)` (0 = ok, -1 = no entropy) | `EFI_RNG_PROTOCOL`, fail-closed, `platform_uefi.c` |
 
 The remaining seams (socket provider, event/completion provider, DNS, the
 vendored-llhttp `abort`/`fprintf`/`stderr` residual, the PE `__chkstk`) are **not**

@@ -211,8 +211,6 @@ typedef struct KlHttpServer {
     int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */
-    uint64_t accept_backoff_until; /**< accepting paused until then (monotonic ms) after descriptor or
-                                        memory exhaustion; 0 = not paused */
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
@@ -254,6 +252,9 @@ typedef struct KlHttpServer {
     KlAsyncOp *async_ops;       /**< active async ops list */
     KlFileIO *file_io;          /**< async file I/O (auto-created if backend supports it) */
     KlError last_error;         /**< diagnostic: set at point of return -1 */
+    /* Appended after the 3.2.0 layout (fields only grow at the end within a major version). */
+    uint64_t accept_backoff_until; /**< accepting paused until then (monotonic ms) after descriptor or
+                                        memory exhaustion; 0 = not paused */
 } KlHttpServer;
 
 /**
