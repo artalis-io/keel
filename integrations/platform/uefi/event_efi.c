@@ -471,8 +471,10 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
 static int el_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
     (void)ctx;                          /* EFI reaches its substrate via file-scope g_efi, not the ctx */
     if (!sop || sop->len > KL_EFI_DGRAM_SNDBUF) return -1;
+    /* A full op pool is a passing shortage that concerns this datagram only: drop it, keep the send
+     * side. Nothing is taken (the life ref is transferred only below), so the caller releases. */
     EfiDgramOp *op = dgram_op_alloc();
-    if (!op) return -1;                 /* nothing taken → caller releases its ref */
+    if (!op) return KL_COMP_POST_DROPPED;
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind = EFI_DG_SEND;
     op->fd   = sop->fd;

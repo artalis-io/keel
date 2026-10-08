@@ -204,9 +204,10 @@ typedef enum {
     `EFI_PORT_UNREACHABLE`, `EFI_BAD_BUFFER_SIZE`, `EFI_NO_MAPPING`, `EFI_OUT_OF_RESOURCES`, for the
     token or the refused Transmit call), and lwIP-raw by the `udp_sendto` result (`ERR_RTE`,
     `ERR_MEM`, `ERR_BUF`, or no pbuf). Both IPv4-only providers drop a datagram for an IPv6 peer, as
-    the hosted ones do (`EAFNOSUPPORT`). A completion backend (io_uring, pollcomp, IOCP) that cannot
+    the hosted ones do (`EAFNOSUPPORT`). A completion backend (io_uring, pollcomp, IOCP, EFI) that cannot
     post a send for a passing lack of resources (no memory for the op or its payload copy; on
-    io_uring, no submission-queue entry even after a submit) drops that datagram the same way.
+    io_uring, no submission-queue entry even after a submit; on EFI, a full op pool) drops that
+    datagram the same way.
     Keel's own refusals inside a provider send (a TOS family it cannot determine, a control
     message it cannot build) are not per-datagram: they stay sticky.
   - *Interrupted* (`EINTR`, `KL_IO_INTERRUPTED`): nothing was lost, so the direct send is retried at

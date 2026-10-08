@@ -473,7 +473,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **Completion datagram sends: a passing resource shortage at the post drops one datagram instead
   of failing the send side (behavior change).** On io_uring, pollcomp and IOCP, a send whose post
   could not allocate its op or payload copy (or, on io_uring, found no submission-queue entry even
-  after a submit, as under CQ overflow) latched the send error, so every later `kl_datagram_send`
+  after a submit, as under CQ overflow), and on the UEFI EFI_UDP4 backend a send that found its
+  static op pool full, latched the send error, so every later `kl_datagram_send`
   returned `KL_DATAGRAM_ERROR`. That datagram is now dropped (`kl_datagram_dropped` counts it,
   `kl_datagram_last_error` reports `KL_ERR_IO`) and the socket keeps sending.
 
