@@ -416,10 +416,10 @@ static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKE
  * g_tcp_graceful_close_hangs models that; g_tcp_close_aborts counts abortive Close calls. */
 static int g_tcp_graceful_close_hangs;
 static int g_tcp_close_aborts;
-/* EDK2 TcpDxe keeps a Transmit whose data fit the send buffer on its processing list until the
- * peer ACKs it, and Cancel (any token, or NULL) never looks at that list: such a Transmit is not
- * retired by Cancel. Only an abortive Close (SOCK_ABORT, which flushes the connection) completes it,
- * with EFI_ABORTED. g_tcp_tx_processing models that for the pending (g_tcp_hung_tx) Transmit. */
+/* Firmware whose Cancel does not retire a pending Transmit (an older Tcp4Dxe, for one, does not
+ * support Cancel at all; EDK2 TcpDxe does retire it). On such firmware only an abortive Close,
+ * which flushes the connection, completes the Transmit, with EFI_ABORTED. g_tcp_tx_processing
+ * models that for the pending (g_tcp_hung_tx) Transmit. */
 static int g_tcp_tx_processing;
 static int tx_is_processing(const void *t) {
     return g_tcp_tx_processing && g_tcp_hung_tx && t == (const void *)&g_tcp_hung_tx->CompletionToken;
@@ -463,7 +463,14 @@ static EFI_STATUS EFIAPI m_tcp_Cancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETI
     tok_terminal(t);
     return EFI_SUCCESS;
 }
-static EFI_STATUS EFIAPI m_tcp_Poll(EFI_TCP4_PROTOCOL *This) { (void)This; FW(); g_tcp_poll_calls++; return EFI_SUCCESS; }
+/* g_tcp_poll_acks: the peer's ACK for the pending Transmit has arrived but the stack only
+ * processes it (completing the Transmit) on the next Poll. */
+static int g_tcp_poll_acks;
+static EFI_STATUS EFIAPI m_tcp_Poll(EFI_TCP4_PROTOCOL *This) {
+    (void)This; FW(); g_tcp_poll_calls++;
+    if (g_tcp_poll_acks && g_tcp_hung_tx) { g_tcp_poll_acks = 0; (void)mock_complete_hung_tcp_tx(); }
+    return EFI_SUCCESS;
+}
 
 /* --- UDP4 protocol (scriptable session + config for the socket_efi_udp4 tests) --- */
 /* Scriptable Configure status (non-NULL cd), a non-NULL Configure counter (single-Configure
@@ -639,7 +646,7 @@ static void reset_counters(void) {
     g_udp_transmit_ret = EFI_SUCCESS; g_udp_transmit_status = EFI_SUCCESS;
     g_udp_tx_calls = 0; g_udp_tx_len = 0; g_udp_hung_tok = NULL;
     g_tcp_hung_tx = NULL; g_tcp_tx_bytes = 0;
-    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0; g_tcp_tx_processing = 0;
+    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0; g_tcp_tx_processing = 0; g_tcp_poll_acks = 0;
     tok_reset();
     accept_reset();
     g_event_count = 0;
@@ -1639,10 +1646,10 @@ static void t_io_reap_pending_send_closes_fast(void) {
     kl_uefi_event_provider_reset();
 }
 
-/* As above, but with the EDK2 TcpDxe behaviour: the queued Transmit sits on the processing list,
- * which Cancel(NULL) does not walk, so only the abortive Close's connection flush retires it (with
- * EFI_ABORTED). close must post that abortive Close before it waits for the Transmit; waiting first
- * pumps the full per-op bound and then quarantines a slot whose tokens the abort did retire. */
+/* As above, on firmware whose Cancel(NULL) does not retire the queued Transmit: only the abortive
+ * Close's connection flush retires it (with EFI_ABORTED). close must post that abortive Close before
+ * it waits for the Transmit; waiting first pumps the full per-op bound and then quarantines a slot
+ * whose tokens the abort did retire. */
 static void t_io_reap_processing_send_aborts_before_drain(void) {
     T_CASE("server io: a queued Transmit Cancel cannot retire is flushed by an abortive Close, promptly");
     reset_counters();
@@ -1679,9 +1686,12 @@ static void t_io_reap_processing_send_aborts_before_drain(void) {
 }
 
 /* A Transmit that already completed (its event is signaled) but whose completion no drain has
- * observed yet is not queued data: nothing is lost by a FIN, so close stays graceful (no RST). */
-static void t_io_close_completed_send_is_graceful(void) {
-    T_CASE("server io: closing a conn whose Transmit already completed is graceful, not abortive");
+ * observed yet is not queued data: nothing is lost by a FIN, so close stays graceful (no RST).
+ * ack_on_poll: the peer's ACK has arrived but the stack completes the Transmit only on its next
+ * Poll; close polls once before it decides, so that close is graceful too. */
+static void t_io_close_completed_send_is_graceful_case(int ack_on_poll) {
+    T_CASE(ack_on_poll ? "server io: closing a conn whose Transmit is ACKed but unprocessed is graceful"
+                       : "server io: closing a conn whose Transmit already completed is graceful, not abortive");
     reset_counters();
     g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
     g_tcp_close_mode = TOK_COMPLETE_OK;
@@ -1704,7 +1714,8 @@ static void t_io_close_completed_send_is_graceful(void) {
     COMP(ep)->cancel(&ev, fd);
     dn = COMP(ep)->drain(&ev, evs, 8, 0);
     CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send op");
-    CHECK(mock_complete_hung_tcp_tx() == 1, "the firmware completes the Transmit before close");
+    if (ack_on_poll) g_tcp_poll_acks = 1;
+    else CHECK(mock_complete_hung_tcp_tx() == 1, "the firmware completes the Transmit before close");
 
     int before = g_destroy_child_calls;
     g_tcp_poll_calls = 0;
@@ -1714,6 +1725,10 @@ static void t_io_close_completed_send_is_graceful(void) {
     CHECK(outstanding_count() == 0, "no token outstanding after close");
     CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
     kl_uefi_event_provider_reset();
+}
+static void t_io_close_completed_send_is_graceful(void) {
+    t_io_close_completed_send_is_graceful_case(0);
+    t_io_close_completed_send_is_graceful_case(1);
 }
 
 /* A long send whose Transmits keep completing must show progress on its stream while it is still

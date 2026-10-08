@@ -983,22 +983,25 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
      * A send step's Transmit still queued means the peer stopped reading (zero window: the
      * typical idle-sweep reap). Its data never left, and a graceful Close would wait behind it
      * (the FIN cannot go out until the window opens). Such a close is abortive (RST). Decide it
-     * BEFORE the Cancel: a Transmit whose event already fired is not queued data, so it keeps the
-     * graceful Close. CheckEvent consumes that signal, so the token is retired here (tx_posted
-     * cleared) and nothing below waits on its event again. */
+     * BEFORE the Cancel: a Transmit that already completed is not queued data, so it keeps the
+     * graceful Close. One Poll first lets the stack process an ACK that has arrived but not been
+     * handled yet. CheckEvent consumes the signal, so a completed token is retired here
+     * (tx_posted cleared) and nothing below waits on its event again. */
     int abortive = 0;
     if (tcp && c->tx_posted) {
+        tcp->Poll(tcp);
         if (bs->CheckEvent(c->tx_tok.CompletionToken.Event) == EFI_SUCCESS) c->tx_posted = 0;
         else abortive = 1;
     }
 
     if (tcp) tcp->Cancel(tcp, NULL);
 
-    /* An abortive Close goes out right after the Cancel, before any drain. Cancel does not reach
-     * a Transmit the stack is still holding for an ACK (EDK2 keeps it on a processing list that
-     * Cancel never walks); the abort flushes the connection, which completes that Transmit (and
-     * any other pending token) with EFI_ABORTED. Draining the Transmit first would pump it for
-     * the whole bound and then quarantine the slot. */
+    /* An abortive Close goes out right after the Cancel, before any drain. EDK2 TcpDxe's Cancel
+     * retires a queued Transmit (including one waiting for an ACK), but not every firmware's does:
+     * an older Tcp4Dxe, for one, does not support Cancel at all. The abort flushes the connection,
+     * which completes such a Transmit (and any other pending token) with EFI_ABORTED, so posting
+     * it before the drains keeps close bounded there too, instead of pumping the Transmit for the
+     * whole bound and then quarantining the slot. */
     int close_posted = 0;
     if (abortive && c->events_created && c->close_tok.CompletionToken.Event) {
         c->close_tok.AbortOnClose = TRUE;

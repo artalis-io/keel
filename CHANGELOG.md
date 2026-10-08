@@ -463,20 +463,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   out and the queue is idle, a buffer above 32 KiB is now freed.
 - **HTTP server: an accept failure on a custom socket provider no longer logs a stale `errno`.** It
   logs the provider's I/O status; the default provider still logs `strerror(errno)`.
-- **UEFI: closing a connection whose send is stuck behind a zero window no longer stalls the
-  loop or leaks the slot.** close() waited for the queued Transmit before it posted the abortive
-  Close. On EDK2 TcpDxe a Transmit the stack holds for an ACK is not retired by Cancel, so that wait
-  pumped for the full per-operation bound (about 60 s) inside the loop and then quarantined the
-  slot until ExitBootServices. The abortive Close now goes out right after the Cancel, and its
-  connection flush retires the Transmit at once. A Transmit that had already completed when close()
-  runs no longer makes the close abortive: it gets a graceful FIN instead of an RST.
+- **UEFI: a connection whose last send already completed closes gracefully; close is bounded
+  where Cancel cannot retire a Transmit.** close() made any connection with a send step's Transmit
+  still marked outstanding close abortively (RST), even when that Transmit had already completed
+  and only its completion was not yet observed. It now polls the stack once and checks the
+  Transmit first: a completed one gets a graceful FIN. This is the change observable on EDK2
+  TcpDxe. As a robustness change, the abortive Close now goes out right after the Cancel and before
+  the token drains. EDK2's Cancel already retires a queued Transmit, but firmware whose Cancel does
+  not (an older Tcp4Dxe without Cancel support) left close pumping that Transmit for the full
+  per-operation bound inside the loop and then quarantining the slot; the abort's connection flush
+  now retires it at once.
 - **Completion datagram sends: a passing resource shortage at the post drops one datagram instead
   of failing the send side (behavior change).** On io_uring, pollcomp and IOCP, a send whose post
   could not allocate its op or payload copy (or, on io_uring, found no submission-queue entry even
   after a submit, as under CQ overflow), and on the UEFI EFI_UDP4 backend a send that found its
   static op pool full, latched the send error, so every later `kl_datagram_send`
   returned `KL_DATAGRAM_ERROR`. That datagram is now dropped (`kl_datagram_dropped` counts it,
-  `kl_datagram_last_error` reports `KL_ERR_IO`) and the socket keeps sending.
+  `kl_datagram_last_error` reports `KL_ERR_IO`) and the socket keeps sending. A shortage that does
+  not pass (an EFI op pool held by quarantined ops, a persistently failing io_uring submit) now
+  drops every send, each counted, rather than latching the send side.
 
 - **Completion server: a streamed response picks its writer by the loop's drive model, not a
   provider bit.** The streamed response's outbound writer sent through the connection's output
