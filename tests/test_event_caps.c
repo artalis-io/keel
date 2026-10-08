@@ -120,4 +120,56 @@ UTEST(event_caps, negotiation_matrix_completion) {
     ASSERT_FALSE(kl_caps_compatible(completion, &non_native_provider));
 }
 
+/* ── Internal capability bits never alias a public one ───────────────────────
+ * KL_SOCK_CAP_OVERLAPPED is internal (src/socket.h) and lives in the same
+ * uint64_t as the public KL_SOCK_CAP_* flags. If it shares a bit with a public
+ * flag, every provider advertising that public flag reads as overlapped (and an
+ * overlapped provider reads as advertising it). */
+
+/* A readiness provider that also carries the datagram data-plane, as the built-in
+ * POSIX / Winsock and the lwIP BSD providers do. It routes nothing through an
+ * overlapped submit path. */
+static const KlSocketProvider datagram_provider = {
+    &stub_ops, NULL,
+    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE | KL_SOCK_CAP_DATAGRAM,
+    NULL,
+};
+
+/* The built-in provider of this build (exactly one platform socket TU is linked). */
+static const KlSocketProvider *builtin_provider(void) {
+#ifdef _WIN32
+    return kl_socket_provider_winsock();
+#else
+    return kl_socket_provider_posix();
+#endif
+}
+
+UTEST(event_caps, internal_overlapped_bit_is_disjoint_from_public_caps) {
+    const uint64_t public_caps =
+        KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE | KL_SOCK_CAP_DATAGRAM;
+    ASSERT_TRUE(KL_SOCK_CAP_OVERLAPPED != 0);
+    ASSERT_EQ((uint64_t)0, (uint64_t)(KL_SOCK_CAP_OVERLAPPED & public_caps));
+}
+
+UTEST(event_caps, datagram_provider_is_not_overlapped) {
+    /* Advertising datagram support says nothing about the completion submit path. */
+    ASSERT_FALSE(kl_socket_provider_has_cap(&datagram_provider, KL_SOCK_CAP_OVERLAPPED));
+    ASSERT_FALSE(kl_socket_provider_has_cap(builtin_provider(), KL_SOCK_CAP_OVERLAPPED));
+    /* ...and an overlapped provider without a datagram vtable does not claim datagram support. */
+    ASSERT_FALSE(kl_socket_provider_has_cap(&overlapped_provider, KL_SOCK_CAP_DATAGRAM));
+}
+
+UTEST(event_caps, completion_loop_refuses_datagram_capable_readiness_provider) {
+    unsigned completion = KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
+    unsigned readiness = KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    /* A completion loop needs an overlapped provider: the built-in provider is a synchronous
+     * send/recv one, so the negotiation must refuse it (the server and client then adopt the
+     * backend's own overlapped provider). Holds with or without the completion axis compiled in. */
+    ASSERT_FALSE(kl_caps_compatible(completion, &datagram_provider));
+    ASSERT_FALSE(kl_caps_compatible(completion, builtin_provider()));
+    /* The readiness arm is unaffected: both are native-fd providers. */
+    ASSERT_TRUE(kl_caps_compatible(readiness, &datagram_provider));
+    ASSERT_TRUE(kl_caps_compatible(readiness, builtin_provider()));
+}
+
 UTEST_MAIN();

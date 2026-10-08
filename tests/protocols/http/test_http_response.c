@@ -1,5 +1,7 @@
 #include "utest.h"
 #include <keel/http_response.h>
+#include <keel/event_ctx.h>
+#include <keel/socket.h>
 #include "net_compat.h"
 #include <string.h>
 #include <fcntl.h>
@@ -211,6 +213,60 @@ UTEST(response, streaming_chunked) {
     ASSERT_TRUE(strstr(buf, "0\r\n\r\n") != NULL);
 
     kl_http_response_free(&res);
+}
+
+/* A streamed response whose event ctx names the built-in socket provider explicitly (as
+ * KlHttpServerConfig.sockets = kl_socket_provider_posix() / _winsock() does) is a synchronous
+ * send/recv provider: its chunks go out through kl_sock_send. The provider also advertises
+ * datagram support, which must not make the stream writer take it for an overlapped (completion)
+ * provider and hand the chunks to a completion output queue the response does not have. */
+UTEST(response, streaming_chunked_explicit_builtin_provider) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ectx;
+    ASSERT_EQ(kl_event_ctx_init(&ectx, &a), 0);
+#ifdef _WIN32
+    ectx.sockets = kl_socket_provider_winsock();
+#else
+    ectx.sockets = kl_socket_provider_posix();
+#endif
+
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    res.ctx = &ectx;
+
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    /* Every outcome is captured first and asserted after the fds, response and ctx are released. */
+    KlHttpResponseWriteFn write_fn = NULL;
+    void *write_ctx = NULL;
+    int begin = kl_http_response_begin_stream(&res, 200, &write_fn, &write_ctx);
+    int w1 = -1, w2 = -1, end = -1;
+    if (begin == 0) {
+        w1 = write_fn(write_ctx, "hello", 5);
+        w2 = write_fn(write_ctx, " world", 6);
+    }
+    int st_err = res.stream_error;
+    if (begin == 0) end = kl_http_response_end_stream(&res);
+    kl_test_closesock(pipefd[1]);
+
+    char buf[2048];
+    kl_ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
+    kl_test_closesock(pipefd[0]);
+    kl_http_response_free(&res);
+    kl_event_ctx_free(&ectx);
+
+    ASSERT_EQ(begin, 0);   /* the status line and headers already go through the stream writer */
+    ASSERT_EQ(w1, 0);
+    ASSERT_EQ(w2, 0);
+    ASSERT_EQ(st_err, 0);
+    ASSERT_EQ(end, 0);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "5\r\nhello\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "6\r\n world\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "0\r\n\r\n") != NULL);
 }
 
 /* ── Audit coverage tests ───────────────────────────────────────────── */

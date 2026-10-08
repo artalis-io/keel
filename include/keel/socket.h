@@ -176,7 +176,12 @@ typedef struct KlSocketProvider {
 /* Capability flags. A provider advertises what it supports; Keel falls back for
  * anything it does not (e.g. serialize when WRITEV is absent). A native-fd
  * provider's handle is a real OS descriptor the readiness event loop can poll:
- * required for the server (see KlHttpServerConfig.sockets). */
+ * required for the server (see KlHttpServerConfig.sockets).
+ *
+ * Bit allocation: public flags take bits from 0 upwards; the high bits (from 63
+ * downwards) are reserved for Keel-internal capabilities that the built-in event
+ * backends set on their own providers. A custom provider sets only the flags below.
+ * Adding a public flag means adding it to the disjointness check in src/socket.h. */
 #define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
 #define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* vectored writev usable on this fd */
 #define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* zero-copy sendfile usable on this fd */

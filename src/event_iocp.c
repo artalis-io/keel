@@ -404,8 +404,8 @@ static const KlSocketOps IOCP_OPS = { .name = "iocp" };
  * completion loop; the readiness dgram send/recv are unused here (comp path drives). */
 extern const struct KlDatagramOps kl_socket_winsock_dgram_ops;
 static const KlSocketProvider IOCP_PROVIDER = {
-    &IOCP_OPS, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
-    &kl_socket_winsock_dgram_ops,
+    &IOCP_OPS, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED | KL_SOCK_CAP_DATAGRAM,
+    &kl_socket_winsock_dgram_ops,   /* present, so advertised (dgram iff KL_SOCK_CAP_DATAGRAM) */
 };
 /* PAL-gate: dominated-by kl_event_init_builtin
  * The overlapped op handlers below all complete against the completion port that
