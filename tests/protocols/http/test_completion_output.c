@@ -23,6 +23,7 @@
 #include "platform_thread.h"
 #include "event_builtin.h"   /* the compiled-in backend, wrapped as a runtime provider */
 #include "completion.h"      /* kl_comp_ops_builtin, KlCompletionOps.send_max */
+#include "socket.h"          /* KL_SOCK_CAP_OVERLAPPED: a provider stamped without it */
 #include <stdio.h>
 
 static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -1148,6 +1149,149 @@ UTEST(completion_output, one_oversized_tls_websocket_write_cannot_cross_the_queu
     kl_plat_thread_join(&tid);
     kl_http_server_free(&twso_srv);
     ASSERT_EQ(-1, g_oversized_frame_rc);                   /* was (completion): taken whole */
+}
+
+/* ── A frame past the queue bound without a drain fails at once ─────────────────────────────────
+ * Without a drain a WebSocket frame is written whole or not at all. On a completion loop a frame
+ * that cannot fit the output queue's producer bound is refused as would-block, and nothing on the
+ * loop thread can make room while the frame is being written: the queue only moves on a send
+ * completion. Retrying the refused write KL_HTTP_CONN_WRITE_SPIN_MAX times only burned the loop
+ * before the same failure. The frame must fail on its first refusal (or before writing anything),
+ * with the same result: -1. Counted through the connection's refusal counter. Plaintext and TLS. */
+static int g_fast_fail_rc;
+static unsigned g_fast_fail_refusals;
+
+static void ws_open_oversized_counted(KlWsServerConn *ws, void *ud) {
+    (void)ud;
+    memset(g_oversized_frame, 'F', sizeof g_oversized_frame);
+    unsigned before = ws->conn->comp_ws_refused;
+    int rc = kl_ws_server_send_binary(ws, g_oversized_frame, sizeof g_oversized_frame);
+    g_fast_fail_refusals = ws->conn->comp_ws_refused - before;
+    g_fast_fail_rc = rc;
+}
+
+static KlHttpServer ff_srv;
+
+/* 0 = ran, 1 = skipped (readiness has no queue bound), -1 = setup failed. */
+static int run_oversized_counted(KlTlsConfig *tls_cfg) {
+    KlHttpServerConfig cfg = { .port = 0, .tls = tls_cfg, .max_connections = 2 };
+    if (kl_http_server_init(&ff_srv, &cfg) != 0) return -1;
+    if (!(kl_event_caps(&ff_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_free(&ff_srv);
+        return 1;
+    }
+    KlWsServerConfig wcfg;
+    kl_ws_server_config_init(&wcfg);
+    wcfg.callbacks.on_open = ws_open_oversized_counted;
+    if (kl_http_server_ws_upgrade(&ff_srv, "/ws", &wcfg) != 0) {
+        kl_http_server_free(&ff_srv);
+        return -1;
+    }
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ff_srv);
+    wait_for_bind(&ff_srv);
+    g_fast_fail_rc = 1;
+    g_fast_fail_refusals = 0;
+    int fd = connect_rcvbuf(ff_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    }
+    for (int i = 0; i < 300 && g_fast_fail_rc == 1; i++) kl_test_sleep_ms(10);
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&ff_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ff_srv);
+    return 0;
+}
+
+UTEST(completion_output, a_tls_websocket_frame_past_the_bound_without_a_drain_fails_at_once) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    int r = run_oversized_counted(&tls_cfg);
+    ASSERT_NE(-1, r);
+    if (r == 1) UTEST_SKIP("The transport queue allowance applies only to completion backends");
+    ASSERT_EQ(-1, g_fast_fail_rc);                         /* the same result as before */
+    ASSERT_LE(g_fast_fail_refusals, 1u);                   /* was: 257 (1 + 256 retries) */
+}
+
+UTEST(completion_output, a_websocket_frame_past_the_bound_without_a_drain_fails_at_once) {
+    int r = run_oversized_counted(NULL);
+    ASSERT_NE(-1, r);
+    if (r == 1) UTEST_SKIP("The transport queue allowance applies only to completion backends");
+    ASSERT_EQ(-1, g_fast_fail_rc);
+    ASSERT_LE(g_fast_fail_refusals, 1u);                   /* was: 257 (1 + 256 retries) */
+}
+
+/* ── A streamed response follows the connection's drive model, not a provider bit ──────────────
+ * The streamed response's outbound writer chose the completion output queue by testing the socket
+ * provider for the OVERLAPPED capability. A provider installed on a completion loop's context
+ * without that bit (written into the shared context rather than negotiated) made the stream go out
+ * through synchronous sends on the loop thread instead, past the connection's output queue. To a
+ * client that pauses, those sends would-block (or block outright, where accepted sockets are
+ * blocking), and the driver then retried the stream's backlog in a loop until the client read it:
+ * no other connection was served meanwhile. The choice belongs to how the connection is driven.
+ * Readiness: the stamp changes nothing (the bit was never set), and the stream is unchanged. */
+static KlHttpServer stamp_srv;
+static KlSocketProvider g_stamped_provider;
+static const KlSocketProvider *g_stamp_orig;
+static int g_stamp_done;
+
+/* On the loop thread, from the handler: replace the context's provider with a copy of it that lacks
+ * the OVERLAPPED bit (restored after the loop has stopped), and shrink this connection's send
+ * buffer so a client that pauses makes a synchronous send would-block at once. */
+static void handle_long_stream_stamped(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    KlEventCtx *ev = kl_http_server_event_ctx(&stamp_srv);
+    if (!g_stamp_done && ev->sockets) {
+        g_stamp_orig = ev->sockets;
+        g_stamped_provider = *ev->sockets;
+        g_stamped_provider.capabilities &= ~(uint64_t)KL_SOCK_CAP_OVERLAPPED;
+        ev->sockets = &g_stamped_provider;
+        g_stamp_done = 1;
+    }
+    int sb = 4096;
+    int sfd = (int)kl_http_request_conn(req)->stream.fd;
+    (void)setsockopt(sfd, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb);
+    handle_long_stream(req, res, ctx);
+}
+
+UTEST(completion_output, a_stream_on_a_provider_stamped_without_the_overlapped_bit_does_not_stall_the_loop) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8 };
+    ASSERT_EQ(0, kl_http_server_init(&stamp_srv, &cfg));
+    kl_http_server_route(&stamp_srv, "GET", "/long", handle_long_stream_stamped, NULL, NULL);
+    kl_http_server_route(&stamp_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    g_stamp_done = 0;
+    g_stamp_orig = NULL;
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &stamp_srv);
+    wait_for_bind(&stamp_srv);
+    int port = stamp_srv.bound_port;
+
+    /* A asks for 960 KiB (it fits the stream's outbound buffer on either model) and pauses. */
+    int a = connect_rcvbuf(port, 4096);
+    if (a >= 0) {
+        const char *rq = "GET /long HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(a, rq, strlen(rq));
+    }
+    kl_test_sleep_ms(300);
+    int answered = hello_answered(port);                   /* while A is paused */
+    size_t got = 0;
+    int closed = 0;
+    if (a >= 0) {                                          /* then A reads it all */
+        got = read_paced(a, 0, &closed);
+        kl_test_closesock(a);
+    }
+    int stamped = g_stamp_done;
+    int completion = (kl_event_caps(&stamp_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    kl_http_server_stop(&stamp_srv);
+    kl_plat_thread_join(&tid);
+    if (g_stamp_done) kl_http_server_event_ctx(&stamp_srv)->sockets = g_stamp_orig;
+    kl_http_server_free(&stamp_srv);
+    ASSERT_TRUE(stamped || !completion);                  /* the stamp took on a completion loop */
+    ASSERT_TRUE(answered);                                 /* was (completion): no answer in 2 s */
+    ASSERT_TRUE(got > (size_t)LONG_STREAM_CHUNKS * BIG_CHUNK);
+    ASSERT_TRUE(closed);
 }
 
 /* A small send buffer on the server's side of an accepted connection, so a client that pauses or

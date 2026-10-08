@@ -671,10 +671,11 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
     }
     /* A completion loop: the connection's output queue sends it, in order with everything else the
      * connection sends; a synchronous send here would block the loop (io_uring accepted sockets are
-     * blocking) or overtake a send already posted. */
-    const KlSocketProvider *sp = res_provider(res);
-    if (sp && (sp->capabilities & KL_SOCK_CAP_OVERLAPPED))
+     * blocking) or overtake a send already posted. Chosen by the loop's drive model, not by what
+     * the socket provider advertises. */
+    if (kl_http_comp_stream_driven(res))
         return kl_http_comp_stream_write(res, data, len);
+    const KlSocketProvider *sp = res_provider(res);
     nw = kl_sock_send(sp, res->conn_fd, data, len);
     if (nw < 0) {
         KlIoStatus st = kl_sock_io_status(res_provider(res));

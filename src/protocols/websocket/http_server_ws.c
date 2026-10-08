@@ -85,10 +85,9 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
     KlHttpConn *c = ws->conn;
-    /* A completion queue has a bounded admission allowance. Flush a large drain in pieces so
-     * its complete buffered length cannot remain permanently larger than that allowance. */
-    if (c->comp_driven && len > 64u * 1024u)
-        len = 64u * 1024u;
+    /* The connection's output path may take a large drain only in pieces (a completion queue has a
+     * bounded admission allowance the whole backlog could stay larger than). */
+    len = kl_http_conn_write_window(c, len);
     kl_ssize_t nw = conn_write(c, data, len);
     /* Only a plaintext socket write can be "would block" here: a TLS -1 is a real error (TLS
      * reports a full buffer as 0), and errno after it is whatever an earlier call left. */
@@ -124,18 +123,6 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
 }
 
 /* ── Send frame ──────────────────────────────────────────────────── */
-
-/* Readiness: the drain just took bytes the socket would not, so WRITE interest must be on to flush
- * them. The dispatch transition after this connection's own event sets it, but a frame sent from
- * elsewhere (another connection's on_message, a timer, a thread-pool done_fn) has no such event
- * behind it, and the backlog would sit until the peer sent something. Inside the connection's own
- * event the transition recomputes the same mask afterwards. A completion loop flushes the drain from
- * its send completions instead. */
-static void ws_arm_write(KlHttpConn *c) {
-    if (!c || c->comp_driven || !c->stream.ctx) return;
-    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
-                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
-}
 
 static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
                          size_t len);
@@ -208,8 +195,11 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
             ws->close_deadline_ms = kl_monotonic_ms();
             return -1;
         }
+        /* The drain just took bytes the connection would not: they need flushing even when no
+         * event of this connection is behind the send (a frame from another connection's
+         * on_message, a timer, a thread-pool done_fn). */
         if (!was_pending && kl_drain_pending(&ws->drain))
-            ws_arm_write(ws->conn);
+            kl_http_conn_ws_request_write(ws->conn);
         return 0;
     }
 
@@ -787,7 +777,7 @@ static uint64_t ws_out_progress(const KlHttpConn *c) {
 /* Output still waiting to leave: on the completion output queue (posted or not yet), or held in
  * the drain. A ping written now goes out behind it. */
 static int ws_out_pending(const KlHttpConn *c) {
-    return c->comp_tlsq_inflight || c->comp_tlsq_len > 0 ||
+    return kl_http_conn_out_pending(c) ||
            (c->ws->drain_enabled && kl_drain_pending(&c->ws->drain));
 }
 

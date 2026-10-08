@@ -24,11 +24,18 @@
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out);
 
+/* 1 when a streamed plaintext response's writes belong on an output queue rather than a send on the
+ * loop thread: the response is bound to a completion loop (completion_http_server.c). Decided by how
+ * the loop drives its connections, never by the socket provider's capability bits: a provider placed
+ * on the context without negotiation does not change the drive model. Always 0 on readiness and in
+ * a build without the completion axis. */
+int kl_http_comp_stream_driven(const KlHttpResponse *res);
+
 /* A streamed plaintext response on a completion loop: hand the bytes to the connection's output
  * queue (completion_http_server.c) instead of sending them on the loop thread. Called by the
- * response's outbound-buffer writer only for a response bound to a completion-driven connection
- * (its socket provider is overlapped). Bytes taken (all of them), 0 to leave them buffered
- * (backpressure), or -1. */
+ * response's outbound-buffer writer only when kl_http_comp_stream_driven says so. Bytes taken (all
+ * of them), 0 to leave them buffered (backpressure), or -1 (also for a response that is not a
+ * pooled completion-driven connection's own). */
 kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len);
 
 /* A streamed TLS response: after the engine took a write, move its output onto a completion-driven

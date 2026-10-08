@@ -452,6 +452,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion server: a streamed response picks its writer by the loop's drive model, not a
+  provider bit.** The streamed response's outbound writer sent through the connection's output
+  queue only when the context's socket provider advertised the internal OVERLAPPED capability. A
+  provider placed on a completion loop's context without negotiation made the stream go out through
+  synchronous sends on the loop thread, past the output queue; to a client that paused, the stream
+  driver then retried the backlog in a loop (or, with blocking accepted sockets, the send blocked)
+  and no other connection was served. On a completion loop the stream writer is now chosen by the
+  loop's drive model. A standalone response (not a pooled server connection's own) bound to a
+  completion context is therefore refused whatever its provider; it used to be sent synchronously
+  when the provider lacked the overlapped bit. (behavior change) Readiness loops are unchanged.
+- **Completion WebSocket without a drain: a frame past the output queue's bound fails at once.** A
+  frame the 1 MiB producer bound refused was retried 256 times on the loop thread before failing,
+  though nothing could make room meanwhile. It now fails on the first refusal, with the same result
+  (-1, and the connection closes). With a drain enabled the drain still buffers it.
+- **WebSocket server: no completion-adapter internals in the protocol code.** The WebSocket TU read
+  the completion output queue's fields and armed readiness WRITE interest itself. It now goes through
+  core-owned accessors for output still queued, the per-call write window, a refusal that cannot
+  clear, and a WebSocket write request (readiness: arm READ|WRITE; completion: nothing), as HTTP/2 does through its
+  `want_write` hook. No behavior change.
 - **UEFI server: a client that stops reading no longer stalls the whole firmware event loop.**
   The EFI completion drain sent server responses through the synchronous socket send, which pumps
   a Transmit token for up to about 60 s. A peer with a zero window (its send buffer full, the

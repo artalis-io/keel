@@ -874,6 +874,34 @@ void kl_http_request_resume_body(const KlHttpRequest *req) {
         (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }
 
+/* ── Connection output seam (http_internal.h) ──────────────────────────────────────────────── */
+
+/* A large drain backlog goes onto a completion output queue in pieces of at most this much, so its
+ * whole length never has to fit the queue's admission allowance at once. */
+#define KL_HTTP_COMP_WRITE_PIECE (64u * 1024u)
+
+int kl_http_conn_out_pending(const KlHttpConn *c) {
+    return c->comp_tlsq_inflight || c->comp_tlsq_len > 0;
+}
+
+size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len) {
+    if (c->comp_driven && len > KL_HTTP_COMP_WRITE_PIECE) return KL_HTTP_COMP_WRITE_PIECE;
+    return len;
+}
+
+int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add) {
+    return c->comp_driven && kl_comp_ws_queue_full(c, add);
+}
+
+void kl_http_conn_ws_request_write(KlHttpConn *c) {
+    /* Inside the connection's own event the dispatch transition recomputes the same mask after
+     * this; a write from anywhere else (another connection's event, a timer, a thread-pool done_fn)
+     * has no such event behind it, and the backlog would sit until the peer sent something. */
+    if (!c || c->comp_driven || !c->stream.ctx) return;
+    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
+                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
+}
+
 /* Streaming-async yield: the public signal a streaming handler uses to park for more body. The
  * streaming dispatch (conn_invoke_streaming_handler) reads the connection state on return: READING_BODY
  * means "handler parked, keep feeding the body reader and re-enter it"; anything else means "handler

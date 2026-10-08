@@ -65,6 +65,9 @@ kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     (void)c; (void)buf; (void)len; abort();
 }
 
+/* No completion axis: no response is bound to a completion loop. */
+int kl_http_comp_stream_driven(const KlHttpResponse *res) { (void)res; return 0; }
+
 kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size_t len) {
     (void)res; (void)data; (void)len; abort();
 }

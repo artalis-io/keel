@@ -63,7 +63,10 @@ static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) 
     if (c->tls) {
         /* A completion loop: the engine's output goes onto the queue at once (below), so it never
          * fills; a WebSocket is held to the queue's producer bound here instead. */
-        if (c->comp_driven && kl_comp_ws_queue_full(c, len)) return 0;
+        if (c->comp_driven && kl_comp_ws_queue_full(c, len)) {
+            c->comp_ws_refused++;
+            return 0;
+        }
         kl_ssize_t n = c->tls->write(c->tls, c->stream.fd, buf, len);
         /* A completion loop: the record is only in the engine's ring. Queue it now, as nothing else
          * may do it soon (a frame or ping written outside a drive waited for the client to speak),
@@ -77,7 +80,34 @@ static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) 
     return kl_stream_send(&c->stream, buf, len);
 }
 
-/* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.) */
+/* ── Connection output seam for protocol code above a KlHttpConn ─────────────────────────────────
+ * Defined by the core (http_server_core.c), which knows how the connection is driven, so a protocol
+ * TU (the WebSocket server) neither reads the completion adapter's output-queue fields nor arms
+ * readiness interest itself. Loop thread only. */
+
+/* 1 while output is still on the connection's completion output queue (posted, or not yet). A
+ * readiness connection has no such queue: its unsent output stays with its producer. */
+int kl_http_conn_out_pending(const KlHttpConn *c);
+
+/* The most of `len` a producer's flush should hand conn_write in one call. A completion output queue
+ * has a bounded admission allowance, so a large buffered backlog goes in pieces that each fit it;
+ * readiness takes it whole. */
+size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len);
+
+/* 1 when a write of `add` bytes would be refused now and nothing on the loop thread can make room
+ * before the write returns: a completion-driven WebSocket whose output queue is at its producer
+ * bound (room comes only from a send completion). Always 0 on readiness, where the socket decides. */
+int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add);
+
+/* A WebSocket's drain just went from empty to holding bytes outside the connection's own event:
+ * make sure they are flushed. Readiness arms READ|WRITE, the mask of the WebSocket state (the
+ * connection keeps reading); that mask is wrong for any other state, hence WebSocket only. A
+ * completion loop flushes from its send completions, so there is nothing to do. */
+void kl_http_conn_ws_request_write(KlHttpConn *c);
+
+/* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.). A refusal nothing can clear
+ * while this runs (a completion output queue at its producer bound) fails at once: retrying it
+ * would only spin to the same failure. */
 static inline int conn_write_all(KlHttpConn *c, const void *buf, size_t len) {
     const char *p = (const char *)buf;
     size_t remaining = len;
@@ -86,6 +116,7 @@ static inline int conn_write_all(KlHttpConn *c, const void *buf, size_t len) {
         kl_ssize_t nw = conn_write(c, p, remaining);
         if (nw < 0) return -1;
         if (nw == 0) {
+            if (kl_http_conn_out_would_block(c, remaining)) return -1;
             if (++spins > KL_HTTP_CONN_WRITE_SPIN_MAX) return -1;
             continue;
         }

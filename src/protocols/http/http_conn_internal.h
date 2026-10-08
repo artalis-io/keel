@@ -145,6 +145,7 @@ struct KlHttpConn {
     int            comp_tlsq_then_close;   /* close once the queue drains */
     int            comp_tlsq_then_send;    /* post the plaintext response once the queue drains */
     int            comp_stream_flushing;   /* the driver is moving a streamed response onto the queue */
+    unsigned       comp_ws_refused;        /* WebSocket writes refused at the queue bound (only grows) */
     int            comp_ops;               /* completion: posted recv/send ops not yet completed */
     int            comp_closing;           /* released with ops outstanding: the last completion releases */
     unsigned       comp_gen;               /* bumped at every release (a caller can tell it was released) */
