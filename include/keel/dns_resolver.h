@@ -49,6 +49,10 @@ typedef struct {
 /**
  * @brief Create an async DNS resolver.
  *
+ * The resolver captures ctx->sockets (the socket provider) at creation: its UDP
+ * socket and its TCP fallback connections both go through that provider. A later
+ * change to ctx->sockets does not affect an existing resolver.
+ *
  * @param ctx Event context (borrowed; must outlive the resolver).
  * @param cfg Configuration (may be NULL for all defaults).
  * @return A KlResolver* to plug into KlHttpClientConfig.resolver, or NULL on error.

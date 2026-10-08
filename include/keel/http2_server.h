@@ -87,7 +87,13 @@ struct KlHttp2ServerSession {
                                                    /**< Submit a response for a stream. The header
                                                     *   fields and body are borrowed for the call
                                                     *   only: the session copies what it keeps, as
-                                                    *   KEEL drops the stream before it flushes. */
+                                                    *   KEEL drops the stream before it flushes.
+                                                    *   Must not report a stream close
+                                                    *   (on_stream_reset) from inside the call:
+                                                    *   KEEL releases the stream right after
+                                                    *   submit returns, so a close reported here
+                                                    *   leaves it releasing a stale stream. Only
+                                                    *   flush may. */
     int (*want_write)(KlHttp2ServerSession *self);    /**< Returns non-zero if output is pending. */
     int (*flush)(KlHttp2ServerSession *self);         /**< Flush pending output via send callback.
                                                        *   May report a stream it closes while

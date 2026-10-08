@@ -501,8 +501,14 @@ int kl_http_server_run(KlHttpServer *s) {
                                                "accept: out of descriptors or memory, backing off");
                             s->accept_backoff_until = kl_monotonic_ms() + KL_HTTP_ACCEPT_RETRY_MS;
                             server_accept_disarm(s);
-                        } else {
+                        } else if (!s->ev.sockets) {
+                            /* The default hosted provider reports through errno too. */
                             kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "accept");
+                        } else {
+                            /* A custom provider may report through its status alone: errno
+                             * would be stale. */
+                            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                                               "accept: failed (I/O status %d)", (int)ast);
                         }
                         break;
                     }
