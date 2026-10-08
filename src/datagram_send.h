@@ -48,10 +48,19 @@ typedef enum {
     KL_DGRAM_SUBMIT_DONE = 0,    /* sent synchronously: retire now (readiness) */
     KL_DGRAM_SUBMIT_INFLIGHT,    /* accepted async: retire via kl_dgram_send_on_complete (completion) */
     KL_DGRAM_SUBMIT_WOULDBLOCK,  /* provider cannot accept now: keep queued (readiness EAGAIN) */
-    KL_DGRAM_SUBMIT_ERROR,       /* hard failure: sticky error; datagram retained */
-    KL_DGRAM_SUBMIT_UNSUPPORTED  /* the op is unavailable on this fd (GSO whole-submit): the
+    KL_DGRAM_SUBMIT_ERROR,       /* the send side failed: sticky error; datagram retained */
+    KL_DGRAM_SUBMIT_UNSUPPORTED, /* the op is unavailable on this fd (GSO whole-submit): the
                                   * caller latches + falls back; nothing was sent so retransmit is safe */
+    KL_DGRAM_SUBMIT_DROPPED      /* the provider refused THIS datagram for a reason of its own (no
+                                  * route, an ICMP report, a full queue, a refusal, a path MTU); the
+                                  * socket is fine: drop it (a direct send reports ERROR for that call
+                                  * only), never latch the sticky error */
 } KlDgramSubmitResult;
+
+/* The `ok` argument of kl_dgram_send_on_complete: how the single in-flight send ended. */
+#define KL_DGRAM_SEND_FAILED  0   /* the send side failed: sticky error (a batch slot is dropped) */
+#define KL_DGRAM_SEND_OK      1   /* sent */
+#define KL_DGRAM_SEND_DROPPED 2   /* this datagram was refused for a reason of its own: dropped */
 
 /* Submit one datagram to the provider (fields, not a slot, so the readiness fast path can submit
  * the caller's buffer directly). `peer` is NULL for a connected-mode send. */
@@ -124,8 +133,12 @@ typedef struct {
     int               pend_drain;    /* a retirement emptied the queue (re-checked before firing) */
     int               in_submit;     /* a submit() call is on the stack (inline-completion window) */
     int               submit_retired;/* an inline on_complete retired the in-flight op */
+    int               direct_dropped;/* the last kl_dgram_send returned ERROR because its direct send
+                                      * was refused for that datagram alone (not sticky, not a bad
+                                      * argument); the facade reports it as KL_ERR_IO */
     size_t            dropped;       /* datagrams dropped by the recoverable per-datagram send-error
-                                      * policy (a hard error on an isolated head, NOT the sticky `err`).
+                                      * policy (a per-datagram refusal of any queued datagram, or a hard
+                                      * error on a batch head; NOT the sticky `err`).
                                       * The facade reads the delta to set its last_error + dropped count. */
 } KlDgramSend;
 
@@ -174,8 +187,9 @@ int  kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_c
                                KlDgramSubmitBatchFn submit_batch, void *submit_ctx);
 
 /* Async retirement of the single in-flight send (completion mode; may be called inline from the
- * submit hook). ok=0 → sticky error. Returns 0, or -1 if a sticky error is set. Spurious/duplicate
- * completions (none in flight) are ignored. */
+ * submit hook). `ok` is KL_DGRAM_SEND_OK / _DROPPED (dropped + reported via on_drop, not sticky) /
+ * _FAILED (sticky error, or a drop for a batch slot). Returns 0, or -1 if a sticky error is set.
+ * Spurious/duplicate completions (none in flight) are ignored. */
 int  kl_dgram_send_on_complete(KlDgramSend *s, int ok);
 
 /* Readiness: retry draining queued datagrams after a WOULD_BLOCK, on a writable event. 0 / -1. */
@@ -220,5 +234,6 @@ static inline int    kl_dgram_send_connected(const KlDgramSend *s) { return s ? 
 static inline size_t kl_dgram_send_queued_bytes(const KlDgramSend *s) { return s ? s->bytes_used : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }
 static inline size_t kl_dgram_send_dropped(const KlDgramSend *s)  { return s ? s->dropped : 0; }
+static inline int    kl_dgram_send_direct_dropped(const KlDgramSend *s) { return s ? s->direct_dropped : 0; }
 
 #endif /* KEEL_SRC_DATAGRAM_SEND_H */

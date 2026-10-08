@@ -1253,7 +1253,8 @@ int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *life) {
 
 /* Send one datagram out `pcb` to dest ip4:port via udp_sendto. Copies `data` into a fresh pbuf,
  * sends, frees it (a datagram is one pbuf, the only alloc lwIP requires). Records a pending
- * KL_COMP_DGRAM_SEND on the slot so the drain reports it (with the byte count). Returns 0 / -1. */
+ * KL_COMP_DGRAM_SEND on the slot so the drain reports it (with the byte count). Returns 0, -1, or
+ * KL_LWR_UDP_SEND_DROPPED when lwIP refused this datagram alone (no route, no pbuf / buffer). */
 int kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_t len,
                     const uint8_t dest_ip[4], uint16_t dest_port) {
     KlLwrCtx *ctx = lwrctx;
@@ -1263,7 +1264,7 @@ int kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_
     s->life = (KlCompLife *)life;   /* the send may be the first op that names the token */
 
     struct pbuf *pb = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
-    if (!pb) return -1;
+    if (!pb) return KL_LWR_UDP_SEND_DROPPED;   /* the pbuf pool is short: this datagram only */
     if (len > 0) {
         if (pbuf_take(pb, data, (u16_t)len) != ERR_OK) { pbuf_free(pb); return -1; }
     }
@@ -1275,6 +1276,7 @@ int kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_
         dst = *IP_ADDR_ANY;
     err_t rc = udp_sendto(p, pb, &dst, dest_port);
     pbuf_free(pb);
+    if (rc == ERR_RTE || rc == ERR_MEM || rc == ERR_BUF) return KL_LWR_UDP_SEND_DROPPED;
     if (rc != ERR_OK) return -1;
 
     /* Record the completed send (bounded FIFO of byte counts). On overflow (a burst larger than

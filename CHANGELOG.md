@@ -555,6 +555,51 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   or other datagram-capable readiness provider is now replaced by the backend's overlapped provider
   (server and async client), or refused where the backend offers none, as the negotiation contract
   already documented; it no longer negotiates by accident.
+- **A datagram send refused for one datagram no longer ends the send side (behavior change).** Any
+  send failure other than would-block set the `KlDatagram`'s sticky send error, so every later
+  `kl_datagram_send` returned `KL_DATAGRAM_ERROR` for the life of the object. Many failures concern
+  only the datagram they hit: no route to its destination (`ENETUNREACH`, `EHOSTUNREACH`,
+  `ENETDOWN`, `EHOSTDOWN`), the ICMP report about an earlier datagram that Linux and the BSDs return
+  from the next send on a connected socket (`ECONNREFUSED`), a full queue (`ENOBUFS`, `ENOMEM`), a
+  firewall or broadcast refusal (`EPERM`, `EACCES`), a path MTU (`EMSGSIZE`), a pinned source that is
+  not local (`EADDRNOTAVAIL`), a peer the socket cannot use (`EINVAL` for an unscoped IPv6 link-local
+  peer, `EAFNOSUPPORT`, `EISCONN`, `EDESTADDRREQ`), and their Winsock counterparts. One query sent
+  while the host had no route killed the built-in DNS resolver's socket for good. Such a failure now
+  fails only its datagram: a direct send returns `KL_DATAGRAM_ERROR` for that call with
+  `kl_datagram_last_error` = `KL_ERR_IO`, and a datagram already accepted (queued, or posted on a
+  completion backend, including an IOCP send refused at issue) is dropped and counted by
+  `kl_datagram_dropped` with `kl_datagram_last_error` = `KL_ERR_IO`; the next send goes out. Any
+  other failure (a closed or invalid socket, an unknown error) is still sticky, and now reports
+  `KL_ERR_SOCKET` (a bad message reports `KL_ERR_INVALID_ARG`). Every backend classifies its own
+  error: the hosted errno mapping and the Winsock provider (which now keeps the error's identity
+  instead of reporting `EIO`, and maps `WSAEHOSTDOWN`), io_uring, pollcomp, IOCP, the EFI_UDP4
+  provider (a Transmit call or token ending `EFI_NOT_FOUND` (no route) / `EFI_ICMP_ERROR` /
+  `EFI_*_UNREACHABLE` / `EFI_BAD_BUFFER_SIZE` / `EFI_NO_MAPPING` / `EFI_OUT_OF_RESOURCES`, or an IPv6
+  peer) and the lwIP raw provider (`udp_sendto` `ERR_RTE` / `ERR_MEM` / `ERR_BUF`, or an IPv6 peer).
+  Keel's own refusals inside the POSIX provider send (a TOS family it cannot determine, a control
+  message it cannot build) stay sticky. An interrupted direct send (`EINTR`) is retried instead of failed. The DNS resolver
+  moves a query whose send fails straight to the next nameserver.
+- **A custom socket provider's `io_status` result `KL_IO_RESET` or `KL_IO_RESOURCE_EXHAUSTED` after a
+  datagram send now means "drop this datagram" (behavior change).** It latched the datagram's send
+  error like any other failure; a reset is now read as the ICMP report a UDP send can return, and
+  resource exhaustion as a full queue or short buffer, and only that datagram is dropped.
+  `KL_IO_INTERRUPTED` retries the send. `KL_IO_FATAL` still latches.
+- **UEFI: a TCP reset from real firmware is reported as a reset, and a refused connection is
+  recognised.** The integration's `efi_min.h` numbered `EFI_CONNECTION_RESET` 102 and
+  `EFI_CONNECTION_REFUSED` 105; the UEFI specification (and EDK2) number them 105 and 106, with 102
+  being `EFI_PROTOCOL_UNREACHABLE`. So a reset (105) was mapped as a refused connection
+  (`KL_ERR_CONNECT`), a refusal (106) was unrecognised (a fatal I/O error), and a protocol-unreachable
+  (102) was taken for a reset. The values now follow the specification, and a UDP send that ends
+  `EFI_PROTOCOL_UNREACHABLE` is a per-datagram drop.
+- **IOCP: a datagram receive past many queued ICMP reports keeps going.** A receive that met more than
+  16 ICMP reports in a row at issue (a socket adopted through `kl_datagram_init`, which keeps the
+  Winsock reports on) failed, and the datagram stopped receiving for good. It now queues its own
+  completion and is issued again from the next drain, as the readiness receive yields would-block at
+  the same bound.
+- **io_uring: a submit refused with `-EAGAIN` no longer spins the loop.** When the kernel was short of
+  memory, `io_uring_enter` returned `-EAGAIN` at once and, with no completion to reap, the drain
+  returned straight away, so the run loop called it again at 100% CPU for as long as the shortage
+  lasted. The drain now waits for one completion or its timeout first.
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

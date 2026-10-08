@@ -109,6 +109,12 @@ typedef struct KlCompletionEvent {
      * at once fails the same way; the consumer waits before it posts another. 0 for every other
      * failure (a cancel, a reset peer). Defaults 0: every backend zero-inits the event. */
     int            resource_exhausted;
+    /* DGRAM_SEND with ok == 0 only: 1 when the send failed for a reason of that one datagram (no route
+     * to its destination, an ICMP report about an earlier datagram, a full queue, a refusal, a path
+     * MTU); the socket is fine and the datagram machine drops it instead of failing the send side.
+     * The backend classifies its own native error. 0 for every other failure (a cancel, a dead
+     * socket, an unknown error). Defaults 0: every backend zero-inits the event. */
+    int            dropped;
 } KlCompletionEvent;
 
 struct KlEventCtx;
@@ -161,7 +167,9 @@ typedef struct KlCompletionOps {
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
     /* Neutral datagram post seam: descriptors carry fd + payload/buffer + KlCompLife, so the
-     * backend never dereferences a transport. See completion_io.h KlDgramSendOp/KlDgramRecvOp + ownership. */
+     * backend never dereferences a transport. See completion_io.h KlDgramSendOp/KlDgramRecvOp + ownership.
+     * post_dgram_send may also return KL_COMP_POST_DROPPED (completion_io.h): refused at issue for a
+     * reason of that one datagram; a backend that never does so returns only 0 / -1. */
     int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
     int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);
     /* Datagram cancel/retire seam: key an op by its KlCompLife token + kind (no transport

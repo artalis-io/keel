@@ -59,6 +59,25 @@ static inline int kl_udp_win_is_icmp_report(int wsa_err) {
     return wsa_err == WSAECONNRESET || wsa_err == WSAENETRESET;
 }
 
+/* 1 when a failed datagram SEND's Winsock error concerns only that datagram (no route, an ICMP
+ * report, a full buffer, a broadcast or firewall refusal, a path MTU, a source address that is not
+ * local, a peer the socket cannot use): the socket is fine, the datagram is dropped and the next one
+ * is sent. Any other code (WSAENOTSOCK, WSAESHUTDOWN, a cancel, unknown) ends the send side. The
+ * Winsock counterpart of kl_dgram_send_err_is_per_datagram (dgram_send_classify.h); used by the IOCP
+ * send post and completion. */
+static inline int kl_udp_win_send_err_is_per_datagram(int wsa_err) {
+    switch (wsa_err) {
+    case WSAENETUNREACH: case WSAEHOSTUNREACH: case WSAECONNREFUSED: case WSAECONNRESET:
+    case WSAENETRESET:   case WSAEHOSTDOWN:    case WSAENETDOWN:
+    case WSAENOBUFS:     case WSAEACCES:       case WSAEMSGSIZE:     case WSAEADDRNOTAVAIL:
+    case WSAEINVAL:      case WSAEAFNOSUPPORT: case WSAEDESTADDRREQ:  case WSAEISCONN:   /* a bad peer */
+    case WSAEINTR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Turn the reports off at the source (SIO_UDP_CONNRESET / SIO_UDP_NETRESET set to FALSE) on a UDP
  * socket Keel configures. Best-effort: a failure leaves the receive-side skip as the backstop. */
 void kl_udp_win_disable_icmp_reports(SOCKET s);

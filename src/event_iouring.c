@@ -46,6 +46,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend): neutral accept/dgram ctx */
 #include <keel/stream_detail.h>  /* KlStream layout: fd / alloc / ctx (recv/send/sendfile) */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
+#include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -172,6 +173,8 @@ typedef struct {
     size_t          test_send_prepared_max;/* test-only: largest send length prepared so far */
     int             test_send_res0_next;   /* test-only: N forced 0 results on a send CQE */
     int             test_submit_rc_next;   /* test-only: one forced submit return (0 = none) */
+    int             test_submit_skip_rc;   /* test-only: the next drain skips the kernel call and
+                                            * takes this as its result (0 = none) */
 #endif
 } KlIouState;
 
@@ -224,6 +227,12 @@ void kl_iou_test_send_res0_next(struct KlEventCtx *ctx, int count) {
 void kl_iou_test_submit_rc_next(struct KlEventCtx *ctx, int rc) {
     KlIouState *st = ctx->loop._backend;
     st->test_submit_rc_next = rc;
+}
+/* Test-only: the next drain does not enter the kernel at all and takes `rc` as the submit result, as
+ * a kernel that refuses at once (-EAGAIN while short of memory) would, with nothing waited for. */
+void kl_iou_test_submit_skip_next(struct KlEventCtx *ctx, int rc) {
+    KlIouState *st = ctx->loop._backend;
+    st->test_submit_skip_rc = rc;
 }
 #endif
 
@@ -1075,6 +1084,8 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
+        /* Refused for a reason of this datagram alone (no route, an ICMP report, ...): drop it. */
+        ev->dropped = (res < 0 && !op->aborted) ? kl_dgram_send_err_is_per_datagram(-res) : 0;
         return 1;
 
     case IOU_CONNECT:
@@ -1132,17 +1143,26 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
     /* Submit the queued SQEs and wait for at least one completion (or the timeout). */
     struct io_uring_cqe *cqe = NULL;
-    int r = io_uring_submit_and_wait_timeout(&st->ring, &cqe, 1, tsp, NULL);
+    int r;
+#ifdef KEEL_IOURING_TEST_HOOKS
+    if (st->test_submit_skip_rc) { r = st->test_submit_skip_rc; st->test_submit_skip_rc = 0; }
+    else
+#endif
+    r = io_uring_submit_and_wait_timeout(&st->ring, &cqe, 1, tsp, NULL);
 #ifdef KEEL_IOURING_TEST_HOOKS
     if (st->test_submit_rc_next) { r = st->test_submit_rc_next; st->test_submit_rc_next = 0; }
 #endif
     /* -EBUSY / -EAGAIN: the kernel holds a CQ overflow backlog (5.5 to 5.18 with NODROP) or is short
      * of resources, and wants completions reaped before it takes more submissions. Not a loop
-     * failure: reap below, and the unsubmitted SQEs go in on the next drain. */
+     * failure: reap below, and the unsubmitted SQEs go in on the next drain. The kernel returned at
+     * once without waiting, so when there is nothing to reap the drain waits for one completion (or
+     * the timeout) below instead of returning straight to a run loop that would call it again. */
     if (r < 0 && r != -ETIME && r != -EINTR && r != -EBUSY && r != -EAGAIN)
         return -1;
+    int waited = 0;
 
     int count = 0;
+reap:;
     unsigned seen = 0, head;
     io_uring_for_each_cqe(&st->ring, head, cqe) {
         if (count >= max) break;                      /* leave the rest for the next drain */
@@ -1205,6 +1225,17 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         /* else: partial write re-prepared; op stays in-flight, no event */
     }
     io_uring_cq_advance(&st->ring, seen);
+    if ((r == -EAGAIN || r == -EBUSY) && seen == 0 && !waited && timeout_ms != 0) {
+        waited = 1;                                   /* once: a refused wait just returns */
+        /* No timeout (tsp NULL) would make this an unbounded wait, and the refused submit may have
+         * left nothing in flight to complete: bound it so the run loop can submit again. On a kernel
+         * without IORING_FEAT_EXT_ARG, liburing implements the timed wait with a timeout SQE: while
+         * the SQ is full it may return at once, so the loop spins (bounded per drain) until the
+         * kernel accepts submissions again. */
+        struct __kernel_timespec bounded = { .tv_sec = 0, .tv_nsec = 10 * 1000000LL };
+        if (io_uring_wait_cqe_timeout(&st->ring, &cqe, tsp ? tsp : &bounded) == 0)
+            goto reap;                                /* a completion arrived: reap it */
+    }
     return count;
 }
 

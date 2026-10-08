@@ -91,6 +91,17 @@ int main(void) {
     CHECK(kl_efi_status_to_error(EFI_OUT_OF_RESOURCES) == KL_ERR_ALLOC,
           "err: OUT_OF_RESOURCES -> ALLOC");
 
+    /* ── the network status codes carry their UEFI spec values (UEFI 2.10 Appendix D,
+     *    EDK2 MdePkg UefiBaseType.h): what real firmware returns must map as named ── */
+    CHECK(EFI_CONNECTION_FIN     == EFIERR(104), "EFI_CONNECTION_FIN == EFIERR(104)");
+    CHECK(EFI_CONNECTION_RESET   == EFIERR(105), "EFI_CONNECTION_RESET == EFIERR(105)");
+    CHECK(EFI_CONNECTION_REFUSED == EFIERR(106), "EFI_CONNECTION_REFUSED == EFIERR(106)");
+    /* By raw spec value (firmware's view), not by our macro: 105 is a reset, 106 a refusal. */
+    CHECK(kl_efi_status_to_io(EFIERR(105))    == KL_IO_RESET,    "io: spec 105 (RESET) -> RESET");
+    CHECK(kl_efi_status_to_error(EFIERR(105)) == KL_ERR_IO,      "err: spec 105 (RESET) -> IO");
+    CHECK(kl_efi_status_to_io(EFIERR(106))    == KL_IO_RESET,    "io: spec 106 (REFUSED) -> RESET");
+    CHECK(kl_efi_status_to_error(EFIERR(106)) == KL_ERR_CONNECT, "err: spec 106 (REFUSED) -> CONNECT");
+
     /* ── KlSockAddr ⇄ EFI_IPv4_ADDRESS round-trip ── */
     {
         uint8_t ip[4] = { 10, 0, 2, 2 };

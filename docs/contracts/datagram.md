@@ -121,7 +121,9 @@ typedef enum {
     KL_DATAGRAM_TOO_LARGE,     /* permanent: exceeds one slot, or the whole BOTH byte budget; nothing taken */
     KL_DATAGRAM_UNSUPPORTED,   /* an explicitly-requested capability is unavailable; nothing sent */
     KL_DATAGRAM_CLOSED,        /* closing/closed: no further sends */
-    KL_DATAGRAM_ERROR          /* bad argument or sticky transport error */
+    KL_DATAGRAM_ERROR          /* bad argument, a sticky transport error, or (direct send only) a
+                                  per-datagram send failure that is not sticky; kl_datagram_last_error
+                                  tells which (§1) */
 } KlDatagramSendStatus;
 ```
 
@@ -181,6 +183,48 @@ typedef enum {
   `on_send_complete`. (An M5 send batch drains on the completion axis through this single-flight
   pump: `sendmmsg` is the readiness fast path.) The ownership policy (copy vs reference) is captured
   *with the op* so a config change can't reinterpret a live op.
+- **Send errors: per-datagram vs sticky.** A provider send failure falls in one of two classes, and
+  the provider decides which (the hosted errno mapping, a provider's own `io_status`, or the
+  completion backend for its native error); the machine never reads an errno.
+  - *Per-datagram:* the failure concerns that datagram only and the socket keeps working:
+    - no route to the destination (`ENETUNREACH` / `EHOSTUNREACH` / `ENETDOWN` / `EHOSTDOWN`);
+    - the ICMP report about an earlier datagram that a connected socket returns from its next send
+      (`ECONNREFUSED`, `ECONNRESET` / `ENETRESET`);
+    - a full queue (`ENOBUFS` / `ENOMEM`), a firewall or broadcast refusal (`EPERM` / `EACCES`), a
+      path MTU (`EMSGSIZE`), a pinned source that is not local (`EADDRNOTAVAIL`);
+    - a peer supplied for that datagram that the socket cannot use: an unscoped IPv6 link-local
+      address (`EINVAL`), an IPv6 peer on an IPv4 socket (`EAFNOSUPPORT`), a destination on a
+      connected socket (`EISCONN`, macOS), none on an unconnected one (`EDESTADDRREQ`);
+    - and the Winsock equivalents (`WSAEHOSTDOWN` included).
+    A provider with `io_status` reports these as `KL_IO_RESET`, `KL_IO_RESOURCE_EXHAUSTED` (a full
+    queue or short buffer), or `KL_IO_INTERRUPTED` once retries run out. The completion backends classify their own results: io_uring and pollcomp by
+    errno, IOCP by Winsock code (also for a send refused at issue), EFI_UDP4 by the Transmit status
+    (`EFI_NOT_FOUND`, the no-route result of the Transmit call; `EFI_ICMP_ERROR`,
+    `EFI_NETWORK_UNREACHABLE`, `EFI_HOST_UNREACHABLE`, `EFI_PROTOCOL_UNREACHABLE`,
+    `EFI_PORT_UNREACHABLE`, `EFI_BAD_BUFFER_SIZE`, `EFI_NO_MAPPING`, `EFI_OUT_OF_RESOURCES`, for the
+    token or the refused Transmit call), and lwIP-raw by the `udp_sendto` result (`ERR_RTE`,
+    `ERR_MEM`, `ERR_BUF`, or no pbuf). Both IPv4-only providers drop a datagram for an IPv6 peer, as
+    the hosted ones do (`EAFNOSUPPORT`). Keel's own refusals inside a provider send (a TOS family it
+    cannot determine, a control message it cannot build) are not per-datagram: they stay sticky.
+  - *Interrupted* (`EINTR`, `KL_IO_INTERRUPTED`): nothing was lost, so the direct send is retried at
+    once (a few times) before it counts as a per-datagram failure; pollcomp retries on its own.
+  - *Sticky:* any other failure (a closed or invalid socket, a socket shut down for writing, an
+    unknown error, `KL_IO_FATAL` from a provider's `io_status`) latches the send error: that send's
+    datagram stays owned in its slot, and every later `kl_datagram_send` returns `KL_DATAGRAM_ERROR`
+    until the object is closed.
+
+  How the caller sees it:
+  - The direct (empty-queue readiness) send that hits a per-datagram failure returns
+    `KL_DATAGRAM_ERROR` for **that call only**: nothing was taken, and the next send is attempted.
+  - A datagram already accepted (queued behind others, or posted on a completion backend, including
+    a post the backend refuses at issue) is **dropped**: it leaves the queue, `kl_datagram_dropped`
+    counts it and `kl_datagram_last_error` reports `KL_ERR_IO`, and the queue keeps draining.
+  - Whenever `kl_datagram_send` returns `KL_DATAGRAM_ERROR`, `kl_datagram_last_error` says which:
+    `KL_ERR_IO` = this datagram only (send again), `KL_ERR_SOCKET` = the send side has failed for
+    good, `KL_ERR_INVALID_ARG` = a bad message.
+
+  A send batch (`kl_datagram_send_batch`) or GSO group drops a datagram on either class (it has
+  always been per-datagram for a batch).
 
 ### Connected-mode send (opt-in capability, decision #8)
 

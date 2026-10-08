@@ -456,11 +456,16 @@ KlUefiUdpOpResult kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long ge
 static int udp_post_send_ex(KlUefiUdp *u, const void *data, size_t len,
                             const KlSockAddr *dest, const KlSockAddr *src) {
     if (!u) return -1;
-    if (kl_uefi_after_ebs()) return -1;
-    if (u->tx_posted) return -1;                 /* a send is already outstanding */
-    if (len > KL_EFI_UDP_TXBUF) return -1;        /* larger than the stable staging buffer */
+    /* Every early refusal records a status of its own, so kl_uefi_udp_last_status never reports a
+     * previous send's result for this one. */
+    if (kl_uefi_after_ebs()) { u->last_status = EFI_UNSUPPORTED; return -1; }
+    if (u->tx_posted) { u->last_status = EFI_NOT_READY; return -1; }   /* a send is already outstanding */
+    if (len > KL_EFI_UDP_TXBUF) { u->last_status = EFI_INVALID_PARAMETER; return -1; }   /* > staging buffer */
     EFI_IPv4_ADDRESS dip; UINT16 dport = 0;
-    if (kl_efi_sockaddr_to_ipv4(dest, &dip, &dport) != 0) return -1;   /* per-datagram dest, IPv4 */
+    if (kl_efi_sockaddr_to_ipv4(dest, &dip, &dport) != 0) {   /* per-datagram dest, IPv4 */
+        u->last_status = EFI_INVALID_PARAMETER;
+        return -1;
+    }
 
     const unsigned char *sb = data;
     for (size_t i = 0; i < len; i++) u->tx_buf[i] = sb[i];
@@ -500,6 +505,20 @@ static int udp_post_send_ex(KlUefiUdp *u, const void *data, size_t len,
 
 int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const KlSockAddr *dest) {
     return udp_post_send_ex(udp_of(fd), data, len, dest, NULL);   /* completion send: no source pin */
+}
+
+EFI_STATUS kl_uefi_udp_last_status(KlSocketHandle fd) {
+    KlUefiUdp *u = udp_of(fd);
+    return u ? u->last_status : EFI_INVALID_PARAMETER;
+}
+
+int kl_uefi_udp_status_per_datagram(EFI_STATUS st) {
+    /* EFI_NOT_FOUND is what a Transmit CALL returns when there is no route (EDK2: Ip4Output ->
+     * Ip4Route fails -> IpIoSend -> Udp4Transmit); EFI_BAD_BUFFER_SIZE is a datagram larger than
+     * the path takes. Both concern this datagram only. */
+    return st == EFI_ICMP_ERROR || st == EFI_NETWORK_UNREACHABLE || st == EFI_HOST_UNREACHABLE ||
+           st == EFI_PROTOCOL_UNREACHABLE || st == EFI_PORT_UNREACHABLE || st == EFI_NO_MAPPING || st == EFI_OUT_OF_RESOURCES ||
+           st == EFI_NOT_FOUND || st == EFI_BAD_BUFFER_SIZE;
 }
 
 KlUefiUdpOpResult kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long gen,

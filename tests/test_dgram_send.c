@@ -1011,4 +1011,90 @@ UTEST(dgram_send, gso_connected_capability) {
     kl_dgram_slots_free(&s2);
 }
 
+/* ── A datagram refused on its own account (SUBMIT_DROPPED / KL_DGRAM_SEND_DROPPED) ─────────────
+ * Only that datagram is lost: never the sticky error, on every path that can submit it. */
+static int g_drops;
+static void on_drop_cb(void *ctx) { (void)ctx; g_drops++; }
+
+/* Readiness direct send: that call reports ERROR, nothing is taken, the next send goes out. */
+UTEST(dgram_send, direct_send_dropped_fails_the_call_only) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_DROPPED };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_drop_cb(&s, on_drop_cb, NULL);
+    g_drops = 0;
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m = { .data = "x", .len = 1, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ERROR);
+    ASSERT_EQ(0, kl_dgram_send_error(&s));                  /* not sticky */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);            /* nothing taken */
+    ASSERT_EQ(0, g_drops);                                  /* the caller saw ERROR; not a queued drop */
+    mk.next = KL_DGRAM_SUBMIT_DONE;
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* A queued ordinary datagram refused on the writable-edge pump: dropped + reported, the rest drain. */
+UTEST(dgram_send, queued_send_dropped_is_reported_and_the_rest_drain) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_drop_cb(&s, on_drop_cb, NULL);
+    g_drops = 0;
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m1 = { .data = "A", .len = 1, .peer = &p, .tos = -1 };
+    KlDatagramMessage m2 = { .data = "B", .len = 1, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m1), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send(&s, &m2), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 2);
+
+    mk.next = KL_DGRAM_SUBMIT_DROPPED;                      /* both are refused on their own account */
+    mk.order_n = 0;
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);                  /* the drain goes past the first drop */
+    ASSERT_EQ(2, mk.order_n);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ(0, kl_dgram_send_error(&s));
+    ASSERT_EQ((size_t)2, kl_dgram_send_dropped(&s));
+    ASSERT_EQ(2, g_drops);
+    mk.next = KL_DGRAM_SUBMIT_DONE;
+    ASSERT_EQ(kl_dgram_send(&s, &m1), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* Completion: a send that ends KL_DGRAM_SEND_DROPPED is a reported drop and the queue keeps pumping;
+ * KL_DGRAM_SEND_FAILED is still the sticky error. */
+UTEST(dgram_send, completion_dropped_vs_failed) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_drop_cb(&s, on_drop_cb, NULL);
+    g_drops = 0;
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m1 = { .data = "A", .len = 1, .peer = &p, .tos = -1 };
+    KlDatagramMessage m2 = { .data = "B", .len = 1, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m1), KL_DATAGRAM_ACCEPTED);   /* A in flight */
+    ASSERT_EQ(kl_dgram_send(&s, &m2), KL_DATAGRAM_ACCEPTED);   /* B queued behind it */
+    ASSERT_EQ(mk.calls, 1);
+
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, KL_DGRAM_SEND_DROPPED), 0);
+    ASSERT_EQ(0, kl_dgram_send_error(&s));
+    ASSERT_EQ(1, g_drops);
+    ASSERT_EQ(mk.calls, 2);                                   /* B was pumped */
+    ASSERT_EQ((int)kl_dgram_send_inflight(&s), 1);
+
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, KL_DGRAM_SEND_FAILED), -1);
+    ASSERT_EQ(1, kl_dgram_send_error(&s));                    /* the send side failed: sticky */
+    ASSERT_EQ(kl_dgram_send(&s, &m1), KL_DATAGRAM_ERROR);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
 UTEST_MAIN();

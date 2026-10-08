@@ -2191,6 +2191,134 @@ static void t_dgram_deferred_post_failure_releases(void) {
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
 
+/* UEFI network status codes a Transmit can end with (UEFI 2.10 Appendix D), for the per-datagram
+ * send-failure tests below. */
+#ifndef EFI_ICMP_ERROR
+#define EFI_ICMP_ERROR          EFIERR(22)
+#endif
+#ifndef EFI_NETWORK_UNREACHABLE
+#define EFI_NETWORK_UNREACHABLE EFIERR(100)
+#endif
+#ifndef EFI_HOST_UNREACHABLE
+#define EFI_HOST_UNREACHABLE    EFIERR(101)
+#endif
+#ifndef EFI_PORT_UNREACHABLE
+#define EFI_PORT_UNREACHABLE    EFIERR(103)
+#endif
+#ifndef EFI_BAD_BUFFER_SIZE
+#define EFI_BAD_BUFFER_SIZE     EFIERR(4)
+#endif
+
+/* A Transmit that ends with an unreachable / ICMP status (or whose Transmit CALL is refused with one)
+ * failed for that datagram only: the send completion is marked dropped. Any other failure status
+ * (EFI_INVALID_PARAMETER here) is not. */
+static int dgram_send_dropped_flag(const KlEventProvider *ep, MockDgramXport *dg, EFI_STATUS tok_status,
+                                   EFI_STATUS call_ret, int *out_ok) {
+    g_udp_transmit_mode = TOK_COMPLETE_OK;
+    g_udp_transmit_status = tok_status;
+    g_udp_transmit_ret = call_ret;
+    KlSockAddr d; mk_ipv4(&d, 10, 0, 2, 3, 53);
+    int dropped = -1;
+    *out_ok = -1;
+    if (mock_post_dgram_send(ep, dg, "AAAA", 4, &d) != 0) return -2;
+    KlCompletionEvent evs[8];
+    for (int k = 0; k < 3 && dropped < 0; k++) {
+        int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+        for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) {
+            dropped = evs[i].dropped; *out_ok = evs[i].ok;
+            kl_comp_life_release(evs[i].life);
+        }
+    }
+    g_udp_transmit_status = EFI_SUCCESS; g_udp_transmit_ret = EFI_SUCCESS;
+    return dropped;
+}
+static void t_dgram_send_unreachable_is_dropped(void) {
+    T_CASE("dgram: a send that fails unreachable / ICMP is a per-datagram drop (ev.dropped), others are not");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlCompLife *life = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
+    MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
+    int ok = -1;
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_HOST_UNREACHABLE, EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token EFI_HOST_UNREACHABLE → ok=0, dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_NETWORK_UNREACHABLE, EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token EFI_NETWORK_UNREACHABLE → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_PORT_UNREACHABLE, EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token EFI_PORT_UNREACHABLE → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_ICMP_ERROR, EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token EFI_ICMP_ERROR → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NETWORK_UNREACHABLE, &ok) == 1 && ok == 0,
+          "Transmit CALL refused EFI_NETWORK_UNREACHABLE (post_failed) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFIERR(102), EFI_SUCCESS, &ok) == 1 && ok == 0,
+          "Tx token spec 102 (EFI_PROTOCOL_UNREACHABLE) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_NOT_FOUND, &ok) == 1 && ok == 0,
+          "Transmit CALL refused EFI_NOT_FOUND (the EDK2 no-route result) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_BAD_BUFFER_SIZE, &ok) == 1 && ok == 0,
+          "Transmit CALL refused EFI_BAD_BUFFER_SIZE (larger than the path takes) → dropped=1");
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_INVALID_PARAMETER, EFI_SUCCESS, &ok) == 0 && ok == 0,
+          "Tx token EFI_INVALID_PARAMETER → dropped=0 (not per-datagram)");
+    {   /* an IPv6 peer on the IPv4-only EFI_UDP4 provider: a peer this socket cannot use, for this
+         * datagram only (the hosted providers report EAFNOSUPPORT, per-datagram) */
+        KlSockAddr d6;
+        CHECK(kl_sockaddr_parse(&d6, "::1", 53) == 0, "parse an IPv6 peer");
+        int tx_before = g_udp_tx_calls, dropped = -1;
+        CHECK(mock_post_dgram_send(ep, &dg, "AAAA", 4, &d6) == 0, "IPv6-peer send accepted (queued)");
+        KlCompletionEvent evs[8];
+        for (int k = 0; k < 3 && dropped < 0; k++) {
+            int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+            for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) {
+                dropped = evs[i].dropped;
+                kl_comp_life_release(evs[i].life);
+            }
+        }
+        CHECK(dropped == 1, "IPv6 peer on EFI_UDP4 → dropped=1 (not the sticky send error)");
+        CHECK(g_udp_tx_calls == tx_before, "no Transmit for the IPv6 peer");
+    }
+    CHECK(dgram_send_dropped_flag(ep, &dg, EFI_SUCCESS, EFI_SUCCESS, &ok) == 0 && ok == 1,
+          "a successful send → ok=1, dropped=0");
+    kl_comp_life_mark_dead(life); kl_comp_life_release(life);
+    CHECK(g_on_final_ran == 1, "every send retired + owner drop → on_final once");
+    kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+/* End to end over the public KlDatagram: a send whose Transmit ends EFI_HOST_UNREACHABLE is dropped
+ * and counted, and the next send is still accepted and transmitted (not the sticky send error). */
+static void t_udp_e2e_unreachable_send_keeps_sending(void) {
+    T_CASE("dgram e2e: an unreachable send is dropped, the next send still goes out");
+    reset_counters();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlDatagram udp;
+    KlDatagramSocketConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_datagram_socket_init(&udp, &uc) == 0, "kl_datagram_socket_init over EFI_UDP4 (completion)");
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    g_udp_transmit_mode   = TOK_COMPLETE_OK;
+    g_udp_transmit_status = EFI_HOST_UNREACHABLE;
+    KlDatagramSendStatus r = kl_datagram_send(
+        &udp, &(KlDatagramMessage){ .data = "hello", .len = 5, .peer = &dest, .tos = -1 });
+    CHECK(r == KL_DATAGRAM_ACCEPTED, "send#1 accepted (posted)");
+    for (int i = 0; i < 4 && kl_datagram_send_queued(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_dropped(&udp) == 1, "send#1 counted as dropped");
+    g_udp_transmit_status = EFI_SUCCESS;
+    int tx_before = g_udp_tx_calls;
+    r = kl_datagram_send(&udp, &(KlDatagramMessage){ .data = "again", .len = 5, .peer = &dest, .tos = -1 });
+    CHECK(r == KL_DATAGRAM_ACCEPTED, "send#2 accepted (was ERROR: the failure latched)");
+    for (int i = 0; i < 4 && kl_datagram_send_queued(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_udp_tx_calls == tx_before + 1, "send#2 reached the firmware (one more Transmit)");
+    (void)kl_datagram_close_cancel(&udp);
+    for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
+    kl_datagram_free(&udp);
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset();
+}
+
 static void t_dgram_life_stale_release_recv(void) {
     T_CASE("dgram life: STALE_RETIRED (clean close) EMITS a terminal + TRANSFERS the op ref (router releases → on_final)");
     reset_counters(); talloc_reset(); g_on_final_ran = 0;
@@ -2857,6 +2985,8 @@ int main(void) {
     t_udp_e2e_unsupported_send_not_queued();
     t_udp_e2e_failed_send_releases_queue();
     t_dgram_deferred_post_failure_releases();
+    t_dgram_send_unreachable_is_dropped();
+    t_udp_e2e_unreachable_send_keeps_sending();
     t_dgram_send_fifo_hole_reuse();
     t_dgram_life_stale_release_recv();
     t_dgram_teardown_clean_release();

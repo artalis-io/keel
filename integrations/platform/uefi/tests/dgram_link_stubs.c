@@ -21,3 +21,4 @@ int            kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;
 int            kl_sockdef_listen(KlSocketHandle f, int backlog) { (void)f; (void)backlog; return -1; }
 int            kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f; (void)a; return -1; }
 const struct KlDatagramOps *kl_sockdef_dgram(void) { return (const struct KlDatagramOps *)0; }
+int            kl_sockdef_dgram_send_dropped(void) { return 0; }

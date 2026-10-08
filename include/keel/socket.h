@@ -148,7 +148,13 @@ typedef struct KlSocketOps {
      * native errors into `errno` (the built-in POSIX/Winsock providers, and
      * lwIP which maps ERR_MEM→EAGAIN) needs no io_status op; a freestanding
      * provider with no hosted errno MUST supply it. (The KlSocketOps table is
-     * append-only: a zero-initialized/NULL slot means the op is not supplied.) */
+     * append-only: a zero-initialized/NULL slot means the op is not supplied.)
+     * After a failed DATAGRAM send, KL_IO_RESET and KL_IO_RESOURCE_EXHAUSTED mean
+     * the failure concerns that datagram only (it is dropped, the next send goes
+     * out), KL_IO_INTERRUPTED
+     * retries the send (then drops it if it keeps being interrupted), and
+     * KL_IO_FATAL and the rest fail the datagram's send side for good
+     * (docs/contracts/datagram.md §1). */
     KlIoStatus (*io_status)(void *ctx);
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);

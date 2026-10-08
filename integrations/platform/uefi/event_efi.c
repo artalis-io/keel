@@ -75,6 +75,7 @@ typedef struct {
     /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
     int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
     int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
+    int                 post_dropped;  /* send: ... for a reason of that datagram (emit dropped=1) */
     int                 terminal_emitted; /* recv/send: a QUARANTINE (borrowed) terminal was already
                                         * emitted for this op; it stays in_use (fail-closed, ref abandoned)
                                         * but must never be re-drained/re-emitted. Gates the drain re-scan. */
@@ -449,11 +450,19 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
         if (!op || c->seq < op->seq) op = c;
     }
     if (op) {
+        if (kl_sockaddr_family(&op->snd_dest) != KL_AF_INET) {
+            /* EFI_UDP4 is IPv4-only: a peer of another family is one this socket cannot use, for this
+             * datagram only (the hosted providers report EAFNOSUPPORT). Drop it, keep the send side. */
+            op->post_failed = 1;
+            op->post_dropped = 1;
+            return;
+        }
         if (kl_uefi_udp_post_send(fd, op->snd, op->snd_len, &op->snd_dest) == 0) {
             op->generation = kl_uefi_udp_generation_h(fd);   /* op identity captured at the real post */
             op->posted = 1;
         } else {
             op->post_failed = 1;   /* real failure (not tx-busy; we checked) → drain reports ok=0 */
+            op->post_dropped = kl_uefi_udp_status_per_datagram(kl_uefi_udp_last_status(fd));
         }
         return;   /* one at a time */
     }
@@ -772,6 +781,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 out[count].kind = KL_COMP_DGRAM_SEND;
                 out[count].life = op->life; op->life = NULL;   /* TRANSFER ref op → event */
                 out[count].ok   = 0;
+                out[count].dropped = op->post_dropped;   /* refused for this datagram only */
                 /* Release the FULL q_bytes reservation (udp.c reserved snd_len at post, releases
                  * ev->bytes) even on failure; else a failed send permanently inflates the send queue. */
                 out[count].bytes = op->snd_len;
@@ -820,6 +830,10 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 out[count].kind  = KL_COMP_DGRAM_SEND;
                 out[count].life  = op->life; op->life = NULL;   /* TRANSFER ref op → event */
                 out[count].ok    = (r == KL_UEFI_UDP_OP_DELIVERED) ? ok : 0;
+                /* A Transmit that ended unreachable / with an ICMP report failed for this datagram
+                 * only (poll_send just recorded the token's status): the machine drops it. */
+                if (r == KL_UEFI_UDP_OP_DELIVERED && !ok)
+                    out[count].dropped = kl_uefi_udp_status_per_datagram(kl_uefi_udp_last_status(op->fd));
                 /* Emit the RESERVED length (== snd_len), not the reported byte count, so udp.c releases
                  * the full q_bytes reservation whether the Transmit succeeded or failed (ok=0). */
                 out[count].bytes = op->snd_len;

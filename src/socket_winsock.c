@@ -16,6 +16,7 @@
 
 #include "socket.h"
 #include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
+#include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: the per-datagram send errors */
 #include <keel/datagram.h>     /* the Winsock datagram ops (socket_dgram_win.c) */
 
 /* Datagram data-plane for this provider (defined in socket_dgram_win.c). */
@@ -65,6 +66,10 @@ void kl_wsa_set_errno(void) {
         case WSAESHUTDOWN:     errno = EPIPE;         break;
         case WSAEHOSTUNREACH:  errno = EHOSTUNREACH;  break;
         case WSAENETUNREACH:   errno = ENETUNREACH;   break;
+        case WSAEHOSTDOWN:     errno = EHOSTUNREACH;  break;   /* no EHOSTDOWN in the Windows CRT */
+        case WSAEAFNOSUPPORT:  errno = EAFNOSUPPORT;  break;
+        case WSAEDESTADDRREQ:  errno = EDESTADDRREQ;  break;
+        case WSAEISCONN:       errno = EISCONN;       break;
         case WSAENETDOWN:      errno = ENETDOWN;      break;
         case WSAENETRESET:     errno = ENETRESET;     break;
         case WSAEADDRINUSE:    errno = EADDRINUSE;    break;
@@ -486,4 +491,10 @@ KlIoStatus kl_sockdef_io_status(void) {
         default:
             return KL_IO_FATAL;
     }
+}
+
+/* Hosted classifier for a failed datagram send (see kl_sock_dgram_send_dropped): the errno the
+ * provider's send left, judged by the shared per-datagram list. */
+int kl_sockdef_dgram_send_dropped(void) {
+    return kl_dgram_send_err_is_per_datagram(errno);
 }

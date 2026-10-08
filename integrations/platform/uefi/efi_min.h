@@ -58,6 +58,7 @@ typedef VOID     *EFI_EVENT;
 #define EFI_LOAD_ERROR         EFIERR(1)
 #define EFI_INVALID_PARAMETER  EFIERR(2)
 #define EFI_UNSUPPORTED        EFIERR(3)
+#define EFI_BAD_BUFFER_SIZE    EFIERR(4)
 #define EFI_NOT_READY          EFIERR(6)
 #define EFI_DEVICE_ERROR       EFIERR(7)
 #define EFI_OUT_OF_RESOURCES   EFIERR(9)
@@ -66,9 +67,25 @@ typedef VOID     *EFI_EVENT;
 #define EFI_ACCESS_DENIED      EFIERR(15)
 #define EFI_NO_MAPPING         EFIERR(17)
 #define EFI_ABORTED            EFIERR(21)
+/* Network results a UDP Transmit token can end with (UEFI 2.10 Appendix D). */
+#ifndef EFI_ICMP_ERROR
+#define EFI_ICMP_ERROR          EFIERR(22)
+#endif
+#ifndef EFI_NETWORK_UNREACHABLE
+#define EFI_NETWORK_UNREACHABLE EFIERR(100)
+#endif
+#ifndef EFI_HOST_UNREACHABLE
+#define EFI_HOST_UNREACHABLE    EFIERR(101)
+#endif
+#ifndef EFI_PROTOCOL_UNREACHABLE
+#define EFI_PROTOCOL_UNREACHABLE EFIERR(102)
+#endif
+#ifndef EFI_PORT_UNREACHABLE
+#define EFI_PORT_UNREACHABLE    EFIERR(103)
+#endif
 #define EFI_CONNECTION_FIN     EFIERR(104)
-#define EFI_CONNECTION_RESET   EFIERR(102)
-#define EFI_CONNECTION_REFUSED EFIERR(105)
+#define EFI_CONNECTION_RESET   EFIERR(105)   /* UEFI 2.10 Appendix D / EDK2 UefiBaseType.h */
+#define EFI_CONNECTION_REFUSED EFIERR(106)
 
 typedef struct {
     UINT32 Data1;

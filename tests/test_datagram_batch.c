@@ -644,9 +644,12 @@ static kl_ssize_t (*g_real_send)(void *, KlSocketHandle, const void *, size_t,
 static KlDatagramOps    g_gate_dg;
 static KlSocketProvider g_gate_sp;
 static int g_block;   /* > 0: the next g_block send attempts WOULD_BLOCK (EAGAIN), then decrement */
+static int g_fail_n;      /* > 0: the next g_fail_n send attempts fail with g_fail_errno, then decrement */
+static int g_fail_errno;
 static kl_ssize_t gate_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                             const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     if (g_block > 0) { g_block--; errno = EAGAIN; return -1; }                       /* forced backpressure */
+    if (g_fail_n > 0) { g_fail_n--; errno = g_fail_errno; return -1; }               /* forced send error */
     if (len > 0 && ((const char *)data)[0] == 'B') { errno = EACCES; return -1; }   /* deterministic hard error */
     return g_real_send(ctx, fd, data, len, dest, src, tos);
 }
@@ -753,6 +756,205 @@ UTEST(dgram_batch, send_batch_backpressure_drains_on_writable) {
 
     ASSERT_EQ(0, kl_datagram_batch_free(b));
     close(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── A send error that concerns one datagram must not end the send side ──────────────────────────
+ *
+ * The kernel refuses single datagrams for reasons that say nothing about the socket: no route to the
+ * destination (ENETUNREACH / EHOSTUNREACH), an ICMP report about an earlier datagram that a
+ * connected socket returns from its next send (ECONNREFUSED), a full device queue (ENOBUFS), a
+ * firewall or broadcast refusal (EPERM / EACCES), a path MTU (EMSGSIZE). Each must fail only the
+ * datagram it hit; the next send goes out. A dead handle (EBADF) still ends the send side. The
+ * gating provider drives each errno deterministically through the real readiness provider path
+ * (readiness-only: the gating provider is native-fd). */
+static int gate_datagram(KlEventCtx *ctx, KlAllocator *a, KlDatagram *tx, int *rxfd, KlSockAddr *dest) {
+    const KlSocketProvider *sp = gating_provider();
+    g_block = 0; g_fail_n = 0; g_fail_errno = 0;
+    int port = mk_rx(rxfd);
+    if (port == 0) return -1;
+    KlSocketHandle txfd = prep_fd(sp);
+    if (!kl_handle_valid(txfd)) return -1;
+    memset(tx, 0, sizeof(*tx));
+    KlDatagramConfig cfg = { .ctx = ctx, .alloc = a, .sockets = sp, .fd = txfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    if (kl_datagram_init_ex(tx, &cfg, 0) != 0) return -1;
+    kl_sockaddr_parse(dest, "127.0.0.1", (uint16_t)port);
+    return 0;
+}
+
+/* The direct (empty-queue) send hits ENETUNREACH: that call reports ERROR, and the next one is sent. */
+UTEST(dgram_batch, send_unreachable_once_then_next_send_succeeds) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_fail_errno = ENETUNREACH; g_fail_n = 1;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&tx, &m));   /* this datagram failed */
+    ASSERT_EQ((int)KL_ERR_IO, (int)kl_datagram_last_error(&tx));        /* per-datagram: KL_ERR_IO */
+
+    KlDatagramMessage m2 = { .data = "two", .len = 3, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m2));   /* was ERROR: sticky */
+    int got = 0; size_t bytes = 0;
+    for (int i = 0; i < 50 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &bytes); }
+    ASSERT_EQ(1, got);
+    ASSERT_EQ((size_t)3, bytes);
+
+    kl_test_closesock(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* A dead handle is not about one datagram: EBADF still latches the error for every later send. */
+/* A provider that classifies by io_status (no hosted errno) and reports KL_IO_RESOURCE_EXHAUSTED for a
+ * failed datagram send (ENOBUFS / ENOMEM: a full queue or a short buffer) failed THAT datagram only:
+ * the call reports ERROR with KL_ERR_IO, and the next send goes out. */
+static KlSocketOps g_status_ops;
+static KlIoStatus  g_status_next;
+static KlIoStatus  status_io(void *c) { (void)c; return g_status_next; }
+UTEST(dgram_batch, provider_status_resource_exhausted_is_per_datagram) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+    const KlSocketOps *saved_ops = g_gate_sp.ops;          /* tx holds &g_gate_sp: patch it in place */
+    g_status_ops = *saved_ops;
+    g_status_ops.io_status = status_io;
+    g_gate_sp.ops = &g_status_ops;
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_status_next = KL_IO_RESOURCE_EXHAUSTED;
+    g_fail_errno = ENOBUFS; g_fail_n = 1;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&tx, &m));
+    ASSERT_EQ((int)KL_ERR_IO, (int)kl_datagram_last_error(&tx));        /* was KL_ERR_SOCKET: sticky */
+    KlDatagramMessage m2 = { .data = "two", .len = 3, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m2));
+    int got = 0; size_t bytes = 0;
+    for (int i = 0; i < 50 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &bytes); }
+    ASSERT_EQ(1, got);
+
+    g_gate_sp.ops = saved_ops;
+    kl_test_closesock(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dgram_batch, send_bad_handle_error_stays_sticky) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_fail_errno = EBADF; g_fail_n = 1;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&tx, &m));
+    ASSERT_EQ((int)KL_ERR_SOCKET, (int)kl_datagram_last_error(&tx));   /* the send side failed */
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&tx, &m));   /* sticky: no retry */
+    ASSERT_EQ((int)KL_ERR_SOCKET, (int)kl_datagram_last_error(&tx));
+
+    kl_test_closesock(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* An interrupted direct send (EINTR) lost nothing: it is retried at once, not dropped. */
+UTEST(dgram_batch, send_interrupted_is_retried) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_fail_errno = EINTR; g_fail_n = 1;
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));   /* was ERROR: dropped */
+    ASSERT_EQ((uint64_t)0, kl_datagram_dropped(&tx));
+    int got = 0; size_t bytes = 0;
+    for (int i = 0; i < 50 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &bytes); }
+    ASSERT_EQ(1, got);
+
+    kl_test_closesock(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* The hosted classification of a failed datagram send. A bad peer supplied for ONE datagram (an
+ * unscoped IPv6 link-local peer: EINVAL; a v6 peer on a v4 socket: EAFNOSUPPORT; a destination on a
+ * connected socket, as macOS reports it: EISCONN; no destination on an unconnected one:
+ * EDESTADDRREQ) concerns that datagram, like a missing route; a dead handle does not. */
+UTEST(dgram_batch, send_errno_classification) {
+    const int per_datagram[] = { ENETUNREACH, EHOSTUNREACH, ECONNREFUSED, ENOBUFS, EPERM, EACCES,
+                                 EMSGSIZE, EADDRNOTAVAIL, EINVAL, EAFNOSUPPORT, EISCONN,
+                                 EDESTADDRREQ };
+    for (size_t i = 0; i < sizeof(per_datagram) / sizeof(per_datagram[0]); i++) {
+        errno = per_datagram[i];
+        EXPECT_EQ(1, kl_sockdef_dgram_send_dropped());
+    }
+    const int fatal[] = { EBADF, ENOTSOCK, EPIPE, EIO };
+    for (size_t i = 0; i < sizeof(fatal) / sizeof(fatal[0]); i++) {
+        errno = fatal[i];
+        EXPECT_EQ(0, kl_sockdef_dgram_send_dropped());
+    }
+#if defined(_WIN32)
+    /* Winsock codes reach the classifier through the seam's errno translation. WSAEHOSTDOWN must not
+     * fall into the unknown (fatal) bucket: IOCP already treats it as per-datagram. */
+    const int wsa[] = { WSAEHOSTDOWN, WSAEAFNOSUPPORT, WSAEDESTADDRREQ, WSAENETUNREACH, WSAEACCES };
+    for (size_t i = 0; i < sizeof(wsa) / sizeof(wsa[0]); i++) {
+        WSASetLastError(wsa[i]);
+        kl_wsa_set_errno();
+        EXPECT_EQ(1, kl_sockdef_dgram_send_dropped());
+    }
+#endif
+}
+
+/* Keel's OWN refusal inside the provider send (the TOS cmsg family cannot be determined because
+ * getsockname fails on a dead handle) is not a kernel verdict about one datagram: it must not
+ * classify as per-datagram, or every such send would be silently dropped forever. */
+UTEST(dgram_batch, provider_own_refusal_is_not_per_datagram) {
+    const KlDatagramOps *ops = kl_sockdef_dgram();
+    ASSERT_TRUE(ops != NULL && ops->send != NULL);
+    KlSocketHandle fd = prep_fd(NULL);
+    ASSERT_TRUE(kl_handle_valid(fd));
+    kl_test_closesock((int)fd);                       /* dead handle: getsockname fails */
+    errno = 0;
+    kl_ssize_t n = ops->send(NULL, fd, "x", 1, NULL, NULL, 0);   /* tos 0, no dest: family from getsockname */
+    ASSERT_EQ((kl_ssize_t)-1, n);
+    ASSERT_EQ(0, kl_sockdef_dgram_send_dropped());
+}
+
+/* A QUEUED datagram (it would-blocked first) that then fails with a per-datagram error on the writable
+ * edge is dropped and reported (kl_datagram_dropped, last_error); the send side keeps working. */
+UTEST(dgram_batch, queued_send_unreachable_is_dropped_not_sticky) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    KlDatagram tx; int rxfd = -1; KlSockAddr dest;
+    ASSERT_EQ(0, gate_datagram(&ctx, &a, &tx, &rxfd, &dest));
+
+    KlDatagramMessage m = { .data = "one", .len = 3, .peer = &dest, .tos = -1 };
+    g_block = 2;                                        /* the direct attempt and the queue pump both
+                                                        * would-block → it stays queued */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));
+    ASSERT_EQ((size_t)1, kl_datagram_send_queued(&tx));
+    g_fail_errno = EHOSTUNREACH; g_fail_n = 1;          /* the writable-edge retry fails for this one */
+    for (int i = 0; i < 50 && kl_datagram_send_queued(&tx) > 0; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&tx));
+    ASSERT_EQ((uint64_t)1, kl_datagram_dropped(&tx));    /* reported as a drop */
+    ASSERT_NE((int)KL_ERR_NONE, (int)kl_datagram_last_error(&tx));
+
+    KlDatagramMessage m2 = { .data = "two", .len = 3, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m2));   /* was ERROR: sticky */
+    int got = 0; size_t bytes = 0;
+    for (int i = 0; i < 50 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &bytes); }
+    ASSERT_EQ(1, got);
+
+    kl_test_closesock(rxfd);
     ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
     kl_event_ctx_free(&ctx);
 }

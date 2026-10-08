@@ -100,7 +100,11 @@ typedef enum {
                                    (send_slot_cap), or the whole send_byte_budget under BOTH; nothing taken */
     KL_DATAGRAM_UNSUPPORTED,    /* an explicitly-requested capability is unavailable; nothing sent */
     KL_DATAGRAM_CLOSED,         /* closing/closed: no further sends */
-    KL_DATAGRAM_ERROR           /* bad argument or sticky transport error */
+    KL_DATAGRAM_ERROR           /* bad argument, a sticky transport error, or a send refused for this
+                                   datagram alone (no route, ICMP report, ...): that call only, the
+                                   next send is attempted. kl_datagram_last_error tells which:
+                                   KL_ERR_INVALID_ARG / KL_ERR_SOCKET (sticky) / KL_ERR_IO (this
+                                   datagram only); docs/contracts/datagram.md §1 */
 } KlDatagramSendStatus;
 
 /* ── One outbound datagram (borrowed; COPIED before kl_datagram_send returns) ──────────────────── */

@@ -278,3 +278,4 @@ void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
 int  kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a; return -1; }
 int  kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f;(void)a; return -1; }
 const struct KlDatagramOps *kl_sockdef_dgram(void) { return NULL; }
+int  kl_sockdef_dgram_send_dropped(void) { return 0; }

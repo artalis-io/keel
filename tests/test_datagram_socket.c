@@ -818,4 +818,146 @@ UTEST(datagram_socket, connected_port_unreachable_does_not_stop_recv) {
     EXPECT_EQ(strlen("peer-is-back"), g_len);
 }
 
+/* ── A send refused for one destination must not end the send side ────────────────────────────────
+ *
+ * A send to the limited broadcast address on a socket without SO_BROADCAST is refused by the kernel
+ * (EACCES / WSAEACCES; ENETUNREACH where there is no broadcast route). That refuses THAT datagram;
+ * the socket is fine, so a following send to an ordinary destination must still be accepted and
+ * delivered. The refused send reports ERROR on a readiness backend (the direct send) and is dropped
+ * after acceptance on a completion backend (the posted send's completion, or the post itself on
+ * IOCP); either way it must not latch an error onto every later send. Runs on every backend. */
+UTEST(datagram_socket, send_refused_for_one_destination_keeps_sending) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&rx, &rc));
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc };   /* broadcast off (default) */
+    ASSERT_EQ(0, kl_datagram_socket_init(&tx, &tc));
+    g_recv_calls = 0; g_len = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv, NULL));
+
+    KlSockAddr bcast; kl_sockaddr_parse(&bcast, "255.255.255.255", kl_datagram_local_port(&rx));
+    KlDatagramMessage bm = { .data = "bcast", .len = 5, .peer = &bcast, .tos = -1 };
+    KlDatagramSendStatus bst = kl_datagram_send(&tx, &bm);
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 16, 10);   /* let a posted send complete */
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", kl_datagram_local_port(&rx));
+    const char *msg = "after-refusal";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+    KlDatagramSendStatus st = kl_datagram_send(&tx, &m);
+    if (st == KL_DATAGRAM_ACCEPTED) pump_until(&ctx, &g_recv_calls, 1, 100);
+
+    close_free(&ctx, &tx); close_free(&ctx, &rx);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(bst == KL_DATAGRAM_ACCEPTED || bst == KL_DATAGRAM_ERROR);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);   /* was ERROR: the refusal latched */
+    EXPECT_EQ(1, g_recv_calls);
+    EXPECT_EQ(strlen(msg), g_len);
+}
+
+/* A CONNECTED socket whose peer went away: Linux and the BSDs return the queued ICMP report
+ * (ECONNREFUSED) from the next send. That send's datagram is lost; the socket is not. When the peer
+ * comes back, the connected socket must still send to it. (Windows reports the ICMP on the receive
+ * side instead, so the send there never fails and the case passes trivially.) No receive is started
+ * on the connected socket, so nothing consumes the report before the send does. */
+UTEST(datagram_socket, connected_send_after_port_unreachable_keeps_sending) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram cl; memset(&cl, 0, sizeof(cl));
+    KlDatagramSocketConfig cc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&cl, &cc));
+
+    uint16_t dead = closed_udp_port();
+    KlSockAddr dead_addr; kl_sockaddr_parse(&dead_addr, "127.0.0.1", dead);
+    int connected = (dead != 0 && kl_datagram_connect(&cl, &dead_addr) == 0);
+
+    /* The probe draws the ICMP report; the second send meets it (ERROR on readiness, a failed posted
+     * send on a completion backend). Neither status is asserted: only what follows matters. */
+    KlDatagramMessage pm = { .data = "probe", .len = 5, .peer = NULL, .tos = -1 };
+    int probed = connected && kl_datagram_send(&cl, &pm) == KL_DATAGRAM_ACCEPTED;
+    if (probed) {
+        for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 16, 10);
+        (void)kl_datagram_send(&cl, &pm);
+        for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 16, 10);
+    }
+
+    /* The peer is back on the same port: the connected socket's next datagram must reach it. */
+    KlDatagram peer; memset(&peer, 0, sizeof(peer));
+    KlDatagramSocketConfig pc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1",
+                                  .bind_port = dead };
+    int peer_up = probed && kl_datagram_socket_init(&peer, &pc) == 0;
+    g_recv_calls = 0; g_len = 0;
+    KlDatagramSendStatus st = KL_DATAGRAM_ERROR;
+    if (peer_up && kl_datagram_recv_start(&peer, on_recv, NULL) == 0) {
+        const char *msg = "peer-is-back";
+        KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = NULL, .tos = -1 };
+        st = kl_datagram_send(&cl, &m);
+        if (st == KL_DATAGRAM_ACCEPTED) pump_until(&ctx, &g_recv_calls, 1, 100);
+    }
+    if (peer_up) close_free(&ctx, &peer);
+    close_free(&ctx, &cl);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(connected);
+    ASSERT_TRUE(probed);
+    ASSERT_TRUE(peer_up);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)st);   /* was ERROR: the ICMP report latched */
+    EXPECT_EQ(1, g_recv_calls);
+    EXPECT_EQ(strlen("peer-is-back"), g_len);
+}
+
+/* Many ICMP reports queued before the first receive is issued (a socket adopted through
+ * kl_datagram_init keeps the Windows reports on, since only configure turns them off). The receive
+ * skips a bounded number of reports per attempt; past that bound it must try again later, never fail
+ * the receive for good. The socket sends to a closed port many times before it is adopted, so every
+ * report is already queued; then a real datagram must still arrive. Elsewhere an unconnected socket
+ * gets no ICMP errors and the case passes trivially. */
+UTEST(datagram_socket, adopted_fd_recv_survives_many_port_unreachable_reports) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlSocketHandle fd = plain_bound_udp();
+    ASSERT_TRUE(kl_handle_valid(fd));
+    uint16_t dead = closed_udp_port();
+    ASSERT_NE((uint16_t)0, dead);
+
+    struct sockaddr_in da; memset(&da, 0, sizeof(da));
+    da.sin_family = AF_INET; da.sin_port = htons(dead);
+    inet_pton(AF_INET, "127.0.0.1", &da.sin_addr);
+    for (int k = 0; k < 40; k++)
+        (void)sendto((int)fd, "x", 1, 0, (struct sockaddr *)&da, (socklen_t)sizeof(da));
+    for (int i = 0; i < 5; i++) kl_event_ctx_run(&ctx, 16, 10);   /* let the reports come back */
+
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig dc; memset(&dc, 0, sizeof(dc));
+    dc.ctx = &ctx; dc.alloc = &g_alloc; dc.fd = fd;
+    dc.send_slots = 4; dc.send_slot_cap = 1500; dc.recv_cap = 2048;
+    if (kl_datagram_init(&rx, &dc) != 0) {
+        (void)kl_test_closesock(fd);   /* not adopted: still ours */
+        kl_event_ctx_free(&ctx);
+        ASSERT_TRUE(0);
+    }
+    g_recv_calls = 0; g_len = 0;
+    int started = kl_datagram_recv_start(&rx, on_recv, NULL) == 0;
+
+    int got = -1;
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc };
+    if (started && kl_datagram_socket_init(&tx, &tc) == 0) {
+        KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", kl_datagram_local_port(&rx));
+        const char *msg = "past-the-reports";
+        KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+        if (kl_datagram_send(&tx, &m) == KL_DATAGRAM_ACCEPTED) {
+            pump_until(&ctx, &g_recv_calls, 1, 100);
+            got = g_recv_calls;
+        }
+        close_free(&ctx, &tx);
+    }
+    close_free(&ctx, &rx);
+    kl_event_ctx_free(&ctx);
+    ASSERT_TRUE(started);   /* was 0 on IOCP: the first receive failed at the report bound */
+    EXPECT_EQ(1, got);
+    EXPECT_EQ(strlen("past-the-reports"), g_len);
+}
+
 UTEST_MAIN();
