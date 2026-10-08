@@ -462,4 +462,73 @@ UTEST(datagram_live, one_readable_event_delivers_a_bounded_batch) {
     ASSERT_LE(max_tick, 64);                      /* was: the whole burst in one callback */
 }
 
+/* A loop allocator that can be told to fail its next N-th allocation, so a completion backend's
+ * datagram send post (which copies the payload into an op it allocates from the loop allocator)
+ * meets a passing out-of-memory. Readiness backends never allocate on a send: the arm is unused. */
+static KlAllocator g_loop_dfl;
+static int g_loop_fail_in;   /* 0 = off; n = fail the n-th malloc from now */
+static void *ff_malloc(void *c, size_t n) {
+    (void)c;
+    if (g_loop_fail_in > 0 && --g_loop_fail_in == 0) return NULL;
+    return g_loop_dfl.malloc(g_loop_dfl.ctx, n);
+}
+static void *ff_realloc(void *c, void *p, size_t o, size_t n) { (void)c; return g_loop_dfl.realloc(g_loop_dfl.ctx, p, o, n); }
+static void  ff_free(void *c, void *p, size_t n) { (void)c; g_loop_dfl.free(g_loop_dfl.ctx, p, n); }
+static KlAllocator g_loop_alloc;
+
+/* A completion backend that cannot allocate the op (nth = 1) or the payload copy (nth = 2) for a
+ * datagram send drops THAT datagram: a passing memory shortage is not a failed socket. The send side
+ * keeps working, and the next datagram is delivered. */
+static void send_survives_post_alloc_failure(int *utest_result, int nth) {
+    g_alloc = kl_allocator_default();
+    g_loop_dfl = kl_allocator_default();
+    KlAllocator la = { ff_malloc, ff_realloc, ff_free, NULL };
+    g_loop_alloc = la;
+    g_loop_fail_in = 0;
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_loop_alloc));
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);
+    ASSERT_TRUE(kl_handle_valid(rxfd));
+    KlSockAddr local; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &local));
+    int port = (int)kl_sockaddr_port(&local);
+    KlSocketHandle txfd = prep_fd(sp, NULL, 0);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+
+    KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = rxfd,
+                            .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    KlDatagramConfig tc = rc; tc.fd = txfd;
+    ASSERT_EQ(0, kl_datagram_init(&rx, &rc));
+    ASSERT_EQ(0, kl_datagram_init(&tx, &tc));
+    g_recv_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv, NULL));
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    KlDatagramMessage m1 = { .data = "lost", .len = 4, .peer = &dest, .tos = -1 };
+    g_loop_fail_in = nth;
+    KlDatagramSendStatus s1 = kl_datagram_send(&tx, &m1);
+    int completion = (g_loop_fail_in == 0);   /* the post consumed the armed failure */
+    g_loop_fail_in = 0;
+    if (completion) {
+        EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)s1);   /* taken, then dropped at the post */
+        EXPECT_EQ((uint64_t)1, kl_datagram_dropped(&tx));
+    }
+
+    const char *msg = "after-oom";
+    KlDatagramMessage m2 = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };
+    EXPECT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m2));   /* was: sticky ERROR */
+    for (int i = 0; i < 100; i++) {
+        kl_event_ctx_run(&ctx, 16, 20);
+        if (g_recv_calls && g_len == strlen(msg) && memcmp(g_buf, msg, g_len) == 0) break;
+    }
+    EXPECT_EQ(strlen(msg), g_len);
+    EXPECT_EQ(0, memcmp(g_buf, msg, strlen(msg)));
+
+    ASSERT_EQ(0, kl_datagram_close_begin(&rx)); pump_close(&ctx, &rx, 100); ASSERT_EQ(0, kl_datagram_free(&rx));
+    ASSERT_EQ(0, kl_datagram_close_begin(&tx)); pump_close(&ctx, &tx, 100); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+UTEST(datagram_live, send_survives_op_alloc_failure)      { send_survives_post_alloc_failure(utest_result, 1); }
+UTEST(datagram_live, send_survives_payload_alloc_failure) { send_survives_post_alloc_failure(utest_result, 2); }
+
 UTEST_MAIN();

@@ -416,11 +416,26 @@ static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKE
  * g_tcp_graceful_close_hangs models that; g_tcp_close_aborts counts abortive Close calls. */
 static int g_tcp_graceful_close_hangs;
 static int g_tcp_close_aborts;
+/* Firmware whose Cancel does not retire a pending Transmit (an older Tcp4Dxe, for one, does not
+ * support Cancel at all; EDK2 TcpDxe does retire it). On such firmware only an abortive Close,
+ * which flushes the connection, completes the Transmit, with EFI_ABORTED. g_tcp_tx_processing
+ * models that for the pending (g_tcp_hung_tx) Transmit. */
+static int g_tcp_tx_processing;
+static int tx_is_processing(const void *t) {
+    return g_tcp_tx_processing && g_tcp_hung_tx && t == (const void *)&g_tcp_hung_tx->CompletionToken;
+}
 static EFI_STATUS EFIAPI m_tcp_Close(EFI_TCP4_PROTOCOL *This, EFI_TCP4_CLOSE_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->CompletionToken.Event;
     tok_submit(&t->CompletionToken, e);
     if (t->AbortOnClose) g_tcp_close_aborts++;
+    if (t->AbortOnClose && g_tcp_tx_processing && g_tcp_hung_tx) {   /* the abort flushes it */
+        EFI_TCP4_IO_TOKEN *tx = g_tcp_hung_tx;
+        g_tcp_hung_tx = NULL;
+        tx->CompletionToken.Status = EFI_ABORTED;
+        ((MockEvent *)tx->CompletionToken.Event)->signaled = 1;
+        tok_terminal(&tx->CompletionToken);
+    }
     if (g_tcp_close_mode == TOK_COMPLETE_OK && (t->AbortOnClose || !g_tcp_graceful_close_hangs)) {
         t->CompletionToken.Status = EFI_SUCCESS; e->signaled = 1; tok_terminal(&t->CompletionToken);
     }
@@ -433,6 +448,7 @@ static EFI_STATUS EFIAPI m_tcp_Cancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETI
         if (!g_cancel_signals) return EFI_SUCCESS;   /* firmware can't cancel: leaves tokens live */
         for (int i = 0; i < g_tok_count; i++)
             if (g_toks[i].outstanding && g_toks[i].ev) {
+                if (tx_is_processing(g_toks[i].token)) continue;   /* not on a list Cancel walks */
                 g_toks[i].ev->signaled = 1;          /* firmware signals the event */
                 g_toks[i].outstanding = 0;
             }
@@ -440,13 +456,21 @@ static EFI_STATUS EFIAPI m_tcp_Cancel(EFI_TCP4_PROTOCOL *This, EFI_TCP4_COMPLETI
     }
     g_tcp_cancel_calls++;
     if (!g_cancel_signals) return EFI_NOT_FOUND;     /* token not retired → drain will fail */
+    if (tx_is_processing(t)) return EFI_NOT_FOUND;   /* processing Transmit: Cancel cannot see it */
     MockEvent *e = (MockEvent *)t->Event;
     if (e) e->signaled = 1;
     t->Status = EFI_ABORTED;
     tok_terminal(t);
     return EFI_SUCCESS;
 }
-static EFI_STATUS EFIAPI m_tcp_Poll(EFI_TCP4_PROTOCOL *This) { (void)This; FW(); g_tcp_poll_calls++; return EFI_SUCCESS; }
+/* g_tcp_poll_acks: the peer's ACK for the pending Transmit has arrived but the stack only
+ * processes it (completing the Transmit) on the next Poll. */
+static int g_tcp_poll_acks;
+static EFI_STATUS EFIAPI m_tcp_Poll(EFI_TCP4_PROTOCOL *This) {
+    (void)This; FW(); g_tcp_poll_calls++;
+    if (g_tcp_poll_acks && g_tcp_hung_tx) { g_tcp_poll_acks = 0; (void)mock_complete_hung_tcp_tx(); }
+    return EFI_SUCCESS;
+}
 
 /* --- UDP4 protocol (scriptable session + config for the socket_efi_udp4 tests) --- */
 /* Scriptable Configure status (non-NULL cd), a non-NULL Configure counter (single-Configure
@@ -622,7 +646,7 @@ static void reset_counters(void) {
     g_udp_transmit_ret = EFI_SUCCESS; g_udp_transmit_status = EFI_SUCCESS;
     g_udp_tx_calls = 0; g_udp_tx_len = 0; g_udp_hung_tok = NULL;
     g_tcp_hung_tx = NULL; g_tcp_tx_bytes = 0;
-    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0;
+    g_tcp_graceful_close_hangs = 0; g_tcp_close_aborts = 0; g_tcp_tx_processing = 0; g_tcp_poll_acks = 0;
     tok_reset();
     accept_reset();
     g_event_count = 0;
@@ -1622,6 +1646,91 @@ static void t_io_reap_pending_send_closes_fast(void) {
     kl_uefi_event_provider_reset();
 }
 
+/* As above, on firmware whose Cancel(NULL) does not retire the queued Transmit: only the abortive
+ * Close's connection flush retires it (with EFI_ABORTED). close must post that abortive Close before
+ * it waits for the Transmit; waiting first pumps the full per-op bound and then quarantines a slot
+ * whose tokens the abort did retire. */
+static void t_io_reap_processing_send_aborts_before_drain(void) {
+    T_CASE("server io: a queued Transmit Cancel cannot retire is flushed by an abortive Close, promptly");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK; g_tcp_graceful_close_hangs = 1; g_tcp_tx_processing = 1;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending (zero window)");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send op");
+
+    int before = g_destroy_child_calls;
+    g_tcp_poll_calls = 0;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_poll_calls < 50, "close did not pump the Transmit that Cancel cannot retire");
+    CHECK(g_tcp_close_aborts == 1, "the Close was abortive (AbortOnClose)");
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+
+/* A Transmit that already completed (its event is signaled) but whose completion no drain has
+ * observed yet is not queued data: nothing is lost by a FIN, so close stays graceful (no RST).
+ * ack_on_poll: the peer's ACK has arrived but the stack completes the Transmit only on its next
+ * Poll; close polls once before it decides, so that close is graceful too. */
+static void t_io_close_completed_send_is_graceful_case(int ack_on_poll) {
+    T_CASE(ack_on_poll ? "server io: closing a conn whose Transmit is ACKed but unprocessed is graceful"
+                       : "server io: closing a conn whose Transmit already completed is graceful, not abortive");
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK; g_tcp_transmit_mode = TOK_HANG;
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    const KlSocketProvider *p = fresh_provider();
+    KlEventCtx ev; memset(&ev, 0, sizeof ev); ev.sockets = p;
+    KlSockAddr a; mk_addr(&a);
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connected");
+
+    KlStream st; memset(&st, 0, sizeof st); st.fd = fd;
+    char payload[] = "HTTP/1.1 200 OK\r\n\r\n";
+    KlIoVec iov = { payload, sizeof payload - 1 };
+    CHECK(COMP(ep)->post_send(&st, &iov, 1, iov.len) == 0, "post_send queued");
+    KlCompletionEvent evs[8];
+    int dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 0, "the send is pending (zero window)");
+    COMP(ep)->cancel(&ev, fd);
+    dn = COMP(ep)->drain(&ev, evs, 8, 0);
+    CHECK(io_events(evs, dn, KL_COMP_WRITE, &st, NULL) == 1, "the reap's cancel completes the send op");
+    if (ack_on_poll) g_tcp_poll_acks = 1;
+    else CHECK(mock_complete_hung_tcp_tx() == 1, "the firmware completes the Transmit before close");
+
+    int before = g_destroy_child_calls;
+    g_tcp_poll_calls = 0;
+    p->ops->close(p->context, fd);
+    CHECK(g_tcp_close_aborts == 0, "the Close was graceful (no AbortOnClose)");
+    CHECK(g_tcp_poll_calls < 50, "close did not pump");
+    CHECK(outstanding_count() == 0, "no token outstanding after close");
+    CHECK(g_destroy_child_calls == before + 1, "the child was torn down (not quarantined)");
+    kl_uefi_event_provider_reset();
+}
+static void t_io_close_completed_send_is_graceful(void) {
+    t_io_close_completed_send_is_graceful_case(0);
+    t_io_close_completed_send_is_graceful_case(1);
+}
+
 /* A long send whose Transmits keep completing must show progress on its stream while it is still
  * pending, so the idle sweep does not reap a slow but moving reader mid-response. */
 static void t_io_send_progress_advances(void) {
@@ -1960,7 +2069,7 @@ static int mock_post_dgram_send(const KlEventProvider *ep, MockDgramXport *dg,
                          .src = NULL, .tos = -1, .life = (KlCompLife *)dg->rx_life };
     kl_comp_life_retain(op.life);
     int rc = COMP(ep)->post_dgram_send(NULL, &op);
-    if (rc < 0) kl_comp_life_release(op.life);   /* failure → caller releases; backend took nothing */
+    if (rc != 0) kl_comp_life_release(op.life);  /* failure or drop → caller releases; backend took nothing */
     return rc;
 }
 static int mock_post_dgram_recv(const KlEventProvider *ep, MockDgramXport *dg) {
@@ -2113,6 +2222,75 @@ static void t_udp_e2e_unsupported_send_not_queued(void) {
     CHECK(r != KL_DATAGRAM_ACCEPTED, "TOS send REJECTED: NOT queued (an accepted send is KL_DATAGRAM_ACCEPTED)");
     CHECK(g_udp_tx_calls == 0, "no EFI Transmit for a rejected send");
     /* Public close lifecycle: abortive close → pump until CLOSED → free. */
+    (void)kl_datagram_close_cancel(&udp);
+    for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
+    kl_datagram_free(&udp);
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset();
+}
+
+/* The EFI datagram op pool is a small static array. A send that finds it full is a passing
+ * shortage of that one datagram: the post refuses it as a per-datagram drop (nothing taken, the
+ * caller keeps its life ref), the public send counts the drop, and once ops free up the next send
+ * is accepted and goes out. A plain post failure would latch the send side instead. */
+static void t_udp_e2e_op_pool_full_drops_one_send(void) {
+    T_CASE("dgram e2e: a send that finds the op pool full is dropped and counted, not latched");
+    reset_counters();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlDatagram udp;
+    KlDatagramSocketConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_datagram_socket_init(&udp, &uc) == 0, "kl_datagram_socket_init over EFI_UDP4 (completion)");
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+
+    /* Fill every op slot with sends of another owner on the same socket: the first holds the one
+     * Tx token (hung), the rest queue behind it. */
+    int owner = 0; g_on_final_ran = 0;
+    KlCompLife *filler = kl_comp_life_create(&g_ta, &owner, mock_on_final, NULL, (KlCompLifeDispatchFn)0);
+    MockDgramXport fx; memset(&fx, 0, sizeof(fx)); fx.fd = kl_datagram_fd(&udp); fx.rx_life = filler;
+    g_udp_transmit_mode = TOK_HANG;
+    int filled = 0;
+    for (int i = 0; i < 64 && mock_post_dgram_send(ep, &fx, "f", 1, &dest) == 0; i++) filled++;
+    CHECK(filled > 0, "the op pool accepted some filler sends");
+    CHECK(mock_post_dgram_send(ep, &fx, "f", 1, &dest) == KL_COMP_POST_DROPPED,
+          "a post into a full op pool is a per-datagram drop");
+    int tx_before = g_udp_tx_calls;
+
+    KlDatagramSendStatus r1 = kl_datagram_send(
+        &udp, &(KlDatagramMessage){ .data = "lost", .len = 4, .peer = &dest, .tos = -1 });
+    CHECK(r1 == KL_DATAGRAM_ACCEPTED, "the send is accepted (then dropped at the post)");
+    CHECK(kl_datagram_dropped(&udp) == 1, "the dropped datagram is counted");
+    CHECK(kl_datagram_send_queued(&udp) == 0, "nothing stays queued");
+
+    /* Free the pool: the hung Transmit completes and the queued filler sends then go out. */
+    mock_complete_hung_tx();
+    g_udp_transmit_mode = TOK_COMPLETE_OK;
+    int retired = 0;
+    for (int round = 0; round < 64 && retired < filled; round++) {
+        KlCompletionEvent evs[8];
+        int dn = COMP(ep)->drain(NULL, evs, 8, 0);
+        for (int i = 0; i < dn; i++)
+            if (evs[i].kind == KL_COMP_DGRAM_SEND && evs[i].life == filler) {
+                retired++;
+                kl_comp_life_release(evs[i].life);
+            }
+    }
+    CHECK(retired == filled, "every filler send retired (op pool free again)");
+
+    KlDatagramSendStatus r2 = kl_datagram_send(
+        &udp, &(KlDatagramMessage){ .data = "after", .len = 5, .peer = &dest, .tos = -1 });
+    CHECK(r2 == KL_DATAGRAM_ACCEPTED, "a later send is accepted (the send side did not latch)");
+    for (int i = 0; i < 4 && kl_datagram_send_queued(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_udp_tx_calls > tx_before + filled - 1, "the later send reached the firmware");
+    CHECK(g_udp_tx_len == 5, "the last Transmit carried the later datagram");
+    CHECK(kl_datagram_dropped(&udp) == 1, "no further drop");
+
+    kl_comp_life_mark_dead(filler); kl_comp_life_release(filler);
+    CHECK(g_on_final_ran == 1, "the filler owner's life was released exactly (no ref leaked by the drop)");
     (void)kl_datagram_close_cancel(&udp);
     for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
     CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
@@ -2984,6 +3162,7 @@ int main(void) {
     t_dgram_two_concurrent_sends();
     t_udp_e2e_unsupported_send_not_queued();
     t_udp_e2e_failed_send_releases_queue();
+    t_udp_e2e_op_pool_full_drops_one_send();
     t_dgram_deferred_post_failure_releases();
     t_dgram_send_unreachable_is_dropped();
     t_udp_e2e_unreachable_send_keeps_sending();
@@ -3035,6 +3214,8 @@ int main(void) {
     t_io_send_pending_nonblocking();
     t_io_send_pending_cancel_close();
     t_io_reap_pending_send_closes_fast();
+    t_io_reap_processing_send_aborts_before_drain();
+    t_io_close_completed_send_is_graceful();
     t_io_send_progress_advances();
     t_accept_cancel_fail_quarantine();   /* intentional permanent slot leak */
     t_io_dead_conn_ops_complete();       /* intentional permanent slot leak */
