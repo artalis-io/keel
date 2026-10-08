@@ -5,6 +5,86 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Low-finding triage after the twentieth pass (2026-10-08)
+
+**Revision:** `main` `9679885` (after #475 to #485). Records a decision for every Low left open by
+the nineteenth and twentieth passes and the twentieth pass's re-review, so they are decisions rather
+than a backlog. Status was checked against the code at this revision. The items already recorded as
+deliberately unfixed (S5, S9, E7, W11, X8; axis I1) keep their earlier decisions and are not
+repeated.
+
+- **Fix if a consumer hits it:** the defect is real and reachable, but narrow. Fix when a consumer
+  reports it or touches the code around it.
+- **Won't fix:** unreachable in practice, a test double, diagnostics only, already documented as
+  the contract, or not worth the risk of the change.
+
+### Reclassified: fix next
+
+One Low is a defect any consumer of a documented feature hits, so it is not left waiting.
+
+| Item | Location | Why |
+|---|---|---|
+| A readiness streamed response that is drained but not ended spins on WRITE | `http_response.c` `kl_http_response_send` (returns 1 for a drained, unended stream), `http_server.c` SENDING arms WRITE, `http_connection.c` `kl_http_conn_on_writable` refreshes `last_active_ms` | An SSE or chunked handler that pushes data later (from a timer or another source) keeps the connection writable-armed with nothing to send: the loop wakes on every tick, and the idle sweep never ends it because each wakeup refreshes the activity time. Every idle SSE client on epoll, kqueue, poll or WSAPoll costs a busy loop. |
+
+### Fix if a consumer hits it
+
+| Item | Location | Note |
+|---|---|---|
+| Free or cancel inside a client streaming callback | `http_client.h` body/headers/read callbacks | Not guarded and not documented; freeing from `on_body` is a use-after-free. A doc note is the minimum. |
+| Caller headers duplicating Host/Content-Length/Transfer-Encoding; names not token-checked | `http_client_common.c` `kl_http_client_build_request` | Smuggling risk only when callers pass untrusted header names. |
+| Chunked trailers merged into the response; a `Location` trailer is followed | `http1_response_parser_llhttp.c`, `http_redirect.c` `find_location` | Needs a hostile origin; credential stripping still applies. |
+| Stale pooled connection not retried for idempotent methods | client pooled paths | The borrow peek catches most; a race with the server's idle close still fails the request. |
+| Readiness WebSocket and h2 server reads treat would-block as close | `http_server_ws.c`, `http2_server.c` readable handlers | A spurious wakeup drops the connection. |
+| WebSocket Close echo lost when the drain is pending | `http_server_ws.c` `ws_handle_close` | Peer behind a slow-read backlog gets no Close echo. |
+| h2 teardown destroys body readers without `on_error` | `http2_server.c` cleanup | A streaming upload reader is not told the body was cut off. |
+| nghttp2 server adapter drops a header on copy failure; h2 responses cap at 64 headers | `http2_nghttp2_server.c` `ng_on_header_cb`, `http2_server.c` `H2_MAX_RESP_HEADERS` | OOM-only drop; many `Set-Cookie` headers truncated on h2 only. |
+| WebSocket client reports a Close-less EOF as 1001 (should be 1006); some protocol errors fail without a Close | `websocket_client.c` | Applications branching on 1006 misbranch. |
+| nghttp2 minimum version not stated (CONTINUATION flood fix is 1.61) | nghttp2 integration README/Makefile | Docs only. |
+| Partial PROXY header from a trusted peer re-arms READ every tick until the idle timeout | `http_connection.c` `kl_http_conn_read_proxy_header` | Only peers inside `proxy_trusted_cidrs`; spins on edge-triggered engines too. |
+| `max_header_size` below 8192 not enforced | `http_connection.c`, `completion_http_server.c` | Silent 8 KiB floor; only for lowered limits. |
+| Windows listeners use `SO_REUSEADDR`, not `SO_EXCLUSIVEADDRUSE` | `socket_winsock.c` | Another local process can co-bind the port. |
+| Handler headers can duplicate the server's framing headers; 204/304 get a Content-Length and body | `http_response.c` | Handler bugs only; desync through proxies. |
+| Graceful stop waits out idle keep-alive connections | `http_server_core.c` `kl_http_server_drain_progress` | Stop takes up to the read timeout or `drain_timeout_ms`. |
+| Readiness TLS rejection drain counts ciphertext | `http_connection.c` drain | A 413/431 on TLS likely lost to an RST. |
+| Learned DNS server cookie never forgotten | `dns_resolver.c` `dns_on_recv` | Anycast or mixed-support resolvers time out and fail over. |
+| OpenSSL ALPN reconfiguration can read past the array after a failed update | `tls_openssl.c` | Misuse path. |
+| mbedTLS: out-of-range `client_auth` fails open to none; mTLS without a CA not rejected at creation (fails closed at handshake); `reset_failed` never clears; `write(0)` returns -1 | `tls_mbedtls.c` | |
+| `PEM_read_bio_PrivateKey` prompts on a TTY for an encrypted key | `tls_openssl.c` | Blocks startup in an interactive shell. |
+| Thread pool's nested-tick return skips the wakeup drain | `thread_pool.c` | Embedders ticking the loop inside `done_fn`. |
+| io_uring watcher whose POLL_ADD fails goes silent; splice stage 2 returning 0 reports success | `event_iouring.c` | Rare kernel errors. |
+| Inheritable handle window after `socket()`/`pipe()` where no atomic flag is used | Winsock, wakeup PALs, macOS pipes | Multithreaded embedders that spawn processes. |
+| Named-pipe listener re-arm after every instance closed uses `first = 0` | `pipe_stream.c` | Narrow name-claim window; Windows IOCP only. |
+| IPv4 multicast `iface_index` ignored off Linux | `socket_dgram_posix.c`, `socket_dgram_win.c` | Multi-homed hosts join on the default NIC. |
+| Winsock `writev` truncates a buffered body above 4 GiB | `socket_winsock.c` | Buffered bodies of that size only. |
+| Readiness accept on Winsock: `WSA_NOT_ENOUGH_MEMORY` maps to EIO, so no back-off | `socket_winsock.c` `kl_wsa_set_errno` | |
+| No-allocator response fallback sends synchronously on a completion loop | `http_response.c` `stream_writev_all` | |
+| WebSocket and h2 output buffers are not shrunk until the slot is released | `completion_http_server.c` | Only the HTTP response path shrinks. |
+| `kl_datagram_last_error` set only by `kl_datagram_send`, not batch or GSO sends | `datagram.c` | |
+| EFI graceful close, receive and connect waits still pump up to about 60 s | `socket_efi_tcp4.c` `efi_sock_close` | UEFI only; a stuck Transmit closes abortively since #485. |
+| Datagram contract says "allocation-free steady state" for completion backends | `docs/contracts/datagram.md` | Docs only. |
+
+### Won't fix
+
+| Item | Reason |
+|---|---|
+| pollcomp loses abort events' refs on an allocation failure | Test double; OOM only. |
+| Unguarded batch products in the POSIX datagram provider | Needs an absurd count on a 32-bit build; the core allocator is guarded. |
+| Timer heap doubling is signed-overflow-prone before its check | Needs about 2^30 timers. |
+| Sync redirect asks the policy about one hop past the limit | The URL is never fetched. |
+| Size-limit failures reported as `KL_ERR_PARSE`; a failed redirect hop start always `KL_ERR_IO` | Diagnostics only. |
+| Proxy port not range-checked | The field is `uint16_t`; only port 0 is unchecked and it fails at connect. |
+| Truncated UDP DNS answer used without TCP fallback | Needs a server exceeding the advertised 1232-byte payload. |
+| A DNS retransmit that hits would-block replaces the leg id | Needs a full send queue. |
+| Vendored llhttp built without the stack protector and FORTIFY | Vendor code policy; defence in depth only. |
+| pollcomp `post_connect` connects through `ctx->sockets` | Test double; documented. |
+| A buffered response above io_uring's `send_max` hint (about 2 GiB) is copied to the queue | Negligible. |
+| `KlHttpConn.comp_ws_refused` is a production field read only by tests | One increment on a refusal path. |
+| A persistent `EINVAL` from the kernel drops every datagram rather than latching | Documented contract (each drop counted, `last_error` `KL_ERR_IO`). |
+| The io_uring bounded wait can spin while the SQ is full on kernels without EXT_ARG | Documented; bounded per drain. |
+| lwIP raw cancel sends RST on an idle reap | Contract met (one terminal per op). |
+| A third-party h2 session that reports a stream close from inside `submit_response` | Documented as not allowed (#484). |
+| `kl_http_client_pool_host_count` counts across providers | Documented (this change). |
+
 ## Twentieth pass: final audit after the audit-19 fixes (2026-10-07)
 
 **Revision:** `main` `cd17c9c` (after #464 to #474). Read-only.
