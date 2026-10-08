@@ -26,6 +26,8 @@ struct KlHttpClientPoolEntry {
     int      proxy_port;                          /* 0 = direct connection */
     KlSocketHandle fd;            /* -1 = free slot */
     KlTls   *tls;
+    const struct KlSocketProvider *sockets; /* the provider the connection was made through: it is
+                                             * closed through it, and handed only to a request on it */
     uint64_t idle_since_ms; /* kl_monotonic_ms() when returned */
     int64_t  timer_id;      /* idle timer (-1 = none) */
     struct KlHttpClientPool *pool; /* back-pointer for timer callback */

@@ -135,6 +135,13 @@ int  kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *c
  * certificate, never gets a connection made under one that does not, or under another client
  * identity. The plain acquire/release carry no config, and match only connections released
  * through them.
+ *
+ * A pooled connection also keeps the socket provider it was made through: it is closed through
+ * it, and acquired only by a request on the same provider. The pooled clients use their own
+ * (KlHttpClientConfig.sockets, else the event context's); these entry points, and
+ * kl_http_client_pool_discard, use the pool event context's (NULL ctx = the built-in default).
+ * A caller-owned provider must outlive every pooled connection made through it, that is, until
+ * the pool has closed them (eviction, idle timeout, or kl_http_client_pool_free).
  */
 int  kl_http_client_pool_acquire_tls(KlHttpClientPool *pool, const char *host, int port,
                                      const KlTlsConfig *tls, const char *proxy_host,

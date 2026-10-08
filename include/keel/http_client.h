@@ -101,10 +101,22 @@ typedef struct {
     KlHttpProxyConfig   *proxy;             /**< HTTP proxy (NULL = direct connection) */
     int              connect_attempt_delay_ms; /**< Async: Happy Eyeballs Connection Attempt Delay (RFC 8305). 0 = default 250ms. A large value degenerates to sequential connect. */
     const KlSocketProvider *sockets;    /**< custom socket provider (bring-your-own stack); NULL =
-                                         *   built-in default. When set, applied to the client's
-                                         *   event context. The async client may instead set
-                                         *   ctx.sockets directly; a non-NULL value here takes
-                                         *   precedence. Must advertise KL_SOCK_CAP_NATIVE_FD.
+                                         *   built-in default. PER CLIENT: the async client takes
+                                         *   this one, else the event context's ctx.sockets (read
+                                         *   at start), and does all of its own socket I/O through
+                                         *   it, including the built-in DNS resolver it creates
+                                         *   when none is configured (its UDP socket and its TCP
+                                         *   fallback; a provider without datagram ops makes that
+                                         *   resolver fail to start, and the client falls back to
+                                         *   blocking name resolution). A caller-supplied
+                                         *   cfg.resolver keeps its own provider.
+                                         *   The event context is never modified, so a server
+                                         *   or another client sharing it keeps its own provider,
+                                         *   whether this start succeeds or fails. A pooled
+                                         *   connection keeps the provider it was made through: it
+                                         *   is closed through it and reused only by a request on
+                                         *   the same provider. Must advertise
+                                         *   KL_SOCK_CAP_NATIVE_FD.
                                          *
                                          *   ON A COMPLETION LOOP (io_uring, IOCP) this provider is
                                          *   REPLACED, not used, unless it advertises

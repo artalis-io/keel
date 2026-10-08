@@ -31,6 +31,7 @@
 #include "completion_io.h"  /* kl_comp_post_connect / kl_comp_cancel: completion connect */
 #include "watcher_internal.h" /* kl_watcher_add_detached: completion connect */
 #include "http_client_internal.h"
+#include "../dns/dns_resolver_internal.h" /* kl_dns_resolver_create_sp: the resolver on the client's provider */
 #include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
 
@@ -111,21 +112,21 @@ static void client_drop_connect_fd(KlHttpClient *c, KlSocketHandle fd)
     if (client_loop_is_completion(c))
         kl_comp_cancel(c->ev_ctx, fd);
     kl_watcher_del(c->ev_ctx, fd);
-    kl_sock_close(c->ev_ctx->sockets, fd);
+    kl_sock_close(c->sockets, fd);
 }
 
 static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
 {
     int family = (kl_sockaddr_family(addr) == KL_AF_INET6) ? AF_INET6 :
                  (kl_sockaddr_family(addr) == KL_AF_UNIX)  ? AF_UNIX : AF_INET;
-    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, family, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(c->sockets, family, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd))
         return -1;
 
-    kl_sock_set_cloexec(c->ev_ctx->sockets, fd);   /* never inherited by an embedder's children */
-    kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
-    if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+    kl_sock_set_cloexec(c->sockets, fd);   /* never inherited by an embedder's children */
+    kl_sock_set_nosigpipe(c->sockets, fd);
+    if (kl_sock_set_nonblocking(c->sockets, fd) < 0) {
+        kl_sock_close(c->sockets, fd);
         return -1;
     }
 
@@ -134,16 +135,16 @@ static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
         c->fd = fd;
         c->state = KL_HTTP_CLIENT_CONNECTING;   /* the connect completion advances us */
         if (client_comp_connect(c, fd, addr) != 0) {
-            kl_sock_close(c->ev_ctx->sockets, fd);
+            kl_sock_close(c->sockets, fd);
             c->fd = KL_INVALID_SOCKET;
             return -1;
         }
         return 0;
     }
 
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr);
-    if (rc < 0 && kl_sock_io_status(c->ev_ctx->sockets) != KL_IO_PENDING) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+    int rc = kl_sock_connect(c->sockets, fd, addr);
+    if (rc < 0 && kl_sock_io_status(c->sockets) != KL_IO_PENDING) {
+        kl_sock_close(c->sockets, fd);
         return -1;
     }
 
@@ -156,7 +157,7 @@ static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
     c->state = KL_HTTP_CLIENT_CONNECTING;
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+        kl_sock_close(c->sockets, fd);
         c->fd = KL_INVALID_SOCKET;
         return -1;
     }
@@ -256,12 +257,12 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     int fam = (kl_sockaddr_family(sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
     /* Always TCP: a resolver's socket type and protocol describe its lookup, not this connection. */
-    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(c->sockets, fam, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd)) { *out_err = KL_ERR_CONNECT; return -1; }
-    kl_sock_set_cloexec(c->ev_ctx->sockets, fd);   /* never inherited by an embedder's children */
-    kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
-    if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+    kl_sock_set_cloexec(c->sockets, fd);   /* never inherited by an embedder's children */
+    kl_sock_set_nosigpipe(c->sockets, fd);
+    if (kl_sock_set_nonblocking(c->sockets, fd) < 0) {
+        kl_sock_close(c->sockets, fd);
         *out_err = KL_ERR_CONNECT;
         return -1;
     }
@@ -270,7 +271,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
      * completion always arrives on a later drain: no inline-success shortcut. */
     if (client_loop_is_completion(c)) {
         if (client_comp_connect(c, fd, sa) != 0) {
-            kl_sock_close(c->ev_ctx->sockets, fd);
+            kl_sock_close(c->sockets, fd);
             *out_err = KL_ERR_CONNECT;
             return -1;
         }
@@ -279,14 +280,14 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
         return 0;
     }
 
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa);
-    if (rc < 0 && kl_sock_io_status(c->ev_ctx->sockets) != KL_IO_PENDING) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+    int rc = kl_sock_connect(c->sockets, fd, sa);
+    if (rc < 0 && kl_sock_io_status(c->sockets) != KL_IO_PENDING) {
+        kl_sock_close(c->sockets, fd);
         *out_err = KL_ERR_CONNECT;
         return -1;
     }
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
-        kl_sock_close(c->ev_ctx->sockets, fd);
+        kl_sock_close(c->sockets, fd);
         *out_err = KL_ERR_CONNECT;
         return -1;
     }
@@ -396,7 +397,7 @@ static void he_on_writable(KlHttpClient *c, KlSocketHandle fd)
     int idx = he_idx_of_fd(c, fd);
     if (idx < 0) return;
     int err = 0;
-    kl_sock_get_so_error(c->ev_ctx->sockets, fd, &err);
+    kl_sock_get_so_error(c->sockets, fd, &err);
     if (err == 0) {
         kl_connect_op_on_attempt_connected(&c->connect_op, idx, fd);
     } else {
@@ -484,10 +485,12 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
 
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
  * (borrowed) → cfg->system_dns (NULL → blocking sync name resolution) → auto-created
- * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
- * sync name resolution (also on auto-create failure, better than failing the request). */
+ * built-in async resolver (owned; *owned = 1), whose sockets go through `sp` (the client's
+ * provider), so they share the handle domain of the client's connections. Returns NULL to fall back
+ * to sync name resolution (also on auto-create failure, better than failing the request). */
 static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
-                                        KlEventCtx *ev_ctx, int *owned) {
+                                        KlEventCtx *ev_ctx, const KlSocketProvider *sp,
+                                        int *owned) {
     *owned = 0;
     if (cfg && cfg->resolver)
         return cfg->resolver;
@@ -499,10 +502,10 @@ static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
      * (docs/archive/phases/phase10_uefi_feasibility_design.md §8, IPv4/numeric first).
      * A freestanding consumer supplies cfg->resolver or a numeric address; here we
      * fall back to sync name resolution (kl_resolve_sync), same as cfg->system_dns. */
-    (void)ev_ctx;
+    (void)ev_ctx; (void)sp;
     return NULL;
 #else
-    KlResolver *r = kl_dns_resolver_create(ev_ctx, NULL);
+    KlResolver *r = kl_dns_resolver_create_sp(ev_ctx, sp, NULL);   /* the client's provider, not the ctx's */
     if (r)
         *owned = 1;
     return r;
@@ -536,7 +539,7 @@ static int client_connect_resolved(KlHttpClient *c, const KlSockAddr *addrs, int
 static void async_handle_connecting(KlHttpClient *c)
 {
     int err = 0;
-    kl_sock_get_so_error(c->ev_ctx->sockets, c->fd, &err);
+    kl_sock_get_so_error(c->sockets, c->fd, &err);
     if (err != 0) {
         c->error = KL_ERR_CONNECT;
         async_complete_error(c);
@@ -580,7 +583,7 @@ static void he_proceed_after_connect(KlHttpClient *c)
 
         /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
         if (c->tls->set_socket_provider)
-            c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
+            c->tls->set_socket_provider(c->tls, c->sockets);
         /* FAIL CLOSED on set_hostname failure: without hostname verification a
          * cert for the wrong host would verify against the CA chain alone.
          * async_complete_error owns c->tls teardown (incl. the pool-discard path). */
@@ -606,11 +609,11 @@ static void async_handle_proxy_connecting(KlHttpClient *c)
     while (c->connect_sent < c->connect_len) {
         /* Send the CONNECT request over the provider (not raw write) so the proxy
          * path also works over a non-OS-fd provider; classify -1 via io_status. */
-        kl_ssize_t w = kl_sock_send(c->ev_ctx->sockets, c->fd,
+        kl_ssize_t w = kl_sock_send(c->sockets, c->fd,
                                     c->connect_buf + c->connect_sent,
                                     c->connect_len - c->connect_sent);
         if (w < 0) {
-            KlIoStatus st = kl_sock_io_status(c->ev_ctx->sockets);
+            KlIoStatus st = kl_sock_io_status(c->sockets);
             if (st == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
@@ -658,11 +661,11 @@ static void async_handle_proxy_handshake(KlHttpClient *c)
         }
 
         /* Read the proxy response over the provider (not raw read); classify -1. */
-        kl_ssize_t r = kl_sock_recv(c->ev_ctx->sockets, c->fd,
+        kl_ssize_t r = kl_sock_recv(c->sockets, c->fd,
                                     c->proxy_recv + c->proxy_recv_len,
                                     KL_PROXY_RESPONSE_MAX - 1 - c->proxy_recv_len);
         if (r < 0) {
-            KlIoStatus st = kl_sock_io_status(c->ev_ctx->sockets);
+            KlIoStatus st = kl_sock_io_status(c->sockets);
             if (st == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
@@ -712,7 +715,7 @@ static void async_handle_proxy_handshake(KlHttpClient *c)
 
         /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
         if (c->tls->set_socket_provider)
-            c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
+            c->tls->set_socket_provider(c->tls, c->sockets);
         /* FAIL CLOSED on set_hostname failure (see the direct-connect path);
          * async_complete_error owns c->tls teardown. */
         if (c->host_buf[0] &&
@@ -755,7 +758,7 @@ static void async_handle_tls_handshake(KlHttpClient *c)
 static void async_handle_sending(KlHttpClient *c)
 {
     while (c->request_sent < c->request_len) {
-        kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+        kl_ssize_t w = kl_http_client_io_write(c->sockets, c->fd, c->tls,
                               c->request_buf + c->request_sent,
                               c->request_len - c->request_sent);
         if (w == 0 && c->tls) {   /* TLS WANT_WRITE: the send buffer is full; wait for writable */
@@ -764,7 +767,7 @@ static void async_handle_sending(KlHttpClient *c)
         }
         if (w < 0) {
             /* A TLS -1 is an error or a close, never would-block (that is 0, above). */
-            if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+            if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
@@ -834,12 +837,12 @@ static void async_handle_sending_stream(KlHttpClient *c)
         case 1:
             /* Send chunk header */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -855,12 +858,12 @@ static void async_handle_sending_stream(KlHttpClient *c)
         case 2:
             /* Send chunk data */
             while (c->chunk_sent < c->chunk_len) {
-                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->sockets, c->fd, c->tls,
                                       c->chunk_buf + c->chunk_sent,
                                       c->chunk_len - c->chunk_sent);
                 if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -881,12 +884,12 @@ static void async_handle_sending_stream(KlHttpClient *c)
         case 3:
             /* Send trailing \r\n */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -903,12 +906,12 @@ static void async_handle_sending_stream(KlHttpClient *c)
         case 4:
             /* Send final chunk (0\r\n\r\n) */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w == 0 && c->tls) { kl_watcher_rearm(c->ev_ctx, c->fd); return; }   /* WANT_WRITE */
                 if (w < 0) {
-                    if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+                    if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -937,10 +940,10 @@ static void async_handle_receiving(KlHttpClient *c)
     char buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
 
     for (;;) {
-        kl_ssize_t nread = kl_http_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
+        kl_ssize_t nread = kl_http_client_io_read(c->sockets, c->fd, c->tls, buf, sizeof(buf));
         if (nread < 0) {
             /* A TLS -1 is an error or a close (WANT_READ is 0, below): never consult a stale errno. */
-            if (!c->tls && kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
+            if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
@@ -1087,11 +1090,11 @@ static void async_complete_success(KlHttpClient *c)
         /* Not reusable: bytes followed the response, or it ended at end of stream (the server
          * closed, so the connection is dead whatever its headers said). */
         if (!c->conn_reusable || kl_http_client_server_wants_close(&c->resp)) {
-            kl_http_client_pool_discard(c->pool, &c->pool_conn);
+            kl_http_client_pool_discard_sp(c->sockets, &c->pool_conn);
         } else {
-            kl_http_client_pool_release_tls(c->pool, &c->pool_conn,
-                                            c->host_buf, c->pool_port,
-                                            c->pool_is_tls ? c->tls_cfg : NULL, NULL, 0);
+            kl_http_client_pool_release_sp(c->pool, c->sockets, &c->pool_conn,
+                                           c->host_buf, c->pool_port,
+                                           c->pool_is_tls ? c->tls_cfg : NULL, NULL, 0);
         }
         c->tls = NULL;
         c->fd = KL_INVALID_SOCKET;
@@ -1101,7 +1104,7 @@ static void async_complete_success(KlHttpClient *c)
             c->tls->destroy(c->tls);
             c->tls = NULL;
         }
-        kl_sock_close(c->ev_ctx->sockets, c->fd);
+        kl_sock_close(c->sockets, c->fd);
         c->fd = KL_INVALID_SOCKET;
     }
 
@@ -1168,7 +1171,7 @@ static void async_complete_error(KlHttpClient *c)
         /* Pool-aware: discard the connection on error */
         c->pool_conn.fd = c->fd;
         c->pool_conn.tls = c->tls;
-        kl_http_client_pool_discard(c->pool, &c->pool_conn);
+        kl_http_client_pool_discard_sp(c->sockets, &c->pool_conn);
         c->tls = NULL;
         c->fd = KL_INVALID_SOCKET;
     } else {
@@ -1180,7 +1183,7 @@ static void async_complete_error(KlHttpClient *c)
         }
 
         if (kl_handle_valid(c->fd)) {
-            kl_sock_close(c->ev_ctx->sockets, c->fd);
+            kl_sock_close(c->sockets, c->fd);
             c->fd = KL_INVALID_SOCKET;
         }
     }
@@ -1223,25 +1226,25 @@ static int client_resolver_valid(const KlResolver *r) {
     return r && r->resolve && r->cancel;
 }
 
-/* Choose the socket provider for a start on the caller's shared ctx: the configured one, else the
- * ctx's own; on a completion loop the backend's native overlapped provider when that one is
- * incompatible, so a completion backend is a drop-in for the client too (the event axis stays
- * masked). The async client's loop must be able to drive the provider's handles: an incoherent
- * pairing is refused up front, and the refusal puts back the provider the ctx had, so neither a
- * later start that brings none of its own nor any other user of the ctx is left on the rejected
- * one. Returns 0, or -1 when refused. */
-static int client_select_provider(KlEventCtx *ev_ctx, const KlHttpClientConfig *cfg)
+/* Choose the socket provider for one client: the configured one, else the ctx's own; on a
+ * completion loop the backend's native overlapped provider when that one is incompatible, so a
+ * completion backend is a drop-in for the client too (the event axis stays masked). The async
+ * client's loop must be able to drive the provider's handles: an incoherent pairing is refused up
+ * front. The choice is the client's alone (*out): the caller's shared ctx is only read, never
+ * written, so neither another client nor a server on the same ctx is moved onto this provider,
+ * whether this start succeeds or fails. Returns 0, or -1 when refused. */
+static int client_select_provider(const KlEventCtx *ev_ctx, const KlHttpClientConfig *cfg,
+                                  const KlSocketProvider **out)
 {
-    const struct KlSocketProvider *prev = ev_ctx->sockets;
-    if (cfg && cfg->sockets) ev_ctx->sockets = cfg->sockets;
-    if (!kl_event_ctx_sockets_compatible(ev_ctx)) {
+    unsigned caps = kl_event_caps(&ev_ctx->loop);
+    const KlSocketProvider *sp = (cfg && cfg->sockets) ? cfg->sockets : ev_ctx->sockets;
+    if (!kl_caps_compatible(caps, sp)) {
         const struct KlSocketProvider *np = kl_event_native_provider(&ev_ctx->loop);
-        if (np && kl_socket_provider_ops_valid(np)) ev_ctx->sockets = np;
+        if (np && kl_socket_provider_ops_valid(np)) sp = np;
     }
-    if (!kl_event_ctx_sockets_compatible(ev_ctx)) {
-        ev_ctx->sockets = prev;
+    if (!kl_caps_compatible(caps, sp))
         return -1;
-    }
+    *out = sp;
     return 0;
 }
 
@@ -1373,7 +1376,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
-    if (client_select_provider(ev_ctx, cfg) < 0) {
+    if (client_select_provider(ev_ctx, cfg, &c->sockets) < 0) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
@@ -1485,7 +1488,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     /* Async DNS resolver path (explicit, built-in default, or sync name resolution). */
     int res_owned = 0;
-    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, c->sockets, &res_owned);
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
@@ -1613,7 +1616,7 @@ void kl_http_client_cancel(KlHttpClient *client)
         if (client->pool) {
             client->pool_conn.fd = client->fd;
             client->pool_conn.tls = client->tls;
-            kl_http_client_pool_discard(client->pool, &client->pool_conn);
+            kl_http_client_pool_discard_sp(client->sockets, &client->pool_conn);
             client->tls = NULL;
             client->fd = KL_INVALID_SOCKET;
         } else {
@@ -1623,7 +1626,7 @@ void kl_http_client_cancel(KlHttpClient *client)
                 client->tls = NULL;
             }
 
-            kl_sock_close(client->ev_ctx->sockets, client->fd);
+            kl_sock_close(client->sockets, client->fd);
             client->fd = KL_INVALID_SOCKET;
         }
     }
@@ -1761,7 +1764,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
-    if (client_select_provider(ev_ctx, cfg) < 0) {
+    if (client_select_provider(ev_ctx, cfg, &c->sockets) < 0) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
@@ -1808,8 +1811,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     KlHttpClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_http_client_pool_acquire_tls(pool, host_buf, parsed.port, tls_cfg,
-                                              NULL, 0, &pconn);
+    int acq = kl_http_client_pool_acquire_sp(pool, c->sockets, host_buf, parsed.port, tls_cfg,
+                                             NULL, 0, &pconn);
 
     if (acq == 0) {
         /* Pool hit: skip connect + TLS, go straight to sending */
@@ -1821,7 +1824,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
         if (kl_watcher_add(ev_ctx, c->fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
             c->fd = KL_INVALID_SOCKET;
             c->tls = NULL;
-            kl_http_client_pool_discard(pool, &pconn);
+            kl_http_client_pool_discard_sp(c->sockets, &pconn);
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
@@ -1835,7 +1838,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
 
     /* Pool miss: normal connect flow */
     int res_owned = 0;
-    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, c->sockets, &res_owned);
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;

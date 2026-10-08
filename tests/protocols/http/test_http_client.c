@@ -6,6 +6,7 @@
 #include <keel/http_server.h>
 #include <keel/event_ctx.h>
 #include <keel/socket.h>
+#include "../../../src/socket.h"   /* kl_sockdef_*: the built-in ops a wrapper delegates to; KL_SOCK_CAP_OVERLAPPED */
 #include <string.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #if !defined(_MSC_VER)
@@ -191,6 +192,192 @@ UTEST(client, refused_provider_leaves_ctx_sockets_unchanged) {
     if (refused) ASSERT_TRUE(after == before);   /* was: the unwatchable provider */
     ASSERT_TRUE(after != &g_unwatchable_provider);
     ASSERT_TRUE(second_ok);                      /* was: refused, the ctx kept the bad provider */
+}
+
+/* ── The configured provider belongs to the client, not to the shared ctx ──────────────────────────
+ * A counting wrapper over the built-in socket ops: each instance counts the sockets made, closed and
+ * written through it. It advertises both a native fd (readiness loops) and the overlapped capability
+ * (completion loops), so every backend accepts it as is. */
+typedef struct { int sockets, closes, sends; } CountProv;
+static CountProv g_cnt[2];
+
+static KlSocketHandle cnt_socket(void *ctx, int d, int t, int p) {
+    ((CountProv *)ctx)->sockets++;
+    return kl_sockdef_socket(d, t, p);
+}
+static int cnt_close(void *ctx, KlSocketHandle fd) {
+    ((CountProv *)ctx)->closes++;
+    return kl_sockdef_close(fd);
+}
+static kl_ssize_t cnt_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    ((CountProv *)ctx)->sends++;
+    return kl_sockdef_send(fd, buf, len);
+}
+static const KlSocketOps g_cnt_ops = {
+    .socket = cnt_socket, .close = cnt_close, .send = cnt_send, .name = "counting",
+};
+static KlSocketProvider g_cnt_prov[2] = {
+    { &g_cnt_ops, &g_cnt[0], KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED, NULL },
+    { &g_cnt_ops, &g_cnt[1], KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED, NULL },
+};
+
+typedef struct { int done, status; } ProvDone;
+static void prov_done(KlHttpClient *client, void *ud) {
+    ProvDone *d = ud;
+    const KlHttpClientResponse *r = kl_http_client_error(client) == 0 ? kl_http_client_response(client)
+                                                                       : NULL;
+    d->status = r ? r->status : -1;
+    d->done = 1;
+}
+static void prov_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
+}
+static void prov_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); }
+static KlHttpServer g_prov_srv;
+static KlPlatThread g_prov_tid;
+
+/* Two clients on one ctx, each with its own provider. Starting a client wrote its provider into the
+ * shared ctx, so the second start rerouted the first client's later I/O (its close among it) through
+ * the second client's provider, and every other user of the ctx (a server sharing it) with it. */
+UTEST(client, configured_provider_is_per_client_and_leaves_ctx_unchanged) {
+    KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&g_prov_srv, &scfg));
+    kl_http_server_route(&g_prov_srv, "GET", "/", prov_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_plat_thread_create(&g_prov_tid, prov_server_thread, &g_prov_srv));
+    for (int i = 0; i < 200 && g_prov_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    int port = g_prov_srv.bound_port;
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
+
+    memset(g_cnt, 0, sizeof g_cnt);
+    KlAllocator a = kl_allocator_default();
+    static KlEventCtx ev;
+    int ev_ok = kl_event_ctx_init(&ev, &a) == 0;
+    const KlSocketProvider *before = ev.sockets;
+    KlHttpClientConfig ca, cb;
+    memset(&ca, 0, sizeof ca);
+    memset(&cb, 0, sizeof cb);
+    ca.sockets = &g_cnt_prov[0];
+    ca.system_dns = 1;           /* resolve inline: the connect starts inside the start call */
+    cb.sockets = &g_cnt_prov[1];
+    cb.system_dns = 1;
+    static ProvDone da, db;
+    memset(&da, 0, sizeof da);
+    memset(&db, 0, sizeof db);
+
+    KlHttpClient *cla = NULL, *clb = NULL;
+    const KlSocketProvider *after_a = NULL, *after_b = NULL;
+    if (ev_ok && port > 0) {
+        cla = kl_http_client_start(&ev, &a, &ca, "GET", url, NULL, 0, NULL, 0, prov_done, &da);
+        after_a = ev.sockets;
+        clb = kl_http_client_start(&ev, &a, &cb, "GET", url, NULL, 0, NULL, 0, prov_done, &db);
+        after_b = ev.sockets;
+        for (int i = 0; i < 300 && cla && clb && !(da.done && db.done); i++)
+            kl_event_ctx_run(&ev, 16, 10);
+    }
+    kl_http_client_free(cla);
+    kl_http_client_free(clb);
+    if (ev_ok) kl_event_ctx_free(&ev);
+    kl_http_server_stop(&g_prov_srv);
+    kl_plat_thread_join(&g_prov_tid);
+    kl_http_server_free(&g_prov_srv);
+
+    ASSERT_TRUE(ev_ok);
+    ASSERT_TRUE(port > 0);
+    ASSERT_TRUE(cla != NULL);
+    ASSERT_TRUE(clb != NULL);
+    ASSERT_TRUE(after_a == before);   /* was: the first client's provider */
+    ASSERT_TRUE(after_b == before);   /* was: the second client's provider */
+    ASSERT_EQ(200, da.status);
+    ASSERT_EQ(200, db.status);
+    /* Each client made, wrote and closed its socket through its own provider. */
+    ASSERT_EQ(1, g_cnt[0].sockets);
+    ASSERT_EQ(1, g_cnt[0].closes);    /* was: 0, closed through the second client's provider */
+    ASSERT_TRUE(g_cnt[0].sends >= 1);
+    ASSERT_EQ(1, g_cnt[1].sockets);
+    ASSERT_EQ(1, g_cnt[1].closes);
+    ASSERT_TRUE(g_cnt[1].sends >= 1);
+}
+
+/* A start that fails after the provider is chosen (here the resolver cannot start) leaves the
+ * shared ctx's provider as it was. */
+static KlResolveReq *nostart_resolve(KlResolver *self, KlEventCtx *ctx, const char *host, int port,
+                                     KlResolveDoneFn done_fn, void *ud) {
+    (void)self; (void)ctx; (void)host; (void)port; (void)done_fn; (void)ud;
+    return NULL;                       /* could not start, no callback */
+}
+static void nostart_cancel(KlResolveReq *req) { (void)req; }
+
+UTEST(client, failed_start_leaves_ctx_sockets_unchanged) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+    const KlSocketProvider *before = ev.sockets;
+    KlResolver r = { .resolve = nostart_resolve, .cancel = nostart_cancel };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_cnt_prov[0];
+    cfg.resolver = &r;
+
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://example.invalid/",
+                                           NULL, 0, NULL, 0, NULL, NULL);
+    int refused = (c == NULL);
+    const KlSocketProvider *after = ev.sockets;
+    kl_http_client_free(c);
+    kl_event_ctx_free(&ev);
+    ASSERT_TRUE(refused);
+    ASSERT_TRUE(after == before);      /* was: the failed client's provider */
+}
+
+/* The built-in resolver a client creates for itself makes its sockets through the client's provider
+ * too, not through the ctx's: otherwise, on a ctx whose own provider is another handle domain (a
+ * bring-your-own stack with ctx.sockets left NULL), the resolver opened a host socket and adopted it
+ * into a loop that cannot drive it. A numeric target still creates the resolver (and its UDP
+ * socket), and makes exactly one connection: two sockets in all, both through the client's provider. */
+UTEST(client, default_resolver_uses_the_client_provider) {
+    KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&g_prov_srv, &scfg));
+    kl_http_server_route(&g_prov_srv, "GET", "/", prov_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_plat_thread_create(&g_prov_tid, prov_server_thread, &g_prov_srv));
+    for (int i = 0; i < 200 && g_prov_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    int port = g_prov_srv.bound_port;
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
+
+    memset(g_cnt, 0, sizeof g_cnt);
+    g_cnt_prov[0].dgram = kl_sockdef_dgram();   /* the resolver needs the datagram data plane */
+    KlAllocator a = kl_allocator_default();
+    static KlEventCtx ev;
+    int ev_ok = kl_event_ctx_init(&ev, &a) == 0;
+    const KlSocketProvider *before = ev.sockets;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_cnt_prov[0];   /* no resolver, no system_dns: the built-in resolver */
+    static ProvDone d;
+    memset(&d, 0, sizeof d);
+
+    KlHttpClient *cl = NULL;
+    if (ev_ok && port > 0) {
+        cl = kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0, prov_done, &d);
+        for (int i = 0; i < 300 && cl && !d.done; i++)
+            kl_event_ctx_run(&ev, 16, 10);
+    }
+    kl_http_client_free(cl);          /* also frees the client's own resolver */
+    const KlSocketProvider *after = ev.sockets;
+    if (ev_ok) kl_event_ctx_free(&ev);
+    g_cnt_prov[0].dgram = NULL;
+    kl_http_server_stop(&g_prov_srv);
+    kl_plat_thread_join(&g_prov_tid);
+    kl_http_server_free(&g_prov_srv);
+
+    ASSERT_TRUE(ev_ok);
+    ASSERT_TRUE(port > 0);
+    ASSERT_TRUE(cl != NULL);
+    ASSERT_EQ(200, d.status);
+    ASSERT_TRUE(after == before);
+    ASSERT_EQ(2, g_cnt[0].sockets);   /* was: 1, the resolver's UDP socket came from the ctx's provider */
+    ASSERT_EQ(2, g_cnt[0].closes);
 }
 
 /* ── kl_http_client_error/response on NULL ────────────────────────────── */

@@ -2,6 +2,7 @@
 #include <keel/keel.h>
 #include <keel/http_client_pool.h>
 #include <keel/socket.h>
+#include "../../../src/socket.h"   /* kl_sockdef_*: the built-in ops a wrapper delegates to; KL_SOCK_CAP_OVERLAPPED */
 
 #include <limits.h>
 #include <string.h>
@@ -606,6 +607,139 @@ UTEST(cpool, async_pooled_reuse) {
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);
+}
+
+/* ── A pooled connection keeps the provider it was made through ───────────────────────────────────
+ * A counting wrapper over the built-in socket ops (native fd for readiness loops, overlapped for
+ * completion loops, so every backend accepts it). */
+typedef struct { int sockets, closes; } PoolCountProv;
+static PoolCountProv g_pcnt;
+static KlSocketHandle pcnt_socket(void *ctx, int d, int t, int p) {
+    ((PoolCountProv *)ctx)->sockets++;
+    return kl_sockdef_socket(d, t, p);
+}
+static int pcnt_close(void *ctx, KlSocketHandle fd) {
+    ((PoolCountProv *)ctx)->closes++;
+    return kl_sockdef_close(fd);
+}
+static const KlSocketOps g_pcnt_ops = { .socket = pcnt_socket, .close = pcnt_close, .name = "pcount" };
+static const KlSocketProvider g_pcnt_prov = {
+    &g_pcnt_ops, &g_pcnt, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED, NULL,
+};
+static KlHttpServer g_prov_pool_srv;
+static KlPlatThread g_prov_pool_tid;
+
+static int prov_pool_server_start(void) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8 };
+    if (kl_http_server_init(&g_prov_pool_srv, &cfg) != 0) return -1;
+    kl_http_server_route(&g_prov_pool_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_plat_thread_create(&g_prov_pool_tid, server_thread_fn, &g_prov_pool_srv);
+    wait_for_bind(&g_prov_pool_srv);
+    return g_prov_pool_srv.bound_port > 0 ? 0 : -1;
+}
+static void prov_pool_server_stop(void) {
+    kl_http_server_stop(&g_prov_pool_srv);
+    kl_plat_thread_join(&g_prov_pool_tid);
+    kl_http_server_free(&g_prov_pool_srv);
+}
+
+/* Sync: a connection made through the request's provider is closed through it when the pool lets
+ * it go (it was closed through the pool ctx's provider), and is not handed to a request on another
+ * provider (whose I/O would then run over a handle its provider never made). */
+UTEST(cpool, sync_pooled_connection_keeps_its_provider) {
+    ASSERT_EQ(prov_pool_server_start(), 0);
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", g_prov_pool_srv.bound_port);
+    memset(&g_pcnt, 0, sizeof g_pcnt);
+
+    KlAllocator a = kl_allocator_default();
+    static KlHttpClientPool pool;
+    int pool_ok = kl_http_client_pool_init(&pool, NULL, &a, NULL) == 0;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_pcnt_prov;
+
+    int st1 = -1, st2 = -1, idle1 = -1, idle2 = -1;
+    if (pool_ok) {
+        KlHttpClientResponse r;
+        if (kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &r) == 0) {
+            st1 = r.status;
+            kl_http_client_response_free(&r);
+        }
+        idle1 = kl_http_client_pool_idle_count(&pool);
+        if (kl_http_client_request_pooled(&pool, &a, NULL, "GET", url, NULL, 0, NULL, 0, &r) == 0) {
+            st2 = r.status;
+            kl_http_client_response_free(&r);
+        }
+        idle2 = kl_http_client_pool_idle_count(&pool);
+        kl_http_client_pool_free(&pool);
+    }
+    prov_pool_server_stop();
+
+    ASSERT_TRUE(pool_ok);
+    ASSERT_EQ(200, st1);
+    ASSERT_EQ(1, idle1);
+    ASSERT_EQ(200, st2);
+    ASSERT_EQ(2, idle2);               /* was: 1, the default-provider request took the connection */
+    ASSERT_EQ(1, g_pcnt.sockets);
+    ASSERT_EQ(1, g_pcnt.closes);       /* was: 0, closed through the pool ctx's provider */
+}
+
+/* Async: the pooled start leaves the shared ctx's provider as it was, and the pooled connection is
+ * closed through the provider it was made with. */
+UTEST(cpool, async_pooled_connection_keeps_its_provider) {
+    ASSERT_EQ(prov_pool_server_start(), 0);
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", g_prov_pool_srv.bound_port);
+    memset(&g_pcnt, 0, sizeof g_pcnt);
+
+    KlAllocator a = kl_allocator_default();
+    static KlEventCtx ev;
+    static KlHttpClientPool pool;
+    int ev_ok = kl_event_ctx_init(&ev, &a) == 0;
+    int pool_ok = ev_ok && kl_http_client_pool_init(&pool, NULL, &a, &ev) == 0;
+    const KlSocketProvider *before = ev_ok ? ev.sockets : NULL;
+    const KlSocketProvider *after = NULL;
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sockets = &g_pcnt_prov;
+
+    static AsyncPoolCtx c1, c2;
+    memset(&c1, 0, sizeof c1);
+    memset(&c2, 0, sizeof c2);
+    int idle1 = -1, idle2 = -1;
+    if (pool_ok) {
+        KlHttpClient *cl = kl_http_client_start_pooled(&pool, &ev, &a, &cfg, "GET", url, NULL, 0,
+                                                       NULL, 0, async_pool_done, &c1);
+        after = ev.sockets;
+        for (int i = 0; cl && i < 1000 && !c1.done; i++) {
+            kl_event_ctx_run(&ev, 16, 10);
+            kl_timer_fire(&ev);
+        }
+        kl_http_client_free(cl);
+        idle1 = kl_http_client_pool_idle_count(&pool);
+
+        cl = kl_http_client_start_pooled(&pool, &ev, &a, NULL, "GET", url, NULL, 0, NULL, 0,
+                                         async_pool_done, &c2);
+        for (int i = 0; cl && i < 1000 && !c2.done; i++) {
+            kl_event_ctx_run(&ev, 16, 10);
+            kl_timer_fire(&ev);
+        }
+        kl_http_client_free(cl);
+        idle2 = kl_http_client_pool_idle_count(&pool);
+        kl_http_client_pool_free(&pool);
+    }
+    if (ev_ok) kl_event_ctx_free(&ev);
+    prov_pool_server_stop();
+
+    ASSERT_TRUE(pool_ok);
+    ASSERT_TRUE(after == before);      /* was: the request's provider, written into the ctx */
+    ASSERT_EQ(200, c1.status);
+    ASSERT_EQ(1, idle1);
+    ASSERT_EQ(200, c2.status);
+    ASSERT_EQ(2, idle2);               /* was: 1, the ctx's (overwritten) provider matched */
+    ASSERT_EQ(1, g_pcnt.sockets);
+    ASSERT_EQ(1, g_pcnt.closes);
 }
 
 /* ── Pooled TLS: the connection is keyed by the TLS config ────────────────

@@ -285,6 +285,10 @@ int kl_url_resolve(const char *base_url, const char *location,
         if (!colon)
             return -1;
         size_t scheme_len = (size_t)(colon - base_url);
+        /* A "+unix" base names a socket path, not a host: copying its scheme would turn the
+         * Location's host into a (relative) socket path. Refuse rather than reinterpret it. */
+        if (scheme_len >= 5 && scheme_is(colon - 5, "+unix"))
+            return -1;
 
         size_t loc_stripped = strip_fragment(location, loc_len);
         if (scheme_len + 1 + loc_stripped >= out_size)

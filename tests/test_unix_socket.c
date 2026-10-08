@@ -727,9 +727,13 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
     kl_http_server_free(&srv);
 }
 
-/* A redirect from one AF_UNIX socket to ANOTHER is cross-origin: they are different servers.
- * Both URLs have no host and no port, which the origin check used to compare as equal, so the
- * caller's Authorization followed a protocol-relative redirect to the second socket. */
+/* A redirect from one AF_UNIX socket to ANOTHER is cross-origin: they are different servers. Both
+ * URLs have no host and no port, which the origin check used to compare as equal, so the caller's
+ * Authorization followed a protocol-relative redirect to the second socket. That redirect is now
+ * refused outright: a protocol-relative Location names a network host, and against a "+unix" base
+ * it would be reinterpreted as a socket path, so kl_url_resolve rejects it (an absolute http+unix
+ * Location is not followed either). With the hop refused, the credential stripping that applies to
+ * a cross-origin hop is moot: the second socket never receives the request at all. */
 static char g_x10_location[300];
 static int  g_x10_saw_auth = -1;
 static void x10_handle_go(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -744,7 +748,7 @@ static void x10_handle_creds(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-UTEST(unix_socket, redirect_to_another_socket_drops_credentials) {
+UTEST(unix_socket, redirect_to_another_socket_is_refused) {
     char pa[108], pb[108];
     test_sock_path(pa, sizeof(pa), "x10a");
     test_sock_path(pb, sizeof(pb), "x10b");
@@ -761,8 +765,7 @@ UTEST(unix_socket, redirect_to_another_socket_drops_credentials) {
     char ea[220], eb[220];
     pct_encode_path(pa, ea, sizeof(ea));
     pct_encode_path(pb, eb, sizeof(eb));
-    /* Protocol-relative: it keeps the base's http+unix scheme with the other socket's path (an
-     * absolute http+unix Location is not followed at all). */
+    /* Protocol-relative, naming the other socket's path where a host would go. */
     snprintf(g_x10_location, sizeof(g_x10_location), "//%s/creds", eb);
     g_x10_saw_auth = -1;
 
@@ -777,14 +780,17 @@ UTEST(unix_socket, redirect_to_another_socket_drops_credentials) {
     KlHttpClientHeader hdrs[] = { { "Authorization", "Bearer secret" } };
     KlAllocator a = kl_allocator_default();
     KlHttpClientResponse resp;
+    memset(&resp, 0, sizeof resp);
     int rc = kl_http_redirect_request(&a, NULL, NULL, "GET", url, hdrs, 1, NULL, 0, &resp);
+    KlError err = resp.error;
     if (rc == 0) kl_http_client_response_free(&resp);
 
     kl_http_server_stop(&sa); kl_http_server_stop(&sb);
     pthread_join(ta, NULL); pthread_join(tb, NULL);
     kl_http_server_free(&sa); kl_http_server_free(&sb);
-    ASSERT_EQ(0, rc);
-    ASSERT_EQ(0, g_x10_saw_auth);                  /* was 1: the token reached the other socket */
+    ASSERT_NE(0, rc);                              /* the protocol-relative hop is refused */
+    ASSERT_EQ((int)KL_ERR_URL, (int)err);          /* as a Location that cannot be resolved */
+    ASSERT_EQ(-1, g_x10_saw_auth);                 /* the second socket never got the request */
 }
 
 UTEST(unix_socket, websocket_connects_over_ws_unix) {

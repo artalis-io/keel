@@ -86,6 +86,9 @@ struct KlHttpClient {
     KlSocketHandle     fd;
     KlHttpClientState      state;
     KlEventCtx        *ev_ctx;
+    const KlSocketProvider *sockets; /* this client's provider, chosen at start; every kl_sock_* call
+                                      * on its handles goes through it. ev_ctx->sockets is only the
+                                      * default it was chosen from, and is never written. */
     KlAllocator       *alloc;
 
     /* Request (heap-copied, owned) */
@@ -187,6 +190,18 @@ int kl_http_client_authority(const KlUrl *url, char *out, size_t cap);
 
 /* Plain-or-TLS I/O abstraction over the socket provider. Returns kl_ssize_t
  * (pointer-width, freestanding) so the async client's I/O locals stay errno-free. */
+/* Provider-aware pool access for the clients (http_client_pool.c). A pooled connection keeps the
+ * provider it was made through: it is closed through it, and acquired only by a request on the same
+ * provider. The public acquire/release/discard use the pool ctx's provider. */
+int  kl_http_client_pool_acquire_sp(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                                    const char *host, int port, const KlTlsConfig *tls,
+                                    const char *proxy_host, int proxy_port,
+                                    KlHttpClientPoolConn *conn);
+int  kl_http_client_pool_release_sp(KlHttpClientPool *pool, const KlSocketProvider *sp,
+                                    KlHttpClientPoolConn *conn, const char *host, int port,
+                                    const KlTlsConfig *tls, const char *proxy_host, int proxy_port);
+void kl_http_client_pool_discard_sp(const KlSocketProvider *sp, KlHttpClientPoolConn *conn);
+
 kl_ssize_t kl_http_client_io_write(const KlSocketProvider *p, KlSocketHandle fd,
                               KlTls *tls, const void *buf, size_t len);
 kl_ssize_t kl_http_client_io_read(const KlSocketProvider *p, KlSocketHandle fd,
