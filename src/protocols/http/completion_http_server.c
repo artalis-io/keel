@@ -415,8 +415,10 @@ kl_ssize_t kl_comp_queue_write(KlHttpConn *c, const void *buf, size_t len) {
     /* A WebSocket client that does not read its frames: would-block, as a full socket is on
      * readiness. The drain (if enabled) keeps the frame, bounded by its own size; without one the
      * frame fails and the connection closes. */
-    if (c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, len))
+    if (c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, len)) {
+        c->comp_ws_refused++;
         return 0;
+    }
     if (comp_tlsq_reserve(c, len) < 0) return -1;
     memcpy(c->comp_tlsq + c->comp_tlsq_len, buf, len);
     c->comp_tlsq_len += len;

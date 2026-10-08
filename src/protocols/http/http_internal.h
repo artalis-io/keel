@@ -63,7 +63,10 @@ static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) 
     if (c->tls) {
         /* A completion loop: the engine's output goes onto the queue at once (below), so it never
          * fills; a WebSocket is held to the queue's producer bound here instead. */
-        if (c->comp_driven && kl_comp_ws_queue_full(c, len)) return 0;
+        if (c->comp_driven && kl_comp_ws_queue_full(c, len)) {
+            c->comp_ws_refused++;
+            return 0;
+        }
         kl_ssize_t n = c->tls->write(c->tls, c->stream.fd, buf, len);
         /* A completion loop: the record is only in the engine's ring. Queue it now, as nothing else
          * may do it soon (a frame or ping written outside a drive waited for the client to speak),
