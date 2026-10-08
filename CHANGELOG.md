@@ -7,6 +7,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Security
 
+- **An HTTP/2 stream closed by the flush that sends its response is released once.** The HTTP/2
+  server flushed a stream's response while it still held the stream and released it afterwards. A
+  session that really sends on that flush closes the stream once its END_STREAM is out and reports
+  the close from inside the flush, which released the stream first; the stream was then released
+  again, its count went to -1, and the next stream was written before the stream table (heap
+  corruption). The nghttp2 adapter sends on that flush for stream 1 of an h2c `Upgrade`, so any
+  plaintext client could trigger it with an upgrade followed by a second request. Each answer now
+  releases the stream before it flushes (the session copies the response at submit), and releasing
+  a slot that is not live is refused (and asserts where asserts are on).
+  **Behavior change for `KlHttp2ServerSession` implementations:** the header name/value and body
+  pointers passed to `submit_response` are borrowed for that call only and are freed before the
+  following `flush`, so a session must copy whatever it sends later (the bundled nghttp2 adapter
+  already does). `flush` may report a stream it closes while sending (`on_stream_reset`) from
+  inside the call. Both rules are now stated in `<keel/http2_server.h>`.
+
 - **The chunked request decoder rejects bare LF and control bytes in extensions and trailers, and
   caps their length (behavior change).** It skipped a chunk extension up to the next CR and a trailer
   line up to its CRLF, accepting any byte on the way, with no length limit (those bytes reach no
@@ -446,6 +461,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   response was being sent failed the send, so a client that shut down its write side after the
   request (`shutdown(SHUT_WR)`) got a cut-off response. A FIN now ends only the read side (the next
   read sees EOF); the send fails only on an error delivery or a reset. (behavior change)
+- **An HTTP/2 client closed from its response callback gets no `on_error` from a failed receive.**
+  When the session completed a stream inside its receive (the response callback closed the client)
+  and then failed on a later frame of the same batch, the receive-failure path checked only for a
+  freed client, so a closed one was still reported to `on_error`. It now checks for a close too, as
+  the flush paths do.
+
 - **A refused async client start leaves the shared `KlEventCtx` on its own socket provider.**
   `kl_http_client_start` and `kl_http_client_start_pooled` wrote `cfg->sockets` to the caller's ctx
   before checking that the ctx's loop could drive it. When the check refused the start, the ctx kept

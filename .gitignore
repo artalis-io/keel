@@ -27,6 +27,7 @@ integrations/http2/nghttp2/tests/test_destroy_open_streams
 integrations/http2/nghttp2/tests/test_rst_after_response
 integrations/http2/nghttp2/tests/test_h2_limits
 integrations/http2/nghttp2/tests/e2e_idle
+integrations/http2/nghttp2/tests/e2e_h2c_upgrade
 integrations/http2/nghttp2/tests/*.exe
 integrations/tls/openssl/tests/tls_e2e
 integrations/tls/mbedtls/tests/tls_e2e
