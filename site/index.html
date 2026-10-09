@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Keel: a portable, event-driven transport substrate for C</title>
-  <meta name="description" content="Keel is a portable, event-driven transport substrate for C: a composable event context driving stream, listener, and datagram transports over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) execution models, plus lwIP-raw and UEFI providers that need no OS sockets. Built-in protocol families: HTTP/1.1, HTTP/2, WebSocket, SSE, and an async DNS resolver. No forced dependencies.">
+  <title>Keel v3.3.0: a portable, event-driven transport substrate for C</title>
+  <meta name="description" content="Keel v3.3.0 is a portable, event-driven transport substrate for C. Socket streams, listeners, datagrams, and process I/O pipes share one event loop, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Readiness and completion backends, lwIP and UEFI providers, writable-again stream callbacks, and six rounds of audit hardening. No forced dependencies.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Keel: a portable, event-driven transport substrate for C">
-  <meta property="og:description" content="A composable event context driving stream, listener, and datagram transports, with built-in protocol families on top. Readiness and completion as orthogonal execution models (epoll/kqueue/WSAPoll + io_uring/IOCP), plus lwIP-raw and UEFI providers that run with no OS sockets. Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
+  <meta property="og:title" content="Keel v3.3.0: a portable, event-driven transport substrate for C">
+  <meta property="og:description" content="Keel v3.3.0 adds anonymous pipes for process I/O and writable-again stream callbacks, with six rounds of audit hardening across HTTP, TLS, DNS, and completion transports. One event loop for socket streams, listeners, datagrams, and pipes. Portable C11. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Keel: a portable, event-driven transport substrate for C">
-  <meta name="twitter:description" content="Stream, listener, and datagram transports over readiness and completion execution models, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
+  <meta name="twitter:title" content="Keel v3.3.0: a portable, event-driven transport substrate for C">
+  <meta name="twitter:description" content="Keel v3.3.0 adds anonymous pipes for process I/O and writable-again stream callbacks, with six rounds of audit hardening across HTTP, TLS, DNS, and completion transports. Portable C11. No forced dependencies.">
   <meta name="twitter:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
@@ -26,10 +26,11 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "Keel",
+    "softwareVersion": "3.3.0",
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "NetworkingRuntime",
     "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
-    "description": "A portable, event-driven transport substrate for C: a composable event context over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) execution models behind a platform-neutral socket seam (POSIX/Winsock/lwIP/UEFI), with stream, listener, and datagram transports and built-in protocol families: HTTP/1.1, HTTP/2, WebSocket, SSE, and an async DNS resolver. No forced dependencies.",
+    "description": "A portable, event-driven transport substrate for C: one event loop over readiness and completion backends for socket streams, listeners, datagrams, and pipes, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Version 3.3.0 adds anonymous process I/O pipes, writable-again stream callbacks, and six rounds of audit hardening. No forced dependencies.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -61,6 +62,7 @@
       <nav aria-label="Primary" class="flex items-center gap-2">
         <div class="hidden md:flex items-center gap-x-6 text-sm">
           <a href="#layers" class="link">Layers</a>
+          <a href="#release" class="link">v3.3.0</a>
           <a href="#evidence" class="link">Evidence</a>
           <a href="#principles" class="link">Principles</a>
           <a href="#protocols" class="link">Protocols</a>
@@ -78,6 +80,7 @@
           </summary>
           <div class="nav-menu">
             <a href="#layers" class="link">Layers</a>
+            <a href="#release" class="link">v3.3.0</a>
             <a href="#evidence" class="link">Evidence</a>
             <a href="#principles" class="link">Principles</a>
             <a href="#protocols" class="link">Protocols</a>
@@ -139,6 +142,12 @@
             </a>
           </div>
 
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            <a href="#release" class="link">Keel v3.3.0</a>: anonymous pipes for
+            process I/O, writable-again stream callbacks, and six rounds of
+            audit hardening.
+          </p>
+
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
             <div class="flex items-center gap-2">
               <svg focusable="false" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/></svg>
@@ -150,7 +159,7 @@
             </div>
             <div class="flex items-center gap-2">
               <svg focusable="false" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><line x1="11" y1="7" x2="6" y2="16"/><line x1="13" y1="7" x2="18" y2="16"/><line x1="7" y1="18" x2="17" y2="18"/></svg>
-              <span>TCP &middot; UDP &middot; HTTP &middot; WS &middot; DNS</span>
+              <span>TCP &middot; UDP &middot; Pipes &middot; HTTP &middot; WS &middot; DNS</span>
             </div>
             <div class="flex items-center gap-2">
               <svg focusable="false" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 8 12 12 20 8"/><polyline points="4 8 4 16 12 20 20 16 20 8"/><polyline points="4 8 12 4 20 8"/><line x1="12" y1="12" x2="12" y2="20"/></svg>
@@ -184,11 +193,16 @@
     KlHttpServer s;
     KlHttpServerConfig cfg = { .<span class="tk-key">port</span> = <span class="tk-num">7070</span> };
 
-    <span class="tk-fn">kl_http_server_init</span>(&amp;s, &amp;cfg);
-    <span class="tk-fn">kl_http_server_route</span>(&amp;s, <span class="tk-str">"GET"</span>, <span class="tk-str">"/run"</span>,
-        handle_run, NULL, NULL);
-    <span class="tk-fn">kl_http_server_run</span>(&amp;s);
+    <span class="tk-kw">if</span> (<span class="tk-fn">kl_http_server_init</span>(&amp;s, &amp;cfg) != <span class="tk-num">0</span>)
+        <span class="tk-kw">return</span> <span class="tk-num">1</span>;
+    <span class="tk-kw">if</span> (<span class="tk-fn">kl_http_server_route</span>(&amp;s, <span class="tk-str">"GET"</span>, <span class="tk-str">"/run"</span>,
+            handle_run, NULL, NULL) != <span class="tk-num">0</span>) {
+        <span class="tk-fn">kl_http_server_free</span>(&amp;s);
+        <span class="tk-kw">return</span> <span class="tk-num">1</span>;
+    }
+    <span class="tk-kw">int</span> rc = <span class="tk-fn">kl_http_server_run</span>(&amp;s);
     <span class="tk-fn">kl_http_server_free</span>(&amp;s);
+    <span class="tk-kw">return</span> rc != <span class="tk-num">0</span>;
 }</pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
@@ -200,6 +214,72 @@
           </p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section id="release" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Keel v3.3.0</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+          Process I/O on the same loop. Hardened across the stack.
+        </h2>
+        <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+          Anonymous pipe pairs extend the stream transport to an embedder's
+          child processes. Six rounds of C audits and their re-reviews tighten
+          parsing, callback lifetime, TLS, DNS, HTTP/2, and completion I/O.
+          <a href="https://github.com/artalis-io/keel/blob/v3.3.0/CHANGELOG.md#330" class="link">Read the release and upgrade notes</a>.
+        </p>
+      </div>
+      <div class="mt-8 grid md:grid-cols-3 gap-6">
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <h3 class="text-paper-50 font-medium">Anonymous pipe pairs</h3>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            <code class="text-paper-200">kl_anon_pipe_create</code> returns a
+            directional <code class="text-paper-200">KlPipeStream</code> and a
+            native child end for your process spawner. POSIX engines use ordinary
+            pipes through watchers; Windows uses private named pipes on IOCP.
+            Keel leaves process creation to the embedder. Both ends start
+            close-on-exec or non-inheritable.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/include/keel/anon_pipe.h" class="link">Pipe API and platform limits</a>,
+            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/include/keel/anon_pipe_native.h" class="link">native-end handoff</a>.
+          </p>
+        </div>
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <h3 class="text-paper-50 font-medium">Writable-again callbacks</h3>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            After <code class="text-paper-200">KL_STREAM_WOULD_BLOCK</code>,
+            <code class="text-paper-200">kl_stream_on_writable</code> signals
+            when to retry, on sockets and pipes alike. The retry reports whether
+            capacity returned or the write side failed. Graceful close also
+            completes after a terminal write failure.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/contracts/stream.md" class="link">Stream and close contract</a>.
+          </p>
+        </div>
+        <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+          <h3 class="text-paper-50 font-medium">Limits and lifetime safety</h3>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            Bounded chunk extensions and trailers, deferred async-client startup
+            errors, TLS-aware pool APIs, and an optional redirect policy callback.
+            DNS spoofing resistance, HTTP/2 limits and h2c upgrade handling, and
+            ordered, bounded completion output receive fixes across the stack.
+          </p>
+        </div>
+      </div>
+      <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+        Upgrading from 3.2.0: rebuild all consumers against the new headers;
+        Keel preserves source compatibility, not ABI compatibility. Build
+        requirements are unchanged. Review the observable behavior changes:
+        HTTP/2 client bodies default to a 16 MiB per-stream cap; mbedTLS client
+        creation without a CA bundle now fails (unverified clients use an
+        explicit insecure factory); and enum switches must account for
+        <code class="text-paper-200">KL_ERR_REDIRECT_REFUSED</code> and
+        <code class="text-paper-200">KL_IO_RESOURCE_EXHAUSTED</code>.
+      </p>
     </div>
   </section>
 
@@ -227,7 +307,11 @@
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">local build</span>
             </header>
-<pre><span class="tk-com"># Build libkeel.a with the platform default (epoll / kqueue).</span>
+<pre><span class="tk-com"># Get the v3.3.0 source release.</span>
+$ git clone --branch v3.3.0 --depth 1 https://github.com/artalis-io/keel.git
+$ cd keel
+
+<span class="tk-com"># Build libkeel.a with the platform default (epoll / kqueue).</span>
 $ make
 
 <span class="tk-com"># Linux 5.6+: completion-native I/O over io_uring (SQE/CQE, splice).</span>
@@ -312,7 +396,7 @@ $ make examples</pre>
                 <tr>
                   <td>IOCP (Windows)</td>
                   <td class="cmp-part">completion</td>
-                  <td>Lifecycle and capability-negotiation suite plus an HTTP-over-IOCP smoke on the Windows (IOCP) CI job.</td>
+                  <td>Unit + integration suites via <code class="text-paper-200">make test-win-iocp</code>, plus HTTP, mock-TLS, async/thread-pool, and datagram smokes on the Windows (IOCP) CI job. Native MSVC also runs IOCP runtime probes via <code class="text-paper-200">make CC=cl BACKEND=iocp test-msvc</code>.</td>
                 </tr>
                 <tr>
                   <td>pollcomp (portable double)</td>
@@ -400,6 +484,8 @@ $ make examples</pre>
               listeners (<code class="text-paper-200">KlListener</code>), and
               datagrams (<code class="text-paper-200">KlDatagram</code>) are peers
               on the same loop, not an afterthought.
+              Named pipes and anonymous process-I/O pipes expose the same
+              stream contract, including writable-again backpressure callbacks.
               <code class="text-paper-200">KlDatagram</code> exposes async receive
               with source and destination addressing; batching
               (<code class="text-paper-200">recvmmsg</code>/<code class="text-paper-200">sendmmsg</code>),
@@ -509,14 +595,14 @@ $ make examples</pre>
         <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
           <div class="flex items-center gap-2 text-paper-50 font-medium">
             <svg focusable="false" class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><line x1="11" y1="7" x2="6" y2="16"/><line x1="13" y1="7" x2="18" y2="16"/><line x1="7" y1="18" x2="17" y2="18"/></svg>
-            Both transports
+            Streams and datagrams
           </div>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
             <code class="text-paper-200">KlStream</code>,
             <code class="text-paper-200">KlListener</code>, and
             <code class="text-paper-200">KlDatagram</code> are peers on the same
-            loop, so TCP and UDP protocols share one connection model rather than
-            two runtimes.
+            loop. Socket streams, named pipes, and anonymous pipe pairs share
+            the stream contract; TCP and UDP protocols use the same runtime.
           </p>
         </div>
         <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
@@ -588,12 +674,22 @@ $ make examples</pre>
                 <tr>
                   <td>TCP server &amp; client</td>
                   <td class="cmp-yes">built-in</td>
-                  <td>Connection pool + state machine, keep-alive, timeouts, backpressure drain; blocking and async clients with pooling and redirects.</td>
+                  <td>Connection pool + state machine, keep-alive, timeouts, backpressure drain; blocking and async clients with pooling and redirects. TLS-aware pool acquire/release APIs and an optional redirect policy callback.</td>
                 </tr>
                 <tr>
                   <td>Windows Named Pipes</td>
                   <td class="cmp-yes">built-in</td>
                   <td>Local-IPC client and listener, each connection an ordinary <code class="text-paper-200">KlStream</code>: the Windows counterpart of an AF_UNIX stream. IOCP engine only (refused, not emulated, on readiness engines); never routed through the socket seam.</td>
+                </tr>
+                <tr>
+                  <td>Anonymous pipe pairs</td>
+                  <td class="cmp-yes">built-in</td>
+                  <td><code class="text-paper-200">kl_anon_pipe_create</code>: a read-only or write-only <code class="text-paper-200">KlPipeStream</code> plus a native child end. POSIX engines with native-descriptor watchers (including io_uring/pollcomp); Windows IOCP only. Both ends start close-on-exec/non-inheritable; the embedder owns spawning and child-end handoff. Cosmopolitan on a Windows host has a known blocked-writer busy-wake defect.</td>
+                </tr>
+                <tr>
+                  <td>Stream backpressure</td>
+                  <td class="cmp-yes">built-in</td>
+                  <td><code class="text-paper-200">kl_stream_on_writable</code> delivers a writable-again edge after <code class="text-paper-200">KL_STREAM_WOULD_BLOCK</code>. Retry the write to learn whether capacity returned or the write side failed; works across socket and pipe streams.</td>
                 </tr>
                 <tr>
                   <td>Datagram transport</td>
@@ -633,7 +729,7 @@ $ make examples</pre>
                 <tr>
                   <td>HTTP/2</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Server and client surfaces use session vtables; backend choice (e.g. nghttp2) stays explicit.</td>
+                  <td>Server and client surfaces use session vtables; backend choice (e.g. nghttp2) stays explicit. h2c upgrade support is an optional server-session op. Client response bodies default to a 16 MiB per-stream cap; server stream, window, and header-list limits reach the adapter.</td>
                 </tr>
                 <tr>
                   <td>TLS</td>
@@ -876,7 +972,10 @@ $ make examples</pre>
               <p class="mt-1 text-sm text-mute-400 leading-relaxed">
                 Header size, body size, multipart part limits, drain buffers,
                 connection timeouts, idle timers, and route-level readers make
-                overload behavior explicit.
+                overload behavior explicit. Chunked requests cap extension
+                lists at 4096 bytes and trailer sections at 8192 bytes, rejecting
+                bare LF and disallowed control bytes. HTTP/2 clients default to
+                a 16 MiB body cap per stream.
               </p>
             </div>
           </div>
@@ -938,6 +1037,7 @@ $ make examples</pre>
 $ make analyze    <span class="tk-com"># clang static analyzer</span>
 $ make cppcheck   <span class="tk-com"># static analysis</span>
 $ make fuzz       <span class="tk-com"># libFuzzer parser and protocol targets</span>
+$ make check-pipe-seam check-cloexec <span class="tk-com"># pipe isolation and descriptor inheritance</span>
 $ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene gates</span></pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
@@ -994,7 +1094,8 @@ $ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene 
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Page last updated <time datetime="2026-09">September&nbsp;2026</time>.
+        Page last updated <time datetime="2026-10-09">October&nbsp;9,&nbsp;2026</time>
+        for <a href="https://github.com/artalis-io/keel/releases/tag/v3.3.0" class="link">Keel v3.3.0</a>.
         A portable, event-driven transport substrate for C: an I/O core, TCP/UDP
         transports, and built-in protocol families.
       </p>

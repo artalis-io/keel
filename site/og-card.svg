@@ -6,8 +6,8 @@
   </g>
   <rect x="72" y="72" width="96" height="96" rx="18" fill="none" stroke="#f4f4f5" stroke-width="7"/>
   <path d="M104 136V104M136 104l-24 24M118 122l18 18" stroke="#f4f4f5" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="72" y="250" fill="#f4f4f5" font-family="Inter, Arial, sans-serif" font-size="76" font-weight="700">Keel</text>
+  <text x="72" y="250" fill="#f4f4f5" font-family="Inter, Arial, sans-serif" font-size="76" font-weight="700">Keel v3.3.0</text>
   <text x="72" y="322" fill="#d4d4d8" font-family="Inter, Arial, sans-serif" font-size="40" font-weight="500">The transport substrate for sandboxed systems.</text>
-  <text x="72" y="396" fill="#a1a1aa" font-family="JetBrains Mono, Menlo, monospace" font-size="26">epoll / kqueue / io_uring / poll</text>
-  <text x="72" y="442" fill="#22d3a8" font-family="JetBrains Mono, Menlo, monospace" font-size="26">Hull runtime <tspan fill="#71717a">-&gt;</tspan> Keel transport <tspan fill="#71717a">-&gt;</tspan> side-car binaries</text>
+  <text x="72" y="396" fill="#a1a1aa" font-family="JetBrains Mono, Menlo, monospace" font-size="26">epoll / kqueue / WSAPoll / poll / io_uring / IOCP</text>
+  <text x="72" y="442" fill="#22d3a8" font-family="JetBrains Mono, Menlo, monospace" font-size="26">Process I/O pipes / stream backpressure / audit hardening</text>
 </svg>
