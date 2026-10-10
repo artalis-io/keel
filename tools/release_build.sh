@@ -42,7 +42,8 @@ git archive --format=tar --prefix="$NAME/" "$REF" > "$OUT/$NAME.tar.tmp"
 #
 # The fuzz corpora are excluded because CR is deliberate there: those seeds carry CRLF as the
 # protocol syntax under test (HTTP request/response, PROXY v1). .gitattributes marks them -text so
-# they pass through byte for byte, and this check must agree with that.
+# they pass through byte for byte, and this check must agree with that. PNG images
+# are binary too; their compressed data and signature may contain CR bytes.
 CRLF_SCAN=$(mktemp -d)
 trap 'rm -rf "$CRLF_SCAN"' EXIT
 tar xf "$OUT/$NAME.tar.tmp" -C "$CRLF_SCAN"
@@ -50,7 +51,7 @@ tar xf "$OUT/$NAME.tar.tmp" -C "$CRLF_SCAN"
 # matches. NOT `grep "$(printf \\r)"`: command substitution collapses that to an EMPTY
 # pattern, and an empty pattern matches every file, which made the first draft of this guard flag
 # whatever it happened to scan first.
-offenders=$(find "$CRLF_SCAN" -type f ! -path '*/fuzz/corpus_*' ! -name '*.bin' \
+offenders=$(find "$CRLF_SCAN" -type f ! -path '*/fuzz/corpus_*' ! -name '*.bin' ! -name '*.png' \
               -exec sh -c 'tr -dc "\\r" < "$1" | grep -q . && echo "$1"' _ {} \; 2>/dev/null \
             | sed "s|^$CRLF_SCAN/$NAME/||" | sort | head -20)
 if [ -n "$offenders" ]; then

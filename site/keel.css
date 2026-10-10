@@ -84,6 +84,35 @@ code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consola
 .layer-card header { padding: .625rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: .5rem; }
 .layer-tag { font-size: .625rem; text-transform: uppercase; letter-spacing: .08em; color: #808089; margin-left: auto; }
 
+/* Architecture uses normal text boxes so labels remain readable on small screens. */
+.hero-spacing { padding-top: 3rem; padding-bottom: 3rem; }
+.nav-desktop { display: none; }
+.architecture-map { margin: 0; padding: 1.25rem; border: 1px solid rgba(255,255,255,0.12); border-radius: .625rem; background: #0f0f10; }
+.arch-stage { padding: 1rem; border: 1px solid rgba(255,255,255,0.10); border-radius: .375rem; min-width: 0; }
+.arch-semantics { border-color: rgba(34,211,168,0.45); }
+.arch-label { color: #22d3a8; font-size: .6875rem; text-transform: uppercase; letter-spacing: .07em; line-height: 1.5; }
+.architecture-map p { margin: .625rem 0 0; font-size: .875rem; line-height: 1.6; overflow-wrap: anywhere; }
+.architecture-map code { font-size: .8125rem; }
+.architecture-map .arch-note { font-size: .8125rem; color: #a1a1aa; }
+.arch-connector { text-align: center; color: #808089; padding: .25rem; }
+.arch-axes { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .75rem; }
+.arch-stage .rule { margin-top: .875rem; }
+.arch-platform { margin-top: .75rem; padding: 1rem; border-left: 2px solid #808089; }
+.architecture-map figcaption { margin-top: 1rem; font-size: .875rem; color: #e4e4e7; }
+.architecture-detail > summary { cursor: pointer; padding: .5rem 0; font-size: .875rem; }
+.evidence-list { padding-left: 1.125rem; }
+.evidence-list li + li { margin-top: .75rem; }
+section[id] { scroll-margin-top: 4.5rem; }
+@media (max-width: 600px) {
+  .arch-axes { grid-template-columns: minmax(0,1fr); }
+  .architecture-map { padding: .875rem; }
+}
+@media (min-width: 1024px) {
+  .hero-spacing { padding-top: 4rem; padding-bottom: 4rem; }
+  .nav-desktop { display: flex; }
+  .nav-mobile { display: none; }
+}
+
 /* ============================================================
    Tailwind v3 utility classes used by the page.
    ============================================================ */
@@ -341,7 +370,7 @@ summary:focus-visible,
 /* main is focus target of the skip link but should not draw a ring on programmatic focus. */
 main:focus { outline: none; }
 
-/* No-JS mobile navigation via <details>/<summary> (shown below md only). */
+/* No-JS navigation disclosure below the 1024px desktop breakpoint. */
 .nav-mobile { position: static; }
 .nav-mobile > summary {
   display: inline-flex; align-items: center; gap: .375rem;
@@ -363,7 +392,7 @@ main:focus { outline: none; }
 .nav-menu a { padding: .625rem 0; font-size: .9375rem; border-top: 1px solid rgba(255,255,255,0.06); }
 .nav-menu a:first-child { border-top: 0; }
 
-/* md: >= 768px - hide the mobile disclosure once the inline nav is available. */
+/* Retained md display utility; navigation uses its own desktop breakpoint. */
 @media (min-width: 768px) {
   .md\:hidden { display: none; }
 }

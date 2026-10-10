@@ -14,3 +14,4 @@
 # they are binary as far as Git is concerned and pass through byte for byte.
 fuzz/corpus_*/** -text
 *.bin -text
+*.png -text
