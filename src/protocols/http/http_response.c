@@ -342,6 +342,20 @@ static inline const KlSocketProvider *res_provider(const KlHttpResponse *res) {
     return res->ctx ? res->ctx->sockets : NULL;
 }
 
+/* Whether this response has anything an HTTP/1.1 response can be written to: a raw socket, or a TLS
+ * session to encrypt into. The entry points below that emit HTTP/1.1 framing *as they are called*
+ * (begin_stream, end_stream, enable_drain, send) refuse when it is false, so a response that was
+ * never bound to an HTTP/1.1 transport cannot put one on some other transport's wire. That is the
+ * state of an HTTP/2 stream's response (http2_server.c gives it no target, because there the session
+ * owns the connection and frames it) and of any response the caller never connected to a socket. It
+ * mirrors the policy the completion axis already applies to a streamed response that is not a pooled
+ * connection's own: kl_http_comp_stream_write() refuses it rather than treat it as some connection
+ * it is not part of. Validity is kl_handle_valid(), never `< 0`: the handle is pointer-width and the
+ * invalid sentinel is not negative on every platform. */
+static inline int res_has_wire(const KlHttpResponse *res) {
+    return res->tls || kl_handle_valid(res->conn_fd);
+}
+
 /* Vectored write through the socket provider: the raw writev() when the provider
  * supports vectored I/O (POSIX / NULL), else a serialized kl_sock_send over the
  * iov. Same return contract as writev (bytes written, -1 on error, errno set). */
@@ -490,6 +504,9 @@ int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
 }
 
 int kl_http_response_send(KlHttpResponse *res) {
+    /* No HTTP/1.1 transport: refuse before a status line is built, rather than write one to a
+     * handle that is not this response's to write (an HTTP/2 stream's, or an unbound one). */
+    if (!res_has_wire(res)) return -1;
     /* Buffer body path: single-attempt writev with send_offset tracking */
     if (res->body_mode == KL_HTTP_BODY_BUFFER || res->body_mode == KL_HTTP_BODY_NONE) {
         char cl_buf[48];
@@ -690,7 +707,9 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
 
 int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
                               size_t max_size) {
-    if (!res || !kl_allocator_ops_valid(alloc)) return -1;
+    /* The drain's writer flushes HTTP/1.1 bytes to the response's write target; with none, refuse
+     * rather than install an emitter that cannot emit. */
+    if (!res || !kl_allocator_ops_valid(alloc) || !res_has_wire(res)) return -1;
     kl_drain_init(&res->drain, response_drain_writer, res, alloc);
     if (max_size > 0)
         kl_drain_set_max_size(&res->drain, max_size);
@@ -735,6 +754,12 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
                              KlHttpResponseWriteFn *out_write, void **out_ctx) {
     res->body_mode = KL_HTTP_BODY_STREAM;
+    /* Refuse before the status line, the headers and the first chunk are written: this function
+     * emits as it is called, so the check has to precede the first write rather than follow it.
+     * body_mode is left as STREAM, so an HTTP/2 stream still gets the 500 that
+     * h2_submit_response() already reserves for a streaming body, and the caller sees the failure
+     * in the return value it already checks. */
+    if (!res_has_wire(res)) return -1;
     kl_http_response_status(res, status);
     if (kl_http_response_header(res, "Transfer-Encoding", "chunked") < 0)
         return -1;
@@ -786,6 +811,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
 
 int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_error) return -1;
+    if (!res_has_wire(res)) return -1;   /* nothing to write the terminating chunk to */
     if (res->head_request) {          /* no body to end, but the stream is over all the same */
         res->stream_ended = 1;
         return 0;

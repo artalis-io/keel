@@ -5,6 +5,25 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Fixed
+
+- **HTTP/2 server: a handler that streams no longer writes HTTP/1.1 framing onto the HTTP/2
+  connection.** An HTTP/2 stream's response was initialized with the connection's live socket and
+  TLS session, and `kl_http_response_begin_stream()` emits as it is called: the status line, the
+  headers and every chunk go straight out through that target. A route served over HTTP/2 (ALPN `h2`
+  or an `h2c` upgrade) whose handler streamed (a chunked body, or any `kl_http_sse_*` route) put
+  `HTTP/1.1 200 OK`, `Transfer-Encoding: chunked` and the body bytes on the connection where the
+  client expects an HTTP/2 frame, in the clear on a plaintext connection and into the TLS record
+  stream carrying the frames on a TLS one. `h2_submit_response()` then submitted its own 500 on top,
+  so the stream got two answers, the first of them unframed, and a strict client fails the connection
+  over it. An HTTP/2 stream now has no HTTP/1.1 write target, and the response entry points that emit
+  eagerly (`kl_http_response_begin_stream`, `kl_http_response_send`, `kl_http_response_end_stream`,
+  `kl_http_response_enable_drain`) refuse with -1 before any byte is produced, the same policy the
+  completion axis already applied to a streamed response that is not a pooled connection's own.
+  Handlers that check the return value, the documented pattern, now take their existing failure
+  branch and the stream is still answered with the 500 reserved for a streaming body. HTTP/1.1
+  streaming is unchanged, and HTTP/2 streaming is still not supported.
+
 ## [3.3.0]
 
 Minor release. No release date here (the tag and publish are a separately authorized step).

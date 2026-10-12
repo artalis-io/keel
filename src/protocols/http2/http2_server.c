@@ -446,8 +446,20 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         h2_stream_destroy(h2c, stream);
         return -1;
     }
-    stream->res.conn_fd = h2c->conn->stream.fd;
-    stream->res.tls = h2c->conn->tls;
+    /* An HTTP/2 stream has no HTTP/1.1 write target. The session owns the connection and frames
+     * what goes on it, so the stream's response must not be able to write the socket or the
+     * connection's TLS session by itself: kl_http_response_begin_stream() and
+     * kl_http_response_send() write *eagerly*, through exactly these two fields, so a handler that
+     * streams (a chunked body, or any kl_http_sse_* route) put "HTTP/1.1 200 OK ... Transfer-Encoding:
+     * chunked" framing on the HTTP/2 connection -- in the clear on a plaintext one, and into the TLS
+     * record stream that carries the frames on a TLS one -- long before h2_submit_response() got a
+     * chance to reject the streaming body. With no target the response layer refuses them
+     * (http_response.c res_has_wire) and the existing 500 fallback still answers the stream.
+     * The handle is set to the invalid sentinel rather than left alone: the stream slot is memset,
+     * so an unassigned conn_fd would be 0, which is a *valid* handle (and stdin). ctx is kept: it
+     * is not a write target, and it records the loop this stream's own I/O is bound to. */
+    stream->res.conn_fd = KL_INVALID_SOCKET;
+    stream->res.tls = NULL;
     stream->res.ctx = h2c->conn->stream.ctx;
     stream->res.keep_alive = 1;
     stream->res.head_request = (req->method_len == 4 &&

@@ -1967,6 +1967,222 @@ UTEST(h2, head_fallback_500_has_no_body) {
     ASSERT_EQ(blen, (size_t)0);                   /* was: "Streaming responses not supported ..." */
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * A streamed response must never put HTTP/1.1 framing on this connection.
+ *
+ * kl_http_response_begin_stream() writes eagerly: the status line, the headers and every chunk go
+ * out through the response's own write target. An HTTP/2 stream has no such target: the session
+ * owns the connection and frames what goes on it. The stream response was nevertheless initialized
+ * with the connection's live socket and TLS session, so a handler that streamed (a chunked body,
+ * or any kl_http_sse_* route) put raw "HTTP/1.1 200 OK ... Transfer-Encoding: chunked" bytes on
+ * the HTTP/2 connection, and h2_submit_response() then submitted its own 500 HEADERS on top: two
+ * answers to one request, the first of them not an HTTP/2 frame at all.
+ *
+ * The test above this one drives the same handler and asserts on the session's recorded status,
+ * which is exactly why the framing went unnoticed: the status was always the 500. These tests read
+ * the socket. They assert the transport saw nothing, and separately that the session still got its
+ * 500, so the refusal cannot be paid for by losing the error response.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* What the handler's own calls returned, so the refusal is asserted where the handler sees it. */
+static int g_begin_rc;
+static int g_write_rc;
+static int g_end_rc;
+
+static void wire_streaming_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    g_begin_rc = kl_http_response_begin_stream(res, 200, &w, &wc);
+    if (g_begin_rc < 0) return;
+    g_write_rc = w(wc, "HELLO-STREAM", 12);
+    g_end_rc = kl_http_response_end_stream(res);
+}
+
+/* Everything the server wrote to the connection end of the pair since the last read. The writes
+ * under test are synchronous inside the nghttp2 callbacks, so by the time the callbacks have
+ * returned the whole of it is in the socket buffer: poll once with a real timeout to catch it,
+ * then drain with no wait left. */
+static size_t wire_read_all(int fd, char *buf, size_t cap) {
+    size_t total = 0;
+    int first = 1;
+    while (total < cap - 1) {
+        int r = kl_test_poll1(fd, 0, first ? 200 : 0);
+        first = 0;
+        if (r <= 0) break;
+        long n = kl_test_sockread(fd, buf + total, cap - 1 - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+static int wire_contains(const char *buf, size_t len, const char *needle) {
+    return len > 0 && strstr(buf, needle) != NULL;
+}
+
+UTEST(h2, a_streaming_handler_emits_no_http1_framing_on_the_wire) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "GET", "/stream", wire_streaming_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    /* Nothing the upgrade itself produced should be sitting on the socket: start clean. */
+    char pre[8];
+    ASSERT_EQ(wire_read_all(pfd[0], pre, sizeof pre), (size_t)0);
+
+    g_begin_rc = g_write_rc = g_end_rc = 0;
+    mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/stream", 7, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+
+    char wire[4096];
+    size_t n = wire_read_all(pfd[0], wire, sizeof wire);
+
+    /* The defect: raw HTTP/1.1 wire format on an HTTP/2 connection. */
+    ASSERT_FALSE(wire_contains(wire, n, "HTTP/1.1"));
+    ASSERT_FALSE(wire_contains(wire, n, "Transfer-Encoding"));
+    ASSERT_FALSE(wire_contains(wire, n, "chunked"));
+    ASSERT_FALSE(wire_contains(wire, n, "HELLO-STREAM"));
+    ASSERT_EQ(n, (size_t)0);                       /* the transport saw nothing at all */
+
+    /* The refusal reaches the handler before any side effect, and it is a refusal, not a silent
+     * success: nothing was written, so the write and end calls never happened. */
+    ASSERT_EQ(g_begin_rc, -1);
+    ASSERT_EQ(g_write_rc, 0);
+    ASSERT_EQ(g_end_rc, 0);
+
+    /* And the HTTP/2 error response still stands: the session is still the only writer, and it
+     * still answers the stream with the existing 500. */
+    ASSERT_EQ(mock.last_status, 500);
+
+    /* No transport close: the connection is still the one we handed it, and still writable. */
+    ASSERT_EQ(conn.stream.fd, (KlSocketHandle)pfd[1]);
+    ASSERT_TRUE(kl_test_poll1(pfd[1], 1, 0) > 0);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
+/* A recording TLS session, to check the other half of the same leak: the stream response was also
+ * handed the connection's TLS session, so a streaming handler wrote its framing into the session
+ * that carries the HTTP/2 frames (encrypted, so invisible to the socket above). The optional vtable
+ * entries stay NULL: this test only needs to know whether anything was handed to write(). */
+typedef struct {
+    KlTls base;
+    size_t write_calls;
+    size_t write_bytes;
+    char   first[256];
+} RecTls;
+
+static KlTlsResult rec_handshake(KlTls *self, KlSocketHandle fd) {
+    (void)self; (void)fd; return KL_TLS_OK;
+}
+static kl_ssize_t rec_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+    (void)self; (void)fd; (void)buf; (void)len; return 0;
+}
+static kl_ssize_t rec_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)fd;
+    RecTls *t = (RecTls *)self;
+    t->write_calls++;
+    t->write_bytes += len;
+    size_t have = strlen(t->first);
+    if (have + len < sizeof t->first) memcpy(t->first + have, buf, len);
+    return (kl_ssize_t)len;
+}
+static KlTlsResult rec_shutdown(KlTls *self, KlSocketHandle fd) {
+    (void)self; (void)fd; return KL_TLS_OK;
+}
+static size_t rec_pending(KlTls *self) { (void)self; return 0; }
+static void rec_reset(KlTls *self) { (void)self; }
+static void rec_destroy(KlTls *self) { (void)self; }
+
+/* Same handler, same connection, but the h2 connection is TLS-protected (an ALPN h2 negotiation
+ * reaches exactly this shape). The bytes must reach neither the socket nor the TLS session. */
+UTEST(h2, a_streaming_handler_writes_nothing_into_the_connections_tls_session) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    RecTls tls; memset(&tls, 0, sizeof tls);
+    tls.base.handshake = rec_handshake;
+    tls.base.read      = rec_read;
+    tls.base.write     = rec_write;
+    tls.base.shutdown  = rec_shutdown;
+    tls.base.pending   = rec_pending;
+    tls.base.reset     = rec_reset;
+    tls.base.destroy   = rec_destroy;
+
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    conn.tls = &tls.base;                       /* the h2 connection runs over TLS */
+    kl_http_router_add(&test_router, "GET", "/stream", wire_streaming_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    g_begin_rc = g_write_rc = g_end_rc = 0;
+    mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/stream", 7, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+
+    char wire[4096];
+    size_t n = wire_read_all(pfd[0], wire, sizeof wire);
+
+    ASSERT_EQ(tls.write_calls, (size_t)0);      /* nothing was handed to the session to encrypt */
+    ASSERT_FALSE(wire_contains(tls.first, strlen(tls.first), "HTTP/1.1"));
+    ASSERT_FALSE(wire_contains(wire, n, "HTTP/1.1"));
+    ASSERT_FALSE(wire_contains(wire, n, "HELLO-STREAM"));
+    ASSERT_EQ(n, (size_t)0);
+
+    ASSERT_EQ(g_begin_rc, -1);
+    ASSERT_EQ(mock.last_status, 500);           /* answered over the session, as before */
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
+/* The same refusal must hold for the other eager public entry point on a response that has no
+ * HTTP/1.1 write target: kl_http_response_send() would otherwise put a whole HTTP/1.1 response
+ * (status line, headers, body) on the HTTP/2 connection without a stream in sight. */
+static void wire_send_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_body_copy(res, "HELLO-BUFFER", 12);
+    g_begin_rc = kl_http_response_send(res);
+}
+
+UTEST(h2, a_direct_response_send_emits_no_http1_framing_on_the_wire) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "GET", "/send", wire_send_handler, NULL, NULL);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    char pre[8];
+    ASSERT_EQ(wire_read_all(pfd[0], pre, sizeof pre), (size_t)0);
+
+    g_begin_rc = 0;
+    mock.callbacks.on_request(mock.cb_user_data, 1, "GET", 3, "/send", 5, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    (void)mock.callbacks.on_stream_end(mock.cb_user_data, 1);
+
+    char wire[4096];
+    size_t n = wire_read_all(pfd[0], wire, sizeof wire);
+    ASSERT_FALSE(wire_contains(wire, n, "HTTP/1.1"));
+    ASSERT_FALSE(wire_contains(wire, n, "HELLO-BUFFER"));
+    ASSERT_EQ(n, (size_t)0);
+    ASSERT_EQ(g_begin_rc, -1);                  /* refused, not sent */
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+}
+
 /* A file response whose file is shorter than its declared size (it shrank after the handler sized
  * it) must not go out as a complete 200: HTTP/2 sends no content-length here, so the client could
  * not tell the body was cut. HTTP/1 closes the connection in the same case (E13). */
