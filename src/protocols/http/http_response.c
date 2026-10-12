@@ -817,6 +817,20 @@ int kl_http_response_end_stream(KlHttpResponse *res) {
         return 0;
     }
 
+    /* Already ended: there is nothing left to do, and nothing to emit. The terminating chunk is what
+     * *ends* a chunked body, so writing a second one does not repeat a harmless step -- it puts
+     * framing where the next response on the kept-alive connection has to start, and because
+     * stream_ended is then set the "a stream that was never ended is never kept alive" rule does not
+     * fire, so that connection is reused with the stray bytes already behind the client. A handler
+     * that ends its own stream and a helper that also ends it (kl_http_sse_end, a compression
+     * wrapper) is the ordinary way to get here, so the second call reports the success it has always
+     * reported and writes nothing: the caller's request -- "this stream is finished" -- is satisfied.
+     * Returning -1 instead would be the larger change: it would send a caller that checks the return
+     * value down an error path for a state that is exactly what it asked for.
+     * Tested against failure, not against the call: stream_ended is set only once the terminator is
+     * actually out, so a termination that failed still returns -1 and is not swallowed here. */
+    if (res->stream_ended) return 0;
+
     if (res->drain_enabled) {
         if (kl_drain_write(&res->drain, "0\r\n\r\n", 5) < 0) {
             res->stream_error = 1;
