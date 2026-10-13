@@ -154,34 +154,53 @@ int kl_http_response_error(KlHttpResponse *res, int code, const char *message);
  * Must be called before kl_http_response_begin_stream(). When enabled,
  * kl_stream_write() buffers data on would-block instead of spin-looping.
  *
+ * The drain's writer flushes HTTP/1.1 bytes to the response's write target, so a response with no
+ * HTTP/1.1 target refuses it: the buffered remainder could never be flushed.
+ *
  * @param res      Response.
  * @param alloc    Allocator for drain buffer.
  * @param max_size Hard cap on buffered bytes (0 = unlimited).
- * @return 0 on success, -1 on error.
+ * @return 0 on success, -1 on error (including a response with no HTTP/1.1 write target).
  */
 int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
                               size_t max_size);
 
 /**
  * @brief Begin chunked streaming response.
+ *
+ * Emits eagerly: the status line, the headers and the terminating framing go out through the
+ * response's write target as this is called. A response with no HTTP/1.1 write target is therefore
+ * refused before any byte is produced (and @p out_write / @p out_ctx are left untouched): the
+ * response of an HTTP/2 stream, whose connection is framed by the HTTP/2 session rather than by
+ * HTTP/1.1, and any response never bound to a socket. Check the return value before writing.
+ *
  * @param res       Response.
  * @param status    HTTP status code.
  * @param out_write Receives the write callback function.
  * @param out_ctx   Receives the write callback context.
- * @return 0 on success, -1 on write error.
+ * @return 0 on success, -1 on write error or when the response has no HTTP/1.1 write target.
  */
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
                              KlHttpResponseWriteFn *out_write, void **out_ctx);
 
 /**
  * @brief End chunked stream (sends final zero-length chunk).
- * @return 0 on success, -1 on error.
+ *
+ * Needs the same write target as kl_http_response_begin_stream(): with none there is no stream to
+ * terminate, and it is refused rather than framing written somewhere else.
+ *
+ * @return 0 on success, -1 on error (including no HTTP/1.1 write target).
  */
 int kl_http_response_end_stream(KlHttpResponse *res);
 
 /**
  * @brief Flush headers + body to the connection fd.
- * @return 0 when done, positive if more to send, -1 on error.
+ *
+ * Only for a response bound to an HTTP/1.1 write target (its own connection fd or TLS session).
+ * A response with none is refused rather than written to a handle that is not its own: an HTTP/2
+ * stream's response, for instance, is sent by the HTTP/2 session, never flushed here.
+ *
+ * @return 0 when done, positive if more to send, -1 on error (including no write target).
  */
 int kl_http_response_send(KlHttpResponse *res);
 
