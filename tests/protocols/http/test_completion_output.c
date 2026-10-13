@@ -1900,14 +1900,23 @@ UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeou
  * This is the same defect through a real KlHttpServer on a real TCP connection, so the wire is the
  * server's own output rather than a test driving the response API.
  *
- * Scope, measured rather than assumed: this server does NOT keep a connection alive after a chunked
- * stream. Verified against the same server build -- a buffered response answers a second request on
- * the same connection; a streamed one is followed by FIN, with no Connection: header either way. So
- * the stray terminator cannot be shown in front of a second request here: it goes out immediately
- * before the server's close. What this test pins is that the response ends AT its single terminating
- * chunk with nothing trailing it -- those trailing bytes are what a client reads as the start of the
- * next response, and what a proxy in front of the server has to make sense of. The reused-connection
- * case is covered directly at the response layer by
+ * Scope, measured rather than assumed. In THIS configuration the handler writes a few bytes that are
+ * all accepted inside the handler, and the driver ends the response there: the connection is closed
+ * after it, with no Connection: header (a buffered response on the same server build does answer a
+ * second request on the same connection). That closure belongs to the all-accepted-inline path and is
+ * NOT a property of streamed responses generally: when the terminating chunk is not fully flushed
+ * inside the handler -- the outbound buffer still holds bytes at handler return, which is what
+ * kl_http_response_enable_drain() produces under backpressure -- the response is finished on the
+ * writable path, the ordinary keep-alive rules apply, and a second request is answered on the same
+ * connection (measured, 4 MiB and 8 MiB streamed bodies with a bounded client receive window). So no
+ * claim is made here either way about closure under backpressure; the contract is the bound, not a
+ * close (docs/contracts/streaming.md: a stream that never got its terminating chunk is never kept
+ * alive, and a buffered remainder is bounded by KlDrain.max_size).
+ *
+ * What this test pins is therefore the part that holds on every path: the response ends AT its single
+ * terminating chunk with nothing trailing it -- those trailing bytes are what a client reads as the
+ * start of the next response, and what a proxy in front of the server has to make sense of. The
+ * reused-connection case is covered directly at the response layer by
  * response.the_next_response_after_a_double_ended_stream_starts_at_the_right_boundary.
  */
 static KlHttpServer te_srv;
@@ -1972,8 +1981,9 @@ UTEST(completion_output, ending_a_stream_twice_leaves_the_connection_framing_cle
     /* The exact length: status line + Transfer-Encoding + empty line + one chunk + one terminator.
      * The unfixed wire is 5 bytes longer -- the stray terminator, byte for byte. */
     ASSERT_EQ((size_t)te_first_len, (size_t)60);
-    /* Not asserted: whether the server closed. It closes after a chunked stream either way (see the
-     * scope note), so it says nothing about this defect. */
+    /* Not asserted: whether the server closed. On this all-accepted-inline path the connection ends
+     * after the response either way, and on other streamed paths it does not (see the scope note), so
+     * closure says nothing about this defect. Recorded, not judged. */
     printf("  (connection closed by the server: %d)\n", te_first_closed);
 }
 

@@ -561,9 +561,10 @@ UTEST(response, end_stream_on_head_marks_the_stream_ended) {
  * kl_http_response_end_stream() guards on stream_error and on head_request, but never on the
  * stream_ended flag it sets itself. Called twice it writes "0\r\n\r\n" twice. One terminating chunk
  * is what ends a chunked body: the second one is not part of the response, it is the first thing the
- * client sees where the *next* response on the kept-alive connection must start. And because
- * stream_ended is then 1, the server's "a stream that was never ended is never kept alive" rule does
- * not fire and the connection is reused, so the stray framing goes out on a live connection.
+ * client sees where the *next* response on the connection must start. And because stream_ended is
+ * then 1, the server's "a stream that was never ended is never kept alive" rule does not fire, so on
+ * a stream the driver does keep (which path it takes decides: docs/contracts/streaming.md) the stray
+ * framing is already behind the client when the next response begins.
  * A handler closing its own stream and a helper that also closes it (kl_http_sse_end, a compress
  * wrapper) is an easy way to get there.
  *

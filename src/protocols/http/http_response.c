@@ -819,16 +819,22 @@ int kl_http_response_end_stream(KlHttpResponse *res) {
 
     /* Already ended: there is nothing left to do, and nothing to emit. The terminating chunk is what
      * *ends* a chunked body, so writing a second one does not repeat a harmless step -- it puts
-     * framing where the next response on the kept-alive connection has to start, and because
-     * stream_ended is then set the "a stream that was never ended is never kept alive" rule does not
-     * fire, so that connection is reused with the stray bytes already behind the client. A handler
-     * that ends its own stream and a helper that also ends it (kl_http_sse_end, a compression
+     * framing where the next response on the connection has to start, and because stream_ended is then
+     * set the "a stream that was never ended is never kept alive" rule does not fire, so on a stream
+     * the driver does keep (docs/contracts/streaming.md bounds the unended stream and the size of the
+     * buffered remainder, KlDrain.max_size) the stray bytes go out behind the client. Whether a given
+     * streamed response is kept is the driver's existing decision, not this guard's, and it varies with
+     * the path taken (scope note, tests/protocols/http/test_completion_output.c).
+     * A handler that ends its own stream and a helper that also ends it (kl_http_sse_end, a compression
      * wrapper) is the ordinary way to get here, so the second call reports the success it has always
      * reported and writes nothing: the caller's request -- "this stream is finished" -- is satisfied.
      * Returning -1 instead would be the larger change: it would send a caller that checks the return
      * value down an error path for a state that is exactly what it asked for.
-     * Tested against failure, not against the call: stream_ended is set only once the terminator is
-     * actually out, so a termination that failed still returns -1 and is not swallowed here. */
+     * Tested against failure, not against the call: stream_ended is set only once the terminator has
+     * been accepted for sending -- written inline, or admitted to the drain when one is enabled -- so a
+     * termination that failed still returns -1 and is not swallowed here. Acceptance is not delivery:
+     * with a drain the terminating bytes can still be queued when this returns 0, which is the
+     * documented contract of this function, not a defect of the guard. */
     if (res->stream_ended) return 0;
 
     if (res->drain_enabled) {
