@@ -23,6 +23,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   Handlers that check the return value, the documented pattern, now take their existing failure
   branch and the stream is still answered with the 500 reserved for a streaming body. HTTP/1.1
   streaming is unchanged, and HTTP/2 streaming is still not supported.
+- **HTTP server: ending a streamed response twice no longer emits a second terminating chunk.**
+  `kl_http_response_end_stream()` guarded against a prior error and against HEAD, but not against the
+  stream having already ended, so a second call wrote `0\r\n\r\n` again. One terminating chunk is what
+  *ends* a chunked body, so the second one is not a repeat of a harmless step: it is framing sitting
+  where the next response on the connection has to start -- and because `stream_ended` was then set,
+  the "a stream that was never ended is never kept alive" rule did not fire and the connection was
+  reused with the stray bytes already behind the client. A handler ending its own stream plus a helper
+  that also ends it (`kl_http_sse_end`, a compression wrapper) is the ordinary way to get there. A
+  repeated `kl_http_response_end_stream()` after a successful one is now a no-op that emits nothing and
+  still returns 0: the caller's request -- this stream is finished -- is already satisfied, and
+  returning an error would send a caller that checks the return value down a failure path for a state
+  it asked for. A termination that *failed* is not a completed one: it keeps returning -1 and a retry
+  still reports the failure.
 
 ## [3.3.0]
 

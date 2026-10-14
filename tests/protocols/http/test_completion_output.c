@@ -1895,4 +1895,96 @@ UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeou
     ASSERT_TRUE(closed);
 }
 
+/* ── A stream ended twice, over a real connection ────────────────────────────────────────────
+ * The response-object tests show the second "0\r\n\r\n" and what it does to a reused response.
+ * This is the same defect through a real KlHttpServer on a real TCP connection, so the wire is the
+ * server's own output rather than a test driving the response API.
+ *
+ * Scope, measured rather than assumed. In THIS configuration the handler writes a few bytes that are
+ * all accepted inside the handler, and the driver ends the response there: the connection is closed
+ * after it, with no Connection: header (a buffered response on the same server build does answer a
+ * second request on the same connection). That closure belongs to the all-accepted-inline path and is
+ * NOT a property of streamed responses generally: when the terminating chunk is not fully flushed
+ * inside the handler -- the outbound buffer still holds bytes at handler return, which is what
+ * kl_http_response_enable_drain() produces under backpressure -- the response is finished on the
+ * writable path, the ordinary keep-alive rules apply, and a second request is answered on the same
+ * connection (measured, 4 MiB and 8 MiB streamed bodies with a bounded client receive window). So no
+ * claim is made here either way about closure under backpressure; the contract is the bound, not a
+ * close (docs/contracts/streaming.md: a stream that never got its terminating chunk is never kept
+ * alive, and a buffered remainder is bounded by KlDrain.max_size).
+ *
+ * What this test pins is therefore the part that holds on every path: the response ends AT its single
+ * terminating chunk with nothing trailing it -- those trailing bytes are what a client reads as the
+ * start of the next response, and what a proxy in front of the server has to make sense of. The
+ * reused-connection case is covered directly at the response layer by
+ * response.the_next_response_after_a_double_ended_stream_starts_at_the_right_boundary.
+ */
+static KlHttpServer te_srv;
+static char te_first[4096];
+static kl_ssize_t te_first_len = -1;
+static int te_first_closed = -1;
+
+static void handle_end_twice(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    w(wc, "abc", 3);
+    (void)kl_http_response_end_stream(res);
+    (void)kl_http_response_end_stream(res);      /* the double close */
+}
+
+static int te_count_term(const char *b, size_t n) {
+    int hits = 0;
+    for (size_t i = 0; i + 5 <= n; i++)
+        if (memcmp(b + i, "0\r\n\r\n", 5) == 0) hits++;
+    return hits;
+}
+
+static void te_run(void) {
+    te_first[0] = '\0';
+    te_first_len = -1;
+    te_first_closed = -1;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .read_timeout_ms = 5000 };
+    if (kl_http_server_init(&te_srv, &cfg) < 0) return;
+    kl_http_server_route(&te_srv, "GET", "/twice", handle_end_twice, NULL, NULL);
+    KlPlatThread tid;
+    if (kl_plat_thread_create(&tid, server_thread_fn, &te_srv) != 0) {
+        kl_http_server_free(&te_srv);
+        return;
+    }
+    wait_for_bind(&te_srv);
+    int fd = connect_rcvbuf(te_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq1 = "GET /twice HTTP/1.1\r\nHost: x\r\n\r\n";       /* keep-alive */
+        (void)kl_test_sockwrite(fd, rq1, strlen(rq1));
+        te_first_len = read_until_close(fd, te_first, sizeof te_first, 600, &te_first_closed);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&te_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&te_srv);
+}
+
+UTEST(completion_output, ending_a_stream_twice_leaves_the_connection_framing_clean) {
+    te_run();                                    /* server stopped before any assert */
+
+    ASSERT_TRUE(te_first_len > 0);
+    printf("  first response: %lld byte(s), terminators=%d, closed=%d\n",
+           (long long)te_first_len, te_count_term(te_first, (size_t)te_first_len), te_first_closed);
+
+    ASSERT_EQ(te_count_term(te_first, (size_t)te_first_len), 1);      /* was 2 */
+    /* The response ends AT its terminating chunk: nothing follows it on the connection. */
+    ASSERT_TRUE((size_t)te_first_len >= 5 &&
+                memcmp(te_first + te_first_len - 5, "0\r\n\r\n", 5) == 0);
+    ASSERT_TRUE(strstr(te_first, "3\r\nabc\r\n") != NULL);
+    /* The exact length: status line + Transfer-Encoding + empty line + one chunk + one terminator.
+     * The unfixed wire is 5 bytes longer -- the stray terminator, byte for byte. */
+    ASSERT_EQ((size_t)te_first_len, (size_t)60);
+    /* Not asserted: whether the server closed. On this all-accepted-inline path the connection ends
+     * after the response either way, and on other streamed paths it does not (see the scope note), so
+     * closure says nothing about this defect. Recorded, not judged. */
+    printf("  (connection closed by the server: %d)\n", te_first_closed);
+}
+
 UTEST_MAIN();

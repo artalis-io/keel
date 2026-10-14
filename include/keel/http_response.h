@@ -189,7 +189,20 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
  * Needs the same write target as kl_http_response_begin_stream(): with none there is no stream to
  * terminate, and it is refused rather than framing written somewhere else.
  *
- * @return 0 on success, -1 on error (including no HTTP/1.1 write target).
+ * Idempotent once it has succeeded: once the terminating chunk has been accepted for sending, a
+ * further call emits nothing and returns 0. A second terminating chunk would not be a repeat of a
+ * harmless step -- it is framing the client reads as the start of whatever comes next on the
+ * connection.
+ *
+ * Success is acceptance, not delivery: it means the terminating chunk was handed to this response's
+ * output path (written inline, or admitted to the drain when one is enabled by
+ * kl_http_response_enable_drain()), and bytes may still be queued when the call returns. Neither
+ * physical transmission nor any peer acknowledgment follows from a 0 return.
+ *
+ * A call that *failed* is not a completed one: it returns -1, and a retry still reports the failure
+ * rather than being swallowed as "already ended".
+ *
+ * @return 0 on success (including "already ended"), -1 on error (including no HTTP/1.1 write target).
  */
 int kl_http_response_end_stream(KlHttpResponse *res);
 

@@ -555,6 +555,228 @@ UTEST(response, end_stream_on_head_marks_the_stream_ended) {
     ASSERT_EQ(ended, 1);                         /* was 0 */
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Ending a stream twice must emit one terminating chunk, not two.
+ *
+ * kl_http_response_end_stream() guards on stream_error and on head_request, but never on the
+ * stream_ended flag it sets itself. Called twice it writes "0\r\n\r\n" twice. One terminating chunk
+ * is what ends a chunked body: the second one is not part of the response, it is the first thing the
+ * client sees where the *next* response on the connection must start. And because stream_ended is
+ * then 1, the server's "a stream that was never ended is never kept alive" rule does not fire, so on
+ * a stream the driver does keep (which path it takes decides: docs/contracts/streaming.md) the stray
+ * framing is already behind the client when the next response begins.
+ * A handler closing its own stream and a helper that also closes it (kl_http_sse_end, a compress
+ * wrapper) is an easy way to get there.
+ *
+ * The wire is the contract here, so these tests read it.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Occurrences of the chunked terminating chunk. The bodies below are fixed, so no chunk content can
+ * be mistaken for it. */
+static int count_terminators(const char *buf, size_t n) {
+    int hits = 0;
+    for (size_t i = 0; i + 5 <= n; i++)
+        if (memcmp(buf + i, "0\r\n\r\n", 5) == 0) hits++;
+    return hits;
+}
+
+/* Read everything currently on the pair. The writes under test are synchronous, so by the time the
+ * calls have returned the whole of it is buffered. */
+static size_t read_all_now(int fd, char *buf, size_t cap) {
+    size_t total = 0;
+    int first = 1;
+    while (total + 1 < cap) {
+        if (kl_test_poll1(fd, 0, first ? 300 : 0) <= 0) break;
+        first = 0;
+        long n = kl_test_sockread(fd, buf + total, cap - 1 - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+UTEST(response, a_stream_ended_twice_emits_one_terminating_chunk) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &w, &wc), 0);
+    w(wc, "abc", 3);
+
+    int first = kl_http_response_end_stream(&res);
+    int second = kl_http_response_end_stream(&res);
+    int third = kl_http_response_end_stream(&res);
+    kl_test_closesock(pipefd[1]);
+
+    char buf[4096];
+    size_t n = read_all_now(pipefd[0], buf, sizeof buf);
+    kl_test_closesock(pipefd[0]);
+
+    printf("  wire: %zu byte(s), terminating chunks: %d\n", n, count_terminators(buf, n));
+    ASSERT_EQ(count_terminators(buf, n), 1);           /* was 3: one end per call */
+    ASSERT_TRUE(strstr(buf, "3\r\nabc\r\n") != NULL);   /* the body is unchanged */
+    /* The whole response ends at its terminator: nothing trails it. */
+    ASSERT_EQ(n, strlen("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"));
+
+    /* A stream that is already ended reports success again rather than turning into an error: a
+     * caller that checks the return value must not be sent down a failure path for a no-op. */
+    ASSERT_EQ(first, 0);
+    ASSERT_EQ(second, 0);
+    ASSERT_EQ(third, 0);
+
+    kl_http_response_free(&res);
+}
+
+UTEST(response, a_repeated_end_stream_leaves_the_completed_stream_alone) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &w, &wc), 0);
+    w(wc, "abc", 3);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
+
+    int ended = res.stream_ended, err = res.stream_error, body_mode = (int)res.body_mode;
+    ASSERT_EQ(res.drain_enabled, 1);
+
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
+
+    /* No state transition of any kind on the second call: already terminal, and terminal is where
+     * it must stay. No second error flag, no mode change, nothing newly buffered. */
+    ASSERT_EQ(res.stream_ended, ended);
+    ASSERT_EQ(res.stream_error, 0);
+    ASSERT_EQ(err, 0);
+    ASSERT_EQ((int)res.body_mode, body_mode);
+
+    kl_test_closesock(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_http_response_free(&res);
+}
+
+/* The damage is what the next response on the same connection inherits. Reuse the response the way
+ * the server does (kl_http_response_reset) and put a second, buffered response on the same socket. */
+UTEST(response, the_next_response_after_a_double_ended_stream_starts_at_the_right_boundary) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &w, &wc), 0);
+    w(wc, "abc", 3);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);   /* the double close */
+
+    /* Keep-alive reuse, exactly as the connection driver does it between requests. */
+    kl_http_response_reset(&res);
+    kl_http_response_status(&res, 200);
+    kl_http_response_body_copy(&res, "SECOND", 6);
+    ASSERT_EQ(kl_http_response_send(&res), 0);
+    kl_test_closesock(pipefd[1]);
+
+    char buf[8192];
+    size_t n = read_all_now(pipefd[0], buf, sizeof buf);
+    kl_test_closesock(pipefd[0]);
+
+    printf("  two responses on one connection, %zu byte(s), terminators: %d\n", n,
+           count_terminators(buf, n));
+    ASSERT_EQ(count_terminators(buf, n), 1);
+
+    /* Walk the wire as a client would: the first response ends at its terminator and the second
+     * begins on the very next byte. A stray terminator makes this byte offset wrong. */
+    const char *term = NULL;
+    for (size_t i = 0; i + 5 <= n; i++)
+        if (memcmp(buf + i, "0\r\n\r\n", 5) == 0) { term = buf + i; break; }
+    ASSERT_TRUE(term != NULL);
+    const char *next = term + 5;
+    ASSERT_TRUE((size_t)(next - buf) < n);
+    ASSERT_TRUE(strncmp(next, "HTTP/1.1 200 OK\r\n", sizeof("HTTP/1.1 200 OK\r\n") - 1) == 0);
+    /* was: "0\r\n\r\nHTTP/1.1 200 OK..." -- the stray terminator occupied the boundary */
+    ASSERT_TRUE(strstr(next, "SECOND") != NULL);
+
+    kl_http_response_free(&res);
+}
+
+/* A failed termination is not a completed one: the failure must keep propagating, and the retry
+ * must not be turned into a silent success by an idempotence guard. */
+UTEST(response, a_failed_termination_keeps_failing_and_emits_nothing) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    KlHttpResponseWriteFn w = NULL;
+    void *wc = NULL;
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &w, &wc), 0);
+    w(wc, "abc", 3);
+
+    /* Take the write target away, so terminating the stream fails at the transport. */
+    kl_test_closesock(pipefd[1]);
+
+    int first = kl_http_response_end_stream(&res);
+    int second = kl_http_response_end_stream(&res);
+    int third = kl_http_response_end_stream(&res);
+
+    ASSERT_EQ(first, -1);      /* the transport failed */
+    ASSERT_EQ(second, -1);     /* still failing: not converted into success */
+    ASSERT_EQ(third, -1);
+    ASSERT_EQ(res.stream_error, 1);
+    ASSERT_EQ(res.stream_ended, 0);
+
+    char buf[2048];
+    size_t n = read_all_now(pipefd[0], buf, sizeof buf);
+    kl_test_closesock(pipefd[0]);
+    ASSERT_EQ(count_terminators(buf, n), 0);           /* the terminator never got out */
+    ASSERT_TRUE(strstr(buf, "3\r\nabc\r\n") != NULL);   /* what was written before it did */
+
+    kl_http_response_free(&res);
+}
+
+/* Characterization, not endorsement: end_stream() with no successful begin_stream() is a separate
+ * pre-existing behavior. stream_ended stays 0, so an idempotence guard on stream_ended cannot
+ * change it, and this test pins that. Whether a bare terminating chunk (no status line, no headers)
+ * should go out at all is a different question, deliberately left out of this change. */
+UTEST(response, end_stream_without_a_begin_stream_is_unchanged_by_the_idempotence_guard) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    int pipefd[2];
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
+    res.conn_fd = pipefd[1];
+
+    int rc = kl_http_response_end_stream(&res);
+    int ended_after = res.stream_ended;
+    kl_test_closesock(pipefd[1]);
+
+    char buf[2048];
+    size_t n = read_all_now(pipefd[0], buf, sizeof buf);
+    kl_test_closesock(pipefd[0]);
+
+    printf("  end_stream with no begin_stream: rc=%d, %zu byte(s), terminators=%d\n",
+           rc, n, count_terminators(buf, n));
+    ASSERT_EQ(rc, 0);                        /* unchanged behavior */
+    ASSERT_EQ(ended_after, 1);
+    ASSERT_EQ(count_terminators(buf, n), 1); /* one bare terminator: pre-existing, see PR notes */
+
+    kl_http_response_free(&res);
+}
+
 /* Send a response with `code` over a socket pair; return 1 if the wire starts with `expect`. */
 static int status_line_is(int code, const char *expect) {
     KlAllocator a = kl_allocator_default();
