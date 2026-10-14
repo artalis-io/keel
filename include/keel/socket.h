@@ -132,8 +132,20 @@ typedef struct KlSocketOps {
     kl_ssize_t (*recv_peek)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
     /* Vectored write + zero-copy file send. May be NULL: a provider without them
      * advertises no WRITEV/SENDFILE capability and Keel serializes / pread-sends
-     * instead. `in_fd` is a *file* descriptor; `out_fd` is a socket handle.
-     * `sendfile` advances `*offset` (byte offset into the file). */
+     * instead. `out_fd` is a socket handle (KlSocketHandle); `sendfile` advances
+     * `*offset` (byte offset into the file).
+     *
+     * sendfile's `in_fd` identifies an open INPUT FILE and is deliberately a host
+     * file descriptor (`int`), not a KlSocketHandle and never a socket. On POSIX
+     * hosts that is a file descriptor: sendfile(2) on Linux and macOS, pread +
+     * write on hosts without a usable sendfile(2). On Windows it is a CRT file
+     * descriptor (`_read` / `_lseeki64`), NOT a native HANDLE: a backend that
+     * needs a HANDLE converts once with _get_osfhandle() (the IOCP TransmitFile
+     * path). The provider borrows the descriptor for the duration of the call and
+     * never closes it; ownership stays with the caller (kl_http_response_file(),
+     * the usual way a descriptor reaches here, takes ownership and closes it).
+     * See kl_http_response_file for the same contract from the caller's side,
+     * including the Windows _O_BINARY caveat. */
     kl_ssize_t (*writev)(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
     kl_ssize_t (*sendfile)(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
     /* Classify the most recent -1 I/O result on this provider into a portable
