@@ -36,7 +36,15 @@
 static struct { unsigned char *p; size_t n; } g_q[QMAX];
 static int g_nq;
 
-static void *q_malloc(void *c, size_t n) { (void)c; return malloc(n ? n : 1); }
+/* When set, the allocation of exactly this size fails (the growth-test gate). The client runs on
+ * the test thread, the peer on its own with raw sockets, so the gate is race-free. */
+static size_t g_fail_size;
+
+static void *q_malloc(void *c, size_t n) {
+    (void)c;
+    if (g_fail_size && n == g_fail_size) return NULL;
+    return malloc(n ? n : 1);
+}
 static void *q_realloc(void *c, void *p, size_t o, size_t n) { (void)c; (void)o; return realloc(p, n ? n : 1); }
 static void q_free(void *c, void *p, size_t n) {
     (void)c;
@@ -173,6 +181,10 @@ static int client_close_code(const Peer *p) {
 typedef struct {
     int opened, messages, closed, errors;
     int free_in;   /* 1 = on_open, 2 = on_message, 3 = on_close: free the connection there */
+    char last[2048];   /* payload of the last on_message (growth tests) */
+    size_t last_len;
+    int last_bin;
+    const char *last_err;   /* last on_error message, or NULL */
     KlWsClientConn *ws;
 } Cli;
 
@@ -181,8 +193,12 @@ static void c_open(KlWsClientConn *ws, void *ud) {
     if (c->free_in == 1) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 static void c_msg(KlWsClientConn *ws, const char *d, size_t n, int bin, void *ud) {
-    (void)d; (void)n; (void)bin;
     Cli *c = ud; c->messages++;
+    c->last_len = n;                                       /* the full length, even when truncated */
+    size_t take = n < sizeof c->last ? n : sizeof c->last;
+    memcpy(c->last, d, take);
+    c->last_bin = bin;
+    (void)ws;
     if (c->free_in == 2) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 static void c_close(KlWsClientConn *ws, uint16_t code, const char *r, size_t rl, void *ud) {
@@ -191,12 +207,12 @@ static void c_close(KlWsClientConn *ws, uint16_t code, const char *r, size_t rl,
     if (c->free_in == 3) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 static void c_err(KlWsClientConn *ws, const char *msg, void *ud) {
-    (void)msg;
-    Cli *c = ud; c->errors++;
+    (void)ws;
+    Cli *c = ud; c->errors++; c->last_err = msg;
     if (c->free_in == 4) { kl_ws_client_free(ws); c->ws = NULL; }
 }
 
-static void run_case(Peer *p, Cli *c) {
+static void run_case_cfg(Peer *p, Cli *c, const KlWsClientConfig *cfg) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &a) != 0) return;
@@ -205,7 +221,7 @@ static void run_case(Peer *p, Cli *c) {
     KlWsClientCallbacks cbs = { .on_open = c_open, .on_message = c_msg,
                                 .on_close = c_close, .on_error = c_err };
     kl_plat_thread_create(&p->tid, peer_thread, p);
-    c->ws = kl_ws_client_connect(&ev, &g_qa, NULL, url, &cbs, c);
+    c->ws = kl_ws_client_connect(&ev, &g_qa, cfg, url, &cbs, c);
     for (int i = 0; i < 300 && c->ws && !c->closed && !c->errors; i++)
         (void)kl_event_ctx_run(&ev, 16, 10);
     for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 1);   /* stale events, if any */
@@ -214,12 +230,24 @@ static void run_case(Peer *p, Cli *c) {
     peer_finish(p);
 }
 
+static void run_case(Peer *p, Cli *c) { run_case_cfg(p, c, NULL); }
+
 /* An unmasked server frame: FIN + opcode, 7-bit length, payload. */
 static size_t frame(unsigned char *o, int op, const void *pl, size_t n) {
     o[0] = (unsigned char)(0x80 | op);
     o[1] = (unsigned char)n;
     memcpy(o + 2, pl, n);
     return 2 + n;
+}
+
+/* An unmasked server frame with a 16-bit extended payload length (126..65535). */
+static size_t frame16(unsigned char *o, int op, const void *pl, size_t n) {
+    o[0] = (unsigned char)(0x80 | op);
+    o[1] = 126;                                              /* 7-bit marker; no MASK bit */
+    o[2] = (unsigned char)(n >> 8);
+    o[3] = (unsigned char)n;
+    memcpy(o + 4, pl, n);
+    return 4 + n;
 }
 
 /* ── Freeing from a callback ────────────────────────────────────────────────────────────────── */
@@ -532,6 +560,156 @@ UTEST(wsc_peer, unsendable_close_reports_the_error_from_the_loop) {
     ASSERT_EQ(errors, 1);
     ASSERT_EQ(freed, 1);
     ASSERT_EQ(written, 0);
+}
+
+/* ── Message-assembly buffer growth (wsc_msg_append) ────────────────────────── */
+/* The reassembly buffer starts at 1024 and doubles (or jumps straight to the need). The cases
+ * below drive every growth transition reachable through the public API: the initial allocation,
+ * the 1024 → 2048 doubling, an extended-length frame that jumps straight to its need, the
+ * configured message limit (exactly at, and one past), and an allocation failure at growth time.
+ * The state where the doubling itself would wrap (msg_cap > SIZE_MAX/2) needs a prior successful
+ * allocation of more than 8 EiB and is unreachable here; see the guard in websocket_client.c. */
+
+/* `parts` payloads of `part_len` bytes: fragment 0 opens a BINARY message, the rest continue, the
+ * last carries FIN. Payload byte i is 'a' + (i % 26) across the whole message. */
+static size_t fragments(unsigned char *o, int parts, size_t part_len) {
+    static char pl[125];
+    size_t n = 0;
+    for (int i = 0; i < parts; i++) {
+        for (size_t k = 0; k < part_len; k++)
+            pl[k] = (char)('a' + ((i * part_len + k) % 26));
+        int fin = (i == parts - 1);
+        int op = (i == 0) ? KL_WS_OP_BINARY : KL_WS_OP_CONTINUATION;
+        n += (size_t)frag(o + n, fin, op, pl, part_len);
+    }
+    return n;
+}
+
+UTEST(wsc_peer, fragmented_message_grows_across_the_initial_capacity) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[2048];
+    size_t n = fragments(f, 12, 100);                        /* 1200 bytes: 1024 → 2048 */
+    n += (size_t)frame(f + n, KL_WS_OP_CLOSE, "\x03\xE8", 2);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 8192;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.errors, 0);
+    ASSERT_EQ(c.messages, 1);
+    ASSERT_EQ(c.last_len, 1200);
+    ASSERT_EQ(c.last_bin, 1);
+    for (size_t k = 0; k < c.last_len; k++)
+        ASSERT_EQ(c.last[k], (char)('a' + (k % 26)));        /* assembled in order, no gaps */
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, single_extended_length_frame_grows_straight_to_its_need) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[4096];
+    static char pl[1500];
+    for (size_t k = 0; k < sizeof pl; k++) pl[k] = (char)('A' + (k % 26));
+    size_t n = frame16(f, KL_WS_OP_BINARY, pl, sizeof pl);   /* first growth: 1024 → 1500 */
+    n += (size_t)frame(f + n, KL_WS_OP_CLOSE, "\x03\xE8", 2);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 4096;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.errors, 0);
+    ASSERT_EQ(c.messages, 1);
+    ASSERT_EQ(c.last_len, 1500);
+    ASSERT_EQ(memcmp(c.last, pl, sizeof pl), 0);
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, frame_larger_than_double_the_initial_capacity_grows_to_its_need) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[4096];
+    static char pl[3000];
+    for (size_t k = 0; k < sizeof pl; k++) pl[k] = (char)('0' + (k % 10));
+    /* needed (3000) > 2 * msg_cap (1024): doubling alone cannot satisfy the need; growth must
+     * jump straight to it (the `new_cap < needed` clamp), not allocate an undersized buffer. */
+    size_t n = frame16(f, KL_WS_OP_BINARY, pl, sizeof pl);
+    n += (size_t)frame(f + n, KL_WS_OP_CLOSE, "\x03\xE8", 2);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 4096;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.errors, 0);
+    ASSERT_EQ(c.messages, 1);
+    ASSERT_EQ(c.last_len, 3000);
+    ASSERT_EQ(memcmp(c.last, pl, sizeof c.last), 0);       /* the captured prefix */
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, message_exactly_at_the_configured_limit_is_delivered) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[2048];
+    size_t n = fragments(f, 11, 100);                        /* 1100 == max_frame_size */
+    n += (size_t)frame(f + n, KL_WS_OP_CLOSE, "\x03\xE8", 2);
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 1100;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.errors, 0);
+    ASSERT_EQ(c.messages, 1);
+    ASSERT_EQ(c.last_len, 1100);
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, message_one_fragment_past_the_configured_limit_fails) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[2048];
+    size_t n = fragments(f, 12, 100);                        /* 1200 > max_frame_size */
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 1100;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.messages, 0);
+    ASSERT_EQ(c.errors, 1);                                  /* "message too large" */
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, frame_declared_past_the_limit_is_rejected_before_assembly) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    static unsigned char f[64];
+    static const char pl[8] = {0};
+    /* The header declares 2000 bytes; the frame-size check fires before any payload is appended. */
+    size_t n = frame16(f, KL_WS_OP_BINARY, pl, sizeof pl);   /* header lies: says 2000 */
+    f[2] = (unsigned char)(2000 >> 8);
+    f[3] = (unsigned char)2000;
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 1100;
+    run_case_cfg(&p, &c, &cfg);
+    ASSERT_EQ(c.messages, 0);
+    ASSERT_EQ(c.errors, 1);                                  /* "frame too large" */
+    ASSERT_EQ(quarantine_check_and_release(), 0);
+}
+
+UTEST(wsc_peer, growth_allocation_failure_fails_the_connection_and_keeps_ownership) {
+    static Peer p; ASSERT_EQ(peer_listen(&p), 0);
+    /* Message 1 fits the initial 1024 buffer. Message 2 forces the 1024 → 2048 doubling; the
+     * gate fails exactly that malloc. A failed growth must leave the live buffer alone (the old
+     * block is still owned, freed once at teardown) and report the error. */
+    static unsigned char f[2048];
+    size_t n = fragments(f, 3, 100);                         /* 300 bytes: delivered */
+    n += (size_t)fragments(f + n, 12, 100);                  /* 1200 bytes: growth fails */
+    p.after = f; p.after_len = n;
+    Cli c; memset(&c, 0, sizeof c);
+    KlWsClientConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.max_frame_size = 8192;
+    g_fail_size = 2048;
+    run_case_cfg(&p, &c, &cfg);
+    g_fail_size = 0;
+    ASSERT_EQ(c.messages, 1);                                /* the first message was delivered */
+    ASSERT_EQ(c.errors, 1);                                  /* the second failed, no retry loop */
+    ASSERT_EQ(quarantine_check_and_release(), 0);            /* no use-after-free on teardown */
 }
 
 UTEST_MAIN();

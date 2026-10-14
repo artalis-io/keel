@@ -7,6 +7,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **WebSocket client: the message-assembly buffer's growth arithmetic is now explicitly
+  overflow-guarded.** The client's reassembly buffer doubled its capacity before clamping to the
+  needed size; a wrapped doubling was already corrected by that clamp (a wrapped value is always
+  below the needed size), so no reachable configuration produced an undersized allocation --
+  crossing the new guard would require a prior successful allocation of over 8 EiB. The explicit
+  `> SIZE_MAX / 2` check mirrors `ws_msg_grow` in the server implementation, so the client's buffer
+  safety no longer rests on the clamp interaction. Regression tests drive every reachable growth
+  transition (the initial allocation, the first doubling, a jump straight to the needed size, the
+  configured message limit from both sides, and an allocation failure at growth time).
 - **HTTP/2 server: a handler that streams no longer writes HTTP/1.1 framing onto the HTTP/2
   connection.** An HTTP/2 stream's response was initialized with the connection's live socket and
   TLS session, and `kl_http_response_begin_stream()` emits as it is called: the status line, the
