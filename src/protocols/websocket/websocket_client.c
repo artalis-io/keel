@@ -481,14 +481,16 @@ static int wsc_msg_append(KlWsClientConn *ws, const char *data, size_t len)
         return -1;
 
     if (needed > ws->msg_cap) {
-        size_t new_cap = ws->msg_cap ? ws->msg_cap * 2 : 1024;
+        /* Checked growth: double only while the multiply cannot wrap; past doubling range,
+         * skip the multiply and let the clamp below size the buffer exactly. Reaching that
+         * state would require a prior successful allocation of over 8 EiB (growth is bounded
+         * by max_frame_size), so this is arithmetic hardening, not a reachable defect; the
+         * point is that no multiplication here can wrap, so the buffer's safety does not rest
+         * on a clamp correcting a wrapped value. */
+        size_t new_cap = ws->msg_cap;
+        if (new_cap == 0) new_cap = 1024;
+        else if (new_cap <= SIZE_MAX / 2) new_cap *= 2;
         if (new_cap < needed) new_cap = needed;
-        /* Explicit overflow guard, mirroring ws_msg_grow in http_server_ws.c. The clamp above
-         * already corrects a wrapped doubling (a wrapped value is always < msg_cap < needed),
-         * so this is arithmetic hardening, not a reachable defect: crossing it would require
-         * msg_cap > SIZE_MAX/2, i.e. a prior successful allocation of over 8 EiB. Kept explicit
-         * so the buffer's safety does not rest on that clamp interaction. */
-        if (new_cap > SIZE_MAX / 2) return -1;
         char *new_buf = kl_malloc(ws->alloc, new_cap);
         if (!new_buf) return -1;
         if (ws->msg_buf) {

@@ -568,7 +568,8 @@ UTEST(wsc_peer, unsendable_close_reports_the_error_from_the_loop) {
  * the 1024 → 2048 doubling, an extended-length frame that jumps straight to its need, the
  * configured message limit (exactly at, and one past), and an allocation failure at growth time.
  * The state where the doubling itself would wrap (msg_cap > SIZE_MAX/2) needs a prior successful
- * allocation of more than 8 EiB and is unreachable here; see the guard in websocket_client.c. */
+ * allocation of more than 8 EiB and is unreachable here; see the checked growth in
+ * websocket_client.c. */
 
 /* `parts` payloads of `part_len` bytes: fragment 0 opens a BINARY message, the rest continue, the
  * last carries FIN. Payload byte i is 'a' + (i % 26) across the whole message. */
