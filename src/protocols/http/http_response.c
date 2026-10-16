@@ -719,36 +719,68 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
 
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
-static int kl_stream_write(void *ctx, const char *data, size_t len) {
-    KlHttpResponse *res = ctx;
+int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int iovcnt) {
+    if (!res) return -1;
     if (res->stream_error) return -1;
-    if (len == 0) return 0;
     if (res->head_request) return 0;
+    if (iovcnt < 0 || iovcnt > KL_HTTP_STREAM_IOV_MAX || (iovcnt > 0 && !iov)) {
+        res->stream_error = 1;
+        return -1;
+    }
+
+    size_t len = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].len > SIZE_MAX - len) {
+            res->stream_error = 1;
+            return -1;
+        }
+        len += iov[i].len;
+    }
+    if (len == 0) return 0;
 
     char hdr[24];
     int hdr_len = format_chunk_hdr(hdr, len);
 
     if (res->drain_enabled) {
-        if (kl_drain_write(&res->drain, hdr, (size_t)hdr_len) < 0 ||
-            kl_drain_write(&res->drain, data, len) < 0 ||
-            kl_drain_write(&res->drain, "\r\n", 2) < 0) {
+        if (kl_drain_write(&res->drain, hdr, (size_t)hdr_len) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
+        for (int i = 0; i < iovcnt; i++) {
+            if (kl_drain_write(&res->drain, iov[i].base, iov[i].len) < 0) {
+                res->stream_error = 1;
+                return -1;
+            }
+        }
+        if (kl_drain_write(&res->drain, "\r\n", 2) < 0) {
             res->stream_error = 1;
             return -1;
         }
         return 0;
     }
 
-    KlIoVec iov[3] = {
-        { .base = hdr,          .len = (size_t)hdr_len },
-        { .base = (void *)data, .len = len },
-        { .base = (void *)"\r\n", .len = 2 },
-    };
+    KlIoVec wire_iov[KL_HTTP_STREAM_IOV_MAX + 2];
+    wire_iov[0] = (KlIoVec){ .base = hdr, .len = (size_t)hdr_len };
+    for (int i = 0; i < iovcnt; i++)
+        wire_iov[i + 1] = iov[i];
+    wire_iov[iovcnt + 1] = (KlIoVec){ .base = (void *)"\r\n", .len = 2 };
 
-    if (stream_writev_all(res_provider(res), res->conn_fd, res->tls, iov, 3) < 0) {
-        res->stream_error = 1;
-        return -1;
+    int wire_count = iovcnt + 2;
+    for (int first = 0; first < wire_count; first += KL_SOCK_IOV_MAX) {
+        int count = wire_count - first;
+        if (count > KL_SOCK_IOV_MAX) count = KL_SOCK_IOV_MAX;
+        if (stream_writev_all(res_provider(res), res->conn_fd, res->tls,
+                              wire_iov + first, count) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
     }
     return 0;
+}
+
+int kl_http_response_stream_write(void *ctx, const char *data, size_t len) {
+    KlIoVec iov = { .base = (void *)data, .len = len };
+    return kl_http_response_stream_writev(ctx, &iov, 1);
 }
 
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
@@ -804,7 +836,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
     }
 
     res->headers_sent = 1;
-    *out_write = kl_stream_write;
+    *out_write = kl_http_response_stream_write;
     *out_ctx = res;
     return 0;
 }

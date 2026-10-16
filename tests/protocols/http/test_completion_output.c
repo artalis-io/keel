@@ -1888,8 +1888,8 @@ UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeou
     kl_plat_thread_join(&tid);
     kl_http_server_free(&is_srv);
     ASSERT_TRUE(resumed);
-    ASSERT_TRUE(strstr(buf, "\r\none\r\n") != NULL);      /* each field part is its own chunk */
-    ASSERT_TRUE(strstr(buf, "\r\ntwo\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "b\r\ndata: one\n\n\r\n") != NULL);  /* one chunk per event */
+    ASSERT_TRUE(strstr(buf, "b\r\ndata: two\n\n\r\n") != NULL);
     ASSERT_TRUE(strstr(buf, "0\r\n\r\n") != NULL);        /* the stream's end */
     ASSERT_TRUE(strstr(buf, " 408 ") == NULL);
     ASSERT_TRUE(closed);

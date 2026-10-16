@@ -3,6 +3,7 @@
 #include <keel/event_ctx.h>
 #include <keel/socket.h>
 #include "event_caps.h"   /* kl_event_caps: the loop's drive model decides the stream writer */
+#include "http_response_internal.h"
 #include "net_compat.h"
 #include <string.h>
 #include <fcntl.h>
@@ -14,6 +15,20 @@ UTEST(response, init_and_free) {
     kl_http_response_init(&res, &a);
     ASSERT_TRUE(res.hdr_buf != NULL);
     ASSERT_EQ(res.status, 200);
+    kl_http_response_free(&res);
+}
+
+UTEST(response, stream_writev_rejects_length_sum_overflow) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
+    KlIoVec iov[2] = {
+        { .base = (void *)"x", .len = SIZE_MAX },
+        { .base = (void *)"y", .len = 1 },
+    };
+
+    ASSERT_EQ(kl_http_response_stream_writev(&res, iov, 2), -1);
+    ASSERT_EQ(res.stream_error, 1);
     kl_http_response_free(&res);
 }
 

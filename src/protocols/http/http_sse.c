@@ -1,4 +1,5 @@
 #include <keel/http_sse.h>
+#include "http_response_internal.h"
 #include <string.h>
 
 int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse) {
@@ -32,15 +33,63 @@ static int has_line_break(const char *s, size_t len) {
  * empty field. */
 static int write_lines(KlHttpSse *sse, const char *prefix, size_t plen,
                        const char *text, size_t len) {
+    if (len == 0) return write_field(sse, prefix, plen, "", 0);
     const char *p = text;
     const char *end = text + len;
-    if (len == 0) return write_field(sse, prefix, plen, "", 0);
     while (p < end) {
         const char *q = p;
         while (q < end && *q != '\n' && *q != '\r') q++;
         if (write_field(sse, prefix, plen, p, (size_t)(q - p)) < 0) return -1;
         if (q == end) break;
         if (*q == '\r' && q + 1 < end && q[1] == '\n') q++;   /* CRLF is one break */
+        p = q + 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    KlHttpResponse *res;
+    KlIoVec iov[KL_HTTP_STREAM_IOV_MAX];
+    int count;
+} KlSseBatch;
+
+static int batch_flush(KlSseBatch *batch) {
+    if (batch->count == 0) return 0;
+    if (kl_http_response_stream_writev(batch->res, batch->iov, batch->count) < 0)
+        return -1;
+    batch->count = 0;
+    return 0;
+}
+
+static int batch_append(KlSseBatch *batch, const char *data, size_t len) {
+    if (batch->count == KL_HTTP_STREAM_IOV_MAX && batch_flush(batch) < 0)
+        return -1;
+    batch->iov[batch->count].base = (void *)data;
+    batch->iov[batch->count].len = len;
+    batch->count++;
+    return 0;
+}
+
+static int batch_field(KlSseBatch *batch, const char *prefix, size_t plen,
+                       const char *value, size_t vlen) {
+    if (batch_append(batch, prefix, plen) < 0 ||
+        batch_append(batch, value, vlen) < 0 ||
+        batch_append(batch, "\n", 1) < 0)
+        return -1;
+    return 0;
+}
+
+static int batch_lines(KlSseBatch *batch, const char *prefix, size_t plen,
+                       const char *text, size_t len) {
+    if (len == 0) return batch_field(batch, prefix, plen, "", 0);
+    const char *p = text;
+    const char *end = text + len;
+    while (p < end) {
+        const char *q = p;
+        while (q < end && *q != '\n' && *q != '\r') q++;
+        if (batch_field(batch, prefix, plen, p, (size_t)(q - p)) < 0) return -1;
+        if (q == end) break;
+        if (*q == '\r' && q + 1 < end && q[1] == '\n') q++;
         p = q + 1;
     }
     return 0;
@@ -53,6 +102,17 @@ int kl_http_sse_event(KlHttpSse *sse, const char *event,
     /* An event name or id is a single line: one with a line break would inject fields. */
     if (event && has_line_break(event, strlen(event))) return -1;
     if (id && has_line_break(id, strlen(id))) return -1;
+    if (sse->write_fn == kl_http_response_stream_write) {
+        KlSseBatch batch = { .res = sse->write_ctx, .count = 0 };
+        if (event && batch_field(&batch, "event: ", 7, event, strlen(event)) < 0)
+            return -1;
+        if (id && batch_field(&batch, "id: ", 4, id, strlen(id)) < 0)
+            return -1;
+        if (batch_lines(&batch, "data: ", 6, data, data_len) < 0 ||
+            batch_append(&batch, "\n", 1) < 0)
+            return -1;
+        return batch_flush(&batch);
+    }
     if (event) {
         if (write_field(sse, "event: ", 7, event, strlen(event)) < 0)
             return -1;
@@ -74,6 +134,12 @@ int kl_http_sse_event(KlHttpSse *sse, const char *event,
 int kl_http_sse_comment(KlHttpSse *sse, const char *text, size_t len) {
     if (!sse) return -1;
     if (len > 0 && !text) return -1;
+    if (sse->write_fn == kl_http_response_stream_write) {
+        KlSseBatch batch = { .res = sse->write_ctx, .count = 0 };
+        if (batch_lines(&batch, ": ", 2, text, len) < 0)
+            return -1;
+        return batch_flush(&batch);
+    }
     return write_lines(sse, ": ", 2, text, len);   /* every line stays a comment */
 }
 
