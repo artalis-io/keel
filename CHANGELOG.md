@@ -5,6 +5,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+## [3.3.1]
+
+Patch release with SSE write batching and HTTP/WebSocket correctness fixes. Public declarations and
+build requirements are unchanged. Existing applications need only the usual 3.x recompile and relink.
+HTTP/2 streaming remains unsupported; handlers must check the streaming entry points' return values.
+
+### Changed
+
+- **SSE events and comments use fewer chunks and transport writes.** Fields are batched in a fixed
+  32-entry stack iovec, and the drain path coalesces each framed chunk through a 4 KiB stack buffer.
+  A small event with event, id and one data field now uses one chunk and one drain write instead of
+  ten chunks and thirty drain writes. Larger events flush across the fixed batch and buffer limits.
+  SSE output bytes and custom-writer piece calls are unchanged, with no added allocation or public
+  layout change.
+
 ### Fixed
 
 - **WebSocket client: the message-assembly buffer's growth arithmetic can no longer wrap.**
