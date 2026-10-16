@@ -2,7 +2,10 @@
 #include <keel/http_sse.h>
 #include <keel/http1_chunked.h>
 #include <keel/allocator.h>
+#include <keel/event_ctx.h>
+#include <keel/socket.h>
 #include <string.h>
+#include "http_response_internal.h"
 #include "net_compat.h"
 
 /* ── Mock write function ─────────────────────────────────────────────── */
@@ -53,6 +56,7 @@ UTEST(sse, basic_event) {
     const char *expected = "event: update\nid: 42\ndata: hello\n\n";
     ASSERT_EQ(m.len, strlen(expected));
     ASSERT_EQ(memcmp(m.buf, expected, m.len), 0);
+    ASSERT_EQ(m.write_count, 10);   /* a custom writer still receives every prefix, value and LF */
 }
 
 UTEST(sse, data_only) {
@@ -357,6 +361,84 @@ UTEST(sse, built_in_writer_flushes_events_and_comments_across_iovec_limit) {
     memcpy(expected, event_body, event_len);
     memcpy(expected + event_len, comment_body, comment_len + 1);
     ASSERT_TRUE(decoded_body_matches(body, body_len, expected));
+}
+
+typedef struct {
+    int calls;
+    size_t bytes;
+} CountingSend;
+
+static kl_ssize_t counting_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    CountingSend *count = ctx;
+    (void)fd;
+    (void)buf;
+    count->calls++;
+    count->bytes += len;
+    return (kl_ssize_t)len;
+}
+
+static unsigned readiness_caps(const KlEventLoop *loop) {
+    (void)loop;
+    return KL_EVENT_CAP_READINESS;
+}
+
+UTEST(sse, drain_path_coalesces_each_sse_chunk_into_one_send) {
+    static const KlSocketOps socket_ops = {
+        .send = counting_send,
+        .name = "counting-sse",
+    };
+    static const KlEventOps event_ops = {
+        .caps = readiness_caps,
+    };
+    const char *lines = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11";
+    CountingSend count = {0};
+    KlSocketProvider provider = {
+        .ops = &socket_ops,
+        .context = &count,
+    };
+    KlEventCtx event_ctx;
+    memset(&event_ctx, 0, sizeof(event_ctx));
+    event_ctx.loop.ops = &event_ops;
+    event_ctx.sockets = &provider;
+
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &alloc);
+    res.conn_fd = 1;
+    res.ctx = &event_ctx;
+    ASSERT_EQ(kl_http_response_enable_drain(&res, &alloc, 0), 0);
+
+    KlHttpSse sse = {
+        .write_fn = kl_http_response_stream_write,
+        .write_ctx = &res,
+        .res = &res,
+    };
+
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, "x", 1, NULL), 0);
+    ASSERT_EQ(count.calls, 1);
+    count.calls = 0;
+    count.bytes = 0;
+
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, lines, strlen(lines), NULL), 0);
+
+    /* Thirty-two iovecs fill the first SSE batch; the remaining newline and event terminator form
+     * the second. Each complete HTTP chunk reaches the drain writer in one contiguous write. */
+    ASSERT_EQ(count.calls, 2);
+    ASSERT_GT(count.bytes, strlen(lines));
+
+    char large_lines[8 * 512 + 7];
+    size_t pos = 0;
+    for (int i = 0; i < 8; i++) {
+        memset(large_lines + pos, 'a' + i, 512);
+        pos += 512;
+        if (i < 7) large_lines[pos++] = '\n';
+    }
+    count.calls = 0;
+    count.bytes = 0;
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, large_lines, pos, NULL), 0);
+    ASSERT_EQ(count.calls, 2);   /* one SSE chunk crosses the 4 KiB staging-buffer boundary */
+    ASSERT_GT(count.bytes, pos);
+    kl_http_response_free(&res);
 }
 
 UTEST(sse, built_in_writer_batches_without_a_drain) {

@@ -14,49 +14,30 @@ int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse) {
     return 0;
 }
 
-/* Helper: write a field prefix + value + newline.  Returns -1 on error. */
-static int write_field(KlHttpSse *sse, const char *prefix, size_t plen,
-                       const char *value, size_t vlen) {
-    if (sse->write_fn(sse->write_ctx, prefix, plen) < 0) return -1;
-    if (sse->write_fn(sse->write_ctx, value, vlen) < 0) return -1;
-    if (sse->write_fn(sse->write_ctx, "\n", 1) < 0) return -1;
-    return 0;
-}
-
 /* An SSE parser ends a line at CR, LF or CRLF. Returns 1 if s[0..len) holds any of them. */
 static int has_line_break(const char *s, size_t len) {
     return memchr(s, '\n', len) != NULL || memchr(s, '\r', len) != NULL;
 }
 
-/* Write `text` one line per field, each with `prefix`, splitting on CRLF, CR and LF alike, so no
- * line break in the caller's text can start a field it did not write. Empty text writes one
- * empty field. */
-static int write_lines(KlHttpSse *sse, const char *prefix, size_t plen,
-                       const char *text, size_t len) {
-    if (len == 0) return write_field(sse, prefix, plen, "", 0);
-    const char *p = text;
-    const char *end = text + len;
-    while (p < end) {
-        const char *q = p;
-        while (q < end && *q != '\n' && *q != '\r') q++;
-        if (write_field(sse, prefix, plen, p, (size_t)(q - p)) < 0) return -1;
-        if (q == end) break;
-        if (*q == '\r' && q + 1 < end && q[1] == '\n') q++;   /* CRLF is one break */
-        p = q + 1;
-    }
-    return 0;
-}
-
 typedef struct {
-    KlHttpResponse *res;
+    KlHttpSse *sse;
     KlIoVec iov[KL_HTTP_STREAM_IOV_MAX];
     int count;
 } KlSseBatch;
 
 static int batch_flush(KlSseBatch *batch) {
     if (batch->count == 0) return 0;
-    if (kl_http_response_stream_writev(batch->res, batch->iov, batch->count) < 0)
-        return -1;
+    if (batch->sse->write_fn == kl_http_response_stream_write) {
+        if (kl_http_response_stream_writev(batch->sse->write_ctx,
+                                           batch->iov, batch->count) < 0)
+            return -1;
+    } else {
+        for (int i = 0; i < batch->count; i++) {
+            if (batch->sse->write_fn(batch->sse->write_ctx, batch->iov[i].base,
+                                     batch->iov[i].len) < 0)
+                return -1;
+        }
+    }
     batch->count = 0;
     return 0;
 }
@@ -102,45 +83,24 @@ int kl_http_sse_event(KlHttpSse *sse, const char *event,
     /* An event name or id is a single line: one with a line break would inject fields. */
     if (event && has_line_break(event, strlen(event))) return -1;
     if (id && has_line_break(id, strlen(id))) return -1;
-    if (sse->write_fn == kl_http_response_stream_write) {
-        KlSseBatch batch = { .res = sse->write_ctx, .count = 0 };
-        if (event && batch_field(&batch, "event: ", 7, event, strlen(event)) < 0)
-            return -1;
-        if (id && batch_field(&batch, "id: ", 4, id, strlen(id)) < 0)
-            return -1;
-        if (batch_lines(&batch, "data: ", 6, data, data_len) < 0 ||
-            batch_append(&batch, "\n", 1) < 0)
-            return -1;
-        return batch_flush(&batch);
-    }
-    if (event) {
-        if (write_field(sse, "event: ", 7, event, strlen(event)) < 0)
-            return -1;
-    }
-    if (id) {
-        if (write_field(sse, "id: ", 4, id, strlen(id)) < 0)
-            return -1;
-    }
-
-    /* Each line of data gets its own "data: " field ("data: \n" for empty data). */
-    if (write_lines(sse, "data: ", 6, data, data_len) < 0)
+    KlSseBatch batch = { .sse = sse, .count = 0 };
+    if (event && batch_field(&batch, "event: ", 7, event, strlen(event)) < 0)
         return -1;
-
-    /* Blank line terminates the event */
-    if (sse->write_fn(sse->write_ctx, "\n", 1) < 0) return -1;
-    return 0;
+    if (id && batch_field(&batch, "id: ", 4, id, strlen(id)) < 0)
+        return -1;
+    if (batch_lines(&batch, "data: ", 6, data, data_len) < 0 ||
+        batch_append(&batch, "\n", 1) < 0)
+        return -1;
+    return batch_flush(&batch);
 }
 
 int kl_http_sse_comment(KlHttpSse *sse, const char *text, size_t len) {
     if (!sse) return -1;
     if (len > 0 && !text) return -1;
-    if (sse->write_fn == kl_http_response_stream_write) {
-        KlSseBatch batch = { .res = sse->write_ctx, .count = 0 };
-        if (batch_lines(&batch, ": ", 2, text, len) < 0)
-            return -1;
-        return batch_flush(&batch);
-    }
-    return write_lines(sse, ": ", 2, text, len);   /* every line stays a comment */
+    KlSseBatch batch = { .sse = sse, .count = 0 };
+    if (batch_lines(&batch, ": ", 2, text, len) < 0)
+        return -1;
+    return batch_flush(&batch);
 }
 
 int kl_http_sse_end(KlHttpSse *sse) {

@@ -17,6 +17,7 @@
 #define KL_HDR_INIT_CAP 512
 #define KL_FILE_BUF_SIZE 8192   /* stack buffer for pread+write fallback */
 #define KL_WRITE_SPIN_MAX 256  /* max retries on EAGAIN/WANT_WRITE before giving up */
+#define KL_STREAM_WRITE_BUF_SIZE 4096
 /* Default backpressure bound for streaming responses (SSE / chunked): the outbound stream
  * buffer holds unsent bytes when the client can't keep up. Bounded so a slow reader applies
  * backpressure to the producer instead of growing memory unboundedly. */
@@ -719,6 +720,34 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
 
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
+static int drain_writev_coalesced(KlDrain *drain, const KlIoVec *iov, int iovcnt) {
+    char buf[KL_STREAM_WRITE_BUF_SIZE];
+    size_t used = 0;
+
+    for (int i = 0; i < iovcnt; i++) {
+        const char *data = iov[i].base;
+        size_t left = iov[i].len;
+        while (left > 0) {
+            if (used == 0 && left >= sizeof(buf)) {
+                if (kl_drain_write(drain, data, left) < 0) return -1;
+                break;
+            }
+            size_t avail = sizeof(buf) - used;
+            size_t copy_len = left < avail ? left : avail;
+            memcpy(buf + used, data, copy_len);
+            used += copy_len;
+            data += copy_len;
+            left -= copy_len;
+            if (used == sizeof(buf)) {
+                if (kl_drain_write(drain, buf, used) < 0) return -1;
+                used = 0;
+            }
+        }
+    }
+    if (used > 0 && kl_drain_write(drain, buf, used) < 0) return -1;
+    return 0;
+}
+
 int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int iovcnt) {
     if (!res) return -1;
     if (res->stream_error) return -1;
@@ -742,17 +771,12 @@ int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int 
     int hdr_len = format_chunk_hdr(hdr, len);
 
     if (res->drain_enabled) {
-        if (kl_drain_write(&res->drain, hdr, (size_t)hdr_len) < 0) {
-            res->stream_error = 1;
-            return -1;
-        }
-        for (int i = 0; i < iovcnt; i++) {
-            if (kl_drain_write(&res->drain, iov[i].base, iov[i].len) < 0) {
-                res->stream_error = 1;
-                return -1;
-            }
-        }
-        if (kl_drain_write(&res->drain, "\r\n", 2) < 0) {
+        KlIoVec wire_iov[KL_HTTP_STREAM_IOV_MAX + 2];
+        wire_iov[0] = (KlIoVec){ .base = hdr, .len = (size_t)hdr_len };
+        for (int i = 0; i < iovcnt; i++)
+            wire_iov[i + 1] = iov[i];
+        wire_iov[iovcnt + 1] = (KlIoVec){ .base = (void *)"\r\n", .len = 2 };
+        if (drain_writev_coalesced(&res->drain, wire_iov, iovcnt + 2) < 0) {
             res->stream_error = 1;
             return -1;
         }
