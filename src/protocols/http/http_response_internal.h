@@ -24,6 +24,13 @@
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out);
 
+/* The built-in chunked stream writer and its scatter-gather form. The latter emits one HTTP chunk
+ * whose payload is the concatenation of iov[0..iovcnt). Kept internal so protocol helpers can batch
+ * logical output without changing KlHttpResponseWriteFn or the public response ABI. */
+#define KL_HTTP_STREAM_IOV_MAX 32
+int kl_http_response_stream_write(void *ctx, const char *data, size_t len);
+int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int iovcnt);
+
 /* 1 when a streamed plaintext response's writes belong on an output queue rather than a send on the
  * loop thread: the response is bound to a completion loop (completion_http_server.c). Decided by how
  * the loop drives its connections, never by the socket provider's capability bits: a provider placed
