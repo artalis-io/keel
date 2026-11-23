@@ -28,6 +28,9 @@
  * only for BACKEND=pollcomp) can wrap them as the _builtin symbols the default-path
  * dispatch expects. See event_lwip.c (the pure-provider template) + event_dispatch.c.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* POLLRDHUP (glibc exposes it only under _GNU_SOURCE) */
+#endif
 #include <keel/event.h>
 #include "event_pollcomp_internal.h"
 #include <keel/event_ctx.h>      /* KlEventCtx (->loop._backend): neutral accept/dgram ctx */
@@ -35,12 +38,21 @@
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
 #include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "event_caps.h"
+#include "event_hangup.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
 #include "completion.h"          /* the abstract axis this TU implements */
 #include "completion_life.h"       /* stable-liveness token for completion ops (neutral) */
 
 #include <poll.h>
+
+/* Hang-up watches need POLLRDHUP (native Linux only; see event_poll.c for why Cosmopolitan and the
+ * other hosts do not claim the capability). */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && defined(POLLRDHUP)
+#define KL_PC_HANGUP 1
+#else
+#define KL_PC_HANGUP 0
+#endif
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -190,7 +202,8 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
  * an OVERLAPPED provider (kl_socket_provider_pollcomp, below). */
 unsigned kl_pollcomp_ev_caps(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD |
+           (KL_PC_HANGUP ? KL_EVENT_CAP_HANGUP : 0u);
 }
 
 /* The overlapped provider this completion loop needs: auto-wired by the server/client
@@ -699,6 +712,9 @@ static short pc_watch_events(KlEventMask mask) {
     short e = 0;
     if (mask & KL_EVENT_READ)  e |= POLLIN;
     if (mask & KL_EVENT_WRITE) e |= POLLOUT;
+#if KL_PC_HANGUP
+    if (kl_hup_wanted(mask))   e |= POLLRDHUP;   /* hang-up watch: the FIN, never data */
+#endif
     return e;
 }
 
@@ -775,8 +791,19 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
             short re = pfds[j].revents;
             if (!re) continue;
             KlEventMask ready = 0;
-            if (re & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
-            if (re & POLLOUT) ready |= KL_EVENT_WRITE;
+            if (kl_hup_wanted(w->mask)) {
+#if KL_PC_HANGUP
+                /* Hang-up watch, level-triggered like the rest of this double: the consumer removes
+                 * the watch once it has acted. */
+                ready = kl_hup_ready(re & POLLRDHUP, re & POLLHUP, re & POLLERR, 1);
+                if (!ready) continue;
+#else
+                continue;   /* no POLLRDHUP: the capability is not advertised, nothing to report */
+#endif
+            } else {
+                if (re & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
+                if (re & POLLOUT) ready |= KL_EVENT_WRITE;
+            }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = w->udata;         /* the tagged KlWatcher */

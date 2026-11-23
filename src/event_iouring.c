@@ -49,6 +49,7 @@
 #include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
+#include "event_hangup.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "completion.h"          /* the abstract axis this TU implements */
 #include "completion_life.h"       /* stable-liveness token for completion ops (neutral) */
@@ -240,6 +241,7 @@ static unsigned iou_poll_mask(KlEventMask mask) {
     unsigned e = 0;
     if (mask & KL_EVENT_READ)  e |= POLLIN;
     if (mask & KL_EVENT_WRITE) e |= POLLOUT;
+    if (kl_hup_wanted(mask))   e |= POLLRDHUP;   /* hang-up watch: the FIN, never data */
     return e;
 }
 
@@ -476,7 +478,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
  * wires so a default-provider server/client is a drop-in. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD | KL_EVENT_CAP_HANGUP;
 }
 
 /* The overlapped provider this completion loop needs, so a server/client that
@@ -1190,8 +1192,15 @@ reap:;
             }
             if (res > 0) {                            /* poll fired: surface a watcher event */
                 KlEventMask ready = 0;
-                if (res & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
-                if (res & POLLOUT) ready |= KL_EVENT_WRITE;
+                if (kl_hup_wanted(w->mask)) {
+                    /* Hang-up watch (POLLRDHUP, no POLLIN): RDHUP is the FIN, ERR or HUP a reset.
+                     * One-shot, and re-arming after a hang-up completes at once (measured): the
+                     * consumer removes the watch once it has acted. */
+                    ready = kl_hup_ready(res & POLLRDHUP, res & POLLHUP, res & POLLERR, 1);
+                } else {
+                    if (res & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
+                    if (res & POLLOUT) ready |= KL_EVENT_WRITE;
+                }
                 memset(&out[count], 0, sizeof(out[count]));
                 out[count].kind = KL_COMP_WATCHER;
                 out[count].target = w->udata;         /* the tagged KlWatcher */

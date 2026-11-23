@@ -1,10 +1,23 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* POLLRDHUP (glibc exposes it only under _GNU_SOURCE) */
+#endif
 #include <keel/event.h>
 #include "event_builtin.h"
 #include "event_caps.h"
+#include "event_hangup.h"
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
 #include <string.h>
+
+/* KL_EVENT_HANGUP needs POLLRDHUP: without it poll() reports nothing for a FIN unless asked for
+ * readable data (measured on macOS). Native Linux only: a Cosmopolitan build resolves poll constants
+ * per host at run time, so it does not claim the capability and the server uses its sweep there. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && defined(POLLRDHUP)
+#define KL_POLL_HANGUP 1
+#else
+#define KL_POLL_HANGUP 0
+#endif
 
 #define INITIAL_CAP 64
 
@@ -22,8 +35,18 @@ static short mask_to_poll(KlEventMask mask) {
     short events = 0;
     if (mask & KL_EVENT_READ)  events |= POLLIN;
     if (mask & KL_EVENT_WRITE) events |= POLLOUT;
+#if KL_POLL_HANGUP
+    if (kl_hup_wanted(mask))   events |= POLLRDHUP;
+#endif
     return events;
 }
+
+#if KL_POLL_HANGUP
+/* A hang-up registration asks for POLLRDHUP and not POLLIN. */
+static int poll_is_hup(short events) {
+    return (events & POLLRDHUP) && !(events & POLLIN);
+}
+#endif
 
 static int ensure_fd_cap(KlPollState *st, int fd) {
     if (fd < 0)
@@ -204,10 +227,18 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
             continue;
 
         KlEventMask ready = 0;
-        if (rev & (POLLIN | POLLHUP | POLLERR))
-            ready |= KL_EVENT_READ;
-        if (rev & POLLOUT)
-            ready |= KL_EVENT_WRITE;
+#if KL_POLL_HANGUP
+        if (poll_is_hup(st->fds[i].events)) {
+            /* Level-triggered: reported on every wait until the consumer changes the registration. */
+            ready = kl_hup_ready(rev & POLLRDHUP, rev & POLLHUP, rev & POLLERR, 1);
+        } else
+#endif
+        {
+            if (rev & (POLLIN | POLLHUP | POLLERR))
+                ready |= KL_EVENT_READ;
+            if (rev & POLLOUT)
+                ready |= KL_EVENT_WRITE;
+        }
 
         if (ready) {
             out[count].udata = st->udata[i];
@@ -235,7 +266,8 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 /* poll() is a readiness poller of native OS descriptors. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD |
+           (KL_POLL_HANGUP ? KL_EVENT_CAP_HANGUP : 0u);
 }
 
 /* Readiness loop: the default POSIX provider works; nothing to auto-wire. */
