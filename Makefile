@@ -612,7 +612,7 @@ test: $(TEST_BIN)
 WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output platform_random fd_type_convention compress compress_vtable connect_op cross_module \
                    datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
-                   dgram_recv_classify dgram_send dgram_slots drain error event event_caps event_ctx \
+                   dgram_recv_classify dgram_send dgram_slots drain error event_hangup event event_caps event_ctx \
                    event_provider event_provider_vtable file_io http1_chunked http1_parser \
                    http1_parser_vtable http1_response_parser http2 http2_client http2_client_hostname_fail \
                    http2_client_vtable http2_overflow http_async http_body_reader http_body_reader_vtable \
@@ -620,7 +620,7 @@ WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_
                    http_client_alloc_sizes http_client_deadline http_client_backpressure http_client_eof http_client_proxy http_client_stream http_connection http_cors http_integration \
                    http_multipart_stream http_overflow http_proto_hooks http_redirect http_request \
                    http_response http_router http_server_integration http_server_state http_server_stats \
-                   http_split_request http_sse http_tls io_status kl_cstr kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream \
+                   http_split_request http_sse http_suspend_hangup http_tls io_status kl_cstr kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream \
                    dns_ns_select proxy_protocol read_flow_control reject_drain resolver_cache resolver_vtable sockaddr \
                    socket_provider socket_provider_vtable socket_runtime socket_runtime_first_use stream stream_close stream_close_live stream_read stream_transport stream_writable \
                    thread_pool timeout timer tls tls_client_split tls_integration tls_vtable transport_public \
@@ -651,7 +651,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output platform_random fd_type_convention compress compress_vtable connect_op \
                         cross_module datagram_batch completion_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
-                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_hangup \
                         event_provider event_provider_vtable file_io http1_chunked http1_parser \
                         http1_parser_vtable http1_response_parser http2 http2_client \
                         http2_client_hostname_fail http2_client_vtable http2_overflow http_async \
@@ -659,7 +659,7 @@ WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_
                         http_client_hostname_fail http_client_pool http_client_alloc_sizes http_client_deadline http_client_backpressure http_client_eof http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_proto_hooks \
                         http_redirect http_request http_response http_router http_server_integration \
-                        http_server_state http_server_stats http_split_request http_sse http_tls io_status iocp_engine kl_cstr \
+                        http_server_state http_server_stats http_split_request http_sse http_suspend_hangup http_tls io_status iocp_engine kl_cstr \
                         kl_cstr_builtin listener loop_teardown peer_addr peer_cert pipe_stream proxy_protocol read_flow_control \
                         reject_drain resolver_cache resolver_vtable sockaddr socket_provider_vtable socket_runtime socket_runtime_first_use stream \
                         stream_close stream_close_live stream_read stream_single_shot stream_writable thread_pool timeout timer tls \
@@ -1037,12 +1037,12 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec completion_output compress cross_module datagram_batch completion_life datagram_live loop_teardown \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
-                          dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error \
+                          dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error event_hangup \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
                           http2_overflow http_async http_body_reader http_client http_client_free_in_done http_client_happy_eyeballs \
                           http_client_pool http_client_alloc_sizes http_client_backpressure http_client_eof http_client_proxy http_client_stream http_connection http_cors \
                           http_integration http_multipart_stream http_overflow http_redirect http_request \
-                          http_response http_router http_server_integration http_server_stats http_split_request http_sse http_tls \
+                          http_response http_router http_server_integration http_server_stats http_split_request http_sse http_suspend_hangup http_tls \
                           iouring_sqe_fail peer_addr peer_cert proxy_protocol read_flow_control reject_drain \
                           resolver_cache sockaddr stream_single_shot stream_transport thread_pool timeout timer tls \
                           tls_integration udp_cmsg unix_socket url version wakeup websocket websocket_client \
@@ -1092,13 +1092,13 @@ COMPLETION_EXCLUDE ?=
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
 POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec completion_output compress cross_module datagram_batch completion_life loop_teardown \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
-                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_hangup \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
                         http2_client http2_overflow http_async http_body_reader http_client \
                         http_client_free_in_done http_client_happy_eyeballs http_client_pool http_client_alloc_sizes http_client_backpressure http_client_eof http_client_proxy http_client_stream \
                         http_connection http_cors http_multipart_stream http_overflow http_redirect \
                         http_request http_response http_router http_server_integration http_server_stats \
-                        http_split_request http_sse http_tls peer_addr peer_cert proxy_protocol read_flow_control \
+                        http_split_request http_sse http_suspend_hangup http_tls peer_addr peer_cert proxy_protocol read_flow_control \
                         reject_drain resolver_cache sockaddr stream_single_shot thread_pool timeout \
                         timer tls tls_integration url version wakeup websocket websocket_client \
                         websocket_overflow websocket_client_peer websocket_split_frames

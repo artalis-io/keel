@@ -38,6 +38,7 @@ tests/protocols/http/test_http_server_state.c
 tests/protocols/http/test_http_server_stats.c
 tests/protocols/http/test_http_split_request.c
 tests/protocols/http/test_http_sse.c
+tests/protocols/http/test_http_suspend_hangup.c
 tests/protocols/http/test_http_tls.c
 tests/protocols/http/test_peer_addr.c
 tests/protocols/http/test_peer_cert.c
@@ -105,6 +106,7 @@ tests/test_fd_type_convention.c
 tests/test_event.c
 tests/test_event_caps.c
 tests/test_event_ctx.c
+tests/test_event_hangup.c
 tests/test_event_provider.c
 tests/test_event_provider_vtable.c
 tests/test_file_io.c
