@@ -32,7 +32,7 @@ static void nap_ms(int ms) {
 }
 
 /* op MUST be first: on_cancel/cancel_fn free via this pointer. */
-typedef struct { KlAsyncOp op; int result; } WorkCtx;
+typedef struct { KlAsyncOp op; int result; int dead; } WorkCtx;
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */
     WorkCtx *w = ud;
@@ -49,13 +49,18 @@ static void on_resume(KlAsyncOp *op, void *ud) {   /* event-loop thread: declare
  * has to default it. Without that default the completion driver takes its CLOSED arm and
  * shuts the socket without ever sending this route's reply. */
 static void on_resume_nostate(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
-static void on_cancel(KlAsyncOp *op, void *ud) { (void)ud; free(op); }
+/* The op can be cancelled while its work is still on the pool (the client hung up, or the server is
+ * freed): mark the context dead and leave freeing to done_fn / cancel_fn, which the pool always runs
+ * exactly once (the async.h on_cancel contract). */
+static void on_cancel(KlAsyncOp *op, void *ud) { (void)ud; ((WorkCtx *)op)->dead = 1; }
 static void cancel_fn(void *ud) { free(ud); }
 static void done_fn(void *ud) {          /* event-loop thread (via the wakeup watcher) */
     WorkCtx *w = ud;
-    KlHttpConn *conn = w->op.conn;
-    kl_http_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
-    kl_async_complete(&g_srv, &w->op);
+    if (!w->dead) {                      /* cancelled: the connection is gone, nothing to send */
+        KlHttpConn *conn = w->op.conn;
+        kl_http_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
+        kl_async_complete(&g_srv, &w->op);
+    }
     free(w);
 }
 
