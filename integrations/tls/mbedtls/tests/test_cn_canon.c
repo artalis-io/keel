@@ -84,7 +84,9 @@ UTEST(cn_canon, would_truncate_is_rejected)
 {
     static const unsigned char cn[] = { 'a','b','c','d','e','f','g','h','i','j' };  /* 10 bytes */
     mbedtls_x509_name n = mk_cn(cn, sizeof(cn), NULL);
-    char out[8] = "sentinel";   /* len (10) >= outlen (8): a cut value is ambiguous */
+    /* Filled to the brim with no terminator, so only the function under test can write the '\0'.
+     * len (10) >= outlen (8): a cut value is ambiguous. */
+    char out[8] = { 's','e','n','t','i','n','e','l' };
     x509_extract_cn(&n, out, sizeof(out));
     ASSERT_EQ('\0', out[0]);
 }

@@ -885,15 +885,15 @@ smoke-pollcomp-client:
 smoke-pollcomp-asan:
 	$(MAKE) clean
 	$(MAKE) BACKEND=pollcomp debug
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_BIN) tests/smoke_pollcomp.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_TLS_BIN) tests/smoke_pollcomp_tls.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
 	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/protocols/websocket/smoke_pollcomp_ws.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_ASYNC_BIN) tests/smoke_pollcomp_async.c -L. -lkeel -lpthread
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_CLIENT_BIN) tests/smoke_pollcomp_client.c -L. -lkeel -lpthread
 	# LeakSanitizer runs by default under ASan on Linux (CI); macOS ASan runs without it.
 	./$(SMOKE_POLLCOMP_BIN)
@@ -925,9 +925,9 @@ smoke-completion-inject:
 smoke-completion-inject-asan:
 	$(MAKE) clean
 	$(MAKE) debug
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
 	      -c -o $(SMOKE_INJECT_OBJ) src/event_pollcomp.c
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
 	      -o $(SMOKE_INJECT_BIN) tests/smoke_completion_inject.c \
 	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread
 	ASAN_OPTIONS=detect_leaks=1 ./$(SMOKE_INJECT_BIN)
@@ -938,11 +938,11 @@ smoke-completion-inject-asan:
 smoke-iouring-asan:
 	$(MAKE) clean
 	$(MAKE) BACKEND=iouring debug
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_IOURING_BIN) tests/smoke_iouring.c -L. -lkeel -lpthread -luring
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_IOURING_ASYNC_BIN) tests/smoke_iouring_async.c -L. -lkeel -lpthread -luring
-	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	$(CC) -std=c11 $(SMOKE_SAN_DEFS) -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_IOURING_CLIENT_BIN) tests/smoke_iouring_client.c -L. -lkeel -lpthread -luring
 	./$(SMOKE_IOURING_BIN)
 	./$(SMOKE_IOURING_ASYNC_BIN)
@@ -1406,6 +1406,13 @@ DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -g
                 -Iinclude -Ivendor/llhttp
 ifeq ($(UNAME_S),Linux)
   DEBUG_CFLAGS += -D_DEFAULT_SOURCE
+endif
+# The sanitized smoke recipes compile their harnesses with their own flags rather than DEBUG_CFLAGS;
+# they need the same platform feature macro, or strict -std=c11 hides POSIX declarations (nanosleep,
+# usleep, strnlen) on glibc.
+SMOKE_SAN_DEFS =
+ifeq ($(UNAME_S),Linux)
+  SMOKE_SAN_DEFS = -D_DEFAULT_SOURCE
 endif
 DEBUG_LDFLAGS = -fsanitize=address,undefined
 
