@@ -326,7 +326,7 @@ Three callbacks per op (separate because deadline semantics differ per use case)
   from here or from the `done_fn` that ran first) is enough: `kl_async_complete` transitions the connection
   to sending on its own. `KlHttpConn` is opaque, so a caller could not set the state anyway
 - `on_deadline`: called when `deadline_ms` reached (sleep = success, HTTP = timeout)
-- `on_cancel`: called if connection dies while suspended
+- `on_cancel`: called if connection dies while suspended, including (by default) when its client hangs up: a FIN or a reset, watched without reading (`KlHttpServerConfig.suspended_hangup`: `CANCEL` default / `RESET_ONLY` / `OFF`; prompt on loops with `KL_EVENT_CAP_HANGUP`, a best-effort 1 s peek sweep elsewhere)
 
 **Important**: `kl_async_complete()` is NOT thread-safe; it manipulates the ops linked list and calls `kl_event_add`. Always call it from the event loop thread (e.g. from a watcher callback or the thread pool's `done_fn`).
 

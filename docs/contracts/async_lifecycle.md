@@ -54,7 +54,19 @@ one mechanism serve opposite semantics (see the `KlAsyncOp` doc in `async.h`).
    thread-pool job, a timer) may still be outstanding at that point, so `on_cancel` marks the
    caller's context dead and frees it only once that work has finished; it does not write to the
    response.
-6. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the
+6. **A client hang-up cancels its op** (`KlHttpServerConfig.suspended_hangup`, 3.5.0). While
+   suspended, the connection is watched for its client's FIN or a reset without reading it (a
+   pipelined request or unread body stays put). Under the default `KL_HTTP_SUSPEND_HANGUP_CANCEL` a FIN
+   or a reset cancels the op exactly as `kl_async_cancel` does: `on_cancel` once, from the loop's I/O
+   processing (or the hang-up sweep's timer), the connection closed, nothing written.
+   `KL_HTTP_SUSPEND_HANGUP_RESET_ONLY` keeps a half-closed client's op (only a reset cancels; after
+   the FIN nothing more is watched), and `KL_HTTP_SUSPEND_HANGUP_OFF` watches nothing. Detection is
+   prompt on a loop with `KL_EVENT_CAP_HANGUP`, even behind unread bytes. Elsewhere it is **best
+   effort**: a once-a-second peek cannot see a FIN or reset behind unread bytes, and since
+   `deadline_ms` is optional, only a deadline whose `on_deadline` actually ends the op guarantees
+   that such a connection is eventually released. See
+   `docs/architecture/suspended_hangup_detection.md`.
+7. **Op reuse.** `kl_async_suspend()` re-arms the op (clears `_terminal`), so the
    same `KlAsyncOp` struct may back a fresh suspension after a prior terminal
    (e.g. a handler that yields repeatedly).
 
@@ -71,5 +83,7 @@ in `CLAUDE.md`.
 `tests/protocols/http/test_http_async.c` covers the guarantees directly: double `kl_async_complete`
 fires `on_resume` once; `kl_async_cancel` is idempotent; cancel-after-complete
 and complete-after-cancel are both no-ops; and a re-suspend after a terminal makes
-the op pending again. The completion-axis resume path is exercised by
+the op pending again. `tests/protocols/http/test_http_suspend_hangup.c` covers guarantee 6 per policy
+and per backend (including the sweep), and `tests/test_event_hangup.c` the event-layer guarantee
+it rests on. The completion-axis resume path is exercised by
 `smoke-pollcomp-async` and the io_uring `/astream` case.

@@ -5,6 +5,52 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+Adds client hang-up detection for suspended server connections. The public API is extended (an
+event-mask interest and report bit, a report-only bit, a capability bit, a server option and its
+enum) and the default behavior of a suspended op changes, so the next release is a minor version
+(3.5.0). Existing applications need the usual 3.x recompile and relink; see the behavior change below.
+
+### Added
+
+- **HTTP server: a client that hangs up while its connection is suspended cancels the op.**
+  `KlHttpServerConfig.suspended_hangup` (appended; `KlHttpSuspendHangup`):
+  `KL_HTTP_SUSPEND_HANGUP_CANCEL` (0, the default) cancels on a FIN or a reset,
+  `KL_HTTP_SUSPEND_HANGUP_RESET_ONLY` keeps a half-closed client's op (only a reset cancels), and
+  `KL_HTTP_SUSPEND_HANGUP_OFF` watches nothing. A cancel is the existing `kl_async_cancel` path:
+  `on_cancel` once, the connection closed, nothing written. The connection is watched without being
+  read, so a pipelined request or an unread body is neither consumed nor mistaken for a hang-up.
+  Detection is prompt on a loop with `KL_EVENT_CAP_HANGUP` (epoll, kqueue, Linux poll, WSAPoll,
+  io_uring, Linux pollcomp), even behind unread bytes. Elsewhere (IOCP, poll and pollcomp off Linux,
+  Cosmopolitan, lwIP, UEFI, an injected backend without the capability) each suspended connection is
+  peeked once a second, which is best effort: a FIN or reset behind unread bytes is invisible to a
+  peek. Design and measurements: `docs/architecture/suspended_hangup_detection.md`.
+- **Event layer: `KL_EVENT_HANGUP`, report-only `KL_EVENT_ERROR`, `KL_EVENT_CAP_HANGUP`.** A
+  registration (or watcher) with `KL_EVENT_HANGUP` interest and no READ interest reports the peer's FIN
+  as `HANGUP` and a reset as `HANGUP | ERROR`, and never reports readable data. A transport observation
+  only: the event layer never closes or cancels anything. READ/WRITE registrations are reported
+  exactly as before. A backend advertises the capability only where its own tests prove the guarantee.
+
+### Changed
+
+- **The default providers' `recv_peek` never blocks**, whatever the socket's mode (POSIX
+  `MSG_DONTWAIT`; Winsock checks readability with a zero-timeout `WSAPoll` first). A completion
+  backend's accepted socket may be blocking, and the hang-up sweep peeks it from the loop thread.
+  Callers that peeked non-blocking sockets see no change.
+
+Upgrade notes:
+
+- **Behavior change: a suspended op whose client goes away is now cancelled.** Before, it ran to
+  completion and its response was written to a closed connection. `on_cancel` already had to handle a
+  connection that died while suspended, so a handler that follows the `async.h` contract (no freeing of
+  what outstanding work still touches, no writes to the response) needs no change. To keep the old
+  behavior set `suspended_hangup = KL_HTTP_SUSPEND_HANGUP_OFF`; to keep clients that half-close after
+  their request, `KL_HTTP_SUSPEND_HANGUP_RESET_ONLY`.
+- **On loops without `KL_EVENT_CAP_HANGUP` detection is best effort.** Keel does not require a finite
+  `KlAsyncOp.deadline_ms`, so there only a deadline whose `on_deadline` actually ends the op guarantees
+  that a connection whose FIN sits behind unread bytes is eventually released.
+- **`KlHttpServerConfig` and `KlHttpServer` have grown** (appended fields); recompile, as with every
+  3.x release. A `switch` over `KlEventMask` may need cases for the new bits.
+
 ## [3.4.0]
 
 Minor release adding response-body backpressure to the async HTTP/1.1 client. The public API is
