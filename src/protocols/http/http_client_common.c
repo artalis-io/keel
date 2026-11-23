@@ -642,11 +642,12 @@ void kl_http_client_decomp_on_complete(void *user_data)
             w->active = 0;
         }
     }
+    /* on_complete means the body ended AND decoded cleanly: a failed decode (including the final
+     * flush's trailer check) is reported through on_done only, paused or not. */
+    if (w->failed)
+        return;
     if (w->paused) {
-        /* The user hears of completion only after the stash drained. A flush that failed while
-         * paused fails the request instead (on_done reports it): on_complete never runs paused. */
-        if (!w->failed)
-            w->complete_pending = 1;
+        w->complete_pending = 1;   /* the user hears of completion only after the resume */
         return;
     }
     if (w->user_on_complete)
@@ -680,8 +681,8 @@ int kl_http_client_decomp_resume(DecompStreamWrap *w)
         w->feed_more = w->flush_more = 0;
         int r = decomp_feed_stoppable(w, in, n, flush);
         if (flush && (r < 0 || !w->feed_more)) {
-            /* The final flush finished (or failed): as when it runs unpaused, a failure is reported
-             * as a decompression failure once the response completes, and on_complete is skipped. */
+            /* The final flush finished (or failed). As when it runs unpaused, a failure skips
+             * on_complete and is reported once the response completes (KL_ERR_COMPRESS). */
             kl_decompress_stream_free(&w->ds);
             w->active = 0;
             if (r < 0) {
