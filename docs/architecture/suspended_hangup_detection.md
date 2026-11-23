@@ -1,6 +1,6 @@
 # Detecting a client hang-up while a server connection is suspended
 
-Status: **design for review, revision 2. Nothing here is implemented.** Revision 2 records the review
+Status: **design for review, revision 3. Nothing here is implemented.** Revision 3 records the review
 decisions and replaces reasoning with measurements from the real CI runners wherever they exist.
 
 ## Problem
@@ -23,9 +23,12 @@ application data is deliberately not being consumed.
 | Cancel a suspended HTTP/1.1 connection on a peer FIN? | Yes, by default, with a documented half-close exception |
 | Enum or boolean for the server option? | Enum, `CANCEL` = 0 = default |
 | Public `KL_EVENT_HANGUP`? | Yes, capability-gated, transport-level meaning only |
+| `KL_EVENT_ERROR`? | Yes, report-only |
+| `KL_EVENT_CAP_HANGUP` | Advertised per backend **implementation**, only where that implementation is tested against the full guarantee, never because the OS has a flag |
 | IOCP | No undocumented `AFD_POLL`; a documented mechanism or the sweep fallback |
 | WSAPoll | Decide from measurement (done: see the matrix) |
 | Sweep fallback | Acceptable with bounded cost and explicit limitations |
+| Fallback probe | **Option A** (existing `recv_peek`); Option B (`peer_state`) deferred, no new provider API |
 | HTTP/2 | Out of scope (see Scope) |
 | Version | 3.5.0, if the default-on behavior ships |
 
@@ -101,8 +104,17 @@ Conclusions:
 6. IOCP's documented receives cannot be a persistent watch: once a FIN or any byte is present, every
    re-post completes at once.
 
-Still reasoned, not measured: lwIP (raw and sockets), UEFI, WSAPoll on a socket already associated with
-an IOCP port, and `CancelIoEx` of a pending peek (the probe never left one pending to cancel).
+**WSAPoll on IOCP-associated sockets** (measured, [run 45238424264](https://github.com/artalis-io/keel/actions/runs/45238424264)): the server socket was accepted the way Keel's IOCP backend
+does it (`AcceptEx`, `SO_UPDATE_ACCEPT_CONTEXT`, associated with a completion port, no notification
+modes). `WSAPoll(events = 0)` reported exactly as on a plain socket in every state tested: associated
+with nothing posted, after a completed and dequeued send, and with a zero-byte receive posted (both
+while its completion was queued and after dequeuing it). FIN and FIN behind unread bytes: HUP. Reset
+and reset behind unread bytes: HUP ERR. Pipelined bytes: nothing. On Windows a reset discards queued
+data, so the peek reports 10054 even for a reset behind unread bytes; a FIN behind unread bytes stays
+hidden from the peek.
+
+Still reasoned, not measured: lwIP (raw and sockets), UEFI, and `CancelIoEx` of a pending peek (the
+probe never left one pending to cancel; the decided design posts no peek).
 
 ## Design
 
@@ -168,7 +180,7 @@ Per-backend mapping (measured unless marked):
 | lwIP raw (reasoned) | provider reports watched connections whose `closed` flag is set | `closed` | `dead` | report once | yes, after tests |
 | UEFI (reasoned) | none | n/a | n/a | n/a | no: sweep |
 
-### Socket axis: the fallback probe (decision pending)
+### Socket axis: the fallback probe (Option A chosen)
 
 The sweep needs a synchronous point query per socket that never blocks and never consumes data. It
 is used **only** for connections whose loop lacks `KL_EVENT_CAP_HANGUP`; a connection is watched by the
@@ -224,10 +236,10 @@ behind pipelined bytes becomes observable within one sweep interval instead of o
 deadline. On Linux it matters only where the loop lacks CAP_HANGUP (an injected backend), since every
 built-in Linux backend has it. On macOS/BSD poll it buys nothing.
 
-Recommendation: start with **Option A** (no new interface) and keep B as a measured follow-up,
-**unless** IOCP is considered important enough to need the precise Windows probe from day one. The
-deciding measurement is WSAPoll on an IOCP-associated socket; if it does not work, B's main benefit
-on Windows disappears.
+**Decision: Option A.** No new provider API. Option B is deferred: it would be reconsidered only if
+measurement shows a compelling correctness or operational reason, and only after its implementation
+has been shown to work. Option A's blind spot (a FIN or reset behind queued bytes) is documented, and
+its consequence depends on the op's deadline (next section).
 
 ### HTTP policy: what abandonment means
 
@@ -257,14 +269,13 @@ typedef enum {
 3. **Sweep fallback.** One timer per server at a fixed interval (default 1 s), scheduled only while at
    least one suspended connection needs it, never per loop iteration. Each tick walks the server's
    list of pending ops (`s->async_ops`, which a retired op has already left), skips connections the
-   loop is watching, and runs the fallback probe (Option A or B, above) once per connection. Never
-   blocking, never consuming. Nothing is probed after cancel, resume or `kl_http_server_free` (the
-   timer is cancelled with the last such connection). An INDETERMINATE or UNSUPPORTED answer changes
-   nothing; the connection is probed again next tick.
+   loop is watching, and calls `recv_peek` (Option A) once per connection. Never blocking, never
+   consuming. Nothing is probed after cancel, resume or `kl_http_server_free` (the timer is cancelled
+   with the last such connection). An indeterminate answer changes nothing; the connection is probed
+   again next tick.
    **Limitation, stated as such:** the one-interval figure is the maximum delay only where the probe
-   can see the condition. A FIN or reset behind unread bytes is invisible to the peek, so with
-   Option A, and on every provider marked "not seen", such a connection is bounded only by the op's
-   own deadline, however short the interval.
+   can see the condition. A FIN or reset behind unread bytes is invisible to the peek, however short
+   the interval. See Deadlines for what then bounds the connection.
 4. **Resume** (`kl_async_complete`): re-arm from a registered fd (the existing `async_rearm` already
    falls back from add to modify). On io_uring, remove the posted poll before
    `kl_http_comp_resume`, with the existing `comp_ops` / `comp_closing` accounting so the slot is
@@ -273,6 +284,28 @@ typedef enum {
    an error or the op's own deadline ends it.
 6. **Ordering:** the cancel runs from the loop's I/O processing (or the sweep timer), outside any
    dispatch frame for that connection. The `on_cancel` contract in `async.h` already covers this.
+
+### Deadlines: no eventual-cleanup guarantee on the fallback
+
+Verified in the code: **Keel does not guarantee a finite deadline for a suspended op.**
+`KlAsyncOp.deadline_ms` is documented as "0 = no deadline", and both run loops (`http_server.c`,
+`http_server_core.c`) skip an op whose deadline is 0. Even with a deadline, `on_deadline` is only a
+trigger: the caller's callback must itself call `kl_async_complete` or `kl_async_cancel`.
+
+Consequence: where detection is impossible (a FIN or reset behind unread bytes, on a connection
+covered only by the sweep, or the Windows reset-after-half-close case above), **the fallback cannot
+guarantee eventual cleanup**. An op with no deadline can then stay suspended, and its socket in
+CLOSE_WAIT, indefinitely. The connections exposed are those whose loop lacks `KL_EVENT_CAP_HANGUP`
+(macOS/BSD poll including Cosmopolitan builds there, IOCP, UEFI, lwIP sockets, injected backends)
+**and** that have bytes queued behind the FIN. With the decided capability set, every built-in Linux
+backend, kqueue and WSAPoll detect it directly.
+
+What this means for Hull's case: a client that sends one request and then closes leaves nothing
+queued, so the peek sees the FIN. The blind spot needs the client to have sent more bytes after the
+request the handler suspended on (a pipelined request, or body bytes the handler has not read). Hull's
+own cap on a stream's total life (10 min by default) is the deadline that bounds it there. The upgrade
+notes will tell embedders that, on fallback backends, a finite `deadline_ms` is the only guarantee of
+eventual cleanup.
 
 ### TLS
 
@@ -286,7 +319,7 @@ record, and reading it would consume the stream. Such a connection ends at the o
   repeatedly.
 - `kl_http_server_free` with suspended ops: unchanged (it cancels every pending op).
 - Source compatibility: appended enum members, an appended config field whose zero value is the
-  decided default, report and capability bits, and (Option B only) an optional provider operation. Behavior change: by default a
+  decided default, and report and capability bits; no new provider operation (Option A). Behavior change: by default a
   suspended op whose client closes is cancelled instead of running to completion. Minor release with
   an upgrade note.
 
@@ -299,7 +332,7 @@ Event backends (one set per CAP_HANGUP backend, proving the guarantee rather tha
 - Pipelined bytes only: no report; loop wake count stays flat over a wait period.
 - No re-report until the next `kl_event_mod`.
 
-Fallback probe (Option A, or `peer_state` under Option B): the same scenarios, expecting INDETERMINATE where a FIN is hidden and never a terminal answer for pipelined bytes alone.
+Fallback probe (`recv_peek`, Option A): the same scenarios, expecting an indeterminate answer where a FIN is hidden and never a terminal answer for pipelined bytes alone.
 
 Server (mapped to Hull's list):
 
@@ -321,12 +354,10 @@ Server (mapped to Hull's list):
 
 ## Open questions
 
-1. **`KL_EVENT_ERROR`.** A report-only bit, so the backend that observed a reset classifies it. The
-   alternative is `SO_ERROR`, which measurement shows is not portable (0 on Windows, cleared on read).
-   Recommendation: add it.
-2. **Fallback probe: Option A (`recv_peek` only) or Option B (`peer_state`).** Recommendation: A
-   first, B only if the IOCP measurement below works and IOCP precision is wanted now.
-3. **IOCP.** Sweep only (no posted watch). Measure WSAPoll on an IOCP-associated socket before
-   relying on it (unverified). If it fails, IOCP keeps the peek with its documented blind spot.
-4. **lwIP and UEFI** stay reasoned until their integration tests exercise the scenarios.
-5. **Sweep interval** fixed at 1 s, or a server option.
+Decided in review: `KL_EVENT_ERROR` (report-only), the fallback probe (Option A) and IOCP (sweep only). Remaining:
+
+1. **IOCP.** Decided: sweep only, no posted watch, Option A's peek. Measured since: WSAPoll works
+   unchanged on IOCP-associated sockets, so a future Option B could close IOCP's one blind spot (a FIN
+   behind unread bytes). That is recorded as evidence, not as a decision to add B.
+2. **lwIP and UEFI** stay reasoned until their integration tests exercise the scenarios.
+3. **Sweep interval** fixed at 1 s, or a server option.
