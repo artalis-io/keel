@@ -257,7 +257,7 @@ typedef enum {
 3. **Sweep fallback.** One timer per server at a fixed interval (default 1 s), scheduled only while at
    least one suspended connection needs it, never per loop iteration. Each tick walks the server's
    list of pending ops (`s->async_ops`, which a retired op has already left), skips connections the
-   loop is watching, and runs the fallback probe (Option A or B below) once per connection. Never
+   loop is watching, and runs the fallback probe (Option A or B, above) once per connection. Never
    blocking, never consuming. Nothing is probed after cancel, resume or `kl_http_server_free` (the
    timer is cancelled with the last such connection). An INDETERMINATE or UNSUPPORTED answer changes
    nothing; the connection is probed again next tick.
@@ -286,7 +286,7 @@ record, and reading it would consume the stream. Such a connection ends at the o
   repeatedly.
 - `kl_http_server_free` with suspended ops: unchanged (it cancels every pending op).
 - Source compatibility: appended enum members, an appended config field whose zero value is the
-  decided default, an optional provider operation and a capability bit. Behavior change: by default a
+  decided default, report and capability bits, and (Option B only) an optional provider operation. Behavior change: by default a
   suspended op whose client closes is cancelled instead of running to completion. Minor release with
   an upgrade note.
 
