@@ -5,6 +5,40 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+Adds response-body backpressure to the async HTTP/1.1 client. The public API is extended (a new
+function, named callback return values and an appended parse result), so the next release is a minor
+version (3.4.0). Existing applications need only the usual 3.x recompile and relink.
+
+### Added
+
+- **Async HTTP client: pause and resume a streamed response body.** A `KlHttpClientBodyFn` may return
+  `KL_HTTP_CLIENT_BODY_PAUSE`: the fragment is accepted and nothing more (no body callback,
+  `on_complete` or successful `on_done`) is delivered until `kl_http_client_resume()`. While paused the
+  client stops reading the connection, so the server is held back by TCP flow control rather than by
+  buffering in the client; memory stays bounded (the unparsed rest of one 8 KiB read, and when
+  decompressing, the output of one 512-byte compressed slice) whatever the response size. Delivery
+  resumes at the exact byte where it stopped across Content-Length, chunked (with trailers) and
+  close-delimited bodies, through streaming decompression and TLS, with identical behavior on readiness
+  and completion engines. `kl_http_client_resume()` only schedules the continuation (never calls back
+  synchronously); cancellation and terminal errors outrank a pause; the whole-request `timeout_ms`
+  keeps running while paused. `KL_HTTP_CLIENT_BODY_CONTINUE` (0) and `KL_HTTP_CLIENT_BODY_ABORT` (-1)
+  name the existing values, so callers that return them are unaffected. The sync client has no resume
+  and treats PAUSE as an abort. `KlHttp1ParseResult` gains `KL_HTTP1_PARSE_PAUSED` (appended); a
+  direct user of `kl_http1_response_parser_llhttp_s` whose body callback returns 1 (formerly an abort)
+  now receives it. Design:
+  `docs/architecture/http_client_backpressure.md`.
+
+### Fixed
+
+- **HTTP client: a streaming callback that cancels the request stops delivery.** A body, headers or
+  complete callback that called `kl_http_client_cancel()` could see further callbacks for the rest of
+  the same read, and the read loop then reported an error through `on_done` on the cancelled client.
+  Nothing more is delivered now and `on_done` is not called.
+- **HTTP client: a body callback's return value is interpreted, not passed to llhttp.** A value that
+  happened to equal llhttp's `HPE_PAUSED` (21) ended the response early as if it were complete; every
+  value other than CONTINUE and PAUSE now aborts. Empty body fragments (an artifact of llhttp re-flushing
+  an open span) are no longer delivered.
+
 ## [3.3.1]
 
 Patch release with SSE write batching and HTTP/WebSocket correctness fixes. Public declarations and
