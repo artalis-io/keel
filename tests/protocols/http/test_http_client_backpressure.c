@@ -918,6 +918,41 @@ UTEST(stoppable, contract_violations_fail_promptly) {
     }
 }
 
+/* A failed final flush is reported the same way whether or not the user paused inside it: the same
+ * error, the same bytes delivered, and no on_complete. Here the flush's "??" exceeds
+ * max_response_size. */
+UTEST(stoppable, failed_flush_same_outcome_paused_or_not) {
+    for (int pause_every = 0; pause_every <= 1; pause_every++) {
+        for (int stoppable = 0; stoppable <= 1; stoppable++) {
+            static Peer p;
+            ASSERT_EQ(peer_listen(&p), 0);
+            peer_add_str(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nContent-Length: 2\r\n"
+                             "\r\nab");
+            p.hold = 1;
+            SrepCfg sc = { .stoppable = stoppable, .expand = 1, .frag = 2 };
+            KlDecompressConfig dc = { .ctx = (KlCompressCtx *)(void *)&sc, .factory = srep_factory,
+                                      .ctx_destroy = NULL };
+            KlHttpClientConfig cfg;
+            memset(&cfg, 0, sizeof cfg);
+            cfg.timeout_ms = 10000;
+            cfg.decompress = &dc;
+            cfg.max_response_size = 6;   /* "aa" "bb" "!!" fit; "??" does not */
+            Consumer k;
+            memset(&k, 0, sizeof k);
+            k.pause_every = pause_every;
+            RunOpts o = { &cfg, NULL, 0 };
+            (void)run_request(&p, &k, &o, NULL);
+            ASSERT_EQ(k.done, 1);
+            ASSERT_EQ(k.err, KL_ERR_COMPRESS);
+            ASSERT_EQ(k.len, (size_t)6);
+            ASSERT_EQ(memcmp(k.got, "aabb!!", 6), 0);
+            ASSERT_EQ(k.completes, 0);
+            ASSERT_EQ(k.cb_while_paused, 0);
+            consumer_free(&k);
+        }
+    }
+}
+
 /* Cancelling from a callback while the decoder is stopped mid-output: nothing more is delivered and
  * the session is released without being called again. */
 UTEST(stoppable, cancel_while_decoder_holds_output) {

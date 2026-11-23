@@ -48,6 +48,11 @@ version (3.4.0). Existing applications need only the usual 3.x recompile and rel
   happened to equal llhttp's `HPE_PAUSED` (21) ended the response early as if it were complete; every
   value other than CONTINUE and PAUSE now aborts. Empty body fragments (an artifact of llhttp re-flushing
   an open span) are no longer delivered.
+- **HTTP client: `on_complete` no longer runs for a body that failed to decode.** With streaming
+  decompression, a failure in the final flush (a bad gzip trailer or checksum, or `max_response_size`
+  exceeded there) called the stream's `on_complete` and then reported `KL_ERR_COMPRESS` through
+  `on_done`. `on_complete` now means the body ended and decoded cleanly; a failed decode is reported
+  through `on_done` only, the same whether or not the body was paused (sync and async clients).
 
 ## [3.3.1]
 

@@ -191,7 +191,10 @@ typedef kl_ssize_t (*KlHttpClientReadFn)(char *buf, size_t buf_len, void *user_d
 typedef struct {
     KlHttpClientBodyFn     on_body;        /**< Response body callback (NULL = buffer) */
     KlHttpClientHeadersFn  on_headers;    /**< NULL = skip */
-    void             (*on_complete)(void *user_data);  /**< NULL = skip */
+    /** Body complete (NULL = skip): the message ended and, when decompressing, the body decoded and
+     *  validated. Not called when decoding fails (on_done reports KL_ERR_COMPRESS or
+     *  KL_ERR_PARSE), whether or not the body was paused. */
+    void             (*on_complete)(void *user_data);
 
     KlHttpClientReadFn     body_read;     /**< Request body pull callback (NULL = use body/body_len) */
 
@@ -386,9 +389,11 @@ void kl_http_client_cancel(KlHttpClient *client);
  *  - kl_http_client_cancel() takes precedence: it drops a scheduled continuation. A streaming
  *    callback may call kl_http_client_cancel(); nothing more is delivered and on_done is not called.
  *    A streaming callback must not call kl_http_client_free().
- *  - The deadline ends a paused request (KL_ERR_TIMEOUT through on_done). The connection is not
- *    watched while paused, so a peer reset or close is seen only after the resume, once the bytes
- *    received before it were delivered; it is then reported through on_done as usual.
+ *  - The deadline ends a paused request (KL_ERR_TIMEOUT through on_done), and so does a decode
+ *    failure found in the same decoder call that paused (for example a gzip trailer that arrived
+ *    with the last body bytes and does not match). The connection is not watched while paused, so a
+ *    peer reset or close is seen only after the resume, once the bytes received before it were
+ *    delivered; it is then reported through on_done as usual.
  *
  * @return 0 if a continuation is scheduled (or already was), or if called from inside a streaming
  *         callback (recorded; it has an effect only if that callback returns PAUSE); -1 otherwise
