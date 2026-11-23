@@ -6,9 +6,10 @@
  * loopback TCP pair; close/read/write map to closesocket/recv/send. See
  * tests/net_compat.h.
  *
- * Precondition: Winsock must already be initialized (WSAStartup) before these
- * helpers are called; the library does this at load (socket_winsock.c's
- * constructor), which every test links, so tests need no explicit WSAStartup.
+ * Winsock is started lazily, never at load: kl_plat_socket_runtime_init() (the
+ * PAL invariant, src/platform_socket.h). Each helper below states it before its
+ * first ws2_32 call, and so must a test that calls ws2_32 itself before any Keel
+ * socket code has run.
  */
 #include "net_compat.h"
 #include "../src/socket.h"   /* kl_socket_provider_* */

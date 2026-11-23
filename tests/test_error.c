@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <string.h>
 #include "net_compat.h"
+#include "platform_socket.h"   /* kl_plat_socket_runtime_init: this test calls socket() itself */
 
 /* ── kl_strerror ─────────────────────────────────────────────────── */
 
@@ -53,7 +54,9 @@ UTEST(error, server_init_null) {
 }
 
 UTEST(error, server_run_bind_in_use) {
-    /* Occupy a port */
+    /* Occupy a port. The raw socket() below runs before any Keel socket call, so it states the PAL
+     * socket-runtime invariant itself (Winsock is started lazily, never implicitly). */
+    ASSERT_EQ(kl_plat_socket_runtime_init(), 0);
     KlSocketHandle sock = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(kl_handle_valid(sock));
 
