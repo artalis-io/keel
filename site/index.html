@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Keel v3.3.0: a portable, event-driven transport substrate for C</title>
-  <meta name="description" content="Keel v3.3.0 is a portable, event-driven transport substrate for C. Socket streams, listeners, datagrams, and process I/O pipes share one event loop, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Readiness and completion backends, lwIP and UEFI providers, writable-again stream callbacks, and six rounds of audit hardening. No forced dependencies.">
+  <title>Keel v3.4.0: a portable, event-driven transport substrate for C</title>
+  <meta name="description" content="Keel v3.4.0 is a portable, event-driven transport substrate for C. Socket streams, listeners, datagrams, and process I/O pipes share one event loop, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Readiness and completion backends, lwIP and UEFI providers, and response-body backpressure in the async HTTP client. No forced dependencies.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Keel v3.3.0: a portable, event-driven transport substrate for C">
-  <meta property="og:description" content="Keel v3.3.0 adds anonymous pipes for process I/O and writable-again stream callbacks, with six rounds of audit hardening across HTTP, TLS, DNS, and completion transports. One event loop for socket streams, listeners, datagrams, and pipes. Portable C11. No forced dependencies.">
+  <meta property="og:title" content="Keel v3.4.0: a portable, event-driven transport substrate for C">
+  <meta property="og:description" content="Keel v3.4.0 adds response-body backpressure to the async HTTP client: pause a streamed body, and TCP flow control holds back the server. One event loop for socket streams, listeners, datagrams, and pipes. Portable C11. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Keel v3.3.0: a portable, event-driven transport substrate for C">
-  <meta name="twitter:description" content="Keel v3.3.0 adds anonymous pipes for process I/O and writable-again stream callbacks, with six rounds of audit hardening across HTTP, TLS, DNS, and completion transports. Portable C11. No forced dependencies.">
+  <meta name="twitter:title" content="Keel v3.4.0: a portable, event-driven transport substrate for C">
+  <meta name="twitter:description" content="Keel v3.4.0 adds response-body backpressure to the async HTTP client: pause a streamed body, and TCP flow control holds back the server. Portable C11. No forced dependencies.">
   <meta name="twitter:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
@@ -26,11 +26,11 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "Keel",
-    "softwareVersion": "3.3.0",
+    "softwareVersion": "3.4.0",
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "NetworkingRuntime",
     "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
-    "description": "A portable, event-driven transport substrate for C: one event loop over readiness and completion backends for socket streams, listeners, datagrams, and pipes, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Version 3.3.0 adds anonymous process I/O pipes, writable-again stream callbacks, and six rounds of audit hardening. No forced dependencies.",
+    "description": "A portable, event-driven transport substrate for C: one event loop over readiness and completion backends for socket streams, listeners, datagrams, and pipes, with built-in HTTP/1.1, HTTP/2, WebSocket, SSE, and DNS. Version 3.4.0 adds response-body backpressure to the async HTTP client. No forced dependencies.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -77,7 +77,7 @@
           <div class="nav-menu">
             <a href="#start" class="link">Start</a>
             <a href="#layers" class="link">Architecture</a>
-            <a href="#release" class="link">v3.3.0</a>
+            <a href="#release" class="link">v3.4.0</a>
             <a href="#evidence" class="link">Evidence</a>
             <a href="#principles" class="link">Principles</a>
             <a href="#protocols" class="link">Protocols</a>
@@ -142,9 +142,9 @@
           </div>
 
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            <a href="#release" class="link">Keel v3.3.0</a>: anonymous pipes for
-            process I/O, writable-again stream callbacks, and six rounds of
-            audit hardening.
+            <a href="#release" class="link">Keel v3.4.0</a>: response-body
+            backpressure for the async HTTP client, through decompression
+            and TLS.
           </p>
 
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
@@ -221,17 +221,17 @@
         <article class="layer-card p-5">
           <h3 class="text-paper-50 font-medium">Build an HTTP service</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">HTTP/1.1, routing and WebSockets; optional HTTP/2 and TLS adapters.</p>
-          <p class="mt-3 text-sm"><a href="#start" class="link">Run hello_server</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.3.0/integrations/README.md" class="link">Integrations</a></p>
+          <p class="mt-3 text-sm"><a href="#start" class="link">Run hello_server</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.4.0/integrations/README.md" class="link">Integrations</a></p>
         </article>
         <article class="layer-card p-5">
           <h3 class="text-paper-50 font-medium">Embed an asynchronous I/O runtime</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed"><code>KlEventCtx</code>, <code>KlListener</code>, <code>KlStream</code> and <code>KlDatagram</code>: bounded buffering and explicit lifetimes.</p>
-          <p class="mt-3 text-sm"><a href="#layers" class="link">See the architecture</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/contracts/stream.md" class="link">Transport API</a></p>
+          <p class="mt-3 text-sm"><a href="#layers" class="link">See the architecture</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/contracts/stream.md" class="link">Transport API</a></p>
         </article>
         <article class="layer-card p-5">
           <h3 class="text-paper-50 font-medium">Build portable local IPC</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">Unix-domain sockets, Windows Named Pipes and directional process pipes. Your application owns process management.</p>
-          <p class="mt-3 text-sm"><a href="https://github.com/artalis-io/keel/blob/v3.3.0/examples/unix_socket_server.c" class="link">Unix socket example</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/architecture/windows_named_pipes.md" class="link">Named Pipes</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/architecture/process_pipe_streams.md" class="link">Process pipes</a></p>
+          <p class="mt-3 text-sm"><a href="https://github.com/artalis-io/keel/blob/v3.4.0/examples/unix_socket_server.c" class="link">Unix socket example</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/architecture/windows_named_pipes.md" class="link">Named Pipes</a> &middot; <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/architecture/process_pipe_streams.md" class="link">Process pipes</a></p>
         </article>
       </div>
     </div>
@@ -395,8 +395,8 @@
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">local build</span>
             </header>
-<pre><span class="tk-com"># Get the v3.3.0 source release.</span>
-$ git clone --branch v3.3.0 --depth 1 https://github.com/artalis-io/keel.git
+<pre><span class="tk-com"># Get the v3.4.0 source release.</span>
+$ git clone --branch v3.4.0 --depth 1 https://github.com/artalis-io/keel.git
 $ cd keel
 
 <span class="tk-com"># Build libkeel.a and the existing example.</span>
@@ -409,11 +409,11 @@ $ curl http://localhost:8080/hello
 <span class="tk-com"># Stop the server with Ctrl+C.</span></pre>
           </div>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/examples/hello_server.c" class="link">Example source</a> &middot;
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/README.md#build" class="link">Build instructions</a> &middot;
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/msvc_build.md" class="link">Windows / MSVC setup</a>.
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/examples/hello_server.c" class="link">Example source</a> &middot;
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/README.md#build" class="link">Build instructions</a> &middot;
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/msvc_build.md" class="link">Windows / MSVC setup</a>.
             Installation, static linking and backend prerequisites are in the
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/operations/platform_support.md#distribution-and-abi" class="link">platform guide</a>.
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/operations/platform_support.md#distribution-and-abi" class="link">platform guide</a>.
           </p>
         </div>
       </div>
@@ -423,65 +423,64 @@ $ curl http://localhost:8080/hello
   <section id="release" class="hairline-t">
     <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
       <div class="max-w-2xl">
-        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Keel v3.3.0</div>
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Keel v3.4.0</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-          Process I/O on the same loop. Hardened across the stack.
+          Pause a response body. The server waits.
         </h2>
         <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-          Anonymous pipe pairs extend the stream transport to an embedder's
-          child processes. Six rounds of C audits and their re-reviews tighten
-          parsing, callback lifetime, TLS, DNS, HTTP/2, and completion I/O.
-          <a href="https://github.com/artalis-io/keel/blob/v3.3.0/CHANGELOG.md#330" class="link">Read the release and upgrade notes</a>.
+          The async HTTP/1.1 client can now pause a streamed response body and
+          resume it later. While paused it stops reading the connection, so TCP
+          flow control holds back the server instead of the client buffering.
+          <a href="https://github.com/artalis-io/keel/blob/v3.4.0/CHANGELOG.md#340" class="link">Read the release and upgrade notes</a>.
         </p>
       </div>
       <div class="mt-8 grid md:grid-cols-3 gap-6">
         <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-          <h3 class="text-paper-50 font-medium">Anonymous pipe pairs</h3>
+          <h3 class="text-paper-50 font-medium">Pause and resume</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            <code class="text-paper-200">kl_anon_pipe_create</code> returns a
-            directional <code class="text-paper-200">KlPipeStream</code> and a
-            native child end for your process spawner. POSIX engines use ordinary
-            pipes through watchers; Windows uses private named pipes on IOCP.
-            Keel leaves process creation to the embedder. Both ends start
-            close-on-exec or non-inheritable.
+            A body callback returns
+            <code class="text-paper-200">KL_HTTP_CLIENT_BODY_PAUSE</code>;
+            <code class="text-paper-200">kl_http_client_resume</code> continues
+            at the exact byte where delivery stopped, across Content-Length,
+            chunked, and close-delimited bodies, on readiness and completion
+            engines alike.
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/include/keel/anon_pipe.h" class="link">Pipe API and platform limits</a>,
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/include/keel/anon_pipe_native.h" class="link">native-end handoff</a>.
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/architecture/http_client_backpressure.md" class="link">Backpressure design</a>,
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/include/keel/http_client.h" class="link">client API</a>.
           </p>
         </div>
         <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-          <h3 class="text-paper-50 font-medium">Writable-again callbacks</h3>
+          <h3 class="text-paper-50 font-medium">Bounded through decompression</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            After <code class="text-paper-200">KL_STREAM_WOULD_BLOCK</code>,
-            <code class="text-paper-200">kl_stream_on_writable</code> signals
-            when to retry, on sockets and pipes alike. The retry reports whether
-            capacity returned or the write side failed. Graceful close also
-            completes after a terminal write failure.
+            The optional
+            <code class="text-paper-200">KlDecompress.dfeed_stoppable</code>
+            lets a decoder stop mid-output and continue later. With the shipped
+            gzip decoder, a paused body holds no decoded output, whatever the
+            compression ratio. Other decoders use a bounded fallback.
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/contracts/stream.md" class="link">Stream and close contract</a>.
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/include/keel/decompress.h" class="link">Decoder contract</a>.
           </p>
         </div>
         <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-          <h3 class="text-paper-50 font-medium">Limits and lifetime safety</h3>
+          <h3 class="text-paper-50 font-medium">Through TLS</h3>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            Bounded chunk extensions and trailers, deferred async-client startup
-            errors, TLS-aware pool APIs, and an optional redirect policy callback.
-            DNS spoofing resistance, HTTP/2 limits and h2c upgrade handling, and
-            ordered, bounded completion output receive fixes across the stack.
+            Resume drains plaintext the TLS library has already decrypted, even
+            when no new bytes arrive on the socket. A real mbedTLS test pauses
+            on every fragment of a body whose last record stays inside the TLS
+            session.
           </p>
         </div>
       </div>
       <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-        Upgrading from 3.2.0: rebuild all consumers against the new headers;
+        Upgrading from 3.3.x: rebuild all consumers against the new headers;
         Keel preserves source compatibility, not ABI compatibility. Build
-        requirements are unchanged. Review the observable behavior changes:
-        HTTP/2 client bodies default to a 16 MiB per-stream cap; mbedTLS client
-        creation without a CA bundle now fails (unverified clients use an
-        explicit insecure factory); and enum switches must account for
-        <code class="text-paper-200">KL_ERR_REDIRECT_REFUSED</code> and
-        <code class="text-paper-200">KL_IO_RESOURCE_EXHAUSTED</code>.
+        requirements are unchanged. Review the behavior changes: in the async
+        client, a body callback that returns 1 now pauses instead of aborting
+        (abort with <code class="text-paper-200">KL_HTTP_CLIENT_BODY_ABORT</code>,
+        -1); custom decoders must be recompiled; and enum switches must account
+        for <code class="text-paper-200">KL_HTTP1_PARSE_PAUSED</code>.
       </p>
     </div>
   </section>
@@ -500,9 +499,9 @@ $ curl http://localhost:8080/hello
             validation; fuzzing and structural architecture gates.
           </p>
           <ul class="mt-4 text-sm text-mute-400 leading-relaxed evidence-list">
-            <li><a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/contracts/stream.md" class="link">Ownership and backpressure contracts</a>: bounded writes, pause/resume and confirmed detachment.</li>
-            <li><a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/architecture/invariants.md" class="link">Structural gates and negative canaries</a>: reject forbidden dependencies and prove the checks detect violations.</li>
-            <li><a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/operations/releasing.md" class="link">Reproducible source archives</a>: checksum, SBOM and clean-tree build/install verification.</li>
+            <li><a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/contracts/stream.md" class="link">Ownership and backpressure contracts</a>: bounded writes, pause/resume and confirmed detachment.</li>
+            <li><a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/architecture/invariants.md" class="link">Structural gates and negative canaries</a>: reject forbidden dependencies and prove the checks detect violations.</li>
+            <li><a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/operations/releasing.md" class="link">Reproducible source archives</a>: checksum, SBOM and clean-tree build/install verification.</li>
           </ul>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Unit suites, sanitizer smokes, strict compile gates and local firmware
@@ -927,7 +926,7 @@ $ curl http://localhost:8080/hello
             <strong>possible extensions, without delivery dates</strong>.
             Shipped providers and documented limitations are listed separately
             in the <a href="#protocols" class="link">support table</a> and
-            <a href="https://github.com/artalis-io/keel/blob/v3.3.0/docs/roadmap/roadmap.md" class="link">repository roadmap</a>.
+            <a href="https://github.com/artalis-io/keel/blob/v3.4.0/docs/roadmap/roadmap.md" class="link">repository roadmap</a>.
           </p>
         </div>
 
@@ -1197,8 +1196,8 @@ $ make check-no-em-dash check-no-milestones <span class="tk-com"># text-hygiene 
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Page last updated <time datetime="2026-10-10">October&nbsp;10,&nbsp;2026</time>
-        for <a href="https://github.com/artalis-io/keel/releases/tag/v3.3.0" class="link">Keel v3.3.0</a>.
+        Page last updated <time datetime="2026-11-23">November&nbsp;23,&nbsp;2026</time>
+        for <a href="https://github.com/artalis-io/keel/releases/tag/v3.4.0" class="link">Keel v3.4.0</a>.
         A portable, event-driven transport substrate for C: an I/O core, TCP/UDP
         transports, and built-in protocol families.
       </p>
