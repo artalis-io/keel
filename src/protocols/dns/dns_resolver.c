@@ -1677,6 +1677,9 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
     for (int i = 0; i < count; i++)
         nsp[i] = nsbuf[i];
     KlAddrFamily fam = KL_AF_UNSPEC;
+    /* nsp[0..count) is filled just above and kl_dns_select_ns reads only those; cppcheck assumes the
+     * loop may run zero times and flags the (then unread) array. */
+    // cppcheck-suppress uninitvar
     int nns = kl_dns_select_ns(nsp, count, defport, r->ns, DNS_MAX_NS, &fam);
 #ifndef KEEL_FREESTANDING
     if (nns == 0 && !(cfg && cfg->nameserver)) {

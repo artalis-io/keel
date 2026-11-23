@@ -345,13 +345,13 @@ static int wsc_parse_handshake_response(const KlWsClientConn *ws)
             while (val < line_end && (*val == ' ' || *val == '\t')) val++;
             size_t vlen = (size_t)(line_end - val);
             while (vlen > 0 && (val[vlen - 1] == ' ' || val[vlen - 1] == '\t')) vlen--;
-            const char *vend = val + vlen;
             if (nlen == 20 && kl_ascii_strncasecmp(p, "Sec-WebSocket-Accept", 20) == 0) {
                 accept_val = val;
                 accept_len = vlen;
             } else if (nlen == 7 && kl_ascii_strncasecmp(p, "Upgrade", 7) == 0) {
                 upgrade_ok = vlen == 9 && kl_ascii_strncasecmp(val, "websocket", 9) == 0;
             } else if (nlen == 10 && kl_ascii_strncasecmp(p, "Connection", 10) == 0) {
+                const char *vend = val + vlen;
                 for (const char *t = val; t < vend; ) {   /* a token list: find "upgrade" */
                     while (t < vend && (*t == ',' || *t == ' ' || *t == '\t')) t++;
                     const char *te = t;
