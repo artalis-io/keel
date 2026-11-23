@@ -1106,7 +1106,7 @@ UTEST(transport, pause_stops_the_producer_and_memory_stays_bounded) {
                                       &sc, on_done, &k);
     ASSERT_TRUE(k.client != NULL);
     k.pause_every = 1;
-    /* Phase 1: run until the first pause, then hold it and watch the producer. */
+    /* Run until the first pause, then hold it and watch the producer. */
     for (int i = 0; i < 2000 && !k.paused; i++) (void)kl_event_ctx_run(&ev, 16, 5);
     ASSERT_EQ(k.paused, 1);
     int stalled = 0, last = -1;
@@ -1125,7 +1125,7 @@ UTEST(transport, pause_stops_the_producer_and_memory_stays_bounded) {
     ASSERT_LT(at_stall, total / 2);   /* the producer is held back by TCP, not drained into us */
     ASSERT_EQ(k.calls, 1);            /* and nothing more was delivered while paused */
     ASSERT_EQ(k.cb_while_paused, 0);
-    /* Phase 2: stream the rest, pausing on every fragment. */
+    /* Then stream the rest, pausing on every fragment. */
     int calls = k.calls;
     ASSERT_EQ(consumer_resume(&k), 0);
     ASSERT_EQ(k.calls, calls);        /* never re-entrant */
