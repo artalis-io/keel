@@ -138,6 +138,11 @@ typedef struct {
  *
  * The callback's return type stays `int`; these name its values. CONTINUE (0) and ABORT (-1) are the
  * values the callback always had. Any other value except PAUSE aborts, as before.
+ *
+ * An abort fails the request with KL_ERR_PARSE, except during the final flush of a decompressed body
+ * (the decoder's last output, delivered when the message ends), where it is reported as
+ * KL_ERR_COMPRESS. The async client reports it through on_done, the sync client through its -1
+ * return and KlHttpClientResponse.error.
  */
 enum {
     KL_HTTP_CLIENT_BODY_CONTINUE = 0,  /**< Fragment consumed; delivery goes on. */
@@ -192,8 +197,9 @@ typedef struct {
     KlHttpClientBodyFn     on_body;        /**< Response body callback (NULL = buffer) */
     KlHttpClientHeadersFn  on_headers;    /**< NULL = skip */
     /** Body complete (NULL = skip): the message ended and, when decompressing, the body decoded and
-     *  validated. Not called when decoding fails (on_done reports KL_ERR_COMPRESS or
-     *  KL_ERR_PARSE), whether or not the body was paused. */
+     *  validated. Not called when decoding fails, whether or not the body was paused; the failure
+     *  (KL_ERR_COMPRESS or KL_ERR_PARSE) is reported through on_done by the async client, and
+     *  through the -1 return and KlHttpClientResponse.error by the sync client. */
     void             (*on_complete)(void *user_data);
 
     KlHttpClientReadFn     body_read;     /**< Request body pull callback (NULL = use body/body_len) */
@@ -384,7 +390,8 @@ void kl_http_client_cancel(KlHttpClient *client);
  *
  * Calling rules (event-loop thread only):
  *  - From inside a streaming callback: allowed. It takes effect after the callback returns, and
- *    only if that callback returned PAUSE (it then works like a pause followed by a resume).
+ *    only if that callback returned PAUSE (it then works like a pause followed by a resume). From
+ *    on_headers or on_complete, which cannot pause, it returns 0 and has no effect.
  *  - Repeated calls while a continuation is already scheduled return 0 and do nothing more.
  *  - kl_http_client_cancel() takes precedence: it drops a scheduled continuation. A streaming
  *    callback may call kl_http_client_cancel(); nothing more is delivered and on_done is not called.

@@ -26,6 +26,12 @@ outrank a pause; resume after termination never revives the request; a callback 
 `kl_http_client_resume` (effective only if that callback returns PAUSE) or `kl_http_client_cancel`
 (nothing more is delivered, no `on_done`), but must not call `kl_http_client_free`.
 
+`on_complete` means the body ended and, when decompressing, decoded and validated: a decode failure
+(including one found by the final flush) skips it, paused or not, and is reported only as the
+request's error. A body callback that aborts fails the request with `KL_ERR_PARSE`, or with
+`KL_ERR_COMPRESS` when it aborts during a decompressed body's final flush (the same in the sync and
+async clients). A resume called from `on_headers` or `on_complete`, which cannot pause, has no effect.
+
 Existing callers return only 0 or -1 and see no change. The sync client has no resume, so a PAUSE there
 fails the request, as any non-zero value always did. Fragments are never empty (the parser used to
 pass llhttp's empty end-of-buffer span flushes through; it no longer does).
