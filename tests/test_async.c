@@ -245,4 +245,45 @@ UTEST(async, watcher_mask_churn_soak) {
     test_loop_free(&loop);
 }
 
+/* A watcher whose callback removes a DIFFERENT watcher is still re-armed. On a one-shot backend
+ * (io_uring's POLL_ADD) a skipped re-arm means this fd is never watched again: a thread pool's wakeup
+ * whose done_fn completes a suspended HTTP op (which removes that connection's hang-up watcher) stops
+ * after its first completion. Drives two reads through the same watcher; the first removes the other. */
+typedef struct {
+    KlEventCtx *ev;
+    int other_fd;
+    int calls;
+} DelOtherCtx;
+
+static void del_other_cb(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+    (void)ready;
+    DelOtherCtx *c = user_data;
+    char b[8];
+    (void)kl_test_sockread(fd, b, sizeof b);
+    if (c->calls++ == 0) kl_watcher_del(c->ev, c->other_fd);
+}
+
+UTEST(async, watcher_rearmed_after_its_callback_removes_another) {
+    TestLoop l;
+    ASSERT_EQ(test_loop_init(&l), 0);
+    int a[2], o[2];
+    ASSERT_EQ(kl_test_socketpair(a), 0);
+    ASSERT_EQ(kl_test_socketpair(o), 0);
+    set_nonblocking(a[0]); set_nonblocking(a[1]); set_nonblocking(o[0]); set_nonblocking(o[1]);
+    DelOtherCtx c = { &l.ev, o[0], 0 };
+    WatcherCtx other = {0};
+    ASSERT_EQ(kl_watcher_add(&l.ev, a[0], KL_EVENT_READ, del_other_cb, &c), 0);
+    ASSERT_EQ(kl_watcher_add(&l.ev, o[0], KL_EVENT_READ, test_watcher_cb, &other), 0);
+    (void)kl_test_sockwrite(a[1], "1", 1);
+    pump_until(&l.ev, &c.calls, 1);
+    ASSERT_EQ(c.calls, 1);
+    (void)kl_test_sockwrite(a[1], "2", 1);
+    pump_until(&l.ev, &c.calls, 2);
+    EXPECT_EQ(c.calls, 2);              /* the watcher was re-armed despite the other's removal */
+    EXPECT_EQ(other.called, 0);
+    kl_watcher_del(&l.ev, a[0]);
+    kl_test_closesock(a[0]); kl_test_closesock(a[1]); kl_test_closesock(o[0]); kl_test_closesock(o[1]);
+    test_loop_free(&l);
+}
+
 UTEST_MAIN();
