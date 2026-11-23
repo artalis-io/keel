@@ -514,6 +514,7 @@ int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *heade
                     w->ds.decomp = decomp;
                     w->ds.error = 0;
                     w->active = 1;
+                    w->stoppable = w->pausable && decomp->dfeed_stoppable != NULL;
                 } else {
                     decomp->destroy(decomp);
                 }
@@ -527,10 +528,66 @@ int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *heade
     return 0;
 }
 
-/* Feed compressed input. A pausable wrapper feeds it in bounded slices and stops between slices once
+/* Emit for dfeed_stoppable: hand the fragment to the user and, if the user paused on it, ask the
+ * decoder to stop (1). The decoder must not emit again in that call; if it does, the stream fails
+ * rather than deliver while paused or hold the output here. */
+static int decomp_emit_stoppable(void *ctx, const char *data, size_t len)
+{
+    DecompStreamWrap *w = ctx;
+    if (len == 0)
+        return 0;
+    if (w->paused) {
+        w->failed = 1;
+        return -1;
+    }
+    if (w->max > 0 && (len > w->max || w->emitted > w->max - len)) {
+        w->failed = 1;
+        return -1;
+    }
+    w->emitted += len;
+    if (decomp_deliver(w, data, len) < 0)
+        return -1;
+    if (w->paused) {
+        w->stop_asked = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* One dfeed_stoppable call. Returns 0 (all input taken, nothing held), PAUSE (the user paused: the
+ * input not taken is in pend_in and, if the decoder stopped with work left, feed_more / flush_more
+ * say to call it again first), or -1. The decoder's report is checked, so one that breaks the
+ * contract (stops unasked, claims more input than it was given, or says it finished without taking
+ * all of it) fails the stream instead of replaying bytes or spinning through empty resumes: every
+ * resume that calls the decoder again follows a fragment the user accepted and paused on. */
+static int decomp_feed_stoppable(DecompStreamWrap *w, const char *data, size_t len, int flush)
+{
+    KlDecompressStream *ds = &w->ds;
+    size_t consumed = 0;
+    w->stop_asked = 0;
+    int r = ds->error ? -1
+                      : ds->decomp->dfeed_stoppable(ds->decomp, data, len, flush, &consumed,
+                                                    decomp_emit_stoppable, w);
+    if (r < 0 || w->failed || (r != 0 && r != 1) || (r == 1 && !w->stop_asked) || consumed > len ||
+        (r == 0 && consumed != len)) {
+        ds->error = 1;
+        w->failed = 1;
+        return -1;
+    }
+    w->feed_more = r == 1;
+    w->flush_more = r == 1 && flush;
+    w->pend_in = consumed < len ? data + consumed : NULL;
+    w->pend_in_len = len - consumed;
+    return w->paused ? KL_HTTP_CLIENT_BODY_PAUSE : 0;
+}
+
+/* Feed compressed input. A stoppable decoder takes it whole and stops itself at the user's pause; a
+ * pausable wrapper over any other decoder feeds it in bounded slices and stops between slices once
  * the user paused, leaving the unfed rest in pend_in. Returns 0, PAUSE, or -1. */
 static int decomp_feed(DecompStreamWrap *w, const char *data, size_t len)
 {
+    if (w->stoppable)
+        return decomp_feed_stoppable(w, data, len, 0);
     size_t slice = w->pausable ? KL_HTTP_CLIENT_DECOMP_SLICE : len;
     size_t off = 0;
     while (off < len) {
@@ -573,12 +630,17 @@ void kl_http_client_decomp_on_complete(void *user_data)
     DecompStreamWrap *w = user_data;
     if (w->active) {
         /* Final flush: a failure here (a truncated stream) fails the request; on_complete has no
-         * error channel, so the client checks `failed` once the response is parsed. Output it
-         * produces after a pause is stashed like any other. */
-        if (kl_decompress_stream_feed(&w->ds, NULL, 0, 1, decomp_emit_to_user, w) < 0)
+         * error channel, so the client checks `failed` once the response is parsed. A stoppable
+         * decoder stopped part-way keeps its session (and the trailer check) for the resume; other
+         * decoders' output after a pause is stashed like any other. */
+        if (w->stoppable)
+            (void)decomp_feed_stoppable(w, NULL, 0, 1);
+        else if (kl_decompress_stream_feed(&w->ds, NULL, 0, 1, decomp_emit_to_user, w) < 0)
             w->failed = 1;
-        kl_decompress_stream_free(&w->ds);
-        w->active = 0;
+        if (!w->feed_more || w->failed) {
+            kl_decompress_stream_free(&w->ds);
+            w->active = 0;
+        }
     }
     if (w->paused) {
         /* The user hears of completion only after the stash drained. A flush that failed while
@@ -607,8 +669,33 @@ int kl_http_client_decomp_resume(DecompStreamWrap *w)
             return 1;
     }
     decomp_stash_free(w);   /* drained: no memory is held while running */
-    /* 2. Compressed input the parser already framed but the decoder had not taken yet. */
-    if (w->pend_in_len > 0) {
+    /* 2. A stoppable decoder: the work it stopped on (output it still holds, then the input it did
+     *    not take; in the final flush, then the trailer check). */
+    if (w->stoppable && (w->feed_more || w->pend_in_len > 0)) {
+        const char *in = w->pend_in;
+        size_t n = w->pend_in_len;
+        int flush = w->flush_more;
+        w->pend_in = NULL;
+        w->pend_in_len = 0;
+        w->feed_more = w->flush_more = 0;
+        int r = decomp_feed_stoppable(w, in, n, flush);
+        if (flush && (r < 0 || !w->feed_more)) {
+            /* The final flush finished (or failed): as when it runs unpaused, a failure is reported
+             * as a decompression failure once the response completes, and on_complete is skipped. */
+            kl_decompress_stream_free(&w->ds);
+            w->active = 0;
+            if (r < 0) {
+                w->complete_pending = 0;
+                return 0;
+            }
+        }
+        if (r < 0)
+            return -1;
+        if (r == KL_HTTP_CLIENT_BODY_PAUSE)
+            return 1;
+    }
+    /* 2'. Other decoders: compressed input the parser already framed but had not fed yet. */
+    if (!w->stoppable && w->pend_in_len > 0) {
         const char *in = w->pend_in;
         size_t n = w->pend_in_len;
         w->pend_in = NULL;

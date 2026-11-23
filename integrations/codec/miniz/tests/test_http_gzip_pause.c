@@ -1,12 +1,13 @@
 /*
  * test_http_gzip_pause.c: response-body pause/resume through the real miniz gzip decoder.
  *
- * The async HTTP client feeds a pausable decoder compressed input in bounded slices and holds output
- * the decoder produced after a pause (KlDecompress.dfeed cannot stop mid-input). These cases drive
- * the public client API against a loopback peer serving real gzip bodies: a text body paused on every
- * fragment, a body at deflate's maximum ratio (all zeros: one slice expands to hundreds of KiB, so the
- * held-back output is at its largest) with the client's peak allocation checked, and a corrupt CRC32
- * that must still fail the request after every decoded byte was delivered across the pauses.
+ * The miniz decoder supplies KlDecompress.dfeed_stoppable, so the async HTTP client stops it at the
+ * fragment the user paused on and holds no decoded output itself. These cases drive the public client
+ * API against a loopback peer serving real gzip bodies: a text body paused on every fragment, a body
+ * at deflate's maximum ratio (all zeros, about 1000:1) with the client's peak allocation checked, and
+ * a corrupt CRC32 that must still fail the request after every decoded byte was delivered across the
+ * pauses. The maximum-ratio body is also run with dfeed_stoppable hidden, through the client's
+ * fallback for decoders without it (bounded input slices, held-back output).
  *
  * POSIX-only harness (built by `make decompress-miniz-test`).
  */
@@ -137,9 +138,16 @@ static int gzip_body(const char *body, size_t n, char **out, size_t *out_len, Kl
     return rc;
 }
 
+/* The miniz decoder with dfeed_stoppable hidden: a decoder that only has dfeed. */
+static KlDecompress *legacy_miniz_create(KlCompressCtx *ctx, KlAllocator *alloc) {
+    KlDecompress *d = kl_decompress_miniz_create(ctx, alloc);
+    if (d) d->dfeed_stoppable = NULL;
+    return d;
+}
+
 /* Serve `gz` as a gzip Content-Length response and stream it through the client, pausing on every
  * fragment and resuming on a later tick. */
-static void fetch(const char *gz, size_t gz_len, Sink *s, Count *cnt) {
+static void fetch_with(const char *gz, size_t gz_len, Sink *s, Count *cnt, KlDecompressFactory fac) {
     static char resp[8 * 1024 * 1024];
     int hl = snprintf(resp, sizeof resp,
                       "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %zu\r\n\r\n", gz_len);
@@ -150,7 +158,7 @@ static void fetch(const char *gz, size_t gz_len, Sink *s, Count *cnt) {
     ca = (KlAllocator){ .malloc = c_malloc, .realloc = c_realloc, .free = c_free, .ctx = cnt };
     KlAllocator da = kl_allocator_default();
     KlCompressCtx *zctx = kl_compress_miniz_ctx_create(6, &da);
-    KlDecompressConfig dc = { .ctx = zctx, .factory = kl_decompress_miniz_create, .ctx_destroy = NULL };
+    KlDecompressConfig dc = { .ctx = zctx, .factory = fac, .ctx_destroy = NULL };
     KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof cfg);
     cfg.timeout_ms = 60000;
@@ -177,6 +185,10 @@ static void fetch(const char *gz, size_t gz_len, Sink *s, Count *cnt) {
     kl_event_ctx_free(&ev);
     kl_compress_miniz_ctx_destroy(zctx);
     peer_join(&p);
+}
+
+static void fetch(const char *gz, size_t gz_len, Sink *s, Count *cnt) {
+    fetch_with(gz, gz_len, s, cnt, kl_decompress_miniz_create);
 }
 
 UTEST(gzip_pause, text_body_every_fragment) {
@@ -214,9 +226,32 @@ UTEST(gzip_pause, max_ratio_body_bounded_hold_back) {
     ASSERT_EQ(s.len, n);
     ASSERT_EQ(memcmp(s.got, body, n), 0);
     ASSERT_EQ(s.bad, 0);
-    /* The decoder session (dictionary ~32 KiB + state ~11 KiB), the 8 KiB receive buffer and at most
-     * one slice's held-back output (512 B at ~1032:1): well under 1 MiB for a 24 MiB body. */
+    /* The decoder session (dictionary 32 KiB + state ~11 KiB), the 8 KiB receive buffer and the
+     * client itself: nothing scales with the ratio, since the stopped decoder keeps its output. */
+    ASSERT_LT(cnt.peak, (size_t)96 * 1024);
+    ASSERT_EQ(cnt.cur, (size_t)0);
+    kl_free(&al, gz, gzl);
+    free(body); free(s.got);
+}
+
+UTEST(gzip_pause, max_ratio_body_legacy_fallback_bounded) {
+    KlAllocator al = kl_allocator_default();
+    size_t n = (size_t)24 * 1024 * 1024;
+    char *body = calloc(1, n);
+    char *gz; size_t gzl;
+    ASSERT_EQ(gzip_body(body, n, &gz, &gzl, &al), 0);
+    Sink s; memset(&s, 0, sizeof s);
+    Count cnt; memset(&cnt, 0, sizeof cnt);
+    fetch_with(gz, gzl, &s, &cnt, legacy_miniz_create);
+    ASSERT_EQ(s.done, 1);
+    ASSERT_EQ((int)s.err, (int)KL_ERR_NONE);
+    ASSERT_EQ(s.len, n);
+    ASSERT_EQ(memcmp(s.got, body, n), 0);
+    ASSERT_EQ(s.bad, 0);
+    /* The session, the receive buffer and at most one 512-byte slice's output held back (deflate
+     * tops out near 1032:1, so about 516 KiB): under the fallback's cap, well under 1 MiB. */
     ASSERT_LT(cnt.peak, (size_t)1024 * 1024);
+    ASSERT_GT(cnt.peak, (size_t)256 * 1024);   /* it did hold output back: the path under test */
     ASSERT_EQ(cnt.cur, (size_t)0);
     kl_free(&al, gz, gzl);
     free(body); free(s.got);

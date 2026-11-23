@@ -17,8 +17,8 @@ extern "C" {
  *
  * Append-only vtable (see docs/contracts/compatibility.md): implementers
  * zero-initialize and recompile per major version. Required (core calls them):
- * decompress, dfeed, encoding, destroy. Optional (NULL = not supplied): reset. New
- * ops are appended after destroy.
+ * decompress, dfeed, encoding, destroy. Optional (NULL = not supplied): reset,
+ * dfeed_stoppable. New ops are appended after dfeed_stoppable.
  */
 typedef struct KlDecompress KlDecompress;
 
@@ -66,6 +66,34 @@ struct KlDecompress {
 
     /** @brief Free all resources. */
     void (*destroy)(KlDecompress *self);
+
+    /**
+     * @brief Optional streaming feed that the consumer can stop (NULL = not supplied).
+     *
+     * Same input and output as dfeed, except that @p emit may return 1 to ask the decoder to stop.
+     * The fragment passed to that emit call is accepted (it is never offered again). The decoder
+     * then returns 1 promptly, without calling @p emit again, after storing in @p *consumed how many
+     * bytes of @p data it took. Output it has decoded but not emitted, and its own state, stay
+     * inside the session. The next call continues exactly there, with the rest of the input
+     * (`data + *consumed`, `len - *consumed`), which may be zero bytes: a decoder that still holds
+     * output must make progress on a call with no input. A stop during the final call
+     * (flush = 1) is continued by another flush call; the trailer is validated only when that
+     * finishes.
+     *
+     * An emit return below 0 fails the stream, as with dfeed; 0 continues.
+     *
+     * The HTTP client uses this op, when supplied, to pause a decompressed response body without
+     * holding decoded output (KL_HTTP_CLIENT_BODY_PAUSE). Without it the client falls back to dfeed
+     * in bounded input slices and holds the rest of a slice's output, up to a fixed cap.
+     *
+     * @param consumed Receives the number of input bytes taken (on a return of 0 or 1).
+     * @return 0 when all of @p data was taken and no output is held (for flush = 1: the stream
+     *         ended and was validated); 1 when stopped by @p emit; -1 on error.
+     */
+    int (*dfeed_stoppable)(KlDecompress *self, const char *data, size_t len, int flush,
+                           size_t *consumed,
+                           int (*emit)(void *ctx, const char *data, size_t len),
+                           void *emit_ctx);
 };
 
 /**

@@ -61,13 +61,21 @@ typedef struct {
     int                 failed;  /* decompression failed (incl. the final flush): fail the request */
 
     /* Body backpressure (async client only; all zero = the sync path, which cannot pause).
-     * KlDecompress.dfeed cannot stop part-way through its input (an emit that refuses output fails
-     * the stream), so a pause is honoured at two bounded levels: compressed input is fed in slices of
-     * at most KL_HTTP_CLIENT_DECOMP_SLICE bytes and no further slice is fed once the user paused;
-     * output the decoder still produces for the slice in progress is kept in `stash` (capped at
+     * A decoder that supplies KlDecompress.dfeed_stoppable is stopped at the fragment the user
+     * paused on and keeps any further output inside itself (`stoppable`): nothing is held here, and
+     * the input it did not take stays in pend_in. KlDecompress.dfeed cannot stop part-way through
+     * its input (an emit that refuses output fails the stream), so for a decoder without the op a
+     * pause is honoured at two bounded levels: compressed input is fed in slices of at most
+     * KL_HTTP_CLIENT_DECOMP_SLICE bytes and no further slice is fed once the user paused; output the
+     * decoder still produces for the slice in progress is kept in `stash` (capped at
      * KL_HTTP_CLIENT_DECOMP_STASH_MAX) and delivered first on resume. */
     int                 pausable;       /* the user may return KL_HTTP_CLIENT_BODY_PAUSE */
+    int                 stoppable;      /* pausable and the decoder supplies dfeed_stoppable */
     int                 paused;         /* the user paused: emit nothing more to the user */
+    int                 stop_asked;     /* this dfeed_stoppable call was asked to stop */
+    int                 feed_more;      /* a stopped decoder holds work: call it again (even with
+                                         * no input) before anything else is fed */
+    int                 flush_more;     /* that stop was in the final (flush) call */
     char               *stash;          /* decoded output held back since the pause */
     size_t              stash_len, stash_off, stash_cap;
     const char         *pend_in;        /* compressed body bytes not yet fed: borrowed from the
@@ -80,8 +88,9 @@ typedef struct {
 
 /* Compressed bytes per dfeed call on a pausable wrapper; bounds the output one call can produce. */
 #define KL_HTTP_CLIENT_DECOMP_SLICE      512
-/* Stash cap: one slice at deflate's maximum ratio (about 1032:1) plus 64 KiB of slack for a decoder
- * that holds a little output back between calls. Exceeding it fails the stream (KL_ERR_COMPRESS). */
+/* Stash cap (decoders without dfeed_stoppable only): one slice at deflate's maximum ratio (about
+ * 1032:1) plus 64 KiB of slack for a decoder that holds a little output back between calls.
+ * Exceeding it fails the stream: KL_ERR_PARSE mid-body, KL_ERR_COMPRESS in the final flush. */
 #define KL_HTTP_CLIENT_DECOMP_STASH_MAX  ((size_t)KL_HTTP_CLIENT_DECOMP_SLICE * 1032u + 65536u)
 /* Largest fragment handed to the user from the stash on resume. */
 #define KL_HTTP_CLIENT_DECOMP_FRAG       16384

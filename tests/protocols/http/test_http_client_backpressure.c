@@ -672,6 +672,302 @@ UTEST(decompress, large_body_repeated_pause_bounded) {
     consumer_free(&k);
 }
 
+/* ── Stoppable decoders (KlDecompress.dfeed_stoppable) ───────────── */
+
+/* "x-srep": each input byte c becomes `expand` fragments of `frag` bytes of c; the final flush emits
+ * "!!" then "??" and then validates (a '#' anywhere fails it, as a bad checksum would). With
+ * `stoppable` it supplies dfeed_stoppable: a stop leaves the fragments still owed for the current
+ * byte, and the flush's progress, inside the session. `misbehave` breaks the contract on purpose.
+ * The configuration and the observations travel in the decoder context. */
+enum { SR_OK, SR_STOP_UNASKED, SR_SHORT_DONE, SR_EMIT_AFTER_STOP, SR_OVER_CONSUME };
+typedef struct {
+    int    stoppable, misbehave;
+    size_t expand, frag;
+    int    calls;
+    int    zero_input_resumes;     /* a call with no input that still had output to give */
+    int    stops_with_input_left;  /* a stop that left part of the call's input untaken */
+    int    flush_resumes;          /* a flush call continuing a stopped flush */
+} SrepCfg;
+
+typedef struct {
+    KlDecompress  base;
+    KlAllocator  *alloc;
+    SrepCfg      *cfg;
+    int           bad, fl_started, fl_owed;
+    char          cur;
+    size_t        owed;
+} Srep;
+
+static char g_srep_fill[16384];
+
+static int srep_run(Srep *r, const char *d, size_t n, int flush, size_t *consumed,
+                    int (*emit)(void *, const char *, size_t), void *ctx, int stoppable) {
+    SrepCfg *c = r->cfg;
+    c->calls++;
+    if (n == 0 && !flush && r->owed > 0) c->zero_input_resumes++;
+    if (flush && r->fl_started && r->fl_owed > 0) c->flush_resumes++;
+    if (stoppable && c->misbehave == SR_STOP_UNASKED) { *consumed = 0; return 1; }
+    size_t i = 0;
+    for (;;) {
+        while (r->owed > 0) {
+            memset(g_srep_fill, r->cur, c->frag);
+            r->owed--;
+            int e = emit(ctx, g_srep_fill, c->frag);
+            if (e < 0) return -1;
+            if (stoppable && e > 0) {
+                if (c->misbehave == SR_EMIT_AFTER_STOP && emit(ctx, g_srep_fill, 1) < 0) return -1;
+                if (i < n) c->stops_with_input_left++;
+                *consumed = c->misbehave == SR_OVER_CONSUME ? n + 1 : i;
+                return 1;
+            }
+        }
+        if (i >= n) break;
+        r->cur = d[i++];
+        if (r->cur == '#') r->bad = 1;
+        r->owed = c->expand;
+    }
+    if (flush) {
+        if (!r->fl_started) { r->fl_started = 1; r->fl_owed = 2; }
+        while (r->fl_owed > 0) {
+            const char *t = r->fl_owed == 2 ? "!!" : "??";
+            r->fl_owed--;
+            int e = emit(ctx, t, 2);
+            if (e < 0) return -1;
+            if (stoppable && e > 0) { *consumed = n; return 1; }
+        }
+        if (r->bad) return -1;
+    }
+    if (stoppable && c->misbehave == SR_SHORT_DONE && n > 1) { *consumed = n - 1; return 0; }
+    *consumed = n;
+    return 0;
+}
+static int srep_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
+                      int (*emit)(void *, const char *, size_t), void *ctx) {
+    size_t consumed;
+    return srep_run((Srep *)self, d, n, flush, &consumed, emit, ctx, 0);
+}
+static int srep_dfeed_stoppable(KlDecompress *self, const char *d, size_t n, int flush,
+                                size_t *consumed, int (*emit)(void *, const char *, size_t),
+                                void *ctx) {
+    return srep_run((Srep *)self, d, n, flush, consumed, emit, ctx, 1);
+}
+static const char *srep_encoding(KlDecompress *s) { (void)s; return "x-srep"; }
+static void srep_destroy(KlDecompress *s) { Srep *r = (Srep *)s; kl_free(r->alloc, r, sizeof(*r)); }
+static KlDecompress *srep_factory(KlCompressCtx *ctx, KlAllocator *alloc) {
+    Srep *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->alloc = alloc;
+    r->cfg = (SrepCfg *)(void *)ctx;
+    r->base.decompress = rep_decompress;
+    r->base.dfeed = srep_dfeed;
+    r->base.encoding = srep_encoding;
+    r->base.destroy = srep_destroy;
+    if (r->cfg->stoppable) r->base.dfeed_stoppable = srep_dfeed_stoppable;
+    return &r->base;
+}
+
+static void run_srep(Peer *p, Consumer *k, SrepCfg *sc, int pause_every, KlAllocator *ca) {
+    KlDecompressConfig dc = { .ctx = (KlCompressCtx *)(void *)sc, .factory = srep_factory,
+                              .ctx_destroy = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.timeout_ms = 20000;
+    cfg.decompress = &dc;
+    cfg.max_response_size = (size_t)64 * 1024 * 1024;
+    memset(k, 0, sizeof *k);
+    k->pause_every = pause_every;
+    RunOpts o = { &cfg, NULL, 0 };
+    (void)run_request(p, k, &o, ca);
+}
+
+/* The expected x-srep output for `in` (NUL-terminated): caller frees. */
+static char *srep_expected(const char *in, size_t expand, size_t frag, size_t *len) {
+    size_t n = strlen(in), per = expand * frag;
+    char *o = malloc(n * per + 4);
+    for (size_t i = 0; i < n; i++) memset(o + i * per, in[i], per);
+    memcpy(o + n * per, "!!??", 4);
+    *len = n * per + 4;
+    return o;
+}
+
+/* Every fragment pauses, so the decoder is stopped: with compressed input still untaken, holding
+ * output it owes for a byte already taken (continued by a call with no input), and inside the final
+ * flush (continued, then validated). Delivery is exact, never re-entrant, nothing while paused. */
+UTEST(stoppable, pause_every_fragment_exact) {
+    static Peer p;
+    ASSERT_EQ(peer_listen(&p), 0);
+    peer_add_str(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     "4\r\nabcd\r\n6\r\nefghij\r\n0\r\n\r\n");
+    p.hold = 1;
+    SrepCfg sc = { .stoppable = 1, .expand = 3, .frag = 5 };
+    Consumer k;
+    run_srep(&p, &k, &sc, 1, NULL);
+    size_t wl;
+    char *want = srep_expected("abcdefghij", 3, 5, &wl);
+    ASSERT_EQ(k.done, 1);
+    ASSERT_EQ(k.err, KL_ERR_NONE);
+    ASSERT_EQ(k.len, wl);
+    ASSERT_EQ(memcmp(k.got, want, wl), 0);
+    ASSERT_EQ(k.calls, 10 * 3 + 2);       /* one callback per decoded fragment: none replayed */
+    ASSERT_EQ(k.completes, 1);
+    ASSERT_GT(sc.stops_with_input_left, 0);
+    ASSERT_GT(sc.zero_input_resumes, 0);
+    ASSERT_GT(sc.flush_resumes, 0);
+    ASSERT_CLEAN(k);
+    free(want);
+    consumer_free(&k);
+}
+
+/* A pause inside the final flush keeps the session: the validation still runs after the resume and
+ * fails the request, after every decoded byte was delivered, without on_complete. */
+UTEST(stoppable, pause_in_final_flush_then_validation_fails) {
+    static Peer p;
+    ASSERT_EQ(peer_listen(&p), 0);
+    peer_add_str(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nContent-Length: 4\r\n\r\nab#c");
+    p.hold = 1;
+    SrepCfg sc = { .stoppable = 1, .expand = 2, .frag = 2 };
+    Consumer k;
+    run_srep(&p, &k, &sc, 1, NULL);
+    ASSERT_EQ(k.done, 1);
+    ASSERT_EQ(k.err, KL_ERR_COMPRESS);
+    ASSERT_EQ(k.len, (size_t)(4 * 4 + 4));   /* the body, then "!!??" from the flush */
+    ASSERT_EQ(memcmp(k.got + 16, "!!??", 4), 0);
+    ASSERT_GT(sc.flush_resumes, 0);
+    ASSERT_EQ(k.completes, 0);
+    ASSERT_EQ(k.cb_while_paused, 0);
+    consumer_free(&k);
+}
+
+/* One compressed byte expands to 1 MiB. A stoppable decoder streams 16 MiB through a few KiB of
+ * client memory whatever the pause pattern; a decoder without the op cannot stop, so pausing on its
+ * first fragment overflows the bounded hold-back and fails the request (the documented limit of the
+ * legacy path), with nothing leaked and only an in-order prefix delivered. */
+UTEST(stoppable, high_expansion_bounded_memory_and_legacy_limit) {
+    static Peer p;
+    const char *in = "0123456789abcdef";
+    static char reply[256];
+    int hl = snprintf(reply, sizeof reply,
+                      "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nContent-Length: %zu\r\n\r\n%s",
+                      strlen(in), in);
+    size_t wl;
+    char *want = srep_expected(in, 64, 16384, &wl);
+
+    ASSERT_EQ(peer_listen(&p), 0);
+    peer_add(&p, reply, (size_t)hl, 0);
+    p.hold = 1;
+    Count cnt;
+    KlAllocator ca = counting_alloc(&cnt);
+    SrepCfg sc = { .stoppable = 1, .expand = 64, .frag = 16384 };
+    Consumer k;
+    run_srep(&p, &k, &sc, 1, &ca);
+    ASSERT_EQ(k.done, 1);
+    ASSERT_EQ(k.err, KL_ERR_NONE);
+    ASSERT_EQ(k.len, wl);
+    ASSERT_EQ(memcmp(k.got, want, wl), 0);
+    ASSERT_LT(cnt.peak, (size_t)32 * 1024);   /* 16 MiB decoded; nothing held by the client */
+    ASSERT_EQ(cnt.cur, (size_t)0);
+    ASSERT_CLEAN(k);
+    consumer_free(&k);
+
+    static Peer q;
+    ASSERT_EQ(peer_listen(&q), 0);
+    peer_add(&q, reply, (size_t)hl, 0);
+    q.hold = 1;
+    Count cnt2;
+    KlAllocator ca2 = counting_alloc(&cnt2);
+    SrepCfg lc = { .stoppable = 0, .expand = 64, .frag = 16384 };
+    run_srep(&q, &k, &lc, 1, &ca2);
+    ASSERT_EQ(k.done, 1);
+    ASSERT_EQ(k.err, KL_ERR_PARSE);
+    ASSERT_LT(k.len, wl);
+    ASSERT_EQ(memcmp(k.got, want, k.len), 0);
+    ASSERT_EQ(k.completes, 0);
+    ASSERT_EQ(cnt2.cur, (size_t)0);
+    ASSERT_EQ(k.cb_while_paused, 0);
+    free(want);
+    consumer_free(&k);
+}
+
+/* A decoder that breaks the dfeed_stoppable contract fails the request at once: it can neither
+ * spin the client through resumes that make no progress, nor deliver while paused, nor make it
+ * skip or replay input. */
+UTEST(stoppable, contract_violations_fail_promptly) {
+    /* user_calls: fragments the user sees before the failure. SR_SHORT_DONE delivers all 12 (6 bytes
+     * x 2) and then reports one byte untaken: that byte is not fed again (no 13th fragment). */
+    static const struct { int misbehave, pause_every, user_calls; } cases[] = {
+        { SR_STOP_UNASKED, 1, 0 }, { SR_STOP_UNASKED, 0, 0 }, { SR_SHORT_DONE, 0, 12 },
+        { SR_EMIT_AFTER_STOP, 1, 1 }, { SR_OVER_CONSUME, 1, 1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        static Peer p;
+        ASSERT_EQ(peer_listen(&p), 0);
+        peer_add_str(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nContent-Length: 6\r\n\r\n"
+                         "abcdef");
+        p.hold = 1;
+        SrepCfg sc = { .stoppable = 1, .misbehave = cases[i].misbehave, .expand = 2, .frag = 3 };
+        Consumer k;
+        run_srep(&p, &k, &sc, cases[i].pause_every, NULL);
+        ASSERT_EQ(k.done, 1);
+        ASSERT_EQ(k.err, KL_ERR_PARSE);   /* not KL_ERR_TIMEOUT: no spinning until the deadline */
+        ASSERT_LE(sc.calls, 2);
+        ASSERT_EQ(k.calls, cases[i].user_calls);
+        ASSERT_EQ(k.completes, 0);
+        ASSERT_EQ(k.cb_while_paused, 0);
+        consumer_free(&k);
+    }
+}
+
+/* Cancelling from a callback while the decoder is stopped mid-output: nothing more is delivered and
+ * the session is released without being called again. */
+UTEST(stoppable, cancel_while_decoder_holds_output) {
+    static Peer p;
+    ASSERT_EQ(peer_listen(&p), 0);
+    peer_add_str(&p, "HTTP/1.1 200 OK\r\nContent-Encoding: x-srep\r\nContent-Length: 3\r\n\r\nabc");
+    p.hold = 1;
+    Count cnt;
+    KlAllocator ca = counting_alloc(&cnt);
+    KlAllocator da = kl_allocator_default();
+    SrepCfg sc = { .stoppable = 1, .expand = 4, .frag = 8 };
+    KlDecompressConfig dc = { .ctx = (KlCompressCtx *)(void *)&sc, .factory = srep_factory,
+                              .ctx_destroy = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.timeout_ms = 10000;
+    cfg.decompress = &dc;
+    Consumer k;
+    memset(&k, 0, sizeof k);
+    k.pause_every = 1;
+    k.cancel_at = 3;   /* the 2nd fragment paused with the decoder owing 2 more; cancel on the 3rd */
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &da), 0);
+    peer_start(&p);
+    KlHttpClientStreamCfg st;
+    memset(&st, 0, sizeof st);
+    st.on_body = on_body;
+    st.on_complete = on_complete;
+    st.user_data = &k;
+    k.client = kl_http_client_start_s(&ev, &ca, &cfg, "GET", url_for(&p, "http"), NULL, 0, NULL, 0,
+                                      &st, on_done, &k);
+    ASSERT_TRUE(k.client != NULL);
+    for (int i = 0; i < 400 && k.calls < 3; i++) {
+        (void)kl_event_ctx_run(&ev, 16, 5);
+        if (k.paused && k.calls < 3) (void)consumer_resume(&k);
+    }
+    int dcalls = sc.calls;
+    for (int i = 0; i < 20; i++) (void)kl_event_ctx_run(&ev, 16, 2);
+    ASSERT_EQ(k.calls, 3);
+    ASSERT_EQ(sc.calls, dcalls);     /* the stopped session is never called again */
+    ASSERT_EQ(k.done, 0);            /* a cancelled request reports nothing */
+    ASSERT_EQ(k.completes, 0);
+    ASSERT_EQ(k.cb_while_paused, 0);
+    kl_http_client_free(k.client);
+    ASSERT_EQ(cnt.cur, (size_t)0);
+    kl_event_ctx_free(&ev);
+    peer_finish(&p);
+    consumer_free(&k);
+}
+
 /* ── TLS: decrypted plaintext held inside the engine ─────────────── */
 
 /* A pass-through "TLS" that reads the socket in big gulps but hands out at most 7 bytes per read,

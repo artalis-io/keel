@@ -362,11 +362,18 @@ void kl_http_client_cancel(KlHttpClient *client);
  *
  * While paused the client does not read the connection (its watcher is removed), so the peer is
  * held back by TCP flow control. Memory stays bounded: the unparsed rest of one receive buffer
- * (KL_HTTP_CLIENT_RECV_BUF_SIZE) and, when decompressing, the output the decoder had already
- * produced for one 512-byte slice of compressed input, capped at about 580 KiB (one slice at
- * deflate's maximum ratio, plus slack). A pluggable decoder that produces more than that for one
- * slice while the caller is paused fails the request. Bytes the TLS engine already holds stay
- * inside it.
+ * (KL_HTTP_CLIENT_RECV_BUF_SIZE), plus, when decompressing:
+ *  - with a decoder that supplies KlDecompress.dfeed_stoppable (the shipped miniz gzip decoder
+ *    does): nothing. The decoder is stopped at the fragment that paused and keeps its own state,
+ *    whatever the compression ratio;
+ *  - with any other decoder: the output it produces after the pause for the rest of one 512-byte
+ *    slice of compressed input (KlDecompress.dfeed cannot stop part-way), capped at about 580 KiB
+ *    (one slice at deflate's maximum ratio, plus slack). A decoder that produces more than the cap
+ *    while the caller is paused (a ratio above about 1100:1, or output it held back and releases
+ *    all at once, e.g. at the final flush) fails the request: KL_ERR_PARSE mid-body,
+ *    KL_ERR_COMPRESS in the final flush. Whether that happens depends on when the caller pauses,
+ *    so a decoder that can exceed the cap should supply dfeed_stoppable.
+ * Bytes the TLS engine already holds stay inside it.
  *
  * The request deadline (KlHttpClientConfig.timeout_ms) bounds the WHOLE request and keeps running
  * while paused: a pause that outlasts it fails the request with KL_ERR_TIMEOUT. Set timeout_ms to
@@ -379,8 +386,9 @@ void kl_http_client_cancel(KlHttpClient *client);
  *  - kl_http_client_cancel() takes precedence: it drops a scheduled continuation. A streaming
  *    callback may call kl_http_client_cancel(); nothing more is delivered and on_done is not called.
  *    A streaming callback must not call kl_http_client_free().
- *  - Terminal errors (deadline, I/O error, decode error) take precedence over a pause and are
- *    reported through on_done as usual.
+ *  - The deadline ends a paused request (KL_ERR_TIMEOUT through on_done). The connection is not
+ *    watched while paused, so a peer reset or close is seen only after the resume, once the bytes
+ *    received before it were delivered; it is then reported through on_done as usual.
  *
  * @return 0 if a continuation is scheduled (or already was), or if called from inside a streaming
  *         callback (recorded; it has an effect only if that callback returns PAUSE); -1 otherwise
