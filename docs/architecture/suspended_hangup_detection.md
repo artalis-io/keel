@@ -31,27 +31,32 @@ where the implementation deliberately differs from it.
    Hang-up interest counts only alone; combined with READ or WRITE it is ignored, on every backend.
    The server also treats a stray READ report on its hang-up watch (a legacy HUP/ERR mapping, should an
    error ever arrive without shutting the receive side) as a failure, and removes the watch.
-9. **A suspended connection's registration is not changed behind the watch.**
+5. **A suspended connection's registration is not changed behind the watch.**
    `kl_http_request_pause_body` / `_resume_body` (allowed from a watcher or timer while suspended) and
    the WebSocket write request only update their flag while the connection is suspended; the resume
    applies it. Before this feature their `kl_event_mod` failed harmlessly on the unregistered fd; now
    it would have replaced the hang-up watch.
-5. **Cosmopolitan never claims the capability**, on Linux either: its poll constants are resolved per
+6. **Cosmopolitan never claims the capability**, on Linux either: its poll constants are resolved per
    host at run time, and the guarantee is per implementation, not per OS. It uses the sweep.
-6. **lwIP raw and UEFI do not claim the capability** (not measured). Both providers' `recv_peek`
+7. **lwIP raw and UEFI do not claim the capability** (not measured). Both providers' `recv_peek`
    always fails today, so the sweep runs but classifies every probe as indeterminate: effectively no
    detection on lwIP raw or UEFI until their providers are measured and extended. A provider without
    `recv_peek` whose handles are not OS descriptors is never peeked at all.
-10. **The sweep counts only a provider-classified reset as a failure.** Other errors (on POSIX
+8. **The sweep counts only a provider-classified reset as a failure.** Other errors (on POSIX
     `ETIMEDOUT` after a keepalive failure, `ECONNABORTED`) are indeterminate, because a provider that
     cannot peek also fails with an unclassified error. On Linux the next peek after such an error
     returns 0, so under RESET_ONLY a keepalive timeout is kept like a FIN; under CANCEL it cancels.
-7. **The default providers' `recv_peek` never blocks**, whatever the socket's mode (POSIX
+9. **The default providers' `recv_peek` never blocks**, whatever the socket's mode (POSIX
    `MSG_DONTWAIT`; Winsock a zero-timeout `WSAPoll` first), because a completion backend's accepted
    socket (io_uring, IOCP `AcceptEx`) may be blocking. No new provider operation.
-8. **The sweep is one server timer** (1 s, fixed), pending only while a swept connection exists. A
+10. **The sweep is one server timer** (1 s, fixed), pending only while a swept connection exists. A
    first pass probes without changing the op list; a second cancels the hits, restarting from the
    head after each cancel because `on_cancel` is user code.
+11. **A substrate fix this feature needed.** After a watcher callback the loop used to skip the re-arm
+    whenever the callback touched ANY watcher. Removing the hang-up watcher from a thread pool's
+    `done_fn` then left the pool's own wakeup un-armed on io_uring (one-shot `POLL_ADD`): the second
+    suspended request never completed (CI's io_uring async smoke). The re-arm now checks only the
+    dispatched watcher (`event_ctx.c`), with a regression test in `test_async`.
 
 ## Problem
 

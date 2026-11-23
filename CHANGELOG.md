@@ -30,6 +30,17 @@ enum) and the default behavior of a suspended op changes, so the next release is
   only: the event layer never closes or cancels anything. READ/WRITE registrations are reported
   exactly as before. A backend advertises the capability only where its own tests prove the guarantee.
 
+### Fixed
+
+- **A watcher whose callback removes a different watcher is re-armed.** After a watcher callback the
+  loop skipped re-arming that watcher whenever the callback had added, removed or changed ANY watcher.
+  On a backend whose registration persists (epoll, kqueue, poll) nothing showed, but on io_uring
+  (one-shot `POLL_ADD`) the watcher was never armed again. Hang-up detection made this reachable on a
+  common path: a thread pool's `done_fn` that completes a suspended op removes that connection's
+  hang-up watcher, which stalled the pool's wakeup after its first completion. The re-arm now checks
+  the dispatched watcher itself: it is skipped only if that watcher was removed or its interest
+  changed.
+
 ### Changed
 
 - **The default providers' `recv_peek` never blocks**, whatever the socket's mode (POSIX
