@@ -5,9 +5,34 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-Adds response-body backpressure to the async HTTP/1.1 client. The public API is extended (a new
-function, named callback return values and an appended parse result), so the next release is a minor
-version (3.4.0). Existing applications need only the usual 3.x recompile and relink.
+## [3.4.0]
+
+Minor release adding response-body backpressure to the async HTTP/1.1 client. The public API is
+extended: a new function (`kl_http_client_resume`), named body-callback return values, an appended
+parse result (`KL_HTTP1_PARSE_PAUSED`) and an appended optional decoder operation
+(`KlDecompress.dfeed_stoppable`). Build requirements are unchanged. Existing applications need only
+the usual 3.x recompile and relink.
+
+Upgrade notes:
+
+- **Async client: a body callback that returns 1 now pauses instead of aborting.** This is a
+  behavioral change for existing source, not only an API addition: code that compiles unchanged can
+  behave differently. The documented abort value is -1 (`KL_HTTP_CLIENT_BODY_ABORT`) and is
+  unchanged. Before 3.4.0, any non-zero value ended the request. A callback that aborted by returning a positive value, 1 in particular, must
+  return -1 instead. Otherwise its response pauses and, with no resume, ends at the request's
+  `timeout_ms`. The sync client still treats 1 as an abort.
+- **Custom `KlDecompress` decoders need no source change, but must be recompiled.** `dfeed_stoppable`
+  is optional and appended after `destroy`. A table that is zero-initialized or uses designated
+  initializers compiles unchanged. One built with positional initializers also compiles, but draws
+  `-Wmissing-field-initializers` under `-Wextra`. This is source compatibility only: `KlDecompress`
+  has grown, so a decoder object compiled against 3.3.x is not binary-compatible with 3.4.0 and must
+  be rebuilt with the rest of the application (Keel promises no cross-version binary ABI).
+- **Direct users of the llhttp response parser:** a body callback returning 1 to
+  `kl_http1_response_parser_llhttp_s` now yields `KL_HTTP1_PARSE_PAUSED`, not an error. A `switch`
+  over `KlHttp1ParseResult` may need a case for it.
+- **`on_complete` now runs only for a body that ended and decoded cleanly.** A failed decode is
+  reported through `on_done` (async client) or the -1 return and `KlHttpClientResponse.error` (sync
+  client), as described under Fixed.
 
 ### Added
 
