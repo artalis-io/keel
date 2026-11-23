@@ -50,6 +50,7 @@ static void he_win(KlHttpClient *c, KlSocketHandle fd);
 static void he_on_writable(KlHttpClient *c, KlSocketHandle fd);
 static void he_on_connect_result(KlHttpClient *c, KlSocketHandle fd, KlEventMask ready);
 static void he_cancel_timers(KlHttpClient *c);
+static void cli_cancel_resume_timer(KlHttpClient *c);
 static void he_on_deadline(void *user_data);
 static void he_on_delay(void *user_data);
 static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
@@ -194,6 +195,16 @@ static void cli_cancel_done_timer(KlHttpClient *c)
     if (c->done_timer >= 0) {
         kl_timer_cancel(c->ev_ctx, c->done_timer);
         c->done_timer = -1;
+    }
+}
+
+/* Drop a scheduled pause continuation (kl_http_client_resume). Every path that completes the
+ * request, cancels it or frees the client calls this, so it can never fire after. */
+static void cli_cancel_resume_timer(KlHttpClient *c)
+{
+    if (c->resume_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->resume_timer);
+        c->resume_timer = -1;
     }
 }
 
@@ -935,66 +946,151 @@ static void async_handle_sending_stream(KlHttpClient *c)
 
 /* ── State: RECEIVING ────────────────────────────────────────────── */
 
+/* Wait for more response bytes: re-register the watcher a pause removed, else re-arm it. Returns 0,
+ * or -1 after failing the request (the watcher could not be registered again). */
+static int cli_wait_readable(KlHttpClient *c)
+{
+    if (!c->watch_parked) {
+        kl_watcher_rearm(c->ev_ctx, c->fd);
+        return 0;
+    }
+    if (kl_watcher_add(c->ev_ctx, c->fd, KL_EVENT_READ, async_on_event, c) != 0) {
+        c->error = KL_ERR_ALLOC;
+        async_complete_error(c);
+        return -1;
+    }
+    c->watch_parked = 0;
+    return 0;
+}
+
+/* A body callback paused. Stop reading the connection: the watcher is removed outright, which is
+ * the one way to drop read interest that behaves the same on every engine (a zero mask still
+ * reports hang-ups on epoll/poll/io_uring and still probes for reads on IOCP). Nothing is posted on
+ * a completion engine either: the client's socket is relayed as readiness there too. The kernel
+ * buffer fills and TCP flow control holds the peer back. */
+static void cli_pause(KlHttpClient *c)
+{
+    c->paused = 1;
+    c->parse_pending = 1;   /* the resume parses the residual first, even an empty one */
+    if (!c->watch_parked && kl_handle_valid(c->fd)) {
+        kl_watcher_del(c->ev_ctx, c->fd);
+        c->watch_parked = 1;
+    }
+    if (c->resume_req) {   /* the callback that paused already asked to resume */
+        c->resume_req = 0;
+        (void)kl_http_client_resume(c);   /* on failure the client stays paused; the caller retries */
+    }
+}
+
+/* The response is complete (parse OK or end of stream). A decompressor that was paused while
+ * flushing still holds output and the user's on_complete: success waits for the resume. */
+static void cli_response_done(KlHttpClient *c)
+{
+    if (c->decomp_wrap && c->decomp_wrap->complete_pending) {
+        c->complete_pending = 1;
+        cli_pause(c);
+        return;
+    }
+    async_complete_success(c);
+}
+
 static void async_handle_receiving(KlHttpClient *c)
 {
-    char buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
+    char stack_buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
+    /* A streaming client reads into its own rbuf so the unparsed rest of a read survives a pause. */
+    char *buf = c->rbuf ? c->rbuf : stack_buf;
 
     for (;;) {
-        kl_ssize_t nread = kl_http_client_io_read(c->sockets, c->fd, c->tls, buf, sizeof(buf));
-        if (nread < 0) {
-            /* A TLS -1 is an error or a close (WANT_READ is 0, below): never consult a stale errno. */
-            if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
-                kl_watcher_rearm(c->ev_ctx, c->fd);
-                return;
-            }
-            /* A clean TLS shutdown surfaces as read()==-1 (the vtable read contract
-             * has no distinct EOF code). Treat it like a socket EOF so a close-
-             * delimited response (HTTP/1.0 / Connection: close, no Content-Length)
-             * is finalized rather than reported as KL_ERR_IO. This is the REAL TLS
-             * EOF signal: finalize here directly (do NOT fall through to the
-             * nread==0 rearm below, which is for the WANT_READ 0 only). */
-            if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls))
-                goto eof;
-            async_complete_error(c);
-            return;
-        }
-        if (nread == 0) {
-            if (c->tls) {
-                /* Over TLS, read()==0 means the vtable returned WANT_READ (mbedTLS
-                 * WANT_READ maps to 0), NOT end-of-stream: e.g. a non-blocking recv
-                 * returned would-block mid-record. Re-arm and wait for more ciphertext.
-                 * A real TLS EOF arrives via read()==-1 + at_eof() (handled above),
-                 * never via 0. */
-                kl_watcher_rearm(c->ev_ctx, c->fd);
-                return;
-            }
-        eof:
-            /* End of stream before the parser reported a complete message: only a close-delimited
-             * body legitimately ends here. A parser with finish decides; without one, keep the
-             * older rule (a status line arrived). A truncated response is an error, never a
-             * success missing its headers or part of its body. */
-            if (c->parser->finish && !c->eof_rule_status_only
-                    ? c->parser->finish(c->parser, &c->resp) == KL_HTTP1_PARSE_OK
-                    : c->resp.status > 0)
-                async_complete_success(c);
-            else {
-                c->error = KL_ERR_PARSE;
+        const char *data;
+        size_t n;
+        if (c->rbuf && (c->parse_pending || c->rbuf_off < c->rbuf_len)) {
+            /* Bytes left over from a pause come before anything still in TLS or on the socket. */
+            c->parse_pending = 0;
+            data = c->rbuf + c->rbuf_off;
+            n = c->rbuf_len - c->rbuf_off;
+        } else {
+            kl_ssize_t nread = kl_http_client_io_read(c->sockets, c->fd, c->tls, buf,
+                                                      KL_HTTP_CLIENT_RECV_BUF_SIZE);
+            if (nread < 0) {
+                /* A TLS -1 is an error or a close (WANT_READ is 0, below): never consult a stale errno. */
+                if (!c->tls && kl_sock_io_status(c->sockets) == KL_IO_WOULD_BLOCK) {
+                    (void)cli_wait_readable(c);
+                    return;
+                }
+                /* A clean TLS shutdown surfaces as read()==-1 (the vtable read contract
+                 * has no distinct EOF code). Treat it like a socket EOF so a close-
+                 * delimited response (HTTP/1.0 / Connection: close, no Content-Length)
+                 * is finalized rather than reported as KL_ERR_IO. This is the REAL TLS
+                 * EOF signal: finalize here directly (do NOT fall through to the
+                 * nread==0 rearm below, which is for the WANT_READ 0 only). */
+                if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls))
+                    goto eof;
                 async_complete_error(c);
+                return;
             }
-            return;
+            if (nread == 0) {
+                if (c->tls) {
+                    /* Over TLS, read()==0 means the vtable returned WANT_READ (mbedTLS
+                     * WANT_READ maps to 0), NOT end-of-stream: e.g. a non-blocking recv
+                     * returned would-block mid-record. Re-arm and wait for more ciphertext.
+                     * A real TLS EOF arrives via read()==-1 + at_eof() (handled above),
+                     * never via 0. */
+                    (void)cli_wait_readable(c);
+                    return;
+                }
+            eof:
+                {
+                    /* End of stream before the parser reported a complete message: only a
+                     * close-delimited body legitimately ends here. A parser with finish decides;
+                     * without one, keep the older rule (a status line arrived). A truncated
+                     * response is an error, never a success missing its headers or part of its
+                     * body. finish may run on_complete (a streaming callback). */
+                    c->in_delivery = 1;
+                    int ok = c->parser->finish && !c->eof_rule_status_only
+                                 ? c->parser->finish(c->parser, &c->resp) == KL_HTTP1_PARSE_OK
+                                 : c->resp.status > 0;
+                    c->in_delivery = 0;
+                    if (c->state == KL_HTTP_CLIENT_DONE)
+                        return;   /* cancelled from on_complete */
+                    if (ok)
+                        cli_response_done(c);
+                    else {
+                        c->error = KL_ERR_PARSE;
+                        async_complete_error(c);
+                    }
+                }
+                return;
+            }
+            if (c->rbuf) {
+                c->rbuf_off = 0;
+                c->rbuf_len = (size_t)nread;
+            }
+            data = buf;
+            n = (size_t)nread;
         }
 
-        size_t consumed;
-        KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->resp,
-                                              buf, (size_t)nread, &consumed);
+        size_t consumed = 0;
+        c->in_delivery = 1;
+        KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->resp, data, n, &consumed);
+        c->in_delivery = 0;
+        if (c->state == KL_HTTP_CLIENT_DONE)
+            return;   /* a streaming callback cancelled the request: nothing more is touched */
+        if (consumed > n)
+            consumed = n;
+        if (c->rbuf)
+            c->rbuf_off += (pr == KL_HTTP1_PARSE_INCOMPLETE) ? n : consumed;
+        if (pr == KL_HTTP1_PARSE_PAUSED) {
+            cli_pause(c);
+            return;
+        }
         if (pr == KL_HTTP1_PARSE_OK) {
             /* Bytes after the response (in this read, or still buffered in TLS) belong to nothing we
              * asked for; a pooled connection carrying them would hand them to the next request as
              * the start of its response. Such a connection is not reused. */
             c->conn_reusable = c->resp.status != 101 &&   /* the connection now speaks another protocol */
-                               consumed == (size_t)nread &&
+                               consumed == n &&
                                !(c->tls && c->tls->pending && c->tls->pending(c->tls) > 0);
-            async_complete_success(c);
+            cli_response_done(c);
             return;
         }
         if (pr == KL_HTTP1_PARSE_ERROR) {
@@ -1002,8 +1098,104 @@ static void async_handle_receiving(KlHttpClient *c)
             async_complete_error(c);
             return;
         }
-        /* KL_HTTP1_PARSE_INCOMPLETE: try to read more (non-blocking) */
+        /* KL_HTTP1_PARSE_INCOMPLETE: try to read more (non-blocking). A resume asked for by a
+         * callback that did not pause is dropped here. Not on the OK path: a pause during the
+         * decompressor's final flush ends parse with OK, and cli_response_done honours its resume. */
+        c->resume_req = 0;
     }
+}
+
+/* The scheduled continuation of a pause. It runs from the timer heap, never from inside
+ * kl_http_client_resume, and resumes in byte order: output the decoder already produced, compressed
+ * input it had not taken, the response the parser had not parsed, and only then TLS and the socket
+ * (async_handle_receiving reads, and re-registers the watcher once it needs the network). */
+static void cli_on_resume(void *user_data)
+{
+    KlHttpClient *c = user_data;
+    c->resume_timer = -1;
+    if (c->state != KL_HTTP_CLIENT_RECEIVING || !c->paused)
+        return;
+    c->paused = 0;
+
+    if (c->decomp_wrap) {
+        c->in_delivery = 1;
+        int r = kl_http_client_decomp_resume(c->decomp_wrap);
+        c->in_delivery = 0;
+        if (c->state == KL_HTTP_CLIENT_DONE)
+            return;   /* cancelled from a callback */
+        if (r < 0) {
+            c->error = KL_ERR_PARSE;   /* as the same failure inside parse would report */
+            async_complete_error(c);
+            return;
+        }
+        if (r > 0) {
+            cli_pause(c);              /* paused again: parse_pending stays for the next resume */
+            return;
+        }
+    }
+    c->resume_req = 0;
+    if (c->complete_pending) {
+        c->complete_pending = 0;
+        async_complete_success(c);
+        return;
+    }
+    async_handle_receiving(c);
+}
+
+int kl_http_client_resume(KlHttpClient *client)
+{
+    if (!client || client->state != KL_HTTP_CLIENT_RECEIVING)
+        return -1;
+    if (client->in_delivery && !client->paused) {
+        client->resume_req = 1;   /* honoured once the callback returns, if it returned PAUSE */
+        return 0;
+    }
+    if (!client->paused)
+        return -1;
+    if (client->resume_timer >= 0)
+        return 0;
+    client->resume_timer = kl_timer_add(client->ev_ctx, 0, cli_on_resume, client);
+    return client->resume_timer >= 0 ? 0 : -1;
+}
+
+/* ── Streaming callback trampolines ──────────────────────────────── */
+
+/* Every streaming callback reaches the caller through these, so a callback that cancels the request
+ * stops all further delivery (the parser and the decompressor are told to abort), whichever of them
+ * was delivering. */
+static int cli_on_body(const char *data, size_t len, void *user_data)
+{
+    KlHttpClient *c = user_data;
+    if (c->state == KL_HTTP_CLIENT_DONE)
+        return KL_HTTP_CLIENT_BODY_ABORT;
+    c->resume_req = 0;   /* only a resume from the callback that pauses counts */
+    int r = c->user_on_body(data, len, c->stream_user_data);
+    if (c->state == KL_HTTP_CLIENT_DONE)
+        return KL_HTTP_CLIENT_BODY_ABORT;
+    if (r == KL_HTTP_CLIENT_BODY_PAUSE)
+        return KL_HTTP_CLIENT_BODY_PAUSE;
+    c->resume_req = 0;
+    return r == KL_HTTP_CLIENT_BODY_CONTINUE ? KL_HTTP_CLIENT_BODY_CONTINUE
+                                             : KL_HTTP_CLIENT_BODY_ABORT;
+}
+
+static int cli_on_headers(int status, const KlHttpClientHeader *headers, int num_headers,
+                          void *user_data)
+{
+    KlHttpClient *c = user_data;
+    if (c->state == KL_HTTP_CLIENT_DONE)
+        return -1;
+    int r = c->user_on_headers ? c->user_on_headers(status, headers, num_headers,
+                                                    c->stream_user_data) : 0;
+    return c->state == KL_HTTP_CLIENT_DONE ? -1 : r;
+}
+
+static void cli_on_complete(void *user_data)
+{
+    KlHttpClient *c = user_data;
+    if (c->state == KL_HTTP_CLIENT_DONE || !c->user_on_complete)
+        return;
+    c->user_on_complete(c->stream_user_data);
 }
 
 /* ── KlWatcher callback ─────────────────────────────────────────── */
@@ -1081,6 +1273,7 @@ static void async_complete_success(KlHttpClient *c)
 {
     he_cancel_timers(c);
     cli_cancel_done_timer(c);
+    cli_cancel_resume_timer(c);
     kl_watcher_del(c->ev_ctx, c->fd);
 
     if (c->pool) {
@@ -1164,6 +1357,7 @@ static void async_complete_error(KlHttpClient *c)
     }
     he_cancel_timers(c);
     cli_cancel_done_timer(c);
+    cli_cancel_resume_timer(c);
     if (kl_handle_valid(c->fd))
         kl_watcher_del(c->ev_ctx, c->fd);
 
@@ -1394,6 +1588,7 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->conn_delay_timer = -1;
     c->deadline_timer = -1;
     c->done_timer = -1;
+    c->resume_timer = -1;
     c->timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
                                                  : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
     c->connect_delay_ms = (cfg && cfg->connect_attempt_delay_ms > 0)
@@ -1421,24 +1616,38 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         c->stream_user_data = stream->user_data;
     }
 
-    /* Create response parser (streaming or buffered) */
+    /* Create response parser (streaming or buffered). Streaming callbacks reach the caller
+     * through the client's trampolines (cli_on_*), behind the decompressor when there is one. */
     if (stream && stream->on_body) {
+        c->user_on_body = stream->on_body;
+        c->user_on_headers = stream->on_headers;
+        c->user_on_complete = stream->on_complete;
+        c->stream_user_data = stream->user_data;
+        /* Its own receive buffer: the unparsed rest of a read survives a pause there. */
+        c->rbuf = kl_malloc(alloc, KL_HTTP_CLIENT_RECV_BUF_SIZE);
+        if (!c->rbuf) {
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlHttpClient));
+            return NULL;
+        }
         /* Wrap streaming callbacks with decompression if configured */
         if (dcfg && dcfg->factory) {
             DecompStreamWrap *w = kl_malloc(alloc, sizeof(DecompStreamWrap));
             if (!w) {
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
                 kl_free(alloc, req_buf, req_len);
                 kl_free(alloc, c, sizeof(KlHttpClient));
                 return NULL;
             }
             memset(w, 0, sizeof(*w));
-            w->user_on_body = stream->on_body;
-            w->user_on_headers = stream->on_headers;
-            w->user_on_complete = stream->on_complete;
-            w->user_data = stream->user_data;
+            w->user_on_body = cli_on_body;
+            w->user_on_headers = cli_on_headers;
+            w->user_on_complete = cli_on_complete;
+            w->user_data = c;
             w->dcfg = dcfg;
             w->max = max_resp;
             w->ds.alloc = alloc;
+            w->pausable = 1;
             c->decomp_wrap = w;
 
             c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
@@ -1448,10 +1657,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                                                       w);
         } else {
             c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
-                                                      stream->on_body,
-                                                      stream->on_headers,
-                                                      stream->on_complete,
-                                                      stream->user_data);
+                                                      cli_on_body, cli_on_headers,
+                                                      cli_on_complete, c);
         }
     } else {
         c->parser = kl_http1_response_parser_llhttp(max_resp, alloc);
@@ -1460,6 +1667,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         if (c->decomp_wrap) {
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         }
+        if (c->rbuf)
+            kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
@@ -1474,6 +1683,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             c->parser->destroy(c->parser);
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            if (c->rbuf)
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
@@ -1513,6 +1724,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             c->owns_resolver = 0;
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            if (c->rbuf)
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlHttpClient));
@@ -1531,6 +1744,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         if (phl >= sizeof(dns_host_buf)) {
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            if (c->rbuf)
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlHttpClient));
@@ -1547,6 +1762,8 @@ KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                         addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+        if (c->rbuf)
+            kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));
@@ -1603,8 +1820,10 @@ void kl_http_client_cancel(KlHttpClient *client)
     kl_connect_op_cancel(&client->connect_op);
     /* The overall request deadline is client-owned (not a connect-op timer); cancel it here. */
     he_cancel_timers(client);
-    /* A deferred error completion must not fire into a cancelled (or freed) client. */
+    /* A deferred error completion must not fire into a cancelled (or freed) client, nor a pause
+     * continuation: cancellation takes precedence over a pause. */
     cli_cancel_done_timer(client);
+    cli_cancel_resume_timer(client);
 
     if (kl_handle_valid(client->fd)) {
         /* Single-fd completion connect still in flight: drop its pending connect op before the
@@ -1645,6 +1864,7 @@ void kl_http_client_free(KlHttpClient *client)
     if (client->state != KL_HTTP_CLIENT_DONE)
         kl_http_client_cancel(client);
     cli_cancel_done_timer(client);   /* never fire into the freed client, whatever the state */
+    cli_cancel_resume_timer(client);
 
     /* Destroy the auto-created resolver (after any resolve_req was cancelled). */
     if (client->owns_resolver && client->resolver) {
@@ -1666,10 +1886,13 @@ void kl_http_client_free(KlHttpClient *client)
     kl_http_client_response_free(&client->resp);
 
     if (client->decomp_wrap) {
-        if (client->decomp_wrap->active)
-            kl_decompress_stream_free(&client->decomp_wrap->ds);
+        kl_http_client_decomp_release(client->decomp_wrap);   /* session + paused output */
         kl_free(client->alloc, client->decomp_wrap, sizeof(DecompStreamWrap));
         client->decomp_wrap = NULL;
+    }
+    if (client->rbuf) {
+        kl_free(client->alloc, client->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
+        client->rbuf = NULL;
     }
 
     /* Free proxy buffers */
@@ -1761,6 +1984,7 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
     }
     memset(c, 0, sizeof(*c));
     c->done_timer = -1;
+    c->resume_timer = -1;   /* no streaming here, but every terminal path cancels it */
 
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
@@ -1827,6 +2051,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
             kl_http_client_pool_discard_sp(c->sockets, &pconn);
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            if (c->rbuf)
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlHttpClient));
@@ -1859,6 +2085,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
             c->owns_resolver = 0;
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            if (c->rbuf)
+                kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlHttpClient));
@@ -1874,6 +2102,8 @@ KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                         addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+        if (c->rbuf)
+            kl_free(alloc, c->rbuf, KL_HTTP_CLIENT_RECV_BUF_SIZE);
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlHttpClient));

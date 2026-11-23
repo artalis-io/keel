@@ -124,6 +124,7 @@ kl_http_client_request_pooled	http_client_pool.h	direct-assertion	tests/protocol
 kl_http_client_request_s	http_client.h	direct-assertion	tests/protocols/http/test_http_client_stream.c (sync_stream: rc + body content asserted)
 kl_http_client_response	http_client.h	direct-assertion	tests/protocols/http/test_http_client.c:142 NULL-guard + happy_eyeballs response fields
 kl_http_client_response_free	http_client.h	direct-assertion	tests/protocols/http/test_http_client.c:14 (response_free(NULL) no-crash) + teardown
+kl_http_client_resume	http_client.h	direct-assertion	tests/protocols/http/test_http_client_backpressure.c (lifecycle.resume_twice_and_after_done, lifecycle.resume_when_not_paused_is_a_noop: return values; delivery.*: byte-exact continuation)
 kl_http_client_start	http_client.h	direct-assertion	tests/protocols/http/test_http_client.c (NULL on bad scheme) + happy_eyeballs completion
 kl_http_client_start_pooled	http_client_pool.h	direct-assertion	tests/protocols/http/test_http_client_pool.c:468 (reuse asserted via idle_count)
 kl_http_client_start_s	http_client.h	direct-assertion	tests/protocols/http/test_http_client_stream.c (async_stream: start_s + streamed body asserted)

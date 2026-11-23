@@ -59,7 +59,32 @@ typedef struct {
     size_t              max;     /* bound on decompressed bytes delivered (0 = none) */
     size_t              emitted; /* decompressed bytes delivered so far */
     int                 failed;  /* decompression failed (incl. the final flush): fail the request */
+
+    /* Body backpressure (async client only; all zero = the sync path, which cannot pause).
+     * KlDecompress.dfeed cannot stop part-way through its input (an emit that refuses output fails
+     * the stream), so a pause is honoured at two bounded levels: compressed input is fed in slices of
+     * at most KL_HTTP_CLIENT_DECOMP_SLICE bytes and no further slice is fed once the user paused;
+     * output the decoder still produces for the slice in progress is kept in `stash` (capped at
+     * KL_HTTP_CLIENT_DECOMP_STASH_MAX) and delivered first on resume. */
+    int                 pausable;       /* the user may return KL_HTTP_CLIENT_BODY_PAUSE */
+    int                 paused;         /* the user paused: emit nothing more to the user */
+    char               *stash;          /* decoded output held back since the pause */
+    size_t              stash_len, stash_off, stash_cap;
+    const char         *pend_in;        /* compressed body bytes not yet fed: borrowed from the
+                                         * client's receive buffer, which it neither refills nor
+                                         * moves until kl_http_client_decomp_resume drained this */
+    size_t              pend_in_len;
+    int                 complete_pending; /* message-complete happened while paused: user
+                                           * on_complete deferred to kl_http_client_decomp_resume */
 } DecompStreamWrap;
+
+/* Compressed bytes per dfeed call on a pausable wrapper; bounds the output one call can produce. */
+#define KL_HTTP_CLIENT_DECOMP_SLICE      512
+/* Stash cap: one slice at deflate's maximum ratio (about 1032:1) plus 64 KiB of slack for a decoder
+ * that holds a little output back between calls. Exceeding it fails the stream (KL_ERR_COMPRESS). */
+#define KL_HTTP_CLIENT_DECOMP_STASH_MAX  ((size_t)KL_HTTP_CLIENT_DECOMP_SLICE * 1032u + 65536u)
+/* Largest fragment handed to the user from the stash on resume. */
+#define KL_HTTP_CLIENT_DECOMP_FRAG       16384
 
 /* ══════════════════════════════════════════════════════════════════════
  * Async client state machine (http_client_async.c): struct exposed here so the
@@ -159,6 +184,24 @@ struct KlHttpClient {
     int                pool_port;
     int                pool_is_tls;
 
+    /* Response-body backpressure (streaming clients). The parser reads from rbuf, which outlives
+     * one receive so a pause can leave its unparsed rest there: rbuf[rbuf_off..rbuf_len). While
+     * paused the watcher is removed (the connection is not read, so TCP flow control holds the peer
+     * back) and nothing is delivered; kl_http_client_resume schedules resume_timer, whose
+     * continuation drains the decompressor, then the parser residual, then reads again. */
+    KlHttpClientBodyFn  user_on_body;      /* the caller's callbacks, reached through trampolines */
+    KlHttpClientHeadersFn user_on_headers;
+    void              (*user_on_complete)(void *user_data);
+    char               *rbuf;              /* KL_HTTP_CLIENT_RECV_BUF_SIZE bytes (streaming only) */
+    size_t              rbuf_off, rbuf_len;
+    int                 paused;            /* body delivery paused by the caller */
+    int                 parse_pending;     /* parse rbuf (even zero bytes) before reading again */
+    int                 complete_pending;  /* response complete; success waits for the resume */
+    int                 watch_parked;      /* the watcher was removed for the pause */
+    int                 in_delivery;       /* a streaming callback is on the stack */
+    int                 resume_req;        /* resume called from the callback that then paused */
+    int64_t             resume_timer;      /* scheduled continuation (-1) */
+
     /* Response decompression */
     KlDecompressConfig *decompress_cfg;
     DecompStreamWrap   *decomp_wrap;     /* heap-allocated for streaming */
@@ -248,5 +291,11 @@ int  kl_http_client_decomp_on_body(const char *data, size_t len, void *user_data
 int  kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *headers,
                                  int num_headers, void *user_data);
 void kl_http_client_decomp_on_complete(void *user_data);
+/* Continue a paused wrapper: deliver the stash, feed the pending compressed input, then run a
+ * deferred user on_complete. Returns 0 when all of that is done, 1 if the user paused again, -1 on a
+ * decode failure (w->failed set) or a user abort. */
+int  kl_http_client_decomp_resume(DecompStreamWrap *w);
+/* Release what a wrapper owns (decoder session, stash); the struct itself stays. */
+void kl_http_client_decomp_release(DecompStreamWrap *w);
 
 #endif /* KEEL_HTTP_CLIENT_INTERNAL_H */

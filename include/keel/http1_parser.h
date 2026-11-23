@@ -12,7 +12,15 @@ typedef enum {
     KL_HTTP1_PARSE_OK,            /**< Full request/response parsed */
     KL_HTTP1_PARSE_INCOMPLETE,    /**< Need more data */
     KL_HTTP1_PARSE_HEADERS_OK,    /**< headers complete, body pending */
-    KL_HTTP1_PARSE_ERROR          /**< Parse error */
+    KL_HTTP1_PARSE_ERROR,         /**< Parse error */
+    KL_HTTP1_PARSE_PAUSED         /**< Response parsers: a body callback returned
+                                   *   KL_HTTP_CLIENT_BODY_PAUSE. *consumed marks the byte just after
+                                   *   the accepted fragment; parse again from there (even with zero
+                                   *   bytes left, which lets a pending message-complete fire) to
+                                   *   continue. Never returned unless a callback paused. A
+                                   *   direct caller of kl_http1_response_parser_llhttp_s whose
+                                   *   body callback returns 1 (formerly an abort) now gets this
+                                   *   value, and must stop or re-parse, not keep feeding. */
 } KlHttp1ParseResult;
 
 /* ── Request parser (server-side) ─────────────────────────────────── */
