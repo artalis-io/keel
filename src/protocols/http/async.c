@@ -11,11 +11,66 @@
 #include <keel/async.h>
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
+#include <keel/event_ctx.h>
 #include <stdint.h>
 #include "http_internal.h"
 #include "event_caps.h"
 #include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
 #include "completion_http.h" /* kl_http_comp_resume: completion resume */
+
+/* ── Client hang-up while suspended ────────────────────────────────────
+ * HTTP decides what abandonment means; the event layer only reports it. While a connection is
+ * suspended its fd is out of the loop for data, but on a loop with KL_EVENT_CAP_HANGUP a
+ * KL_EVENT_HANGUP watcher observes the peer's FIN or a reset without reading (a pipelined request
+ * or unread body stays where it is). The watch is removed on its first report, whatever the
+ * policy: a level-triggered or one-shot backend would report it again. Every terminal transition
+ * of the op (resume, cancel, connection death, server free) goes through async_retire, which
+ * removes the watch before anything re-registers or closes the fd. */
+
+static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_data);
+
+static void async_watch_hangup(KlHttpServer *s, KlHttpConn *conn) {
+    conn->hup_state = KL_HUP_NONE;
+    conn->hup_server = s;
+    if (s->config.suspended_hangup == KL_HTTP_SUSPEND_HANGUP_OFF)
+        return;
+    if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) &&
+        kl_watcher_add(&s->ev, conn->stream.fd, KL_EVENT_HANGUP, async_on_hangup, conn) == 0)
+        conn->hup_state = KL_HUP_WATCHED;
+}
+
+static void async_unwatch_hangup(KlHttpServer *s, KlHttpConn *conn) {
+    if (conn->hup_state == KL_HUP_WATCHED)
+        kl_watcher_del(&s->ev, conn->stream.fd);
+    conn->hup_state = KL_HUP_NONE;
+}
+
+/* The client hung up (or the connection failed) while suspended. Runs from the loop's I/O
+ * processing, outside any frame driving the connection. */
+static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+    KlHttpConn *conn = user_data;
+    KlHttpServer *s = conn->hup_server;
+    (void)fd;
+    if (!(ready & (KL_EVENT_HANGUP | KL_EVENT_READ)))
+        return;
+    /* A hang-up registration has no READ interest, so a READ report can only be a backend's legacy
+     * mapping of HUP/ERR (an error that did not also shut the receive side): a failure. */
+    if (!(ready & KL_EVENT_HANGUP))
+        ready = (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_ERROR);
+    kl_watcher_del(&s->ev, conn->stream.fd);   /* first report: stop watching, whatever follows */
+    conn->hup_state = KL_HUP_NONE;
+    KlAsyncOp *op = conn->async_op;
+    if (!op || conn->state != KL_HTTP_CONN_SUSPENDED)
+        return;
+    if (!(ready & KL_EVENT_ERROR) &&
+        s->config.suspended_hangup == KL_HTTP_SUSPEND_HANGUP_RESET_ONLY) {
+        /* An orderly FIN, which may be a half-close: the op runs on and its response is delivered.
+         * Nothing more is watched (a reset after this FIN is bounded by the op's own deadline). */
+        conn->hup_state = KL_HUP_FIN_KEPT;
+        return;
+    }
+    kl_async_cancel(s, op);   /* on_cancel once, the connection closed, nothing written */
+}
 
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
@@ -37,6 +92,7 @@ int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
     op->next = s->async_ops;
     s->async_ops = op;
 
+    async_watch_hangup(s, conn);
     return 0;
 }
 
@@ -54,8 +110,10 @@ static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
         pp = &(*pp)->next;
     }
     KlHttpConn *conn = op->conn;
-    if (conn && conn->async_op == op)
+    if (conn && conn->async_op == op) {
         conn->async_op = NULL;
+        async_unwatch_hangup(s, conn);   /* before anything re-registers or closes the fd */
+    }
     return conn;
 }
 

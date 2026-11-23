@@ -128,6 +128,7 @@ http_server.h	KlHttpServerConfig	struct	caller-constructed	caller-built; F2-C ap
 http_server.h	KlHttpServerLogFn	callback	api-signature	-
 http_server.h	KlHttpServerStats	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
 http_server.h	KlHttpServerTransport	enum	enum-constants	-
+http_server.h	KlHttpSuspendHangup	enum	enum-constants	-
 http_server.h	KlPeerCred	struct	caller-inspectable	library-filled; caller reads; F2-C append-only
 http_server.h	KlPlatformCap	enum	enum-constants	-
 http_sse.h	KlHttpSse	struct	caller-owned-value	F2-B caller-owned value; init-in-place; layout internal

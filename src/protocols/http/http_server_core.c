@@ -174,6 +174,12 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
+    if (s->config.suspended_hangup != KL_HTTP_SUSPEND_HANGUP_CANCEL &&
+        s->config.suspended_hangup != KL_HTTP_SUSPEND_HANGUP_RESET_ONLY &&
+        s->config.suspended_hangup != KL_HTTP_SUSPEND_HANGUP_OFF) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     if (s->config.bind_addr == NULL)
         s->config.bind_addr = "0.0.0.0";
     if (s->config.max_connections <= 0)
@@ -853,11 +859,14 @@ int kl_http_server_use_post(KlHttpServer *s, const char *method, const char *pat
 
 /* ── Read-side body flow control (event-axis-agnostic) ────────────────────────
  * Readiness drops/re-arms READ interest (kl_event_mod); completion stops posting /
- * re-posts the recv via the completion seam. Both idempotent; loop-thread only. */
+ * re-posts the recv via the completion seam. Both idempotent; loop-thread only.
+ * While the connection is suspended its fd carries only the hang-up watch (async.c), which must not
+ * be overwritten: only the flag changes, and kl_async_complete re-arms with it on resume. */
 void kl_http_request_pause_body(const KlHttpRequest *req) {
     KlHttpConn *c = req ? kl_http_request_conn(req) : NULL;
     if (!c || c->stream.read_paused) return;                 /* idempotent */
     c->stream.read_paused = 1;
+    if (c->state == KL_HTTP_CONN_SUSPENDED) return;          /* applied by the resume */
     if (!(kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION))
         (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, 0, &c->stream);   /* readiness: stop READ now */
     /* completion: comp_start_body_read skips the next recv; the in-flight recv may
@@ -870,7 +879,7 @@ void kl_http_request_resume_body(const KlHttpRequest *req) {
     c->stream.read_paused = 0;
     if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)
         kl_http_comp_post_read(c);                    /* completion: re-post the body recv */
-    else
+    else if (c->state != KL_HTTP_CONN_SUSPENDED)      /* suspended: applied by the resume */
         (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }
 
@@ -898,6 +907,7 @@ void kl_http_conn_ws_request_write(KlHttpConn *c) {
      * this; a write from anywhere else (another connection's event, a timer, a thread-pool done_fn)
      * has no such event behind it, and the backlog would sit until the peer sent something. */
     if (!c || c->comp_driven || !c->stream.ctx) return;
+    if (c->state == KL_HTTP_CONN_SUSPENDED) return;   /* never overwrite a suspended fd's hang-up watch */
     (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
                        (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
 }

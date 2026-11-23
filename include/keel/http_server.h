@@ -62,6 +62,31 @@ typedef enum {
     KL_HTTP_SERVER_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
 } KlHttpServerTransport;
 
+/**
+ * @brief What a client's hang-up does to a connection suspended with kl_async_suspend().
+ *
+ * A FIN cannot be told apart from a half-close (a client that called shutdown(SHUT_WR) after its
+ * request and still waits for the response): both are one FIN on the wire. The policy decides.
+ *
+ * Detection depends on the event backend. On a loop with KL_EVENT_CAP_HANGUP (epoll, kqueue,
+ * Linux poll, WSAPoll, io_uring, Linux pollcomp) a FIN or reset is seen promptly, even behind
+ * unread bytes, without reading them. Elsewhere (IOCP, poll and pollcomp off Linux, Cosmopolitan,
+ * lwIP, UEFI, an injected backend without the capability) the server peeks each suspended
+ * connection once a second, which is BEST EFFORT: a FIN or reset behind unread bytes (a pipelined
+ * request, an unread body) is invisible to the peek. Keel does not require a finite
+ * KlAsyncOp.deadline_ms, so on those backends only an op deadline that ends the op guarantees that
+ * such a connection is eventually released.
+ */
+typedef enum {
+    KL_HTTP_SUSPEND_HANGUP_CANCEL     = 0, /**< default: a FIN or a reset cancels the suspended op
+                                            *   (kl_async_cancel: on_cancel once, connection closed,
+                                            *   nothing written) */
+    KL_HTTP_SUSPEND_HANGUP_RESET_ONLY = 1, /**< half-close kept: only a reset cancels; after a FIN the
+                                            *   op runs on and its response is still delivered. A
+                                            *   reset after that FIN is not watched for. */
+    KL_HTTP_SUSPEND_HANGUP_OFF        = 2  /**< nothing is watched (the behavior before 3.5.0) */
+} KlHttpSuspendHangup;
+
 /*
  * Append-only config (see docs/contracts/compatibility.md): callers
  * zero-initialize and recompile per major version; every member is optional and
@@ -175,6 +200,10 @@ typedef struct KlHttpServerConfig {
                                  *   An int rather than a bool because these headers are C11 with no
                                  *   <stdbool.h> dependency, matching has_pid and unix_socket_unlink.
                                  *   Full semantics: docs/contracts/early_rejection_drain.md */
+    /* Appended in 3.5.0. */
+    KlHttpSuspendHangup suspended_hangup; /**< a suspended connection's client hang-up; 0 = CANCEL
+                                           *   (see KlHttpSuspendHangup). Any other value is rejected
+                                           *   by kl_http_server_init. */
 } KlHttpServerConfig;
 
 /**
