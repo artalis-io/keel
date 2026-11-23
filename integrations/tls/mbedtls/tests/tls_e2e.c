@@ -39,6 +39,8 @@
 
 #include <keel/event_ctx.h>
 #include <keel/http_client.h>
+#include <keel/http_server.h>
+#include <keel/async.h>
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -1192,6 +1194,91 @@ static void test_client_pause_drains_tls_pending(KlAllocator *alloc, PemPair *se
     if (!g_pause_fail) printf("  PASS: resume drained TLS-held plaintext with no socket event\n");
 }
 
+/* ── Server: a TLS client hangs up while its request is suspended ──
+ *
+ * A real Keel server over mbedTLS suspends GET /park. The client (a real mbedTLS session) then goes
+ * away, once after sending close_notify and once by just dropping TCP. Either way the server must
+ * cancel the suspended op exactly once: detection is at the transport, beneath the TLS session, so a
+ * close_notify (application data inside a record) is neither read nor needed. Default policy. */
+
+static KlHttpServer g_hup_srv;
+static KlAsyncOp g_hup_op;
+static volatile int g_hup_parked, g_hup_cancels;
+static int g_hup_fail;
+#define HUP_CHECK(cond) do { if (!(cond)) { \
+    printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); g_hup_fail++; } } while (0)
+
+static void hup_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_hup_cancels++; }
+static void hup_park(KlHttpRequest *req, KlHttpResponse *res, void *ud)
+{
+    (void)res; (void)ud;
+    memset(&g_hup_op, 0, sizeof g_hup_op);
+    g_hup_op.on_cancel = hup_cancel;
+    if (kl_async_suspend(&g_hup_srv, kl_http_request_conn(req), &g_hup_op) == 0) g_hup_parked++;
+}
+static void *hup_srv_main(void *arg) { (void)arg; kl_http_server_run(&g_hup_srv); return NULL; }
+
+static void hup_wait(volatile int *v, int want, int ms)
+{
+    for (int i = 0; i < ms / 10 && *v < want; i++) usleep(10 * 1000);
+}
+
+static void test_server_tls_hangup_while_suspended(KlAllocator *alloc, PemPair *server)
+{
+    printf("== Server: TLS client hangs up while its request is suspended ==\n");
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, pemlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, pemlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_insecure(alloc);
+    assert(sctx && cctx);
+    KlTlsConfig tc = { .ctx = sctx, .factory = kl_tls_mbedtls_create, .ctx_destroy = NULL };
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.bind_addr = "127.0.0.1";
+    cfg.tls = &tc;
+    assert(kl_http_server_init(&g_hup_srv, &cfg) == 0);
+    kl_http_server_route(&g_hup_srv, "GET", "/park", hup_park, NULL, NULL);
+    pthread_t tid;
+    assert(pthread_create(&tid, NULL, hup_srv_main, NULL) == 0);
+    for (int i = 0; i < 300 && g_hup_srv.bound_port == 0; i++) usleep(10 * 1000);
+
+    static const char req[] = "GET /park HTTP/1.1\r\nHost: server.local\r\n\r\n";
+    for (int variant = 0; variant < 2; variant++) {        /* 0: close_notify first; 1: TCP only */
+        int before = g_hup_cancels;
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof a);
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons((uint16_t)g_hup_srv.bound_port);
+        HUP_CHECK(connect(fd, (struct sockaddr *)&a, sizeof a) == 0);
+        KlTls *t = kl_tls_mbedtls_create(cctx, alloc);     /* blocking fd: each call waits */
+        HUP_CHECK(t != NULL);
+        KlTlsResult hr;
+        int spins = 0;
+        while ((hr = t->handshake(t, (KlSocketHandle)fd)) != KL_TLS_OK && hr != KL_TLS_ERROR && ++spins < 1000) {}
+        HUP_CHECK(hr == KL_TLS_OK);
+        HUP_CHECK(t->write(t, (KlSocketHandle)fd, req, sizeof req - 1) == (kl_ssize_t)(sizeof req - 1));
+        hup_wait(&g_hup_parked, variant + 1, 3000);
+        HUP_CHECK(g_hup_parked == variant + 1);
+        if (variant == 0) (void)t->shutdown(t, (KlSocketHandle)fd);   /* close_notify */
+        t->destroy(t);
+        close(fd);
+        hup_wait(&g_hup_cancels, before + 1, 3500);
+        HUP_CHECK(g_hup_cancels == before + 1);
+        printf("  %s: suspended op cancelled %d time(s)\n",
+               variant == 0 ? "close_notify + close" : "TCP close, no close_notify", g_hup_cancels - before);
+    }
+    kl_http_server_stop(&g_hup_srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&g_hup_srv);
+    HUP_CHECK(g_hup_cancels == 2);                         /* free cancelled nothing more */
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    if (!g_hup_fail) printf("  PASS: suspended op cancelled once per TLS hang-up, with or without close_notify\n");
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     Rng rng;
@@ -1223,6 +1310,7 @@ int main(void) {
     test_short_retry_rejected(&alloc, &ca, &server);
     test_null_ca_fails_closed(&alloc);
     test_client_pause_drains_tls_pending(&alloc, &server);
+    test_server_tls_hangup_while_suspended(&alloc, &server);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
@@ -1241,6 +1329,7 @@ int main(void) {
     if (g_null_ca_fail) { printf("\nFAIL: NULL CA path check\n"); return 1; }
     if (g_short_retry_fail) { printf("\nFAIL: shorter write retry check\n"); return 1; }
     if (g_pause_fail) { printf("\nFAIL: %d client pause/resume check(s)\n", g_pause_fail); return 1; }
+    if (g_hup_fail) { printf("\nFAIL: %d server hang-up check(s)\n", g_hup_fail); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }
