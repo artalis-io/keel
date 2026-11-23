@@ -37,8 +37,15 @@
 #include <mbedtls/x509.h>
 #include <mbedtls/oid.h>
 
+#include <keel/event_ctx.h>
+#include <keel/http_client.h>
+
+#include <arpa/inet.h>
 #include <assert.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -997,6 +1004,194 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server)
     printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
 }
 
+/* ── Async HTTP client: a paused body resumes from plaintext held inside mbedTLS ──
+ *
+ * A real mbedTLS server session sends one HTTP response in a single write, so mbedTLS cuts it into
+ * 16 KiB records; the last record is 12000 bytes. The client reads at most 8 KiB per call, so after
+ * its final read 3808 bytes of decrypted plaintext stay inside the client's mbedTLS session
+ * (mbedtls_ssl_get_bytes_avail) with nothing left on the socket to make it readable. The consumer
+ * pauses on every body fragment; the server then holds the connection open and sends nothing more.
+ * The body can only complete if kl_http_client_resume delivers what the TLS engine holds without
+ * waiting for socket readiness. Checked: plaintext really was pending at a pause, every byte arrives
+ * exactly and in order, nothing is delivered while paused, and the request succeeds once. */
+
+#define PAUSE_RECORD   16384
+#define PAUSE_TAIL     12000
+
+typedef struct {
+    int         lfd;
+    KlTlsCtx   *sctx;
+    KlAllocator *alloc;
+    const char *resp;
+    size_t      resp_len;
+} PauseSrv;
+
+static void *pause_srv_main(void *arg)
+{
+    PauseSrv *p = arg;
+    struct pollfd pf = { p->lfd, POLLIN, 0 };
+    if (poll(&pf, 1, 10000) <= 0) return NULL;
+    int fd = accept(p->lfd, NULL, NULL);
+    if (fd < 0) return NULL;
+    KlTls *t = kl_tls_mbedtls_create(p->sctx, p->alloc);   /* blocking fd: each call waits */
+    if (!t) { close(fd); return NULL; }
+    KlTlsResult hr;
+    int spins = 0;
+    while ((hr = t->handshake(t, (KlSocketHandle)fd)) != KL_TLS_OK)
+        if (hr == KL_TLS_ERROR || ++spins > 1000) goto out;
+    char req[2048];
+    size_t got = 0;
+    while (got < sizeof req - 1) {                          /* the request headers */
+        kl_ssize_t n = t->read(t, (KlSocketHandle)fd, req + got, sizeof req - 1 - got);
+        if (n < 0) goto out;
+        got += (size_t)n;
+        req[got] = '\0';
+        if (strstr(req, "\r\n\r\n")) break;
+    }
+    size_t off = 0;
+    while (off < p->resp_len) {                             /* ONE logical write: full records */
+        kl_ssize_t n = t->write(t, (KlSocketHandle)fd, p->resp + off, p->resp_len - off);
+        if (n < 0) goto out;
+        off += (size_t)n;
+    }
+    /* Hold the connection: no more bytes, so no readiness event, until the client closes. */
+    pf.fd = fd;
+    while (poll(&pf, 1, 10000) > 0) {
+        char b[256];
+        if (recv(fd, b, sizeof b, 0) <= 0) break;
+    }
+out:
+    t->destroy(t);
+    close(fd);
+    return NULL;
+}
+
+typedef struct {
+    KlHttpClient *client;
+    KlTls        *tls;           /* the client's session, captured by the factory wrapper */
+    char         *got;
+    size_t        len;
+    int           paused, pauses, pending_at_pause, cb_while_paused, done;
+    KlError       err;
+} PauseSink;
+
+static PauseSink *g_pause_sink;
+
+static KlTls *pause_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)
+{
+    KlTls *t = kl_tls_mbedtls_create(ctx, alloc);
+    if (g_pause_sink) g_pause_sink->tls = t;
+    return t;
+}
+
+static int pause_on_body(const char *d, size_t n, void *ud)
+{
+    PauseSink *k = ud;
+    if (k->paused) k->cb_while_paused = 1;
+    memcpy(k->got + k->len, d, n);
+    k->len += n;
+    k->paused = 1;
+    k->pauses++;
+    if (k->tls && k->tls->pending(k->tls) > 0)
+        k->pending_at_pause++;                  /* decrypted bytes wait inside mbedTLS */
+    return KL_HTTP_CLIENT_BODY_PAUSE;
+}
+
+static void pause_on_done(KlHttpClient *c, void *ud)
+{
+    PauseSink *k = ud;
+    if (k->paused) k->cb_while_paused = 1;
+    k->done++;
+    k->err = kl_http_client_last_error(c);
+}
+
+static int g_pause_fail;
+#define PAUSE_CHECK(cond) do { if (!(cond)) { \
+    printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); g_pause_fail++; } } while (0)
+
+static void test_client_pause_drains_tls_pending(KlAllocator *alloc, PemPair *server)
+{
+    printf("== Async HTTP client: pause/resume with plaintext pending in mbedTLS ==\n");
+
+    /* Headers padded so headers + body = 4 full records + a 12000-byte last record. */
+    static char resp[4 * PAUSE_RECORD + PAUSE_TAIL];
+    const size_t total = sizeof resp;
+    char hdr[128];
+    int hl0 = snprintf(hdr, sizeof hdr, "HTTP/1.1 200 OK\r\nContent-Length: %06zu\r\n\r\n", (size_t)0);
+    size_t body_len = total - (size_t)hl0;
+    int hl = snprintf(resp, sizeof resp, "HTTP/1.1 200 OK\r\nContent-Length: %06zu\r\n\r\n", body_len);
+    assert(hl == hl0);
+    for (size_t i = 0; i < body_len; i++) resp[(size_t)hl + i] = (char)('a' + (i * 7 + i / 251) % 26);
+
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, pemlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, pemlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create_insecure(alloc);   /* identity is not under test */
+    assert(sctx && cctx);
+
+    PauseSrv srv = { -1, sctx, alloc, resp, total };
+    srv.lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof a;
+    assert(srv.lfd >= 0 && bind(srv.lfd, (struct sockaddr *)&a, sizeof a) == 0 &&
+           listen(srv.lfd, 1) == 0 && getsockname(srv.lfd, (struct sockaddr *)&a, &al) == 0);
+    pthread_t tid;
+    assert(pthread_create(&tid, NULL, pause_srv_main, &srv) == 0);
+
+    PauseSink k;
+    memset(&k, 0, sizeof k);
+    k.got = malloc(body_len);
+    g_pause_sink = &k;
+    KlTlsConfig tc = { .ctx = cctx, .factory = pause_tls_factory, .ctx_destroy = NULL };
+    KlHttpClientConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.timeout_ms = 15000;
+    cfg.tls = &tc;
+    KlHttpClientStreamCfg sc;
+    memset(&sc, 0, sizeof sc);
+    sc.on_body = pause_on_body;
+    sc.user_data = &k;
+    KlEventCtx ev;
+    assert(kl_event_ctx_init(&ev, alloc) == 0);
+    char url[64];
+    snprintf(url, sizeof url, "https://127.0.0.1:%d/", ntohs(a.sin_port));
+    k.client = kl_http_client_start_s(&ev, alloc, &cfg, "GET", url, NULL, 0, NULL, 0, &sc,
+                                      pause_on_done, &k);
+    PAUSE_CHECK(k.client != NULL);
+    for (int i = 0; k.client && i < 100000 && !k.done; i++) {
+        (void)kl_event_ctx_run(&ev, 16, 5);
+        if (k.paused && !k.done) {
+            for (int j = 0; j < 3 && !k.done; j++) (void)kl_event_ctx_run(&ev, 16, 2);
+            int before = k.pauses;
+            k.paused = 0;
+            PAUSE_CHECK(kl_http_client_resume(k.client) == 0);
+            PAUSE_CHECK(k.pauses == before);                /* never re-entrant */
+        }
+    }
+    PAUSE_CHECK(k.done == 1);
+    PAUSE_CHECK(k.err == KL_ERR_NONE);
+    PAUSE_CHECK(k.len == body_len);
+    PAUSE_CHECK(k.len == body_len && memcmp(k.got, resp + hl, body_len) == 0);
+    PAUSE_CHECK(k.pending_at_pause > 0);
+    PAUSE_CHECK(k.cb_while_paused == 0);
+    printf("  %zu body bytes in %d paused fragments; plaintext pending in mbedTLS at %d pauses\n",
+           k.len, k.pauses, k.pending_at_pause);
+
+    kl_http_client_free(k.client);
+    kl_event_ctx_free(&ev);
+    pthread_join(tid, NULL);
+    close(srv.lfd);
+    g_pause_sink = NULL;
+    free(k.got);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    if (!g_pause_fail) printf("  PASS: resume drained TLS-held plaintext with no socket event\n");
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     Rng rng;
@@ -1027,6 +1222,7 @@ int main(void) {
     test_truncation_is_not_eof(&alloc, &ca, &server);
     test_short_retry_rejected(&alloc, &ca, &server);
     test_null_ca_fails_closed(&alloc);
+    test_client_pause_drains_tls_pending(&alloc, &server);
 
     /* Scenarios omitted because the mbedTLS adapter's public API cannot express
      * them (documented rather than faked):
@@ -1044,6 +1240,7 @@ int main(void) {
     if (g_a18_fail) { printf("\nFAIL: %d audit-18 check(s)\n", g_a18_fail); return 1; }
     if (g_null_ca_fail) { printf("\nFAIL: NULL CA path check\n"); return 1; }
     if (g_short_retry_fail) { printf("\nFAIL: shorter write retry check\n"); return 1; }
+    if (g_pause_fail) { printf("\nFAIL: %d client pause/resume check(s)\n", g_pause_fail); return 1; }
     printf("\nALL PASS: both KlTls transport axes + hardening suite verified\n");
     return 0;
 }
