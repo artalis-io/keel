@@ -90,7 +90,9 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op);
  * **When on_cancel runs.** From kl_async_cancel (a deadline the caller fails, say), from
  * kl_http_server_free for every op still pending, and when the suspended connection dies: on a
  * completion loop a send posted meanwhile (a stream chunk) can fail because the client went, and
- * the connection is released and its op cancelled from inside the loop's I/O processing. Work the
+ * the connection is released and its op cancelled from inside the loop's I/O processing. And, by
+ * default, when the client hangs up while the connection is suspended (a FIN or a reset; see
+ * KlHttpServerConfig.suspended_hangup): from the loop's I/O processing or the hang-up sweep's timer. Work the
  * caller started for the op (a thread-pool job, a timer) may then still be outstanding: on_cancel
  * must not free what that work will still touch. Mark the context dead and free it once the work
  * has finished (its done_fn sees the mark and does not complete the op). on_cancel must not write
