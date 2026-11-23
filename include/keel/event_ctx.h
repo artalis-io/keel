@@ -52,7 +52,7 @@ typedef struct KlEventCtx {
     KlEventLoop loop;             /**< Platform event loop */
     KlAllocator *alloc;           /**< borrowed: must outlive ctx */
     KlWatcher *watchers;          /**< Head of ctx-owned watcher list */
-    int dispatch_dirty;       /**< set by kl_watcher_mod/del during callback */
+    int dispatch_dirty;       /**< set by kl_watcher_add/mod/del (kept for compatibility; the re-arm after a callback now checks the dispatched watcher itself) */
     KlError last_error;       /**< diagnostic: set at point of return -1 */
     /* Timer heap */
     KlTimerEntry *timers;     /**< min-heap array (NULL until first add) */

@@ -368,9 +368,18 @@ void keel__event_dispatch_watcher(KlEventCtx *ctx, void *watcher, KlEventMask re
     KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int; a completion backend
                                    * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
                                    * truncated + sign-extended by an int, breaking watcher rearm. */
+    KlEventMask mask_before = w->mask;
     ctx->dispatch_dirty = 0;
-    w->on_ready(wfd, ready, w->user_data);  /* may kl_watcher_del/add -> sets dispatch_dirty */
-    // cppcheck-suppress knownConditionTrueFalse
-    if (!ctx->dispatch_dirty)
+    w->on_ready(wfd, ready, w->user_data);  /* may kl_watcher_del/add/mod (sets dispatch_dirty) */
+    /* Re-arm THIS watcher unless the callback removed it or changed its interest (kl_watcher_mod / an
+     * upsert re-arm by themselves). Adding or removing OTHER watchers must not suppress it: a one-shot
+     * backend (io_uring's POLL_ADD) would then never watch this fd again. A thread-pool wakeup whose
+     * done_fn completes a suspended op, which removes that connection's hang-up watcher, is exactly
+     * that case. Liveness is again checked by pointer identity, never by dereferencing a node the
+     * callback may have freed. */
+    int still_linked = 0;
+    for (const KlWatcher *it = ctx->watchers; it; it = it->next)
+        if (it == w) { still_linked = 1; break; }
+    if (still_linked && w->mask == mask_before)
         kl_watcher_rearm(ctx, wfd);
 }
