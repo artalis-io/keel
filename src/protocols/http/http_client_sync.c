@@ -572,7 +572,9 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
                             !(tls && tls->pending && tls->pending(tls) > 0);
             break;
         }
-        if (pr2 == KL_HTTP1_PARSE_ERROR)
+        /* The sync client has no resume: a body callback's PAUSE fails the request, as any value
+         * other than CONTINUE always did. Reading on would deliver past the pause. */
+        if (pr2 == KL_HTTP1_PARSE_ERROR || pr2 == KL_HTTP1_PARSE_PAUSED)
             break;
     }
 

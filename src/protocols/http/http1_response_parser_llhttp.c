@@ -58,6 +58,8 @@ typedef struct {
     void             (*on_complete_cb)(void *user_data);
     void              *stream_data;
     size_t             body_streamed;   /**< total bytes forwarded (for size limit) */
+    int                body_paused;     /**< on_body_cb returned KL_HTTP_CLIENT_BODY_PAUSE in this
+                                         *   parse call: report KL_HTTP1_PARSE_PAUSED, not complete */
 } RespLlhttpParser;
 
 /* ── String accumulation helpers ─────────────────────────────────── */
@@ -259,6 +261,12 @@ static int resp_on_body(llhttp_t *parser, const char *at, size_t len)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
 
+    /* llhttp re-flushes a body span still open at the end of the previous buffer when it is
+     * executed again; executed with no new bytes (the continuation after a pause) that flush is
+     * empty. An empty fragment carries nothing: never deliver it. */
+    if (len == 0)
+        return 0;
+
     /* Streaming mode: forward chunks to callback */
     if (p->on_body_cb) {
         if (p->max_body > 0 && p->body_streamed + len > p->max_body) {
@@ -266,7 +274,19 @@ static int resp_on_body(llhttp_t *parser, const char *at, size_t len)
             return -1;
         }
         p->body_streamed += len;
-        return p->on_body_cb(at, len, p->stream_data);
+        int rc = p->on_body_cb(at, len, p->stream_data);
+        if (rc == KL_HTTP_CLIENT_BODY_CONTINUE)
+            return 0;
+        if (rc == KL_HTTP_CLIENT_BODY_PAUSE) {
+            /* The fragment is accepted. HPE_PAUSED stops llhttp right after this span with its
+             * framing state intact (error_pos = the span's end), resumable by llhttp_resume. */
+            p->body_paused = 1;
+            return HPE_PAUSED;
+        }
+        /* ABORT, or any other value: fail. Passing the value through made a callback that returned
+         * HPE_PAUSED's number look like the end of the message. */
+        p->error = 1;
+        return -1;
     }
 
     /* Buffer mode: accumulate */
@@ -382,6 +402,14 @@ static KlHttp1ParseResult resp_parser_parse(KlHttp1ResponseParser *self,
     if (p->error)
         return KL_HTTP1_PARSE_ERROR;
 
+    if (p->body_paused) {
+        /* A pause stops llhttp at the end of the accepted span, before any later callback (so
+         * before message-complete). *consumed is that span end; the caller parses again from it. */
+        p->body_paused = 0;
+        llhttp_resume(&p->parser);
+        return KL_HTTP1_PARSE_PAUSED;
+    }
+
     if (p->complete)
         return transfer_to_response(p, resp);
 
@@ -424,6 +452,7 @@ static void resp_parser_reset(KlHttp1ResponseParser *self)
     p->complete = 0;
     p->error = 0;
     p->no_body = 0;
+    p->body_paused = 0;
     p->body_streamed = 0;        /* the size limit counts one response */
 
     kl_free(p->alloc, p->hdr_name, p->hdr_name_cap);

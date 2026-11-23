@@ -129,6 +129,7 @@ kl_http_client_request_pooled	http_client_pool.h
 kl_http_client_request_s	http_client.h
 kl_http_client_response	http_client.h
 kl_http_client_response_free	http_client.h
+kl_http_client_resume	http_client.h
 kl_http_client_start	http_client.h
 kl_http_client_start_pooled	http_client_pool.h
 kl_http_client_start_s	http_client.h

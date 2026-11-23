@@ -134,11 +134,32 @@ typedef struct {
 /* ── Streaming types ──────────────────────────────────────────────── */
 
 /**
+ * @brief Return values of a KlHttpClientBodyFn.
+ *
+ * The callback's return type stays `int`; these name its values. CONTINUE (0) and ABORT (-1) are the
+ * values the callback always had. Any other value except PAUSE aborts, as before.
+ */
+enum {
+    KL_HTTP_CLIENT_BODY_CONTINUE = 0,  /**< Fragment consumed; delivery goes on. */
+    KL_HTTP_CLIENT_BODY_ABORT    = -1, /**< Fail the request (unchanged abort behavior). */
+    KL_HTTP_CLIENT_BODY_PAUSE    = 1   /**< Fragment consumed; deliver nothing more until
+                                        *   kl_http_client_resume(). Async client only: the sync
+                                        *   client has no resume and treats PAUSE as ABORT. */
+};
+
+/**
  * @brief Response body streaming callback (push-based).
+ *
+ * A fragment is never empty. Returning KL_HTTP_CLIENT_BODY_PAUSE (async client) accepts this fragment
+ * and stops all further delivery: no body callback, no on_complete and no successful on_done runs
+ * until kl_http_client_resume() is called. The client stops reading the connection, so the peer is
+ * held back by TCP flow control rather than by buffering in the client. See kl_http_client_resume()
+ * for the exact guarantees.
+ *
  * @param data  Body chunk data.
- * @param len   Chunk length.
+ * @param len   Chunk length (> 0).
  * @param user_data  User context from KlHttpClientStreamCfg.
- * @return 0 to continue, -1 to abort.
+ * @return KL_HTTP_CLIENT_BODY_CONTINUE, KL_HTTP_CLIENT_BODY_ABORT or KL_HTTP_CLIENT_BODY_PAUSE.
  */
 typedef int (*KlHttpClientBodyFn)(const char *data, size_t len, void *user_data);
 
@@ -330,9 +351,49 @@ KlError kl_http_client_last_error(const KlHttpClient *client);
 void kl_http_client_cancel(KlHttpClient *client);
 
 /**
+ * @brief Resume response-body delivery after a body callback returned KL_HTTP_CLIENT_BODY_PAUSE.
+ *
+ * Delivery continues at the exact byte where it stopped: nothing is lost, repeated or reordered,
+ * whatever the framing (Content-Length, chunked with trailers, close-delimited) and whether or not
+ * the body is being decompressed or carried over TLS.
+ *
+ * Never re-entrant: this call only schedules the continuation, which runs on a later loop tick.
+ * No callback is invoked from inside kl_http_client_resume(). The continuation may pause again.
+ *
+ * While paused the client does not read the connection (its watcher is removed), so the peer is
+ * held back by TCP flow control. Memory stays bounded: the unparsed rest of one receive buffer
+ * (KL_HTTP_CLIENT_RECV_BUF_SIZE) and, when decompressing, the output the decoder had already
+ * produced for one 512-byte slice of compressed input, capped at about 580 KiB (one slice at
+ * deflate's maximum ratio, plus slack). A pluggable decoder that produces more than that for one
+ * slice while the caller is paused fails the request. Bytes the TLS engine already holds stay
+ * inside it.
+ *
+ * The request deadline (KlHttpClientConfig.timeout_ms) bounds the WHOLE request and keeps running
+ * while paused: a pause that outlasts it fails the request with KL_ERR_TIMEOUT. Set timeout_ms to
+ * cover the longest expected pause.
+ *
+ * Calling rules (event-loop thread only):
+ *  - From inside a streaming callback: allowed. It takes effect after the callback returns, and
+ *    only if that callback returned PAUSE (it then works like a pause followed by a resume).
+ *  - Repeated calls while a continuation is already scheduled return 0 and do nothing more.
+ *  - kl_http_client_cancel() takes precedence: it drops a scheduled continuation. A streaming
+ *    callback may call kl_http_client_cancel(); nothing more is delivered and on_done is not called.
+ *    A streaming callback must not call kl_http_client_free().
+ *  - Terminal errors (deadline, I/O error, decode error) take precedence over a pause and are
+ *    reported through on_done as usual.
+ *
+ * @return 0 if a continuation is scheduled (or already was), or if called from inside a streaming
+ *         callback (recorded; it has an effect only if that callback returns PAUSE); -1 otherwise
+ *         when the client is not paused (never paused, already running, finished or cancelled, all
+ *         with no effect), or if the continuation could not be scheduled (allocation failure). In
+ *         that case the client stays paused and the call may be retried.
+ */
+int kl_http_client_resume(KlHttpClient *client);
+
+/**
  * @brief Free all client resources (response, buffers, parser).
  *
- * Safe to call after kl_http_client_cancel() or after completion callback.
+ * Safe to call after kl_http_client_cancel() or after completion callback, and while paused.
  */
 void kl_http_client_free(KlHttpClient *client);
 

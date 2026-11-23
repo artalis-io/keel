@@ -424,18 +424,71 @@ int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
 
 /* ── Streaming decompression wrapper ─────────────────────────────── */
 
+/* Hold decoded output produced after the user paused (bounded; see DecompStreamWrap). */
+static int decomp_stash(DecompStreamWrap *w, const char *data, size_t len)
+{
+    if (len > KL_HTTP_CLIENT_DECOMP_STASH_MAX - w->stash_len) {
+        w->failed = 1;
+        return -1;
+    }
+    size_t need = w->stash_len + len;
+    if (need > w->stash_cap) {
+        size_t cap = w->stash_cap ? w->stash_cap : 4096;
+        while (cap < need)
+            cap *= 2;                               /* need <= STASH_MAX: no overflow */
+        if (cap > KL_HTTP_CLIENT_DECOMP_STASH_MAX)
+            cap = KL_HTTP_CLIENT_DECOMP_STASH_MAX;
+        char *nb = kl_realloc(w->ds.alloc, w->stash, w->stash_cap, cap);
+        if (!nb) {
+            w->failed = 1;
+            return -1;
+        }
+        w->stash = nb;
+        w->stash_cap = cap;
+    }
+    memcpy(w->stash + w->stash_len, data, len);
+    w->stash_len += len;
+    return 0;
+}
+
+static void decomp_stash_free(DecompStreamWrap *w)
+{
+    if (w->stash)
+        kl_free(w->ds.alloc, w->stash, w->stash_cap);
+    w->stash = NULL;
+    w->stash_len = w->stash_off = w->stash_cap = 0;
+}
+
+/* Hand one fragment to the user. Returns 0 to go on, -1 to abort; a PAUSE sets w->paused (only on a
+ * pausable wrapper: the sync path cannot resume, so there PAUSE aborts as before). */
+static int decomp_deliver(DecompStreamWrap *w, const char *data, size_t len)
+{
+    if (!w->user_on_body)
+        return 0;
+    int r = w->user_on_body(data, len, w->user_data);
+    if (r == KL_HTTP_CLIENT_BODY_CONTINUE)
+        return 0;
+    if (r == KL_HTTP_CLIENT_BODY_PAUSE && w->pausable) {
+        w->paused = 1;
+        return 0;
+    }
+    return -1;
+}
+
 static int decomp_emit_to_user(void *ctx, const char *data, size_t len)
 {
     DecompStreamWrap *w = ctx;
+    if (len == 0)
+        return 0;
     /* max_response_size bounds the decompressed bytes delivered, not only those on the wire. */
     if (w->max > 0 && (len > w->max || w->emitted > w->max - len)) {
         w->failed = 1;
         return -1;
     }
     w->emitted += len;
-    if (!w->user_on_body)
-        return 0;
-    return w->user_on_body(data, len, w->user_data);
+    if (w->paused)
+        return decomp_stash(w, data, len);   /* the decoder cannot stop mid-feed: hold the rest */
+    return decomp_deliver(w, data, len);
 }
 
 int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *headers,
@@ -474,17 +527,44 @@ int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *heade
     return 0;
 }
 
+/* Feed compressed input. A pausable wrapper feeds it in bounded slices and stops between slices once
+ * the user paused, leaving the unfed rest in pend_in. Returns 0, PAUSE, or -1. */
+static int decomp_feed(DecompStreamWrap *w, const char *data, size_t len)
+{
+    size_t slice = w->pausable ? KL_HTTP_CLIENT_DECOMP_SLICE : len;
+    size_t off = 0;
+    while (off < len) {
+        size_t n = len - off < slice ? len - off : slice;
+        if (kl_decompress_stream_feed(&w->ds, data + off, n, 0, decomp_emit_to_user, w) < 0) {
+            w->failed = 1;
+            return -1;
+        }
+        off += n;
+        if (w->paused) {
+            w->pend_in = off < len ? data + off : NULL;
+            w->pend_in_len = len - off;
+            return KL_HTTP_CLIENT_BODY_PAUSE;
+        }
+    }
+    return 0;
+}
+
 int kl_http_client_decomp_on_body(const char *data, size_t len, void *user_data)
 {
     DecompStreamWrap *w = user_data;
     if (w->active) {
-        int r = kl_decompress_stream_feed(&w->ds, data, len, 0, decomp_emit_to_user, w);
-        if (r < 0) w->failed = 1;
+        int r = decomp_feed(w, data, len);
+        if (r < 0 && !w->failed)
+            w->failed = 1;   /* a user abort inside an emit surfaces as a failed feed */
         return r;
     }
     /* Passthrough */
-    if (w->user_on_body)
-        return w->user_on_body(data, len, w->user_data);
+    if (w->user_on_body) {
+        int r = w->user_on_body(data, len, w->user_data);
+        if (r == KL_HTTP_CLIENT_BODY_PAUSE && !w->pausable)
+            return KL_HTTP_CLIENT_BODY_ABORT;
+        return r;
+    }
     return 0;
 }
 
@@ -493,14 +573,70 @@ void kl_http_client_decomp_on_complete(void *user_data)
     DecompStreamWrap *w = user_data;
     if (w->active) {
         /* Final flush: a failure here (a truncated stream) fails the request; on_complete has no
-         * error channel, so the client checks `failed` once the response is parsed. */
+         * error channel, so the client checks `failed` once the response is parsed. Output it
+         * produces after a pause is stashed like any other. */
         if (kl_decompress_stream_feed(&w->ds, NULL, 0, 1, decomp_emit_to_user, w) < 0)
             w->failed = 1;
         kl_decompress_stream_free(&w->ds);
         w->active = 0;
     }
+    if (w->paused) {
+        /* The user hears of completion only after the stash drained. A flush that failed while
+         * paused fails the request instead (on_done reports it): on_complete never runs paused. */
+        if (!w->failed)
+            w->complete_pending = 1;
+        return;
+    }
     if (w->user_on_complete)
         w->user_on_complete(w->user_data);
+}
+
+int kl_http_client_decomp_resume(DecompStreamWrap *w)
+{
+    w->paused = 0;
+    /* 1. Output already decoded: in bounded fragments, stopping at the next pause. */
+    while (w->stash_off < w->stash_len) {
+        size_t n = w->stash_len - w->stash_off;
+        if (n > KL_HTTP_CLIENT_DECOMP_FRAG)
+            n = KL_HTTP_CLIENT_DECOMP_FRAG;
+        const char *frag = w->stash + w->stash_off;
+        w->stash_off += n;
+        if (decomp_deliver(w, frag, n) < 0)
+            return -1;
+        if (w->paused)
+            return 1;
+    }
+    decomp_stash_free(w);   /* drained: no memory is held while running */
+    /* 2. Compressed input the parser already framed but the decoder had not taken yet. */
+    if (w->pend_in_len > 0) {
+        const char *in = w->pend_in;
+        size_t n = w->pend_in_len;
+        w->pend_in = NULL;
+        w->pend_in_len = 0;
+        int r = decomp_feed(w, in, n);
+        if (r < 0)
+            return -1;
+        if (r == KL_HTTP_CLIENT_BODY_PAUSE)
+            return 1;
+    }
+    /* 3. The message completed while paused: the user's on_complete was deferred to here. */
+    if (w->complete_pending) {
+        w->complete_pending = 0;
+        if (w->user_on_complete)
+            w->user_on_complete(w->user_data);
+    }
+    return 0;
+}
+
+void kl_http_client_decomp_release(DecompStreamWrap *w)
+{
+    if (w->active) {
+        kl_decompress_stream_free(&w->ds);
+        w->active = 0;
+    }
+    decomp_stash_free(w);
+    w->pend_in = NULL;
+    w->pend_in_len = 0;
 }
 
 /* ── Response free ────────────────────────────────────────────────── */
