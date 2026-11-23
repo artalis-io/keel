@@ -184,9 +184,17 @@ kl_ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;
 }
+/* Never blocks, whatever the socket's mode: a completion backend's accepted socket may be blocking,
+ * and the server's suspended-connection sweep peeks it from the loop thread. Would-block is -1 with
+ * EAGAIN/EWOULDBLOCK, as on a non-blocking socket. */
 kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     kl_ssize_t r;
-    do { r = recv((int)fd, buf, len, MSG_PEEK); } while (r < 0 && errno == EINTR);
+#ifdef MSG_DONTWAIT
+    const int flags = MSG_PEEK | MSG_DONTWAIT;
+#else
+    const int flags = MSG_PEEK;   /* every supported POSIX host defines MSG_DONTWAIT */
+#endif
+    do { r = recv((int)fd, buf, len, flags); } while (r < 0 && errno == EINTR);
     return r;
 }
 

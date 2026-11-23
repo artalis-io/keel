@@ -284,6 +284,11 @@ typedef struct KlHttpServer {
     /* Appended after the 3.2.0 layout (fields only grow at the end within a major version). */
     uint64_t accept_backoff_until; /**< accepting paused until then (monotonic ms) after descriptor or
                                         memory exhaustion; 0 = not paused */
+    /* Appended in 3.5.0: the suspended-connection hang-up sweep, for loops without
+     * KL_EVENT_CAP_HANGUP (async.c). INTERNAL. */
+    int64_t hup_sweep_timer;       /**< the pending sweep timer (valid while hup_sweep_armed) */
+    int     hup_sweep_armed;       /**< 1 = a sweep timer is pending */
+    int     hup_sweep_conns;       /**< suspended connections the sweep covers */
 } KlHttpServer;
 
 /**

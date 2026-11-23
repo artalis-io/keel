@@ -12,9 +12,11 @@
 #include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <keel/event_ctx.h>
+#include <keel/timer.h>
 #include <stdint.h>
 #include "http_internal.h"
 #include "event_caps.h"
+#include "socket.h"           /* kl_sock_recv_peek / kl_sock_io_status: the sweep's probe */
 #include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
 #include "completion_http.h" /* kl_http_comp_resume: completion resume */
 
@@ -28,6 +30,31 @@
  * removes the watch before anything re-registers or closes the fd. */
 
 static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_data);
+static void async_hup_sweep(void *user_data);
+
+/* ── The sweep: loops without KL_EVENT_CAP_HANGUP ──
+ * One timer per server, pending only while at least one suspended connection needs it; never per
+ * loop iteration. Each tick peeks every swept connection once (recv_peek: never blocks, never
+ * consumes) and cancels those whose client is gone. BEST EFFORT: a FIN or reset behind unread bytes
+ * is invisible to a peek, so such a connection is bounded only by its op's deadline (and Keel does
+ * not require one). */
+#define KL_HUP_SWEEP_MS 1000
+
+/* Can this server's sockets be peeked without risk? A provider's own recv_peek, or the built-in
+ * default on a real descriptor. A provider without recv_peek whose handles are not OS descriptors
+ * (lwIP raw: a tcp_pcb pointer) must never reach the default recv(). */
+static int async_hup_can_peek(const KlHttpServer *s) {
+    const KlSocketProvider *p = s->ev.sockets;
+    return !p || (p->ops && p->ops->recv_peek) || kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD);
+}
+
+static void async_hup_sweep_arm(KlHttpServer *s) {
+    if (s->hup_sweep_armed || s->hup_sweep_conns <= 0) return;
+    int64_t id = kl_timer_add(&s->ev, KL_HUP_SWEEP_MS, async_hup_sweep, s);
+    if (id < 0) return;            /* no timer: the op's deadline remains the bound */
+    s->hup_sweep_timer = id;
+    s->hup_sweep_armed = 1;
+}
 
 static void async_watch_hangup(KlHttpServer *s, KlHttpConn *conn) {
     conn->hup_state = KL_HUP_NONE;
@@ -35,14 +62,70 @@ static void async_watch_hangup(KlHttpServer *s, KlHttpConn *conn) {
     if (s->config.suspended_hangup == KL_HTTP_SUSPEND_HANGUP_OFF)
         return;
     if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) &&
-        kl_watcher_add(&s->ev, conn->stream.fd, KL_EVENT_HANGUP, async_on_hangup, conn) == 0)
+        kl_watcher_add(&s->ev, conn->stream.fd, KL_EVENT_HANGUP, async_on_hangup, conn) == 0) {
         conn->hup_state = KL_HUP_WATCHED;
+        return;
+    }
+    if (!async_hup_can_peek(s))
+        return;
+    conn->hup_state = KL_HUP_SWEPT;
+    s->hup_sweep_conns++;
+    async_hup_sweep_arm(s);
 }
 
 static void async_unwatch_hangup(KlHttpServer *s, KlHttpConn *conn) {
-    if (conn->hup_state == KL_HUP_WATCHED)
+    if (conn->hup_state == KL_HUP_WATCHED) {
         kl_watcher_del(&s->ev, conn->stream.fd);
+    } else if (conn->hup_state == KL_HUP_SWEPT || conn->hup_state == KL_HUP_SWEEP_HIT) {
+        if (--s->hup_sweep_conns <= 0) {
+            s->hup_sweep_conns = 0;
+            if (s->hup_sweep_armed) {   /* nothing left to sweep: no probe after this */
+                (void)kl_timer_cancel(&s->ev, s->hup_sweep_timer);
+                s->hup_sweep_armed = 0;
+            }
+        }
+    }
     conn->hup_state = KL_HUP_NONE;
+}
+
+/* One non-consuming probe: 1 = FIN seen (nothing queued ahead of it), 2 = reset, 0 = nothing
+ * terminal observed or indeterminate (bytes queued, would-block, any other error). */
+static int async_hup_probe(const KlHttpServer *s, const KlHttpConn *conn) {
+    char b;
+    kl_ssize_t r = kl_sock_recv_peek(s->ev.sockets, conn->stream.fd, &b, 1);
+    if (r == 0) return 1;
+    if (r < 0 && kl_sock_io_status(s->ev.sockets) == KL_IO_RESET) return 2;
+    return 0;
+}
+
+static void async_hup_sweep(void *user_data) {
+    KlHttpServer *s = user_data;
+    s->hup_sweep_armed = 0;
+    /* First pass, no list changes: probe every swept connection once. */
+    for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
+        KlHttpConn *c = op->conn;
+        if (!c || c->async_op != op || c->hup_state != KL_HUP_SWEPT) continue;
+        int r = async_hup_probe(s, c);
+        if (r == 1 && s->config.suspended_hangup == KL_HTTP_SUSPEND_HANGUP_RESET_ONLY) {
+            async_unwatch_hangup(s, c);     /* leaves the sweep; the op runs on */
+            c->hup_state = KL_HUP_FIN_KEPT;
+        } else if (r != 0) {
+            c->hup_state = KL_HUP_SWEEP_HIT;
+        }
+    }
+    /* Second pass: cancel the hits. on_cancel is user code and may change the list, so restart from the
+     * head after each cancel; each one retires its op, so this terminates. */
+    for (;;) {
+        KlAsyncOp *hit = NULL;
+        for (KlAsyncOp *op = s->async_ops; op; op = op->next)
+            if (op->conn && op->conn->async_op == op && op->conn->hup_state == KL_HUP_SWEEP_HIT) {
+                hit = op;
+                break;
+            }
+        if (!hit) break;
+        kl_async_cancel(s, hit);
+    }
+    async_hup_sweep_arm(s);   /* again only if a swept connection remains */
 }
 
 /* The client hung up (or the connection failed) while suspended. Runs from the loop's I/O

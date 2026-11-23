@@ -223,8 +223,19 @@ kl_ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
+/* Never blocks, whatever the socket's mode (an IOCP backend's AcceptEx socket is blocking, and the
+ * server's suspended-connection sweep peeks it from the loop thread). Winsock has no MSG_DONTWAIT,
+ * so a zero-timeout WSAPoll decides first: nothing readable is would-block; readable (data, a FIN or
+ * a reset) means the peek returns at once. */
 kl_ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     if (kl_plat_socket_runtime_init() != 0) return -1;   /* PAL invariant */
+    WSAPOLLFD p;
+    p.fd = (SOCKET)fd;
+    p.events = POLLRDNORM;
+    p.revents = 0;
+    int n = WSAPoll(&p, 1, 0);
+    if (n == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
+    if (n == 0) { WSASetLastError(WSAEWOULDBLOCK); kl_wsa_set_errno(); return -1; }
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
     if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
