@@ -42,6 +42,7 @@
 #define KL_HUP_WATCHED  1
 #define KL_HUP_SWEPT    2
 #define KL_HUP_FIN_KEPT 3
+#define KL_HUP_SWEEP_HIT 4   /* swept, and this tick's probe saw a hang-up: about to be cancelled */
 
 #define KL_HTTP_PEER_SOCKET 0   /* Address came from the accepted socket */
 #define KL_HTTP_PEER_PROXY  1   /* Address came from a trusted PROXY header */
