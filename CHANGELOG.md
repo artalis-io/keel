@@ -49,10 +49,14 @@ version (3.4.0). Existing applications need only the usual 3.x recompile and rel
   value other than CONTINUE and PAUSE now aborts. Empty body fragments (an artifact of llhttp re-flushing
   an open span) are no longer delivered.
 - **HTTP client: `on_complete` no longer runs for a body that failed to decode.** With streaming
-  decompression, a failure in the final flush (a bad gzip trailer or checksum, or `max_response_size`
-  exceeded there) called the stream's `on_complete` and then reported `KL_ERR_COMPRESS` through
-  `on_done`. `on_complete` now means the body ended and decoded cleanly; a failed decode is reported
-  through `on_done` only, the same whether or not the body was paused (sync and async clients).
+  decompression, a failure in the final flush called the stream's `on_complete` and then reported
+  `KL_ERR_COMPRESS`. With the shipped gzip decoder a flush failure is a truncated stream (a missing
+  or short trailer, or a cut-off header) or bytes after the trailer; its flush emits no output, and a
+  checksum mismatch is normally found earlier, mid-body, as `KL_ERR_PARSE`, which never reached
+  `on_complete`. With a decoder that emits output in its flush, `max_response_size` exceeded there or
+  a body callback aborting there are flush failures too. `on_complete` now means the body ended and
+  decoded cleanly; a failed decode skips it whether or not the body was paused, and is reported
+  through `on_done` (async client) or the -1 return and `KlHttpClientResponse.error` (sync client).
 
 ## [3.3.1]
 
