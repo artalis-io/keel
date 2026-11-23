@@ -483,7 +483,7 @@ static int listener_arm(void *vp) {
  * still completes (aborted, or connected if it won the race) and retires through the dispatch. */
 static void listener_cancel(void *vp) {
     KlPipeListener *pl = vp;
-    for (KlPipeStream *p = pl->pending; p; p = p->pend_next)
+    for (const KlPipeStream *p = pl->pending; p; p = p->pend_next)
         kl_comp_pipe_cancel(pl->ctx, p->life, KL_PIPE_OP_ACCEPT);
 }
 

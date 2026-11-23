@@ -803,7 +803,10 @@ int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
         nh++;
     }
     h2c->upgrading = 1;                          /* its pre-body middleware already ran */
+    /* The header arrays are filled for [0, nh) just above and h2_cb_on_request reads only those;
+     * cppcheck assumes the loop may run zero times and flags the (then unread) arrays. */
     int rc = h2_cb_on_request(h2c, 1, req->method, req->method_len, target, target_len,
+                              // cppcheck-suppress uninitvar
                               NULL, 0, names, values, name_lens, value_lens, nh);
     kl_free(h2c->alloc, target, target_len + 1);
     if (rc == 0 && h2_stream_find(h2c, 1))      /* not already answered by middleware */
