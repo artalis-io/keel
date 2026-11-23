@@ -32,6 +32,7 @@ typedef struct {
     int                 done;       /* decompression finished? */
     int                 verified;   /* trailer (CRC32 + ISIZE) checked and matched? */
     int                 trailing;   /* bytes arrived after the 8-byte trailer */
+    int                 more_out;   /* tinfl holds output not yet produced (HAS_MORE_OUTPUT) */
     unsigned char       hdr_buf[10];
     size_t              hdr_len;
     /* Optional header fields (FEXTRA, FNAME, FCOMMENT, FHCRC) parsed across feeds: the field
@@ -317,14 +318,18 @@ static int gz_hdr_skip(KlMinizDecompSession *s, const unsigned char **p, size_t 
     return 1;
 }
 
-static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
-                           int flush,
-                           int (*emit)(void *ctx, const char *data, size_t len),
-                           void *emit_ctx) {
-    KlMinizDecompSession *s = (KlMinizDecompSession *)self;
-
+/* The streaming decoder behind dfeed and dfeed_stoppable. With `stoppable`, an emit returning 1
+ * stops it right after that emit (return 1, *consumed = input taken); every piece of state it needs
+ * to continue (tinfl, the dictionary ring and its offset, more_out) lives in the session, and output
+ * it has not produced yet stays inside tinfl. Without it, emit's positive returns are ignored, as
+ * dfeed always did. Every other return leaves *consumed = len (0) or is an error (-1). */
+static int miniz_feed(KlMinizDecompSession *s, const char *data, size_t len, int flush,
+                      size_t *consumed,
+                      int (*emit)(void *ctx, const char *data, size_t len),
+                      void *emit_ctx, int stoppable) {
     const unsigned char *p = (const unsigned char *)data;
     size_t remaining = len;
+    *consumed = len;
 
     if (s->done) {
         /* The deflate stream already finished; only the 8-byte trailer (CRC32 + ISIZE)
@@ -388,6 +393,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         s->out_full = 0;
         s->verified = 0;
         s->trailing = 0;
+        s->more_out = 0;
         s->started = 1;
     }
 
@@ -395,17 +401,19 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
      * tinfl_decompress_mem_to_callback does): the bytes just produced are emitted from there. */
     /* Also continue with no input left while tinfl still holds output (HAS_MORE_OUTPUT: the ring
      * segment up to the wrap point was full), or that output would be stranded inside it. */
-    tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
-    while (!s->done && (remaining > 0 || status == TINFL_STATUS_HAS_MORE_OUTPUT)) {
+    /* more_out persists, so a call with no input still drains output a stopped call left in tinfl. */
+    int stop = 0;
+    while (!s->done && (remaining > 0 || s->more_out)) {
         size_t in_bytes = remaining;
         size_t out_bytes = TINFL_LZ_DICT_SIZE - s->dict_ofs;
         unsigned char *out_buf = s->dict + s->dict_ofs;
 
         int flags = TINFL_FLAG_HAS_MORE_INPUT;
 
-        status = tinfl_decompress(&s->decomp, p, &in_bytes,
-                                  s->dict, out_buf, &out_bytes, flags);
+        tinfl_status status = tinfl_decompress(&s->decomp, p, &in_bytes,
+                                               s->dict, out_buf, &out_bytes, flags);
         s->dict_ofs = (s->dict_ofs + out_bytes) & (TINFL_LZ_DICT_SIZE - 1);
+        s->more_out = status == TINFL_STATUS_HAS_MORE_OUTPUT;
 
         p += in_bytes;
         remaining -= in_bytes;
@@ -419,12 +427,16 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
                 return -1;
             s->crc = (uint32_t)mz_crc32(s->crc, out_buf, out_bytes);
             s->total_out += (uint32_t)out_bytes;
-            if (emit(emit_ctx, (const char *)out_buf, out_bytes) < 0)
+            int er = emit(emit_ctx, (const char *)out_buf, out_bytes);
+            if (er < 0)
                 return -1;
+            if (stoppable && er > 0)
+                stop = 1;
         }
 
         if (status == TINFL_STATUS_DONE) {
             s->done = 1;
+            s->more_out = 0;
             /* Remaining bytes should be the 8-byte trailer */
             if (remaining <= 8) {
                 memcpy(s->trail_buf + s->trail_len, p, remaining);
@@ -436,6 +448,10 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
 
         if (status < TINFL_STATUS_DONE)
             return -1;
+        if (stop) {   /* the consumer took that output and asked to stop: continue here next call */
+            *consumed = len - remaining;
+            return 1;
+        }
     }
 
     /* Accumulate trailer bytes from remaining data (trailer may span feeds). */
@@ -465,7 +481,24 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
     if (flush && (!s->verified || s->trailing))
         return -1;
 
-    return 0;
+    /* A stop on the output that ended the deflate stream lands here (nothing more is emitted after
+     * it): report the stop; the next call has nothing left to do and returns 0. */
+    return stop;
+}
+
+static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len, int flush,
+                          int (*emit)(void *ctx, const char *data, size_t len),
+                          void *emit_ctx) {
+    size_t consumed;
+    return miniz_feed((KlMinizDecompSession *)self, data, len, flush, &consumed, emit, emit_ctx,
+                      0) < 0 ? -1 : 0;
+}
+
+static int miniz_dfeed_stoppable_fn(KlDecompress *self, const char *data, size_t len, int flush,
+                                    size_t *consumed,
+                                    int (*emit)(void *ctx, const char *data, size_t len),
+                                    void *emit_ctx) {
+    return miniz_feed((KlMinizDecompSession *)self, data, len, flush, consumed, emit, emit_ctx, 1);
 }
 
 /* ── Vtable: encoding ────────────────────────────────────────────── */
@@ -490,6 +523,7 @@ static void miniz_decomp_reset(KlDecompress *self) {
     s->hdr_need = 0;
     s->hdr_xlen = 0;
     s->trail_len = 0;
+    s->more_out = 0;
 }
 
 /* ── Vtable: destroy ─────────────────────────────────────────────── */
@@ -516,6 +550,7 @@ KlDecompress *kl_decompress_miniz_create(KlCompressCtx *ctx,
     s->base.encoding = miniz_decomp_encoding;
     s->base.reset = miniz_decomp_reset;
     s->base.destroy = miniz_decomp_destroy;
+    s->base.dfeed_stoppable = miniz_dfeed_stoppable_fn;
     s->alloc = alloc;
 
     return &s->base;

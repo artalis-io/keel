@@ -107,7 +107,8 @@ static int md_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
 static const char *md_encoding(KlDecompress *self) { (void)self; return "x-double"; }
 static void md_reset(KlDecompress *self) { (void)self; }
 static void md_destroy(KlDecompress *self) { (void)self; }
-static KlDecompress g_md = { md_decompress, md_dfeed, md_encoding, md_reset, md_destroy };
+static KlDecompress g_md = { .decompress = md_decompress, .dfeed = md_dfeed, .encoding = md_encoding,
+                                .reset = md_reset, .destroy = md_destroy };
 static KlDecompress *md_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_md; }
 
 UTEST(alloc_sizes, decompressed_body_is_freed_with_its_size_and_terminated) {

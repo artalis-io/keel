@@ -672,7 +672,8 @@ static int md_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
 static const char *md_encoding(KlDecompress *self) { (void)self; return "x-double"; }
 static void md_reset(KlDecompress *self) { (void)self; }
 static void md_destroy(KlDecompress *self) { (void)self; }
-static KlDecompress g_md = { md_decompress, md_dfeed, md_encoding, md_reset, md_destroy };
+static KlDecompress g_md = { .decompress = md_decompress, .dfeed = md_dfeed, .encoding = md_encoding,
+                                .reset = md_reset, .destroy = md_destroy };
 
 /* A decompressor that holds the dfeed contract to the letter: input comes with flush=0, and the
  * final call (flush=1) has none (decompress.h: data NULL, len 0). The client's bounded path passed
@@ -682,7 +683,8 @@ static int strict_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
     if (flush && (d || n)) return -1;
     return md_dfeed(self, d, n, flush, emit, ctx);
 }
-static KlDecompress g_strict = { md_decompress, strict_dfeed, md_encoding, md_reset, md_destroy };
+static KlDecompress g_strict = { .decompress = md_decompress, .dfeed = strict_dfeed, .encoding = md_encoding,
+                                .reset = md_reset, .destroy = md_destroy };
 static KlDecompress *strict_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_strict; }
 static KlDecompressConfig g_strict_cfg = { .ctx = NULL, .factory = strict_factory };
 static KlDecompress *md_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_md; }
@@ -842,7 +844,8 @@ static int bomb_dfeed(KlDecompress *self, const char *d, size_t n, int flush,
 static const char *bomb_encoding(KlDecompress *self) { (void)self; return "x-bomb"; }
 static void bomb_reset(KlDecompress *self) { (void)self; }
 static void bomb_destroy(KlDecompress *self) { (void)self; }
-static KlDecompress g_bomb = { bomb_decompress, bomb_dfeed, bomb_encoding, bomb_reset, bomb_destroy };
+static KlDecompress g_bomb = { .decompress = bomb_decompress, .dfeed = bomb_dfeed, .encoding = bomb_encoding,
+                                .reset = bomb_reset, .destroy = bomb_destroy };
 static KlDecompress *bomb_factory(KlCompressCtx *ctx, KlAllocator *alloc) { (void)ctx; (void)alloc; return &g_bomb; }
 static KlDecompressConfig g_bomb_cfg = { .ctx = NULL, .factory = bomb_factory };
 

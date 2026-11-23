@@ -81,8 +81,9 @@ Answers to the reconnaissance questions:
 2. The completion architecture permits no outstanding payload receive after a pause, because the
    client posts none (see above).
 3. The parser can stop exactly at a body-callback boundary (llhttp `HPE_PAUSED` from a span callback).
-4. The decoder cannot stop part-way through a `dfeed` call; it can be stopped between calls. Hence the
-   bounded slicing and stash below.
+4. The decoder cannot stop part-way through a `dfeed` call; it can be stopped between calls. Hence a
+   new optional vtable op, `dfeed_stoppable`, which the shipped decoder implements, and a bounded
+   fallback (slicing and a stash) for decoders without it. See below.
 5. TLS pending bytes stay in the engine and are read first by the continuation, without waiting for
    readiness.
 
@@ -104,9 +105,11 @@ Nothing reads the connection, so the kernel buffer fills and TCP closes the wind
 **Resume.** `kl_http_client_resume` schedules `resume_timer` (zero delay; one at a time). The
 continuation `cli_on_resume` works in byte order:
 
-1. the decompressor's stash (output decoded from earlier bytes), in fragments of at most 16 KiB;
-2. compressed body bytes the decoder had not taken (`pend_in`, borrowed from `rbuf`, which is neither
-   refilled nor moved until this is drained);
+1. the decompressor's stash (output decoded from earlier bytes; fallback path only), in fragments of
+   at most 16 KiB;
+2. the decoder's own unfinished work and the compressed body bytes it had not taken (`pend_in`,
+   borrowed from `rbuf`, which is neither refilled nor moved until this is drained); a stopped
+   final flush is continued here, and its trailer check runs when it finishes;
 3. a deferred `on_complete` (the message ended while output was stashed), then success;
 4. the parser residual in `rbuf`, parsed even when empty (a pending message-complete fires);
 5. TLS plaintext and the socket, through the ordinary read loop, which re-registers the watcher only
@@ -114,21 +117,54 @@ continuation `cli_on_resume` works in byte order:
 
 Any step may pause again; the continuation then parks with nothing scheduled.
 
-**Decompression.** A pausable wrapper feeds compressed input in slices of at most 512 bytes and feeds
-no further slice once the user paused. Output the decoder still produces for the slice in progress goes
-to a stash capped at `512 * 1032 + 64 KiB` (one slice at deflate's maximum ratio, plus slack); a
-decoder that exceeds it fails the request. The stash is freed once drained. The
-final flush may also be stashed; the user's `on_complete` then waits for the resume. Checksum and
-trailer validation run unchanged (the final flush is still the last call). The sync path does not slice
-(its wrapper is not pausable).
+**Decompression: a decoder that can stop.** `KlDecompress` gains an optional op, appended after
+`destroy` under the append-only, zero-default vtable policy (`docs/contracts/compatibility.md`):
+
+```c
+int (*dfeed_stoppable)(KlDecompress *self, const char *data, size_t len, int flush,
+                       size_t *consumed, int (*emit)(void *, const char *, size_t), void *emit_ctx);
+```
+
+`emit` may return 1 ("stop"). The fragment it was given is accepted. The decoder then returns 1 without
+emitting again, with `*consumed` the input bytes it took; output it has decoded but not emitted, and
+its state, stay inside the session. The next call continues there with the rest of the input, possibly
+zero bytes (a decoder still holding output must make progress on an empty call). A stop in the final
+call (`flush = 1`) is continued by another flush call, which validates the trailer when it finishes.
+Returning 0 means all input was taken and nothing is held.
+
+The wrapper calls it with the whole body span and stops it at the fragment the user paused on; the
+untaken input stays in `pend_in`. It holds no decoded output itself, so memory while paused does not
+depend on the compression ratio. It checks every return: a decoder that stops unasked, emits after
+being asked to stop, reports more input than it was given, or reports completion with input left
+fails the request (`KL_ERR_PARSE` mid-body, `KL_ERR_COMPRESS` in the flush). So a resume that calls
+the decoder again always follows a fragment the user accepted, and no input is fed twice. The miniz
+backend implements it: its output already lives in its 32 KiB dictionary ring, and the only extra
+state is whether tinfl still holds output (`more_out`).
+
+ABI: Keel promises source and static-relink compatibility, not binary compatibility (no shared object,
+no `dlopen`), so a decoder compiled against an older header never meets the newer library. A decoder
+that zero-initializes its table (designated initializer, `memset`, or `= {0}`) leaves the new slot
+NULL and keeps the fallback below. A table written with positional initializers still compiles to the
+same thing (C zero-fills omitted members) but draws `-Wmissing-field-initializers` under `-Wextra`;
+four in-tree test decoders were switched to designated initializers for that reason.
+
+**Decompression: fallback for decoders without it.** A pausable wrapper over a decoder that has only
+`dfeed` feeds compressed input in slices of at most 512 bytes and feeds no further slice once the user
+paused. Output the decoder still produces for the slice in progress goes to a stash capped at
+`512 * 1032 + 64 KiB` (one slice at deflate's maximum ratio, plus slack); a decoder that exceeds it
+fails the request. The stash is freed once drained. The final flush may also be stashed; the user's
+`on_complete` then waits for the resume. Checksum and trailer validation run unchanged (the final flush
+is still the last call). The sync path does not slice (its wrapper is not pausable) and never uses
+`dfeed_stoppable`.
 
 **Callback trampolines.** The client reaches every user streaming callback through `cli_on_body`,
 `cli_on_headers`, `cli_on_complete` (behind the decompressor when there is one). They make a
 cancellation from any callback stop all further delivery, and scope `resume` calls made from inside a
 callback.
 
-**Memory bound while paused.** Client struct + `rbuf` (8 KiB) + at most one stash (bounded as above,
-typically a few KiB) + whatever the TLS engine already holds (one record). Independent of the response
+**Memory bound while paused.** Client struct + `rbuf` (8 KiB) + whatever the TLS engine already holds
+(one record) + the decoder session (miniz: about 43 KiB) + on the fallback path only, at most one stash
+(bounded as above; a highly compressible body reaches about 516 KiB with a deflate decoder). Independent of the response
 size. The stress test streams 48 MiB through under 32 KiB of client allocations.
 
 ## 4. Invariants
@@ -149,10 +185,15 @@ size. The stress test streams 48 MiB through under 32 KiB of client allocations.
   `KL_ERR_TIMEOUT`. Separating an inactivity timeout and a consumer-stall timeout from the
   whole-request deadline would need new configuration and is left for a follow-up.
 - PAUSE is honoured by the async streaming client only. The sync client fails the request.
-- The stash cap is sized for deflate (about 1032:1). A pluggable decoder that produces more than the
-  cap for one 512-byte slice (brotli or zstd can, on degenerate input) fails the request while paused,
-  never while running; mid-body this surfaces as `KL_ERR_PARSE`, as every mid-body decode failure
-  always has. The shipped miniz backend stays below the cap.
+- Fallback path only (a decoder without `dfeed_stoppable`): the stash cap is sized for deflate (about
+  1032:1). A decoder that produces more than the cap while the caller is paused fails the request, and
+  whether that happens depends on when the caller pauses (and on read boundaries), not only on the
+  response. Two conforming kinds can: one above about 1100:1 for a 512-byte slice (zstd, brotli on
+  degenerate input), and one that holds output back and releases it at once (at the final flush, a
+  body over about 580 KiB fails at any ratio). The error is `KL_ERR_PARSE` mid-body and
+  `KL_ERR_COMPRESS` in the final flush. The failure is clean: bounded memory, nothing leaked, an
+  in-order prefix delivered, no `on_complete`. Such decoders should implement `dfeed_stoppable`;
+  removing the fallback would need a major version (the op would become required).
 - A direct user of the public parser `kl_http1_response_parser_llhttp_s` whose body callback returns 1
   (formerly an abort) now gets `KL_HTTP1_PARSE_PAUSED` and must handle it.
 - HTTP/2 is out of scope: per-stream backpressure there means withholding the stream's

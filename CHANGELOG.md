@@ -15,8 +15,8 @@ version (3.4.0). Existing applications need only the usual 3.x recompile and rel
   `KL_HTTP_CLIENT_BODY_PAUSE`: the fragment is accepted and nothing more (no body callback,
   `on_complete` or successful `on_done`) is delivered until `kl_http_client_resume()`. While paused the
   client stops reading the connection, so the server is held back by TCP flow control rather than by
-  buffering in the client; memory stays bounded (the unparsed rest of one 8 KiB read, and when
-  decompressing, the output of one 512-byte compressed slice) whatever the response size. Delivery
+  buffering in the client; memory stays bounded (the unparsed rest of one 8 KiB read; with the
+  shipped gzip decoder nothing more, whatever the compression ratio) whatever the response size. Delivery
   resumes at the exact byte where it stopped across Content-Length, chunked (with trailers) and
   close-delimited bodies, through streaming decompression and TLS, with identical behavior on readiness
   and completion engines. `kl_http_client_resume()` only schedules the continuation (never calls back
@@ -27,6 +27,16 @@ version (3.4.0). Existing applications need only the usual 3.x recompile and rel
   direct user of `kl_http1_response_parser_llhttp_s` whose body callback returns 1 (formerly an abort)
   now receives it. Design:
   `docs/architecture/http_client_backpressure.md`.
+- **`KlDecompress.dfeed_stoppable` (optional, appended after `destroy`).** A streaming feed the
+  consumer can stop: `emit` may return 1, after which the decoder returns 1 with the number of input
+  bytes it took and keeps any further output and its state inside the session; the next call (with
+  the rest of the input, possibly none) continues there, and a stop in the final flush is continued
+  by another flush call that then validates the trailer. The async client uses it to pause a
+  decompressed body without holding decoded output; the miniz gzip decoder implements it. A decoder
+  without it keeps working through a bounded fallback (512-byte input slices, at most about 580 KiB
+  of decoded output held while paused; more than that fails the request while paused). Decoder
+  tables that zero-initialize need no change; a table built with positional initializers compiles
+  unchanged but draws `-Wmissing-field-initializers` under `-Wextra` (use designated initializers).
 
 ### Fixed
 
