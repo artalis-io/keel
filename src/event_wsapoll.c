@@ -16,6 +16,7 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include "event_caps.h"
+#include "event_hangup.h"
 
 #include "sockcompat.h"
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */   /* winsock2.h + kl_wsa_set_errno() */
@@ -28,6 +29,9 @@ typedef struct {
     KlAllocator *alloc;
     WSAPOLLFD   *fds;     /* pollfd array for WSAPoll() */
     void       **udata;   /* parallel udata array */
+    unsigned char *hup;   /* parallel: 1 = a hang-up registration (KL_EVENT_HANGUP interest alone).
+                           * Decided by interest, never by udata; events = 0 alone is ambiguous with
+                           * a paused READ. */
     int          count;   /* active entries */
     int          capacity;/* allocated size */
 } KlWsaPollState;
@@ -71,8 +75,18 @@ static int grow_arrays(KlWsaPollState *st) {
         return -1;
     }
 
+    unsigned char *nh = kl_realloc(st->alloc, st->hup, (size_t)st->capacity, (size_t)new_cap);
+    if (!nh) {
+        void **ru = kl_realloc(st->alloc, nu, new_ud_sz, old_ud_sz);
+        st->udata = ru ? ru : nu;
+        WSAPOLLFD *rev = kl_realloc(st->alloc, nf, new_fds_sz, old_fds_sz);
+        st->fds = rev ? rev : nf;
+        return -1;
+    }
+
     st->fds = nf;
     st->udata = nu;
+    st->hup = nh;
     st->capacity = new_cap;
     return 0;
 }
@@ -97,6 +111,13 @@ int kl_event_init_builtin(KlEventLoop *loop) {
         kl_free(alloc, st, sizeof(*st));
         return -1;
     }
+    st->hup = kl_malloc(alloc, INITIAL_CAP);
+    if (!st->hup) {
+        kl_free(alloc, st->udata, INITIAL_CAP * sizeof(void *));
+        kl_free(alloc, st->fds, INITIAL_CAP * sizeof(WSAPOLLFD));
+        kl_free(alloc, st, sizeof(*st));
+        return -1;
+    }
 
     st->capacity = INITIAL_CAP;
     st->count = 0;
@@ -117,12 +138,18 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     if (!kl_handle_valid(fd))
         return -1;
 
+    /* A hang-up registration polls with no interest (events = 0): WSAPoll still reports HUP for
+     * a FIN and HUP|ERR for a reset, and nothing for data (measured, including on sockets associated
+     * with an IOCP port). It is flagged in st->hup, because events = 0 is also a paused READ. */
+    unsigned char hup = (unsigned char)kl_hup_wanted(mask);
+
     /* Idempotent re-add: update in place (matches epoll/kqueue/poll upsert). */
     int existing = find_slot(st, fd);
     if (existing >= 0) {
         st->fds[existing].events = mask_to_poll(mask);
         st->fds[existing].revents = 0;
         st->udata[existing] = udata;
+        st->hup[existing] = hup;
         return 0;
     }
 
@@ -136,6 +163,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     st->fds[idx].events = mask_to_poll(mask);
     st->fds[idx].revents = 0;
     st->udata[idx] = udata;
+    st->hup[idx] = hup;
     return 0;
 }
 
@@ -146,6 +174,7 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         return -1;
     st->fds[idx].events = mask_to_poll(mask);
     st->udata[idx] = udata;
+    st->hup[idx] = (unsigned char)kl_hup_wanted(mask);   /* see kl_event_add_builtin */
     return 0;
 }
 
@@ -160,6 +189,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     if (idx != last) {
         st->fds[idx] = st->fds[last];
         st->udata[idx] = st->udata[last];
+        st->hup[idx] = st->hup[last];
     }
     st->count--;
     return 0;
@@ -190,10 +220,16 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
             continue;
 
         KlEventMask ready = 0;
-        if (rev & (POLLRDNORM | POLLHUP | POLLERR))
-            ready |= KL_EVENT_READ;
-        if (rev & POLLWRNORM)
-            ready |= KL_EVENT_WRITE;
+        if (st->hup[i]) {
+            /* Hang-up registration, level-triggered: HUP is the FIN, ERR a reset (a FIN alone shows
+             * HUP without ERR, so HUP is not a failure here). */
+            ready = kl_hup_ready(0, rev & POLLHUP, rev & POLLERR, 0);
+        } else {
+            if (rev & (POLLRDNORM | POLLHUP | POLLERR))
+                ready |= KL_EVENT_READ;
+            if (rev & POLLWRNORM)
+                ready |= KL_EVENT_WRITE;
+        }
 
         if (ready) {
             out[count].udata = st->udata[i];
@@ -211,6 +247,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
         return;
 
     KlAllocator *alloc = st->alloc;
+    kl_free(alloc, st->hup, (size_t)st->capacity);
     kl_free(alloc, st->udata, (size_t)st->capacity * sizeof(void *));
     kl_free(alloc, st->fds, (size_t)st->capacity * sizeof(WSAPOLLFD));
     kl_free(alloc, st, sizeof(*st));
@@ -220,7 +257,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 /* WSAPoll is a readiness poller of native OS descriptors (SOCKETs). */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD | KL_EVENT_CAP_HANGUP;
 }
 
 /* Readiness loop: the default Winsock provider works; nothing to auto-wire. */

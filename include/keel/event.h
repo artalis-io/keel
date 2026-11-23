@@ -9,8 +9,22 @@ extern "C" {
 
 
 typedef enum {
-    KL_EVENT_READ  = 1, /**< FD is readable */
-    KL_EVENT_WRITE = 2  /**< FD is writable */
+    KL_EVENT_READ   = 1, /**< FD is readable */
+    KL_EVENT_WRITE  = 2, /**< FD is writable */
+    /** Interest and report: transport liveness without consuming data. As interest (alone:
+     *  combined with KL_EVENT_READ or KL_EVENT_WRITE it is ignored), it asks the backend to report the peer's
+     *  write-side shutdown (a FIN) or a transport failure, and never readable data. As a report,
+     *  the peer shut down its sending direction or the connection failed; the socket may still be
+     *  writable. A transport-level observation only: the event layer never closes, cancels or
+     *  otherwise acts on it. Honored only by a loop that advertises KL_EVENT_CAP_HANGUP. A
+     *  level-triggered backend reports it on every wait while the condition holds; the consumer
+     *  removes or changes the registration once it has acted. */
+    KL_EVENT_HANGUP = 4,
+    /** Report only, never interest (ignored if requested): set with KL_EVENT_HANGUP when the
+     *  backend observed a transport failure (a reset) rather than an orderly FIN. Reported only to
+     *  a registration whose interest includes KL_EVENT_HANGUP; READ/WRITE registrations are
+     *  reported exactly as before. Never reported without KL_EVENT_HANGUP. */
+    KL_EVENT_ERROR  = 8
 } KlEventMask;
 
 typedef struct {
@@ -83,6 +97,12 @@ struct KlEventOps {
 #define KL_EVENT_CAP_READINESS  (1u << 0)
 #define KL_EVENT_CAP_NATIVE_FD  (1u << 1)
 #define KL_EVENT_CAP_COMPLETION (1u << 2)
+/* KL_EVENT_HANGUP is honored, as a guarantee of this backend's implementation (not of the OS):
+ * with HANGUP interest alone it reports a FIN, including one behind unread bytes;
+ * reports a reset with KL_EVENT_ERROR; never reports readable data; and never consumes data.
+ * A backend sets it only where its tests prove all four. Watchers (kl_watcher_add) may use HANGUP
+ * interest on such a loop, readiness or completion. */
+#define KL_EVENT_CAP_HANGUP     (1u << 3)
 
 /** @brief A named event-backend provider handed to KlEventCtx.event_provider. */
 typedef struct KlEventProvider {

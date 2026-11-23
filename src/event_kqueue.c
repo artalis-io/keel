@@ -1,9 +1,12 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include "event_caps.h"
+#include "event_hangup.h"
 #include <sys/event.h>
 #include <fcntl.h>       /* FD_CLOEXEC on the kqueue descriptor */
 #include <errno.h>
+#include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 
 #define KL_EVENT_BATCH 256  /* internal stack buffer for kernel events */
@@ -12,7 +15,36 @@
  * released at close; kept in loop->_backend, never on the public KlEventLoop layout. */
 typedef struct {
     int fd;
+    /* Which descriptors are hang-up registrations (KL_EVENT_HANGUP interest alone): indexed by fd,
+     * grown on demand. Decided by the interest registered, never by the caller's udata. */
+    unsigned char *hup;
+    size_t hup_cap;
 } KlKqueueState;
+
+/* Record whether `fd` is a hang-up registration. Clearing never allocates. -1 on allocation failure. */
+static int kq_set_hup(KlEventLoop *loop, KlKqueueState *st, KlSocketHandle fd, int on) {
+    if (fd < 0) return -1;
+    size_t i = (size_t)fd;
+    if (i >= st->hup_cap) {
+        if (!on) return 0;
+        size_t cap = st->hup_cap ? st->hup_cap : 64;
+        while (cap <= i) {
+            if (cap > SIZE_MAX / 2) return -1;
+            cap *= 2;
+        }
+        unsigned char *n = kl_realloc(loop->alloc, st->hup, st->hup_cap, cap);
+        if (!n) return -1;
+        memset(n + st->hup_cap, 0, cap - st->hup_cap);
+        st->hup = n;
+        st->hup_cap = cap;
+    }
+    st->hup[i] = on ? 1 : 0;
+    return 0;
+}
+
+static int kq_is_hup(const KlKqueueState *st, uintptr_t ident) {
+    return ident < st->hup_cap && st->hup[ident];
+}
 
 int kl_event_init_builtin(KlEventLoop *loop) {
     loop->_backend = NULL;  /* deterministic: no state until it is fully built */
@@ -20,6 +52,8 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     if (!st) return -1;     /* allocator failure: nothing created, _backend stays NULL */
     /* -1 is the descriptor sentinel (kqueue returns it on failure, and close() skips a negative
      * fd). The state is published only with a valid descriptor. */
+    st->hup = NULL;
+    st->hup_cap = 0;
     st->fd = kqueue();
     if (st->fd < 0) {
         kl_free(loop->alloc, st, sizeof(*st));  /* kernel-object failure: unwind exactly once */
@@ -38,7 +72,11 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     struct kevent changes[2];
     int n = 0;
 
-    if (mask & KL_EVENT_READ) {
+    /* A hang-up registration watches EVFILT_READ and is recorded in st->hup: the wait reports only
+     * the EV_EOF it carries (the FIN or a reset) and swallows a report for data alone. */
+    int hup = kl_hup_wanted(mask);
+    if (kq_set_hup(loop, st, fd, hup) < 0) return -1;
+    if ((mask & KL_EVENT_READ) || hup) {
         EV_SET(&changes[n], fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, udata);
         n++;
     }
@@ -63,7 +101,9 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
 
-    unsigned short read_flags = (mask & KL_EVENT_READ)
+    int hup = kl_hup_wanted(mask);   /* see kl_event_add_builtin */
+    if (kq_set_hup(loop, st, fd, hup) < 0) return -1;
+    unsigned short read_flags = ((mask & KL_EVENT_READ) || hup)
         ? (EV_ADD | EV_ENABLE | EV_CLEAR)
         : (EV_ADD | EV_DISABLE);
     unsigned short write_flags = (mask & KL_EVENT_WRITE)
@@ -79,6 +119,7 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
 int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
+    (void)kq_set_hup(loop, st, fd, 0);
     EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
     return kevent(st->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
@@ -100,22 +141,34 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     int n = kevent(st->fd, NULL, 0, events, batch, tsp);
     if (n < 0) return errno == EINTR ? 0 : -1;   /* a signal interrupted the wait: an empty tick */
 
+    int count = 0;
     for (int i = 0; i < n; i++) {
-        out[i].udata = events[i].udata;
-        out[i].ready = 0;
+        if (events[i].filter == EVFILT_READ && kq_is_hup(st, events[i].ident)) {
+            /* A hang-up registration. EV_EOF: the peer's FIN, or a reset (an errno in fflags). A
+             * report for data alone is swallowed (EV_CLEAR: one per arrival, no spin). */
+            if (!(events[i].flags & EV_EOF)) continue;
+            out[count].udata = events[i].udata;
+            out[count].ready = KL_EVENT_HANGUP | (events[i].fflags ? KL_EVENT_ERROR : 0);
+            count++;
+            continue;
+        }
+        out[count].udata = events[i].udata;
+        out[count].ready = 0;
         if (events[i].filter == EVFILT_READ)
-            out[i].ready |= KL_EVENT_READ;
+            out[count].ready |= KL_EVENT_READ;
         if (events[i].filter == EVFILT_WRITE)
-            out[i].ready |= KL_EVENT_WRITE;
+            out[count].ready |= KL_EVENT_WRITE;
+        count++;
     }
 
-    return n;
+    return count;
 }
 
 void kl_event_close_builtin(KlEventLoop *loop) {
     KlKqueueState *st = loop->_backend;
     if (!st) return;                            /* idempotent */
     if (st->fd >= 0) close(st->fd);             /* close any descriptor, including 0 */
+    if (st->hup) kl_free(loop->alloc, st->hup, st->hup_cap);
     kl_free(loop->alloc, st, sizeof(*st));
     loop->_backend = NULL;                      /* reset: resource released exactly once */
 }
@@ -123,7 +176,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 /* kqueue is a readiness poller of native OS descriptors. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD | KL_EVENT_CAP_HANGUP;
 }
 
 /* Readiness loop: the default POSIX provider works; nothing to auto-wire. */

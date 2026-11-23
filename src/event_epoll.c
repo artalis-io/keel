@@ -1,6 +1,7 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include "event_caps.h"
+#include "event_hangup.h"
 #include <sys/epoll.h>
 #include <errno.h>
 #include <unistd.h>
@@ -32,6 +33,7 @@ static uint32_t mask_to_epoll(KlEventMask mask) {
     uint32_t ev = EPOLLET;  /* edge-triggered */
     if (mask & KL_EVENT_READ)  ev |= EPOLLIN;
     if (mask & KL_EVENT_WRITE) ev |= EPOLLOUT;
+    if (kl_hup_wanted(mask))   ev |= EPOLLRDHUP;   /* the peer's FIN, never readable data */
     return ev;
 }
 
@@ -65,16 +67,30 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     int n = epoll_wait(st->fd, events, batch, timeout_ms);
     if (n < 0) return errno == EINTR ? 0 : -1;   /* a signal interrupted the wait: an empty tick */
 
+    int count = 0;
     for (int i = 0; i < n; i++) {
-        out[i].udata = events[i].data.ptr;
-        out[i].ready = 0;
-        if (events[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR))
-            out[i].ready |= KL_EVENT_READ;
-        if (events[i].events & EPOLLOUT)
-            out[i].ready |= KL_EVENT_WRITE;
+        uint32_t e = events[i].events;
+        if (e & EPOLLRDHUP) {
+            /* EPOLLRDHUP is reported only to a registration that asked for it, which only a hang-up
+             * registration does (decided by interest, never by udata). RDHUP is the FIN; ERR, or HUP
+             * (both directions shut, which only a reset does to a connection that has not shut its own
+             * side down), is a failure. A TCP reset or error also shuts the receive side, so it always
+             * carries RDHUP here (measured). */
+            out[count].udata = events[i].data.ptr;
+            out[count].ready = kl_hup_ready(1, e & EPOLLHUP, e & EPOLLERR, 1);
+            count++;
+            continue;
+        }
+        out[count].udata = events[i].data.ptr;
+        out[count].ready = 0;
+        if (e & (EPOLLIN | EPOLLHUP | EPOLLERR))
+            out[count].ready |= KL_EVENT_READ;
+        if (e & EPOLLOUT)
+            out[count].ready |= KL_EVENT_WRITE;
+        count++;
     }
 
-    return n;
+    return count;
 }
 
 void kl_event_close_builtin(KlEventLoop *loop) {
@@ -88,7 +104,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 /* epoll is a readiness poller of native OS descriptors. */
 unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
-    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD | KL_EVENT_CAP_HANGUP;
 }
 
 /* Readiness loop: the default POSIX provider works; nothing to auto-wire. */
