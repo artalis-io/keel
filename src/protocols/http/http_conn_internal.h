@@ -37,6 +37,12 @@
 #define KL_HTTP_CONN_READ_BUF_SIZE 8192
 
 /* peer_source values (internal; callers use kl_http_conn_peer_addr()). */
+/* KlHttpConn.hup_state (async.c). */
+#define KL_HUP_NONE     0
+#define KL_HUP_WATCHED  1
+#define KL_HUP_SWEPT    2
+#define KL_HUP_FIN_KEPT 3
+
 #define KL_HTTP_PEER_SOCKET 0   /* Address came from the accepted socket */
 #define KL_HTTP_PEER_PROXY  1   /* Address came from a trusted PROXY header */
 
@@ -161,6 +167,12 @@ struct KlHttpConn {
 
     struct KlAsyncOp *async_op;
     uint64_t suspend_start_ms;
+    /* Hang-up observation while suspended (async.c): set by kl_async_suspend, cleared when the op is
+     * retired. KL_HUP_NONE: nothing watched; KL_HUP_WATCHED: a KL_EVENT_HANGUP watcher is registered on
+     * the fd; KL_HUP_SWEPT: the server's sweep peeks it (no KL_EVENT_CAP_HANGUP); KL_HUP_FIN_KEPT: a FIN
+     * was seen under RESET_ONLY and the op runs on. */
+    int hup_state;
+    struct KlHttpServer *hup_server;   /* the server that owns the watch or the sweep entry */
     /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
      * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,
      * so the connection is never driven or released twice. */
