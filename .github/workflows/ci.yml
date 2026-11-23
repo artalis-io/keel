@@ -689,9 +689,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cosmocc
+        # Pinned release, bounded download, and a SHA-256 pin. The floating
+        # https://cosmo.zip/pub/cosmocc/cosmocc.zip both changed under CI and stopped answering
+        # (a 40+ minute hang with no timeout). The pin is trust-on-first-use: the project publishes
+        # no digest for this asset (not in the release notes, the asset metadata or the cosmocc
+        # README), so the hash below was recorded from the GitHub release download on 2026-11-23.
+        # It guarantees every run uses those exact bytes and fails if they change; it does not
+        # independently authenticate them. To upgrade, bump COSMOCC_VERSION and re-record the hash.
+        timeout-minutes: 10
+        env:
+          COSMOCC_VERSION: "4.0.2"
+          COSMOCC_SHA256: "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44"
         run: |
           mkdir -p /opt/cosmo
-          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc.zip
+          curl -fsSL --connect-timeout 30 --max-time 180 --retry 3 --retry-all-errors \
+            -o /tmp/cosmocc.zip \
+            "https://github.com/jart/cosmopolitan/releases/download/${COSMOCC_VERSION}/cosmocc-${COSMOCC_VERSION}.zip"
+          echo "${COSMOCC_SHA256}  /tmp/cosmocc.zip" | sha256sum -c -
           unzip -q -d /opt/cosmo /tmp/cosmocc.zip
           rm /tmp/cosmocc.zip
           echo "/opt/cosmo/bin" >> $GITHUB_PATH
