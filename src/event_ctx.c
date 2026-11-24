@@ -45,6 +45,7 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->dispatch_dirty = 0;
     ctx->dispatch_depth = 0;          /* batch-dispatch reclamation */
     ctx->retired = NULL;
+    ctx->watcher_gen = 0;
     ctx->last_error = KL_ERR_NONE;
     ctx->timers = NULL;
     ctx->timer_count = 0;
@@ -175,6 +176,7 @@ int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
     w->mask = mask;
     w->on_ready = on_ready;
     w->user_data = user_data;
+    w->gen = ++ctx->watcher_gen;   /* a new registration, whatever address it reuses */
     w->next = ctx->watchers;
     ctx->watchers = w;
 
@@ -213,6 +215,7 @@ void *kl_watcher_add_detached(KlEventCtx *ctx, KlSocketHandle fd,
     w->mask = KL_EVENT_WRITE;
     w->on_ready = on_ready;
     w->user_data = user_data;
+    w->gen = ++ctx->watcher_gen;   /* a new registration, whatever address it reuses */
     w->next = ctx->watchers;
     ctx->watchers = w;
     return watcher_tag(w);
@@ -368,18 +371,21 @@ void keel__event_dispatch_watcher(KlEventCtx *ctx, void *watcher, KlEventMask re
     KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int; a completion backend
                                    * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
                                    * truncated + sign-extended by an int, breaking watcher rearm. */
-    KlEventMask mask_before = w->mask;
+    const KlEventMask mask_before = w->mask;
+    const uint64_t gen = w->gen;
     ctx->dispatch_dirty = 0;
     w->on_ready(wfd, ready, w->user_data);  /* may kl_watcher_del/add/mod (sets dispatch_dirty) */
-    /* Re-arm THIS watcher unless the callback removed it or changed its interest (kl_watcher_mod / an
-     * upsert re-arm by themselves). Adding or removing OTHER watchers must not suppress it: a one-shot
-     * backend (io_uring's POLL_ADD) would then never watch this fd again. A thread-pool wakeup whose
-     * done_fn completes a suspended op, which removes that connection's hang-up watcher, is exactly
-     * that case. Liveness is again checked by pointer identity, never by dereferencing a node the
-     * callback may have freed. */
-    int still_linked = 0;
+    /* Re-arm the SAME registration that was dispatched, and only if the callback neither removed it
+     * nor changed its interest (kl_watcher_mod / an upsert re-arm by themselves). Adding or removing
+     * OTHER watchers must not suppress it: a one-shot backend (io_uring's POLL_ADD) would then never
+     * watch this fd again (a thread-pool wakeup whose done_fn completes a suspended op, which removes
+     * that connection's hang-up watcher, is exactly that case). Identity is the node's address AND
+     * its generation: the callback may have freed the node and a new watcher, even on the same fd with
+     * the same mask, may occupy that address; it is a different registration and is not re-armed
+     * here. The node is found by pointer comparison before anything in it is read. */
+    const KlWatcher *same = NULL;
     for (const KlWatcher *it = ctx->watchers; it; it = it->next)
-        if (it == w) { still_linked = 1; break; }
-    if (still_linked && w->mask == mask_before)
+        if (it == w) { same = it; break; }
+    if (same && same->gen == gen && same->mask == mask_before)
         kl_watcher_rearm(ctx, wfd);
 }

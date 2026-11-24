@@ -22,6 +22,11 @@ struct KlWatcher {
     KlWatcherFn on_ready;    /* Callback when FD is ready */
     void *user_data;         /* Opaque user pointer */
     struct KlWatcher *next;  /* Next watcher in the ctx-owned list */
+    /* The registration's identity: a value from the ctx's counter, assigned when the node is
+     * created (never by an in-place upsert). A node allocated at a freed node's address is a
+     * different registration and gets a different generation, so "same address" never stands in
+     * for "same watcher" (the re-arm after a callback relies on this). */
+    uint64_t gen;
 };
 
 /* Timer heap entry: stored in the KlEventCtx.timers min-heap array. */

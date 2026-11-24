@@ -75,6 +75,9 @@ typedef struct KlEventCtx {
      * ABI-stable; embedders recompile when it changes. */
     int         dispatch_depth;
     KlWatcher  *retired;
+    /* Watcher registration identity: the last generation handed to a new watcher node (see
+     * KlWatcher.gen in event_ctx_internal.h). Monotonic per ctx. */
+    uint64_t    watcher_gen;
     /* Datagram completions (DGRAM_RECV/DGRAM_SEND) are routed by each token's own KlCompLifeDispatchFn
      * (life->dispatch), not a ctx-global hook. */
 } KlEventCtx;
