@@ -16,6 +16,9 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
 #include <stdint.h>
 #include <keel/clock.h>
 #include "net_compat.h"
@@ -348,7 +351,7 @@ static void conn_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
     (void)fd; (void)ready; (void)ud;
     g_conn_calls++;
 }
-static int conn_case(int refused, int *soerr_out) {
+static int conn_case(int refused, int *soerr_out, int *delivered_out) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) != 0) return -1;
@@ -373,6 +376,30 @@ static int conn_case(int refused, int *soerr_out) {
     socklen_t sl = (socklen_t)sizeof soerr;
     (void)getsockopt(c, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
     *soerr_out = soerr;
+    /* The real outcome, read by the caller after the backend saw the report: a connected socket
+     * carries bytes to the peer, a refused one cannot send. */
+    *delivered_out = 0;
+    if (!refused) {
+        int a2 = (int)accept(l, NULL, NULL);
+        if (a2 >= 0) {
+            if (kl_test_sockwrite(c, "ok", 2) == 2) {
+                char b[4];
+                for (int i = 0; i < 100 && *delivered_out == 0; i++) {
+                    if (kl_test_sockread(a2, b, sizeof b) == 2 && b[0] == 'o') *delivered_out = 1;
+                    else kl_test_sleep_ms(10);
+                }
+            }
+            kl_test_closesock(a2);
+        }
+    } else {
+#if !defined(_WIN32)
+        void (*prev)(int) = signal(SIGPIPE, SIG_IGN);   /* a send on a refused socket raises it */
+#endif
+        *delivered_out = kl_test_sockwrite(c, "x", 1) == 1;
+#if !defined(_WIN32)
+        signal(SIGPIPE, prev);
+#endif
+    }
     int calls = g_conn_calls;
     kl_watcher_del(&ev, c);
     kl_event_ctx_free(&ev);
@@ -381,18 +408,113 @@ static int conn_case(int refused, int *soerr_out) {
     return calls > 0 ? 0 : 3;
 }
 UTEST(event_hangup, a_successful_nonblocking_connect_is_reported) {
-    int soerr = -1, rc = conn_case(0, &soerr);
+    int soerr = -1, delivered = 0, rc = conn_case(0, &soerr, &delivered);
     if (rc == 1) UTEST_SKIP("completion loop");
     if (rc == 2) UTEST_SKIP("the connect completed synchronously");
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(soerr, 0);
+    EXPECT_TRUE(delivered);                                  /* connected: bytes reach the peer */
 }
 UTEST(event_hangup, a_refused_nonblocking_connect_is_reported) {
-    int soerr = 0, rc = conn_case(1, &soerr);
+    int soerr = 0, delivered = 1, rc = conn_case(1, &soerr, &delivered);
     if (rc == 1) UTEST_SKIP("completion loop");
     if (rc == 2) UTEST_SKIP("the connect completed synchronously");
     EXPECT_EQ(rc, 0);                                        /* the failure is observed, not lost */
-    EXPECT_TRUE(soerr != 0);
+    EXPECT_TRUE(soerr != 0);   /* the caller still reads why, after the backend's own report */
+    EXPECT_FALSE(delivered);
+}
+
+/* Listening and UDP sockets, observable behavior only: an idle set of them blocks (no spurious
+ * callback, no busy loop), a pending connection is reported READ on the listener and accepted, and
+ * connected and unconnected UDP sockets are reported READ for a datagram and WRITE for send room,
+ * and both carry datagrams. Every readiness backend. */
+typedef struct { int read, write, other; } RegCount;
+static void count_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)fd;
+    RegCount *rc = ud;
+    if (ready & KL_EVENT_READ) rc->read++;
+    if (ready & KL_EVENT_WRITE) rc->write++;
+    if (ready & ~(KL_EVENT_READ | KL_EVENT_WRITE)) rc->other++;
+}
+static int udp_bound(struct sockaddr_in *a) {
+    memset(a, 0, sizeof *a);
+    a->sin_family = AF_INET;
+    a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int u = (int)socket(AF_INET, SOCK_DGRAM, 0);
+    socklen_t al = (socklen_t)sizeof *a;
+    if (u < 0 || bind(u, (struct sockaddr *)a, sizeof *a) != 0 ||
+        getsockname(u, (struct sockaddr *)a, &al) != 0) return -1;
+    kl_test_set_nonblock(u);
+    return u;
+}
+UTEST(event_hangup, listeners_and_udp_sockets_behave) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    if (kl_event_caps(&ev.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ev); UTEST_SKIP("completion loop"); }
+    struct sockaddr_in la, ua, ca;
+    memset(&la, 0, sizeof la);
+    la.sin_family = AF_INET;
+    la.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int l = (int)socket(AF_INET, SOCK_STREAM, 0);
+    socklen_t al = (socklen_t)sizeof la;
+    ASSERT_EQ(bind(l, (struct sockaddr *)&la, sizeof la), 0);
+    ASSERT_EQ(listen(l, 4), 0);
+    ASSERT_EQ(getsockname(l, (struct sockaddr *)&la, &al), 0);
+    kl_test_set_nonblock(l);
+    int u = udp_bound(&ua);                                  /* unconnected */
+    int cu = udp_bound(&ca);                                 /* connected to u */
+    ASSERT_TRUE(u >= 0 && cu >= 0);
+    ASSERT_EQ(connect(cu, (struct sockaddr *)&ua, sizeof ua), 0);
+    RegCount rl = {0}, ru = {0}, rcu = {0};
+    ASSERT_EQ(kl_watcher_add(&ev, l, KL_EVENT_READ, count_on_ready, &rl), 0);
+    ASSERT_EQ(kl_watcher_add(&ev, u, KL_EVENT_READ, count_on_ready, &ru), 0);
+    ASSERT_EQ(kl_watcher_add(&ev, cu, KL_EVENT_READ, count_on_ready, &rcu), 0);
+    /* Idle: nothing to report, and the waits really block. */
+    uint64_t t0 = kl_monotonic_ms();
+    for (int i = 0; i < 5; i++) kl_event_ctx_run(&ev, 8, 50);
+    uint64_t idle_ms = kl_monotonic_ms() - t0;
+    EXPECT_EQ(rl.read + rl.write + rl.other + ru.read + ru.write + ru.other +
+              rcu.read + rcu.write + rcu.other, 0);
+    EXPECT_TRUE_MSG(idle_ms >= 200, "idle waits returned early: a busy loop");
+    /* A pending connection: READ on the listener, and it is accepted. */
+    int c = (int)socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_EQ(connect(c, (struct sockaddr *)&la, sizeof la), 0);
+    for (int i = 0; i < 40 && rl.read == 0; i++) kl_event_ctx_run(&ev, 8, 25);
+    EXPECT_GT(rl.read, 0);
+    int a = (int)accept(l, NULL, NULL);
+    EXPECT_TRUE(a >= 0);
+    /* A datagram each way: READ on the receiver, and the bytes arrive. */
+    char b[16];
+    ASSERT_EQ(send(cu, "to-u", 4, 0), 4);                    /* connected -> unconnected */
+    for (int i = 0; i < 40 && ru.read == 0; i++) kl_event_ctx_run(&ev, 8, 25);
+    EXPECT_GT(ru.read, 0);
+    EXPECT_EQ(recv(u, b, sizeof b, 0), 4);
+    ASSERT_EQ(sendto(u, "to-cu", 5, 0, (struct sockaddr *)&ca, sizeof ca), 5);
+    for (int i = 0; i < 40 && rcu.read == 0; i++) kl_event_ctx_run(&ev, 8, 25);
+    EXPECT_GT(rcu.read, 0);
+    EXPECT_EQ(recv(cu, b, sizeof b, 0), 5);
+    /* Drained again: idle again, no spurious report. */
+    RegCount su = ru, scu = rcu;
+    kl_watcher_del(&ev, l);                                  /* the accepted connection is done */
+    for (int i = 0; i < 4; i++) kl_event_ctx_run(&ev, 8, 25);
+    EXPECT_EQ(ru.read, su.read);
+    EXPECT_EQ(rcu.read, scu.read);
+    /* WRITE interest on both UDP kinds: room is reported, and a send goes out. */
+    ASSERT_EQ(kl_watcher_mod(&ev, u, KL_EVENT_READ | KL_EVENT_WRITE), 0);
+    ASSERT_EQ(kl_watcher_mod(&ev, cu, KL_EVENT_READ | KL_EVENT_WRITE), 0);
+    kl_event_ctx_run(&ev, 8, 100);
+    EXPECT_GT(ru.write, 0);
+    EXPECT_GT(rcu.write, 0);
+    EXPECT_EQ(ru.other + rcu.other + rl.other, 0);
+    kl_watcher_del(&ev, u);
+    kl_watcher_del(&ev, cu);
+    kl_event_ctx_free(&ev);
+    if (a >= 0) kl_test_closesock(a);
+    kl_test_closesock(c);
+    kl_test_closesock(l);
+    kl_test_closesock(u);
+    kl_test_closesock(cu);
 }
 
 #if defined(_WIN32)
@@ -416,13 +538,11 @@ UTEST(event_hangup, a_reused_socket_handle_is_polled_again) {
     kl_test_closesock(c);
     kl_event_ctx_run(&ev, 8, 20);                           /* the backend notices the stale handle */
     int s2 = -1, reused = 0;                                 /* the reused handle: a new socket */
-    int keep[64], nkeep = 0;
-    for (int i = 0; i < 64 && !reused; i++) {               /* until the old handle value comes back */
+    for (int i = 0; i < 1000 && !reused; i++) {             /* until the old handle value comes back */
         int t = (int)socket(AF_INET, SOCK_STREAM, 0);
         if (t == old) { s2 = t; reused = 1; }
-        else keep[nkeep++] = t;
+        else kl_test_closesock(t);   /* close each miss: holding them keeps Windows from reusing */
     }
-    for (int i = 0; i < nkeep; i++) kl_test_closesock(keep[i]);
     if (!reused) { kl_event_ctx_free(&ev); UTEST_SKIP("the handle value was not reused"); }
     struct sockaddr_in a;                                    /* connect it to a fresh listener */
     memset(&a, 0, sizeof a);
