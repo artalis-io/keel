@@ -23,8 +23,9 @@ struct KlWatcher {
     void *user_data;         /* Opaque user pointer */
     struct KlWatcher *next;  /* Next watcher in the ctx-owned list */
     /* The registration's identity: a value from the ctx's counter, assigned when the node is
-     * created, and again when an in-place upsert makes it detached (kl_watcher_add_detached), which
-     * leaves no readiness registration to re-arm; an ordinary upsert keeps it. A node allocated at a
+     * created, and again when an in-place upsert makes it detached (kl_watcher_add_detached), so the
+     * dispatch does not re-arm it (that upsert does not remove an existing backend registration, which
+     * stays live); an ordinary upsert keeps it. A node allocated at a
      * freed node's address is a different registration and gets a different generation, so "same
      * address" never stands in for "same watcher" (the re-arm after a callback relies on this). */
     uint64_t gen;
