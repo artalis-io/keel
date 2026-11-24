@@ -120,9 +120,22 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlKqueueState *st = loop->_backend;
     struct kevent changes[2];
     (void)kq_set_hup(loop, st, fd, 0);
-    EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    return kevent(st->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
+    /* EV_RECEIPT: kevent processes EVERY change and reports each one's result. Without it (and with
+     * no event list) it stops at the first failing change, so a registration with only one filter
+     * (a WRITE-only watcher has no EVFILT_READ: ENOENT) kept its other filter, which went on
+     * delivering events with a udata the caller had freed. A missing filter is expected; 0 if at least
+     * one filter was removed and nothing else failed. */
+    struct kevent res[2];
+    EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+    EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+    int n = kevent(st->fd, changes, 2, res, 2, NULL);
+    if (n < 0) return -1;
+    int removed = 0, failed = 0;
+    for (int i = 0; i < n; i++) {
+        if (!(res[i].flags & EV_ERROR) || res[i].data == 0) removed++;
+        else if (res[i].data != ENOENT) failed++;
+    }
+    return (removed > 0 && !failed) ? 0 : -1;
 }
 
 int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
