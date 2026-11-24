@@ -751,10 +751,15 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
-        /* A graceful drain ends keep-alive: a connection waiting for its next request, with nothing
-         * of it received, is closed now rather than holding the drain until its deadline. Quietly:
-         * no request is outstanding, so there is nothing to answer. */
-        if (draining && tc->state == KL_HTTP_CONN_READING && tc->stream.read_len == 0) {
+        /* A graceful drain ends keep-alive: a connection that has answered a request and waits for
+         * its next one, with nothing of it received (not in the read buffer, not held by the TLS
+         * engine), is closed now rather than holding the drain until its deadline. Quietly: no
+         * request is outstanding, so there is nothing to answer, and an HTTP client retries a request
+         * on a reused connection it finds closed. A connection that has not sent its first request
+         * yet is left to send it (or to its read timeout, or the drain's deadline). */
+        if (draining && tc->state == KL_HTTP_CONN_READING && tc->served_request &&
+            tc->stream.read_len == 0 &&
+            !(tc->tls && tc->tls->pending && tc->tls->pending(tc->tls) > 0)) {
             if (completion_loop) {
                 kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort the receive → released by its completion */
             } else {
@@ -825,13 +830,16 @@ static void server_drain_stop_listening(KlHttpServer *s) {
     if (s->drain_listener_closed) return;
     s->drain_listener_closed = 1;
     if (!s->accept_via_listener) return;
+    /* Completion: the close requests the cancel of every posted accept by the listen socket
+     * (io_uring submits a cancel per op, pollcomp aborts them, IOCP cancels its AcceptEx), and closing
+     * the socket below completes an IOCP AcceptEx too. Never kl_comp_shutdown_accepts here: that is
+     * the teardown quiesce, and on IOCP it makes the port drop every later completion. */
     kl_listener_close(&s->accept_listener);
     if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
         if (kl_handle_valid(s->listen_fd)) {
-            kl_sock_close(s->ev.sockets, s->listen_fd);   /* forces an IOCP AcceptEx to complete */
+            kl_sock_close(s->ev.sockets, s->listen_fd);
             s->listen_fd = KL_INVALID_SOCKET;
         }
-        (void)kl_comp_shutdown_accepts(s);                /* io_uring / pollcomp: force the rest */
     } else if (s->listen_registered) {
         kl_event_del(&s->ev.loop, s->listen_fd);
         s->listen_registered = 0;

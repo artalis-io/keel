@@ -33,17 +33,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   (with `drain_timeout_ms`):
   - the server **stops listening**: the listen socket is closed and an owned AF_UNIX node removed,
     so a new connection is refused at connect instead of waiting in a backlog nobody accepts from,
-    and a load balancer or fleet fails over at once. An adopted `listen_fd` is closed too (the
-    socket-activation manager keeps its own copy);
-  - **keep-alive ends**: every HTTP/1.1 response begun during the drain carries
-    `Connection: close`, a response begun before it still closes its connection afterwards, and an
-    idle keep-alive connection (waiting for its next request, nothing of it received) is closed at
-    once instead of holding the drain until its deadline;
+    and a load balancer or fleet fails over at once. An adopted `listen_fd` is closed too, but the
+    socket-activation manager keeps its own copy, so there new connections queue for the next
+    instance. The autonomous lwIP raw and UEFI providers keep their listener until
+    `kl_http_server_free` and close each new connection instead;
+  - **keep-alive ends**: every HTTP/1.1 response begun during the drain says `Connection: close`
+    (unless the handler set a Connection header itself), a response begun before it still closes
+    its connection afterwards, and a keep-alive connection waiting for its next request (nothing
+    of it received) is closed at once instead of holding the drain until its deadline. A
+    connection that has not sent its first request yet may still send it;
   - the loop's wait is bounded by the remaining drain time, so `kl_http_server_run` returns at the
     deadline rather than up to a second later.
 
   In-flight requests, suspended ops and streamed responses still finish, and
-  `kl_http_server_free` still cancels what remains.
+  `kl_http_server_free` still cancels what remains. A server runs once per `kl_http_server_init`:
+  after a drain its listener is gone.
 
 ### Fixed
 

@@ -411,17 +411,22 @@ int  kl_http_server_run(KlHttpServer *s);
  * - **stops listening**: the listen socket is closed (an owned AF_UNIX node is
  *   removed), so a new connection is refused at connect instead of waiting in
  *   the backlog, and a load balancer or fleet fails over at once. An adopted
- *   `listen_fd` (socket activation) is closed too; the activating manager keeps
- *   its own copy;
- * - **ends keep-alive**: every HTTP/1.1 response from then on carries
- *   `Connection: close`, and an idle keep-alive connection (waiting for its
- *   next request, nothing of it received) is closed;
+ *   `listen_fd` (socket activation) is closed too, but the activating manager
+ *   keeps its own copy, so there new connections queue for the next instance.
+ *   The autonomous completion providers (lwIP raw, UEFI) keep their listener
+ *   until kl_http_server_free and close each new connection instead;
+ * - **ends keep-alive**: every HTTP/1.1 response begun from then on says
+ *   `Connection: close` (unless the handler set a Connection header itself),
+ *   one begun before still closes its connection afterwards, and a keep-alive
+ *   connection waiting for its next request, nothing of it received, is closed.
+ *   A connection that has not sent its first request yet may still send it;
  * - lets in-flight requests, suspended ops and streamed responses finish;
  *   WebSocket connections get a close frame and HTTP/2 connections a GOAWAY.
  *
  * kl_http_server_run returns once nothing is active or `drain_timeout_ms` has
  * passed; kl_http_server_free then cancels what remains (on_cancel once each).
- * Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
+ * A server is run once per kl_http_server_init: after a drain its listener is
+ * gone. Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
  */
 void kl_http_server_stop(KlHttpServer *s);
 

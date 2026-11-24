@@ -177,6 +177,9 @@ struct KlHttpConn {
     /* The owning server's draining flag (read atomically): a drain ends keep-alive, so a response
      * started while it is set says Connection: close. NULL for a connection with no server. */
     const int *server_draining;
+    /* 1 once a request on this connection has been answered and it waits for the next (a keep-alive
+     * reset); 0 for a connection accepted but not yet sent a request. A drain closes only the first. */
+    int served_request;
     /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
      * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,
      * so the connection is never driven or released twice. */
