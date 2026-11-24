@@ -5,6 +5,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security: peer credentials are reported only for UNIX-domain sockets.**
+  `kl_http_request_peer_cred`, `kl_ws_server_peer_cred` and `kl_peer_cred_fd` documented -1 for a
+  socket that is not AF_UNIX, but returned 0 with credentials the OS made up: uid 0 and gid 0 on
+  macOS (`getpeereid` succeeds on a TCP socket), the kernel's "no credentials" values with
+  `has_pid = 1` on Linux (`SO_PEERCRED`). An application that authorized by peer uid on a TCP
+  listener could admit a remote client as root on macOS. The socket's family is now checked first,
+  and any other socket yields -1 with `out` untouched. AF_UNIX connections are unaffected. The
+  `KlPeerCred` comment also now says that macOS fills the pid (`LOCAL_PEERPID`).
+
 ## [3.5.0]
 
 Minor release adding client hang-up detection for suspended server connections. The public API is
