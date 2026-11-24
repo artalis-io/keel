@@ -1616,23 +1616,25 @@ static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
     kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
     wait_for_bind(&pace_srv);
     int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
-    ASSERT_TRUE(fd >= 0);
-    const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    (void)kl_test_sockwrite(fd, rq, strlen(rq));
-    static char buf[64 * 1024];
     size_t got = 0;
-    while (got < 64 * 1024) {                             /* read some, so the stream is moving */
-        if (kl_test_poll1(fd, 0, 2000) <= 0) break;
-        kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
-        if (n <= 0) break;
-        got += (size_t)n;
+    if (fd >= 0) {                                        /* no early return: the server must stop */
+        const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        static char buf[64 * 1024];
+        while (got < 64 * 1024) {                         /* read some, so the stream is moving */
+            if (kl_test_poll1(fd, 0, 2000) <= 0) break;
+            kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        kl_test_closesock(fd);                            /* unread data: the close resets */
+        for (int i = 0; i < 300 && !g_pace.cancelled; i++) kl_test_sleep_ms(10);
     }
-    kl_test_closesock(fd);                                /* unread data: the close resets */
-    for (int i = 0; i < 300 && !g_pace.cancelled; i++) kl_test_sleep_ms(10);
     int cancelled = g_pace.cancelled, ended = g_pace.ended;
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&pace_srv);
+    ASSERT_TRUE(fd >= 0);
     ASSERT_TRUE(got > 0);
     ASSERT_FALSE(ended);
     ASSERT_EQ(cancelled, 1);                              /* exactly once, before free */
@@ -1642,6 +1644,47 @@ UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once) {
 }
 UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once_without_the_hangup_watch) {
     pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_OFF);
+}
+
+/* A client that half-closes (shutdown SHUT_WR) while the paced stream's output waits, and keeps
+ * reading: under RESET_ONLY that is a kept half-close, never a cancel. A write watch is not a hang-up
+ * registration, and WSAPoll reports the FIN to it as a bare READ, which once cancelled the op. */
+UTEST(completion_output, a_half_close_while_a_paced_stream_waits_is_kept_under_reset_only) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4,
+                               .suspended_hangup = KL_HTTP_SUSPEND_HANGUP_RESET_ONLY };
+    ASSERT_EQ(0, kl_http_server_init(&pace_srv, &cfg));
+    kl_http_server_route(&pace_srv, "GET", "/paced", handle_paced, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
+    wait_for_bind(&pace_srv);
+    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    size_t got = 0;
+    if (fd >= 0) {
+        const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(300);                            /* the server fills its drain and pauses */
+#if defined(_WIN32)
+        (void)shutdown((SOCKET)fd, SD_SEND);              /* half-close; still reading */
+#else
+        (void)shutdown(fd, SHUT_WR);                      /* half-close; still reading */
+#endif
+        static char buf[64 * 1024];
+        uint64_t start = kl_monotonic_ms();
+        while (kl_monotonic_ms() - start < 3000) {
+            if (kl_test_poll1(fd, 0, 200) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        kl_test_closesock(fd);
+    }
+    int cancelled_while_reading = g_pace.cancelled;
+    kl_http_server_stop(&pace_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&pace_srv);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_TRUE(got > 0);
+    ASSERT_EQ(cancelled_while_reading, 0);               /* a half-close is kept, not cancelled */
 }
 
 /* ── A buffered response larger than the backend's send_max ──────────────────────────────────────

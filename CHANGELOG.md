@@ -44,8 +44,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   its fd is now also watched for writability, on the same watcher as the hang-up watch, and each
   writable event flushes the drain, so `on_drain` fires as it empties. The loop arms the watch just
   before it waits, so whatever buffered the output during the tick is covered, with no timer and no
-  polling. A send that fails while suspended cancels the op (`on_cancel` once). Completion loops
-  already moved the drain from the write completion and are unchanged.
+  polling. A send that fails while suspended cancels the op (`on_cancel` once). While the output
+  is moving, a client's half-close is not reported on its own (a reset still is, through the failed
+  send), and the hang-up watch is back once the output has gone. On WSAPoll, which reports a FIN to
+  a write watch as a bare READ, a FIN while output waits stops that suspension's write watch and the
+  hang-up policy decides, as without a stream. Completion loops already moved the drain from the
+  write completion and are unchanged.
 
 Upgrade notes:
 

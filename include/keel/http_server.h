@@ -76,6 +76,12 @@ typedef enum {
  * request, an unread body) is invisible to the peek. Keel does not require a finite
  * KlAsyncOp.deadline_ms, so on those backends only an op deadline that ends the op guarantees that
  * such a connection is eventually released.
+ *
+ * A suspended streamed response with output waiting is watched for writability on a readiness loop
+ * (the hang-up interest rides along but is not reported on its own), so while its output is moving a
+ * half-close is not seen; a reset still ends the op through the failed send, and the hang-up watch
+ * resumes once the output has gone. On WSAPoll a FIN seen while output waits stops this suspension's
+ * write watch, and its stream then moves only as the producer writes.
  */
 typedef enum {
     KL_HTTP_SUSPEND_HANGUP_CANCEL     = 0, /**< default: a FIN or a reset cancels the suspended op
