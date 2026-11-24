@@ -397,6 +397,11 @@ int kl_http_server_run(KlHttpServer *s) {
             }
             continue;
         }
+        /* Last thing before the wait: everything that can write ran in the previous tick (dispatch,
+         * sweep, deadlines, timers), so a suspended stream whose output is waiting is now watched for
+         * writability, and one whose output went is not. */
+        kl_async_sync_stream_interest(s);
+
         /* Compute dynamic timeout based on nearest async op deadline */
         server_accept_backoff_check(s);
         uint64_t now = kl_monotonic_ms();

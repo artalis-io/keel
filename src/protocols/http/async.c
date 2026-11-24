@@ -74,9 +74,11 @@ static void async_watch_hangup(KlHttpServer *s, KlHttpConn *conn) {
 }
 
 static void async_unwatch_hangup(KlHttpServer *s, KlHttpConn *conn) {
-    if (conn->hup_state == KL_HUP_WATCHED) {
+    /* One watcher carries the hang-up watch and a suspended stream's write watch (async_stream_watch_write). */
+    if (conn->hup_state == KL_HUP_WATCHED || conn->stream_write_watched)
         kl_watcher_del(&s->ev, conn->stream.fd);
-    } else if (conn->hup_state == KL_HUP_SWEPT || conn->hup_state == KL_HUP_SWEEP_HIT) {
+    conn->stream_write_watched = 0;
+    if (conn->hup_state == KL_HUP_SWEPT || conn->hup_state == KL_HUP_SWEEP_HIT) {
         if (--s->hup_sweep_conns <= 0) {
             s->hup_sweep_conns = 0;
             if (s->hup_sweep_armed) {   /* nothing left to sweep: no probe after this */
@@ -128,12 +130,77 @@ static void async_hup_sweep(void *user_data) {
     async_hup_sweep_arm(s);   /* again only if a swept connection remains */
 }
 
+static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_data);
+
+/* ── Suspended streams on a readiness loop ───────────────────────────────
+ * A streamed response written while suspended goes through its drain: what the socket does not take at
+ * once waits there. kl_async_suspend took the fd out of the loop, so nothing would move it until the
+ * producer wrote again, and on_drain would never fire: a producer pacing itself on on_drain stalled for
+ * good. While output waits, the suspended connection's fd is therefore also watched for writability,
+ * on the same watcher as the hang-up watch (combined, the hang-up interest is not reported on its own:
+ * a failed send then ends the op instead), and each writable event flushes the drain, which fires
+ * on_drain once it empties. A completion loop needs none of this: its write completion moves the drain. */
+
+static void async_stream_watch_write(KlHttpServer *s, KlHttpConn *conn, int on) {
+    if (!!on == conn->stream_write_watched) return;
+    const int hup = conn->hup_state == KL_HUP_WATCHED;
+    int rc;
+    if (on)
+        rc = hup ? kl_watcher_mod(&s->ev, conn->stream.fd, (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_WRITE))
+                 : kl_watcher_add(&s->ev, conn->stream.fd, KL_EVENT_WRITE, async_on_hangup, conn);
+    else if (hup)
+        rc = kl_watcher_mod(&s->ev, conn->stream.fd, KL_EVENT_HANGUP);
+    else {
+        kl_watcher_del(&s->ev, conn->stream.fd);
+        rc = 0;
+    }
+    if (rc == 0) conn->stream_write_watched = on ? 1 : 0;
+}
+
+/* The suspended connection's streamed response has output waiting (readiness). */
+static int async_stream_pending(const KlHttpConn *conn) {
+    return conn->res.body_mode == KL_HTTP_BODY_STREAM && conn->res.drain_enabled &&
+           kl_drain_pending(&conn->res.drain);
+}
+
+/* Writable while suspended with stream output waiting: flush it. kl_drain_flush fires on_drain when the
+ * drain empties; that is user code, and may write more, end the stream, complete or cancel the op. */
+static void async_stream_progress(KlHttpServer *s, KlHttpConn *conn) {
+    KlAsyncOp *op = conn->async_op;
+    if (!op || conn->state != KL_HTTP_CONN_SUSPENDED) return;
+    int r = kl_drain_flush(&conn->res.drain);
+    if (conn->async_op != op || conn->state != KL_HTTP_CONN_SUSPENDED)
+        return;                                 /* on_drain completed or cancelled the op */
+    if (r < 0) {
+        kl_async_cancel(s, op);                 /* the send failed: the client is gone */
+        return;
+    }
+    if (!async_stream_pending(conn))
+        async_stream_watch_write(s, conn, 0);
+}
+
+/* http_internal.h: the readiness loop, once per tick just before it waits: a suspended connection whose
+ * streamed response has output waiting is watched for writability, and one that has none is not. Writes
+ * happen only on the loop thread, in the tick's dispatch, sweeps and timers, so whatever buffered output
+ * arms the watch before the loop waits again: no wakeup is missed and nothing polls. */
+void kl_async_sync_stream_interest(KlHttpServer *s) {
+    for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
+        KlHttpConn *c = op->conn;
+        if (!c || c->async_op != op || c->state != KL_HTTP_CONN_SUSPENDED) continue;
+        async_stream_watch_write(s, c, async_stream_pending(c));
+    }
+}
+
 /* The client hung up (or the connection failed) while suspended. Runs from the loop's I/O
  * processing, outside any frame driving the connection. */
 static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     KlHttpConn *conn = user_data;
     KlHttpServer *s = conn->hup_server;
     (void)fd;
+    if (conn->stream_write_watched && (ready & KL_EVENT_WRITE)) {
+        async_stream_progress(s, conn);   /* writable: move the suspended stream's output */
+        return;
+    }
     if (!(ready & (KL_EVENT_HANGUP | KL_EVENT_READ)))
         return;
     /* A hang-up registration has no READ interest, so a READ report can only be a backend's legacy
@@ -142,6 +209,7 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
         ready = (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_ERROR);
     kl_watcher_del(&s->ev, conn->stream.fd);   /* first report: stop watching, whatever follows */
     conn->hup_state = KL_HUP_NONE;
+    conn->stream_write_watched = 0;            /* the stream's write watch went with it; re-armed below */
     KlAsyncOp *op = conn->async_op;
     if (!op || conn->state != KL_HTTP_CONN_SUSPENDED)
         return;

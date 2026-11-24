@@ -36,6 +36,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   accepted. A body write that passed the cap still puts the drain in error, and `end_stream` on a
   drain in error still fails. Trailers a helper writes through the ordinary write path (SSE,
   compression) get no allowance.
+- **A suspended streamed response makes progress on readiness loops.** `kl_async_suspend` takes the
+  connection's fd out of the loop, so on epoll, kqueue, poll and the Windows readiness backend nothing flushed a
+  streamed response's drain while it was suspended, and `on_drain` never fired until the producer
+  wrote again: a producer that paused at a high-water mark and resumed from `on_drain` (the
+  documented way to pace a stream) stalled for good. While such a connection's stream output waits,
+  its fd is now also watched for writability, on the same watcher as the hang-up watch, and each
+  writable event flushes the drain, so `on_drain` fires as it empties. The loop arms the watch just
+  before it waits, so whatever buffered the output during the tick is covered, with no timer and no
+  polling. A send that fails while suspended cancels the op (`on_cancel` once). Completion loops
+  already moved the drain from the write completion and are unchanged.
 
 Upgrade notes:
 

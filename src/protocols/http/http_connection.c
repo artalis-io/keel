@@ -161,6 +161,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->stream.fd = fd;
     c->state = KL_HTTP_CONN_READING;
     c->stream.read_len = 0;
+    c->stream_write_watched = 0;
     c->hdr_parsed = 0;
     c->hdr_sent = 0;
     c->route = NULL;
