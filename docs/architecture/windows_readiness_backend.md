@@ -63,6 +63,10 @@ the cost is finding which socket of a signalled group changed.
 
 ## 4. Options
 
+*Superseded by section 8: this table is the record of the investigation as first written. Option D
+failed a proof obligation (section 5a), and option B's `FD_SETSIZE` concern is answered by sets sized
+at run time.*
+
 | | How it blocks | Hang-up-only (3.5.0) | Half-close write progress | Scale | Complexity |
 |---|---|---|---|---|---|
 | **A. WSAPoll + targeted WSAEventSelect fallback** (only for write-after-FIN sockets) | needs two waits at once: WSAPoll cannot wait on an event object, so it takes a helper thread or alternating timeouts | kept | yes | as today | **high**; rejected: two notification lifecycles, migration between them, and either a thread or polling |
@@ -72,7 +76,7 @@ the cost is finding which socket of a signalled group changed.
 | E. IOCP for this | completion axis | n/a | yes | n/a | rejected: mixes readiness and completion axes |
 | F. Document the stall | n/a | kept | **no** | n/a | rejected: violates the streaming progress contract |
 
-## 5. Recommended design: D
+## 5. Option D as first designed (rejected, see 5a and 8)
 
 Keep `WSAPoll` for what it does correctly (a level classification, including hang-up behind unread
 data, measured in 3.5.0) and stop using it as the blocking primitive. Block only on event objects that
@@ -145,8 +149,8 @@ wait(timeout):
 
 ### What changes elsewhere
 
-* `src/event_wsapoll.c` only (about 150 changed lines). The event API, `KL_EVENT_CAP_HANGUP`, the
-  socket provider (unless the accept option is chosen), the completion axis and HTTP are unchanged.
+* (As first written for option D; not what shipped.) `src/event_wsapoll.c` only, with the event API,
+  `KL_EVENT_CAP_HANGUP`, the socket provider, the completion axis and HTTP unchanged.
 * PR #514 then drops its WSAPoll workaround (`stream_write_off`, and the write watch's bare-READ
   peek), because a write-only registration no longer receives a bare READ for a FIN. BSD poll still
   reports a reset to a write-only registration as `POLLHUP | POLLERR`; giving `event_poll.c` the same
@@ -249,4 +253,22 @@ completions and also has no hang-up-only watch).
 * `KL_EVENT_HANGUP` alone is accepted and never reported. A failed connect (`select()` except set) is
   reported as WRITE, and the next operation sees the error.
 * No socket-provider change is needed: accepted sockets inherit nothing from `select()`.
+* The except set is classified when it fires, without tracking socket state. It reports a failed
+  connect and also pending TCP urgent (out-of-band) data, which Keel never reads and which would stay
+  set (a review found it: one urgent byte from a peer made a waiting writer spin at 100% CPU). When a
+  socket is in the except set but not the write set, the backend reads `SO_ERROR`: an error (a failed
+  connect, any socket error) is reported as WRITE so the next operation sees it; no error can only be
+  urgent data, so that registration stops watching the except set until its identity changes (`add`,
+  an upsert, a reused handle). One extra wakeup per urgent byte, no spin, and no inferred connection
+  state: "not connected" (an unconnected UDP socket) is never mistaken for "connecting".
+* An infinite wait with nothing to watch blocks, as epoll and kqueue do.
+
+### Measured performance (Windows 10.0.26300, idle TCP pairs plus one active, round trip per event)
+
+| registrations | select() | WSAPoll (before) |
+|---|---|---|
+| 64 | 16 us | 19 us |
+| 256 | 29 us | 63 us |
+| 1000 | 86 us | 412 us |
+| 2000 | 160 us | 1330 us |
 

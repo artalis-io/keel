@@ -213,7 +213,7 @@ jobs:
           release: false
           install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf
 
-      # WSAPoll event backend + Winsock provider. Builds and links the entire
+      # Winsock select() event backend + Winsock provider. Builds and links the entire
       # library on Windows; TCP HTTP server + sync/async client, the UDP
       # datagram core (WSARecvMsg/WSASendMsg + cmsg), AND the built-in DNS
       # resolver (iphlpapi config discovery), then runs real loopback smoke
@@ -283,7 +283,7 @@ jobs:
 
       # The SUPPORTED developer path, verbatim, so this job cannot drift from what docs/build.md tells
       # a human to type. Every step re-sources it because each `run:` is a fresh shell.
-      - name: Native MSVC library build (WSAPoll)
+      - name: Native MSVC library build (select)
         run: |
           source scripts/msvc-env.sh
           make CC=cl
@@ -932,7 +932,7 @@ jobs:
 
   # Download the verified source archive, check its checksum, extract it, and build/test from the
   # EXTRACTED tree (not the checkout) on each hosted OS default backend: Ubuntu epoll, macOS kqueue.
-  # Windows (WSAPoll) is a separate job below because it needs msys2.
+  # Windows (select) is a separate job below because it needs msys2.
   archive-validate:
     name: Archive build (${{ matrix.name }})
     needs: release-archive
@@ -965,9 +965,9 @@ jobs:
           make
           make test
 
-  # Windows (WSAPoll) archive validation: same download/verify/extract/build, via msys2 + MinGW.
+  # Windows (select) archive validation: same download/verify/extract/build, via msys2 + MinGW.
   archive-validate-windows:
-    name: Archive build (Windows WSAPoll)
+    name: Archive build (Windows select)
     needs: release-archive
     runs-on: windows-latest
     defaults:
@@ -987,7 +987,7 @@ jobs:
           pattern: keel-*-source-validation
           merge-multiple: true
           path: dist
-      - name: Verify checksum, extract, and build from the extracted tree (Winsock/WSAPoll)
+      - name: Verify checksum, extract, and build from the extracted tree (Winsock/select)
         timeout-minutes: 15
         run: |
           set -e

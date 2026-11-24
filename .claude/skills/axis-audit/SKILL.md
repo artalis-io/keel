@@ -90,11 +90,11 @@ above both and must not touch platform socket APIs or event engines.
 
 ```text
 Application → Protocols → Abstract connection/socket ops
-   ├── Event axis:   Readiness (epoll, kqueue, WSAPoll)  |  Completion (io_uring, IOCP)
+   ├── Event axis:   Readiness (epoll, kqueue, Windows select())  |  Completion (io_uring, IOCP)
    └── Socket axis:  Linux sockets | Darwin sockets | Winsock
 ```
 
-Valid combinations (where supported): Linux sockets + {epoll, io_uring}; Winsock + {WSAPoll,
+Valid combinations (where supported): Linux sockets + {epoll, io_uring}; Winsock + {select(),
 IOCP}; Darwin sockets + kqueue. The architecture must **not** assume every socket impl uses
 readiness, or that a completion engine owns the socket impl.
 
@@ -122,7 +122,7 @@ coupling that leaks upward.
    Readiness/completion MAY be explicit event-axis concepts; protocols just need a stable
    Keel-level contract, not platform mechanics.
 4. **Protocols remain above both axes.** Protocol modules must: use common socket/stream + event
-   abstractions; NOT include platform networking headers; NOT call epoll/kqueue/WSAPoll/IOCP/
+   abstractions; NOT include platform networking headers; NOT call epoll/kqueue/select()/IOCP/
    io_uring directly; NOT assume a socket is a Unix int fd; NOT contain Windows completion logic;
    NOT rely on readiness-only control flow unless the abstraction permits. (Mechanical: grep the
    protocol TUs for `<sys/epoll.h>`/`<sys/event.h>`/`io_uring`/`WSA`/`OVERLAPPED`/`epoll_`/`kevent`.)
@@ -241,7 +241,7 @@ APIs before documenting the contract + migration impact; do broad formatting/unr
    files+symbols; the architectural principle; why correct/incorrect; a concrete failure scenario;
    the smallest reasonable fix.
 4. **Compatibility matrix**: for `Linux sockets + epoll`, `Linux sockets + io_uring`,
-   `Darwin sockets + kqueue`, `Winsock + WSAPoll`, `Winsock + IOCP` (+ pollcomp double): mark
+   `Darwin sockets + kqueue`, `Winsock + select()`, `Winsock + IOCP` (+ pollcomp double): mark
    implemented / buildable / tested / production-ready / incomplete / unsupported-by-design. Do
    NOT infer production-readiness merely because code exists.
 5. **Contract definition**: concise proposed internal contract for socket ownership, event-loop

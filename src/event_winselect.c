@@ -36,7 +36,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define INITIAL_CAP 64
+#define INITIAL_CAP 64   /* = FD_SETSIZE: every set allocation is at least sizeof(fd_set) */
 
 /* The Winsock fd_set layout (a count, then the sockets), sized at run time. */
 typedef struct {
@@ -50,6 +50,7 @@ typedef struct {
     KlEventMask *mask;    /* their interest */
     void       **udata;   /* parallel udata */
     unsigned char *dead;  /* 1 = select() rejected the handle (closed without kl_event_del) */
+    unsigned char *xoff;  /* 1 = the except set proved to report only urgent data here: stop watching it */
     int          count;   /* active entries */
     int          capacity;/* allocated entries (also the capacity of each set) */
     KlWinFdSet  *rset, *wset, *xset;
@@ -74,14 +75,16 @@ static int resize(KlWinSelState *st, int cap) {
     KlEventMask *nm = kl_malloc(a, (size_t)cap * sizeof(KlEventMask));
     void **nu = kl_malloc(a, (size_t)cap * sizeof(void *));
     unsigned char *nd = kl_malloc(a, (size_t)cap);
+    unsigned char *nx = kl_malloc(a, (size_t)cap);
     KlWinFdSet *r = kl_malloc(a, set_bytes(cap));
     KlWinFdSet *w = kl_malloc(a, set_bytes(cap));
     KlWinFdSet *x = kl_malloc(a, set_bytes(cap));
-    if (!ns || !nm || !nu || !nd || !r || !w || !x) {
+    if (!ns || !nm || !nu || !nd || !nx || !r || !w || !x) {
         if (ns) kl_free(a, ns, (size_t)cap * sizeof(SOCKET));
         if (nm) kl_free(a, nm, (size_t)cap * sizeof(KlEventMask));
         if (nu) kl_free(a, nu, (size_t)cap * sizeof(void *));
         if (nd) kl_free(a, nd, (size_t)cap);
+        if (nx) kl_free(a, nx, (size_t)cap);
         if (r) kl_free(a, r, set_bytes(cap));
         if (w) kl_free(a, w, set_bytes(cap));
         if (x) kl_free(a, x, set_bytes(cap));
@@ -92,17 +95,19 @@ static int resize(KlWinSelState *st, int cap) {
         memcpy(nm, st->mask, (size_t)st->count * sizeof(KlEventMask));
         memcpy(nu, st->udata, (size_t)st->count * sizeof(void *));
         memcpy(nd, st->dead, (size_t)st->count);
+        memcpy(nx, st->xoff, (size_t)st->count);
     }
     if (old > 0) {
         kl_free(a, st->sock, (size_t)old * sizeof(SOCKET));
         kl_free(a, st->mask, (size_t)old * sizeof(KlEventMask));
         kl_free(a, st->udata, (size_t)old * sizeof(void *));
         kl_free(a, st->dead, (size_t)old);
+        kl_free(a, st->xoff, (size_t)old);
         kl_free(a, st->rset, set_bytes(old));
         kl_free(a, st->wset, set_bytes(old));
         kl_free(a, st->xset, set_bytes(old));
     }
-    st->sock = ns; st->mask = nm; st->udata = nu; st->dead = nd;
+    st->sock = ns; st->mask = nm; st->udata = nu; st->dead = nd; st->xoff = nx;
     st->rset = r; st->wset = w; st->xset = x;
     st->capacity = cap;
     return 0;
@@ -139,6 +144,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         st->mask[existing] = mask;
         st->udata[existing] = udata;
         st->dead[existing] = 0;
+        st->xoff[existing] = 0;   /* may be a new socket behind a reused handle */
         return 0;
     }
     if (st->count >= st->capacity) {
@@ -150,6 +156,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     st->mask[idx] = mask;
     st->udata[idx] = udata;
     st->dead[idx] = 0;
+    st->xoff[idx] = 0;
     return 0;
 }
 
@@ -160,6 +167,14 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         return -1;
     st->mask[idx] = mask;
     st->udata[idx] = udata;
+    /* kl_watcher_add on a descriptor already in the watcher list arrives here, and Winsock reuses
+     * handle values quickly: a registration select() rejected before may be a new socket now. If it
+     * is still invalid, the next WSAENOTSOCK marks it again. A new socket starts with the except
+     * set watched again. */
+    if (st->dead[idx]) {
+        st->dead[idx] = 0;
+        st->xoff[idx] = 0;
+    }
     return 0;
 }
 
@@ -174,6 +189,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
         st->mask[idx] = st->mask[last];
         st->udata[idx] = st->udata[last];
         st->dead[idx] = st->dead[last];
+        st->xoff[idx] = st->xoff[last];
     }
     st->count--;
     return 0;
@@ -215,13 +231,17 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
                 st->rset->fd_array[st->rset->fd_count++] = s;
             if (st->mask[i] & KL_EVENT_WRITE) {
                 st->wset->fd_array[st->wset->fd_count++] = s;
-                st->xset->fd_array[st->xset->fd_count++] = s;   /* a failed connect is reported here */
+                /* The except set reports a failed connect (SO_ERROR set), and also pending TCP
+                 * urgent (OOB) data, which Keel never reads. See the classification below. */
+                if (!st->xoff[i])
+                    st->xset->fd_array[st->xset->fd_count++] = s;
             }
             /* KL_EVENT_HANGUP alone: not expressible in select() (see the file comment); no set. */
         }
         if (st->rset->fd_count == 0 && st->wset->fd_count == 0) {
-            /* select() rejects three empty sets; nothing to wait on, so honor the timeout. */
-            if (timeout_ms > 0) Sleep((DWORD)timeout_ms);
+            /* select() rejects three empty sets; nothing to wait on, so honor the timeout (an
+             * infinite one blocks, as epoll and kqueue do: returning at once would spin a caller). */
+            if (timeout_ms != 0) Sleep(timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
             return 0;
         }
 
@@ -253,8 +273,23 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
             KlEventMask ready = 0;
             if ((m & KL_EVENT_READ) && in_set(st->rset, s))
                 ready |= KL_EVENT_READ;
-            if ((m & KL_EVENT_WRITE) && (in_set(st->wset, s) || in_set(st->xset, s)))
-                ready |= KL_EVENT_WRITE;   /* writable, or a failed connect (the next op reports it) */
+            if (m & KL_EVENT_WRITE) {
+                if (in_set(st->wset, s)) {
+                    ready |= KL_EVENT_WRITE;
+                } else if (in_set(st->xset, s)) {
+                    /* Classify the exceptional condition that actually fired, with one documented
+                     * query and no socket-state tracking: a pending error (a failed connect, or any
+                     * socket error) is reported as WRITE so the next operation sees it; with no
+                     * error, all the except set can mean is urgent data, which Keel never reads and
+                     * which would stay set: stop watching the except set for this registration (a
+                     * spin otherwise), until its identity changes (add, upsert, reused handle). */
+                    int soerr = 0, len = (int)sizeof(soerr);
+                    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &len) != 0 || soerr != 0)
+                        ready |= KL_EVENT_WRITE;
+                    else
+                        st->xoff[i] = 1;
+                }
+            }
             if (ready) {
                 out[count].udata = st->udata[i];
                 out[count].ready = ready;
@@ -276,6 +311,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
     kl_free(alloc, st->mask, (size_t)cap * sizeof(KlEventMask));
     kl_free(alloc, st->udata, (size_t)cap * sizeof(void *));
     kl_free(alloc, st->dead, (size_t)cap);
+    kl_free(alloc, st->xoff, (size_t)cap);
     kl_free(alloc, st->rset, set_bytes(cap));
     kl_free(alloc, st->wset, set_bytes(cap));
     kl_free(alloc, st->xset, set_bytes(cap));
