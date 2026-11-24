@@ -10,6 +10,9 @@
  * two are readiness cases: output buffered while the connection had no WRITE interest.
  */
 #include "utest.h"
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <keel/keel.h>
 #include <keel/tls.h>
 #include "net_compat.h"
@@ -1653,11 +1656,29 @@ UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once_wi
 }
 
 /* A client that half-closes (shutdown SHUT_WR) while the paced stream's output waits, and keeps
- * reading: under RESET_ONLY that is a kept half-close, never a cancel. A write watch is not a hang-up
- * registration, and WSAPoll reports the FIN to it as a bare READ, which once cancelled the op. */
-UTEST(completion_output, a_half_close_while_a_paced_stream_waits_is_kept_under_reset_only) {
-    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4,
-                               .suspended_hangup = KL_HTTP_SUSPEND_HANGUP_RESET_ONLY };
+ * reading: the whole 4 MiB stream must still arrive, ended, with the producer paced only by on_drain
+ * (it writes nothing more than the stream), under RESET_ONLY (a kept half-close) and OFF (no hang-up
+ * watch), and without the loop spinning: process CPU stays well below the transfer's wall time.
+ * WSAPoll reported the FIN to the write watch on every call, so a half-closed stream either spun or
+ * stopped; the Windows readiness backend is select() now, which keeps write readiness. */
+static double process_cpu_ms(void) {
+#if defined(_WIN32)
+    FILETIME c, e, k, u;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
+    ULARGE_INTEGER kk, uu;
+    kk.LowPart = k.dwLowDateTime; kk.HighPart = k.dwHighDateTime;
+    uu.LowPart = u.dwLowDateTime; uu.HighPart = u.dwHighDateTime;
+    return (double)(kk.QuadPart + uu.QuadPart) / 10000.0;
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    return ru.ru_utime.tv_sec * 1000.0 + ru.ru_utime.tv_usec / 1000.0 +
+           ru.ru_stime.tv_sec * 1000.0 + ru.ru_stime.tv_usec / 1000.0;
+#endif
+}
+
+static void half_close_case(int *utest_result, KlHttpSuspendHangup policy) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .suspended_hangup = policy };
     ASSERT_EQ(0, kl_http_server_init(&pace_srv, &cfg));
     kl_http_server_route(&pace_srv, "GET", "/paced", handle_paced, NULL, NULL);
     KlPlatThread tid;
@@ -1665,6 +1686,8 @@ UTEST(completion_output, a_half_close_while_a_paced_stream_waits_is_kept_under_r
     wait_for_bind(&pace_srv);
     int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
     size_t got = 0;
+    int ended = 0;
+    double cpu_ms = 0, wall_ms = 0;
     if (fd >= 0) {
         const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1674,23 +1697,51 @@ UTEST(completion_output, a_half_close_while_a_paced_stream_waits_is_kept_under_r
 #else
         (void)shutdown(fd, SHUT_WR);                      /* half-close; still reading */
 #endif
+        /* A pause with the client not reading: the server's output waits behind a half-closed
+         * peer. A loop that spins on the FIN burns CPU here with no progress to show for it. */
+        double c0 = process_cpu_ms();
+        uint64_t t0 = kl_monotonic_ms();
+        kl_test_sleep_ms(1000);
+        cpu_ms = process_cpu_ms() - c0;
+        wall_ms = (double)(kl_monotonic_ms() - t0);
         static char buf[64 * 1024];
+        char tail[8] = {0};
         uint64_t start = kl_monotonic_ms();
-        while (kl_monotonic_ms() - start < 3000) {
+        while (kl_monotonic_ms() - start < 15000) {
             if (kl_test_poll1(fd, 0, 200) <= 0) continue;
             kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
             if (n <= 0) break;
             got += (size_t)n;
+            size_t keep = (size_t)n < 5 ? (size_t)n : 5;      /* the last 5 bytes seen: "0\r\n\r\n" */
+            memmove(tail, tail + keep, 5 - keep);
+            memcpy(tail + 5 - keep, buf + n - keep, keep);
+            if (memcmp(tail, "0\r\n\r\n", 5) == 0) { ended = 1; break; }
         }
         kl_test_closesock(fd);
     }
-    int cancelled_while_reading = g_pace.cancelled;
+    int cancelled = g_pace.cancelled, failed = g_pace.failed, drains = g_pace.drains;
+    size_t sent = g_pace.sent;
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&pace_srv);
+    printf("  half-closed paced stream (%s): %zu bytes read, %d drains, cancelled %d, failed %d, "
+           "%.0f ms CPU over a %.0f ms stalled pause\n",
+           policy == KL_HTTP_SUSPEND_HANGUP_OFF ? "OFF" : "RESET_ONLY", got, drains, cancelled,
+           failed, cpu_ms, wall_ms);
     ASSERT_TRUE(fd >= 0);
-    ASSERT_TRUE(got > 0);
-    ASSERT_EQ(cancelled_while_reading, 0);               /* a half-close is kept, not cancelled */
+    ASSERT_EQ(cancelled, 0);                              /* a half-close is kept, not cancelled */
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(sent, (size_t)PACE_TOTAL);                  /* the producer wrote the stream, no more */
+    ASSERT_TRUE(drains > 0);                              /* paced by on_drain alone */
+    ASSERT_TRUE(got > (size_t)PACE_TOTAL);                /* every byte, plus framing */
+    ASSERT_TRUE(ended);                                   /* and the terminating chunk */
+    ASSERT_LT(cpu_ms, wall_ms * 0.5);                     /* no spin while the output waits */
+}
+UTEST(completion_output, a_half_closed_paced_stream_completes_under_reset_only) {
+    half_close_case(utest_result, KL_HTTP_SUSPEND_HANGUP_RESET_ONLY);
+}
+UTEST(completion_output, a_half_closed_paced_stream_completes_without_the_hangup_watch) {
+    half_close_case(utest_result, KL_HTTP_SUSPEND_HANGUP_OFF);
 }
 
 /* ── A buffered response larger than the backend's send_max ──────────────────────────────────────
