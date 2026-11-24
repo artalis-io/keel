@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -438,6 +440,90 @@ UTEST(unix_socket, peer_credentials_available) {
         ASSERT_EQ((long)getpid(), g_captured_cred.pid);
     /* Peer label is Linux/SELinux-only; smoke-check it doesn't misbehave. */
     ASSERT_TRUE(g_label_rc == 0 || g_label_rc == -1);
+}
+
+/* Only an AF_UNIX socket has peer credentials. On a TCP or UDP socket the OS query does not fail
+ * reliably (macOS getpeereid on TCP gives uid 0 / gid 0; Linux SO_PEERCRED gives "no credentials"
+ * values), so kl_peer_cred_fd must refuse by family and leave `out` untouched. */
+static void cred_sentinel(KlPeerCred *c) { c->uid = 12345; c->gid = 23456; c->pid = 34567; c->has_pid = 7; }
+static int cred_is_sentinel(const KlPeerCred *c) {
+    return c->uid == 12345 && c->gid == 23456 && c->pid == 34567 && c->has_pid == 7;
+}
+
+UTEST(unix_socket, peer_credentials_refused_on_tcp_and_udp) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(lfd >= 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(0, bind(lfd, (struct sockaddr *)&a, sizeof(a)));
+    ASSERT_EQ(0, listen(lfd, 1));
+    socklen_t al = sizeof(a);
+    ASSERT_EQ(0, getsockname(lfd, (struct sockaddr *)&a, &al));
+    int cfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(cfd >= 0);
+    ASSERT_EQ(0, connect(cfd, (struct sockaddr *)&a, sizeof(a)));
+    int sfd = accept(lfd, NULL, NULL);
+    ASSERT_TRUE(sfd >= 0);
+
+    KlPeerCred c;
+    cred_sentinel(&c);
+    EXPECT_EQ(-1, kl_peer_cred_fd((KlSocketHandle)sfd, &c));   /* the accepted end */
+    EXPECT_TRUE(cred_is_sentinel(&c));
+    EXPECT_EQ(-1, kl_peer_cred_fd((KlSocketHandle)cfd, &c));   /* the connecting end */
+    EXPECT_TRUE(cred_is_sentinel(&c));
+
+    int ufd = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_TRUE(ufd >= 0);
+    EXPECT_EQ(-1, kl_peer_cred_fd((KlSocketHandle)ufd, &c));
+    EXPECT_TRUE(cred_is_sentinel(&c));
+
+    /* The positive control: an AF_UNIX pair still reports this process. */
+    int sp[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sp));
+    EXPECT_EQ(0, kl_peer_cred_fd((KlSocketHandle)sp[0], &c));
+    EXPECT_EQ((long)getuid(), c.uid);
+    EXPECT_EQ((long)getgid(), c.gid);
+    if (c.has_pid) EXPECT_EQ((long)getpid(), c.pid);
+
+    close(sp[0]); close(sp[1]);
+    close(ufd); close(sfd); close(cfd); close(lfd);
+}
+
+/* End to end: an HTTP request over TCP gets no peer credentials. */
+UTEST(unix_socket, http_request_over_tcp_has_no_peer_credentials) {
+    g_cred_rc = -2;
+    cred_sentinel(&g_captured_cred);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .bind_addr = "127.0.0.1", .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    for (int i = 0; i < 300 && srv.bound_port == 0; i++) usleep(10000);
+    ASSERT_TRUE(srv.bound_port != 0);
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(fd >= 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)srv.bound_port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(0, connect(fd, (struct sockaddr *)&a, sizeof(a)));
+    const char *req = "GET /whoami HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    char buf[1024];
+    ASSERT_TRUE(read_unix_response(fd, buf, sizeof(buf)) > 0);
+    close(fd);
+
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+
+    EXPECT_EQ(-1, g_cred_rc);
+    EXPECT_TRUE(cred_is_sentinel(&g_captured_cred));
 }
 
 UTEST(unix_socket, adopts_inherited_listen_fd) {
