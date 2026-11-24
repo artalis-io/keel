@@ -729,18 +729,7 @@ transition:
         kl_http_server_sweep_conn_timeouts(s, now, 0);
 
         /* Sweep async op deadlines */
-        {
-            KlAsyncOp *aop = s->async_ops;
-            while (aop) {
-                KlAsyncOp *next_aop = aop->next;
-                if (!aop->_terminal && aop->deadline_ms > 0 && now >= aop->deadline_ms) {
-                    aop->deadline_ms = 0;   /* fire on_deadline at most once */
-                    if (aop->on_deadline)
-                        aop->on_deadline(aop, aop->user_data);
-                }
-                aop = next_aop;
-            }
-        }
+        kl_async_sweep_deadlines(s, now);
 
         /* Fire expired timers */
         kl_timer_fire(&s->ev);

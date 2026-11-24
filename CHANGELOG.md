@@ -15,6 +15,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   listener could admit a remote client as root on macOS. The socket's family is now checked first,
   and any other socket yields -1 with `out` untouched. AF_UNIX connections are unaffected. The
   `KlPeerCred` comment also now says that macOS fills the pid (`LOCAL_PEERPID`).
+- **The async-op deadline sweep no longer reads an op a callback released.** Both run loops
+  remembered the next op in the list before calling an op's `on_deadline`. An `on_deadline` that
+  cancelled that next op, whose `on_cancel` freed its memory (a common pattern: a deadline that fails
+  a group of related ops), left the sweep following a freed pointer, a use-after-free. The sweep is
+  now one function for both loops: it restarts from the head after every callback, so it only
+  follows ops still in the list. An op still fires at most once per deadline, and a sweep fires at
+  most as many callbacks as there were ops when it began.
 
 ## [3.5.0]
 
