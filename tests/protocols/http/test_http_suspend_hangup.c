@@ -23,6 +23,7 @@
 #include "kl_atomic.h"
 #include "mock_tls.h"         /* identity TLS (no crypto), readiness and completion */
 #include "http_conn_internal.h"   /* KlHttpConn.hup_state: proves detection happened (or not) */
+#include <keel/thread_pool.h>
 #include "event_builtin.h"   /* the built-in backend, wrapped below without KL_EVENT_CAP_HANGUP */
 #include "event_caps.h"
 #include "socket.h"
@@ -522,6 +523,98 @@ UTEST(suspend_hangup, sweep_reset_cancels_under_reset_only) {
     EXPECT_EQ(ld(&n_resume), 0);
     stop();
     EXPECT_EQ(ld(&n_cancel), 1);
+}
+
+/* ── Teardown with queued pool work: context ownership across every terminal path ──
+ * A work context has two owners that each release it once, in either order: the pool (done_fn if the
+ * work ran, cancel_fn if it never did) and the op (resumed, or cancelled by a hang-up or by
+ * kl_http_server_free). One worker, whose first job blocks on a gate, so later jobs stay queued. One
+ * client hangs up while its job is queued (on_cancel first, cancel_fn later); at teardown the queued
+ * job of a still-suspended op gets cancel_fn first and on_cancel later; the running job's done_fn
+ * resumes its op. Every context must be freed exactly once (ASan catches a use-after-free). */
+typedef struct { KlAsyncOp op; int op_ended, pool_released, idx; } TdCtx;
+static int td_gate, td_started, td_frees, td_freed[4];
+static KlThreadPool *td_pool;
+
+static void td_free(TdCtx *w) { td_freed[w->idx]++; td_frees++; free(w); }
+static void td_release_op(TdCtx *w)   { w->op_ended = 1;      if (w->pool_released) td_free(w); }
+static void td_release_pool(TdCtx *w) { w->pool_released = 1; if (w->op_ended) td_free(w); }
+
+static void td_work(void *u) {   /* worker thread */
+    TdCtx *w = u;
+    if (w->idx == 0) {
+        kl_atomic_store_int(&td_started, 1);
+        while (!kl_atomic_load_int(&td_gate)) kl_test_sleep_ms(5);
+    }
+}
+static void td_done(void *u) {   /* loop thread, or main() once the loop has stopped */
+    TdCtx *w = u;
+    if (!w->op_ended) {
+        kl_http_response_json(kl_http_conn_response(w->op.conn), 200, "{}", 2);
+        kl_async_complete(&srv, &w->op);
+        w->op_ended = 1;
+    }
+    td_release_pool(w);
+}
+static void td_cancel_fn(void *u) { td_release_pool(u); }
+static void td_on_cancel(KlAsyncOp *op, void *u) { (void)u; inc(&n_cancel); td_release_op((TdCtx *)op); }
+
+static void handle_td(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    int i = ld(&n_parked);
+    TdCtx *w = calloc(1, sizeof *w);
+    w->idx = i;
+    w->op.on_cancel = td_on_cancel;
+    kl_async_suspend(&srv, kl_http_request_conn(req), &w->op);
+    KlWorkItem item = { .work_fn = td_work, .done_fn = td_done, .cancel_fn = td_cancel_fn, .user_data = w };
+    if (kl_thread_pool_submit(td_pool, &item) != 0) abort();
+    inc(&n_parked);
+}
+
+UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
+    kl_atomic_store_int(&td_gate, 0);
+    kl_atomic_store_int(&td_started, 0);
+    td_frees = 0;
+    memset(td_freed, 0, sizeof td_freed);
+    kl_atomic_store_int(&n_parked, 0);
+    kl_atomic_store_int(&n_cancel, 0);
+    KlHttpServerConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.bind_addr = "127.0.0.1";
+    ASSERT_EQ(kl_http_server_init(&srv, &cfg), 0);
+    KlThreadPoolConfig pc = { .num_workers = 1, .queue_capacity = 8 };
+    td_pool = kl_thread_pool_create(&srv.ev, &pc);
+    ASSERT_TRUE(td_pool != NULL);
+    kl_http_server_route(&srv, "GET", "/td", handle_td, NULL, NULL);
+    kl_plat_thread_create(&srv_tid, srv_thread, NULL);
+    for (int i = 0; i < 300 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    static const char q[] = "GET /td HTTP/1.1\r\nHost: x\r\n\r\n";
+    int fds[3];
+    for (int i = 0; i < 3; i++) {
+        fds[i] = client();
+        ASSERT_TRUE(fds[i] >= 0);
+        (void)kl_test_sockwrite(fds[i], q, sizeof q - 1);
+        ASSERT_TRUE(wait_for(&n_parked, i + 1, 2000));
+    }
+    ASSERT_TRUE(wait_for(&td_started, 1, 2000));   /* job 0 holds the only worker; 1 and 2 are queued */
+    kl_test_closesock(fds[2]);                        /* hang-up while its job is queued */
+    EXPECT_TRUE(wait_for(&n_cancel, 1, DETECT_MS));
+    EXPECT_EQ(td_frees, 0);                           /* the pool still owns it */
+
+    kl_http_server_stop(&srv);
+    kl_plat_thread_join(&srv_tid);
+    kl_atomic_store_int(&td_gate, 1);                 /* job 0 finishes; 1 and 2 never run */
+    kl_thread_pool_free(td_pool);                     /* done_fn(0), cancel_fn(1), cancel_fn(2) */
+    EXPECT_EQ(td_freed[0], 1);                        /* resumed and released by done_fn */
+    EXPECT_EQ(td_freed[2], 1);                        /* cancelled earlier, released by cancel_fn */
+    EXPECT_EQ(td_freed[1], 0);                        /* still suspended: its op owns it */
+    kl_http_server_free(&srv);                        /* cancels op 1: on_cancel frees it */
+    EXPECT_EQ(td_freed[1], 1);
+    EXPECT_EQ(td_frees, 3);
+    EXPECT_EQ(ld(&n_cancel), 2);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(suspend_hangup, invalid_policy_rejected) {

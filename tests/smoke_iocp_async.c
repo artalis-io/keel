@@ -26,7 +26,16 @@
 static KlHttpServer g_srv;
 static KlThreadPool *g_pool;
 
-typedef struct { KlAsyncOp op; int result; int dead; } WorkCtx;   /* op MUST be first */
+/* Two owners, each releasing the context exactly once, in either order: the pool (done_fn if the work
+ * ran, cancel_fn if it never did; kl_thread_pool_free runs one of them for every item) and the op
+ * (resumed by done_fn, or cancelled by on_cancel: a client hang-up, or kl_http_server_free). Whichever
+ * finishes second frees it. A cancel can come while the work is queued or running, and main() frees
+ * the pool before the server, so cancel_fn can run while the op is still suspended. All of these run
+ * on the loop thread, or on main() once the loop thread has been joined: never concurrently. */
+typedef struct { KlAsyncOp op; int result; int op_ended; int pool_released; } WorkCtx;
+
+static void ctx_release_op(WorkCtx *w)   { w->op_ended = 1;      if (w->pool_released) free(w); }
+static void ctx_release_pool(WorkCtx *w) { w->pool_released = 1; if (w->op_ended) free(w); }   /* op MUST be first */
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */
     WorkCtx *w = ud;
@@ -40,19 +49,17 @@ static void on_resume(KlAsyncOp *op, void *ud) { (void)ud; op->conn->state = KL_
  * has to default it. Without that default the completion driver takes its CLOSED arm and
  * shuts the socket without ever sending this route's reply. */
 static void on_resume_nostate(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
-/* The op can be cancelled while its work is still on the pool (the client hung up, or the server is
- * freed): mark the context dead and leave freeing to done_fn / cancel_fn, which the pool always runs
- * exactly once (the async.h on_cancel contract). */
-static void on_cancel(KlAsyncOp *op, void *ud) { (void)ud; ((WorkCtx *)op)->dead = 1; }
-static void cancel_fn(void *ud) { free(ud); }
+static void on_cancel(KlAsyncOp *op, void *ud) { (void)ud; ctx_release_op((WorkCtx *)op); }
+static void cancel_fn(void *ud) { ctx_release_pool(ud); }   /* the work never ran */
 static void done_fn(void *ud) {          /* event-loop thread (via the wakeup watcher) */
     WorkCtx *w = ud;
-    if (!w->dead) {                      /* cancelled: the connection is gone, nothing to send */
+    if (!w->op_ended) {                  /* not cancelled meanwhile: send the reply */
         KlHttpConn *conn = w->op.conn;
         kl_http_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
         kl_async_complete(&g_srv, &w->op);
+        w->op_ended = 1;                 /* resumed: on_cancel can no longer run for it */
     }
-    free(w);
+    ctx_release_pool(w);
 }
 
 static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
@@ -67,7 +74,7 @@ static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
                         .cancel_fn = cancel_fn, .user_data = w };
     if (kl_thread_pool_submit(g_pool, &item) < 0) {
         kl_http_response_error(res, 503, "busy");
-        kl_async_complete(&g_srv, &w->op);
+        kl_async_complete(&g_srv, &w->op);   /* the pool never took it: free it here */
         free(w);
     }
 }
