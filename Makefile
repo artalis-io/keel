@@ -253,7 +253,7 @@ ifdef KEEL_NO_COMPLETION
 else
   COMPLETION_CORE = src/completion_core.c src/protocols/http/completion_http_server.c \
                     src/protocols/http2/completion_http2.c src/protocols/websocket/completion_ws.c src/completion_dispatch.c
-  # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
+  # A readiness EVENT_SRC (epoll/kqueue/poll/winselect) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
   ifndef COMPLETION_BACKEND
@@ -395,8 +395,8 @@ LIB_OBJ = $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(COMPRESS_MINIZ_OBJ)
 
 # Which backend the CURRENT libkeel.a was archived from. Only one of these exists at a time, so
 # switching BACKEND makes the archive out of date even when that backend's objects are already built
-# and older than the archive. Without it, build wsapoll -> build iocp -> build wsapoll leaves an IOCP
-# archive in place: make sees libkeel.a newer than every wsapoll object and skips the rule, and the
+# and older than the archive. Without it, build winselect -> build iocp -> build winselect leaves an IOCP
+# archive in place: make sees libkeel.a newer than every winselect object and skips the rule, and the
 # test run that follows is measuring the wrong backend. Per-backend object directories do not help
 # there, because the ARCHIVE path is what is stale (#280).
 # The pair check-backend-isolation switches between. Windows has two native backends; on Linux the
@@ -589,7 +589,7 @@ test: $(TEST_BIN)
 
 # Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 71 of the
 # 105 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
-# socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
+# socket/thread runtime (select/Winsock/winpthreads). Tier 3: suites whose POSIX
 # network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
 # are routed through tests/net_compat.h, including the mock-TLS suites (tls,
 # tls_integration, peer_cert), which exercise the TLS server/client integration
@@ -605,7 +605,7 @@ test: $(TEST_BIN)
 #                   on the GitHub runner, which delivers a TOS that is neither the sent mark nor
 #                   the -1 sentinel. Root cause is #276 (the send never marks, because Windows
 #                   leaves KL_DGRAM_CAP_TOS ungranted). Enrol it once #276 is fixed, not before.
-# stream_transport runs on WSAPoll only: it builds its own readiness accept loop, so it is
+# stream_transport runs on the Windows select() backend only: it builds its own readiness accept loop, so it is
 # readiness-by-construction like event / event_ctx / socket_provider.
 # Needs real work: dns_resolver, which links against kl_socket_provider_posix (absent on
 # Windows) and wants a Windows-native mock-UDP-nameserver + hosts/resolv.conf harness; it is
@@ -640,7 +640,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 # stream_single_shot is a BARE-stream test (raw kl_comp_post_recv/_send + drain, no HTTP connection
 # driver), so it validates the IOCP single-shot completion contract natively; it skips on a
 # readiness build. test_event_caps is a *readiness*-backend suite (it asserts READINESS caps), so it
-# runs in the WSAPoll/POSIX jobs, NOT here.
+# runs in the Windows select()/POSIX jobs, NOT here.
 #
 # EXCLUDED, and why:
 # (wakeup and http_client were excluded for #265; both are fixed and enrolled below.)
@@ -740,7 +740,7 @@ check-msvc-consumer: $(KEEL_LIB)
 	$(CC) $(CFLAGS) $(TEST_OBJ_TMP) $(EXE_OUT)$(MSVC_CONSUMER_BIN) tools/msvc_consumer.c $(LD_SEP) $(LD_KEEL) $(LD_THREAD) $(LDFLAGS)
 	@./$(MSVC_CONSUMER_BIN)
 # The MSVC set is derived (see MSVC_TEST_SUITES above); this makes that stay true. Passes both
-# backend base sets, because WSAPoll and IOCP derive from different Windows suite lists and a
+# backend base sets, because the select() and IOCP backends derive from different Windows suite lists and a
 # contract that only holds for the default backend is not a contract. The exclusion lists go
 # through too, so the gate can tell "excluded on purpose" from "quietly missing".
 check-msvc-parity:
@@ -752,7 +752,7 @@ check-msvc-parity:
 # ENROLLED_CUR is that variable ITSELF, not a re-derivation, so a command-line or environment
 # override of it (it is ?=) shows up as a violation instead of being quietly reproduced.
 check-msvc-parity-one:
-	@LABEL="$(if $(filter iocp,$(BACKEND)),iocp,wsapoll)" \
+	@LABEL="$(if $(filter iocp,$(BACKEND)),iocp,winselect)" \
 	  BASE_CUR="$(MSVC_BASE_SUITES)" ENROLLED_CUR="$(MSVC_TEST_SUITES)" \
 	  BASE_WSAPOLL="$(WIN_TEST_SUITES)" BASE_IOCP="$(WIN_IOCP_TEST_SUITES)" \
 	  EXCL_ALL="$(MSVC_EXCLUDE)" MSVC_EXCLUDE_PTHREAD="$(MSVC_EXCLUDE_PTHREAD)" \

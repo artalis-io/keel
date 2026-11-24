@@ -294,4 +294,159 @@ UTEST(event_hangup, write_readiness_survives_a_peer_half_close) {
     kl_test_closesock(c);
 }
 
+/* A peer's TCP urgent (out-of-band) byte must not make a waiting writer spin. Keel never reads
+ * urgent data; on Windows select() reports it in the except set for as long as it is pending, and a
+ * backend that watched the except set for a connected writer returned at once on every wait. */
+static void send_oob(int c) {
+#if defined(_WIN32)
+    (void)send((SOCKET)c, "!", 1, MSG_OOB);
+#else
+    (void)send(c, "!", 1, MSG_OOB);
+#endif
+}
+
+UTEST(event_hangup, an_urgent_byte_does_not_spin_a_waiting_writer) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    if (kl_event_caps(&ev.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ev); UTEST_SKIP("completion loop"); }
+    int s, c;
+    ASSERT_EQ(tcp_pair(&s, &c), 0);
+    int rb = 4096, sb = 8192;
+    (void)setsockopt(c, SOL_SOCKET, SO_RCVBUF, (const char *)&rb, sizeof rb);
+    (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb);
+    memset(g_hc_buf, 'w', sizeof g_hc_buf);
+    HcWriter w = { s, 0, 0, 0, 0 };
+    hc_fill(&w);
+    ASSERT_TRUE(w.sent > 0);
+    send_oob(c);                                            /* one urgent byte from the peer */
+    kl_test_sleep_ms(100);
+    ASSERT_EQ(kl_watcher_add(&ev, s, KL_EVENT_WRITE, hc_on_ready, &w), 0);
+    for (int i = 0; i < 6; i++) kl_event_ctx_run(&ev, 8, 50);   /* about 300 ms, peer not reading */
+    EXPECT_EQ(w.others, 0);
+    EXPECT_EQ(w.spurious, 0);                               /* every WRITE report had room behind it */
+    EXPECT_TRUE_MSG(w.calls <= 6, "the urgent byte kept the writer's wait returning: a spin");
+    const long sent_before_read = w.sent;
+    kl_test_set_nonblock(c);
+    char rd[65536];
+    for (int i = 0; i < 400 && w.sent == sent_before_read; i++) {
+        long n = kl_test_sockread(c, rd, sizeof rd);
+        if (n <= 0) kl_event_ctx_run(&ev, 8, 10);
+    }
+    EXPECT_TRUE(w.sent > sent_before_read);                 /* room again: the writer went on */
+    kl_watcher_del(&ev, s);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(s);
+    kl_test_closesock(c);
+}
+
+/* A nonblocking connect is observed both ways through a WRITE registration: a successful one is
+ * reported writable with no socket error, a refused one is reported (writable, or the backend's
+ * failure report) with the error pending. Every readiness backend. */
+static int g_conn_calls;
+static void conn_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)fd; (void)ready; (void)ud;
+    g_conn_calls++;
+}
+static int conn_case(int refused, int *soerr_out) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    if (kl_event_ctx_init(&ev, &alloc) != 0) return -1;
+    if (kl_event_caps(&ev.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ev); return 1; }
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int l = (int)socket(AF_INET, SOCK_STREAM, 0);
+    socklen_t al = (socklen_t)sizeof a;
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || getsockname(l, (struct sockaddr *)&a, &al) != 0) return -1;
+    if (refused) kl_test_closesock(l);                       /* nothing listens on that port now */
+    else (void)listen(l, 1);
+    int c = (int)socket(AF_INET, SOCK_STREAM, 0);
+    kl_test_set_nonblock(c);
+    int r = connect(c, (struct sockaddr *)&a, sizeof a);
+    if (r == 0) { kl_test_closesock(c); if (!refused) kl_test_closesock(l); kl_event_ctx_free(&ev); return 2; }
+    g_conn_calls = 0;
+    if (kl_watcher_add(&ev, c, KL_EVENT_WRITE, conn_on_ready, NULL) != 0) { kl_event_ctx_free(&ev); return -1; }
+    for (int i = 0; i < 60 && g_conn_calls == 0; i++) kl_event_ctx_run(&ev, 8, 100);   /* up to 6 s */
+    int soerr = 0;
+    socklen_t sl = (socklen_t)sizeof soerr;
+    (void)getsockopt(c, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
+    *soerr_out = soerr;
+    int calls = g_conn_calls;
+    kl_watcher_del(&ev, c);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(c);
+    if (!refused) kl_test_closesock(l);
+    return calls > 0 ? 0 : 3;
+}
+UTEST(event_hangup, a_successful_nonblocking_connect_is_reported) {
+    int soerr = -1, rc = conn_case(0, &soerr);
+    if (rc == 1) UTEST_SKIP("completion loop");
+    if (rc == 2) UTEST_SKIP("the connect completed synchronously");
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(soerr, 0);
+}
+UTEST(event_hangup, a_refused_nonblocking_connect_is_reported) {
+    int soerr = 0, rc = conn_case(1, &soerr);
+    if (rc == 1) UTEST_SKIP("completion loop");
+    if (rc == 2) UTEST_SKIP("the connect completed synchronously");
+    EXPECT_EQ(rc, 0);                                        /* the failure is observed, not lost */
+    EXPECT_TRUE(soerr != 0);
+}
+
+#if defined(_WIN32)
+/* Winsock reuses SOCKET values quickly. A watcher whose socket was closed without kl_watcher_del is
+ * marked dead by the backend; a new socket that gets the same handle value and is watched again
+ * (kl_watcher_add on a descriptor already in the list re-registers it) must be polled. */
+static int g_reuse_reads;
+static void reuse_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)ud;
+    if (ready & KL_EVENT_READ) { char b[64]; (void)kl_test_sockread((int)fd, b, sizeof b); g_reuse_reads++; }
+}
+UTEST(event_hangup, a_reused_socket_handle_is_polled_again) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    int s, c;
+    ASSERT_EQ(tcp_pair(&s, &c), 0);
+    ASSERT_EQ(kl_watcher_add(&ev, s, KL_EVENT_READ, reuse_on_ready, NULL), 0);
+    const int old = s;
+    kl_test_closesock(s);                                   /* closed without kl_watcher_del */
+    kl_test_closesock(c);
+    kl_event_ctx_run(&ev, 8, 20);                           /* the backend notices the stale handle */
+    int s2 = -1, reused = 0;                                 /* the reused handle: a new socket */
+    int keep[64], nkeep = 0;
+    for (int i = 0; i < 64 && !reused; i++) {               /* until the old handle value comes back */
+        int t = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (t == old) { s2 = t; reused = 1; }
+        else keep[nkeep++] = t;
+    }
+    for (int i = 0; i < nkeep; i++) kl_test_closesock(keep[i]);
+    if (!reused) { kl_event_ctx_free(&ev); UTEST_SKIP("the handle value was not reused"); }
+    struct sockaddr_in a;                                    /* connect it to a fresh listener */
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int l = (int)socket(AF_INET, SOCK_STREAM, 0);
+    socklen_t al = (socklen_t)sizeof a;
+    ASSERT_EQ(bind(l, (struct sockaddr *)&a, sizeof a), 0);
+    ASSERT_EQ(listen(l, 1), 0);
+    ASSERT_EQ(getsockname(l, (struct sockaddr *)&a, &al), 0);
+    ASSERT_EQ(connect(s2, (struct sockaddr *)&a, sizeof a), 0);
+    int c2 = (int)accept(l, NULL, NULL);
+    kl_test_closesock(l);
+    kl_test_set_nonblock(s2);
+    g_reuse_reads = 0;
+    ASSERT_EQ(kl_watcher_add(&ev, s2, KL_EVENT_READ, reuse_on_ready, NULL), 0);
+    (void)kl_test_sockwrite(c2, "x", 1);
+    for (int i = 0; i < 20 && g_reuse_reads == 0; i++) kl_event_ctx_run(&ev, 8, 20);
+    EXPECT_TRUE(g_reuse_reads > 0);
+    kl_watcher_del(&ev, s2);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(s2);
+    kl_test_closesock(c2);
+}
+#endif
+
 UTEST_MAIN();
