@@ -37,9 +37,15 @@ enum) and the default behavior of a suspended op changes, so the next release is
   On a backend whose registration persists (epoll, kqueue, poll) nothing showed, but on io_uring
   (one-shot `POLL_ADD`) the watcher was never armed again. Hang-up detection made this reachable on a
   common path: a thread pool's `done_fn` that completes a suspended op removes that connection's
-  hang-up watcher, which stalled the pool's wakeup after its first completion. The re-arm now checks
-  the dispatched watcher itself: it is skipped only if that watcher was removed or its interest
-  changed.
+  hang-up watcher, which stalled the pool's wakeup after its first completion. The re-arm now applies
+  to the dispatched registration itself: it is skipped only if that registration was removed or its
+  interest changed. Identity is the watcher node's address and a per-context generation assigned when
+  the node is created, so a new watcher that reuses a freed node's address (even on the same descriptor
+  with the same interest) is never re-armed as if it were the old one.
+- **kqueue: removing a registration removes every filter.** `kl_event_del` deleted the READ and WRITE
+  filters in one call, and kqueue stops at the first failing change, so a WRITE-only registration (no
+  READ filter: `ENOENT`) kept its WRITE filter and went on delivering events carrying a udata the caller
+  had already freed. Each filter's result is now checked (`EV_RECEIPT`).
 
 ### Changed
 
