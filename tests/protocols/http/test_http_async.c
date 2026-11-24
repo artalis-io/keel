@@ -322,7 +322,7 @@ UTEST(async, deadline_sweep_survives_a_callback_that_releases_the_next_op) {
 }
 
 /* An on_deadline that sets a past deadline again (on its own op, still pending) fires once per sweep,
- * not in a loop: the sweep's budget is the number of ops it began with. */
+ * not in a loop, and does not starve the due ops after it. */
 static int g_sw_rearm_fired;
 static void sw_rearm_deadline(KlAsyncOp *op, void *ud) { (void)ud; g_sw_rearm_fired++; op->deadline_ms = 1; }
 
@@ -348,6 +348,40 @@ UTEST(async, deadline_sweep_fires_a_rearmed_deadline_once_per_sweep) {
     EXPECT_EQ(g_sw_rearm_fired, 2);
     kl_async_cancel(&s, &op);
     kl_test_closesock(f[0]);
+    cleanup_test_server(&s);
+}
+
+static int g_sw_other_fired;
+static void sw_other_deadline(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sw_other_fired++; op->deadline_ms = 1; }
+
+UTEST(async, deadline_sweep_rearm_does_not_starve_the_next_op) {
+    KlHttpServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 2, &s.alloc_storage), 0);
+    for (int i = 0; i < 2; i++) {
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].stream.ctx = &s.ev;
+    }
+    int fa[2], fb[2];
+    KlHttpConn *cb = sw_conn(&s, fb);
+    KlHttpConn *ca = sw_conn(&s, fa);
+    ASSERT_TRUE(ca != NULL && cb != NULL);
+    g_sw_rearm_fired = g_sw_other_fired = 0;
+    KlAsyncOp b = { .deadline_ms = 1, .on_resume = sw_noop, .on_deadline = sw_other_deadline,
+                    .on_cancel = sw_noop };
+    KlAsyncOp a = { .deadline_ms = 1, .on_resume = sw_noop, .on_deadline = sw_rearm_deadline,
+                    .on_cancel = sw_noop };
+    ASSERT_EQ(kl_async_suspend(&s, cb, &b), 0);
+    ASSERT_EQ(kl_async_suspend(&s, ca, &a), 0);   /* the list is A -> B; both due, both re-arm */
+    for (int i = 0; i < 5; i++)
+        kl_async_sweep_deadlines(&s, kl_monotonic_ms());
+    EXPECT_EQ(g_sw_rearm_fired, 5);
+    EXPECT_EQ(g_sw_other_fired, 5);
+    kl_async_cancel(&s, &a);
+    kl_async_cancel(&s, &b);
+    kl_test_closesock(fa[0]);
+    kl_test_closesock(fb[0]);
     cleanup_test_server(&s);
 }
 

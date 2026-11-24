@@ -593,7 +593,9 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Idle-timeout sweep on the completion loop too (slowloris defense); the
      * completion path never falls through to the readiness sweep in http_server.c. */
     kl_http_server_sweep_conn_timeouts(s, cnow, 1);
-    kl_async_sweep_deadlines(s, cnow);              /* async-op deadlines */
+#ifndef KEEL_FREESTANDING
+    kl_async_sweep_deadlines(s, cnow);              /* async-op deadlines (none can exist freestanding) */
+#endif
     kl_timer_fire(&s->ev);                          /* due one-shot timers */
     kl_http_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
     return 0;
