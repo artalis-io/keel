@@ -15,6 +15,7 @@
 #include <string.h>
 #include "internal_trace.h"
 #include "kl_cstr.h"          /* kl_ascii_strncasecmp: freestanding-safe, locale-free */
+#include "kl_atomic.h"        /* the server's draining flag */
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
@@ -389,6 +390,11 @@ static void conn_log_access(KlHttpConn *c) {
     c->access_log(&c->req, c->res.status, bytes, duration, c->access_log_data);
 }
 
+/* The owning server is in a graceful drain (kl_http_server_stop with drain_timeout_ms). */
+static int conn_server_draining(const KlHttpConn *c) {
+    return c->server_draining && kl_atomic_load_int(c->server_draining);
+}
+
 /*
  * Initialize response for the current request, so middleware can write headers/status before the handler runs.
  */
@@ -406,6 +412,13 @@ static int conn_init_response(KlHttpConn *c) {
     c->res.ctx = c->stream.ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
     c->res.stream_inflight = 1;   /* this response is the connection's own (see the field) */
     c->res.keep_alive = c->req.keep_alive;
+    /* A graceful drain ends keep-alive: this response says so, and the connection closes after it. */
+    if (conn_server_draining(c)) {
+        c->req.keep_alive = 0;
+        c->res.keep_alive = 0;
+        if (kl_http_response_header(&c->res, "Connection", "close") < 0)
+            return -1;
+    }
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
     return 0;
@@ -1274,6 +1287,9 @@ static KlHttpConnState conn_send_complete(KlHttpConn *c) {
         c->req.keep_alive = 0;
         c->res.keep_alive = 0;
     }
+    /* A response begun before a graceful drain started still ends its connection. */
+    if (conn_server_draining(c))
+        c->req.keep_alive = 0;
     if (c->req.keep_alive)
         return conn_keepalive_reset(c);
     /* Response fully flushed and the connection is ending. If request input may still be unread

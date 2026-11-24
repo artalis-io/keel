@@ -323,6 +323,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
             return -1;
         }
         s->pool.conns[i].access_log = s->config.access_log;
+        s->pool.conns[i].server_draining = &s->draining;
         s->pool.conns[i].access_log_data = s->config.access_log_data;
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
         s->pool.conns[i].router = &s->router;
@@ -587,6 +588,7 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
     if (s->accept_backoff_until > cnow && s->accept_backoff_until - cnow < (uint64_t)cwait)
         cwait = (int)(s->accept_backoff_until - cnow);   /* wake to post the accept again */
     cwait = kl_timer_next_timeout(&s->ev, cwait);
+    cwait = kl_http_server_drain_wait(s, cnow, cwait);
     if (kl_http_comp_run(s, cwait) < 0)
         return -1;
     cnow = kl_monotonic_ms();
@@ -657,7 +659,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     /* Completion: an accept post that failed for a moment left the listener paused with nothing
      * posted, and no connection may be left to free a slot and resume it. Try again every sweep
      * (a no-op while accepts are posted, or while the pool is full). */
-    if (completion_loop && s->accept_via_listener && !kl_atomic_load_int(&s->draining))
+    const int draining = kl_atomic_load_int(&s->draining);
+    if (completion_loop && s->accept_via_listener && !draining)
         kl_listener_notify_slot_free(&s->accept_listener);
     for (int i = 0; i < s->pool.capacity; i++) {
         KlHttpConn *tc = &s->pool.conns[i];
@@ -748,6 +751,18 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             }
             continue;
         }
+        /* A graceful drain ends keep-alive: a connection waiting for its next request, with nothing
+         * of it received, is closed now rather than holding the drain until its deadline. Quietly:
+         * no request is outstanding, so there is nothing to answer. */
+        if (draining && tc->state == KL_HTTP_CONN_READING && tc->stream.read_len == 0) {
+            if (completion_loop) {
+                kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort the receive → released by its completion */
+            } else {
+                kl_event_del(&s->ev.loop, tc->stream.fd);
+                kl_http_server_conn_release(s, tc);
+            }
+            continue;
+        }
         /* TLS handshake time counts against read timeout */
         int timed_out = (now - tc->last_active_ms > timeout);
         /* Body deadline: absolute time from body start, not resettable. */
@@ -798,8 +813,53 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     }
 }
 
+/* The first drain tick stops listening: a new connection is then refused at connect (and an owned
+ * AF_UNIX node removed) instead of waiting in a backlog nobody accepts from, so a load balancer or a
+ * fleet fails over at once; this also ends a readiness loop's wakeups on a listen socket it no longer
+ * accepts from. Runs on the loop thread (kl_http_server_stop may be a signal handler). The listener's
+ * own close contract is followed: readiness detaches at once; completion requests the cancel of every
+ * posted accept, and the ordinary loop reaps them (kl_http_server_free completes the detachment if
+ * the drain ends first). Autonomous completion backends (no counted listener) accept nothing during
+ * a drain already and keep their listener until free. */
+static void server_drain_stop_listening(KlHttpServer *s) {
+    if (s->drain_listener_closed) return;
+    s->drain_listener_closed = 1;
+    if (!s->accept_via_listener) return;
+    kl_listener_close(&s->accept_listener);
+    if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
+        if (kl_handle_valid(s->listen_fd)) {
+            kl_sock_close(s->ev.sockets, s->listen_fd);   /* forces an IOCP AcceptEx to complete */
+            s->listen_fd = KL_INVALID_SOCKET;
+        }
+        (void)kl_comp_shutdown_accepts(s);                /* io_uring / pollcomp: force the rest */
+    } else if (s->listen_registered) {
+        kl_event_del(&s->ev.loop, s->listen_fd);
+        s->listen_registered = 0;
+    }
+#ifndef KEEL_FREESTANDING
+    kl_http_server_close_listener(s);   /* closes the socket, removes an owned AF_UNIX node */
+#else
+    if (kl_handle_valid(s->listen_fd)) {
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
+    }
+#endif
+}
+
+int kl_http_server_draining(const KlHttpServer *s) {
+    return s ? kl_atomic_load_int(&s->draining) : 0;
+}
+
+int kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms) {
+    if (!kl_atomic_load_int(&s->draining)) return wait_ms;
+    if (now >= s->drain_deadline_ms) return 0;
+    uint64_t rem = s->drain_deadline_ms - now;
+    return (wait_ms < 0 || rem < (uint64_t)wait_ms) ? (int)rem : wait_ms;
+}
+
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
     if (!kl_atomic_load_int(&s->draining)) return;
+    server_drain_stop_listening(s);
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     for (int j = 0; j < s->pool.capacity; j++) {

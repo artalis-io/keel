@@ -324,3 +324,4 @@ kl_anon_pipe_create	anon_pipe.h	direct-assertion	tests/test_anon_pipe.c:107 ASSE
 kl_anon_pipe_end_close	anon_pipe.h	direct-assertion	tests/test_anon_pipe.c:329 end handle NULL after close; handle count back to baseline
 kl_anon_pipe_end_fd	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:129 ASSERT_EQ(kl_anon_pipe_end_fd(&e), -1) (POSIX)
 kl_anon_pipe_end_handle	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:285 the child HANDLE is a non-inheritable pipe (Windows)
+kl_http_server_draining	http_server.h	direct-assertion	tests/protocols/http/test_http_server_integration.c:987 (0 before stop, 1 while draining)

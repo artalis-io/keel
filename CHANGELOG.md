@@ -5,8 +5,28 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Added
+
+- **`kl_http_server_draining()`** reports whether a graceful drain is in progress, from any thread,
+  so an application no longer has to read the server's internal `draining` field.
+
 ### Changed
 
+- **A graceful drain is gateway-grade.** From the run loop's first tick after `kl_http_server_stop`
+  (with `drain_timeout_ms`):
+  - the server **stops listening**: the listen socket is closed and an owned AF_UNIX node removed,
+    so a new connection is refused at connect instead of waiting in a backlog nobody accepts from,
+    and a load balancer or fleet fails over at once. An adopted `listen_fd` is closed too (the
+    socket-activation manager keeps its own copy);
+  - **keep-alive ends**: every HTTP/1.1 response begun during the drain carries
+    `Connection: close`, a response begun before it still closes its connection afterwards, and an
+    idle keep-alive connection (waiting for its next request, nothing of it received) is closed at
+    once instead of holding the drain until its deadline;
+  - the loop's wait is bounded by the remaining drain time, so `kl_http_server_run` returns at the
+    deadline rather than up to a second later.
+
+  In-flight requests, suspended ops and streamed responses still finish, and
+  `kl_http_server_free` still cancels what remains.
 - **The Windows readiness backend is Winsock `select()`, replacing WSAPoll.** After a peer
   half-close (FIN), WSAPoll reports `POLLHUP` on every call whatever interest is requested, so a
   WSAPoll wait could not block until a half-closed socket was writable again: a writer waiting for
@@ -34,6 +54,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   now one function for both loops, and keeps its place in a cursor that retiring an op advances
   before the op's `on_cancel` runs. Ops are still visited in list order, each at most once per
   sweep.
+- **Readiness loops no longer spin during a drain.** A connection that arrived after
+  `kl_http_server_stop` left the listen socket readable, and the drain re-armed it every tick: the
+  loop ran at 100% CPU until the drain ended (kqueue and poll; epoll likely). Closing the listener at
+  the drain's start ends it.
+- **`kl_http_server_stop` publishes the drain deadline before the drain flag.** A loop tick between
+  the two stores (a stop from another thread or a signal handler) could read a deadline of 0 and end
+  the drain at once.
+- **pollcomp delivers a cancelled operation without waiting out the poll timeout.** Its drain
+  collected the cancelled operations, then still blocked in `poll()` for the full timeout before
+  returning them, so an idle-timeout or drain close took up to a second.
 - **A streamed response's `on_drain` producer is bounded on completion loops.** On io_uring, IOCP
   and pollcomp the response drain's `on_drain` fired while the server was moving the stream's backlog
   onto the connection's output queue, a step allowed past the queue's bound, so every write made from

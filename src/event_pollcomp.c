@@ -733,6 +733,9 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
         pc_op_free(op);
     }
     if (count >= max) return count;
+    /* Completions are already ready: collect whatever else is, but never block before returning them
+     * (a cancelled receive would otherwise wait out the whole timeout to be delivered). */
+    if (count > 0) timeout_ms = 0;
 
     /* Count pending ops + registered watches; build one pollfd array (ops then watches). */
     size_t nops = 0, nwatch = 0;
