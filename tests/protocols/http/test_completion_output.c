@@ -1642,17 +1642,26 @@ static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
     int cancelled = g_pace.cancelled, ended = g_pace.ended;
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
+    /* Nothing is left suspended, so nothing is left on the hang-up sweep: a reset reported to the
+     * write watch as a bare READ (macOS poll) once cancelled the op but kept its sweep count, and the
+     * sweep timer then re-armed itself every second for good. */
+    int sweep_conns = pace_srv.hup_sweep_conns, sweep_armed = pace_srv.hup_sweep_armed;
     kl_http_server_free(&pace_srv);
     ASSERT_TRUE(fd >= 0);
     ASSERT_TRUE(got > 0);
     ASSERT_FALSE(ended);
     ASSERT_EQ(cancelled, 1);                              /* exactly once, before free */
+    ASSERT_EQ(sweep_conns, 0);
+    ASSERT_EQ(sweep_armed, 0);
 }
 UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once) {
     pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_CANCEL);
 }
 UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once_without_the_hangup_watch) {
     pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_OFF);
+}
+UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once_under_reset_only) {
+    pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_RESET_ONLY);
 }
 
 /* A client that half-closes (shutdown SHUT_WR) while the paced stream's output waits, and keeps

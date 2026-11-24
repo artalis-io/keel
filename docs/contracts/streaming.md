@@ -41,7 +41,8 @@ divergent meaning.
 connection is suspended (`kl_async_suspend`). To push events later (an SSE feed driven by a timer,
 a watcher or another connection), begin the stream, suspend, write while suspended, and end the
 stream from the resume (`on_resume`). A suspended connection is out of the event loop for reads (only
-its hang-up, and while output waits its writability, are watched) and exempt from the idle timeout, so
+its hang-up, per `KlHttpServerConfig.suspended_hangup`, is watched; on a readiness loop, while stream
+output waits, so is its writability, which moves the output) and exempt from the idle timeout, so
 a quiet stream costs nothing and is not cut off at `read_timeout_ms`. A
 handler or resume that returns without suspending gives the response up: what it wrote is flushed
 (the outbound buffer, if anything is still in it) and the connection then ends, on both axes. A

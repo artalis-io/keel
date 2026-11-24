@@ -207,16 +207,20 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
      * mapping of HUP/ERR (an error that did not also shut the receive side): a failure. */
     if (!(ready & KL_EVENT_HANGUP))
         ready = (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_ERROR);
-    kl_watcher_del(&s->ev, conn->stream.fd);   /* first report: stop watching, whatever follows */
-    conn->hup_state = KL_HUP_NONE;
-    conn->stream_write_watched = 0;            /* the stream's write watch went with it; re-armed below */
+    /* First report: stop watching, whatever follows. The watcher carries the write watch too, and a
+     * connection on the sweep (a write watch with no hang-up registration) leaves the sweep here, so
+     * its count stays right. The next tick's kl_async_sync_stream_interest re-arms the write watch
+     * while output waits. */
+    async_unwatch_hangup(s, conn);
     KlAsyncOp *op = conn->async_op;
     if (!op || conn->state != KL_HTTP_CONN_SUSPENDED)
         return;
     if (!(ready & KL_EVENT_ERROR) &&
         s->config.suspended_hangup == KL_HTTP_SUSPEND_HANGUP_RESET_ONLY) {
         /* An orderly FIN, which may be a half-close: the op runs on and its response is delivered.
-         * Nothing more is watched (a reset after this FIN is bounded by the op's own deadline). */
+         * No hang-up is watched after it: a reset after this FIN ends the op only while stream
+         * output waits (the write watch, re-armed next tick, sees it); otherwise it is bounded by
+         * the op's own deadline. */
         conn->hup_state = KL_HUP_FIN_KEPT;
         return;
     }
