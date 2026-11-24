@@ -163,6 +163,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->state = KL_HTTP_CONN_READING;
     c->stream.read_len = 0;
     c->stream_write_watched = 0;
+    c->served_request = 0;
     c->hdr_parsed = 0;
     c->hdr_sent = 0;
     c->route = NULL;
@@ -416,8 +417,7 @@ static int conn_init_response(KlHttpConn *c) {
     if (conn_server_draining(c)) {
         c->req.keep_alive = 0;
         c->res.keep_alive = 0;
-        if (kl_http_response_header(&c->res, "Connection", "close") < 0)
-            return -1;
+        c->res.close_notice = 1;   /* the head says Connection: close (http_response.c) */
     }
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
@@ -1249,6 +1249,7 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     conn_request_body_reset(c);
     c->hdr_parsed = 0;
     c->stream.read_len = 0;
+    c->served_request = 1;   /* now an idle keep-alive connection until its next request */
     if (c->stream.read_cap > KL_HTTP_CONN_READ_BUF_SIZE) {
         char *shrunk = kl_realloc(c->stream.alloc, c->stream.read_buf,
                                    c->stream.read_cap, KL_HTTP_CONN_READ_BUF_SIZE);

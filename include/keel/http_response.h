@@ -66,6 +66,10 @@ typedef struct KlHttpResponse {
     KlTls *tls;             /**< TLS session (NULL for plaintext) */
     struct KlEventCtx *ctx; /**< Back-pointer to event ctx (for ctx->sockets;
                                  bound with conn_fd, preserved across reset) */
+    /* Appended after 3.5.0. */
+    int close_notice;       /**< Internal: the connection closes after this response for a server
+                                 reason (a graceful drain); the head says Connection: close unless
+                                 the handler set a Connection header itself. Set by the server. */
 } KlHttpResponse;
 
 /**

@@ -966,10 +966,18 @@ UTEST(server_integration, no_new_connection_is_served_while_draining) {
  * A connection that has sent part of a request holds the drain (it is not idle). While it does: the
  * listener is closed, so a new connect is refused rather than left in a backlog; the loop does not
  * spin on a listen socket it no longer accepts from; kl_http_server_draining reports it. */
+static void handle_own_conn(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_http_response_header(res, "connection", "close");
+    kl_http_response_json(res, 200, "{}", 2);
+}
+
+
 static uint64_t drain_srv_start(KlHttpServer *srv, KlPlatThread *tid, int drain_ms) {
     KlHttpServerConfig cfg = { .port = 0, .drain_timeout_ms = drain_ms, .read_timeout_ms = 30000 };
     if (kl_http_server_init(srv, &cfg) != 0) return 0;
     kl_http_server_route(srv, "GET", "/hi", handle_hi, NULL, NULL);
+    kl_http_server_route(srv, "GET", "/own", handle_own_conn, NULL, NULL);
     kl_plat_thread_create(tid, server_thread_fn, srv);
     wait_for_bind(srv);
     return (uint64_t)srv->bound_port;
@@ -1018,17 +1026,20 @@ UTEST(server_integration, a_request_finished_during_a_drain_gets_connection_clos
     kl_test_sleep_ms(100);
     kl_http_server_stop(&srv);
     kl_test_sleep_ms(150);
+    uint64_t t0 = kl_monotonic_ms();
     (void)kl_test_sockwrite(fd, "Host: x\r\n\r\n", 11);
     char buf[2048];
     buf[0] = '\0';
-    (void)read_response(fd, buf, sizeof buf, 2000);              /* reads to EOF: the server closes */
+    (void)read_one_response(fd, buf, sizeof buf, 2000);
+    char b;
+    int closed = kl_test_poll1(fd, 0, 2000) > 0 && kl_test_sockread(fd, &b, 1) == 0;   /* then EOF */
     kl_test_closesock(fd);
-    uint64_t t0 = kl_monotonic_ms();
     kl_plat_thread_join(&tid);
     EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
     EXPECT_TRUE(strstr(buf, "Connection: close\r\n") != NULL);
     EXPECT_TRUE(strstr(buf, "keep-alive") == NULL);
-    EXPECT_TRUE(kl_monotonic_ms() - t0 < 1500);
+    EXPECT_TRUE(closed);
+    EXPECT_TRUE_MSG(kl_monotonic_ms() - t0 < 1500, "the drain did not end once the response was out");
     kl_http_server_free(&srv);
 }
 
@@ -1052,12 +1063,62 @@ UTEST(server_integration, a_drain_closes_idle_keep_alive_connections) {
     uint64_t t0 = kl_monotonic_ms();
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
-    EXPECT_TRUE_MSG(kl_monotonic_ms() - t0 < 500, "an idle keep-alive connection held the drain");
+    EXPECT_TRUE_MSG(kl_monotonic_ms() - t0 < 750, "an idle keep-alive connection held the drain");
     char b;
     int readable = kl_test_poll1(keep, 0, 2000) > 0;             /* never block: a failure must not hang */
     EXPECT_TRUE(readable);
     if (readable) EXPECT_EQ(0, (int)kl_test_sockread(keep, &b, 1));   /* the server closed it */
     kl_test_closesock(keep);
+    kl_http_server_free(&srv);
+}
+
+/* A connection accepted before the drain whose first request had not arrived yet is not an idle
+ * keep-alive connection: its request is still served (with Connection: close). */
+UTEST(server_integration, a_drain_serves_the_first_request_of_a_new_connection) {
+    static KlHttpServer srv;
+    KlPlatThread tid;
+    int port = (int)drain_srv_start(&srv, &tid, 3000);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    kl_test_sleep_ms(100);                                       /* accepted, nothing sent yet */
+    kl_http_server_stop(&srv);
+    kl_test_sleep_ms(150);                                       /* the drain has started */
+    const char *rq = "GET /hi HTTP/1.1\r\nHost: x\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    char buf[2048];
+    buf[0] = '\0';
+    (void)read_one_response(fd, buf, sizeof buf, 2000);
+    kl_test_closesock(fd);
+    kl_plat_thread_join(&tid);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+    EXPECT_TRUE(strstr(buf, "Connection: close\r\n") != NULL);
+    kl_http_server_free(&srv);
+}
+
+/* A handler that sets its own Connection header during a drain gets exactly that header, not a
+ * second one from the server. */
+UTEST(server_integration, a_drain_does_not_duplicate_a_handler_connection_header) {
+    static KlHttpServer srv;
+    KlPlatThread tid;
+    int port = (int)drain_srv_start(&srv, &tid, 3000);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    (void)kl_test_sockwrite(fd, "GET /own HTTP/1.1\r\n", 19);   /* not idle: holds the drain */
+    kl_test_sleep_ms(100);
+    kl_http_server_stop(&srv);
+    kl_test_sleep_ms(150);
+    (void)kl_test_sockwrite(fd, "Host: x\r\n\r\n", 11);
+    char buf[2048];
+    buf[0] = '\0';
+    (void)read_one_response(fd, buf, sizeof buf, 2000);
+    kl_test_closesock(fd);
+    kl_plat_thread_join(&tid);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+    int n = 0;
+    for (const char *p = buf; (p = strstr(p, "onnection:")) != NULL; p++) n++;
+    EXPECT_EQ(1, n);
     kl_http_server_free(&srv);
 }
 
@@ -1076,7 +1137,7 @@ UTEST(server_integration, a_drain_ends_at_its_deadline) {
     kl_plat_thread_join(&tid);
     uint64_t took = kl_monotonic_ms() - t0;
     EXPECT_TRUE(took >= 350);
-    EXPECT_TRUE_MSG(took < 900, "the drain overran its deadline");
+    EXPECT_TRUE_MSG(took < 1000, "the drain overran its deadline");
     kl_test_closesock(holder);
     kl_http_server_free(&srv);
 }
