@@ -187,7 +187,7 @@ void kl_async_sync_stream_interest(KlHttpServer *s) {
     for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
         KlHttpConn *c = op->conn;
         if (!c || c->async_op != op || c->state != KL_HTTP_CONN_SUSPENDED) continue;
-        async_stream_watch_write(s, c, async_stream_pending(c));
+        async_stream_watch_write(s, c, !c->stream_write_off && async_stream_pending(c));
     }
 }
 
@@ -201,6 +201,18 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
         async_stream_progress(s, conn);   /* writable: move the suspended stream's output */
         return;
     }
+    if (conn->stream_write_watched) {
+        /* A report without WRITE while the write watch is on. That registration is not a hang-up
+         * registration, so a backend may report the peer's FIN as a bare READ: WSAPoll maps a FIN's
+         * POLLHUP to READ there, level-triggered. Treated as a failure below it would cancel a
+         * half-closed client under RESET_ONLY and even under OFF; flushed on, it would spin. Drop the
+         * write watch for the rest of this suspension instead: the hang-up watch (if any) is back on
+         * its own and classifies what happened per the policy, as without a stream. Only this
+         * connection's stream then moves on the producer's own writes, as before the write watch. */
+        conn->stream_write_off = 1;
+        async_stream_watch_write(s, conn, 0);
+        return;
+    }
     if (!(ready & (KL_EVENT_HANGUP | KL_EVENT_READ)))
         return;
     /* A hang-up registration has no READ interest, so a READ report can only be a backend's legacy
@@ -209,7 +221,8 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
         ready = (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_ERROR);
     kl_watcher_del(&s->ev, conn->stream.fd);   /* first report: stop watching, whatever follows */
     conn->hup_state = KL_HUP_NONE;
-    conn->stream_write_watched = 0;            /* the stream's write watch went with it; re-armed below */
+    conn->stream_write_watched = 0;   /* the stream's write watch went with it; the next tick's
+                                       * kl_async_sync_stream_interest re-arms it while output waits */
     KlAsyncOp *op = conn->async_op;
     if (!op || conn->state != KL_HTTP_CONN_SUSPENDED)
         return;
@@ -233,6 +246,7 @@ int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
     kl_event_del(&s->ev.loop, conn->stream.fd);
 
     /* Park the connection */
+    conn->stream_write_off = 0;   /* a new suspension may watch its stream for writability */
     conn->state = KL_HTTP_CONN_SUSPENDED;
     conn->async_op = op;
     conn->suspend_start_ms = kl_monotonic_ms();

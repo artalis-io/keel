@@ -177,6 +177,9 @@ struct KlHttpConn {
      * streamed response has output waiting in the drain (async.c). The same watcher as the hang-up
      * watch, so it goes with it when the op retires. */
     int stream_write_watched;
+    /* 1 = this suspension no longer watches its stream for writability: the write watch saw a report
+     * without WRITE (a peer's FIN on WSAPoll), and the hang-up watch decides instead (async.c). */
+    int stream_write_off;
     struct KlHttpServer *hup_server;   /* the server that owns the watch or the sweep entry */
     /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
      * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,
