@@ -1,6 +1,6 @@
 /*
  * completion_readiness_stub.c: the kl_comp_ops_builtin() stub for READINESS builds
- * (epoll / kqueue / poll / WSAPoll). Linked by the Makefile when the selected EVENT_SRC
+ * (epoll / kqueue / poll / Windows select()). Linked by the Makefile when the selected EVENT_SRC
  * is a readiness backend; a completion backend provides its own kl_comp_ops_builtin().
  *
  * A readiness loop's caps lack KL_EVENT_CAP_COMPLETION, so the server never enters the

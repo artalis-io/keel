@@ -92,7 +92,7 @@ The widening only earns its place if a non-socket transport uses it, so it ships
 - It does not give `KlListener` a `KlStream *` output (A), a handle union (B), or a universal handle.
 - It does not move the HTTP server to the object family. Its fd handoff is correct for sockets and
   stays.
-- It does not add WSAPoll pipe listening (refused, like the client), pool-credit accounting for pipes
+- It does not add Windows select() pipe listening (refused, like the client), pool-credit accounting for pipes
   (no pool: `reserve` / `release` stay NULL), or instance recycling via `DisconnectNamedPipe` (every
   instance is closed after retirement; recycling is an optimization no consumer needs).
 

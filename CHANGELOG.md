@@ -5,6 +5,26 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Changed
+
+- **The Windows readiness backend is Winsock `select()`, replacing WSAPoll.** After a peer
+  half-close (FIN), WSAPoll reports `POLLHUP` on every call whatever interest is requested, so a
+  WSAPoll wait could not block until a half-closed socket was writable again: a writer waiting for
+  room (a streamed response to a client that called `shutdown(SD_SEND)` and still reads) either spun
+  or stopped. `select()` keeps write readiness independent of the peer's direction (measured on
+  Windows; `docs/architecture/windows_readiness_backend.md`). `src/event_winselect.c` replaces
+  `src/event_wsapoll.c` as the default Windows readiness backend; `BACKEND=winselect`, and the old
+  `BACKEND=wsapoll`, select it. Its descriptor sets grow with the registrations (no fixed
+  `FD_SETSIZE` limit), and a socket closed without `kl_event_del` no longer stops the loop.
+
+Upgrade notes:
+
+- **Windows readiness loops no longer advertise `KL_EVENT_CAP_HANGUP`.** `select()` reports a FIN
+  only as readability, like data, so it cannot express a hang-up-only watch. A `KL_EVENT_HANGUP`
+  registration is accepted and never reported; the HTTP server's suspended-connection hang-up
+  detection uses its 1 s peek sweep there, as on IOCP (best effort: a FIN behind unread bytes is
+  invisible to a peek). Linux, macOS and BSD loops are unchanged.
+
 ## [3.5.0]
 
 Minor release adding client hang-up detection for suspended server connections. The public API is

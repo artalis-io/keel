@@ -12,7 +12,7 @@ include mk/toolchain.mk
 
 # Windows detection: explicit `make OS=windows` (e.g. MinGW cross-compile from
 # Linux: make CC=x86_64-w64-mingw32-gcc OS=windows) or a native MSYS2/MinGW shell
-# where uname reports MINGW*/MSYS*. Selects the WSAPoll event backend + Winsock.
+# where uname reports MINGW*/MSYS*. Selects the Winsock select() event backend + Winsock.
 ifeq ($(OS),windows)
   WINDOWS := 1
 endif
@@ -89,13 +89,16 @@ ifdef COSMO
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else ifdef WINDOWS
-  # Windows (MinGW-w64): WSAPoll event backend + Winsock socket provider, its own
-  # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c; no #ifdef in the
+  # Windows (MinGW-w64): select() event backend + Winsock socket provider, its own
+  # TUs (event_winselect.c / socket_winsock.c / platform_win.c; no #ifdef in the
   # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
   CFLAGS  = $(CC_QUIET) $(CC_STD) $(CC_WARN) $(CC_WERROR) $(KEEL_OPT) \
             $(CC_HARDEN) $(CC_DEFS) -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = $(CC_QUIET) $(CC_STD) $(KEEL_VENDOR_OPT) $(CC_DEFS) -Iinclude -Ivendor/llhttp
-  # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
+  # Event backend: select() (readiness, the default; BACKEND=winselect, or the old name
+  # BACKEND=wsapoll, which selects the same TU) or IOCP (completion, BACKEND=iocp). The WSAPoll
+  # backend was replaced: WSAPoll cannot block until a half-closed socket is writable again
+  # (docs/architecture/windows_readiness_backend.md).
   # The IOCP TU is the only place the completion model lives; no #ifdef leaks into
   # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
   # defaults + the Winsock load constructor the IOCP provider reuses).
@@ -106,7 +109,7 @@ else ifdef WINDOWS
     # are always linked; this flag suppresses the readiness kl_comp_ops_builtin stub.
     COMPLETION_BACKEND = 1
   else
-    EVENT_SRC = src/event_wsapoll.c
+    EVENT_SRC = src/event_winselect.c
   endif
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
@@ -353,7 +356,7 @@ override LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
 # when the compiled-in provider and the loop disagree) and, when both event backends landed in the
 # archive, duplicate-symbol link errors. Neither pointed at the real cause.
 #
-# EVENT_SRC names the backend uniquely (event_wsapoll / event_iocp / event_epoll / event_kqueue /
+# EVENT_SRC names the backend uniquely (event_winselect / event_iocp / event_epoll / event_kqueue /
 # event_poll / event_pollcomp / event_iouring), so it is the natural build id; BACKEND itself is
 # empty for each platform's default. KEEL_NO_COMPLETION and COSMO change the shape of the same
 # EVENT_SRC, so they discriminate too.
@@ -385,7 +388,7 @@ all: $(KEEL_LIB)
 
 # `ar rcs` REPLACES members of the same name and leaves every other member in place, so archiving a
 # different backend's objects over an existing libkeel.a keeps the old backend's event TU: the
-# archive ends up with both event_wsapoll.o and event_iocp.o and the link fails on duplicate
+# archive ends up with both event_winselect.o and event_iocp.o and the link fails on duplicate
 # symbols. Per-backend object directories alone do not prevent that, because the ARCHIVE path is
 # shared. Remove it first so each archive is built from exactly one backend's objects (#280).
 LIB_OBJ = $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(COMPRESS_MINIZ_OBJ)
@@ -401,10 +404,10 @@ LIB_OBJ = $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(COMPRESS_MINIZ_OBJ)
 #   make check-backend-isolation KEEL_ISOLATION_BACKENDS="iouring poll"
 # The backend event TUs, as archive member names. event_ctx.o and event_dispatch.o are part of every
 # build and are deliberately NOT in this list.
-KEEL_EVENT_TU_RE = ^event_(epoll|kqueue|poll|pollcomp|iouring|wsapoll|iocp)[.]o$$
+KEEL_EVENT_TU_RE = ^event_(epoll|kqueue|poll|pollcomp|iouring|winselect|iocp)[.]o$$
 
 ifdef WINDOWS
-  KEEL_ISOLATION_BACKENDS ?= wsapoll iocp
+  KEEL_ISOLATION_BACKENDS ?= winselect iocp
 else
   KEEL_ISOLATION_BACKENDS ?= poll pollcomp
 endif
@@ -1923,7 +1926,7 @@ check-backend-isolation:
 # source, and this keeps the convention true. See tools/check_winsock_init.pl for why it matters.
 check-winsock-init:
 	@perl tools/check_winsock_init.pl $(wildcard src/*_win.c src/protocols/*/*_win.c) \
-	  src/socket_winsock.c src/event_wsapoll.c src/event_iocp.c src/resolve_sync.c \
+	  src/socket_winsock.c src/event_winselect.c src/event_iocp.c src/resolve_sync.c \
 	  tests/net_compat_win.c tests/test_datagram_public.c tests/loopback_listener.h
 
 check-winsock-init-selftest:

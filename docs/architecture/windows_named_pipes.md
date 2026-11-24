@@ -96,7 +96,7 @@ Hull, the named consumer, cannot use an IOCP-native Keel pipe as Hull is built t
    backend with no `_WIN32` and no IOCP, so a `_WIN32` IOCP transport does not exist in that binary.
 2. **Hull's byte transport is not `KlStream`.** `hull/src/hull/cap/net_stream.c` drives `KlConnectOp`
    plus raw socket-provider `send`/`recv` on readiness watchers through `HlAsyncBackend`, which on a
-   native Keel build defaults to WSAPoll. The brief forbids readiness emulation for pipes.
+   native Keel build defaults to Windows select(). The brief forbids readiness emulation for pipes.
 
 This Keel work stands on its own (native MinGW/MSVC consumers, and the `KlStream` claim this note
 exists to test). Hull consumption needs, on Hull's side, a native-Windows build running Keel on IOCP
@@ -273,7 +273,7 @@ duplication. It was renamed to `KlCompLife` (`src/completion_life.{h,c}`) in its
 ### 3.5 What does not change
 
 `KlSocketProvider` and every socket provider, `KlSockAddr`, `KlCompletionOps` and every other
-completion backend, WSAPoll, the `KlStream` contract, `KlListener`, the `AF_UNIX` path
+completion backend, Windows select(), the `KlStream` contract, `KlListener`, the `AF_UNIX` path
 (`unix_socket_node_*`, `KL_HTTP_SERVER_TRANSPORT_UNIX`), and every protocol TU. No `LocalIpc`
 abstraction wraps `AF_UNIX` and pipes: `AF_UNIX` stays socket provider + `KlStream`; a pipe is pipe
 transport + `KlStream`.
@@ -283,7 +283,7 @@ transport + `KlStream`.
 | | `KlStream` (client) | Pipe listener | Engine |
 |---|---|---|---|
 | Windows, `BACKEND=iocp` (MinGW + MSVC) | supported | supported (§5) | IOCP, native |
-| Windows, WSAPoll (default) | `KL_PIPE_UNSUPPORTED` | `KL_PIPE_UNSUPPORTED` | none; no readiness emulation |
+| Windows, Windows select() (default) | `KL_PIPE_UNSUPPORTED` | `KL_PIPE_UNSUPPORTED` | none; no readiness emulation |
 | Windows, runtime-installed event provider | `KL_PIPE_UNSUPPORTED` | `KL_PIPE_UNSUPPORTED` | none |
 | POSIX (any engine), cosmocc | `KL_PIPE_UNSUPPORTED` (use `AF_UNIX`) | n/a | n/a |
 
@@ -338,7 +338,7 @@ Type safety backs R3 at compile time: `KlPipeHandle *` does not convert implicit
 ## 7. Verification record (2026-09-28, Windows 11, local)
 
 - **`test_pipe_stream` (21 cases).** MinGW-w64 GCC 16.2 IOCP and MSVC 19.44 `cl` IOCP: 20 passed, 1
-  expected skip (`unsupported_off_iocp`). MinGW WSAPoll: 2 passed (argument validation, unsupported),
+  expected skip (`unsupported_off_iocp`). MinGW Windows select(): 2 passed (argument validation, unsupported),
   19 skipped. The cases cover:
   - connect: absent, busy, DACL-denied, non-local names, identification-only impersonation;
   - data: echo, 1 MiB fragmented transfer (1000-byte reads, 64 KiB bounded queue with `WOULD_BLOCK`
@@ -356,7 +356,7 @@ Type safety backs R3 at compile time: `KlPipeHandle *` does not convert implicit
 - **The gate can fail.** One injected violation per rule R1 to R5, plus a protocol-TU include of
   `completion_pipe.h` against `check-tier1-boundary`: each was reported, and the tree was restored.
 - **Regression.** The full `WIN_IOCP_TEST_SUITES` set (MinGW and MSVC, clean MSVC objects) and `WIN_TEST_SUITES` set (MinGW,
-  WSAPoll) are green. All structural and hygiene gates are green, as are the F2 inventory
+  Windows select()) are green. All structural and hygiene gates are green, as are the F2 inventory
   (`check-public-headers`, `check-public-coverage`).
 - **Not run locally:** POSIX builds (Linux / macOS / cosmocc; no WSL or Docker on the host). There
   the suite reduces to the refusal and argument cases, and the standing CI jobs cover it.

@@ -216,7 +216,7 @@ static int async_rearm(KlHttpServer *s, KlHttpConn *conn, KlEventMask mask) {
 
 /* Release a resumed connection on a readiness loop. Its fd is not necessarily out of the loop: a
  * nested complete inside on_resume registered it again. Deleting an fd that is not registered is
- * harmless; leaving a closed one registered is not (poll and WSAPoll keep its entry, and poll
+ * harmless; leaving a closed one registered is not (poll and the Windows select() backend keep its entry, and poll
  * reports it on every wait). */
 static void async_release(KlHttpServer *s, KlHttpConn *conn) {
     kl_event_del(&s->ev.loop, conn->stream.fd);

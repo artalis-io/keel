@@ -4,6 +4,12 @@ Status: **implemented for 3.5.0.** This is the reviewed design (revision 3: revi
 measurements from the real CI runners wherever they exist) plus, in the next section, every point
 where the implementation deliberately differs from it.
 
+**Since 3.5.0:** the Windows readiness backend is Winsock `select()`, not WSAPoll
+([windows_readiness_backend.md](windows_readiness_backend.md)). WSAPoll could not block until a
+half-closed socket was writable again; `select()` cannot express a hang-up-only watch, so the Windows
+readiness backend no longer advertises `KL_EVENT_CAP_HANGUP` and suspended connections there use the
+1 s peek sweep, as on IOCP. The WSAPoll measurements below are kept as the record they are.
+
 ## Implementation notes: where the code differs from revision 3
 
 1. **One mechanism on every loop: a `KlWatcher`.** On suspend, the server registers a

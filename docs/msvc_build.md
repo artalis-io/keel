@@ -14,7 +14,7 @@ That produces a native `libkeel.a` whose only DLL imports are `WS2_32.dll` and `
 
 | command | what it does |
 |---|---|
-| `make CC=cl` | the library, WSAPoll readiness backend |
+| `make CC=cl` | the library, Winsock `select()` readiness backend |
 | `make CC=cl BACKEND=iocp` | the library, IOCP completion backend |
 | `make CC=cl test-msvc` | build and run the MSVC test suites (derived from the Windows set) |
 | `make CC=cl check-msvc-no-mingw` | assert no MinGW runtime import crept in |
@@ -62,7 +62,7 @@ not track headers: run `make clean` after editing one. CI always builds clean, s
 `link.exe` neither require nor care about those extensions, and keeping one naming scheme is what lets
 every compile and link rule stay toolchain-neutral instead of branching on the extension.
 
-**Object trees are per-toolchain.** `build/event_wsapoll` and `build/event_wsapoll-msvc` are separate,
+**Object trees are per-toolchain.** `build/event_winselect` and `build/event_winselect-msvc` are separate,
 because an MSVC object and a MinGW object of the same TU are not interchangeable and the archive path
 is shared. Without that separation a `make CC=cl` after a `make` would mix them into one `libkeel.a`.
 

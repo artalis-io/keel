@@ -382,7 +382,7 @@ KlPipeStatus kl_anon_pipe_create(struct KlEventCtx *ctx, KlAnonPipeDir dir, cons
      *   completion: the engine carries pipe ops (Windows IOCP);
      *   readiness:  the platform's pipe ends are pollable descriptors (POSIX) and the loop watches
      *               native descriptors (epoll, kqueue, poll, and io_uring / pollcomp via their relay).
-     * Anything else (Windows WSAPoll, any runtime-installed loop) is refused. A runtime loop
+     * Anything else (the Windows select() readiness backend, any runtime-installed loop) is refused. A runtime loop
      * (loop.ops) is refused even when it advertises KL_EVENT_CAP_NATIVE_FD: that bit means "polls
      * the handles its socket provider hands out", which for the lwIP BSD loop are lwIP socket
      * numbers, not host descriptors, so a host pipe's readiness would never be reported. The

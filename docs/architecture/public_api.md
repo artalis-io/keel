@@ -52,7 +52,7 @@ empties. Bound the buffer with `kl_drain_set_max_size` for untrusted peers.
 ## Scope
 
 This is the **readiness** transport surface (watcher + provider ops + drain), the
-default `KlEventCtx` on epoll/kqueue/poll/WSAPoll. It is what a protocol author
+default `KlEventCtx` on epoll/kqueue/poll/Windows select(). It is what a protocol author
 targets to build a server today. The completion axis drives Keel's *own*
 protocols through the internal completion driver; a public completion-model
 authoring surface is out of scope for Phase 5 (the readiness surface above is the

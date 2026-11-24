@@ -15,7 +15,7 @@
  *
  * STABILITY. The kl_datagram_* FUNCTION + TYPE CONTRACT is STABLE: validated LIVE across every
  * supported event backend: the completion loops pollcomp, io_uring, Windows IOCP, raw lwIP-raw, and
- * firmware EFI_UDP4, plus the readiness loops POSIX epoll/kqueue/poll and Windows WSAPoll; each
+ * firmware EFI_UDP4, plus the readiness loops POSIX epoll/kqueue/poll and Windows select(); each
  * validated in docs/contracts/datagram.md §10. The
  * struct LAYOUT is NOT ABI-stable: a consumer that stack-/embed-allocates a KlDatagram opts into the
  * layout by including <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only

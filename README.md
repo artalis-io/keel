@@ -22,7 +22,7 @@ Three axes, orthogonal in the code rather than only in the diagram:
    event engine     socket provider
    readiness        POSIX · Winsock
    epoll kqueue     lwIP (BSD + raw NO_SYS)
-   WSAPoll poll     UEFI (EFI_TCP4 / EFI_UDP4)
+   select  poll     UEFI (EFI_TCP4 / EFI_UDP4)
    completion
    io_uring IOCP
         |
@@ -292,7 +292,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Features
 
-- **Two event axes, six backends**: **readiness** (epoll edge-triggered, kqueue edge-triggered, WSAPoll, poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
+- **Two event axes, six backends**: **readiness** (epoll edge-triggered, kqueue edge-triggered, Windows select(), poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
 - **Three orthogonal axes**: the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/archive/audits/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
 - **TCP or UNIX socket servers**: same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Windows Named Pipes**: `kl_pipe_connect()` and `kl_pipe_listen()` (`<keel/pipe.h>`) open and serve local `\\.\pipe\` endpoints as ordinary `KlStream`s, the Windows local-IPC counterpart of an `AF_UNIX` stream; the listener hands each client over as a stream through `KlListener`. IOCP engine only (refused, not emulated, elsewhere); never routed through the socket provider. Server instances are local-only, current-user + SYSTEM DACL
@@ -321,7 +321,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Backpressure write buffer**: `KlDrain` buffers unsent data on would-block, flushes on write-readiness
 - **Timer scheduling**: one-shot timers on the event loop via min-heap
 - **Error diagnostics**: sqlite3-style per-struct error codes with `kl_strerror()`
-- **UDP datagrams**: the **STABLE** fixed-slot `KlDatagram` API (`<keel/datagram.h>`): the Tier-1 datagram primitive, a caller-owned, single-threaded handle over a prepared UDP fd with one-call socket create/configure/bind/adopt, provider-neutral connect, async per-datagram receive (source + local/destination address via pktinfo), a fixed-slot whole-datagram send queue with on-drain backpressure, source-pinned sends + per-packet TOS/ECN, multicast/broadcast, transparent `recvmmsg`/`sendmmsg` batching, UDP GSO/GRO offload, ECN/TOS/DSCP marking, and confirmed-detachment close. Validated **live across every event backend**: readiness (epoll/kqueue/poll/WSAPoll) and completion (pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4). Its function+type contract is ABI-stable; the struct layout is opt-in via `<keel/datagram_detail.h>`. The built-in DNS resolver is built on `KlDatagram`; it is the base intended for new portable message protocols (a future QUIC/HTTP-3, mDNS/CoAP)
+- **UDP datagrams**: the **STABLE** fixed-slot `KlDatagram` API (`<keel/datagram.h>`): the Tier-1 datagram primitive, a caller-owned, single-threaded handle over a prepared UDP fd with one-call socket create/configure/bind/adopt, provider-neutral connect, async per-datagram receive (source + local/destination address via pktinfo), a fixed-slot whole-datagram send queue with on-drain backpressure, source-pinned sends + per-packet TOS/ECN, multicast/broadcast, transparent `recvmmsg`/`sendmmsg` batching, UDP GSO/GRO offload, ECN/TOS/DSCP marking, and confirmed-detachment close. Validated **live across every event backend**: readiness (epoll/kqueue/poll/Windows select()) and completion (pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4). Its function+type contract is ABI-stable; the struct layout is opt-in via `<keel/datagram_detail.h>`. The built-in DNS resolver is built on `KlDatagram`; it is the base intended for new portable message protocols (a future QUIC/HTTP-3, mDNS/CoAP)
 - **Pluggable DNS resolver**: bring your own async DNS (c-ares, thread-pool wrapper), with caching decorator; ships a built-in async resolver (dual-family A+AAAA, RFC 8305)
 - **Happy Eyeballs client connect**: async client races the resolved address list (RFC 8305): configurable Connection Attempt Delay, first handshake wins, overall request deadline
 - **Server load introspection**: `kl_http_server_stats()` for connection counts, enabling user-space load-shedding middleware
@@ -335,7 +335,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others. For the full model (the Tier-1 semantic transports (`KlListener`/`KlStream`/`KlDatagram`), the engine/provider split, and the rules that keep them separate) see [`docs/architecture/overview.md`](docs/architecture/overview.md) and the enforceable [`docs/architecture/invariants.md`](docs/architecture/invariants.md).
 
-- **Event axis** (`event.h` + `completion.h`): how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
+- **Event axis** (`event.h` + `completion.h`): how the loop learns work is ready. **Readiness** backends (epoll, kqueue, Windows select(), poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
 - **Socket axis** (`socket.h`, the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`): where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.
 - **Protocol axis** (`http_connection.c`, `http2_server.c`, `websocket.c`, the `http_client_*` TUs, the `KlTls` vtable, body readers, `http_response.c`): HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/archive/audits/keel_axis_audit.md` audits this separation mechanically.
 
@@ -344,7 +344,7 @@ Below the axes sit orthogonal, independently testable modules:
 | Module | Header | Description |
 |--------|--------|-------------|
 | **allocator** | `allocator.h` | Bring-your-own allocator interface |
-| **event** | `event.h` + `completion.h` | Readiness (epoll / kqueue / WSAPoll / poll) + completion (io_uring / IOCP) behind one interface |
+| **event** | `event.h` + `completion.h` | Readiness (epoll / kqueue / Windows select() / poll) + completion (io_uring / IOCP) behind one interface |
 | **socket** | `socket.h` | Platform-neutral socket seam (`KlSocketProvider`): POSIX / Winsock built in, lwIP + UEFI shipped |
 | **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
 | **request** | `http_request.h` | Parsed HTTP request struct (header-only, zero alloc) |
@@ -597,7 +597,7 @@ void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
 
 The watcher callback runs on the event loop thread, making it safe to call `kl_async_complete()` which re-registers the connection FD and drives the state machine forward.
 
-`KlWakeup` is the portable signal channel: a raw `pipe(2)` is not watchable on Windows (WSAPoll and IOCP watch sockets only), so `kl_wakeup_open()` gives you a pipe where a pipe works and a loopback socket pair where it does not. `kl_wakeup_signal()` is the one call a foreign thread may make; everything else, including `kl_async_complete()`, belongs in the watcher callback.
+`KlWakeup` is the portable signal channel: a raw `pipe(2)` is not watchable on Windows (the `select()` readiness backend and IOCP watch sockets only), so `kl_wakeup_open()` gives you a pipe where a pipe works and a loopback socket pair where it does not. `kl_wakeup_signal()` is the one call a foreign thread may make; everything else, including `kl_async_complete()`, belongs in the watcher callback.
 
 `on_resume` does not have to set anything. If it returns having only built the response (on `kl_http_conn_response(op->conn)`), `kl_async_complete()` sends it.
 
@@ -867,8 +867,8 @@ Route params, middleware, and body reading add no measurable overhead; all withi
 | Linux | epoll (edge-triggered) | `make` |
 | Linux 5.6+ | io_uring (completion, SQE/CQE) | `make BACKEND=iouring` |
 | Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
-| Windows (MinGW) | WSAPoll (readiness) or IOCP (completion) | `make BACKEND=wsapoll` / `BACKEND=iocp` |
-| Windows (native MSVC) | WSAPoll or IOCP, same PAL and Make graph | `source scripts/msvc-env.sh` then `make CC=cl` |
+| Windows (MinGW) | Winsock `select()` (readiness) or IOCP (completion) | default / `BACKEND=iocp` (`BACKEND=winselect`, or the old `BACKEND=wsapoll`, names the readiness default) |
+| Windows (native MSVC) | `select()` or IOCP, same PAL and Make graph | `source scripts/msvc-env.sh` then `make CC=cl` |
 | Any POSIX host | pollcomp (portable completion double) | `make BACKEND=pollcomp` |
 | Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
 | Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
@@ -973,7 +973,7 @@ Three embedded C HTTP libraries compared.
 | **Architecture** | 35+ independent modules on 3 orthogonal axes | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
-| **Event backends** | readiness (epoll, kqueue, WSAPoll, poll) + completion (io_uring, IOCP) | select/poll only | select, poll, epoll |
+| **Event backends** | readiness (epoll, kqueue, Windows select(), poll) + completion (io_uring, IOCP) | select/poll only | select, poll, epoll |
 | **Router + middleware** | Built-in with `:param` capture | None (DIY if/else) | None (single callback) |
 | **HTTP client** | Sync + async + streaming + H2 | Basic client | Server only |
 | **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros | None (raw malloc) |
@@ -993,8 +993,8 @@ GitHub Actions runs on every push and PR against `main`:
 - **Linux (epoll)** / **(poll fallback)** / **(no completion)** / **macOS (kqueue)**: build, full suite, example smokes
 - **Completion (poll)** / **(io_uring)** / **io_uring unit suite**: completion-axis roundtrips and unit gates
 - **Sanitized completion (pollcomp)** / **(io_uring)**: the same two completion axes under ASan + UBSan
-- **Windows (MinGW, full core)**: Winsock/WSAPoll build, `WIN_TEST_SUITES`, TCP/datagram/DNS smokes, installed-artifact gates
-- **Windows (native MSVC, cl.exe)**: `cl`/`lib` build + suites on WSAPoll and IOCP, public-API consumer link, no-MinGW-import assertion
+- **Windows (MinGW, full core)**: Winsock/select() build, `WIN_TEST_SUITES`, TCP/datagram/DNS smokes, installed-artifact gates
+- **Windows (native MSVC, cl.exe)**: `cl`/`lib` build + suites on Windows select() and IOCP, public-API consumer link, no-MinGW-import assertion
 - **Windows (IOCP)**: IOCP lifecycle suite + HTTP/TLS/async/datagram roundtrips
 - **Linux (musl/Alpine)** / **Cosmopolitan (APE)**: build, test, examples
 - **ASan + UBSan**: build and test with sanitizers

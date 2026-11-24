@@ -2,7 +2,7 @@
  * completion.h: INTERNAL. The platform-independent completion event axis.
  *
  * Completion is an event *concept*, a peer to readiness: just as <keel/event.h> is
- * the abstract readiness axis with epoll/kqueue/poll/WSAPoll as interchangeable
+ * the abstract readiness axis with epoll/kqueue/poll/Windows select() as interchangeable
  * implementations, this is the abstract completion axis with IOCP as ONE
  * implementation (io_uring-completion / POSIX AIO are future siblings). It names
  * WHAT a completion transport does (post an async op, drain finished ops), never

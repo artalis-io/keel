@@ -23,7 +23,7 @@ three and touch no platform socket API or event engine directly.
               ▼                            ▼
    Engine     readiness  |  completion     Provider   POSIX | Winsock | lwIP | EFI
    (model)    epoll/kqueue/  io_uring/      (stack)    sockets        raw    EFI_*
-              WSAPoll/poll   IOCP/pollcomp
+              select/poll    IOCP/pollcomp
 ```
 
 - **Transport axis**: the three **Tier-1 semantic primitives**, each a `STABLE` public API whose
@@ -44,7 +44,7 @@ three and touch no platform socket API or event engine directly.
 - **Engine axis**: readiness ([event.h](../../include/keel/event.h): register interest → wait →
   re-arm) and completion ([completion.h](../../src/completion.h): submit owned op → track → retire) are
   *peer models*, negotiated by capability ([event_caps.h](../../src/event_caps.h)). The **production**
-  backends preserve their native model (epoll/kqueue/WSAPoll/poll are readiness; io_uring/IOCP are
+  backends preserve their native model (epoll/kqueue/Windows select()/poll are readiness; io_uring/IOCP are
   completion); neither is emulated in terms of the other. The sole deliberate exception is
   **pollcomp**, a portable *test double* that implements the completion contract over `poll()` so the
   completion driver can run under ASan on any POSIX host; it is a CI/testing backend, not a

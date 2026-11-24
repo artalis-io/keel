@@ -3,7 +3,7 @@
  *
  * A separate TU (mirrors platform_wakeup_posix.c)
  * so the wakeup is an independently-overridable seam. Windows has no pipe(2) that
- * WSAPoll can watch, so the channel is a connected loopback TCP pair.
+ * the Windows readiness backend (select()) can watch, so the channel is a connected loopback TCP pair.
  */
 #include "platform.h"
 #include "platform_socket.h"   /* kl_plat_socket_runtime_init: the PAL socket-runtime invariant */

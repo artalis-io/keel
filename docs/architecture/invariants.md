@@ -48,7 +48,7 @@ implementation detail of the driver, never a branch in protocol code.
 The two engine models keep their native semantics. Readiness = register interest → wait → perform
 op → handle `EAGAIN` → re-arm. Completion = construct owned op → submit → track lifetime → receive
 completion → retire/cancel/resubmit. No **production** backend is emulated in terms of the other
-(epoll/kqueue/WSAPoll/poll stay readiness; io_uring/IOCP stay completion). The one deliberate
+(epoll/kqueue/Windows select()/poll stay readiness; io_uring/IOCP stay completion). The one deliberate
 exception is **pollcomp**; a portable *test double* that implements the completion contract over
 `poll()` so the completion driver can be exercised under ASan on any POSIX host. It is explicitly a
 CI/testing backend; the invariant this states is that production backends preserve their native

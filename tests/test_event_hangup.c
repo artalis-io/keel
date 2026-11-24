@@ -16,6 +16,8 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <string.h>
+#include <stdint.h>
+#include <keel/clock.h>
 #include "net_compat.h"
 #include "../src/event_caps.h"   /* kl_event_caps */
 
@@ -216,6 +218,80 @@ UTEST(event_hangup, any_udata_cookie_keeps_its_registration_kind) {
     if (hup) kl_event_del(&loop, hs);
     kl_test_closesock(rs); kl_test_closesock(rc); kl_test_closesock(hs);
     kl_event_close(&loop);
+}
+
+/* ── Write readiness is independent of the peer's half-close ──────────────────────────────────────
+ * A peer that half-closes (shutdown of its sending direction) still reads, so a writer waiting for
+ * room must get it: TCP is full duplex. With the server's send path full and the peer not reading, a
+ * WRITE registration must report nothing (and the loop must not spin); once the peer reads, it must
+ * report WRITE. Every readiness backend. WSAPoll could not do this (after a FIN it reports POLLHUP on
+ * every call, so the wait returned at once with a bare READ); the Windows readiness backend is
+ * select() for this reason. */
+static void half_close(int c) {
+#if defined(_WIN32)
+    (void)shutdown((SOCKET)c, SD_SEND);
+#else
+    (void)shutdown(c, SHUT_WR);
+#endif
+}
+
+typedef struct { int fd; int calls; int spurious; int others; long sent; } HcWriter;
+static char g_hc_buf[16384];
+static void hc_fill(HcWriter *w) {                          /* write until the send path is full */
+    for (int i = 0; i < 100000; i++) {
+        long n = kl_test_sockwrite(w->fd, g_hc_buf, sizeof g_hc_buf);
+        if (n <= 0) break;
+        w->sent += n;
+    }
+}
+static void hc_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)fd;
+    HcWriter *w = ud;
+    w->calls++;
+    if (!(ready & KL_EVENT_WRITE)) { w->others++; return; }
+    long before = w->sent;
+    hc_fill(w);
+    if (w->sent == before) w->spurious++;                   /* reported writable, but nothing went */
+}
+
+UTEST(event_hangup, write_readiness_survives_a_peer_half_close) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    if (kl_event_caps(&ev.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ev); UTEST_SKIP("completion loop"); }
+    int s, c;
+    ASSERT_EQ(tcp_pair(&s, &c), 0);
+    int rb = 4096, sb = 8192;
+    (void)setsockopt(c, SOL_SOCKET, SO_RCVBUF, (const char *)&rb, sizeof rb);
+    (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb);
+    memset(g_hc_buf, 'w', sizeof g_hc_buf);
+    HcWriter w = { s, 0, 0, 0, 0 };
+    hc_fill(&w);
+    ASSERT_TRUE(w.sent > 0);
+    half_close(c);
+    kl_test_sleep_ms(100);
+    ASSERT_EQ(kl_watcher_add(&ev, s, KL_EVENT_WRITE, hc_on_ready, &w), 0);
+
+    for (int i = 0; i < 6; i++) kl_event_ctx_run(&ev, 8, 50);   /* about 300 ms, peer not reading */
+    EXPECT_EQ(w.others, 0);                                 /* no bare READ for the FIN */
+    EXPECT_EQ(w.spurious, 0);                               /* every WRITE report had room behind it */
+    EXPECT_TRUE_MSG(w.calls <= 6, "the loop kept reporting the half-closed socket: a spin");
+    const long sent_before_read = w.sent;
+
+    kl_test_set_nonblock(c);                                /* the peer reads everything */
+    char rd[65536];
+    long got = 0;
+    for (int i = 0; i < 400 && (got < w.sent || w.sent == sent_before_read); i++) {
+        long n = kl_test_sockread(c, rd, sizeof rd);
+        if (n > 0) got += n;
+        else kl_event_ctx_run(&ev, 8, 10);                  /* the writer refills as room appears */
+    }
+    EXPECT_TRUE(w.sent > sent_before_read);                 /* writable again: the writer went on */
+    EXPECT_EQ(w.spurious, 0);
+    kl_watcher_del(&ev, s);
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(s);
+    kl_test_closesock(c);
 }
 
 UTEST_MAIN();

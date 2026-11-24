@@ -8,7 +8,7 @@
  * only supplies the endpoint (a path) and the object that owns the pipe handle.
  *
  * ENGINE. Named pipes are completion-native, so the transport runs ONLY on the IOCP engine
- * (BACKEND=iocp). On every other engine (WSAPoll, epoll, kqueue, poll, io_uring, pollcomp) and on
+ * (BACKEND=iocp). On every other engine (the Windows select() readiness backend, epoll, kqueue, poll, io_uring, pollcomp) and on
  * every non-Windows platform kl_pipe_connect returns KL_PIPE_UNSUPPORTED before touching the OS.
  * There is no readiness emulation. POSIX local IPC is AF_UNIX, through the socket provider.
  *
