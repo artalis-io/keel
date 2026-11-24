@@ -173,6 +173,10 @@ struct KlHttpConn {
      * the fd; KL_HUP_SWEPT: the server's sweep peeks it (no KL_EVENT_CAP_HANGUP); KL_HUP_FIN_KEPT: a FIN
      * was seen under RESET_ONLY and the op runs on. */
     int hup_state;
+    /* Readiness: 1 while the suspended connection's fd is also watched for writability, because its
+     * streamed response has output waiting in the drain (async.c). The same watcher as the hang-up
+     * watch, so it goes with it when the op retires. */
+    int stream_write_watched;
     struct KlHttpServer *hup_server;   /* the server that owns the watch or the sweep entry */
     /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
      * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,

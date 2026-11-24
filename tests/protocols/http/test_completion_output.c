@@ -1505,6 +1505,145 @@ UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
     ASSERT_TRUE(seen_last);                                /* was (readiness): stuck until resume */
 }
 
+/* ── A suspended stream paced on on_drain completes ────────────────────────────────────────────────
+ * The producer writes while suspended until its drain holds PACE_HIGH bytes, then stops and waits for
+ * on_drain (the drain emptied) to go on; nothing else wakes it. On a readiness loop the suspended fd was
+ * out of the loop, so nothing flushed the drain and on_drain never fired: the stream stalled for good
+ * (until the client hung up). Both axes must deliver every byte, with on_drain doing the pacing. */
+#define PACE_TOTAL (4 * 1024 * 1024)
+#define PACE_CHUNK (16 * 1024)
+#define PACE_HIGH  (256 * 1024)
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    size_t sent;
+    int paused, drains, failed, cancelled, ended;
+} PaceStream;
+static PaceStream g_pace;
+static KlHttpServer pace_srv;
+
+static void pace_pump(void *ud);
+static void pace_on_drain(void *ud) {
+    (void)ud;
+    g_pace.drains++;
+    if (g_pace.paused) {                                  /* resume from the loop, not inside the flush */
+        g_pace.paused = 0;
+        (void)kl_timer_add(kl_http_server_event_ctx(&pace_srv), 0, pace_pump, NULL);
+    }
+}
+static void pace_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
+static void pace_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_pace.cancelled++; }
+static void pace_pump(void *ud) {
+    (void)ud;
+    if (g_pace.failed || g_pace.cancelled || g_pace.ended) return;
+    static char chunk[PACE_CHUNK];
+    memset(chunk, 'p', sizeof chunk);
+    while (g_pace.sent < PACE_TOTAL) {
+        if (kl_drain_buffered(&g_pace.res->drain) >= PACE_HIGH) { g_pace.paused = 1; return; }
+        if (g_pace.w(g_pace.wc, chunk, sizeof chunk) < 0) { g_pace.failed = 1; return; }
+        g_pace.sent += sizeof chunk;
+    }
+    g_pace.ended = 1;
+    kl_http_response_end_stream(g_pace.res);
+    kl_async_complete(&pace_srv, &g_pace.op);
+}
+static void handle_paced(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_pace, 0, sizeof g_pace);
+    g_pace.res = res;
+    KlHttpConn *c = kl_http_request_conn(req);
+    shrink_sndbuf(c);
+    if (kl_http_response_begin_stream(res, 200, &g_pace.w, &g_pace.wc) < 0) return;
+    kl_drain_on_drain(&res->drain, pace_on_drain, NULL);
+    g_pace.op.on_resume = pace_resume;
+    g_pace.op.on_cancel = pace_cancel;
+    if (kl_async_suspend(&pace_srv, c, &g_pace.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&pace_srv), 0, pace_pump, NULL);
+}
+
+UTEST(completion_output, a_suspended_stream_paced_on_on_drain_completes) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&pace_srv, &cfg));
+    kl_http_server_route(&pace_srv, "GET", "/paced", handle_paced, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
+    wait_for_bind(&pace_srv);
+    size_t got = 0;
+    int ended = 0;
+    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    if (fd >= 0) {
+        const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(300);                            /* the server fills its drain and pauses */
+        static char buf[64 * 1024];
+        char tail[8] = {0};
+        uint64_t start = kl_monotonic_ms();
+        while (kl_monotonic_ms() - start < 10000) {
+            if (kl_test_poll1(fd, 0, 200) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            got += (size_t)n;
+            size_t keep = (size_t)n < 5 ? (size_t)n : 5;      /* the last 5 bytes seen: "0\r\n\r\n" */
+            memmove(tail, tail + keep, 5 - keep);
+            memcpy(tail + 5 - keep, buf + n - keep, keep);
+            if (memcmp(tail, "0\r\n\r\n", 5) == 0) { ended = 1; break; }
+        }
+        kl_test_closesock(fd);
+    }
+    int drains = g_pace.drains, cancelled = g_pace.cancelled, failed = g_pace.failed;
+    kl_http_server_stop(&pace_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&pace_srv);
+    printf("  paced stream: %zu bytes read, %d drains, cancelled %d, failed %d\n",
+           got, drains, cancelled, failed);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(cancelled, 0);
+    ASSERT_TRUE(drains > 0);                              /* the producer was paced by on_drain */
+    ASSERT_TRUE(got > (size_t)PACE_TOTAL);                /* every byte, plus framing */
+    ASSERT_TRUE(ended);                                   /* was (readiness): stalled at the pause */
+}
+
+/* A client that goes away while the paced stream's output waits: the op is cancelled once (the
+ * failed send on a readiness loop's write watch, or the hang-up watch), with the hang-up watch on (the
+ * default) and off. Nothing is left suspended, and the server is not stuck. */
+static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .suspended_hangup = policy };
+    ASSERT_EQ(0, kl_http_server_init(&pace_srv, &cfg));
+    kl_http_server_route(&pace_srv, "GET", "/paced", handle_paced, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
+    wait_for_bind(&pace_srv);
+    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    ASSERT_TRUE(fd >= 0);
+    const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    static char buf[64 * 1024];
+    size_t got = 0;
+    while (got < 64 * 1024) {                             /* read some, so the stream is moving */
+        if (kl_test_poll1(fd, 0, 2000) <= 0) break;
+        kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    kl_test_closesock(fd);                                /* unread data: the close resets */
+    for (int i = 0; i < 300 && !g_pace.cancelled; i++) kl_test_sleep_ms(10);
+    int cancelled = g_pace.cancelled, ended = g_pace.ended;
+    kl_http_server_stop(&pace_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&pace_srv);
+    ASSERT_TRUE(got > 0);
+    ASSERT_FALSE(ended);
+    ASSERT_EQ(cancelled, 1);                              /* exactly once, before free */
+}
+UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once) {
+    pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_CANCEL);
+}
+UTEST(completion_output, a_paced_stream_whose_client_leaves_is_cancelled_once_without_the_hangup_watch) {
+    pace_abandon_case(utest_result, KL_HTTP_SUSPEND_HANGUP_OFF);
+}
+
 /* ── A buffered response larger than the backend's send_max ──────────────────────────────────────
  *
  * A completion backend may cap one post_send (KlCompletionOps.send_max): EFI copies a send into a

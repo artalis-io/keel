@@ -159,6 +159,9 @@ int  kl_http_server_run_completion_loop(KlHttpServer *s);
 void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
+/* Readiness loop, once per tick just before the wait: watch a suspended stream's fd for writability
+ * while its output waits (async.c). */
+void kl_async_sync_stream_interest(KlHttpServer *s);
 
 /* How long accepting pauses after an accept fails for lack of a descriptor or kernel memory. The
  * connection stays queued in the kernel, so retrying at once fails the same way and spins the loop;
