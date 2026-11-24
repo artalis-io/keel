@@ -211,7 +211,7 @@ kl_listener_start	listener.h	direct-assertion	tests/test_listener.c:112 (ASSERT_
 kl_listener_state	listener.h	direct-assertion	tests/test_listener.c:115 (ASSERT_EQ on returned state enum)
 kl_malloc	allocator.h	direct-assertion	tests/test_allocator.c:6 (ASSERT p!=NULL / ASSERT_EQ track counts)
 kl_monotonic_ms	clock.h	indirect-execution	tests/protocols/dns/test_dns_resolver.c:1724 (poll deadline in asserted DNS flow; own return not asserted)
-kl_peer_cred_fd	http_server.h	indirect-execution	tests/test_unix_socket.c (via kl_http_request_peer_cred; uid/gid asserted downstream)
+kl_peer_cred_fd	http_server.h	direct-assertion	tests/test_unix_socket.c:453 (-1 on TCP and UDP fds with out untouched; AF_UNIX pair uid/gid/pid asserted)
 kl_platform_caps	http_server.h	intentional-untested	No test or example calls it; advisory capability bitmask, only in header doc comments (GAP)
 kl_proxy_parse	proxy_protocol.h	direct-assertion	tests/protocols/proxy_protocol/test_proxy_protocol.c (parsed header asserted); fuzzed by fuzz_proxy
 kl_realloc	allocator.h	direct-assertion	tests/test_allocator.c:15 (ASSERT p2!=NULL)
