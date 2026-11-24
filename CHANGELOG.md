@@ -5,23 +5,6 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-### Fixed
-
-- **Security: peer credentials are reported only for UNIX-domain sockets.**
-  `kl_http_request_peer_cred`, `kl_ws_server_peer_cred` and `kl_peer_cred_fd` documented -1 for a
-  socket that is not AF_UNIX, but returned 0 with credentials the OS made up: uid 0 and gid 0 on
-  macOS (`getpeereid` succeeds on a TCP socket), the kernel's "no credentials" values with
-  `has_pid = 1` on Linux (`SO_PEERCRED`). An application that authorized by peer uid on a TCP
-  listener could admit a remote client as root on macOS. The socket's family is now checked first,
-  and any other socket yields -1 with `out` untouched. AF_UNIX connections are unaffected. The
-  `KlPeerCred` comment also now says that macOS fills the pid (`LOCAL_PEERPID`).
-- **The async-op deadline sweep no longer reads an op a callback released.** Both run loops
-  remembered the next op in the list before calling an op's `on_deadline`. An `on_deadline` that
-  cancelled that next op, whose `on_cancel` freed its memory (a common pattern: a deadline that fails
-  a group of related ops), left the sweep following a freed pointer, a use-after-free. The sweep is
-  now one function for both loops, and keeps its place in a cursor that retiring an op advances
-  before the op's `on_cancel` runs. Ops are still visited in list order, each at most once per
-  sweep.
 ### Added
 
 - **`kl_http_server_draining()`** reports whether a graceful drain is in progress, from any thread,
@@ -51,6 +34,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Security: peer credentials are reported only for UNIX-domain sockets.**
+  `kl_http_request_peer_cred`, `kl_ws_server_peer_cred` and `kl_peer_cred_fd` documented -1 for a
+  socket that is not AF_UNIX, but returned 0 with credentials the OS made up: uid 0 and gid 0 on
+  macOS (`getpeereid` succeeds on a TCP socket), the kernel's "no credentials" values with
+  `has_pid = 1` on Linux (`SO_PEERCRED`). An application that authorized by peer uid on a TCP
+  listener could admit a remote client as root on macOS. The socket's family is now checked first,
+  and any other socket yields -1 with `out` untouched. AF_UNIX connections are unaffected. The
+  `KlPeerCred` comment also now says that macOS fills the pid (`LOCAL_PEERPID`).
+- **The async-op deadline sweep no longer reads an op a callback released.** Both run loops
+  remembered the next op in the list before calling an op's `on_deadline`. An `on_deadline` that
+  cancelled that next op, whose `on_cancel` freed its memory (a common pattern: a deadline that fails
+  a group of related ops), left the sweep following a freed pointer, a use-after-free. The sweep is
+  now one function for both loops, and keeps its place in a cursor that retiring an op advances
+  before the op's `on_cancel` runs. Ops are still visited in list order, each at most once per
+  sweep.
 - **Readiness loops no longer spin during a drain.** A connection that arrived after
   `kl_http_server_stop` left the listen socket readable, and the drain re-armed it every tick: the
   loop ran at 100% CPU until the drain ended (kqueue and poll; epoll likely). Closing the listener at
