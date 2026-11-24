@@ -77,10 +77,11 @@ typedef enum {
  * KlAsyncOp.deadline_ms, so on those backends only an op deadline that ends the op guarantees that
  * such a connection is eventually released.
  *
- * A suspended streamed response with output waiting is watched for writability on a readiness loop
- * (the hang-up interest rides along but is not reported on its own), so while its output is moving a
- * half-close is not seen; a reset still ends the op through the failed send, and the hang-up watch
- * resumes once the output has gone.
+ * Whatever the policy, a suspended streamed response with output waiting is watched for writability
+ * on a readiness loop (the hang-up interest rides along but is not reported on its own), so while its
+ * output is moving a half-close is not seen. A reset still ends the op, under every policy: through
+ * the failed send, or (macOS poll) through the watch's report of it. The hang-up watch resumes once
+ * the output has gone.
  */
 typedef enum {
     KL_HTTP_SUSPEND_HANGUP_CANCEL     = 0, /**< default: a FIN or a reset cancels the suspended op
@@ -88,8 +89,12 @@ typedef enum {
                                             *   nothing written) */
     KL_HTTP_SUSPEND_HANGUP_RESET_ONLY = 1, /**< half-close kept: only a reset cancels; after a FIN the
                                             *   op runs on and its response is still delivered. A
-                                            *   reset after that FIN is not watched for. */
-    KL_HTTP_SUSPEND_HANGUP_OFF        = 2  /**< nothing is watched (the behavior before 3.5.0) */
+                                            *   reset after that FIN is not watched for, except
+                                            *   while stream output waits (see above). */
+    KL_HTTP_SUSPEND_HANGUP_OFF        = 2  /**< no hang-up watch (the behavior before 3.5.0); a
+                                            *   streamed response with output waiting is still
+                                            *   watched for writability, and a reset then ends the
+                                            *   op (see above) */
 } KlHttpSuspendHangup;
 
 /*
