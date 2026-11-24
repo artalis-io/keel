@@ -57,8 +57,12 @@ where the implementation deliberately differs from it.
     `done_fn` then left the pool's own wakeup un-armed on io_uring (one-shot `POLL_ADD`): the second
     suspended request never completed (CI's io_uring async smoke). The re-arm now checks only the
     dispatched registration (`event_ctx.c`), identified by address and a per-context generation so a
-    new watcher at a reused address is never mistaken for the old one, with regression tests in
-    `test_async` (they discriminate on io_uring, where a missed re-arm is never repaired). Making that
+    new watcher at a reused address is never mistaken for the old one (and an in-place upsert into a
+    detached watcher gets a new generation too), with regression tests in `test_async`. The missed
+    re-arm cases discriminate on io_uring, where a missed re-arm is never repaired; the address-reuse
+    case also on kqueue and pollcomp; the detached-upsert case, which counts `kl_event_mod` through a
+    wrapping provider, on every readiness backend (on a completion backend an in-place upsert leaves
+    the existing backend registration live, so it cannot be observed there). Making that
     identity test deterministic exposed a kqueue bug on `main`: `kl_event_del` left the WRITE filter of a
     WRITE-only registration in place, delivering events for a freed udata; fixed with `EV_RECEIPT`.
 

@@ -41,7 +41,8 @@ enum) and the default behavior of a suspended op changes, so the next release is
   to the dispatched registration itself: it is skipped only if that registration was removed or its
   interest changed. Identity is the watcher node's address and a per-context generation assigned when
   the node is created, so a new watcher that reuses a freed node's address (even on the same descriptor
-  with the same interest) is never re-armed as if it were the old one.
+  with the same interest) is never re-armed as if it were the old one. A callback that turns its own
+  watcher into a detached one in place also gets a new generation, so the dispatch does not re-arm it.
 - **kqueue: removing a registration removes every filter.** `kl_event_del` deleted the READ and WRITE
   filters in one call, and kqueue stops at the first failing change, so a WRITE-only registration (no
   READ filter: `ENOENT`) kept its WRITE filter and went on delivering events carrying a udata the caller
