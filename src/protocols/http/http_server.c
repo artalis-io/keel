@@ -310,6 +310,7 @@ int kl_http_server_run(KlHttpServer *s) {
      * Setting it after the bind, as this did, overwrote such a stop and the server ran on. */
     kl_atomic_store_int(&s->running, 1);
     kl_atomic_store_int(&s->draining, 0);
+    s->drain_listener_closed = 0;
 
     if (kl_http_server_bind_listener(s) < 0)
         return server_start_failed(s);
@@ -416,6 +417,7 @@ int kl_http_server_run(KlHttpServer *s) {
         }
 
         wait_timeout = kl_timer_next_timeout(&s->ev, wait_timeout);
+        wait_timeout = kl_http_server_drain_wait(s, now, wait_timeout);
 
         /* Open the batch bracket BEFORE kl_event_wait and hold it through the file-I/O
          * completion callbacks AND watcher/connection dispatch. Those file-I/O callbacks run while a
@@ -751,10 +753,12 @@ transition:
 
 void kl_http_server_stop(KlHttpServer *s) {
     if (s->config.drain_timeout_ms > 0 && !kl_atomic_load_int(&s->draining)) {
-        /* Enter drain mode: stop accepting, let in-flight finish */
-        kl_atomic_store_int(&s->draining, 1);
+        /* Enter drain mode: stop accepting, let in-flight finish. The deadline is written before the
+         * flag is published (a seq-cst store): a loop tick that sees draining also sees its deadline,
+         * never the 0 that would end the drain at once. */
         s->drain_deadline_ms = kl_monotonic_ms() +
                                (uint64_t)s->config.drain_timeout_ms;
+        kl_atomic_store_int(&s->draining, 1);
     } else {
         kl_atomic_store_int(&s->running, 0);
     }

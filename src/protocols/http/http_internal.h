@@ -163,6 +163,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
  * next one in the list (async_retire advances the sweep's cursor). Both hosted run loops call it. */
 void kl_async_sweep_deadlines(KlHttpServer *s, uint64_t now);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
+/* Bound a loop wait by the remaining graceful-drain time, so the drain ends on time (http_server_core.c). */
+int  kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms);
 
 /* How long accepting pauses after an accept fails for lack of a descriptor or kernel memory. The
  * connection stays queued in the kernel, so retrying at once fails the same way and spins the loop;

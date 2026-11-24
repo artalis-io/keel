@@ -293,6 +293,7 @@ typedef struct KlHttpServer {
     int     hup_sweep_conns;       /**< suspended connections the sweep covers */
     /* Appended after 3.5.0. INTERNAL. */
     KlAsyncOp *deadline_sweep_next; /**< the deadline sweep's next op (async.c); NULL between sweeps */
+    int     drain_listener_closed; /**< 1 = this drain has stopped listening (http_server_core.c) */
 } KlHttpServer;
 
 /**
@@ -404,9 +405,32 @@ int  kl_http_server_run(KlHttpServer *s);
 
 /**
  * @brief Request server shutdown. If drain_timeout_ms is configured,
- *        enters drain mode first (stops accepting, waits for in-flight).
+ *        enters drain mode first; a second call stops at once.
+ *
+ * A graceful drain, from the run loop's next tick:
+ * - **stops listening**: the listen socket is closed (an owned AF_UNIX node is
+ *   removed), so a new connection is refused at connect instead of waiting in
+ *   the backlog, and a load balancer or fleet fails over at once. An adopted
+ *   `listen_fd` (socket activation) is closed too; the activating manager keeps
+ *   its own copy;
+ * - **ends keep-alive**: every HTTP/1.1 response from then on carries
+ *   `Connection: close`, and an idle keep-alive connection (waiting for its
+ *   next request, nothing of it received) is closed;
+ * - lets in-flight requests, suspended ops and streamed responses finish;
+ *   WebSocket connections get a close frame and HTTP/2 connections a GOAWAY.
+ *
+ * kl_http_server_run returns once nothing is active or `drain_timeout_ms` has
+ * passed; kl_http_server_free then cancels what remains (on_cancel once each).
+ * Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
  */
 void kl_http_server_stop(KlHttpServer *s);
+
+/**
+ * @brief Whether a graceful drain is in progress (kl_http_server_stop with a
+ *        drain_timeout_ms). Safe from any thread.
+ * @return 1 while draining, 0 otherwise.
+ */
+int  kl_http_server_draining(const KlHttpServer *s);
 
 /** @brief Free all server resources (pool, router, event loop). */
 void kl_http_server_free(KlHttpServer *s);

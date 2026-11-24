@@ -195,6 +195,7 @@ kl_http_router_run_post_middleware	http_router.h
 kl_http_router_use	http_router.h
 kl_http_router_use_post	http_router.h
 kl_http_server_bound_port	http_server.h
+kl_http_server_draining	http_server.h
 kl_http_server_event_ctx	http_server.h
 kl_http_server_event_ctx_const	http_server.h
 kl_http_server_free	http_server.h

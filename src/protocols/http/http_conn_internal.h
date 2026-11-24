@@ -174,6 +174,9 @@ struct KlHttpConn {
      * was seen under RESET_ONLY and the op runs on. */
     int hup_state;
     struct KlHttpServer *hup_server;   /* the server that owns the watch or the sweep entry */
+    /* The owning server's draining flag (read atomically): a drain ends keep-alive, so a response
+     * started while it is set says Connection: close. NULL for a connection with no server. */
+    const int *server_draining;
     /* Frames on the stack that drive this connection (the route handler, a body reader's on_data,
      * kl_async_complete's on_resume). An op ended inside one is left to that frame to drive or close,
      * so the connection is never driven or released twice. */
