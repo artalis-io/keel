@@ -187,7 +187,7 @@ void kl_async_sync_stream_interest(KlHttpServer *s) {
     for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
         KlHttpConn *c = op->conn;
         if (!c || c->async_op != op || c->state != KL_HTTP_CONN_SUSPENDED) continue;
-        async_stream_watch_write(s, c, !c->stream_write_off && async_stream_pending(c));
+        async_stream_watch_write(s, c, async_stream_pending(c));
     }
 }
 
@@ -201,26 +201,6 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
         async_stream_progress(s, conn);   /* writable: move the suspended stream's output */
         return;
     }
-    if (conn->stream_write_watched) {
-        /* A report without WRITE while the write watch is on. That registration is not a hang-up
-         * registration, so a poll-style backend reports the peer's FIN or reset as a bare READ (a
-         * level-triggered POLLHUP: WSAPoll, BSD/macOS poll). Classify it with the sweep's
-         * non-consuming peek. A reset ends the op, whatever the policy: the stream cannot be
-         * delivered. Anything else (a FIN, a half-close, bytes queued ahead of it, or no way to peek)
-         * is not a failure: the write watch is dropped for the rest of this suspension (flushing on,
-         * it would spin on the level-triggered report), the hang-up watch (if any) is back on its own
-         * and decides per the policy as without a stream, and only this connection's stream then moves
-         * on the producer's own writes. */
-        KlAsyncOp *wop = conn->async_op;
-        if (wop && conn->state == KL_HTTP_CONN_SUSPENDED && async_hup_can_peek(s) &&
-            async_hup_probe(s, conn) == 2) {
-            kl_async_cancel(s, wop);   /* reset: on_cancel once; retiring removes the watch */
-            return;
-        }
-        conn->stream_write_off = 1;
-        async_stream_watch_write(s, conn, 0);
-        return;
-    }
     if (!(ready & (KL_EVENT_HANGUP | KL_EVENT_READ)))
         return;
     /* A hang-up registration has no READ interest, so a READ report can only be a backend's legacy
@@ -229,8 +209,7 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
         ready = (KlEventMask)(KL_EVENT_HANGUP | KL_EVENT_ERROR);
     kl_watcher_del(&s->ev, conn->stream.fd);   /* first report: stop watching, whatever follows */
     conn->hup_state = KL_HUP_NONE;
-    conn->stream_write_watched = 0;   /* the stream's write watch went with it; the next tick's
-                                       * kl_async_sync_stream_interest re-arms it while output waits */
+    conn->stream_write_watched = 0;            /* the stream's write watch went with it; re-armed below */
     KlAsyncOp *op = conn->async_op;
     if (!op || conn->state != KL_HTTP_CONN_SUSPENDED)
         return;
@@ -254,7 +233,6 @@ int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
     kl_event_del(&s->ev.loop, conn->stream.fd);
 
     /* Park the connection */
-    conn->stream_write_off = 0;   /* a new suspension may watch its stream for writability */
     conn->state = KL_HTTP_CONN_SUSPENDED;
     conn->async_op = op;
     conn->suspend_start_ms = kl_monotonic_ms();
