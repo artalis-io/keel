@@ -31,13 +31,13 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-/* op MUST be first: on_cancel recovers the context from the op pointer. */
 /* Two owners, each releasing the context exactly once, in either order: the pool (done_fn if the work
  * ran, cancel_fn if it never did; kl_thread_pool_free runs one of them for every item) and the op
  * (resumed by done_fn, or cancelled by on_cancel: a client hang-up, or kl_http_server_free). Whichever
  * finishes second frees it. A cancel can come while the work is queued or running, and main() frees
  * the pool before the server, so cancel_fn can run while the op is still suspended. All of these run
  * on the loop thread, or on main() once the loop thread has been joined: never concurrently. */
+/* op MUST be first: on_cancel recovers the context from the op pointer. */
 typedef struct { KlAsyncOp op; int result; int op_ended; int pool_released; } WorkCtx;
 
 static void ctx_release_op(WorkCtx *w)   { w->op_ended = 1;      if (w->pool_released) free(w); }
