@@ -72,7 +72,7 @@ In standing CI, a dedicated read-only `Release archive (verify + upload)` job (U
 required) runs `make check-release-artifacts RELEASE_REQUIRE_PKGCONFIG=1`, builds the archive, and
 uploads the tarball + checksum as short-lived workflow artifacts (validation output, not a release
 asset; named with the version and the audited commit). Downstream `Archive build` jobs on Ubuntu
-(epoll), macOS (kqueue), and Windows (WSAPoll) download that archive, verify its checksum, extract it,
+(epoll), macOS (kqueue), and Windows (Windows select()) download that archive, verify its checksum, extract it,
 and build/test from the extracted tree. The workflow keeps read-only permissions, uses no release/upload
 API, needs no secrets, and keeps a short artifact retention. The `check-workflows` gate lints the
 workflow YAML (and actionlint when installed) locally so a malformed workflow edit is caught before push.

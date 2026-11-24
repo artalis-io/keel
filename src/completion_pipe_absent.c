@@ -1,12 +1,12 @@
 /*
  * completion_pipe_absent.c: the named-pipe completion seam on every engine that has none.
  *
- * Linked on every build whose event backend is not IOCP (epoll / kqueue / poll / WSAPoll / io_uring /
+ * Linked on every build whose event backend is not IOCP (epoll / kqueue / poll / Windows select() / io_uring /
  * pollcomp). kl_comp_pipe_available() is 0, and the pipe transport checks it before it opens a
  * handle, so the remaining functions are unreachable in a correct program; they fail closed rather
  * than abort, because a caller that skipped the check should get an error, not a crash.
  *
- * No readiness emulation lives here on purpose: a named pipe is completion-native, and WSAPoll cannot
+ * No readiness emulation lives here on purpose: a named pipe is completion-native, and the Windows readiness backend (select()) cannot
  * watch a HANDLE. See docs/architecture/windows_named_pipes.md.
  */
 #include "completion_pipe.h"

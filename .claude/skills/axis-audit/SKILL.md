@@ -55,7 +55,7 @@ negotiation, `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) + `src/complet
 `src/completion_core.c` (the platform-independent completion axis + generic connection driver)
 + `src/completion_dispatch.c` / `src/completion_io.h` (the run-loop completion dispatch seam; the old io_engine has been retired). Backends, Makefile-selected via `BACKEND=`:
 - **Readiness:** `event_epoll.c` (Linux default), `event_kqueue.c` (macOS default),
-  `event_wsapoll.c` (Windows default), `event_poll.c` (universal fallback).
+  `event_winselect.c` (Windows default, Winsock `select()`), `event_poll.c` (universal fallback).
 - **Completion:** `event_iouring.c` (Linux, `BACKEND=iouring`; completion-native SQE/CQE),
   `event_iocp.c` (Windows, `BACKEND=iocp`), `event_pollcomp.c` (portable `poll()` facade,
   `BACKEND=pollcomp`; the CI/ASan test double). Each backend implements `kl_event_caps` +

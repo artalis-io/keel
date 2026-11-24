@@ -47,7 +47,7 @@ static int clamp_int(size_t n) {
  * "accept: No error"; a pending connect looks like a hard failure). Reading
  * WSAGetLastError() does not clear it, so callers that additionally feed it to
  * kl_sock_errno_to_error() are unaffected. Shared (declared in sockcompat.h) so
- * the Winsock event backend (event_wsapoll.c) and kl_plat_poll1 translate the
+ * the Winsock event backend (event_winselect.c) and kl_plat_poll1 translate the
  * same way; the server's `errno == EINTR` retry check depends on it. */
 void kl_wsa_set_errno(void) {
     switch (WSAGetLastError()) {

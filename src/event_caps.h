@@ -22,7 +22,7 @@
  * helpers below. */
 
 /* Implemented once per event backend TU (event_epoll.c, event_kqueue.c,
- * event_poll.c, event_wsapoll.c, event_iouring.c). Returns a compile-time-constant
+ * event_poll.c, event_winselect.c, event_iouring.c). Returns a compile-time-constant
  * set; `loop` is accepted for a future per-loop-mode backend (io_uring readiness
  * vs completion) but is unused by today's readiness backends. */
 unsigned kl_event_caps(const KlEventLoop *loop);

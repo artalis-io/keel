@@ -2,7 +2,7 @@
  * event_builtin.h: the compiled-in event backend's implementation entry points.
  *
  * Exactly one backend TU (event_epoll.c / event_kqueue.c / event_poll.c /
- * event_wsapoll.c / event_iouring.c / event_iocp.c / event_pollcomp.c) is built
+ * event_winselect.c / event_iouring.c / event_iocp.c / event_pollcomp.c) is built
  * in via the Makefile's BACKEND= selection and defines these `*_builtin`
  * functions. The public kl_event_* API (event.h) is implemented once in
  * event_dispatch.c, which calls these directly on the default path (loop->ops ==

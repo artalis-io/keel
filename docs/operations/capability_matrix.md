@@ -28,7 +28,7 @@ asserted here.
 | POSIX + io_uring (Linux, completion) | ✅ | ✅ | ✅ the `IOURING_TEST_SUITES` gate (`make BACKEND=iouring test-iouring`) + smokes + LSan (container) | Default on Linux (kernel 5.6+) |
 | POSIX + kqueue (macOS) | ✅ | ✅ | ✅ full suite (macOS CI) | Default on macOS |
 | POSIX + poll (universal fallback) | ✅ | ✅ | ✅ full suite | Universal fallback (`make BACKEND=poll`); auto-selected under Cosmopolitan |
-| Winsock + WSAPoll (Windows) | ✅ | ✅ | ✅ the `WIN_TEST_SUITES` subset (Windows CI, `make test-win`) | Default on Windows |
+| Winsock + `select()` (Windows) | ✅ | ✅ | ✅ the `WIN_TEST_SUITES` subset (Windows CI, `make test-win`) | Default on Windows |
 | Winsock + IOCP (Windows, completion) | ✅ | ✅ | ✅ lifecycle + smokes: plaintext, TLS-via-mock, PROXY, chunked TransmitFile, UDP-local | `make BACKEND=iocp`; real-mbedTLS-over-IOCP is BYO / out-of-CI |
 | pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async/proxy/bigstream, ASan/LSan | Test double (`make BACKEND=pollcomp`), not a shipping backend |
 
@@ -67,11 +67,11 @@ completion axis (the readiness axis is covered by the default `make test`).
 | Partial I/O (short read/write) | EAGAIN / short `writev` retried | completion reports `< requested`; driver re-posts remainder | `test_http_client_stream`, `test_http_multipart_stream` |
 | TLS (handshake + app data) | `read`/`write` vtable on the socket | memory-BIO `feed_input`/`drain_output` | `tls`, `tls_integration`, `peer_cert` over completion; `smoke-*-tls` |
 | PROXY protocol header | `kl_http_conn_read_proxy_header` (peek+consume) | `comp_drive_proxy` + `kl_http_conn_ingest_proxy` from `read_buf` | `test_peer_addr` 6/6 over completion; `smoke-*` proxy |
-| Client hang-up while suspended (`KlHttpServerConfig.suspended_hangup`) | `KL_EVENT_HANGUP` watcher where the loop has `KL_EVENT_CAP_HANGUP` (epoll, kqueue, Linux poll, WSAPoll); otherwise a 1 s `recv_peek` sweep | the same watcher relayed as a completion watch (io_uring `POLL_ADD(POLLRDHUP)`, Linux pollcomp); IOCP and non-Linux pollcomp use the sweep | `test_event_hangup`, `test_http_suspend_hangup` (every backend), mbedTLS `e2e`; `docs/architecture/suspended_hangup_detection.md` |
+| Client hang-up while suspended (`KlHttpServerConfig.suspended_hangup`) | `KL_EVENT_HANGUP` watcher where the loop has `KL_EVENT_CAP_HANGUP` (epoll, kqueue, Linux poll); otherwise a 1 s `recv_peek` sweep (also on the Windows `select()` readiness backend, which cannot express a hang-up-only watch) | the same watcher relayed as a completion watch (io_uring `POLL_ADD(POLLRDHUP)`, Linux pollcomp); IOCP and non-Linux pollcomp use the sweep | `test_event_hangup`, `test_http_suspend_hangup` (every backend), mbedTLS `e2e`; `docs/architecture/suspended_hangup_detection.md` |
 | Close with outstanding work | stale-event guard after close | single terminal completion; op/buffer freed once | ASan/LSan smokes; `test_read_flow_control.shutdown_while_paused` |
 | Timeout | idle sweep + timer heap | same timer heap; deadline on the loop | `test_timeout`, `test_timer` |
 | UDP datagram (source + local addr) | `recvmsg`/`IP_PKTINFO` | `kl_comp_post_dgram_recv`/`_send` (WSARecvMsg on IOCP) | `datagram_socket`, `datagram_batch`, `datagram_multicast`, `udp_cmsg` over completion |
-| Windows Named Pipe stream + listener (`<keel/pipe.h>`) | **none** (refused: `KL_PIPE_UNSUPPORTED`; no readiness emulation) | overlapped `ReadFile`/`WriteFile` on the IOCP port (`completion_pipe.h`), routed by life token as `KL_COMP_PIPE_READ`/`_WRITE` | `pipe_stream` (IOCP, MinGW + MSVC); refusal asserted on WSAPoll |
+| Windows Named Pipe stream + listener (`<keel/pipe.h>`) | **none** (refused: `KL_PIPE_UNSUPPORTED`; no readiness emulation) | overlapped `ReadFile`/`WriteFile` on the IOCP port (`completion_pipe.h`), routed by life token as `KL_COMP_PIPE_READ`/`_WRITE` | `pipe_stream` (IOCP, MinGW + MSVC); refusal asserted on Windows select() |
 
 **One documented asymmetry (by design, not a gap):** a broadcast send without
 `SO_BROADCAST` surfaces `EACCES` *synchronously* on readiness but on the *send

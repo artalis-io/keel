@@ -16,7 +16,7 @@ extern "C" {
  * pattern, the piece that lets a background thread reach kl_async_complete()
  * safely (that call is loop-thread-only).
  *
- * A raw pipe(2) does NOT work everywhere: WSAPoll and IOCP can only watch
+ * A raw pipe(2) does NOT work everywhere: the Windows readiness backend (select()) and IOCP can only watch
  * sockets, never pipe HANDLEs, so a POSIX-only pipe leaves the watcher silently
  * dead on Windows. This channel is a pipe where a pipe is watchable and a
  * connected loopback socket pair where it is not, so one piece of caller code

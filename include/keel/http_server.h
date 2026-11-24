@@ -69,9 +69,9 @@ typedef enum {
  * request and still waits for the response): both are one FIN on the wire. The policy decides.
  *
  * Detection depends on the event backend. On a loop with KL_EVENT_CAP_HANGUP (epoll, kqueue,
- * Linux poll, WSAPoll, io_uring, Linux pollcomp) a FIN or reset is seen promptly, even behind
- * unread bytes, without reading them. Elsewhere (IOCP, poll and pollcomp off Linux, Cosmopolitan,
- * lwIP, UEFI, an injected backend without the capability) the server peeks each suspended
+ * Linux poll, io_uring, Linux pollcomp) a FIN or reset is seen promptly, even behind unread bytes,
+ * without reading them. Elsewhere (the Windows readiness backend, IOCP, poll and pollcomp off
+ * Linux, Cosmopolitan, lwIP, UEFI, an injected backend without the capability) the server peeks each suspended
  * connection once a second, which is BEST EFFORT: a FIN or reset behind unread bytes (a pipelined
  * request, an unread body) is invisible to the peek. Keel does not require a finite
  * KlAsyncOp.deadline_ms, so on those backends only an op deadline that ends the op guarantees that

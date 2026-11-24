@@ -812,7 +812,7 @@ static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlCompLife *life, KlDg
  *
  * ReadFile / WriteFile on an overlapped pipe HANDLE, on the same port and through the same op
  * registry, teardown quiesce and life-token routing as every other op. No readiness is involved:
- * WSAPoll cannot watch a HANDLE, and nothing here pretends it can. */
+ * The Windows readiness backend (select()) cannot watch a HANDLE, and nothing here pretends it can. */
 
 /* One Win32 call per issue; pipe I/O lengths are DWORD, so a larger write goes out in pieces the
  * drain re-posts (like a partial WSASend). */

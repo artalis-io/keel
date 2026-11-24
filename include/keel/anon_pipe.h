@@ -30,7 +30,7 @@
  * anything unsupported returns KL_PIPE_UNSUPPORTED before touching the OS.
  *   - Windows, IOCP engine: A is the overlapped server end of a private, single-instance named pipe
  *     (random name, current-user + SYSTEM DACL, remote clients rejected, client process verified), and
- *     B its synchronous client end, as a child's C runtime expects. WSAPoll cannot watch a pipe HANDLE
+ *     B its synchronous client end, as a child's C runtime expects. the Windows readiness backend (select()) cannot watch a pipe HANDLE
  *     and refuses.
  *   - POSIX, any engine that watches native descriptors (epoll, kqueue, poll, and io_uring / pollcomp
  *     through their watcher relay): an ordinary pipe (pipe2 with O_CLOEXEC). A is non-blocking and

@@ -13,7 +13,7 @@
  * <pthread.h> and <windows.h> types and this header is included by protocol TUs that must stay free
  * of platform headers.
  *
- * The same one-platform-per-TU pattern as event_epoll.c/event_wsapoll.c and socket_posix.c/socket_winsock.c.
+ * The same one-platform-per-TU pattern as event_epoll.c/event_winselect.c and socket_posix.c/socket_winsock.c.
  * See docs/archive/phases/phase6_winsock_design.md §B.0/§B.3.
  *
  * Deliberately several narrow functions rather than one KlPlatformOps god-object
@@ -52,7 +52,7 @@ int kl_plat_open_read(const char *path);
  * is the handle to register with the event loop (kl_watcher_add); it coalesces:
  * the byte count carries no meaning, only "something is ready".
  *
- * POSIX: pipe(2). Windows: a connected loopback TCP socket pair, because WSAPoll
+ * POSIX: pipe(2). Windows: a connected loopback TCP socket pair, because the Windows readiness backend
  * can only watch sockets, not pipe HANDLEs (see docs/archive/phases/phase6_winsock_design.md
  * §B.3). */
 typedef struct {

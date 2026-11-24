@@ -59,7 +59,7 @@ ABI-stable in either language.
 | epoll (Linux default) | readiness | Standing-CI tested | job `Linux (epoll)` (`make`) |
 | kqueue (macOS default) | readiness | Standing-CI tested | job `macOS (kqueue)` |
 | poll (universal fallback) | readiness | Standing-CI tested | job `Linux (poll fallback)` (`make BACKEND=poll`) |
-| WSAPoll (Windows default) | readiness | Standing-CI tested | job `Windows (MinGW, full core)` (`make OS=windows CC=gcc`) |
+| Winsock `select()` (Windows default) | readiness | Standing-CI tested | job `Windows (MinGW, full core)` (`make OS=windows CC=gcc`) |
 | io_uring (Linux) | completion | Standing-CI tested | jobs `Completion (io_uring)`, `Completion (io_uring) unit suite` (`make BACKEND=iouring`) |
 | IOCP (Windows) | completion | Standing-CI tested | job `Windows (IOCP)` (`make OS=windows BACKEND=iocp CC=gcc`) |
 | pollcomp (portable poll()-based completion double) | completion (test) | Standing-CI tested | job `Completion (poll)` (`make BACKEND=pollcomp`); a CI/ASan double, never a production backend |
@@ -94,7 +94,7 @@ counterpart of an `AF_UNIX` stream and deliberately does **not** go through `KlS
 | | Level | Evidence |
 |---|---|---|
 | Client (`KlStream`) on IOCP, MinGW + MSVC | Standing-CI tested | `test_pipe_stream` in `WIN_IOCP_TEST_SUITES` (job `Windows (IOCP)`) and in the derived MSVC IOCP set (job `Windows (native MSVC, cl.exe)`) |
-| Client on WSAPoll / any readiness engine | Not supported, by design | `kl_pipe_connect` returns `KL_PIPE_UNSUPPORTED` before any OS call; asserted by `test_pipe_stream` in `WIN_TEST_SUITES` |
+| Client on Windows select() / any readiness engine | Not supported, by design | `kl_pipe_connect` returns `KL_PIPE_UNSUPPORTED` before any OS call; asserted by `test_pipe_stream` in `WIN_TEST_SUITES` |
 | Client on POSIX, io_uring, pollcomp | Not applicable | same refusal (POSIX local IPC is `AF_UNIX`) |
 | Listener (`kl_pipe_listen`) on IOCP, MinGW + MSVC | Standing-CI tested | the same `test_pipe_stream` enrolment; built on `KlListener`'s object handoff family ([listener_accept_handoff.md](../architecture/listener_accept_handoff.md)) |
 

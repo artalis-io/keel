@@ -165,8 +165,8 @@ CI (`.github/workflows/ci.yml`) runs on push / PR to `main`. Standing jobs:
 | **completion** | the pollcomp double: HTTP/TLS/WebSocket/async roundtrips, the stream single-shot oracle, ASan+UBSan leak run, runtime-injected provider |
 | **completion-iouring** / **-suite** | io_uring roundtrips + ASan/LSan, and the `IOURING_TEST_SUITES` unit gate |
 | **sanitized-completion** / **-iouring** | the same two completion axes rebuilt and rerun under ASan+UBSan |
-| **windows** | Winsock/WSAPoll full-core build, `WIN_TEST_SUITES` subset, TCP/datagram/DNS loopback smokes, and the installed-artifact gates (`check-install`, `check-installed-consumer`) |
-| **windows-msvc** | native `cl.exe` / `lib.exe`: library + `test-msvc` on both WSAPoll and IOCP, public-API-only consumer link, no-MinGW-import assertion, standalone public headers |
+| **windows** | Winsock/select() full-core build, `WIN_TEST_SUITES` subset, TCP/datagram/DNS loopback smokes, and the installed-artifact gates (`check-install`, `check-installed-consumer`) |
+| **windows-msvc** | native `cl.exe` / `lib.exe`: library + `test-msvc` on both Windows select() and IOCP, public-API-only consumer link, no-MinGW-import assertion, standalone public headers |
 | **windows-iocp** | IOCP lifecycle suite + HTTP/TLS/async/KlDatagram roundtrips |
 | **sanitizers** | build + suite under ASan+UBSan |
 | **fuzz** | seven parser fuzzers, 60 s each: HTTP request + response, multipart, WebSocket, DNS, PROXY, URL (see [fuzzing.md](fuzzing.md)) |
@@ -174,7 +174,7 @@ CI (`.github/workflows/ci.yml`) runs on push / PR to `main`. Standing jobs:
 | **musl** / **cosmo** | Alpine/musl build + suite; Cosmopolitan APE build + example smokes |
 | **integrations** | mbedTLS + nghttp2 -- roundtrip, real-socket e2e, h2spec (pass-floor 130/146), h2load, curl + nghttpd interop, ALPN, real-TLS smoke |
 | **lwip** | lwIP providers -- loopback (server/client/UDP echo), HTTPS-over-lwIP, raw-completion backend under ASan+UBSan+LSan |
-| **release-archive** / **archive-validate** | builds and verifies the deterministic source archive, then rebuilds and tests from the extracted tree on Ubuntu, macOS and Windows/WSAPoll |
+| **release-archive** / **archive-validate** | builds and verifies the deterministic source archive, then rebuilds and tests from the extracted tree on Ubuntu, macOS and Windows/Windows select() |
 
 Separate workflows run alongside `ci.yml`: **CodeQL** (`cpp`), **OpenSSF Scorecard**, **Benchmark**
 (informational, not gating), **Docs** (Doxygen publish) and **Deploy Keel Site**.

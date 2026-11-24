@@ -33,7 +33,7 @@ src/event_kqueue.c
 src/event_poll.c
 src/event_pollcomp.c
 src/event_pollcomp_builtin.c
-src/event_wsapoll.c
+src/event_winselect.c
 src/file_io.c
 src/internal_trace.c
 src/kl_cstr.c

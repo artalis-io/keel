@@ -18,7 +18,7 @@ tracked in [the roadmap](../roadmap/roadmap.md).
 | `KlListener` | `listener.h` | the accept-side state machine (bounded accept window, pool-credit reservation, confirmed detachment) |
 | `KlConnectOp` | `connect_op.h` | one outbound connection: resolve → Happy-Eyeballs race → terminal-once |
 
-All three are **model-agnostic**: the same object drives readiness (epoll/kqueue/poll/WSAPoll) and
+All three are **model-agnostic**: the same object drives readiness (epoll/kqueue/poll/Windows select()) and
 completion (io_uring/IOCP/pollcomp) backends; the difference is confined to the adapter hooks each
 installs. None of them own a socket, timer, or event loop; an adapter supplies those through hooks
 and drives the `on_*` entry points. TLS lives **above** the raw stream (the adapter's read/write
@@ -189,7 +189,7 @@ with `kl_anon_pipe_end_close`. The stream contract needs nothing new for this:
 - **Backpressure** on a write-only stream is `KL_STREAM_WOULD_BLOCK` plus the writable-again edge.
 - **Engines:** support follows the platform and what the loop can drive (see
   [process_pipe_streams.md](../architecture/process_pipe_streams.md) §3, §4, §6):
-  - Windows IOCP: a private, single-instance, overlapped named pipe, in completion mode. WSAPoll
+  - Windows IOCP: a private, single-instance, overlapped named pipe, in completion mode. Windows select()
     refuses.
   - POSIX, every engine that watches native descriptors (epoll, kqueue, poll, and io_uring / pollcomp
     through their watcher relay): an ordinary pipe in readiness mode, over the generic watcher

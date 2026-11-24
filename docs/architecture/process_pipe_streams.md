@@ -254,7 +254,7 @@ Creation stays separate from I/O semantics, as it already is for named pipes.
 | Cosmopolitan (poll), POSIX hosts | as poll | supported |
 | Cosmopolitan, Windows host | as poll | read supported; write readiness defective (§4.4) |
 | Windows IOCP (MinGW, MSVC) | overlapped pair + completion seam | supported |
-| Windows WSAPoll | none (cannot watch a `HANDLE`) | `KL_PIPE_UNSUPPORTED` |
+| Windows select() | none (cannot watch a `HANDLE`) | `KL_PIPE_UNSUPPORTED` |
 | any runtime-installed provider (lwIP BSD, lwIP-raw, EFI) | none | `KL_PIPE_UNSUPPORTED` |
 
 No combination is emulated. The readiness adapter is used only where the engine natively watches
@@ -374,7 +374,7 @@ int   kl_anon_pipe_end_fd(const KlAnonPipeEnd *peer);
 
 - **`KlStdin` / `KlStdout` / `KlProcess`:** process roles and lifecycle are Hull's.
 - **Capability bits:** directionality is structural (§2).
-- **`CreatePipe` handles plus a thread per handle:** fake asynchrony. **WSAPoll support:** cannot
+- **`CreatePipe` handles plus a thread per handle:** fake asynchrony. **Windows select() support:** cannot
   watch a `HANDLE`.
 - **POSIX `socketpair` instead of `pipe2`:** it would get `MSG_NOSIGNAL` for free, but the child
   would see a socket on its stdio, which some tools treat differently, and the design would drift
@@ -416,7 +416,7 @@ with plain blocking I/O on a helper thread. Real children are left to Hull.
     open.
   - F5 regression: after `kl_anon_pipe_create`, a `fork`/`exec`ed helper sees none of Keel's
     internal descriptors (wakeup, splice) on POSIX.
-- **Engines.** epoll, poll, kqueue, io_uring and pollcomp (CI). IOCP under MinGW and MSVC. WSAPoll
+- **Engines.** epoll, poll, kqueue, io_uring and pollcomp (CI). IOCP under MinGW and MSVC. Windows select()
   and non-`NATIVE_FD` engines asserted `UNSUPPORTED`.
 - **Cosmopolitan.** The §4.4 probe turned into a test run under cosmocc on a **Windows runner**. It
   asserts the *correct* behaviour, and is expected to fail until the upstream defect is resolved, so
