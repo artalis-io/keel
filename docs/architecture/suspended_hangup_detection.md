@@ -56,7 +56,11 @@ where the implementation deliberately differs from it.
     whenever the callback touched ANY watcher. Removing the hang-up watcher from a thread pool's
     `done_fn` then left the pool's own wakeup un-armed on io_uring (one-shot `POLL_ADD`): the second
     suspended request never completed (CI's io_uring async smoke). The re-arm now checks only the
-    dispatched watcher (`event_ctx.c`), with a regression test in `test_async`.
+    dispatched registration (`event_ctx.c`), identified by address and a per-context generation so a
+    new watcher at a reused address is never mistaken for the old one, with regression tests in
+    `test_async` (they discriminate on io_uring, where a missed re-arm is never repaired). Making that
+    identity test deterministic exposed a kqueue bug on `main`: `kl_event_del` left the WRITE filter of a
+    WRITE-only registration in place, delivering events for a freed udata; fixed with `EV_RECEIPT`.
 
 ## Problem
 
