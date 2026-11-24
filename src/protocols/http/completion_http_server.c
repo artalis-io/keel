@@ -633,6 +633,8 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
         if (!cb || !had_pending || kl_drain_pending(&c->res.drain)) break;
         const unsigned gen = c->comp_gen;
         cb(cb_ctx);                                 /* may write (bounded), end or cancel */
+        /* The callback may release c (comp_gen bumped), which cppcheck cannot see through it. */
+        /* cppcheck-suppress knownConditionTrueFalse */
         if (c->comp_gen != gen || c->comp_closing) return;   /* it ended the connection */
         /* It ended the stream: move the terminator (and what it wrote) on, as the loop above does
          * for a stream that was already ended. At most once more. */
@@ -1269,6 +1271,8 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
         if (drained) {
             const unsigned gen = c->comp_gen;
             drained(drained_ctx);          /* may write (bounded), end, complete or cancel */
+            /* The callback may release c (comp_gen bumped), which cppcheck cannot see through it. */
+            /* cppcheck-suppress knownConditionTrueFalse */
             if (c->comp_gen != gen || c->comp_closing)
                 return;                    /* the callback ended the connection: nothing more here */
         }
