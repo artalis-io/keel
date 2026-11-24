@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include "platform_thread.h"   /* the PAL's threading primitives; no pthreads above this */
+#include "thread_pool_internal.h"   /* keel__thread_pool_shutting_down: a test probe */
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -251,6 +252,15 @@ int kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item)
     kl_plat_mutex_unlock(&pool->mutex);
 
     return 0;
+}
+
+int keel__thread_pool_shutting_down(KlThreadPool *pool)
+{
+    if (!pool) return 0;
+    kl_plat_mutex_lock(&pool->mutex);
+    int s = pool->shutdown;
+    kl_plat_mutex_unlock(&pool->mutex);
+    return s;
 }
 
 void kl_thread_pool_free(KlThreadPool *pool)

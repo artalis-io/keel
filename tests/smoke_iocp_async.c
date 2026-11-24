@@ -32,10 +32,11 @@ static KlThreadPool *g_pool;
  * finishes second frees it. A cancel can come while the work is queued or running, and main() frees
  * the pool before the server, so cancel_fn can run while the op is still suspended. All of these run
  * on the loop thread, or on main() once the loop thread has been joined: never concurrently. */
+/* op MUST be first: on_cancel recovers the context from the op pointer. */
 typedef struct { KlAsyncOp op; int result; int op_ended; int pool_released; } WorkCtx;
 
 static void ctx_release_op(WorkCtx *w)   { w->op_ended = 1;      if (w->pool_released) free(w); }
-static void ctx_release_pool(WorkCtx *w) { w->pool_released = 1; if (w->op_ended) free(w); }   /* op MUST be first */
+static void ctx_release_pool(WorkCtx *w) { w->pool_released = 1; if (w->op_ended) free(w); }
 
 static void work_fn(void *ud) {          /* worker thread: simulate blocking work */
     WorkCtx *w = ud;

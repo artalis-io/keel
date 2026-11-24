@@ -24,6 +24,7 @@
 #include "mock_tls.h"         /* identity TLS (no crypto), readiness and completion */
 #include "http_conn_internal.h"   /* KlHttpConn.hup_state: proves detection happened (or not) */
 #include <keel/thread_pool.h>
+#include "thread_pool_internal.h"   /* keel__thread_pool_shutting_down: order the gate after shutdown */
 #include "event_builtin.h"   /* the built-in backend, wrapped below without KL_EVENT_CAP_HANGUP */
 #include "event_caps.h"
 #include "socket.h"
@@ -540,6 +541,15 @@ static void td_free(TdCtx *w) { td_freed[w->idx]++; td_frees++; free(w); }
 static void td_release_op(TdCtx *w)   { w->op_ended = 1;      if (w->pool_released) td_free(w); }
 static void td_release_pool(TdCtx *w) { w->pool_released = 1; if (w->op_ended) td_free(w); }
 
+/* Opens the gate only once kl_thread_pool_free has signalled shutdown, so job 0 cannot finish (and
+ * free the only worker) while jobs 1 and 2 could still be dequeued: they are certain to reach
+ * cancel_fn, whatever the scheduling. */
+static void td_gate_opener(void *arg) {
+    KlThreadPool *pool = arg;
+    while (!keel__thread_pool_shutting_down(pool)) kl_test_sleep_ms(1);
+    kl_atomic_store_int(&td_gate, 1);
+}
+
 static void td_work(void *u) {   /* worker thread */
     TdCtx *w = u;
     if (w->idx == 0) {
@@ -604,8 +614,10 @@ UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
 
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&srv_tid);
-    kl_atomic_store_int(&td_gate, 1);                 /* job 0 finishes; 1 and 2 never run */
+    KlPlatThread opener;                              /* job 0 finishes only after shutdown: 1, 2 never run */
+    ASSERT_EQ(kl_plat_thread_create(&opener, td_gate_opener, td_pool), 0);
     kl_thread_pool_free(td_pool);                     /* done_fn(0), cancel_fn(1), cancel_fn(2) */
+    kl_plat_thread_join(&opener);
     EXPECT_EQ(td_freed[0], 1);                        /* resumed and released by done_fn */
     EXPECT_EQ(td_freed[2], 1);                        /* cancelled earlier, released by cancel_fn */
     EXPECT_EQ(td_freed[1], 0);                        /* still suspended: its op owns it */
