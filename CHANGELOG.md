@@ -31,9 +31,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   remembered the next op in the list before calling an op's `on_deadline`. An `on_deadline` that
   cancelled that next op, whose `on_cancel` freed its memory (a common pattern: a deadline that fails
   a group of related ops), left the sweep following a freed pointer, a use-after-free. The sweep is
-  now one function for both loops: it restarts from the head after every callback, so it only
-  follows ops still in the list. An op still fires at most once per deadline, and a sweep fires at
-  most as many callbacks as there were ops when it began.
+  now one function for both loops, and keeps its place in a cursor that retiring an op advances
+  before the op's `on_cancel` runs. Ops are still visited in list order, each at most once per
+  sweep.
 - **A streamed response's `on_drain` producer is bounded on completion loops.** On io_uring, IOCP
   and pollcomp the response drain's `on_drain` fired while the server was moving the stream's backlog
   onto the connection's output queue, a step allowed past the queue's bound, so every write made from

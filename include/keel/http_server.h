@@ -301,6 +301,8 @@ typedef struct KlHttpServer {
     int64_t hup_sweep_timer;       /**< the pending sweep timer (valid while hup_sweep_armed) */
     int     hup_sweep_armed;       /**< 1 = a sweep timer is pending */
     int     hup_sweep_conns;       /**< suspended connections the sweep covers */
+    /* Appended after 3.5.0. INTERNAL. */
+    KlAsyncOp *deadline_sweep_next; /**< the deadline sweep's next op (async.c); NULL between sweeps */
 } KlHttpServer;
 
 /**
