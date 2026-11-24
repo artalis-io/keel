@@ -894,7 +894,15 @@ int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_ended) return 0;
 
     if (res->drain_enabled) {
-        if (kl_drain_write(&res->drain, "0\r\n\r\n", 5) < 0) {
+        /* The terminating chunk is never refused by the stream's bound: a producer that filled its
+         * buffer to the cap must still be able to end the response. Exactly these 5 bytes get a
+         * reserved allowance past max_size (restored at once), behind everything already accepted;
+         * a real failure (allocation, transport) is still reported. */
+        const size_t cap = res->drain.max_size;
+        if (cap > 0 && cap <= SIZE_MAX - 5) res->drain.max_size = cap + 5;
+        int wr = kl_drain_write(&res->drain, "0\r\n\r\n", 5);
+        res->drain.max_size = cap;
+        if (wr < 0) {
             res->stream_error = 1;
             return -1;
         }

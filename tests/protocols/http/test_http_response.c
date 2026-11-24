@@ -851,4 +851,52 @@ UTEST(response, a_handler_set_1xx_is_not_sent_as_a_final_response) {
     ASSERT_TRUE(status_line_is(200, "HTTP/1.1 200 OK\r\n"));
 }
 
+/* ── end_stream is never refused by the stream's bound ──────────────────────────────────────────
+ * A producer that filled the response's drain to its cap (a client that is not reading) must still
+ * be able to end the response: the 5-byte terminating chunk gets a reserved allowance past the cap,
+ * behind everything already accepted. A real failure (a drain already in error) still fails. */
+static kl_ssize_t blocked_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)ctx; (void)fd; (void)buf; (void)len;
+    return 0;                                         /* takes nothing: everything is buffered */
+}
+static unsigned es_readiness_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_CAP_READINESS; }
+
+static void end_stream_at_cap_case(int *utest_result, int poisoned) {
+    static const KlSocketOps socket_ops = { .send = blocked_send, .name = "blocked" };
+    static const KlEventOps event_ops = { .caps = es_readiness_caps };
+    KlSocketProvider provider = { .ops = &socket_ops, .context = NULL };
+    KlEventCtx event_ctx;
+    memset(&event_ctx, 0, sizeof event_ctx);
+    event_ctx.loop.ops = &event_ops;
+    event_ctx.sockets = &provider;
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    kl_http_response_init(&res, &alloc);
+    res.conn_fd = 1;
+    res.ctx = &event_ctx;
+    ASSERT_EQ(kl_http_response_enable_drain(&res, &alloc, 4096), 0);
+    static char fill[4096];
+    memset(fill, 'f', sizeof fill);
+    ASSERT_EQ(kl_drain_write(&res.drain, fill, sizeof fill), 0);   /* the drain is at its cap */
+    ASSERT_EQ(res.drain.buf_len, (size_t)4096);
+    if (poisoned) {
+        EXPECT_LT(kl_drain_write(&res.drain, "x", 1), 0);          /* past the cap: sticky error */
+        EXPECT_EQ(kl_http_response_end_stream(&res), -1);           /* a real failure is reported */
+        EXPECT_FALSE(res.stream_ended);
+    } else {
+        EXPECT_EQ(kl_http_response_end_stream(&res), 0);
+        EXPECT_TRUE(res.stream_ended);
+        EXPECT_EQ(res.drain.buf_len, (size_t)4096 + 5); /* behind what was accepted */
+        EXPECT_EQ(memcmp(res.drain.buf + 4096, "0\r\n\r\n", 5), 0);
+        EXPECT_EQ(res.drain.max_size, (size_t)4096);               /* the allowance is not kept */
+        EXPECT_EQ(kl_http_response_end_stream(&res), 0);           /* repeated: success, ... */
+        EXPECT_EQ(res.drain.buf_len, (size_t)4096 + 5);            /* ... and no second terminator */
+        EXPECT_EQ(res.drain.max_size, (size_t)4096);
+        EXPECT_LT(kl_drain_write(&res.drain, "x", 1), 0);          /* the cap still holds after */
+    }
+    kl_http_response_free(&res);
+}
+UTEST(http_response, end_stream_is_not_refused_by_a_full_drain) { end_stream_at_cap_case(utest_result, 0); }
+UTEST(http_response, end_stream_on_a_failed_drain_still_fails) { end_stream_at_cap_case(utest_result, 1); }
+
 UTEST_MAIN();
