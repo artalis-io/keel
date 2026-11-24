@@ -163,8 +163,11 @@ alpn-interop: $(LIB)
 	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	./tests/alpn_server & echo $$! >/tmp/keel_alpn.pid; sleep 1; \
-	  ha=$$(echo | openssl s_client -alpn h2 -connect 127.0.0.1:18443 2>/dev/null | grep -i "ALPN protocol"); \
-	  hb=$$(echo | openssl s_client -alpn http/1.1 -connect 127.0.0.1:18443 2>/dev/null | grep -i "ALPN protocol"); \
+	  probe() { for t in 1 2 3; do o=$$(echo | openssl s_client -alpn "$$1" -connect 127.0.0.1:18443 2>&1); \
+	    r=$$(echo "$$o" | grep -i "ALPN protocol"); test -n "$$r" && { echo "$$r"; return 0; }; sleep 1; done; \
+	    echo "openssl s_client -alpn $$1: no ALPN line after 3 attempts; last output:" >&2; echo "$$o" >&2; }; \
+	  ha=$$(probe h2); \
+	  hb=$$(probe http/1.1); \
 	  c2=$$(curl -s -k --http2 https://127.0.0.1:18443/ 2>/dev/null); \
 	  c1=$$(curl -s -k --http1.1 https://127.0.0.1:18443/ 2>/dev/null); \
 	  kc=$$(./tests/alpn_client https://127.0.0.1:18443 2>/dev/null); kcrc=$$?; \
