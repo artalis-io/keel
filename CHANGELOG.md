@@ -17,6 +17,26 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `BACKEND=wsapoll`, select it. Its descriptor sets grow with the registrations (no fixed
   `FD_SETSIZE` limit), and a socket closed without `kl_event_del` no longer stops the loop.
 
+### Fixed
+
+- **A streamed response's `on_drain` producer is bounded on completion loops.** On io_uring, IOCP
+  and pollcomp the response drain's `on_drain` fired while the server was moving the stream's backlog
+  onto the connection's output queue, a step allowed past the queue's bound, so every write made from
+  the callback was accepted as well: a producer that refilled from `on_drain` could queue megabytes
+  (8 MiB measured in one callback) for a client that was not reading. Both places the server moves
+  the backlog (after each completed send, and when the connection starts sending after its async op
+  completes) now fire `on_drain` after the move, under the same conditions as before (the drain held
+  bytes and is now empty), and its writes meet the same bound as any other write. Readiness loops
+  were not affected. (A producer writing on after its op completed is outside the contract: the
+  response is then the driver's, and ends when its buffer empties, on every loop.)
+- **`kl_http_response_end_stream` no longer fails on a drain within 5 bytes of `max_size`.** The
+  5-byte terminating chunk was refused like a body write when fewer than 5 bytes of room were left
+  (typically a producer whose chunk size divides the cap exactly), and the stream failed. The
+  terminating chunk now gets a reserved 5-byte allowance past the cap, behind everything already
+  accepted. A body write that passed the cap still puts the drain in error, and `end_stream` on a
+  drain in error still fails. Trailers a helper writes through the ordinary write path (SSE,
+  compression) get no allowance.
+
 Upgrade notes:
 
 - **Windows readiness loops no longer advertise `KL_EVENT_CAP_HANGUP`.** `select()` reports a FIN

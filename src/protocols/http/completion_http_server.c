@@ -611,14 +611,33 @@ static void comp_tls_send_response(struct KlHttpServer *s, KlHttpConn *c) {
  * its own connection. */
 static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
-    c->comp_stream_flushing = 1;                    /* the outbound buffer goes onto the queue whole */
-    do {
-        r = kl_http_response_send(&c->res);
-        if (r < 0) break;
-        if (kl_comp_tls_flush(c) < 0) { r = -1; break; }   /* ring → queue (TLS), then send */
-    } while (r == 1 && c->res.stream_ended);
-    c->comp_stream_flushing = 0;
-    if (r < 0) { kl_comp_close(s, c); return; }
+    for (int pass = 0; ; pass++) {
+        /* The producer's on_drain is held back while the driver moves the buffer past the queue's
+         * bound (comp_stream_flushing), and fired once the bound applies again, so its writes are
+         * bounded like any other (as in comp_tls_on_write). It fires when it always has: the drain
+         * held bytes and the move emptied it. */
+        const int was_ended = c->res.stream_ended;
+        const int had_pending = c->res.drain_enabled && kl_drain_pending(&c->res.drain);
+        KlDrainCb cb = c->res.drain_enabled ? c->res.drain.on_drain : NULL;
+        void *cb_ctx = c->res.drain.drain_ctx;
+        if (cb) c->res.drain.on_drain = NULL;
+        c->comp_stream_flushing = 1;                /* the outbound buffer goes onto the queue whole */
+        do {
+            r = kl_http_response_send(&c->res);
+            if (r < 0) break;
+            if (kl_comp_tls_flush(c) < 0) { r = -1; break; }   /* ring → queue (TLS), then send */
+        } while (r == 1 && c->res.stream_ended);
+        c->comp_stream_flushing = 0;
+        if (cb) c->res.drain.on_drain = cb;
+        if (r < 0) { kl_comp_close(s, c); return; }
+        if (!cb || !had_pending || kl_drain_pending(&c->res.drain)) break;
+        const unsigned gen = c->comp_gen;
+        cb(cb_ctx);                                 /* may write (bounded), end or cancel */
+        if (c->comp_gen != gen || c->comp_closing) return;   /* it ended the connection */
+        /* It ended the stream: move the terminator (and what it wrote) on, as the loop above does
+         * for a stream that was already ended. At most once more. */
+        if (pass > 0 || was_ended || !c->res.stream_ended) break;
+    }
     c->comp_tlsq_resp_mark = c->comp_tlsq_appended;
     c->comp_tlsq_resp_pending = 1;
     if (comp_tlsq_idle(c)) {                        /* nothing to send: complete now */
@@ -1226,12 +1245,33 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
      * room, which also tells the producer it may write more. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         int fr = 0;
+        KlDrainCb drained = NULL;
+        void *drained_ctx = NULL;
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
+            /* comp_stream_flushing lets the DRIVER's own movement of the backlog past the queue
+             * bound; it must not extend to the producer. So the producer's on_drain is held back
+             * while the flag is set, and fired below, once it is clear: a write from it is then
+             * bounded like any other (it used to be accepted without limit on completion loops).
+             * fr == 0 means the drain is empty. A low-water on_writable refill that emptied it
+             * would also fire on_drain here, unlike inside kl_drain_flush; the response drain
+             * never sets on_writable (drain_reserve.h is not used for HTTP output). */
+            KlDrainCb cb = c->res.drain.on_drain;
+            void *cb_ctx = c->res.drain.drain_ctx;
+            c->res.drain.on_drain = NULL;
             c->comp_stream_flushing = 1;
             fr = kl_drain_flush(&c->res.drain);
             c->comp_stream_flushing = 0;
+            c->res.drain.on_drain = cb;
+            c->res.drain.drain_ctx = cb_ctx;
+            if (fr == 0) { drained = cb; drained_ctx = cb_ctx; }
         }
         if (fr < 0 || (c->tls && comp_tlsq_absorb_ring(c) < 0)) { kl_comp_close(s, c); return; }
+        if (drained) {
+            const unsigned gen = c->comp_gen;
+            drained(drained_ctx);          /* may write (bounded), end, complete or cancel */
+            if (c->comp_gen != gen || c->comp_closing)
+                return;                    /* the callback ended the connection: nothing more here */
+        }
     }
     /* A WebSocket's frames held back while the queue was full: move them on now there is room. */
     if (c->state == KL_HTTP_CONN_WEBSOCKET) {

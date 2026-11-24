@@ -1987,4 +1987,153 @@ UTEST(completion_output, ending_a_stream_twice_leaves_the_connection_framing_cle
     printf("  (connection closed by the server: %d)\n", te_first_closed);
 }
 
+/* ── A legacy on_drain producer is bounded on a completion loop ─────────────────────────────────
+ * The classic backpressure loop: write until the response's drain holds bytes, then wait for its
+ * on_drain and write again. On a completion loop on_drain fired while the driver was moving the
+ * backlog onto the output queue, with the queue's bound lifted for the driver, so every write the
+ * producer made from it was taken too: one callback accepted 8 MiB for a client that was not
+ * reading. on_drain now fires after the move, and writes from it are bounded like any other. The
+ * whole stream must still arrive, in full, once the client reads. Completion backends only. */
+#define LD_TOTAL     160       /* 10 MiB in 64 KiB chunks */
+#define LD_PER_CALL  128       /* what one on_drain offers at most: 8 MiB */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int total, calls, max_per_call, failed, finishing, drain_on;
+    int early;                /* complete the op early, with bytes in the drain; the producer ends */
+    int completing, finish_tries, completed_pending, completed, calls_after;
+} LdStream;
+static LdStream g_ld;
+static int g_ld_early;
+static KlHttpServer ld_srv;
+
+static void ld_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    if (!g_ld.early) kl_http_response_end_stream(g_ld.res);
+}
+static void ld_finish(void *ud) {
+    (void)ud;
+    /* The early case completes only while bytes wait in the drain: the path under test is the
+     * driver moving them when the connection starts sending. */
+    if (g_ld.early && !kl_drain_pending(&g_ld.res->drain)) {
+        if (++g_ld.finish_tries < 2000) {
+            (void)kl_timer_add(kl_http_server_event_ctx(&ld_srv), 1, ld_finish, NULL);
+            return;
+        }
+        g_ld.failed = 1;
+    }
+    g_ld.completed_pending = g_ld.early && kl_drain_pending(&g_ld.res->drain);
+    g_ld.completed = 1;                        /* before: the driver may call on_drain from inside */
+    kl_async_complete(&ld_srv, &g_ld.op);
+}
+static void ld_refill(void *ud) {
+    (void)ud;
+    if (g_ld.failed || g_ld.finishing) return;
+    g_ld.calls++;
+    if (g_ld.completed) g_ld.calls_after++;
+    int n = 0;
+    while (n < LD_PER_CALL && g_ld.total < LD_TOTAL) {
+        if (g_ld.w(g_ld.wc, g_big_chunk, sizeof g_big_chunk) < 0) { g_ld.failed = 1; return; }
+        n++;
+        g_ld.total++;
+        if (kl_drain_pending(&g_ld.res->drain)) break;       /* backpressure: wait for on_drain */
+    }
+    if (n > g_ld.max_per_call) g_ld.max_per_call = n;
+    if (g_ld.early) {
+        /* The op completes while bytes wait in the drain; the driver then moves them itself (the
+         * connection's send path) and this callback keeps refilling until it ends the stream. */
+        if (!g_ld.completing && g_ld.total >= 20 && kl_drain_pending(&g_ld.res->drain)) {
+            g_ld.completing = 1;
+            (void)kl_timer_add(kl_http_server_event_ctx(&ld_srv), 0, ld_finish, NULL);
+        }
+        if (g_ld.total >= LD_TOTAL) {
+            g_ld.finishing = 1;
+            if (kl_http_response_end_stream(g_ld.res) < 0) g_ld.failed = 1;
+        }
+        return;
+    }
+    if (g_ld.total >= LD_TOTAL) {
+        g_ld.finishing = 1;
+        (void)kl_timer_add(kl_http_server_event_ctx(&ld_srv), 0, ld_finish, NULL);
+    }
+}
+static void ld_start(void *ud) {
+    (void)ud;
+    g_ld.drain_on = g_ld.res->drain_enabled;
+    if (!g_ld.drain_on) { g_ld.failed = 1; return; }
+    kl_drain_on_drain(&g_ld.res->drain, ld_refill, NULL);
+    ld_refill(NULL);
+}
+static void handle_legacy_drain(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_ld, 0, sizeof g_ld);
+    g_ld.early = g_ld_early;
+    g_ld.res = res;
+    memset(g_big_chunk, 'L', sizeof g_big_chunk);
+    if (kl_http_response_begin_stream(res, 200, &g_ld.w, &g_ld.wc) < 0) return;
+    g_ld.op.on_resume = ld_resume;
+    if (kl_async_suspend(&ld_srv, kl_http_request_conn(req), &g_ld.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&ld_srv), 20, ld_start, NULL);
+}
+
+static void legacy_drain_case(int *utest_result, int tls, int early) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 2, .tls = tls ? &tls_cfg : NULL };
+    ASSERT_EQ(0, kl_http_server_init(&ld_srv, &cfg));
+    if (!(kl_event_caps(&ld_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_free(&ld_srv);
+        UTEST_SKIP("The output queue's driver bypass exists only on completion backends");
+    }
+    kl_http_server_route(&ld_srv, "GET", "/ld", handle_legacy_drain, NULL, NULL);
+    g_ld_early = early;
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &ld_srv);
+    wait_for_bind(&ld_srv);
+    size_t got = 0;
+    int closed = 0;
+    int fd = connect_rcvbuf(ld_srv.bound_port, 64 * 1024);
+    if (fd >= 0) {
+        const char *rq = "GET /ld HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(300);                       /* not reading: the producer meets the bound */
+        got = read_paced(fd, 0, &closed);            /* then everything, to the close */
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&ld_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&ld_srv);
+    printf("  legacy on_drain (%s%s): %d chunks in %d calls, at most %d per call, %zu bytes read\n",
+           tls ? "tls" : "plain", early ? ", completed early" : "", g_ld.total, g_ld.calls, g_ld.max_per_call, got);
+    ASSERT_TRUE(g_ld.drain_on);
+    ASSERT_FALSE(g_ld.failed);
+    ASSERT_GT(g_ld.calls, 1);
+    if (early) {
+        /* Once the op has completed the response is the driver's alone: it ends when its buffer
+         * empties (http_connection.c, conn_stream_given_up), so a producer writing on from on_drain
+         * is outside the contract and may be cut short. What must hold is the bound: those writes
+         * used to be taken without limit (128 chunks in one callback). */
+        ASSERT_TRUE(g_ld.completing);
+        ASSERT_TRUE(g_ld.completed_pending);           /* the op completed with the drain holding bytes */
+        ASSERT_GE(g_ld.calls_after, 1);                /* and on_drain was called after it: the path */
+        ASSERT_LE(g_ld.max_per_call, 40);
+        ASSERT_TRUE(closed);
+        return;
+    }
+    ASSERT_EQ(g_ld.total, LD_TOTAL);
+    /* One call may fill the queue's room (1 MiB, 16 chunks) and the drain behind it: far below the
+     * 128 one call could add before. */
+    ASSERT_LE(g_ld.max_per_call, 40);
+    ASSERT_GE(got, (size_t)LD_TOTAL * BIG_CHUNK);    /* all of it went out, in full */
+    ASSERT_TRUE(closed);
+}
+UTEST(completion_output, a_legacy_on_drain_producer_is_bounded) { legacy_drain_case(utest_result, 0, 0); }
+UTEST(completion_output, a_legacy_on_drain_tls_producer_is_bounded) { legacy_drain_case(utest_result, 1, 0); }
+/* The same producer after its op completed with bytes still in the drain: the connection's send
+ * path moves them, and the on_drain it fires must be bounded too (writing on after the completion
+ * is outside the contract, so delivery in full is not asserted). */
+UTEST(completion_output, a_legacy_on_drain_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 0, 1); }
+UTEST(completion_output, a_legacy_on_drain_tls_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 1, 1); }
+
 UTEST_MAIN();
