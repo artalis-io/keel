@@ -203,12 +203,20 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
     }
     if (conn->stream_write_watched) {
         /* A report without WRITE while the write watch is on. That registration is not a hang-up
-         * registration, so a backend may report the peer's FIN as a bare READ: WSAPoll maps a FIN's
-         * POLLHUP to READ there, level-triggered. Treated as a failure below it would cancel a
-         * half-closed client under RESET_ONLY and even under OFF; flushed on, it would spin. Drop the
-         * write watch for the rest of this suspension instead: the hang-up watch (if any) is back on
-         * its own and classifies what happened per the policy, as without a stream. Only this
-         * connection's stream then moves on the producer's own writes, as before the write watch. */
+         * registration, so a poll-style backend reports the peer's FIN or reset as a bare READ (a
+         * level-triggered POLLHUP: WSAPoll, BSD/macOS poll). Classify it with the sweep's
+         * non-consuming peek. A reset ends the op, whatever the policy: the stream cannot be
+         * delivered. Anything else (a FIN, a half-close, bytes queued ahead of it, or no way to peek)
+         * is not a failure: the write watch is dropped for the rest of this suspension (flushing on,
+         * it would spin on the level-triggered report), the hang-up watch (if any) is back on its own
+         * and decides per the policy as without a stream, and only this connection's stream then moves
+         * on the producer's own writes. */
+        KlAsyncOp *wop = conn->async_op;
+        if (wop && conn->state == KL_HTTP_CONN_SUSPENDED && async_hup_can_peek(s) &&
+            async_hup_probe(s, conn) == 2) {
+            kl_async_cancel(s, wop);   /* reset: on_cancel once; retiring removes the watch */
+            return;
+        }
         conn->stream_write_off = 1;
         async_stream_watch_write(s, conn, 0);
         return;

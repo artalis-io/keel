@@ -1542,7 +1542,11 @@ static void pace_pump(void *ud) {
     memset(chunk, 'p', sizeof chunk);
     while (g_pace.sent < PACE_TOTAL) {
         if (kl_drain_buffered(&g_pace.res->drain) >= PACE_HIGH) { g_pace.paused = 1; return; }
-        if (g_pace.w(g_pace.wc, chunk, sizeof chunk) < 0) { g_pace.failed = 1; return; }
+        if (g_pace.w(g_pace.wc, chunk, sizeof chunk) < 0) {
+            g_pace.failed = 1;                            /* the client is gone: end the op, as an */
+            kl_async_cancel(&pace_srv, &g_pace.op);       /* application would on a failed write */
+            return;
+        }
         g_pace.sent += sizeof chunk;
     }
     g_pace.ended = 1;
@@ -1605,9 +1609,11 @@ UTEST(completion_output, a_suspended_stream_paced_on_on_drain_completes) {
     ASSERT_TRUE(ended);                                   /* was (readiness): stalled at the pause */
 }
 
-/* A client that goes away while the paced stream's output waits: the op is cancelled once (the
- * failed send on a readiness loop's write watch, or the hang-up watch), with the hang-up watch on (the
- * default) and off. Nothing is left suspended, and the server is not stuck. */
+/* A client that goes away while the paced stream's output waits: the op is cancelled exactly once,
+ * whoever sees it first (the readiness write watch's failed flush or reset peek, the hang-up watch, or
+ * the producer's own failed write, on which it cancels as an application would), with the hang-up
+ * watch on (the default) and off. Nothing is left suspended. Before the write watch, the producer
+ * waited on an on_drain that never came and nothing ended the op. */
 static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .suspended_hangup = policy };
     ASSERT_EQ(0, kl_http_server_init(&pace_srv, &cfg));
