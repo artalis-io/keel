@@ -203,6 +203,7 @@ void *kl_watcher_add_detached(KlEventCtx *ctx, KlSocketHandle fd,
             e->mask = KL_EVENT_WRITE;
             e->on_ready = on_ready;
             e->user_data = user_data;
+            e->gen = ++ctx->watcher_gen;   /* now detached: not the registration a dispatch re-arms */
             return watcher_tag(e);
         }
     }

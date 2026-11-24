@@ -10,6 +10,8 @@
 #include "net_compat.h"
 #include "../src/watcher_internal.h"   /* kl_watcher_add_detached (the ABA regression below) */
 #include <keel/thread_pool.h>
+#include "../src/event_builtin.h"   /* the built-in backend, wrapped below to count kl_event_mod */
+#include "../src/event_caps.h"      /* kl_event_caps: readiness or completion */
 #include <stdlib.h>
 #include <string.h>
 
@@ -291,8 +293,10 @@ UTEST(async, watcher_rearmed_after_its_callback_removes_another) {
 
 /* ── Re-arm identity: the watcher that was dispatched, and only that registration ──
  * After a callback the loop re-arms the dispatched registration unless the callback removed it or
- * changed its interest. These cases discriminate on a one-shot backend (io_uring's POLL_ADD), where a
- * missed re-arm means the fd is never watched again; elsewhere they check that nothing regresses. */
+ * changed its interest. The missed re-arm cases discriminate on a one-shot backend (io_uring's
+ * POLL_ADD), where a missed re-arm means the fd is never watched again; elsewhere they check that
+ * nothing regresses. The address-reuse case below also discriminates on kqueue and pollcomp, and the
+ * detached-upsert case on every readiness backend. */
 
 typedef struct {
     KlEventCtx *ev;
@@ -452,6 +456,62 @@ UTEST(async, reused_watcher_address_is_not_rearmed_as_the_old_registration) {
     kl_watcher_del(&ev, a[0]);
     kl_event_ctx_free(&ev);
     free(ls.cached);
+    kl_test_closesock(a[0]); kl_test_closesock(a[1]);
+}
+
+/* A callback that turns its own watcher into a DETACHED one in place (same node, same address, same
+ * WRITE mask) must not have the dispatch re-arm it: a detached watcher gets no readiness registration
+ * from the loop. A provider wrapping the built-in backend counts kl_event_mod, so the check does not
+ * depend on the backend re-delivering anything. Readiness-only: a completion backend's built-in table
+ * also carries the completion driver and cannot be wrapped this way, and there an in-place upsert
+ * leaves the existing backend registration live anyway (pollcomp keeps delivering on it), so nothing
+ * observable separates a re-arm from none. */
+static int g_mod_calls;
+static int counting_mod(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) {
+    g_mod_calls++;
+    return kl_event_mod_builtin(l, fd, m, u);
+}
+static const KlEventOps counting_ops = {
+    kl_event_init_builtin, kl_event_add_builtin, counting_mod, kl_event_del_builtin,
+    kl_event_wait_builtin, kl_event_close_builtin, kl_event_caps_builtin, kl_event_native_provider_builtin, NULL,
+};
+static const KlEventProvider counting_provider = { &counting_ops, "builtin-counting-mod" };
+
+static KlEventCtx *g_up_ev;
+static int g_up_calls;
+static void up_detached_cb(KlSocketHandle fd, KlEventMask r, void *u) { (void)fd; (void)r; (void)u; }
+static void up_cb(KlSocketHandle fd, KlEventMask r, void *u) {
+    (void)r; (void)u;
+    g_up_calls++;
+    (void)kl_watcher_add_detached(g_up_ev, fd, up_detached_cb, NULL);   /* in-place upsert */
+}
+
+UTEST(async, watcher_upserted_into_a_detached_one_is_not_rearmed) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventLoop probe = { 0 };
+    probe.alloc = &alloc;
+    if (kl_event_init(&probe) != 0) UTEST_SKIP("no event loop");
+    const unsigned caps = kl_event_caps(&probe);
+    kl_event_close(&probe);
+    if (caps & KL_EVENT_CAP_COMPLETION) UTEST_SKIP("the counting wrapper is readiness-only");
+
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init_ex(&ev, &alloc, &counting_provider), 0);
+    g_up_ev = &ev;
+    g_up_calls = 0;
+    int a[2];
+    ASSERT_EQ(kl_test_socketpair(a), 0);
+    set_nonblocking(a[0]); set_nonblocking(a[1]);
+    ASSERT_EQ(kl_watcher_add(&ev, a[0], KL_EVENT_WRITE, up_cb, NULL), 0);
+    void *tag = kl_watcher_add_detached(&ev, a[0], up_cb, NULL);   /* the node's tag; still WRITE */
+    ASSERT_TRUE(tag != NULL);
+    g_mod_calls = 0;
+    KlEvent e = { tag, KL_EVENT_WRITE };
+    (void)kl_event_dispatch(&ev, &e);                              /* depth 0, unbatched */
+    EXPECT_EQ(g_up_calls, 1);
+    EXPECT_EQ(g_mod_calls, 0);                                     /* no re-arm of the detached node */
+    kl_watcher_del(&ev, a[0]);
+    kl_event_ctx_free(&ev);
     kl_test_closesock(a[0]); kl_test_closesock(a[1]);
 }
 
