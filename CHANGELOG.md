@@ -5,10 +5,34 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
-Adds client hang-up detection for suspended server connections. The public API is extended (an
-event-mask interest and report bit, a report-only bit, a capability bit, a server option and its
-enum) and the default behavior of a suspended op changes, so the next release is a minor version
-(3.5.0). Existing applications need the usual 3.x recompile and relink; see the behavior change below.
+## [3.5.0]
+
+Minor release adding client hang-up detection for suspended server connections. The public API is
+extended: an event-mask interest and report bit (`KL_EVENT_HANGUP`), a report-only bit
+(`KL_EVENT_ERROR`), a capability bit (`KL_EVENT_CAP_HANGUP`), a server option
+(`KlHttpServerConfig.suspended_hangup`) and its enum (`KlHttpSuspendHangup`). The default behavior of
+a suspended op changes (see the first upgrade note). It also fixes two event-layer defects (watcher
+re-arm after a callback, and kqueue registration removal). Build requirements are unchanged. Existing applications need the usual 3.x recompile and
+relink.
+
+Upgrade notes:
+
+- **Behavior change: a suspended op whose client goes away is now cancelled.** Before, it ran to
+  completion and its response was written to a closed connection. `on_cancel` already had to handle a
+  connection that died while suspended, so a handler that follows the `async.h` contract (no freeing of
+  what outstanding work still touches, no writes to the response) needs no change. To keep the old
+  behavior set `suspended_hangup = KL_HTTP_SUSPEND_HANGUP_OFF`; to keep clients that half-close after
+  their request, `KL_HTTP_SUSPEND_HANGUP_RESET_ONLY`.
+- **On loops without `KL_EVENT_CAP_HANGUP` detection is best effort.** Keel does not require a finite
+  `KlAsyncOp.deadline_ms`, so there only a deadline whose `on_deadline` actually ends the op guarantees
+  that a connection whose FIN sits behind unread bytes is eventually released. On lwIP raw and UEFI the
+  providers' `recv_peek` always fails, so those loops detect no hang-up yet.
+- **`KlHttpServerConfig` and `KlHttpServer` have grown** (appended fields); recompile, as with every
+  3.x release. A `switch` over `KlEventMask` may need cases for the new bits.
+- **A custom socket provider's `recv_peek` must not block.** On a loop without
+  `KL_EVENT_CAP_HANGUP` the sweep calls it, from the loop thread, once a second for each suspended
+  connection whose handle is peekable. A provider that cannot peek without blocking should run with
+  `suspended_hangup = KL_HTTP_SUSPEND_HANGUP_OFF`. The shipped providers already comply.
 
 ### Added
 
@@ -54,20 +78,6 @@ enum) and the default behavior of a suspended op changes, so the next release is
   `MSG_DONTWAIT`; Winsock checks readability with a zero-timeout `WSAPoll` first). A completion
   backend's accepted socket may be blocking, and the hang-up sweep peeks it from the loop thread.
   Callers that peeked non-blocking sockets see no change.
-
-Upgrade notes:
-
-- **Behavior change: a suspended op whose client goes away is now cancelled.** Before, it ran to
-  completion and its response was written to a closed connection. `on_cancel` already had to handle a
-  connection that died while suspended, so a handler that follows the `async.h` contract (no freeing of
-  what outstanding work still touches, no writes to the response) needs no change. To keep the old
-  behavior set `suspended_hangup = KL_HTTP_SUSPEND_HANGUP_OFF`; to keep clients that half-close after
-  their request, `KL_HTTP_SUSPEND_HANGUP_RESET_ONLY`.
-- **On loops without `KL_EVENT_CAP_HANGUP` detection is best effort.** Keel does not require a finite
-  `KlAsyncOp.deadline_ms`, so there only a deadline whose `on_deadline` actually ends the op guarantees
-  that a connection whose FIN sits behind unread bytes is eventually released.
-- **`KlHttpServerConfig` and `KlHttpServer` have grown** (appended fields); recompile, as with every
-  3.x release. A `switch` over `KlEventMask` may need cases for the new bits.
 
 ## [3.4.0]
 
