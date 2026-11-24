@@ -170,7 +170,12 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     /* kl_watcher_add on a descriptor already in the watcher list arrives here, and Winsock reuses
      * handle values quickly: a registration select() rejected before may be a new socket now. If it
      * is still invalid, the next WSAENOTSOCK marks it again. A new socket starts with the except
-     * set watched again. */
+     * set watched again. Known limit: a socket closed without kl_event_del whose handle value is
+     * reused before any wait sees WSAENOTSOCK is indistinguishable from a re-arm, so it keeps the
+     * old registration's xoff; if that new socket is connecting, a failed connect then surfaces
+     * only at the caller's deadline. That needs the del-before-close contract to be broken;
+     * clearing xoff on every mod instead would cost a wakeup per re-arm on a socket with urgent
+     * data pending. */
     if (st->dead[idx]) {
         st->dead[idx] = 0;
         st->xoff[idx] = 0;
@@ -282,7 +287,12 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
                      * socket error) is reported as WRITE so the next operation sees it; with no
                      * error, all the except set can mean is urgent data, which Keel never reads and
                      * which would stay set: stop watching the except set for this registration (a
-                     * spin otherwise), until its identity changes (add, upsert, reused handle). */
+                     * spin otherwise), until its identity changes (add, upsert, reused handle).
+                     * Nothing is lost by that: Winsock's except set reports only a failed connect
+                     * and urgent data, urgent data arrives only on an established connection, and
+                     * an established connection cannot fail to connect later. Its errors (a reset)
+                     * surface through the write and read sets. Reading SO_ERROR does not clear it
+                     * on Winsock, so the caller still reads the failure after this report. */
                     int soerr = 0, len = (int)sizeof(soerr);
                     if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &len) != 0 || soerr != 0)
                         ready |= KL_EVENT_WRITE;
