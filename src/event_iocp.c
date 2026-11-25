@@ -224,6 +224,19 @@ static int iocp_watch_post(KlIocpOp *op) {
     return -1;
 }
 
+/* A re-registration of a watched handle value (kl_watcher_add or kl_watcher_mod on a descriptor
+ * already watched) may name a NEW socket: Winsock reuses handle values, and a socket closed without
+ * kl_event_del leaves its watch behind. So associate the socket with the port again; for the
+ * socket already associated this fails with ERROR_INVALID_PARAMETER and changes nothing. Without
+ * it the probe re-posted on the new socket completed nowhere: its readiness was never reported,
+ * and kl_event_close's quiesce waited for that completion forever. A watch whose re-post failed
+ * (dead) is revived, so the next drain posts it on the new socket; if the handle is still no
+ * socket, that post fails and marks it dead again. */
+static void iocp_watch_renew(KlIocpState *st, KlIocpWatch *w, void *udata) {
+    (void)CreateIoCompletionPort((HANDLE)(uintptr_t)w->fd, st->port, (ULONG_PTR)udata, 0);
+    w->op->watch_dead = 0;   /* a dead op waits to be re-armed (watch_rearm): the drain re-posts it */
+}
+
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!kl_handle_valid(fd))
         return -1;
@@ -237,6 +250,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     if ((uintptr_t)udata & 1) {
         for (KlIocpWatch *w = st->watches; w; w = w->next)
             if (w->fd == (SOCKET)fd) {   /* idempotent re-add; the interest may have changed */
+                iocp_watch_renew(st, w, udata);
                 w->op->watcher_udata = udata;
                 return iocp_watch_reinterest(st, w, mask, udata);
             }
@@ -316,6 +330,7 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     KlIocpState *st = loop->_backend;
     for (KlIocpWatch *w = st->watches; w; w = w->next)
         if (w->fd == (SOCKET)fd) {
+            iocp_watch_renew(st, w, udata);
             w->op->watcher_udata = udata;
             return iocp_watch_reinterest(st, w, mask, udata);
         }
