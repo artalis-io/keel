@@ -164,7 +164,7 @@ alpn-interop: $(LIB)
 	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 	./tests/alpn_server & echo $$! >/tmp/keel_alpn.pid; sleep 1; \
 	  probe() { for t in 1 2 3; do o=$$(echo | openssl s_client -alpn "$$1" -connect 127.0.0.1:18443 2>&1); \
-	    r=$$(echo "$$o" | grep -i "ALPN protocol"); test -n "$$r" && { echo "$$r"; return 0; }; sleep 1; done; \
+	    r=$$(echo "$$o" | grep -a -i "ALPN protocol"); test -n "$$r" && { echo "$$r"; return 0; }; sleep 1; done; \
 	    echo "openssl s_client -alpn $$1: no ALPN line after 3 attempts; last output:" >&2; echo "$$o" >&2; }; \
 	  ha=$$(probe h2); \
 	  hb=$$(probe http/1.1); \
