@@ -132,6 +132,8 @@ KlHttpServerStats	struct	http_server.h
 KlHttpServerTransport	enum	http_server.h
 KlHttpServerUnixNode	union	http_server.h
 KlHttpSse	struct	http_sse.h
+KlHttpStreamStatus	enum	http_response.h
+KlHttpStreamWritableFn	callback	http_response.h
 KlHttpSuspendHangup	enum	http_server.h
 KlIoStatus	enum	socket.h
 KlIoVec	struct	socket.h

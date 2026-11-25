@@ -469,6 +469,17 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
     return kl_comp_queue_write(c, data, len);
 }
 
+/* http_response_internal.h: what the connection's output queue holds of a pooled, completion-driven
+ * response and has not seen completed. While the response streams, the queue carries only its
+ * output (the head, the chunks; ciphertext with TLS), so the appended-but-not-sent count is it. */
+size_t kl_http_comp_stream_queued(const KlHttpResponse *res) {
+    if (!res->stream_inflight) return 0;
+    const KlHttpConn *c = (const KlHttpConn *)((const char *)res - offsetof(KlHttpConn, res));
+    if (!c->comp_driven) return 0;
+    uint64_t q = c->comp_tlsq_appended - c->comp_tlsq_sent;
+    return q > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)q;
+}
+
 /* The completion-driven TLS connection a streamed response belongs to, when its writes are the
  * producer's own (not the driver moving them: comp_stream_flushing), else NULL. */
 static KlHttpConn *comp_stream_tls_conn(KlHttpResponse *res) {
@@ -1275,6 +1286,15 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
             /* cppcheck-suppress knownConditionTrueFalse */
             if (c->comp_gen != gen || c->comp_closing)
                 return;                    /* the callback ended the connection: nothing more here */
+        }
+        /* A send completed: a suspended producer refused with WOULD_BLOCK may write again. Fired
+         * here, with the queue's bound in force again (comp_stream_flushing clear). */
+        if (c->state == KL_HTTP_CONN_SUSPENDED && c->res.stream_writable_armed) {
+            const unsigned gen = c->comp_gen;
+            kl_http_response_stream_progress(&c->res);
+            /* cppcheck-suppress knownConditionTrueFalse */
+            if (c->comp_gen != gen || c->comp_closing)
+                return;                    /* the callback ended the connection */
         }
     }
     /* A WebSocket's frames held back while the queue was full: move them on now there is room. */

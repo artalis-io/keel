@@ -749,6 +749,60 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
 
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
+/* ── Stream capacity: one bound over everything Keel holds for the response ───────────────────── */
+
+size_t kl_http_response_stream_capacity(const KlHttpResponse *res) {
+    if (!res) return 0;
+    size_t cap = res->stream_capacity ? res->stream_capacity : KL_STREAM_DRAIN_MAX;
+    /* A drain a caller enabled with a smaller hard cap (kl_http_response_enable_drain) bounds it
+     * too: admission must never let the drain refuse part of an admitted chunk. */
+    if (res->drain_enabled && res->drain.max_size > 0 && res->drain.max_size < cap)
+        cap = res->drain.max_size;
+    return cap;
+}
+
+size_t kl_http_response_stream_pending(const KlHttpResponse *res) {
+    if (!res) return 0;
+    size_t p = res->drain_enabled ? kl_drain_buffered(&res->drain) : 0;
+    size_t q = kl_http_comp_stream_queued(res);
+    return q > SIZE_MAX - p ? SIZE_MAX : p + q;
+}
+
+/* The framed size of a chunk of `len` payload bytes: hex size line, payload, CRLF. 0 on overflow. */
+static size_t chunk_framed_len(size_t len, size_t *hdr_len_out, char hdr[24]) {
+    int hl = format_chunk_hdr(hdr, len);
+    if (hl <= 0) return 0;
+    *hdr_len_out = (size_t)hl;
+    if (len > SIZE_MAX / 2 - (size_t)hl - 2) return 0;
+    return (size_t)hl + len + 2;
+}
+
+/* 1 when a framed chunk of `framed` bytes fits the room left under the capacity now. */
+static int stream_room_for(const KlHttpResponse *res, size_t framed) {
+    size_t cap = kl_http_response_stream_capacity(res);
+    if (framed > cap) return 0;
+    return kl_http_response_stream_pending(res) <= cap - framed;
+}
+
+int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritableFn fn, void *ctx) {
+    if (!res) return -1;
+    res->stream_writable_fn = fn;
+    res->stream_writable_ctx = fn ? ctx : NULL;
+    if (!fn) res->stream_writable_armed = 0;
+    return 0;
+}
+
+void kl_http_response_stream_progress(KlHttpResponse *res) {
+    if (!res || !res->stream_writable_armed || !res->stream_writable_fn) return;
+    if (res->stream_error || res->stream_ended || res->body_mode != KL_HTTP_BODY_STREAM) {
+        res->stream_writable_armed = 0;
+        return;
+    }
+    if (kl_http_response_stream_pending(res) >= kl_http_response_stream_capacity(res)) return;
+    res->stream_writable_armed = 0;              /* firing disarms, whether or not it retries */
+    res->stream_writable_fn(res->stream_writable_ctx);
+}
+
 static int drain_writev_coalesced(KlDrain *drain, const KlIoVec *iov, int iovcnt) {
     char buf[KL_STREAM_WRITE_BUF_SIZE];
     size_t used = 0;
@@ -836,6 +890,65 @@ int kl_http_response_stream_write(void *ctx, const char *data, size_t len) {
     return kl_http_response_stream_writev(ctx, &iov, 1);
 }
 
+KlHttpStreamStatus kl_http_response_stream_try_writev(KlHttpResponse *res, const KlIoVec *iov,
+                                                      int iovcnt) {
+    if (!res) return KL_HTTP_STREAM_ERROR;
+    if (res->stream_error) return KL_HTTP_STREAM_ERROR;
+    if (res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent || res->stream_ended)
+        return KL_HTTP_STREAM_CLOSED;
+    if (iovcnt < 0 || iovcnt > KL_HTTP_STREAM_IOV_MAX || (iovcnt > 0 && !iov)) {
+        res->stream_error = 1;
+        return KL_HTTP_STREAM_ERROR;
+    }
+    size_t len = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].len > 0 && !iov[i].base) {
+            res->stream_error = 1;
+            return KL_HTTP_STREAM_ERROR;
+        }
+        if (iov[i].len > SIZE_MAX / 2 - len) return KL_HTTP_STREAM_TOO_LARGE;
+        len += iov[i].len;
+    }
+    if (len == 0 || res->head_request) {
+        res->stream_writable_armed = 0;
+        return KL_HTTP_STREAM_ACCEPTED;
+    }
+    /* Without an outbound buffer (no allocator) a write could only block: not this API. */
+    if (!res->drain_enabled) {
+        res->stream_error = 1;
+        return KL_HTTP_STREAM_ERROR;
+    }
+    char hdr[24];
+    size_t hdr_len = 0;
+    size_t framed = chunk_framed_len(len, &hdr_len, hdr);
+    if (framed == 0 || framed > kl_http_response_stream_capacity(res))
+        return KL_HTTP_STREAM_TOO_LARGE;
+    if (!stream_room_for(res, framed)) {
+        res->stream_writable_armed = 1;          /* the next progress point below capacity fires */
+        return KL_HTTP_STREAM_WOULD_BLOCK;
+    }
+    /* Admitted whole: the room check covers everything below (the drain's own cap is at least the
+     * capacity), so no piece of this chunk can be refused for room. Only an allocation or transport
+     * failure can stop it part way, and that ends the stream (ERROR, the connection closes). */
+    KlIoVec wire_iov[KL_HTTP_STREAM_IOV_MAX + 2];
+    wire_iov[0] = (KlIoVec){ .base = hdr, .len = hdr_len };
+    for (int i = 0; i < iovcnt; i++)
+        wire_iov[i + 1] = iov[i];
+    wire_iov[iovcnt + 1] = (KlIoVec){ .base = (void *)"\r\n", .len = 2 };
+    if (drain_writev_coalesced(&res->drain, wire_iov, iovcnt + 2) < 0) {
+        res->stream_error = 1;
+        return KL_HTTP_STREAM_ERROR;
+    }
+    res->stream_writable_armed = 0;
+    return KL_HTTP_STREAM_ACCEPTED;
+}
+
+KlHttpStreamStatus kl_http_response_stream_try_write(KlHttpResponse *res, const void *data,
+                                                     size_t len) {
+    KlIoVec iov = { .base = (void *)data, .len = len };
+    return kl_http_response_stream_try_writev(res, &iov, 1);
+}
+
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
                              KlHttpResponseWriteFn *out_write, void **out_ctx) {
     res->body_mode = KL_HTTP_BODY_STREAM;
@@ -856,7 +969,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
      * on a slow client. If no allocator is available, fall back to the spin-write path. */
     if (!res->drain_enabled && res->alloc)
-        (void)kl_http_response_enable_drain(res, res->alloc, KL_STREAM_DRAIN_MAX);
+        (void)kl_http_response_enable_drain(res, res->alloc, kl_http_response_stream_capacity(res));
 
     KlStatusLine sl = status_line_for(res->status);
 
@@ -942,6 +1055,7 @@ int kl_http_response_end_stream(KlHttpResponse *res) {
             return -1;
         }
         res->stream_ended = 1;
+        res->stream_writable_armed = 0;          /* an ended stream has no writable edge */
         return 0;
     }
 

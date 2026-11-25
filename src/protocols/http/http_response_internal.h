@@ -57,4 +57,14 @@ int kl_http_comp_stream_tls_flush(KlHttpResponse *res);
  * buffers it), else 0. Always 0 on readiness. */
 int kl_http_comp_stream_tls_full(KlHttpResponse *res);
 
+/* The bytes of a streamed response a completion-driven connection's output queue holds and has not
+ * seen completed (queued, posted, ciphertext with TLS). 0 on readiness and for a response that is
+ * not a pooled completion-driven connection's own. Counted toward the response's stream capacity. */
+size_t kl_http_comp_stream_queued(const KlHttpResponse *res);
+
+/* A progress point of a suspended streamed response (its output moved): fire the writable edge if
+ * it is armed and the pending bytes are below the capacity. The caller re-validates the connection
+ * afterwards: the callback may write, end the stream, complete or cancel the op. */
+void kl_http_response_stream_progress(KlHttpResponse *res);
+
 #endif /* KEEL_SRC_HTTP_RESPONSE_INTERNAL_H */

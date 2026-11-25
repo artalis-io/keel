@@ -37,6 +37,66 @@ needs nothing else to wake it.
 Both surface the same "buffer drained, resume producing" signal; no parallel callbacks with
 divergent meaning.
 
+**Bounded streaming: `kl_http_response_stream_try_writev`.** The non-fatal form of the same
+outcomes, with KlStream's write contract (`docs/contracts/stream.md`, "Write") for a chunked
+response:
+
+- *One bound.* Every byte Keel holds for the response and has not handed to the kernel counts:
+  its outbound buffer and, on a completion loop, the connection's output queue (posted sends
+  included; ciphertext with TLS). The bound is the response's stream capacity,
+  `KlHttpServerConfig.stream_capacity` (default 1 MiB, per response; `kl_http_response_stream_pending`
+  and `kl_http_response_stream_capacity` read both).
+- *Atomic admission.* A write is framed as one chunk and admitted whole (`ACCEPTED`) or not at all:
+  `WOULD_BLOCK` (it fits the capacity, not the room left now), `TOO_LARGE` (it never fits),
+  `CLOSED` (no open stream), `ERROR` (the stream failed; sticky). No byte of a refused write, framing
+  included, reaches any queue. Because admission is decided against the one total before any byte
+  moves, no layer below can refuse part of an admitted chunk; only an allocation or transport failure
+  can stop one part way, and that is `ERROR` and ends the connection.
+- *Writable edge* (`kl_http_response_stream_on_writable`): armed only by `WOULD_BLOCK`, disarmed by
+  `ACCEPTED`, fired at most once per arming when pending falls below the capacity, from a progress
+  point (a readiness writable flush of a suspended connection, a completion send completion), never
+  from inside a write. A retry that does not fit yet returns `WOULD_BLOCK` again and re-arms. It fires
+  only while the connection is suspended (a producer owns the stream), and never after the stream
+  ended, failed or was reset, or after the op completed or was cancelled: `on_cancel` is the terminal
+  signal. No wakeup is lost: `WOULD_BLOCK` means bytes are pending, so a progress point is coming (the
+  suspended connection's write watch on readiness, the in-flight send's completion on completion).
+- *End of stream.* `kl_http_response_end_stream` is never refused by the bound: its 5-byte terminal
+  chunk goes behind everything accepted, outside the admission check.
+- *Memory.* The capacity bounds pending bytes, not memory. Allocated capacity, for capacity C, the
+  16 KiB flush chunk F and the TLS overhead O of what is queued (one record per TLS write, about 22
+  to 29 bytes each; an admitted chunk is written in up to three writes, its size line with the first
+  4 KiB, the rest, and the CRLF, so about 66 to 87 bytes per chunk), for a response written only
+  through the bounded API:
+  - outbound buffer: at most C + 5 (grows from 4 KiB by doubling, clamped to its cap C; the 5-byte
+    terminator's allowance; never shrinks before the response is reset). A drain the caller enabled
+    with no cap (`kl_http_response_enable_drain(..., 0)`) can reach just under 2(C + 5);
+  - completion output queue: at most 2P, where P < 2(C + 5 + O + F) is its buffer (the smallest
+    F times a power of two holding what is queued plus one absorbed TLS chunk, never smaller than
+    before) and the second P is the previous buffer, kept while a send from it is in flight;
+  - a completion backend's copy of the send in flight: at most min(256 KiB, C + O);
+  - the response headers (a 512-byte buffer and up) and the TLS engine's fixed buffers.
+  So readiness holds at most C + 5 plus headers and fixed TLS buffers, and a completion loop at most
+  (C + 5) + 4(C + 5 + O + F) + min(256 KiB, C + O) plus the same: about 5C + 64 KiB + min(256 KiB, C).
+  With TLS pending can exceed C by O (admission counts plaintext; the queue holds ciphertext): for
+  C up to 1 MiB on a completion loop that is the last admitted chunk's records, since the outbound
+  buffer then never holds plaintext (the queue's own 1 MiB producer bound is never reached); above
+  that, plaintext waiting in the outbound buffer adds its records when it is encrypted. None of it
+  grows with the response's length. (Measured:
+  relaying 32 MiB at C = 64 KiB, the relay server's own allocations grew by 77 KiB on kqueue and
+  under 300 KiB on pollcomp.)
+- *The legacy writer* (`begin_stream`'s `KlHttpResponseWriteFn`) keeps its semantics: fatal at its
+  outbound buffer's cap (`stream_capacity`, 1 MiB by default), and on a completion loop not counting
+  the output queue, so a producer pacing itself on `kl_drain_buffered` keeps working. A suspended
+  producer's total stays finite (outbound buffer plus the queue's own 1 MiB producer bound); inside
+  the handler, on a completion loop, the queue still takes everything the handler writes until it
+  returns (nothing can be sent meanwhile), as before. The bounded API counts the queue in both
+  cases, so it is the one to use when the total must be bounded.
+- *Mixing the two writers on one response.* The capacity bound holds only for a response written
+  exclusively through the bounded API. Legacy writes count toward pending output but are not refused
+  by the bound, so pending can exceed the capacity. Framing and order stay intact either way (both
+  append whole chunks to one ordered pipeline); a bounded write then returns `WOULD_BLOCK` until
+  pending falls back under the capacity, and its edge fires when it does.
+
 **Producing later: suspend.** A stream belongs to its producer only while the handler runs or the
 connection is suspended (`kl_async_suspend`). To push events later (an SSE feed driven by a timer,
 a watcher or another connection), begin the stream, suspend, write while suspended, and end the

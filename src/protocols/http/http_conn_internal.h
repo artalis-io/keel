@@ -165,6 +165,7 @@ struct KlHttpConn {
     KlHttp2ServerConfig *h2_config;
     KlHttpRouter *router;
     size_t max_body_size;
+    size_t stream_capacity;   /* KlHttpServerConfig.stream_capacity, copied to each response */
 
     struct KlAsyncOp *async_op;
     uint64_t suspend_start_ms;

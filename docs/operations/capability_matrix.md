@@ -123,7 +123,7 @@ it does not mean out-of-CI.** Standing CI coverage per integration:
 
 | Adapter | Vtable | Validation |
 |---|---|---|
-| mbedTLS (`integrations/tls/mbedtls`) | `KlTls` | **CI-gated**: real mbedTLS 3.6.x built from source → `make KEEL_TLS=mbedtls smoke-tls`; also real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`) and the `tls`/`tls_integration`/`peer_cert` suites. |
+| mbedTLS (`integrations/tls/mbedtls`) | `KlTls` | **CI-gated**: real mbedTLS 3.6.x built from source → `make KEEL_TLS=mbedtls smoke-tls`; also real loopback HTTPS handshake + roundtrip over **both** axes (`smoke-tls`, `smoke-tls-completion-e2e`) and the `tls`/`tls_integration`/`peer_cert` suites; the bounded-streaming relay with real TLS on its upstream hop (`relay-tls`, CI on epoll, local on any backend). |
 | nghttp2 client (`integrations/http2/nghttp2`) | `KlHttp2ClientSession` | **CI-gated** (`make -C integrations/http2/nghttp2 test`): in-memory roundtrip + **real-socket e2e** via `kl_http2_client_connect` (h2c), plus `h2load` and the ALPN e2e (`alpn-interop`). ASan+UBSan+LSan on nghttp2 1.64 + 1.59. |
 | nghttp2 server (`integrations/http2/nghttp2`) | `KlHttp2ServerSession` | **CI-gated**: real-socket e2e via `KlHttpServerConfig.h2` (h2c prior-knowledge), **h2spec** conformance (pass-count floor 130 of ~146), and **third-party interop**; `curl --http2-prior-knowledge` (`interop-curl`) + `nghttpd` (`interop-nghttpd`); same sanitizer coverage. |
 

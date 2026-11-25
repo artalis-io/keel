@@ -4,6 +4,7 @@
 #include <keel/allocator.h>
 #include <keel/handle.h>
 #include <keel/drain.h>
+#include <keel/socket.h>   /* KlIoVec */
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
@@ -70,6 +71,13 @@ typedef struct KlHttpResponse {
     int close_notice;       /**< Internal: the connection closes after this response for a server
                                  reason (a graceful drain); the head says Connection: close unless
                                  the handler set a Connection header itself. Set by the server. */
+
+    /* Appended after 3.5.0: bounded streaming (kl_http_response_stream_try_writev). Set by the
+     * server or by these functions; do not touch. */
+    size_t stream_capacity;           /**< bound on pending stream output; 0 = the default (1 MiB) */
+    int    stream_writable_armed;     /**< 1 = a WOULD_BLOCK armed the writable edge */
+    void (*stream_writable_fn)(void *ctx); /**< the writable edge (a KlHttpStreamWritableFn) */
+    void  *stream_writable_ctx;       /**< its argument */
 } KlHttpResponse;
 
 /**
@@ -209,6 +217,96 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
  * @return 0 on success (including "already ended"), -1 on error (including no HTTP/1.1 write target).
  */
 int kl_http_response_end_stream(KlHttpResponse *res);
+
+/* ── Bounded streaming: non-fatal, atomic admission and a writable edge ──────────────────────────
+ *
+ * The same contract as KlStream's write facet (<keel/stream.h>: kl_stream_write,
+ * kl_stream_on_writable), for a chunked response begun with kl_http_response_begin_stream(). Every
+ * byte Keel holds for the response and has not yet handed to the kernel counts toward one bound,
+ * the response's stream capacity (KlHttpServerConfig.stream_capacity; 1 MiB by default): its
+ * outbound buffer and, on a completion loop, the connection's output queue (ciphertext with TLS).
+ * The bound is guaranteed for a response written ONLY through these functions. The writer returned
+ * by kl_http_response_begin_stream() keeps its own semantics: its bytes count toward the pending
+ * total but it is not refused by it (it fails only at its outbound buffer's cap, which is the
+ * stream capacity, and on a completion loop the output queue does not count against it). Mixing the
+ * two on one response keeps framing and order intact (both append whole chunks to one ordered
+ * pipeline), but forfeits the bound: pending can exceed the capacity, and the functions below then
+ * return WOULD_BLOCK until it falls back under it.
+ *
+ * The capacity bounds pending bytes, not memory: a buffer grows by doubling, and a completion
+ * queue keeps the previous buffer while a send from it is in flight. For capacity C, retained
+ * memory is at most about C on readiness and about 5C + 64 KiB + min(256 KiB, C) on a completion
+ * loop, plus fixed per-connection buffers (exact terms: docs/contracts/streaming.md, "Bounded
+ * streaming").
+ */
+
+/** Result of a bounded stream write. */
+typedef enum {
+    KL_HTTP_STREAM_ACCEPTED = 0,  /**< the whole write was taken (copied); Keel delivers it */
+    KL_HTTP_STREAM_WOULD_BLOCK,   /**< nothing taken: retry after the writable edge */
+    KL_HTTP_STREAM_TOO_LARGE,     /**< its framed size exceeds the capacity: permanent, split it */
+    KL_HTTP_STREAM_CLOSED,        /**< no open stream: not begun, ended, or the response is gone */
+    KL_HTTP_STREAM_ERROR          /**< the stream failed (allocation or transport), sticky */
+} KlHttpStreamStatus;
+
+/**
+ * @brief Write one chunk, all or nothing, without blocking or failing on a full stream.
+ *
+ * The vector is framed as ONE chunk (its total size, the bytes, CRLF) and admitted whole or not at
+ * all: on any status other than ACCEPTED no byte of it, framing included, entered the response's
+ * output. Accepted bytes are copied before return; refused ones stay the caller's.
+ *
+ * - ACCEPTED: taken. A zero-length write is ACCEPTED and emits nothing (a zero-size chunk would
+ *   end the body). A HEAD response takes everything and emits nothing.
+ * - WOULD_BLOCK: the framed chunk fits the capacity but not the room left now. It arms the writable
+ *   edge (kl_http_response_stream_on_writable).
+ * - TOO_LARGE: the framed chunk exceeds the capacity (or its size overflows): it can never fit.
+ * - CLOSED: the stream was not begun, was ended, or the response was reset or released.
+ * - ERROR: the stream failed earlier or now; every later write and kl_http_response_end_stream()
+ *   fail too, and the connection closes. Invalid arguments (a NULL vector with a count, more than
+ *   32 entries) are ERROR as well.
+ *
+ * Loop thread only, like every response call.
+ */
+KlHttpStreamStatus kl_http_response_stream_try_writev(KlHttpResponse *res, const KlIoVec *iov,
+                                                      int iovcnt);
+
+/** @brief kl_http_response_stream_try_writev() of one buffer. */
+KlHttpStreamStatus kl_http_response_stream_try_write(KlHttpResponse *res, const void *data,
+                                                     size_t len);
+
+/**
+ * @brief Bytes accepted for this response and not yet handed to the kernel: its outbound buffer,
+ *        plus, on a completion loop, the connection's output queue (posted sends included).
+ */
+size_t kl_http_response_stream_pending(const KlHttpResponse *res);
+
+/** @brief The bound kl_http_response_stream_pending() is admitted against. */
+size_t kl_http_response_stream_capacity(const KlHttpResponse *res);
+
+/** Writable-edge callback: "retry the write you were refused". Carries no status; the retry's own
+ *  KlHttpStreamStatus is the answer. */
+typedef void (*KlHttpStreamWritableFn)(void *ctx);
+
+/**
+ * @brief Install (or, with @p fn NULL, remove) the writable edge: "retry the write you were refused".
+ *
+ * After kl_http_response_stream_try_writev() returns WOULD_BLOCK, @p fn fires at most once, when the
+ * pending bytes fell below the capacity; the retry's own status is the answer (WOULD_BLOCK again if
+ * it needs more room than has freed, which re-arms). Only a WOULD_BLOCK arms it and an ACCEPTED
+ * write disarms it; draining alone never fires it.
+ *
+ * A refusal before @p fn was installed is remembered: once it is installed, it fires as above.
+ *
+ * It fires only while the connection is suspended (kl_async_suspend: a producer owns the stream),
+ * from the point where output progressed (a writable socket's flush, a completed send), never from
+ * inside a write. It never fires once the stream ended, failed or was reset, or once the op
+ * completed or was cancelled: on_cancel is the terminal signal. The callback may write, end the
+ * stream, complete or cancel the op; it must not free the response. Firing disarms it.
+ *
+ * @return 0, or -1 for a NULL response.
+ */
+int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritableFn fn, void *ctx);
 
 /**
  * @brief Flush headers + body to the connection fd.

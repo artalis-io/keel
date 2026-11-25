@@ -183,6 +183,11 @@ kl_http_response_json	http_response.h
 kl_http_response_reset	http_response.h
 kl_http_response_send	http_response.h
 kl_http_response_status	http_response.h
+kl_http_response_stream_capacity	http_response.h
+kl_http_response_stream_on_writable	http_response.h
+kl_http_response_stream_pending	http_response.h
+kl_http_response_stream_try_write	http_response.h
+kl_http_response_stream_try_writev	http_response.h
 kl_http_router_add	http_router.h
 kl_http_router_add_streaming	http_router.h
 kl_http_router_add_streaming_async	http_router.h

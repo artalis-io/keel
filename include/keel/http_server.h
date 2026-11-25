@@ -214,6 +214,10 @@ typedef struct KlHttpServerConfig {
     KlHttpSuspendHangup suspended_hangup; /**< a suspended connection's client hang-up; 0 = CANCEL
                                            *   (see KlHttpSuspendHangup). Any other value is rejected
                                            *   by kl_http_server_init. */
+    /* Appended after 3.5.0. */
+    size_t stream_capacity;   /**< each streamed response's bound on pending output (0 = 1 MiB; see
+                               *   kl_http_response_stream_try_writev). Per response, not a
+                               *   server-wide budget. */
 } KlHttpServerConfig;
 
 /**

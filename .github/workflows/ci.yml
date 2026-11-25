@@ -813,6 +813,10 @@ jobs:
         timeout-minutes: 5
         run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" smoke-tls
 
+      - name: Bounded-streaming relay over real mbedTLS, upstream, downstream and both (epoll)
+        timeout-minutes: 5
+        run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" relay-tls
+
   lwip:
     name: Integration (lwIP)
     runs-on: ubuntu-latest
