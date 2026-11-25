@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/http_body_reader_multipart.h>
-#include "http_body_reader_multipart_internal.h"   /* white-box: header-search work counter */
+#include "http_body_reader_multipart_internal.h"   /* white-box: parser work counter */
 #include <stdint.h>  /* SIZE_MAX */
 #include <stdio.h>   /* fprintf */
 #include <stdlib.h>  /* abort */
@@ -1224,7 +1224,7 @@ static size_t mp_unterminated_header_work(int frags, size_t frag_len) {
             if (br->on_data(br, frag, frag_len) != 0) break;
             if (kl_http_multipart_next(br, NULL, NULL, NULL) != KL_HTTP_MP_EVT_NEED_DATA) break;
         }
-        work = keel__http_multipart_hdr_scan_work(br);
+        work = keel__http_multipart_work(br);
     }
     kl_free(&a, frag, frag_len);
     br->destroy(br);
@@ -1384,6 +1384,106 @@ UTEST(mp, header_cap_explicit_values_are_honoured) {
     unlimited.max_headers_size = SIZE_MAX;     /* the documented "no practical limit" */
     ASSERT_EQ(mp_parse_header_block(100 * 1024, &unlimited, &last), KL_HTTP_MP_ERR_NONE);
     ASSERT_EQ(last, KL_HTTP_MP_EVT_DONE);
+}
+
+/* ── Many parts, buffered and interleaved: linear work, intact parts ── */
+
+/* Body for part i: a deterministic pattern of a size that varies with i (0 included). */
+static size_t mp_gen_body_len(int i) { return (size_t)((i * 37) % 300); }
+static char mp_gen_body_byte(int i, size_t j) { return (char)('a' + (char)((i * 7 + (int)j) % 26)); }
+
+/* A body of `parts` parts named p<i>; the caller frees *out_len + 1 bytes. */
+static char *mp_gen_many_parts(KlAllocator *a, int parts, size_t *out_len) {
+    size_t cap = 64, n = 0;
+    for (int i = 0; i < parts; i++) cap += 96 + mp_gen_body_len(i);
+    char *b = kl_malloc(a, cap + 1);
+    if (!b) mp_test_oom();
+    for (int i = 0; i < parts; i++) {
+        n += (size_t)snprintf(b + n, cap - n,
+                              "--MANY\r\nContent-Disposition: form-data; name=\"p%d\"\r\n\r\n", i);
+        for (size_t j = 0; j < mp_gen_body_len(i); j++) b[n++] = mp_gen_body_byte(i, j);
+        b[n++] = '\r'; b[n++] = '\n';
+    }
+    n += (size_t)snprintf(b + n, cap - n, "--MANY--\r\n");
+    *out_len = n;
+    return b;
+}
+
+/* Feed the body in `chunk`-byte on_data calls; pull after each one (interleaved) or only
+ * after on_complete. Checks every part's name and bytes; returns the parser's work, or 0
+ * on any mismatch. */
+static size_t mp_run_many_parts(int parts, size_t chunk, int interleaved, size_t max_input) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpMultipartConfig cfg = {0};
+    cfg.max_input_buffer = max_input;
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=MANY");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
+    if (!br) return 0;
+    size_t n = 0;
+    char *body = mp_gen_many_parts(&a, parts, &n);
+    Collector c; collector_init(&c, &a);
+    KlHttpMultipartEvent e = KL_HTTP_MP_EVT_NEED_DATA;
+    int bad = 0;
+    for (size_t off = 0; off < n; off += chunk) {
+        size_t m = n - off < chunk ? n - off : chunk;
+        if (br->on_data(br, body + off, m) != 0) { bad = 1; break; }
+        if (interleaved) {
+            e = collect_until_need(br, &c);
+            if (e != KL_HTTP_MP_EVT_NEED_DATA && e != KL_HTTP_MP_EVT_DONE) { bad = 1; break; }
+        }
+    }
+    br->on_complete(br);
+    if (!bad) e = collect_until_need(br, &c);
+    if (bad || e != KL_HTTP_MP_EVT_DONE || c.count != parts) bad = 1;
+    for (int i = 0; !bad && i < parts; i++) {
+        char want[16];
+        snprintf(want, sizeof want, "p%d", i);
+        if (!c.parts[i].name || strcmp(c.parts[i].name, want) != 0 ||
+            c.parts[i].body_len != mp_gen_body_len(i)) { bad = 1; break; }
+        for (size_t j = 0; j < c.parts[i].body_len; j++)
+            if (c.parts[i].body[j] != mp_gen_body_byte(i, j)) { bad = 1; break; }
+    }
+    size_t work = bad ? 0 : keel__http_multipart_work(br);
+    if (bad) fprintf(stderr, "many-parts mismatch: parts=%d chunk=%zu interleaved=%d max_input=%zu\n",
+                     parts, chunk, interleaved, max_input);
+    collector_free(&c);
+    kl_free(&a, body, n + 1);
+    br->destroy(br);
+    return work;
+}
+
+UTEST(mp, many_parts_buffered_whole_is_linear) {
+    /* All of the body buffered before the first pull: consuming each event used to move the
+     * whole remaining input to the front, quadratic in the number of events. Consumption now
+     * advances an offset, so 4x the parts costs about 4x the work. */
+    size_t w1 = mp_run_many_parts(1000, 8192, 0, 0);
+    size_t w4 = mp_run_many_parts(4000, 8192, 0, 0);
+    ASSERT_GT(w1, (size_t)0);
+    ASSERT_GT(w4, (size_t)0);
+    ASSERT_LE(w4, 4 * w1 + 65536);
+}
+
+UTEST(mp, many_parts_interleaved_is_linear) {
+    /* Pulling after each 8 KiB read: the consumed prefix is compacted only when on_data needs
+     * the room and it is at least as large as what remains, so each moved byte is paid for. */
+    size_t w1 = mp_run_many_parts(1000, 8192, 1, 0);
+    size_t w4 = mp_run_many_parts(4000, 8192, 1, 0);
+    ASSERT_GT(w1, (size_t)0);
+    ASSERT_GT(w4, (size_t)0);
+    ASSERT_LE(w4, 4 * w1 + 65536);
+}
+
+UTEST(mp, parts_intact_across_compactions) {
+    /* Odd read sizes, so delimiters, header blocks and bodies straddle reads and the buffer is
+     * compacted mid-part; and a tight max_input_buffer, which forces compaction to make room
+     * rather than growth. */
+    const size_t chunks[] = { 1, 7, 100, 1000, 4093, 8192, 65536 };
+    for (size_t k = 0; k < sizeof chunks / sizeof chunks[0]; k++) {
+        EXPECT_GT(mp_run_many_parts(300, chunks[k], 1, 0), (size_t)0);
+        EXPECT_GT(mp_run_many_parts(300, chunks[k], 0, 0), (size_t)0);
+    }
+    EXPECT_GT(mp_run_many_parts(300, 1000, 1, 2048), (size_t)0);
+    EXPECT_GT(mp_run_many_parts(300, 1500, 1, 2048), (size_t)0);
 }
 
 UTEST_MAIN();

@@ -57,7 +57,13 @@ struct KlHttpMultipartReader {
     KlHttpMultipartParserState state;
     KlHttpMultipartErrorCode   last_error;
 
-    /* Input buffer: bytes received via on_data, not yet consumed. */
+    /* Input buffer: bytes received via on_data, not yet consumed. Consuming
+     * advances input_off instead of moving the rest to the front, so pulling
+     * many small events from a large buffered body costs linear time; the
+     * consumed prefix is compacted away only when on_data needs the room (see
+     * mp_input_reserve). input == input_buf + input_off always. */
+    char  *input_buf;
+    size_t input_off;
     char  *input;
     size_t input_len;
     size_t input_cap;
@@ -78,15 +84,10 @@ struct KlHttpMultipartReader {
     char  *hdr;
     size_t hdr_len;
     size_t hdr_cap;
-    /* hdr[0, hdr_scanned) has already been searched for "\r\n\r\n" without
-     * a match, so the next search resumes there (less 3 bytes, for a
-     * terminator split across two fragments) instead of rescanning the whole
-     * accumulator: a part whose headers arrive in many small fragments costs
-     * linear, not quadratic, CPU. Reset with hdr_len. */
-    size_t hdr_scanned;
-    /* Bytes examined by the terminator search over the reader's life; read
-     * only by the white-box probe in http_body_reader_multipart_internal.h. */
-    size_t hdr_scan_work;
+    /* Bytes the reader has searched or moved over its life (delimiter and
+     * header-terminator searches, buffer compaction); read only by the
+     * white-box probe in http_body_reader_multipart_internal.h. */
+    size_t work;
 
     /* Current-part metadata strings, allocated. Replaced each PART_BEGIN. */
     char  *cur_name;       size_t cur_name_len;
@@ -227,10 +228,32 @@ static int mp_grow_buf(KlAllocator *alloc, char **buf, size_t *cap,
     return 0;
 }
 
+/* Make room for `additional` bytes after the unconsumed input. The cap
+ * (max_input_buffer) applies to unconsumed bytes, as it always has. The consumed
+ * prefix is compacted away when it is at least as large as what remains (so each
+ * byte moved was paid for by a consumed byte: linear overall) or when the cap
+ * would otherwise be exceeded; otherwise the buffer grows. */
 static int mp_input_reserve(KlHttpMultipartReader *mr, size_t additional) {
-    return mp_grow_buf(mr->alloc, &mr->input, &mr->input_cap,
-                       mr->input_len, additional,
-                       mr->config.max_input_buffer);
+    size_t limit = mr->config.max_input_buffer;
+    if (additional > SIZE_MAX - mr->input_len) return -1;
+    if (limit > 0 && mr->input_len + additional > limit) return -1;
+    if (mr->input_off <= mr->input_cap &&
+        additional <= mr->input_cap - mr->input_off - mr->input_len)
+        return 0;                                   /* fits after the live bytes */
+    if (mr->input_off > 0 &&
+        (mr->input_off >= mr->input_len ||
+         (limit > 0 && mr->input_off + mr->input_len + additional > limit))) {
+        if (mr->input_len > 0) memmove(mr->input_buf, mr->input, mr->input_len);
+        mr->work += mr->input_len;
+        mr->input_off = 0;
+        mr->input = mr->input_buf;
+        if (additional <= mr->input_cap - mr->input_len) return 0;
+    }
+    if (mp_grow_buf(mr->alloc, &mr->input_buf, &mr->input_cap,
+                    mr->input_off + mr->input_len, additional, limit) < 0)
+        return -1;
+    mr->input = mr->input_buf + mr->input_off;
+    return 0;
 }
 
 static int mp_hdr_reserve(KlHttpMultipartReader *mr, size_t additional) {
@@ -244,12 +267,22 @@ static void mp_apply_consume(KlHttpMultipartReader *mr) {
     if (mr->input_consumed == 0) return;
     if (mr->input_consumed >= mr->input_len) {
         mr->input_len = 0;
+        mr->input_off = 0;                  /* empty: start over at the front, for free */
+        mr->input = mr->input_buf;
     } else {
-        memmove(mr->input, mr->input + mr->input_consumed,
-                mr->input_len - mr->input_consumed);
+        mr->input_off += mr->input_consumed;
+        mr->input += mr->input_consumed;
         mr->input_len -= mr->input_consumed;
     }
     mr->input_consumed = 0;
+}
+
+/* mp_memmem, counting the bytes it examined into mr->work. */
+static const char *mp_find(KlHttpMultipartReader *mr, const char *hay, size_t hlen,
+                           const char *needle, size_t nlen) {
+    const char *f = mp_memmem(hay, hlen, needle, nlen);
+    mr->work += f ? (size_t)(f - hay) + nlen : hlen;
+    return f;
 }
 
 /* ── Header parsing ──────────────────────────────────────────────────── */
@@ -435,7 +468,7 @@ static void mp_destroy(KlHttpBodyReader *self) {
     mp_free_str(mr->alloc, &mr->cur_name, &mr->cur_name_len);
     mp_free_str(mr->alloc, &mr->cur_filename, &mr->cur_filename_len);
     mp_free_str(mr->alloc, &mr->cur_ctype, &mr->cur_ctype_len);
-    if (mr->input) kl_free(mr->alloc, mr->input, mr->input_cap);
+    if (mr->input_buf) kl_free(mr->alloc, mr->input_buf, mr->input_cap);
     if (mr->hdr)   kl_free(mr->alloc, mr->hdr,   mr->hdr_cap);
     kl_free(mr->alloc, mr, sizeof(*mr));
 }
@@ -501,7 +534,7 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
 
             if (mr->input_len < nlen) return mp_need_or_eof(mr);
 
-            const char *found = mp_memmem(mr->input, mr->input_len, needle, nlen);
+            const char *found = mp_find(mr, mr->input, mr->input_len, needle, nlen);
             if (found) {
                 size_t skip = (size_t)(found - mr->input) + nlen;
                 mr->input_consumed = skip;
@@ -538,7 +571,6 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
                 mp_apply_consume(mr);
                 mr->state = KL_HTTP_MP_S_HEADERS;
                 mr->hdr_len = 0;
-                mr->hdr_scanned = 0;
                 mr->current_part_size = 0;
                 continue;
             }
@@ -547,73 +579,70 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
 
         case KL_HTTP_MP_S_HEADERS: {
             /*
-             * Pull bytes from input into the growable header buffer
-             * until "\r\n\r\n". We must NOT copy past max_headers_size,
-             * otherwise a chunk that carries [headers + lots of body]
-             * would trip HEADERS_TOO_LARGE even when the headers fit.
-             * Copy only as much as the cap allows, then search; if the
-             * cap is exhausted without finding the terminator, error.
+             * Move bytes from input into the growable header buffer up to
+             * and including "\r\n\r\n", never past it: the input is
+             * searched in place, so only header bytes are copied and each
+             * input byte is examined once (a part whose headers arrive in
+             * many fragments costs linear, not quadratic, time). hdr holds
+             * the earlier fragments, already searched; a terminator split
+             * across fragments is caught by matching hdr's last bytes with
+             * the start of the input. We must NOT copy past max_headers_size,
+             * otherwise a chunk that carries [headers + lots of body] would
+             * trip HEADERS_TOO_LARGE even when the headers fit: only the
+             * bytes the cap still allows are searched.
              */
             if (mr->input_len == 0) return mp_need_or_eof(mr);
 
-            size_t cap_limit = mr->config.max_headers_size;
-            size_t available = cap_limit > 0
-                ? (cap_limit > mr->hdr_len ? cap_limit - mr->hdr_len : 0)
-                : SIZE_MAX;
-            if (cap_limit > 0 && available == 0)
+            size_t cap_limit = mr->config.max_headers_size;   /* finite or SIZE_MAX: see the factory */
+            size_t available = cap_limit > mr->hdr_len ? cap_limit - mr->hdr_len : 0;
+            if (available == 0)
                 return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
+            size_t window = mr->input_len < available ? mr->input_len : available;
 
-            size_t take = mr->input_len < available ? mr->input_len : available;
+            static const char term[4] = { '\r', '\n', '\r', '\n' };
+            size_t take = 0;          /* bytes to move; ends the headers when found */
+            int    found = 0;
+            /* Split terminator: hdr ends with its first k bytes, input begins with the rest. */
+            for (size_t k = 3; k >= 1 && !found; k--) {
+                if (mr->hdr_len >= k && window >= 4 - k &&
+                    memcmp(mr->hdr + mr->hdr_len - k, term, k) == 0 &&
+                    memcmp(mr->input, term + k, 4 - k) == 0) {
+                    take = 4 - k;
+                    found = 1;
+                }
+            }
+            if (!found) {
+                const char *end = mp_find(mr, mr->input, window, term, 4);
+                if (end) {
+                    take = (size_t)(end - mr->input) + 4;
+                    found = 1;
+                } else {
+                    take = window;
+                }
+            }
 
             if (mp_hdr_reserve(mr, take) < 0)
                 return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
-
             memcpy(mr->hdr + mr->hdr_len, mr->input, take);
             mr->hdr_len += take;
             mr->input_consumed = take;
             mp_apply_consume(mr);
 
-            /* Resume where the previous search stopped. Its last 3 bytes may
-             * begin a terminator completed by this fragment, so back up by 3. */
-            size_t from = mr->hdr_scanned > 3 ? mr->hdr_scanned - 3 : 0;
-            mr->hdr_scan_work += mr->hdr_len - from;
-            const char *end = mp_memmem(mr->hdr + from, mr->hdr_len - from,
-                                        "\r\n\r\n", 4);
-            mr->hdr_scanned = mr->hdr_len;
-            if (!end) {
+            if (!found) {
                 /* No terminator yet. If we just filled hdr to the cap
                  * but more input is still pending, the headers exceed
                  * what the caller permitted. */
-                if (cap_limit > 0 && mr->hdr_len >= cap_limit &&
-                    mr->input_len > 0)
+                if (mr->hdr_len >= cap_limit && mr->input_len > 0)
                     return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
                 return mp_need_or_eof(mr);
             }
 
-            /* Found the terminator. We may have copied bytes BEYOND it
-             * (the take semantics drained at most `available` bytes;
-             * the overshoot is whatever sits past hdr_end). Push that
-             * tail back to the front of input so BODY processes it. */
-            size_t hdr_end   = (size_t)(end - mr->hdr) + 4;
-            size_t overshoot = mr->hdr_len - hdr_end;
-            if (overshoot > 0) {
-                if (mp_input_reserve(mr, overshoot) < 0)
-                    return mp_fail(mr, KL_HTTP_MP_ERR_INPUT_OVERFLOW);
-                if (mr->input_len > 0) {
-                    memmove(mr->input + overshoot, mr->input, mr->input_len);
-                }
-                memcpy(mr->input, mr->hdr + hdr_end, overshoot);
-                mr->input_len += overshoot;
-            }
-
-            mr->hdr_len = hdr_end;
             if (mp_parse_headers(mr) < 0)
                 return mp_fail_or_keep(mr, KL_HTTP_MP_ERR_MALFORMED);
 
             mr->parts_begun++;
             mr->state = KL_HTTP_MP_S_BODY;
             mr->hdr_len = 0;  /* reuse hdr buffer for the next part */
-            mr->hdr_scanned = 0;
 
             if (meta) {
                 meta->name             = mr->cur_name;
@@ -629,8 +658,8 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
         case KL_HTTP_MP_S_BODY: {
             if (mr->input_len == 0) return mp_need_or_eof(mr);
 
-            const char *found = mp_memmem(mr->input, mr->input_len,
-                                          mr->delimiter, mr->delimiter_len);
+            const char *found = mp_find(mr, mr->input, mr->input_len,
+                                        mr->delimiter, mr->delimiter_len);
             if (found) {
                 size_t body_len = (size_t)(found - mr->input);
                 if (body_len > 0) {
@@ -684,9 +713,9 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
     }
 }
 
-size_t keel__http_multipart_hdr_scan_work(const KlHttpBodyReader *br) {
+size_t keel__http_multipart_work(const KlHttpBodyReader *br) {
     if (!br || br->on_data != mp_on_data) return 0;
-    return ((const KlHttpMultipartReader *)br)->hdr_scan_work;
+    return ((const KlHttpMultipartReader *)br)->work;
 }
 
 KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br) {
