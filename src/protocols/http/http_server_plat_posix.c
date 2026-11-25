@@ -49,8 +49,11 @@ static struct sigaction    kl_old_term, kl_old_int;
 
 static void kl_signal_handler(int sig) {
     (void)sig;
+    int saved_errno = errno;   /* the wakeup write may set it (EAGAIN on a full pipe): keep the
+                                * interrupted code's errno intact */
     KlHttpServer *s = atomic_load(&kl_signal_server);
     if (s) kl_http_server_stop(s);
+    errno = saved_errno;
 }
 #endif
 

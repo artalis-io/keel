@@ -127,7 +127,8 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * lock-free cannot offer the graceful-stop contract the rest of the API documents, and silently
      * downgrading to a potentially locking atomic on the handler path is the outcome this check exists
      * to prevent. First thing after the memset, so there is nothing acquired to unwind. */
-    if (!kl_atomic_int_is_lock_free(&s->running) || !kl_atomic_int_is_lock_free(&s->draining)) {
+    if (!kl_atomic_int_is_lock_free(&s->running) || !kl_atomic_int_is_lock_free(&s->draining) ||
+        !kl_atomic_int_is_lock_free(&s->stop_requested)) {
         s->last_error = KL_ERR_UNSUPPORTED;
         return -1;
     }
