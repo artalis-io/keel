@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "platform_thread.h"
+#include "kl_atomic.h"        /* the late-install tests' cross-thread flags */
 #include "event_builtin.h"   /* the compiled-in backend, wrapped as a runtime provider */
 #include "completion.h"      /* kl_comp_ops_builtin, KlCompletionOps.send_max */
 #include "socket.h"          /* KL_SOCK_CAP_OVERLAPPED: a provider stamped without it */
@@ -2757,56 +2758,118 @@ UTEST(completion_output, a_refused_producer_without_a_writable_callback_costs_no
 /* ── A writable callback installed after the refusal, once the output has gone ───────────────────
  * The producer's first WOULD_BLOCK comes with no callback installed. It waits (polling pending from a
  * timer, test side only) until everything it wrote has gone, then installs the callback. The refusal
- * is remembered, so the loop must deliver one deferred edge with nothing in flight and no further
- * client I/O. Completion loops lost it (only a send completion fired the edge, and none was left);
- * readiness keeps it through the write watch. Variants: the callback replaced before the edge (only
- * the second one fires), the op cancelled right after the install (no edge at all), and a callback
- * that is refused again and must get its next edge. Never from inside the install call. */
-enum { LA_LATE, LA_REPLACE, LA_CANCEL, LA_REARM };
-#define LA_CHUNK      (16u * 1024u)
-#define LA_RAW_CAP    (16u * 1024u * 1024u)
+ * is remembered, so the loop must deliver one deferred edge, promptly (well inside the server's 1 s
+ * poll timeout), with nothing in flight and no further client I/O. Completion loops lost it (only a
+ * send completion fired the edge, and none was left); readiness keeps it through the write watch.
+ * Variants: the callback replaced before the edge (only the new one fires), the op cancelled or
+ * completed before the edge (no edge at all), a producer that is refused with no callback again and
+ * again (each later edge also comes from the deferred path), TLS, and a callback that re-arms its
+ * edge with nothing in flight (the loop must not spin). Never from inside the install call. */
+enum { LA_LATE, LA_REPLACE, LA_CANCEL, LA_COMPLETE, LA_REARM, LA_SPIN };
+#define LA_CHUNK        (16u * 1024u)
+#define LA_RAW_CAP      (16u * 1024u * 1024u)
+#define LA_LATE_CYCLES  3        /* REARM: refusals with no callback, each resolved by a late install */
+#define LA_PROMPT_MS    500      /* half the server loop's 1 s poll timeout */
 typedef struct {
     KlAsyncOp op;
     KlHttpResponse *res;
     int mode;
     size_t sent, total;
-    volatile int would_blocks, a_fires, b_fires, fires_in_install, fires_after_end;
-    volatile int installed, in_install, ended, completed, cancelled, failed;
+    int would_blocks, a_fires, b_fires, fires_in_install, fires_after_end, failed, ended;
+    int fn_installed, in_install, late_installs, late_waiting, late_fires, spin_fires, spin_stop;
+    uint64_t install_ms, max_late_delay_ms;
+    int cancelled, completed;    /* the client thread reads these while the loop runs: kl_atomic */
 } LaStream;
 static LaStream g_la;
 static int g_la_mode;
 static KlHttpServer la_srv;
 
+static KlEventCtx *la_ctx(void) { return kl_http_server_event_ctx(&la_srv); }
 static void la_pump(void);
 static void la_fn_a(void *ud) {
     (void)ud;
     g_la.a_fires++;
     if (g_la.in_install) g_la.fires_in_install++;
 }
+static void la_spin_stop(void *ud) { (void)ud; g_la.spin_stop = 1; }
 static void la_fn_b(void *ud) {
     (void)ud;
     g_la.b_fires++;
     if (g_la.in_install) g_la.fires_in_install++;
-    if (g_la.ended || g_la.cancelled) { g_la.fires_after_end++; return; }
-    la_pump();
-}
-static void la_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_la.completed = 1; }
-static void la_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_la.cancelled++; }
-static void la_install(void *ud) {
-    (void)ud;
-    if (g_la.ended || g_la.cancelled) return;
-    if (kl_http_response_stream_pending(g_la.res) > 0) {       /* not drained yet: look again */
-        (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 5, la_install, NULL);
+    if (g_la.ended || kl_atomic_load_int(&g_la.cancelled)) { g_la.fires_after_end++; return; }
+    if (g_la.late_waiting) {                      /* the deferred edge of a late install */
+        g_la.late_waiting = 0;
+        g_la.late_fires++;
+        uint64_t d = kl_monotonic_ms() - g_la.install_ms;
+        if (d > g_la.max_late_delay_ms) g_la.max_late_delay_ms = d;
+    }
+    if (g_la.mode == LA_SPIN && !g_la.spin_stop) {
+        /* White-box: re-arm with nothing pending or in flight, a state the API cannot reach (a refusal
+         * needs pending bytes, and those are always posted). The loop must still not spin on it. */
+        if (++g_la.spin_fires == 1) (void)kl_timer_add(la_ctx(), 300, la_spin_stop, NULL);
+        g_la.res->stream_writable_armed = 1;
         return;
     }
+    if (g_la.mode == LA_REARM && g_la.late_installs < LA_LATE_CYCLES) {
+        (void)kl_http_response_stream_on_writable(g_la.res, NULL, NULL);  /* refused next with none */
+        g_la.fn_installed = 0;
+    }
+    la_pump();
+}
+static void la_resume(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    kl_atomic_store_int(&g_la.completed, 1);
+}
+static void la_cancel(KlAsyncOp *op, void *ud) {
+    (void)op; (void)ud;
+    kl_atomic_store_int(&g_la.cancelled, kl_atomic_load_int(&g_la.cancelled) + 1);
+}
+static void la_finish(void) {
+    g_la.ended = 1;
+    kl_http_response_end_stream(g_la.res);
+    kl_async_complete(&la_srv, &g_la.op);
+}
+/* T1: install the callback (in REPLACE, the one to be replaced). */
+static void la_install(void *ud) {
+    (void)ud;
+    if (g_la.ended || kl_atomic_load_int(&g_la.cancelled)) return;
     g_la.in_install = 1;
-    if (g_la.mode == LA_REPLACE)
-        (void)kl_http_response_stream_on_writable(g_la.res, la_fn_a, NULL);
-    (void)kl_http_response_stream_on_writable(g_la.res, la_fn_b, NULL);
+    int first = g_la.late_installs == 0;
+    (void)kl_http_response_stream_on_writable(g_la.res,
+                                              g_la.mode == LA_REPLACE && first ? la_fn_a : la_fn_b,
+                                              NULL);
     g_la.in_install = 0;
-    g_la.installed = 1;
-    if (g_la.mode == LA_CANCEL)
-        kl_async_cancel(&la_srv, &g_la.op);                     /* before the deferred edge */
+    g_la.fn_installed = 1;
+    g_la.late_installs++;
+    g_la.install_ms = kl_monotonic_ms();
+}
+/* T2: a separate callback after T1 and before the deferred edge: replace, cancel or complete. */
+static void la_act(void *ud) {
+    (void)ud;
+    if (g_la.ended || kl_atomic_load_int(&g_la.cancelled)) return;
+    if (g_la.mode == LA_REPLACE)
+        (void)kl_http_response_stream_on_writable(g_la.res, la_fn_b, NULL);
+    else if (g_la.mode == LA_CANCEL)
+        kl_async_cancel(&la_srv, &g_la.op);
+    else if (g_la.mode == LA_COMPLETE)
+        la_finish();
+}
+static void la_poll(void *ud) {
+    (void)ud;
+    if (g_la.ended || kl_atomic_load_int(&g_la.cancelled)) return;
+    if (kl_http_response_stream_pending(g_la.res) > 0) {       /* not drained yet: look again */
+        (void)kl_timer_add(la_ctx(), 5, la_poll, NULL);
+        return;
+    }
+    /* Drained. T1 and T2 are added from inside a timer callback, so both wait for the NEXT
+     * kl_timer_fire (timer.c: a timer added while timers fire waits for the next call) and fire there
+     * together, T1 first (deadline order, then id). On a completion loop that call runs after the
+     * tick's edge pass and before the next tick's; on readiness the edge needs the next wait's
+     * writable report. Either way T2 runs after the install and before the deferred edge could. */
+    (void)kl_timer_add(la_ctx(), 0, la_install, NULL);
+    if (g_la.late_installs == 0 &&
+        (g_la.mode == LA_REPLACE || g_la.mode == LA_CANCEL || g_la.mode == LA_COMPLETE))
+        (void)kl_timer_add(la_ctx(), 0, la_act, NULL);
 }
 static void la_pump(void) {
     static unsigned char chunk[LA_CHUNK];
@@ -2816,11 +2879,13 @@ static void la_pump(void) {
         KlHttpStreamStatus st = kl_http_response_stream_try_write(g_la.res, chunk, n);
         if (st == KL_HTTP_STREAM_WOULD_BLOCK) {
             g_la.would_blocks++;
-            if (!g_la.installed) {
-                /* Refused with no callback: the rest of the stream is one chunk (or, re-arming, enough
-                 * to be refused again), and the callback comes once the output has gone. */
-                g_la.total = g_la.sent + (g_la.mode == LA_REARM ? 2u * 1024u * 1024u : LA_CHUNK);
-                (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 5, la_install, NULL);
+            if (!g_la.fn_installed) {
+                /* Refused with no callback: the first time, decide the rest of the stream (one chunk,
+                 * or enough to be refused again and again); then install once the output has gone. */
+                if (g_la.late_installs == 0)
+                    g_la.total = g_la.sent + (g_la.mode == LA_REARM ? 2u * 1024u * 1024u : LA_CHUNK);
+                g_la.late_waiting = 1;
+                (void)kl_timer_add(la_ctx(), 5, la_poll, NULL);
             }
             return;
         }
@@ -2831,9 +2896,7 @@ static void la_pump(void) {
         }
         g_la.sent += n;
     }
-    g_la.ended = 1;
-    kl_http_response_end_stream(g_la.res);
-    kl_async_complete(&la_srv, &g_la.op);
+    la_finish();
 }
 static void la_start(void *ud) { (void)ud; la_pump(); }
 static void handle_la(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -2850,13 +2913,21 @@ static void handle_la(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     g_la.op.on_resume = la_resume;
     g_la.op.on_cancel = la_cancel;
     if (kl_async_suspend(&la_srv, c, &g_la.op) < 0) return;
-    (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 0, la_start, NULL);
+    (void)kl_timer_add(la_ctx(), 0, la_start, NULL);
 }
 
-static void late_install_case(int *utest_result, int mode) {
+static void late_install_case(int *utest_result, int mode, int tls) {
     g_la_mode = mode;
-    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP };
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP,
+                               .tls = tls ? &tls_cfg : NULL };
     ASSERT_EQ(0, kl_http_server_init(&la_srv, &cfg));
+    if (mode == LA_SPIN && !(kl_event_caps(&la_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        kl_http_server_free(&la_srv);
+        /* Readiness watches the socket for an armed edge: a writable socket reports at every wait, so
+         * this unreachable state is level-triggered there by design. */
+        UTEST_SKIP("The edge pass and its spin guard exist only on completion loops");
+    }
     kl_http_server_route(&la_srv, "GET", "/la", handle_la, NULL, NULL);
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &la_srv);
@@ -2881,59 +2952,90 @@ static void late_install_case(int *utest_result, int mode) {
             kl_test_sleep_ms(1);
         }
         kl_test_closesock(fd);
-        for (int i = 0; i < 300 && mode == LA_CANCEL && !g_la.cancelled; i++) kl_test_sleep_ms(10);
+        for (int i = 0; i < 300 && mode == LA_CANCEL && !kl_atomic_load_int(&g_la.cancelled); i++)
+            kl_test_sleep_ms(10);
         kl_test_sleep_ms(100);                       /* any late edge would fire meanwhile */
     }
     kl_http_server_stop(&la_srv);
-    kl_plat_thread_join(&tid);
+    kl_plat_thread_join(&tid);                       /* everything below reads after the join */
     kl_http_server_free(&la_srv);
     int ended = 0;
     long got = raw_len ? sa_dechunk(raw, raw_len, body, LA_RAW_CAP, &ended) : -1;
     size_t mismatch = (size_t)-1;
     for (long i = 0; got > 0 && i < got; i++)
         if (body[i] != sa_byte((size_t)i)) { mismatch = (size_t)i; break; }
-    printf("  late install (mode %d): %ld of %zu payload bytes, ended %d, %d would-blocks, "
-           "A %d, B %d, in-install %d, after-end %d, cancelled %d, completed %d, failed %d\n", mode,
-           got, g_la.total, ended, g_la.would_blocks, g_la.a_fires, g_la.b_fires,
-           g_la.fires_in_install, g_la.fires_after_end, g_la.cancelled, g_la.completed, g_la.failed);
+    const int cancelled = kl_atomic_load_int(&g_la.cancelled);
+    const int completed = kl_atomic_load_int(&g_la.completed);
+    printf("  late install (mode %d%s): %ld of %zu payload bytes, ended %d, %d would-blocks, "
+           "%d late installs, %d late edges (max %llu ms), A %d, B %d, spin %d, in-install %d, "
+           "after-end %d, cancelled %d, completed %d, failed %d\n", mode, tls ? ", tls" : "", got,
+           g_la.sent, ended, g_la.would_blocks, g_la.late_installs, g_la.late_fires,
+           (unsigned long long)g_la.max_late_delay_ms, g_la.a_fires, g_la.b_fires, g_la.spin_fires,
+           g_la.fires_in_install, g_la.fires_after_end, cancelled, completed, g_la.failed);
     free(raw);
     free(body);
     ASSERT_TRUE(fd >= 0);
     ASSERT_GE(g_la.would_blocks, 1);                 /* refused before any callback was there */
-    ASSERT_TRUE(g_la.installed);
+    ASSERT_GE(g_la.late_installs, 1);
     ASSERT_EQ(g_la.fires_in_install, 0);             /* never from inside the install */
     ASSERT_EQ(g_la.a_fires, 0);                      /* a replaced callback never fires */
     ASSERT_EQ(g_la.fires_after_end, 0);
     ASSERT_EQ(g_la.failed, 0);
     if (mode == LA_CANCEL) {
-        ASSERT_EQ(g_la.cancelled, 1);
+        ASSERT_EQ(cancelled, 1);
         ASSERT_EQ(g_la.b_fires, 0);                  /* cancelled before the deferred edge: none */
-        ASSERT_FALSE(g_la.completed);
+        ASSERT_FALSE(completed);
         return;
     }
-    ASSERT_EQ(g_la.cancelled, 0);
-    ASSERT_TRUE(g_la.completed);
-    ASSERT_EQ(got, (long)g_la.total);                /* every byte, after the late install ... */
+    ASSERT_EQ(cancelled, 0);
+    ASSERT_TRUE(completed);
+    ASSERT_EQ(got, (long)g_la.sent);                 /* every byte written ... */
     ASSERT_EQ(mismatch, (size_t)-1);                 /* ... in order, exact */
     ASSERT_TRUE(ended);
-    if (mode == LA_REARM)
-        ASSERT_GE(g_la.would_blocks, 2);             /* refused again from the callback ... */
-    else
+    if (mode == LA_COMPLETE) {
+        ASSERT_EQ(g_la.b_fires, 0);                  /* completed before the deferred edge: none */
+        return;
+    }
+    ASSERT_EQ(g_la.sent, g_la.total);
+    ASSERT_LT(g_la.max_late_delay_ms, (uint64_t)LA_PROMPT_MS);   /* prompt: no full wait first */
+    if (mode == LA_SPIN) {
+        ASSERT_EQ(g_la.late_fires, 1);
+        ASSERT_LE(g_la.spin_fires, 10);              /* a handful of ticks, not a spinning loop */
+        return;
+    }
+    if (mode == LA_REARM) {
+        ASSERT_EQ(g_la.late_installs, LA_LATE_CYCLES);   /* refused with no callback each time ... */
+        ASSERT_EQ(g_la.late_fires, LA_LATE_CYCLES);      /* ... and each got its deferred edge */
+    } else {
         ASSERT_EQ(g_la.would_blocks, 1);
-    ASSERT_EQ(g_la.b_fires, g_la.would_blocks);      /* ... and each refusal got exactly one edge */
+        ASSERT_EQ(g_la.late_fires, 1);
+    }
+    ASSERT_EQ(g_la.b_fires, g_la.would_blocks);      /* each refusal got exactly one edge */
 }
 
 UTEST(completion_output, a_writable_callback_installed_after_the_output_went_gets_its_edge) {
-    late_install_case(utest_result, LA_LATE);
+    late_install_case(utest_result, LA_LATE, 0);
+}
+UTEST(completion_output, a_tls_writable_callback_installed_after_the_output_went_gets_its_edge) {
+    late_install_case(utest_result, LA_LATE, 1);
 }
 UTEST(completion_output, a_writable_callback_replaced_before_its_late_edge_fires_only_the_new_one) {
-    late_install_case(utest_result, LA_REPLACE);
+    late_install_case(utest_result, LA_REPLACE, 0);
 }
 UTEST(completion_output, a_late_writable_callback_whose_op_is_cancelled_never_fires) {
-    late_install_case(utest_result, LA_CANCEL);
+    late_install_case(utest_result, LA_CANCEL, 0);
 }
-UTEST(completion_output, a_late_writable_callback_refused_again_gets_its_next_edge) {
-    late_install_case(utest_result, LA_REARM);
+UTEST(completion_output, a_late_writable_callback_whose_op_completes_never_fires) {
+    late_install_case(utest_result, LA_COMPLETE, 0);
+}
+UTEST(completion_output, a_producer_refused_with_no_callback_again_gets_each_late_edge) {
+    late_install_case(utest_result, LA_REARM, 0);
+}
+UTEST(completion_output, a_tls_producer_refused_with_no_callback_again_gets_each_late_edge) {
+    late_install_case(utest_result, LA_REARM, 1);
+}
+UTEST(completion_output, a_late_edge_rearmed_with_nothing_in_flight_does_not_spin_the_loop) {
+    late_install_case(utest_result, LA_SPIN, 0);
 }
 
 UTEST_MAIN();

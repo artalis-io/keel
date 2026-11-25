@@ -1415,20 +1415,33 @@ static int comp_stream_edge_idle(const KlAsyncOp *op) {
  * this one covers an edge whose callback was installed after the last completion. Everything that can
  * install a callback ran in the previous tick (dispatch, sweeps, deadlines, timers), so the edge fires
  * before the loop waits: no completion is needed and nothing polls. Callbacks are user code and may
- * complete or cancel ops (changing the list), so restart from the head after each; each firing disarms
- * its edge, and the budget bounds the pass even if callbacks keep arming others. */
+ * complete or cancel ops (changing the list), so restart from the head after each.
+ *
+ * Each connection fires at most once per pass (comp_edge_fired), and one that fired never by itself
+ * makes the pass ask for a zero wait. A callback refused again normally has a send in flight: a refusal
+ * means bytes are pending, and pending output on a completion connection is always posted (the queue
+ * kicks a send whenever it holds unposted bytes and none is in flight), so the connection is no longer
+ * eligible here and its completion fires the next edge. Were that invariant ever broken, the re-armed
+ * edge would still be eligible: firing it again in this pass, or forcing a zero wait for it, would spin
+ * the loop. Instead it waits for the next tick's pass. Only an edge that became due during the pass
+ * without having fired in it (a callback that installed another connection's) forces a zero wait. */
 int kl_http_comp_stream_edges(struct KlHttpServer *s) {
     unsigned budget = 0;
-    for (const KlAsyncOp *op = s->async_ops; op; op = op->next) budget++;
+    for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
+        budget++;
+        if (op->conn) op->conn->comp_edge_fired = 0;
+    }
     while (budget-- > 0) {
         KlAsyncOp *hit = NULL;
         for (KlAsyncOp *op = s->async_ops; op; op = op->next)
-            if (comp_stream_edge_idle(op)) { hit = op; break; }
+            if (comp_stream_edge_idle(op) && !op->conn->comp_edge_fired) { hit = op; break; }
         if (!hit) return 0;
+        hit->conn->comp_edge_fired = 1;
         kl_http_response_stream_progress(&hit->conn->res);   /* disarms, then calls */
     }
     for (const KlAsyncOp *op = s->async_ops; op; op = op->next)
-        if (comp_stream_edge_idle(op)) return 1;      /* armed meanwhile: the wait must not block */
+        if (comp_stream_edge_idle(op) && !op->conn->comp_edge_fired)
+            return 1;                                 /* due meanwhile: the wait must not block */
     return 0;
 }
 
