@@ -674,7 +674,9 @@ jobs:
         run: make
 
       - name: Test
-        timeout-minutes: 5
+        # make test compiles every suite before running it (about 90-145 s on a shared runner,
+        # depending on the runner) and the suites take about 155 s: 5 minutes left no headroom.
+        timeout-minutes: 10
         run: make test
 
       - name: Smoke test examples
