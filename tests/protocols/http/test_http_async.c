@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "../../../src/protocols/http/http_conn_internal.h"
+#include "../../../src/protocols/http/http_internal.h"   /* kl_async_sweep_deadlines */
 #include <keel/clock.h>
 #include <keel/keel.h>
 #include <keel/async.h>
@@ -232,17 +233,8 @@ UTEST(async, deadline_fires_on_timeout) {
     /* Wait for the deadline to pass */
     kl_test_sleep_ms(30);  /* 30ms */
 
-    /* Run the deadline sweep manually (mirrors http_server.c logic) */
-    uint64_t now = kl_monotonic_ms();
-    KlAsyncOp *aop = s.async_ops;
-    while (aop) {
-        KlAsyncOp *next = aop->next;
-        if (aop->deadline_ms > 0 && now >= aop->deadline_ms) {
-            if (aop->on_deadline)
-                aop->on_deadline(aop, aop->user_data);
-        }
-        aop = next;
-    }
+    /* Run the deadline sweep both run loops use */
+    kl_async_sweep_deadlines(&s, kl_monotonic_ms());
 
     /* on_deadline should have been called, which calls kl_async_complete */
     ASSERT_EQ(actx.deadline_called, 1);
@@ -252,6 +244,144 @@ UTEST(async, deadline_fires_on_timeout) {
     c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
+    cleanup_test_server(&s);
+}
+
+/* The deadline sweep must not remember the next op across a callback. Op A's on_deadline cancels op
+ * B, and B's on_cancel releases B's memory: here it is overwritten to look like a pending op whose
+ * deadline has passed (what a free and reuse can leave). A sweep that saved B as "next" before calling
+ * A's on_deadline would then fire the overwritten B. */
+static KlHttpServer *g_sw_srv;
+static KlAsyncOp *g_sw_victim;
+static int g_sw_stale_fired, g_sw_a_fired, g_sw_b_cancelled;
+static void sw_stale_deadline(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sw_stale_fired++; }
+static void sw_b_cancel(KlAsyncOp *op, void *ud) {
+    (void)ud;
+    g_sw_b_cancelled++;
+    memset(op, 0, sizeof(*op));          /* released: the memory is no longer an op */
+    op->deadline_ms = 1;
+    op->on_deadline = sw_stale_deadline;
+}
+static void sw_a_deadline(KlAsyncOp *op, void *ud) {
+    (void)ud;
+    g_sw_a_fired++;
+    kl_async_cancel(g_sw_srv, g_sw_victim);   /* the op after this one in the list */
+    kl_async_complete(g_sw_srv, op);
+}
+static void sw_noop(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
+
+static KlHttpConn *sw_conn(KlHttpServer *s, int fds[2]) {
+    if (kl_test_socketpair(fds) != 0) return NULL;
+    set_nonblocking(fds[0]);
+    set_nonblocking(fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s->pool, fds[1]);
+    if (!c) return NULL;
+    if (kl_event_add(&s->ev.loop, fds[1], KL_EVENT_READ, c) != 0) return NULL;
+    c->res.alloc = &s->alloc_storage;
+    kl_http_response_init(&c->res, c->res.alloc);
+    kl_http_response_json(&c->res, 200, "{}", 2);
+    c->res.conn_fd = fds[1];
+    return c;
+}
+
+UTEST(async, deadline_sweep_survives_a_callback_that_releases_the_next_op) {
+    KlHttpServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    for (int i = 0; i < 4; i++) {
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].stream.ctx = &s.ev;
+    }
+    int fa[2], fb[2];
+    KlHttpConn *ca = sw_conn(&s, fa);
+    KlHttpConn *cb = sw_conn(&s, fb);
+    ASSERT_TRUE(ca != NULL && cb != NULL);
+
+    g_sw_srv = &s;
+    g_sw_stale_fired = g_sw_a_fired = g_sw_b_cancelled = 0;
+    const uint64_t past = kl_monotonic_ms() > 1 ? kl_monotonic_ms() - 1 : 1;
+    KlAsyncOp b = { .deadline_ms = past + 100000, .on_resume = sw_noop, .on_cancel = sw_b_cancel };
+    KlAsyncOp a = { .deadline_ms = past, .on_resume = sw_noop, .on_deadline = sw_a_deadline,
+                    .on_cancel = sw_noop };
+    g_sw_victim = &b;
+    ASSERT_EQ(kl_async_suspend(&s, cb, &b), 0);   /* B first: the list is A -> B */
+    ASSERT_EQ(kl_async_suspend(&s, ca, &a), 0);
+    ASSERT_TRUE(s.async_ops == &a && a.next == &b);
+
+    kl_async_sweep_deadlines(&s, kl_monotonic_ms());
+
+    EXPECT_EQ(g_sw_a_fired, 1);
+    EXPECT_EQ(g_sw_b_cancelled, 1);
+    EXPECT_EQ(g_sw_stale_fired, 0);            /* the released B was never touched */
+    EXPECT_TRUE(s.async_ops == NULL);
+
+    kl_test_closesock(fa[0]);
+    kl_test_closesock(fb[0]);
+    cleanup_test_server(&s);
+}
+
+/* An on_deadline that sets a past deadline again (on its own op, still pending) fires once per sweep,
+ * not in a loop, and does not starve the due ops after it. */
+static int g_sw_rearm_fired;
+static void sw_rearm_deadline(KlAsyncOp *op, void *ud) { (void)ud; g_sw_rearm_fired++; op->deadline_ms = 1; }
+
+UTEST(async, deadline_sweep_fires_a_rearmed_deadline_once_per_sweep) {
+    KlHttpServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 2, &s.alloc_storage), 0);
+    for (int i = 0; i < 2; i++) {
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].stream.ctx = &s.ev;
+    }
+    int f[2];
+    KlHttpConn *c = sw_conn(&s, f);
+    ASSERT_TRUE(c != NULL);
+    g_sw_rearm_fired = 0;
+    KlAsyncOp op = { .deadline_ms = 1, .on_resume = sw_noop, .on_deadline = sw_rearm_deadline,
+                     .on_cancel = sw_noop };
+    ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
+    kl_async_sweep_deadlines(&s, kl_monotonic_ms());
+    EXPECT_EQ(g_sw_rearm_fired, 1);
+    kl_async_sweep_deadlines(&s, kl_monotonic_ms());
+    EXPECT_EQ(g_sw_rearm_fired, 2);
+    kl_async_cancel(&s, &op);
+    kl_test_closesock(f[0]);
+    cleanup_test_server(&s);
+}
+
+static int g_sw_other_fired;
+static void sw_other_deadline(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sw_other_fired++; op->deadline_ms = 1; }
+
+UTEST(async, deadline_sweep_rearm_does_not_starve_the_next_op) {
+    KlHttpServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 2, &s.alloc_storage), 0);
+    for (int i = 0; i < 2; i++) {
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].stream.ctx = &s.ev;
+    }
+    int fa[2], fb[2];
+    KlHttpConn *cb = sw_conn(&s, fb);
+    KlHttpConn *ca = sw_conn(&s, fa);
+    ASSERT_TRUE(ca != NULL && cb != NULL);
+    g_sw_rearm_fired = g_sw_other_fired = 0;
+    KlAsyncOp b = { .deadline_ms = 1, .on_resume = sw_noop, .on_deadline = sw_other_deadline,
+                    .on_cancel = sw_noop };
+    KlAsyncOp a = { .deadline_ms = 1, .on_resume = sw_noop, .on_deadline = sw_rearm_deadline,
+                    .on_cancel = sw_noop };
+    ASSERT_EQ(kl_async_suspend(&s, cb, &b), 0);
+    ASSERT_EQ(kl_async_suspend(&s, ca, &a), 0);   /* the list is A -> B; both due, both re-arm */
+    for (int i = 0; i < 5; i++)
+        kl_async_sweep_deadlines(&s, kl_monotonic_ms());
+    EXPECT_EQ(g_sw_rearm_fired, 5);
+    EXPECT_EQ(g_sw_other_fired, 5);
+    kl_async_cancel(&s, &a);
+    kl_async_cancel(&s, &b);
+    kl_test_closesock(fa[0]);
+    kl_test_closesock(fb[0]);
     cleanup_test_server(&s);
 }
 

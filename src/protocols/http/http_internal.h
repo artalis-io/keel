@@ -158,6 +158,10 @@ int  kl_http_server_run_completion_loop(KlHttpServer *s);
  * freestanding kl_http_server_free (http_server_core.c) reaches it on the hosted path. */
 void kl_http_server_close_listener(KlHttpServer *s);
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
+/* Fire on_deadline for every pending op whose deadline has passed (async.c), in list order, each at
+ * most once per sweep. Safe against a callback that completes, cancels or frees any op, including the
+ * next one in the list (async_retire advances the sweep's cursor). Both hosted run loops call it. */
+void kl_async_sweep_deadlines(KlHttpServer *s, uint64_t now);
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 /* Readiness loop, once per tick just before the wait: watch a suspended stream's fd for writability
  * while its output waits (async.c). */

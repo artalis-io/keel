@@ -227,6 +227,27 @@ static void async_on_hangup(KlSocketHandle fd, KlEventMask ready, void *user_dat
     kl_async_cancel(s, op);   /* on_cancel once, the connection closed, nothing written */
 }
 
+/* ── Deadline sweep ─────────────────────────────────────────────────── */
+
+/* on_deadline is a trigger that usually completes or cancels its own op, and may complete, cancel or
+ * free any other (an op's on_cancel commonly frees its context). The scan keeps its place in
+ * s->deadline_sweep_next rather than in a local: async_retire advances that cursor past an op it
+ * unlinks, before the op's on_cancel can free it, so the scan never follows a freed pointer. As
+ * before, ops are visited in list order, each at most once per sweep: an op suspended during the
+ * sweep (added at the head) or a deadline set again from a callback waits for the next tick. */
+void kl_async_sweep_deadlines(KlHttpServer *s, uint64_t now) {
+    s->deadline_sweep_next = s->async_ops;
+    while (s->deadline_sweep_next) {
+        KlAsyncOp *op = s->deadline_sweep_next;
+        s->deadline_sweep_next = op->next;
+        if (op->_terminal || op->deadline_ms == 0 || now < op->deadline_ms)
+            continue;
+        op->deadline_ms = 0;   /* fire on_deadline at most once */
+        if (op->on_deadline)
+            op->on_deadline(op, op->user_data);   /* may retire or free any op; the cursor follows */
+    }
+}
+
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
 int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
@@ -259,6 +280,8 @@ static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
     if (op->_terminal) return NULL;
     op->_terminal = 1;
 
+    if (s->deadline_sweep_next == op)   /* a deadline sweep's next op: keep its place */
+        s->deadline_sweep_next = op->next;
     KlAsyncOp **pp = &s->async_ops;
     while (*pp) {
         if (*pp == op) { *pp = op->next; break; }
