@@ -79,6 +79,14 @@ static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
 }
 static void server_thread_fn(void *arg) { kl_http_server_run((KlHttpServer *)arg); }
+/* The relay server's run, and when it returned by itself (a drain ends it without a second stop). */
+static volatile int g_rl_run_done;
+static volatile uint64_t g_rl_run_done_ms;
+static void rl_thread_fn(void *arg) {
+    kl_http_server_run((KlHttpServer *)arg);
+    g_rl_run_done_ms = kl_monotonic_ms();
+    g_rl_run_done = 1;
+}
 static void shrink_sndbuf(KlHttpConn *c) {
     int sb = 8192;
     (void)setsockopt((int)c->stream.fd, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb);
@@ -269,7 +277,7 @@ static void rl_on_done(KlHttpClient *cli, void *ud) {
     g_rl.cli = NULL;
     if (!g_rl.finished && !g_rl.cancelled) kl_async_cancel(&rl_srv, &g_rl.op);   /* upstream failed */
 }
-static void rl_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_rl.completed = 1; }
+static void rl_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_rl.completed++; }
 static void rl_cancel(KlAsyncOp *op, void *ud) {
     (void)op; (void)ud;
     g_rl.cancelled++;
@@ -360,12 +368,18 @@ static KlTlsCtx *rl_server_ctx(void) {
 }
 #endif
 
-static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode) {
+static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode, int drain_ms) {
     static KlTlsConfig tls_cfg;
     g_mode = mode;
+    /* Each case starts from zero: the handlers reset these only once a request arrives, and a case
+     * that waits on them (pauses, would-blocks) before then would read the previous case's values.
+     * The run order differs per platform (MinGW runs the cases in reverse). */
+    memset(&g_rl, 0, sizeof g_rl);
+    memset(&g_up, 0, sizeof g_up);
     tls_cfg = (KlTlsConfig){ .ctx = NULL, .factory = mock_tls_create };
     KlHttpServerConfig ucfg = { .port = 0, .max_connections = 4, .stream_capacity = RL_CAP };
     KlHttpServerConfig rcfg = { .port = 0, .max_connections = 4, .stream_capacity = RL_CAP,
+                                .drain_timeout_ms = drain_ms,
                                 .tls = (mode & RL_DOWN_MOCK) ? &tls_cfg : NULL,
                                 .alloc = &g_rl_alloc };
 #if defined(KEEL_RELAY_MBEDTLS)
@@ -397,7 +411,8 @@ static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode
     if (kl_http_server_init(&rl_srv, &rcfg) != 0) return -1;
     kl_http_server_route(&rl_srv, "GET", "/relay", handle_relay, NULL, NULL);
     kl_plat_thread_create(up_tid, server_thread_fn, &up_srv);
-    kl_plat_thread_create(rl_tid, server_thread_fn, &rl_srv);
+    g_rl_run_done = 0;
+    kl_plat_thread_create(rl_tid, rl_thread_fn, &rl_srv);
     wait_for_bind(&up_srv);
     wait_for_bind(&rl_srv);
     snprintf(g_up_url, sizeof g_up_url, "%s://127.0.0.1:%d/up",
@@ -462,7 +477,7 @@ static int dn_read_tls(Dechunk *d) {
 
 static void relay_case(int *utest_result, int mode) {
     KlPlatThread up_tid, rl_tid;
-    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, mode), 0);
+    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, mode, 0), 0);
     Dechunk d = { .mismatch_at = (size_t)-1 };
     size_t rss0 = peak_rss();
     kl_test_sleep_ms(20);
@@ -557,7 +572,7 @@ UTEST(stream_relay, a_relay_over_real_tls_both_ways_is_bounded) {
  * is cancelled from on_cancel, and the upstream server then sees its client go: its op ends too. */
 UTEST(stream_relay, a_downstream_client_that_leaves_while_upstream_is_paused_ends_both) {
     KlPlatThread up_tid, rl_tid;
-    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0), 0);
+    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 0), 0);
     int fd = connect_rcvbuf(rl_srv.bound_port, 4096);
     size_t got = 0;
     if (fd >= 0) {
@@ -592,7 +607,7 @@ UTEST(stream_relay, a_downstream_client_that_leaves_while_upstream_is_paused_end
  * client freed, with nothing left behind (sanitizer builds check the rest). */
 UTEST(stream_relay, a_server_stop_while_upstream_is_paused_ends_the_relay) {
     KlPlatThread up_tid, rl_tid;
-    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0), 0);
+    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 0), 0);
     int fd = connect_rcvbuf(rl_srv.bound_port, 4096);
     if (fd >= 0) {
         const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -607,6 +622,140 @@ UTEST(stream_relay, a_server_stop_while_upstream_is_paused_ends_the_relay) {
     ASSERT_EQ(g_rl.cancelled, 1);
     ASSERT_TRUE(g_rl.cli == NULL);
     ASSERT_FALSE(g_rl.completed);
+}
+
+/* ── A graceful drain over a backpressured relay ──────────────────────────────────────────────────
+ * The relay server is stopped with a drain while its response is paused on a reader that stopped
+ * reading. The listener closes at once (a new connect is refused) and the suspended relay holds the
+ * drain. Then either the reader resumes, and the body completes byte-exact and the run returns by
+ * itself before the deadline; or it never does, and the run returns at the deadline and the server's
+ * free cancels the relay once. */
+
+/* Request the relay, read `first` payload bytes, then stop reading until the relay has paused on its
+ * bound and its upstream has stopped on its own. Returns the socket, or -1. */
+static int rl_read_then_stall(Dechunk *d, size_t first) {
+    int fd = connect_rcvbuf(rl_srv.bound_port, 16384);
+    if (fd < 0) return -1;
+    const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    static unsigned char buf[64 * 1024];
+    uint64_t t0 = kl_monotonic_ms();
+    while (d->payload < first && d->state >= 0 && kl_monotonic_ms() - t0 < 30000) {
+        if (kl_test_poll1(fd, 0, 500) <= 0) continue;
+        kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        dc_feed(d, buf, (size_t)n);
+    }
+    for (int i = 0; i < 300 && (g_rl.pauses == 0 || g_up.would_blocks == 0); i++) kl_test_sleep_ms(10);
+    kl_test_sleep_ms(200);
+    return fd;
+}
+
+/* Read until the connection ends. 1 when it ended (EOF or reset), 0 when `timeout_ms` passed. */
+static int rl_read_to_end(int fd, Dechunk *d, int timeout_ms) {
+    static unsigned char buf[64 * 1024];
+    uint64_t t0 = kl_monotonic_ms();
+    while (kl_monotonic_ms() - t0 < (uint64_t)timeout_ms) {
+        if (kl_test_poll1(fd, 0, 500) <= 0) continue;
+        kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+        if (n <= 0) return 1;
+        dc_feed(d, buf, (size_t)n);
+    }
+    return 0;
+}
+
+UTEST(stream_relay, a_drain_while_backpressured_completes_once_the_reader_resumes) {
+    KlPlatThread up_tid, rl_tid;
+    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 30000), 0);
+    Dechunk d = { .mismatch_at = (size_t)-1 };
+    int fd = rl_read_then_stall(&d, RL_TOTAL / 8);
+    int pauses_at_stop = g_rl.pauses, up_blocked = g_up.would_blocks;
+
+    uint64_t t_stop = kl_monotonic_ms();
+    kl_http_server_stop(&rl_srv);
+    kl_test_sleep_ms(150);                                   /* a loop tick has run */
+    int draining = kl_http_server_draining(&rl_srv);
+    int late = connect_rcvbuf(rl_srv.bound_port, 0);         /* refused: no new connections */
+    if (late >= 0) kl_test_closesock(late);
+    kl_test_sleep_ms(300);
+    int held = !g_rl_run_done && !g_rl.cancelled && !g_rl.completed;   /* the relay holds the drain */
+
+    int ended = fd >= 0 ? rl_read_to_end(fd, &d, 60000) : 0;  /* the reader resumes */
+    if (fd >= 0) kl_test_closesock(fd);
+    for (int i = 0; i < 500 && !g_rl_run_done; i++) kl_test_sleep_ms(10);
+    int run_done = g_rl_run_done;
+    uint64_t run_ms = run_done ? g_rl_run_done_ms - t_stop : 0;
+    kl_test_sleep_ms(100);                                   /* nothing may fire after the end */
+    int completed = g_rl.completed, cancelled = g_rl.cancelled, after = g_rl.edges_after_end;
+    int cli_left = g_rl.cli != NULL, up_ended = g_up.ended, up_cancelled = g_up.cancelled;
+    relay_servers_down(&up_tid, &rl_tid);
+    printf("  drain, reader resumes: %zu payload bytes, %d pauses, %d resumes, run returned %llu ms "
+           "after the stop\n", d.payload, g_rl.pauses, g_rl.resumes, (unsigned long long)run_ms);
+
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_GT(pauses_at_stop, 0);                            /* backpressured at the stop ... */
+    ASSERT_GT(up_blocked, 0);                                /* ... all the way upstream */
+    EXPECT_EQ(draining, 1);
+    EXPECT_TRUE(late < 0);
+    EXPECT_TRUE(held);
+    EXPECT_TRUE(ended);                                      /* the connection closed after the body */
+    ASSERT_EQ(d.state, 6);                                   /* well-formed chunked body, ended */
+    ASSERT_EQ(d.payload, (size_t)RL_TOTAL);                  /* every byte ... */
+    ASSERT_EQ(d.mismatch_at, (size_t)-1);                    /* ... exact and in order */
+    EXPECT_EQ(completed, 1);                                 /* completed once ... */
+    EXPECT_EQ(cancelled, 0);                                 /* ... and never cancelled */
+    EXPECT_EQ((int)g_rl.failed, 0);
+    EXPECT_EQ(g_rl.upstream_err, 0);
+    EXPECT_EQ(g_rl.resumes, g_rl.pauses);
+    EXPECT_EQ(g_rl.resume_failed, 0);
+    EXPECT_EQ(after, 0);
+    EXPECT_FALSE(cli_left);                                  /* the upstream client finished, freed */
+    EXPECT_EQ(up_ended, 1);
+    EXPECT_EQ(up_cancelled, 0);
+    EXPECT_TRUE(run_done);                                   /* the run returned by itself ... */
+    EXPECT_LT(run_ms, (uint64_t)30000);                      /* ... before the deadline */
+}
+
+UTEST(stream_relay, a_drain_past_its_deadline_ends_the_backpressured_relay_cleanly) {
+    size_t live0 = g_ca.live;                                /* the relay server allocates through g_ca */
+    KlPlatThread up_tid, rl_tid;
+    ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 600), 0);
+    Dechunk d = { .mismatch_at = (size_t)-1 };
+    int fd = rl_read_then_stall(&d, RL_TOTAL / 8);
+    int pauses_at_stop = g_rl.pauses;
+
+    uint64_t t_stop = kl_monotonic_ms();
+    kl_http_server_stop(&rl_srv);                            /* the reader never resumes */
+    for (int i = 0; i < 1000 && !g_rl_run_done; i++) kl_test_sleep_ms(10);
+    int run_done = g_rl_run_done;
+    uint64_t run_ms = run_done ? g_rl_run_done_ms - t_stop : 0;
+    int completed_in_run = g_rl.completed;
+    relay_servers_down(&up_tid, &rl_tid);                    /* the free cancels what remains */
+    int ended = fd >= 0 ? rl_read_to_end(fd, &d, 5000) : 0;
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_test_sleep_ms(100);
+    size_t live_after = g_ca.live;
+    printf("  drain past its deadline: %zu payload bytes, %d pauses, run returned %llu ms after the "
+           "stop, relay server live allocation %zu -> %zu\n", d.payload, pauses_at_stop,
+           (unsigned long long)run_ms, live0, live_after);
+
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_GT(pauses_at_stop, 0);
+    EXPECT_TRUE(run_done);                                   /* the run returned at the deadline */
+    EXPECT_GE(run_ms, (uint64_t)500);
+    EXPECT_LT(run_ms, (uint64_t)5000);
+    EXPECT_EQ(completed_in_run, 0);
+    EXPECT_EQ(g_rl.cancelled, 1);                            /* cancelled exactly once ... */
+    EXPECT_EQ(g_rl.completed, 0);                            /* ... and never completed */
+    EXPECT_EQ(g_rl.edges_after_end, 0);                      /* no edge after the end */
+    EXPECT_TRUE(g_rl.cli == NULL);                           /* its upstream client released */
+    EXPECT_EQ(g_up.cancelled, 1);                            /* and the upstream op ended with it */
+    EXPECT_EQ(g_up.ended, 0);
+    EXPECT_TRUE(ended);                                      /* the reader sees the connection end ... */
+    EXPECT_NE(d.state, 6);                                   /* ... without a body end it never got */
+    EXPECT_LT(d.payload, (size_t)RL_TOTAL);
+    EXPECT_EQ(d.mismatch_at, (size_t)-1);                    /* what did arrive was exact */
+    EXPECT_EQ(live_after, live0);                            /* everything the server allocated returned */
 }
 
 UTEST_MAIN();
