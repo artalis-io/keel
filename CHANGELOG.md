@@ -69,6 +69,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A `kl_http_server_stop` issued before `kl_http_server_run` starts is honoured.** A stop from a
+  signal handler during startup used to be overwritten by the run's own `running = 1`, so the
+  server ran on; that run now returns 0 at once, without listening.
+
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
   the backend's last completions without dispatching them. A client freed from such an op's

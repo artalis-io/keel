@@ -311,6 +311,7 @@ typedef struct KlHttpServer {
     int     drain_listener_closed; /**< 1 = this drain has stopped listening (http_server_core.c) */
     /* Appended after 3.5.0: run-once enforcement. INTERNAL. */
     int     run_started;           /**< 1 = kl_http_server_run has been entered since init */
+    int     stop_requested;        /**< 1 = kl_http_server_stop was called (atomic; honoured by a later run) */
 } KlHttpServer;
 
 /**
@@ -451,7 +452,9 @@ int  kl_http_server_run(KlHttpServer *s);
  * kl_http_server_run returns once nothing is active or `drain_timeout_ms` has
  * passed; kl_http_server_free then cancels what remains (on_cancel once each).
  * A server is run once per kl_http_server_init: after a drain its listener is
- * gone. Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
+ * gone. A stop requested before kl_http_server_run starts (a signal during
+ * startup) is honoured: that run returns 0 at once, without listening.
+ * Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
  */
 void kl_http_server_stop(KlHttpServer *s);
 

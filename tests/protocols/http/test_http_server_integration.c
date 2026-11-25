@@ -1186,4 +1186,28 @@ UTEST(server_integration, a_second_run_is_refused_and_opens_no_listener) {
     kl_http_server_free(&srv);
 }
 
+/* A stop requested before the run starts (a SIGTERM during startup) is honoured: the run returns 0
+ * at once and never listens, with and without a graceful drain configured. It used to be overwritten
+ * by the run's own `running = 1` and the server ran on. */
+static void early_stop_case(int *utest_result, int drain_ms) {
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .bind_addr = "127.0.0.1", .port = 0, .drain_timeout_ms = drain_ms };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_stop(&srv);                                   /* before kl_http_server_run */
+    RerunArg r = { &srv, -2, 0 };
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, rerun_thread_fn, &r);
+    for (int i = 0; i < 100 && !kl_atomic_load_int(&r.done); i++) kl_test_sleep_ms(10);
+    int returned = kl_atomic_load_int(&r.done);
+    if (!returned) kl_http_server_stop(&srv);                    /* lost stop: it is serving */
+    kl_plat_thread_join(&tid);
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(0, r.rc);
+    EXPECT_EQ(0, srv.bound_port);                                /* never bound */
+    EXPECT_EQ(0, kl_http_server_draining(&srv));
+    kl_http_server_free(&srv);
+}
+UTEST(server_integration, a_stop_before_run_is_honoured) { early_stop_case(utest_result, 0); }
+UTEST(server_integration, a_stop_before_run_is_honoured_with_a_drain) { early_stop_case(utest_result, 500); }
+
 UTEST_MAIN();

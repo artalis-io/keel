@@ -328,6 +328,15 @@ int kl_http_server_run(KlHttpServer *s) {
     kl_atomic_store_int(&s->draining, 0);
     s->drain_listener_closed = 0;
 
+    /* A stop that came before the store above (a signal during startup) would be overwritten by it:
+     * honour it here, before anything listens. A stop after the store clears `running` or starts a
+     * drain as usual. Both are seq-cst, so one of the two always sees the stop. */
+    if (kl_atomic_load_int(&s->stop_requested)) {
+        kl_atomic_store_int(&s->running, 0);
+        kl_atomic_store_int(&s->draining, 0);
+        return 0;
+    }
+
     if (kl_http_server_bind_listener(s) < 0)
         return server_start_failed(s);
 
@@ -773,6 +782,9 @@ transition:
 }
 
 void kl_http_server_stop(KlHttpServer *s) {
+    /* Recorded first, for a run that has not published `running` yet (it checks this right after,
+     * so a stop is never lost to that run's own `running = 1`). */
+    kl_atomic_store_int(&s->stop_requested, 1);
     if (s->config.drain_timeout_ms > 0 && !kl_atomic_load_int(&s->draining)) {
         /* Enter drain mode: stop accepting, let in-flight finish. The deadline is written before the
          * flag is published (a seq-cst store): a loop tick that sees draining also sees its deadline,
