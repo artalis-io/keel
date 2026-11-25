@@ -7,6 +7,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Added
 
+- **`KlHttpServerConfig.header_timeout_ms`**: an absolute deadline for a request's head (see
+  Fixed). 0 = `read_timeout_ms`; a negative value disables it.
+- **`KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`** (8192): the per-part header cap a zero
+  `KlHttpMultipartConfig.max_headers_size` now selects.
 - **`kl_http_server_draining()`** reports whether a graceful drain is in progress, from any thread,
   so an application no longer has to read the server's internal `draining` field.
 - **Bounded response streaming: non-fatal, atomic writes and a writable edge.** A chunked response
@@ -87,18 +91,29 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   with `read_timeout_ms = 1000`, and at the defaults (8 KiB heads, 30 s) one connection could be
   held for about 66 hours, so a few hundred such clients exhausted the pool. A request head now
   also has an absolute deadline, the new `KlHttpServerConfig.header_timeout_ms` (0 = use
-  `read_timeout_ms`, 30 s by default). It starts when the first partial head of a request is seen
-  (a head that arrives whole never starts it), is not extended by further fragments, restarts with
-  each keep-alive request, and stops once the head is parsed, so request bodies (`body_timeout_ms`),
-  responses, streams and suspended ops are unaffected. The existing timeout sweep enforces it on
-  readiness and completion loops alike: 408, then close.
+  `read_timeout_ms`, 30 s by default; < 0 = none). A connection's first request has it from the
+  accept, so it also bounds a TLS handshake, a PROXY header and an HTTP/2 prior-knowledge preface,
+  none of which yields parseable bytes when dripped; a keep-alive request has it from its first
+  received bytes, ciphertext included (one lone CRLF before a request is ignored, RFC 9112 2.2). It
+  is not extended by further fragments and stops once the head is parsed, so request bodies
+  (`body_timeout_ms`), responses, streams and suspended ops are unaffected. The existing timeout
+  sweep, which runs on every loop iteration, enforces it on readiness and completion loops alike:
+  408 (a bare close during a TLS handshake or PROXY header), then close.
 - **Security: multipart part headers are searched in linear time, and capped by default.** Each
   `kl_http_multipart_next` searched a part's whole accumulated header block for its blank line from
   the first byte, so a part whose headers never ended, delivered in ordinary 8 KiB reads, cost
   quadratic CPU on the loop thread (2.7 s at 8 MiB, 42.8 s at 32 MiB). The search now resumes
-  where the previous one stopped. Separately, `max_headers_size = 0` (and a NULL config) meant no
-  cap, so such a part also grew the header buffer without bound; zero now selects
-  `KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE` (8 KiB). See the upgrade notes.
+  where the previous one stopped, and the input is searched in place, so only header bytes are
+  copied. Separately, `max_headers_size = 0` (and a NULL config) meant no cap, so such a part also
+  grew the header buffer without bound; zero now selects `KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`
+  (8 KiB). See the upgrade notes.
+- **Security: pulling many small multipart events is linear.** Each `kl_http_multipart_next` moved
+  the whole unconsumed input to the front of its buffer, so a body of many small parts already
+  buffered (a request read before its parts are pulled) cost quadratic CPU: 21.7 s for 4 MiB of
+  minimal parts. Consuming now advances an offset, and the consumed prefix is compacted away only
+  when `on_data` needs the room and it is at least as large as what remains (or the
+  `max_input_buffer` cap requires it); the same 4 MiB now takes 23 ms. `max_input_buffer` still caps
+  the unconsumed bytes.
 - **`max_header_size` below 8192 is enforced.** The 431 check ran only once the 8 KiB read buffer
   was full, so a smaller configured limit was silently 8 KiB. An incomplete header block that
   reaches `max_header_size` now gets a 431 on readiness and completion loops. (The limit applies to
@@ -205,11 +220,14 @@ Upgrade notes:
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
   capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
   keeps every default.
-- **Behavior change: a request head must now arrive within `header_timeout_ms` of its first bytes**
-  (default: `read_timeout_ms`, 30 s unless configured). Before, only the gap between fragments was
-  bounded. A client that needs longer for a head is answered 408; raise `header_timeout_ms` for it.
-  A server with a short `read_timeout_ms` (say 1 s) now also bounds a whole head to that, so set
-  `header_timeout_ms` separately if heads legitimately trickle in over a slow link.
+- **Behavior change: a request head must now arrive within `header_timeout_ms`** (default:
+  `read_timeout_ms`, 30 s unless configured), counted from the accept for a connection's first
+  request (TLS handshake included) and from the first bytes of each later keep-alive request.
+  Before, only the gap between fragments was bounded. A client that needs longer is answered 408
+  (closed, mid-handshake); raise `header_timeout_ms` for it. A server with a short
+  `read_timeout_ms` (say 1 s) now also bounds a whole handshake plus head to that, so set
+  `header_timeout_ms` separately if they legitimately trickle in over a slow link. To keep the old
+  behavior set `header_timeout_ms` to a negative value.
 - **Behavior change: `KlHttpMultipartConfig.max_headers_size = 0` is now 8 KiB, not unlimited**
   (`KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`, the HTTP server's own default header limit), and so is
   the multipart factory with a NULL config. A part whose header block exceeds it fails with

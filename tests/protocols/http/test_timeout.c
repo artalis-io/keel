@@ -550,4 +550,123 @@ UTEST(timeout, header_deadline_does_not_apply_to_body) {
     stop_server(&tid);
 }
 
+/* Drip `s` a byte every `gap_ms` until the server answers or closes; returns the elapsed ms
+ * from the first byte to the answer (read into buf) or to the end of the drip. */
+static uint64_t drip_until_answered(int fd, const char *s, int gap_ms, char *buf, size_t cap,
+                                    int *answered) {
+    uint64_t t0 = kl_monotonic_ms();
+    *answered = 0;
+    for (size_t i = 0; i < strlen(s); i++) {
+        if (kl_test_sockwrite(fd, s + i, 1) != 1) { *answered = 1; break; }
+        if (kl_test_poll1(fd, 0, gap_ms) != 0) { *answered = 1; break; }
+    }
+    buf[0] = '\0';
+    if (*answered) (void)read_response(fd, buf, cap, 2000);
+    return kl_monotonic_ms() - t0;
+}
+
+static KlHttp2ServerSession *null_h2_factory(KlAllocator *alloc, KlHttp2ServerCallbacks *cb, void *ud) {
+    (void)alloc; (void)cb; (void)ud;
+    return NULL;   /* never reached: the preface is never completed */
+}
+
+UTEST(timeout, header_partial_h2_preface_drip_gets_408_at_deadline) {
+    /* With HTTP/2 enabled a partial prior-knowledge preface is held before any parse. A
+     * keep-alive request whose bytes are such a preface, dripped, still meets the deadline:
+     * it starts when the bytes arrive, not when they are first parsed. */
+    KlHttp2ServerConfig h2 = { .factory = null_h2_factory };
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 1000, .h2 = &h2 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    char buf[4096];
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    int answered = 0;
+    uint64_t elapsed = drip_until_answered(fd, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r", 150, buf, sizeof buf,
+                                           &answered);
+    EXPECT_TRUE(answered);
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);   /* the drip alone would take ~3.5 s */
+    EXPECT_TRUE(buf[0] == '\0' || strstr(buf, "408") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_lone_crlf_does_not_start_the_deadline) {
+    /* RFC 9112 2.2: an empty line before a request is ignored, so it must not start the next
+     * request's deadline on an idle keep-alive connection (the idle timeout still applies). */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 4000, .header_timeout_ms = 600 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    char buf[4096];
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    ASSERT_EQ(kl_test_sockwrite(fd, "\r\n", 2), 2L);
+    /* Longer than the deadline plus a sweep: a started deadline would have been enforced. */
+    EXPECT_EQ(kl_test_poll1(fd, 0, 2000), 0);
+    ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_deadline_is_per_connection_not_per_slot) {
+    /* One slot, reused: a connection that started a head and went away must not leave its
+     * start time to the next connection in the slot. */
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .read_timeout_ms = 4000,
+                               .header_timeout_ms = 600 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    (void)kl_test_sockwrite(fd, "GET /ok HT", 10);
+    kl_test_sleep_ms(100);
+    kl_test_closesock(fd);
+    kl_test_sleep_ms(1500);                     /* the slot is free again, its start long past */
+
+    fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(send_fragmented(fd, "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                              3, 150), 0);
+    char buf[4096];
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_deadline_disabled_by_a_negative_value) {
+    /* header_timeout_ms < 0 restores the idle timeout alone: a drip inside it is served. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 1000, .header_timeout_ms = -1 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(send_fragmented(fd, "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                              8, 300), 0);    /* ~2.1 s in all, 300 ms gaps */
+    char buf[4096];
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
 UTEST_MAIN();

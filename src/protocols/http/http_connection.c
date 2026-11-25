@@ -175,7 +175,10 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->async_op = NULL;
     c->suspend_start_ms = 0;
     c->body_start_ms = 0;          /* a reused slot's stale value would fire the body deadline */
-    c->hdr_start_ms = 0;           /* likewise the header deadline */
+    /* The first request's header deadline runs from the accept, so it covers a TLS handshake, a
+     * PROXY header and an HTTP/2 preface as well as the head itself, ciphertext included. Set here
+     * rather than left to the previous connection in this slot. */
+    c->hdr_start_ms = c->last_active_ms;
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
@@ -1080,10 +1083,18 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
     if (consumed > len) consumed = len;           /* a parser over-report must not walk past the data */
     if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
         c->hdr_parsed += consumed;                /* the parser holds its place; feed only new bytes next */
-        /* A partial head starts the header deadline (once per request): the idle timeout alone is
-         * refreshed by every fragment, so a head dripped a byte at a time would never time out. */
+        /* A partial head starts the header deadline (once per request) if the arrival of its bytes
+         * has not already (kl_http_conn_note_head_bytes): the idle timeout alone is refreshed by every
+         * fragment, so a head dripped a byte at a time would never time out. */
         if (c->hdr_start_ms == 0 && c->stream.read_len > 0)
             c->hdr_start_ms = kl_monotonic_ms();
+        /* RFC 9112 2.2: a server SHOULD ignore an empty line received before a request, so a lone
+         * CRLF on an idle keep-alive connection does not start the next request's deadline. One
+         * only: more than two bytes of empty lines count as the start of a request. */
+        if (c->served_request && c->stream.read_len <= 2 &&
+            (c->stream.read_buf[0] == '\r' || c->stream.read_buf[0] == '\n') &&
+            (c->stream.read_len < 2 || c->stream.read_buf[1] == '\n'))
+            c->hdr_start_ms = 0;
     } else {
         c->hdr_parsed = 0;                        /* header phase over (dispatched, or the conn closes) */
         c->hdr_start_ms = 0;                      /* the next request's head gets a fresh deadline */
@@ -1102,8 +1113,16 @@ int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st) {
            c->tls->pending(c->tls) > 0;
 }
 
+void kl_http_conn_note_head_bytes(KlHttpConn *c, uint64_t now) {
+    if (c->state == KL_HTTP_CONN_READING && c->hdr_start_ms == 0)
+        c->hdr_start_ms = now;
+}
+
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
+    /* Bytes for a new request (plaintext, or ciphertext not yet a whole record) start its header
+     * deadline here, before any of them can be parsed. */
+    kl_http_conn_note_head_bytes(c, c->last_active_ms);
 
     if (c->state == KL_HTTP_CONN_READING) {
         int hdr_drains = 0;
@@ -1273,6 +1292,7 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     c->num_params = 0;
     c->route_result = 0;
     c->body_start_ms = 0;
+    c->hdr_start_ms = 0;     /* the next request's deadline starts with its first bytes */
     c->file_io_phase = FILE_IO_IDLE;
     c->last_active_ms = kl_monotonic_ms();
     c->state = KL_HTTP_CONN_READING;

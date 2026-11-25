@@ -662,6 +662,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
                             : timeout;
+    /* < 0 disables the header deadline (the idle timeout alone, as before it existed). */
+    const int header_deadline = s->config.header_timeout_ms >= 0;
     uint64_t header_timeout = s->config.header_timeout_ms > 0
                               ? (uint64_t)s->config.header_timeout_ms
                               : timeout;
@@ -785,10 +787,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             now - tc->body_start_ms > body_timeout) {
             timed_out = 1;
         }
-        /* Header deadline: absolute time from the first partial head of this request, not
-         * resettable by further fragments (which do refresh last_active_ms). Only while READING:
-         * once the head is complete the body deadline and the other phases' rules apply. */
-        if (!timed_out && tc->state == KL_HTTP_CONN_READING &&
+        /* Header deadline: absolute time from the accept (first request) or the request's first
+         * bytes (keep-alive), not extended by further fragments (which do refresh last_active_ms).
+         * Only before dispatch: once the head is complete the body deadline and the other phases'
+         * rules apply. */
+        if (!timed_out && header_deadline &&
+            (tc->state == KL_HTTP_CONN_READING || tc->state == KL_HTTP_CONN_TLS_HANDSHAKE ||
+             tc->state == KL_HTTP_CONN_PROXY_HEADER) &&
             tc->hdr_start_ms > 0 &&
             now - tc->hdr_start_ms > header_timeout) {
             timed_out = 1;

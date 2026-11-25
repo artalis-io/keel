@@ -106,9 +106,11 @@ struct KlHttpConn {
     uint64_t last_active_ms;
     uint64_t request_start_ms;
     uint64_t body_start_ms;
-    /* Header deadline: when the current request's head was first seen incomplete (0 = no partial
-     * head pending). Set and cleared by kl_http_conn_parse_headers, checked by the timeout sweep
-     * against header_timeout_ms while the connection is READING. */
+    /* Header deadline: when the current request's head began (0 = none pending). The first request's
+     * is the accept (kl_http_conn_acquire), so it spans the TLS handshake and a PROXY header; a
+     * keep-alive request's is the arrival of its first bytes (kl_http_conn_note_head_bytes, or
+     * kl_http_conn_parse_headers for bytes already buffered). Cleared once the head is parsed and by
+     * the keep-alive reset; checked by the timeout sweep against header_timeout_ms before dispatch. */
     uint64_t hdr_start_ms;
     /* Request-body framing progress. The post-rejection drain terminates on FRAMING COMPLETION, not
      * on a byte count: for chunked, wire bytes and decoded bytes differ, so only the decoder knows
@@ -261,6 +263,9 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
  * header parser runs. On KL_HTTP1_PARSE_HEADERS_OK, *rest / *rest_len are the bytes after the header
  * block (the start of the body, if any). */
 KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, size_t *rest_len);
+/* Bytes arrived on a READING connection (any transport, before decryption): start the header
+ * deadline of the request they begin, if it has not started. */
+void kl_http_conn_note_head_bytes(KlHttpConn *c, uint64_t now);
 
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len);

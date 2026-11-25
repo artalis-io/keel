@@ -1180,6 +1180,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         return;
     }
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
+    kl_http_conn_note_head_bytes(c, c->last_active_ms);   /* a new request's bytes start its deadline */
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
      * bounded recv was posted per completion, so this is the non-blocking drain progression. */
