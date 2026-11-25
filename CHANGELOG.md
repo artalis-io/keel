@@ -58,6 +58,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
+  io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
+  the backend's last completions without dispatching them. A client freed from such an op's
+  `on_cancel` (a relay ending its upstream request) abandons its DNS resolver's datagram, whose
+  posted receive still holds the inbound buffer through its completion; the reap dropped that
+  completion without releasing it, leaking about 2.5 KiB per client. It now releases what it drops.
 - **Security: peer credentials are reported only for UNIX-domain sockets.**
   `kl_http_request_peer_cred`, `kl_ws_server_peer_cred` and `kl_peer_cred_fd` documented -1 for a
   socket that is not AF_UNIX, but returned 0 with credentials the OS made up: uid 0 and gid 0 on

@@ -1471,7 +1471,11 @@ int kl_http_comp_run(struct KlHttpServer *s, int timeout_ms) {
  *     accept (a shutdown-race ok=1 fd is disposed by the CLOSING listener) and reaches detachment;
  *   - DROPS every other completion (READ/WRITE/UDP/WATCHER/CONNECT) without dispatch: the backend
  *     drain already freed each op record, and the owning conn/udp/watcher is freed by its own
- *     teardown, so nothing leaks and no callback, HTTP step, or timer runs;
+ *     teardown, so no callback, HTTP step, or timer runs;
+ *   - but still releases a dropped completion's transferred life reference, as kl_comp_run does
+ *     for one with no handler. A datagram abandoned during teardown (the DNS resolver of an HTTP
+ *     client freed from an async op's on_cancel) leaves its posted recv owning the inbound buffer
+ *     through that reference; dropping it without the release leaked the buffer and the token;
  *   - never calls kl_timer_fire.
  * Terminating: kl_comp_shutdown_accepts guaranteed every posted accept will complete, and each
  * blocking kl_comp_drain reaps the pending completions. Returns 0, or -1 if the force could not be
@@ -1483,10 +1487,12 @@ int kl_http_comp_quiesce_accepts(struct KlHttpServer *s) {
         KlCompletionEvent evs[KL_COMP_MAX_EVENTS];
         int n = kl_comp_drain(&s->ev, evs, KL_COMP_MAX_EVENTS, KL_ACCEPT_QUIESCE_TIMEOUT_MS);
         if (n < 0) return -1;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < n; i++) {
             if (evs[i].kind == KL_COMP_ACCEPT)
                 comp_server_conn_dispatch(&s->ev, &evs[i]);   /* accept → listener retire only */
-        /* all other kinds: op already freed by the drain; intentionally not dispatched */
+            else if (evs[i].life && !evs[i].retain_life)
+                kl_comp_life_release(evs[i].life);           /* dropped, but its reference is not */
+        }
     }
     return 0;
 }
