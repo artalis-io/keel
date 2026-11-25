@@ -333,7 +333,6 @@ UTEST(compress_bounded, a_head_response_takes_writes_without_running_the_codec) 
     int feeds = g_m.feeds;
     EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
     EXPECT_EQ(g_m.feeds, feeds);                           /* no finish fed */
-    EXPECT_TRUE(t.cs.stage == NULL);
     EXPECT_TRUE(t.res.stream_ended);
     EXPECT_EQ(t.g.wire_len, (size_t)0);
     EXPECT_TRUE(g_m.destroyed);

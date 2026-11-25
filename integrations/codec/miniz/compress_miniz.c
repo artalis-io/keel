@@ -172,8 +172,10 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
          * input taken, nothing left in the lookahead, and its output copied out: tdefl flushes only
          * in such a call. A block closed part way (a full block of input or code buffer) leaves
          * output to copy and lookahead to compress, so that call's flush did not happen yet and the
-         * loop must go on. Where the flush did overflow out_buf, one more call after the copy adds
-         * only an empty block and a sync marker (6 bytes, covered by miniz_flush_bound). */
+         * loop must go on. Where the flush did overflow out_buf, or tdefl closed a block itself on
+         * the last input byte and that block overflowed it, one more call after the copy adds only
+         * an empty block and the sync marker (6 bytes on top of that block's own leftover bits:
+         * covered by miniz_flush_bound). */
         if (flush_type == TDEFL_SYNC_FLUSH && !drain_only && remaining == 0 &&
             s->comp.m_lookahead_size == 0 && s->comp.m_output_flush_remaining == 0)
             break;

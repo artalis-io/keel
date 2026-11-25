@@ -64,11 +64,12 @@ static Producer g_p;
 static KlHttpServer g_srv;
 static KlCompressCtx *g_cctx;
 
-/* The body is a deterministic function of the offset: SSE-like text for most, random blocks for
- * some (incompressible, so the wire fills). */
+/* The body is a deterministic function of the offset: random 16 KiB blocks for most (incompressible,
+ * so about 9 MB reach the wire: more than any kernel buffers between the two ends, whatever the
+ * host's socket-buffer autotuning) and SSE-like text in between. */
 static size_t next_block(size_t at, char *b) {
     unsigned s = (unsigned)(at * 2654435761u) | 1u;        /* local: both threads call this */
-    if ((at / 16384) % 4 == 3) {
+    if ((at / 16384) % 4 != 3) {
         size_t n = 16384;
         for (size_t i = 0; i < n; i++) b[i] = (char)(rnd(&s) & 0xff);
         return n;
@@ -83,15 +84,15 @@ static void pump(void) {
             KlHttpStreamStatus st = kl_http_compress_stream_try_end(&g_p.cs);
             if (st == KL_HTTP_STREAM_WOULD_BLOCK) { g_p.end_would_blocks++; return; }
             if (st != KL_HTTP_STREAM_ACCEPTED) { g_p.errors++; kl_async_cancel(&g_srv, &g_p.op); return; }
-            g_p.ended = 1;
+            __atomic_store_n(&g_p.ended, 1, __ATOMIC_RELEASE);
             kl_async_complete(&g_srv, &g_p.op);
             return;
         }
         if (g_p.block_len == 0) g_p.block_len = next_block(g_p.produced, g_p.block);
         KlHttpStreamStatus st = kl_http_compress_stream_try_write(&g_p.cs, g_p.block, g_p.block_len);
-        if (st == KL_HTTP_STREAM_WOULD_BLOCK) { g_p.would_blocks++; return; }
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK) { __atomic_fetch_add(&g_p.would_blocks, 1, __ATOMIC_RELEASE); return; }
         if (st != KL_HTTP_STREAM_ACCEPTED) { g_p.errors++; kl_async_cancel(&g_srv, &g_p.op); return; }
-        g_p.produced += g_p.block_len;
+        __atomic_store_n(&g_p.produced, g_p.produced + g_p.block_len, __ATOMIC_RELEASE);
         g_p.block_len = 0;
         size_t pend = kl_http_response_stream_pending(g_p.res);
         if (pend > g_p.max_pending) g_p.max_pending = pend;
@@ -101,13 +102,12 @@ static void on_writable(void *ud) { (void)ud; pump(); }
 static void on_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
 static void on_cancel(KlAsyncOp *op, void *ud) {
     (void)op; (void)ud;
-    g_p.cancelled++;
     kl_http_compress_stream_release(&g_p.cs);      /* abandon: write nothing more */
+    __atomic_fetch_add(&g_p.cancelled, 1, __ATOMIC_RELEASE);   /* published after the release */
 }
 static void start(void *ud) { (void)ud; pump(); }
 static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
-    (void)ctx;
-    memset(&g_p, 0, sizeof g_p);
+    (void)ctx;                                     /* g_p was zeroed by server_up, before this thread */
     g_p.res = res;
     KlCompressConfig cfg = { .ctx = g_cctx, .factory = kl_compress_miniz_create };
     if (kl_http_compress_stream_begin(res, &cfg, 200, &g_p.cs) < 0) return;
@@ -122,6 +122,7 @@ static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 static void *server_thread(void *arg) { kl_http_server_run(arg); return NULL; }
 static pthread_t g_tid;
 static int server_up(void) {
+    memset(&g_p, 0, sizeof g_p);                         /* no state left from an earlier case */
     g_cctx = kl_compress_miniz_ctx_create(1, &g_alloc);
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = GB_CAP,
                                .alloc = &g_alloc };
@@ -212,6 +213,15 @@ static int rd_feed(Reader *r, const unsigned char *p, size_t n) {
     return 0;
 }
 
+/* Wait (up to 10 s) for the producer's first refusal: the stalled reader's buffers have filled. */
+static int wait_for_backpressure(void) {
+    for (int i = 0; i < 1000; i++) {
+        if (__atomic_load_n(&g_p.would_blocks, __ATOMIC_ACQUIRE) > 0) return 1;
+        usleep(10000);
+    }
+    return 0;
+}
+
 static double now_s(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -223,9 +233,9 @@ UTEST(gzip_backpressure, a_stalled_reader_bounds_the_producer_and_the_body_arriv
     ASSERT_EQ(server_up(), 0);
     int fd = connect_small(g_srv.bound_port);
     ASSERT_GE(fd, 0);
-    usleep(400000);                                         /* stall: every buffer fills */
-    EXPECT_GT(g_p.would_blocks, 0);
-    EXPECT_LT(g_p.produced, (size_t)GB_TOTAL);              /* the producer stopped, not finished */
+    EXPECT_TRUE(wait_for_backpressure());                   /* stall: every buffer fills */
+    usleep(100000);
+    EXPECT_LT(__atomic_load_n(&g_p.produced, __ATOMIC_ACQUIRE), (size_t)GB_TOTAL);   /* stopped */
     Reader r;
     memset(&r, 0, sizeof r);
     r.gz_skip = 10;
@@ -240,7 +250,9 @@ UTEST(gzip_backpressure, a_stalled_reader_bounds_the_producer_and_the_body_arriv
         ASSERT_EQ(rd_feed(&r, buf, (size_t)n), 0);
     }
     EXPECT_EQ(r.st, 4);                                     /* the terminal chunk arrived */
-    EXPECT_EQ(r.decoded, g_p.produced);
+    /* The terminal chunk leaves inside try_end, before the producer records the end. */
+    for (int i = 0; i < 200 && !__atomic_load_n(&g_p.ended, __ATOMIC_ACQUIRE); i++) usleep(10000);
+    EXPECT_EQ(r.decoded, __atomic_load_n(&g_p.produced, __ATOMIC_ACQUIRE));
     EXPECT_GE(r.decoded, (size_t)GB_TOTAL);
     EXPECT_EQ(r.mismatch, (size_t)0);                       /* byte-exact */
     EXPECT_TRUE(g_p.ended);
@@ -259,12 +271,11 @@ UTEST(gzip_backpressure, a_client_that_leaves_mid_stall_cancels_and_releases_the
     ASSERT_EQ(server_up(), 0);
     int fd = connect_small(g_srv.bound_port);
     ASSERT_GE(fd, 0);
-    usleep(400000);
-    EXPECT_GT(g_p.would_blocks, 0);
+    EXPECT_TRUE(wait_for_backpressure());
     close(fd);                                              /* gone without reading */
-    for (int i = 0; i < 300 && !g_p.cancelled; i++) usleep(10000);
+    for (int i = 0; i < 300 && !__atomic_load_n(&g_p.cancelled, __ATOMIC_ACQUIRE); i++) usleep(10000);
     EXPECT_EQ(g_p.cancelled, 1);
-    EXPECT_TRUE(g_p.cs.comp == NULL);                       /* released in on_cancel */
+    EXPECT_TRUE(__atomic_load_n(&g_p.cs.comp, __ATOMIC_ACQUIRE) == NULL);   /* released in on_cancel */
     server_down();
     EXPECT_EQ(g_ca.live, live0);
 }

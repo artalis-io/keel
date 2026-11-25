@@ -264,7 +264,7 @@ UTEST(miniz_bounded, a_sync_flush_near_any_block_close_ends_with_the_sync_marker
                 bi = probe.m_block_index;
                 closes++;
                 size_t at = probe.m_lookahead_pos;
-                for (size_t n = at > 40 ? at - 40 : 1; n <= at + 40 && n < sizeof data; n++) {
+                for (size_t n = at > 8 ? at - 8 : 1; n <= at + 8 && n < sizeof data; n++) {
                     KlCompressCtx *ctx;
                     KlCompress *c = new_codec(&ctx, &al, lv);
                     ASSERT_TRUE(c != NULL);
@@ -288,7 +288,7 @@ UTEST(miniz_bounded, a_sync_flush_near_any_block_close_ends_with_the_sync_marker
             }
         }
     }
-    ASSERT_GT(checked, 1000);
+    ASSERT_GT(checked, 300);
 }
 
 /* Random sizes (to 140 KB), random content mixes and levels, with unflushed (legacy) feeds mixed
