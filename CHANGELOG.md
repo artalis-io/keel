@@ -83,6 +83,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **pollcomp delivers a cancelled operation without waiting out the poll timeout.** Its drain
   collected the cancelled operations, then still blocked in `poll()` for the full timeout before
   returning them, so an idle-timeout or drain close took up to a second.
+- **IOCP: a watched socket handle that Windows reuses is watched again, and teardown no longer
+  hangs on it.** When a watched socket was closed without `kl_watcher_del` and a new socket got the
+  same handle value, `kl_watcher_add` on it found the old watch and kept it, without associating the
+  new socket with the completion port. Its readiness was never reported, and `kl_event_ctx_free`
+  (or a server's teardown) waited forever for the stale probe's completion. A re-registered watch
+  now associates its socket with the port and revives a watch whose socket had died. Readiness
+  loops were not affected. Found by an intermittent CI hang in
+  `event_hangup.a_reused_socket_handle_is_polled_again`, which now retries long enough to exercise
+  IOCP too.
 - **A streamed response's `on_drain` producer is bounded on completion loops.** On io_uring, IOCP
   and pollcomp the response drain's `on_drain` fired while the server was moving the stream's backlog
   onto the connection's output queue, a step allowed past the queue's bound, so every write made from

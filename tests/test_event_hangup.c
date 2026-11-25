@@ -538,7 +538,11 @@ UTEST(event_hangup, a_reused_socket_handle_is_polled_again) {
     kl_test_closesock(c);
     kl_event_ctx_run(&ev, 8, 20);                           /* the backend notices the stale handle */
     int s2 = -1, reused = 0;                                 /* the reused handle: a new socket */
-    for (int i = 0; i < 1000 && !reused; i++) {             /* until the old handle value comes back */
+    /* Until the old handle value comes back. The select() backend gets it back within a few tries;
+     * IOCP rarely does within a thousand, and there a re-registered watch was not associated with
+     * the port: the new socket's readiness was lost and kl_event_ctx_free hung. Enough tries that
+     * IOCP runs this case too, not only skips it. */
+    for (int i = 0; i < 20000 && !reused; i++) {
         int t = (int)socket(AF_INET, SOCK_STREAM, 0);
         if (t == old) { s2 = t; reused = 1; }
         else kl_test_closesock(t);   /* close each miss: holding them keeps Windows from reusing */
