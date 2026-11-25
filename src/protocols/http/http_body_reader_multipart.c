@@ -1,6 +1,7 @@
 #include <keel/http_body_reader_multipart.h>
 #include "../../allocator_validate.h"
 #include "kl_cstr.h"   /* kl_ascii_strn?casecmp: ASCII, locale-free, portable */
+#include "http_body_reader_multipart_internal.h"
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
@@ -72,10 +73,20 @@ struct KlHttpMultipartReader {
     int    parts_begun;        /* parts for which PART_BEGIN has fired */
 
     /* Per-part header accumulator. Growable; capped by
-     * config.max_headers_size (0 = unlimited). Reset on each part. */
+     * config.max_headers_size (0 selects KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE,
+     * resolved in the factory). Reset on each part. */
     char  *hdr;
     size_t hdr_len;
     size_t hdr_cap;
+    /* hdr[0, hdr_scanned) has already been searched for "\r\n\r\n" without
+     * a match, so the next search resumes there (less 3 bytes, for a
+     * terminator split across two fragments) instead of rescanning the whole
+     * accumulator: a part whose headers arrive in many small fragments costs
+     * linear, not quadratic, CPU. Reset with hdr_len. */
+    size_t hdr_scanned;
+    /* Bytes examined by the terminator search over the reader's life; read
+     * only by the white-box probe in http_body_reader_multipart_internal.h. */
+    size_t hdr_scan_work;
 
     /* Current-part metadata strings, allocated. Replaced each PART_BEGIN. */
     char  *cur_name;       size_t cur_name_len;
@@ -527,6 +538,7 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
                 mp_apply_consume(mr);
                 mr->state = KL_HTTP_MP_S_HEADERS;
                 mr->hdr_len = 0;
+                mr->hdr_scanned = 0;
                 mr->current_part_size = 0;
                 continue;
             }
@@ -561,7 +573,13 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
             mr->input_consumed = take;
             mp_apply_consume(mr);
 
-            const char *end = mp_memmem(mr->hdr, mr->hdr_len, "\r\n\r\n", 4);
+            /* Resume where the previous search stopped. Its last 3 bytes may
+             * begin a terminator completed by this fragment, so back up by 3. */
+            size_t from = mr->hdr_scanned > 3 ? mr->hdr_scanned - 3 : 0;
+            mr->hdr_scan_work += mr->hdr_len - from;
+            const char *end = mp_memmem(mr->hdr + from, mr->hdr_len - from,
+                                        "\r\n\r\n", 4);
+            mr->hdr_scanned = mr->hdr_len;
             if (!end) {
                 /* No terminator yet. If we just filled hdr to the cap
                  * but more input is still pending, the headers exceed
@@ -595,6 +613,7 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
             mr->parts_begun++;
             mr->state = KL_HTTP_MP_S_BODY;
             mr->hdr_len = 0;  /* reuse hdr buffer for the next part */
+            mr->hdr_scanned = 0;
 
             if (meta) {
                 meta->name             = mr->cur_name;
@@ -663,6 +682,11 @@ KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
             return mp_fail(mr, KL_HTTP_MP_ERR_MALFORMED);
         }
     }
+}
+
+size_t keel__http_multipart_hdr_scan_work(const KlHttpBodyReader *br) {
+    if (!br || br->on_data != mp_on_data) return 0;
+    return ((const KlHttpMultipartReader *)br)->hdr_scan_work;
 }
 
 KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br) {
@@ -740,7 +764,12 @@ KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttp
     if (user_data) {
         mr->config = *(const KlHttpMultipartConfig *)user_data;
     }
-    /* All cap fields default to 0 = unlimited. The caller decides. */
+    /* Every cap but one defaults to 0 = unlimited; the caller decides. The
+     * per-part header cap is finite by default: header bytes are buffered
+     * whole until "\r\n\r\n", so an unterminated header block would
+     * otherwise grow without bound. SIZE_MAX restores no practical limit. */
+    if (mr->config.max_headers_size == 0)
+        mr->config.max_headers_size = KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE;
 
     return &mr->base;
 }
