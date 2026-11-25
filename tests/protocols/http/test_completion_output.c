@@ -2727,9 +2727,11 @@ static void idle_case(int *utest_result, int no_callback) {
         kl_test_closesock(fd);
     }
     int edges = g_id.edges, wb = g_id.would_blocks, writes_after = g_id.writes_after_edge;
-    int completed = g_id.completed, cancelled = g_id.cancelled;
     kl_http_server_stop(&id_srv);
     kl_plat_thread_join(&tid);
+    /* Read after the join: the stream's end is written before kl_async_complete runs on_resume, so
+     * a client that has read the end may still be ahead of the server thread. */
+    int completed = g_id.completed, cancelled = g_id.cancelled;
     kl_http_server_free(&id_srv);
     printf("  idle after edge: %d edges, %d would-blocks, write watch %d, suspended %d, "
            "%.0f ms CPU over %.0f ms idle\n", edges, wb, watched_idle, suspended_idle, cpu_ms, wall_ms);
