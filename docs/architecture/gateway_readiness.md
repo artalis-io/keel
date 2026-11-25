@@ -32,8 +32,8 @@ The body below is the assessment as written against 3.5.0 and is kept unchanged 
 | Windows readiness on `select()` (replaces WSAPoll, found while doing P0-4a) | #515 | merged |
 | P0-4b-a legacy `on_drain` bypass, `end_stream` at the cap | #516 | merged |
 | P0-4b-b bounded admission and the writable edge | #517 | merged; see [http_stream_backpressure.md](http_stream_backpressure.md) |
-| Graceful drain over a backpressured relay (release acceptance) | this branch | `stream_relay.a_drain_*`: resumes byte-exact; past its deadline, cancelled once |
-| P0-4b-c compression-aware admission | none yet | design open: the codec vtable gives no output bound |
+| Graceful drain over a backpressured relay (release acceptance) | #518 | merged: `stream_relay.a_drain_*`: resumes byte-exact; past its deadline, cancelled once |
+| P0-4b-c compression-aware admission | this branch | implemented; flush per accepted write, see [http_stream_backpressure.md](http_stream_backpressure.md) section 8 |
 
 Where section E names WSAPoll, read the Windows `select()` backend
 ([windows_readiness_backend.md](windows_readiness_backend.md)): write readiness now survives a

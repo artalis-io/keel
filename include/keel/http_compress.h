@@ -34,6 +34,9 @@ typedef struct {
     KlHttpResponse  *res;        /**< Response (for end_stream) */
     KlAllocator *alloc;      /**< For destroying comp */
     int          error;      /**< Sticky error flag */
+    /* Appended after 3.5.0: bounded streaming (kl_http_compress_stream_try_write). Keel-owned. */
+    char        *stage;      /**< One flush's output before it is admitted as a chunk */
+    size_t       stage_cap;  /**< Its size: the largest bound admitted so far */
 } KlHttpCompressStream;
 
 /**
@@ -87,10 +90,63 @@ int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
  * Flushes remaining compressed data (trailer), destroys the compression
  * session, and ends the underlying chunked stream.
  *
+ * It releases the session in every state, including after an error and on a
+ * stream written with kl_http_compress_stream_try_write(); that makes it the way
+ * to release a bounded stream from the op's on_cancel (it then returns -1).
+ *
  * @param cs  Compress stream handle.
  * @return 0 on success, -1 on error.
  */
 int kl_http_compress_stream_end(KlHttpCompressStream *cs);
+
+/* ── Bounded compressed streaming ────────────────────────────────────────────────────────────────
+ *
+ * kl_http_response_stream_try_write() for a compressed stream: the same statuses, the same writable
+ * edge (kl_http_response_stream_on_writable on cs->res), the same capacity. Each accepted write is
+ * compressed and flushed whole (KL_COMPRESS_FLUSH_SYNC), so its bytes reach the client without
+ * waiting for later input and the codec holds nothing back between writes; the output goes out as
+ * one chunk. Admission is decided before the codec is touched, against the codec's worst case for
+ * this input (KlCompress.flush_bound) framed as one chunk: a refused write leaves the codec and the
+ * output exactly as they were. Only a codec that supplies flush_bound can be used
+ * (kl_http_compress_stream_bounded); any other gets ERROR and is never fed.
+ *
+ * Flushing every write costs some ratio on very small writes (each flush ends a deflate block);
+ * a producer of many tiny fragments that can wait may batch them into fewer writes. Memory: one
+ * staging buffer per stream, at most the largest admitted bound (never more than the capacity),
+ * freed when the stream ends. Do not mix with kl_http_compress_stream_write on one stream if the
+ * bound matters: an unflushed write leaves output owed, which the next bound has to cover.
+ */
+
+/** @brief 1 when the stream's codec supplies flush_bound (bounded writes are possible), else 0. */
+int kl_http_compress_stream_bounded(const KlHttpCompressStream *cs);
+
+/**
+ * @brief Compress and write @p data as one flushed chunk, all or nothing, without blocking.
+ *
+ * - ACCEPTED: compressed, flushed and queued. A zero-length write is ACCEPTED and feeds nothing.
+ * - WOULD_BLOCK: the worst case fits the capacity but not the room left; nothing was fed. Arms the
+ *   writable edge.
+ * - TOO_LARGE: the worst case exceeds the capacity (or does not fit a size_t): split the input.
+ * - CLOSED: the stream has ended or the response is gone.
+ * - ERROR: sticky. The codec lacks flush_bound, data is NULL with a length, the staging buffer
+ *   could not be allocated, the codec failed or emitted more than its bound, or the response's
+ *   stream failed. Release with kl_http_compress_stream_end().
+ */
+KlHttpStreamStatus kl_http_compress_stream_try_write(KlHttpCompressStream *cs, const char *data,
+                                                      size_t len);
+
+/**
+ * @brief Finish a bounded compressed stream: its final output, then the terminal chunk.
+ *
+ * The codec's finish output is admitted like a write (its flush_bound with final set), so a full
+ * stream answers WOULD_BLOCK and ends once room frees: finishing never deadlocks on a stream that
+ * is still moving, and the terminal chunk itself is never refused. On ACCEPTED, ERROR or CLOSED the
+ * session and staging buffer are released (do not call kl_http_compress_stream_end() afterwards);
+ * on WOULD_BLOCK or TOO_LARGE nothing changed. TOO_LARGE means the stream's capacity is smaller
+ * than the codec's finish output (a few dozen bytes for gzip): permanent, so release the stream
+ * with kl_http_compress_stream_end().
+ */
+KlHttpStreamStatus kl_http_compress_stream_try_end(KlHttpCompressStream *cs);
 
 #ifdef __cplusplus
 }

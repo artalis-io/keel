@@ -1,7 +1,7 @@
 # Bounded HTTP response streaming (P0-4b): design assessment
 
 Status: **P0-4b-a merged (#516); P0-4b-b implemented** on top of `main` `01a2ee9` (#514, #515 and
-#516 merged). P0-4b-c (compression) is not started. The design below is revision 2 as approved; the
+#516 merged). P0-4b-c (compression) is implemented as section 8 describes. The design below is revision 2 as approved; the
 implementation departs from it in four places, each for a measured or source-level reason:
 
 1. **No `kl_drain_reserve_writev`.** Atomicity comes from deciding admission once, against the one
@@ -221,10 +221,35 @@ becomes bounded like everywhere else and gets -1 at the cap instead of unbounded
 
 ## 8. Compression
 
-`KlHttpCompressStream` emits synchronously; one input can produce up to its own size plus
-overhead. Admission at input level needs a worst-case output bound: an optional appended
-`KlCompress.bound(len)` op (deflateBound-style), with a conservative generic fallback. Separate
-stage: the uncompressed path is complete without it.
+As implemented (P0-4b-c). Admitting a write needs the most output it can cause, and a codec that
+buffers (deflate's no-flush mode) owes output for earlier input at any later write: a single
+100-byte write was measured to release 50 KB from miniz. Two designs were compared:
+
+* **Reserve for retained output, keep normal buffering.** Sound for miniz only from its internals
+  (one block's output fits its 85,196-byte output buffer), so a standing per-stream reservation and a
+  state-reading codec op; each codec retains differently. It also leaves the latency defect: with no
+  flush, an SSE stream of 20,000 token events (3.5 MB) delivered nothing until it ended.
+* **Flush every accepted write (chosen).** The codec then retains nothing between writes, so each
+  write's output is bounded by its own length alone and decodes on arrival. Measured with miniz 3.0.2
+  at level 6, wire bytes including chunk framing, flushed against unflushed: ~180-byte SSE events
+  15.3% of input against 1.4% (about 27 bytes per event; still 6.7 times smaller than uncompressed);
+  1 to 4 KiB text 20.4% against 18.8%; 64 KiB blocks 18.78% against 18.72%; random data +0.07 to
+  +1.6 points. CPU is unchanged for bulk and about 1.4 us more per tiny event. A producer that
+  prefers ratio to latency can batch small writes.
+
+The codec contract is one optional appended op, `size_t (*flush_bound)(KlCompress *, size_t len,
+int final)`: the most one `feed` with `KL_COMPRESS_FLUSH_SYNC` (or the finish, when `final`) can
+emit given the session's state, including a header not yet sent and output an earlier unflushed
+`feed` still owes; it never modifies the session and answers `SIZE_MAX` on overflow. Supplying it
+declares support for the sync flush. It knows nothing of HTTP. `kl_http_compress_stream_try_write`
+asks the response, through the internal `kl_http_response_stream_admit` (the same checks
+`try_writev` makes, nothing written), whether a chunk of that bound fits; only then does it feed the
+codec, into a per-stream staging buffer (grown to the largest admitted bound, freed at the end), and
+submit the output as one chunk, which is then necessarily admitted. Output past the bound is a codec
+defect and fails the stream before any of it leaves. `kl_http_compress_stream_try_end` admits the
+finish the same way and then appends the terminal chunk outside the bound. A codec without the op is
+refused, never fed; nothing else about compression changes. No conservative generic fallback: it
+could not be sound for a codec whose retention Keel cannot see.
 
 ## 9. Revised PR decomposition
 

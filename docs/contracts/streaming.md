@@ -96,6 +96,18 @@ response:
   by the bound, so pending can exceed the capacity. Framing and order stay intact either way (both
   append whole chunks to one ordered pipeline); a bounded write then returns `WOULD_BLOCK` until
   pending falls back under the capacity, and its edge fires when it does.
+- *Compressed streams* (`kl_http_compress_stream_try_write` / `_try_end`, `<keel/http_compress.h>`):
+  the same statuses, capacity and edge. A write is admitted against the codec's worst case for that
+  input (`KlCompress.flush_bound`, framed as one chunk) before the codec is touched, so a refused
+  write leaves the codec and the output unchanged. An accepted write is compressed and flushed
+  whole (`KL_COMPRESS_FLUSH_SYNC`): its bytes go out as one chunk at once, decodable on arrival, and
+  the codec retains nothing for later output. The finish is admitted the same way (`WOULD_BLOCK`
+  until room frees), then the terminal chunk follows outside the bound as above. A codec without
+  `flush_bound` is refused (`ERROR`) and never fed. Memory adds one staging buffer per stream, at most
+  the largest admitted bound (under the capacity). The cost of flushing every write is ratio on very
+  small writes: measured with miniz at level 6, a stream of ~180-byte SSE events became about 15% of
+  its size on the wire instead of 1.4% unflushed, while 1 to 4 KiB writes cost 1.6 points and 64 KiB
+  writes nothing measurable; the unflushed stream delivered none of those events until it ended.
 
 **Producing later: suspend.** A stream belongs to its producer only while the handler runs or the
 connection is suspended (`kl_async_suspend`). To push events later (an SSE feed driven by a timer,

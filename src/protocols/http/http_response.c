@@ -949,6 +949,28 @@ KlHttpStreamStatus kl_http_response_stream_try_write(KlHttpResponse *res, const 
     return kl_http_response_stream_try_writev(res, &iov, 1);
 }
 
+KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len) {
+    if (!res) return KL_HTTP_STREAM_ERROR;
+    if (res->stream_error) return KL_HTTP_STREAM_ERROR;
+    if (res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent || res->stream_ended)
+        return KL_HTTP_STREAM_CLOSED;
+    if (len == 0 || res->head_request) return KL_HTTP_STREAM_ACCEPTED;
+    if (!res->drain_enabled) {
+        res->stream_error = 1;
+        return KL_HTTP_STREAM_ERROR;
+    }
+    char hdr[24];
+    size_t hdr_len = 0;
+    size_t framed = chunk_framed_len(len, &hdr_len, hdr);
+    if (framed == 0 || framed > kl_http_response_stream_capacity(res))
+        return KL_HTTP_STREAM_TOO_LARGE;
+    if (!stream_room_for(res, framed)) {
+        res->stream_writable_armed = 1;
+        return KL_HTTP_STREAM_WOULD_BLOCK;
+    }
+    return KL_HTTP_STREAM_ACCEPTED;
+}
+
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
                              KlHttpResponseWriteFn *out_write, void **out_ctx) {
     res->body_mode = KL_HTTP_BODY_STREAM;

@@ -24,6 +24,8 @@ typedef struct {
     uint32_t         crc;       /* running CRC32 for gzip trailer */
     uint32_t         total_in;  /* total input bytes for ISIZE trailer */
     int              started;   /* gzip header emitted? */
+    size_t           retained;  /* input fed without a flush since the last flush: its output
+                                 * may still be owed (miniz_flush_bound counts it) */
 } KlMinizSession;
 
 /* ── Gzip constants ──────────────────────────────────────────────── */
@@ -138,7 +140,8 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
     }
 
     /* Compress data */
-    tdefl_flush flush_type = flush ? TDEFL_FINISH : TDEFL_NO_FLUSH;
+    tdefl_flush flush_type = flush == KL_COMPRESS_FLUSH_SYNC ? TDEFL_SYNC_FLUSH
+                           : flush ? TDEFL_FINISH : TDEFL_NO_FLUSH;
     const char *p = data;
     size_t remaining = len;
 
@@ -162,12 +165,22 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         remaining -= in_bytes;
 
         if (status == TDEFL_STATUS_DONE) break;
+        /* A sync flush is complete once tdefl has taken all the input and has no flushed output
+         * left to copy out. Asking again would append another empty sync block. */
+        if (flush_type == TDEFL_SYNC_FLUSH && remaining == 0 && s->comp.m_output_flush_remaining == 0)
+            break;
         /* Input left, or (finishing) the final block may still be inside tdefl: keep draining it
          * through out_buf until tdefl reports DONE. */
     } while (remaining > 0 || flush);
 
-    /* Emit trailer on final flush */
-    if (flush) {
+    if (flush_type == TDEFL_NO_FLUSH) {
+        s->retained = len > SIZE_MAX - s->retained ? SIZE_MAX : s->retained + len;
+    } else {
+        s->retained = 0;
+    }
+
+    /* Emit trailer on the final flush only (a sync flush leaves the member open) */
+    if (flush_type == TDEFL_FINISH) {
         unsigned char trailer[8];
         write_le32(trailer, s->crc);
         write_le32(trailer + 4, s->total_in);
@@ -176,6 +189,31 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
     }
 
     return 0;
+}
+
+/* ── Vtable: flush_bound ─────────────────────────────────────────── */
+
+/* The most deflate emits for n input bytes: miniz's mz_compressBound,
+ * max(128 + n * 110 / 100, 128 + n + 5 * (n / 31744 + 1)), computed in size_t (mz_ulong is 32-bit
+ * on Windows), with n / 8 standing in for n * 10 / 100. It covers every block tdefl closes for that
+ * input, stored, fixed or dynamic. SIZE_MAX when it does not fit. */
+static size_t deflate_bound(size_t n) {
+    if (n > SIZE_MAX / 4) return SIZE_MAX;
+    return 128 + n + n / 8 + 5 * (n / 31744 + 1);
+}
+
+/* Header not yet sent (10), the deflate of this input plus whatever an earlier unflushed feed
+ * retained, the sync flush's empty stored block (5), and when final the last block's end (5) and
+ * the trailer (8). Reads the session, never writes it. */
+static size_t miniz_flush_bound(KlCompress *self, size_t len, int final) {
+    const KlMinizSession *s = (const KlMinizSession *)self;
+    if (s->retained > SIZE_MAX / 4 || len > SIZE_MAX / 4 - s->retained) return SIZE_MAX;
+    size_t b = deflate_bound(s->retained + len);
+    if (b == SIZE_MAX) return SIZE_MAX;
+    b += 5;
+    if (!s->started) b += sizeof(gzip_header);
+    if (final) b += 5 + 8;
+    return b;
 }
 
 /* ── Vtable: encoding ────────────────────────────────────────────── */
@@ -192,6 +230,7 @@ static void miniz_reset(KlCompress *self) {
     s->crc = 0;
     s->total_in = 0;
     s->started = 0;
+    s->retained = 0;
 }
 
 /* ── Vtable: destroy ─────────────────────────────────────────────── */
@@ -235,6 +274,7 @@ KlCompress *kl_compress_miniz_create(KlCompressCtx *ctx, KlAllocator *alloc) {
     s->base.encoding = miniz_encoding;
     s->base.reset = miniz_reset;
     s->base.destroy = miniz_destroy;
+    s->base.flush_bound = miniz_flush_bound;
     s->level = mctx->level;
     s->alloc = alloc;
 

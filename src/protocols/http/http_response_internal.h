@@ -62,6 +62,14 @@ int kl_http_comp_stream_tls_full(KlHttpResponse *res);
  * not a pooled completion-driven connection's own. Counted toward the response's stream capacity. */
 size_t kl_http_comp_stream_queued(const KlHttpResponse *res);
 
+/* Would kl_http_response_stream_try_writev() take a chunk of `len` payload bytes now? The same
+ * checks in the same order, returning the status that write would, with nothing written: ACCEPTED
+ * means it fits (nothing taken, the edge left as it was), WOULD_BLOCK arms the writable edge as a
+ * refused write does, ERROR is sticky as there. A write of at most `len` bytes made before anything
+ * else changes the stream is then ACCEPTED (the framed size grows with the length). For writers
+ * that must know a chunk fits before producing it (a compressor's flush). */
+KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len);
+
 /* A progress point of a suspended streamed response (its output moved): fire the writable edge if
  * it is armed and the pending bytes are below the capacity. The caller re-validates the connection
  * afterwards: the callback may write, end the stream, complete or cancel the op. */
