@@ -1417,8 +1417,9 @@ static int comp_stream_edge_idle(const KlAsyncOp *op) {
  * before the loop waits: no completion is needed and nothing polls. Callbacks are user code and may
  * complete or cancel ops (changing the list), so restart from the head after each.
  *
- * Each connection fires at most once per pass (comp_edge_fired), and one that fired never by itself
- * makes the pass ask for a zero wait. A callback refused again normally has a send in flight: a refusal
+ * Each connection fires at most once per pass (comp_edge_fired, cleared only here, at the pass's
+ * start, so an op re-suspended from its own callback cannot fire again in the same pass), and one that
+ * fired never by itself makes the pass ask for a zero wait. A callback refused again normally has a send in flight: a refusal
  * means bytes are pending, and pending output on a completion connection is always posted (the queue
  * kicks a send whenever it holds unposted bytes and none is in flight), so the connection is no longer
  * eligible here and its completion fires the next edge. Were that invariant ever broken, the re-armed

@@ -273,7 +273,6 @@ int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
     /* Park the connection */
     conn->state = KL_HTTP_CONN_SUSPENDED;
     conn->async_op = op;
-    conn->comp_edge_fired = 0;          /* a fresh suspension starts outside any edge pass */
     conn->suspend_start_ms = kl_monotonic_ms();
     op->conn = conn;
     op->_terminal = 0;         /* fresh suspension → pending (allows op reuse) */
