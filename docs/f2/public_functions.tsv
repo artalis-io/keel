@@ -134,7 +134,11 @@ kl_http_client_start	http_client.h
 kl_http_client_start_pooled	http_client_pool.h
 kl_http_client_start_s	http_client.h
 kl_http_compress_stream_begin	http_compress.h
+kl_http_compress_stream_bounded	http_compress.h
 kl_http_compress_stream_end	http_compress.h
+kl_http_compress_stream_release	http_compress.h
+kl_http_compress_stream_try_end	http_compress.h
+kl_http_compress_stream_try_write	http_compress.h
 kl_http_compress_stream_write	http_compress.h
 kl_http_conn_peer_addr	http_connection.h
 kl_http_conn_response	http_connection.h

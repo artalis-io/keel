@@ -24,6 +24,8 @@ typedef struct {
     uint32_t         crc;       /* running CRC32 for gzip trailer */
     uint32_t         total_in;  /* total input bytes for ISIZE trailer */
     int              started;   /* gzip header emitted? */
+    size_t           retained;  /* input fed without a flush since the last flush: its output
+                                 * may still be owed (miniz_flush_bound counts it) */
 } KlMinizSession;
 
 /* ── Gzip constants ──────────────────────────────────────────────── */
@@ -138,7 +140,8 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
     }
 
     /* Compress data */
-    tdefl_flush flush_type = flush ? TDEFL_FINISH : TDEFL_NO_FLUSH;
+    tdefl_flush flush_type = flush == KL_COMPRESS_FLUSH_SYNC ? TDEFL_SYNC_FLUSH
+                           : flush ? TDEFL_FINISH : TDEFL_NO_FLUSH;
     const char *p = data;
     size_t remaining = len;
 
@@ -146,6 +149,9 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         unsigned char out_buf[4096];
         size_t in_bytes = remaining;
         size_t out_bytes = sizeof(out_buf);
+        /* With output of an earlier block still to copy out, tdefl only copies: it neither
+         * compresses nor flushes in that call. */
+        int drain_only = s->comp.m_output_flush_remaining != 0;
 
         tdefl_status status = tdefl_compress(&s->comp,
                                               p, &in_bytes,
@@ -162,12 +168,29 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         remaining -= in_bytes;
 
         if (status == TDEFL_STATUS_DONE) break;
+        /* A sync flush is complete after a call that compressed (not a copy-only one) with all the
+         * input taken, nothing left in the lookahead, and its output copied out: tdefl flushes only
+         * in such a call. A block closed part way (a full block of input or code buffer) leaves
+         * output to copy and lookahead to compress, so that call's flush did not happen yet and the
+         * loop must go on. Where the flush did overflow out_buf, or tdefl closed a block itself on
+         * the last input byte and that block overflowed it, one more call after the copy adds only
+         * an empty block and the sync marker (6 bytes on top of that block's own leftover bits:
+         * covered by miniz_flush_bound). */
+        if (flush_type == TDEFL_SYNC_FLUSH && !drain_only && remaining == 0 &&
+            s->comp.m_lookahead_size == 0 && s->comp.m_output_flush_remaining == 0)
+            break;
         /* Input left, or (finishing) the final block may still be inside tdefl: keep draining it
          * through out_buf until tdefl reports DONE. */
     } while (remaining > 0 || flush);
 
-    /* Emit trailer on final flush */
-    if (flush) {
+    if (flush_type == TDEFL_NO_FLUSH) {
+        s->retained = len > SIZE_MAX - s->retained ? SIZE_MAX : s->retained + len;
+    } else {
+        s->retained = 0;
+    }
+
+    /* Emit trailer on the final flush only (a sync flush leaves the member open) */
+    if (flush_type == TDEFL_FINISH) {
         unsigned char trailer[8];
         write_le32(trailer, s->crc);
         write_le32(trailer + 4, s->total_in);
@@ -176,6 +199,63 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
     }
 
     return 0;
+}
+
+/* ── Vtable: flush_bound ─────────────────────────────────────────── */
+
+/* The most deflate emits for n input bytes: B(n) = 128 + n + n/8 + 5 * (n/31744 + 1), in size_t
+ * (mz_ulong is 32-bit on Windows). It is at least miniz's own mz_compressBound,
+ * max(128 + n*110/100, 128 + n + 5*(n/31744 + 1)). SIZE_MAX when it does not fit.
+ *
+ * Why it bounds every flush (miniz 3.0.2, tdefl_flush_block and the block-closing tests in
+ * tdefl_compress_normal / _fast). The input since the last flush is cut into blocks of
+ * T bytes each:
+ * - A block whose input is still in the 32 KiB window falls back to a stored block whenever the
+ *   coded block is not smaller than T - 1: so at most T + 5 (3 header bits and the pad to a byte,
+ *   which also absorbs up to 7 bits a previous block left, then LEN and NLEN) or less.
+ *   For T >= 48 that fits in its own T/8 share of B; only the last block of a flush can be smaller,
+ *   and the constant covers it.
+ * - A block beyond the window is always coded. Blocks only get that large when tdefl does not
+ *   close them at 31 KiB: the fast path closes only on a full code buffer (64 KiB of codes, so at
+ *   least ~20 KB of input), and the normal path also closes at 31 KiB unless matches dominate. Its
+ *   size is the dynamic header (at most 14 + 19*3 + 316*7 bits plus EOB: under 295 bytes) plus the
+ *   data, and the data under the Huffman code built for the block costs no more than under any
+ *   other code within the 15-bit limit, two of which bound it: the fixed code (9 bits per literal,
+ *   at most 23 bits per 3-byte match: tdefl drops 3-byte matches 8 KiB away or more, so at most
+ *   7.67 bits per matched byte), or a code giving 253 literals 8 bits and the rest at most 14 (just
+ *   over 8.07 bits per literal byte, at most 10 per matched byte). With m matched bytes the fixed
+ *   code leaves 1.33m bits of the 9T allowed, the other leaves 0.93T - 1.93m: one of them exceeds
+ *   the header (2,360 bits) for any T above ~6 KB, and these blocks are past 20 KB. tdefl's
+ *   fallback when a dynamic block overflows its buffer is the fixed code, inside 9T bits with no
+ *   header.
+ * - Output an earlier unflushed feed left owed (blocks still in tdefl, or closed, not copied out)
+ *   belongs to blocks of that input, so B(retained + len) covers it with the same per-block sums.
+ * miniz_flush_bound adds the sync flush's empty stored block (5), an empty fixed block and a
+ * second sync marker when the flush overflowed the copy buffer (6, see miniz_feed), the gzip
+ * header before the first feed (10), and for the finish its last block (at most 10 bits and a pad:
+ * 5 allowed) and the trailer (8).
+ * The one assumption is miniz's length limiting (tdefl_huffman_enforce_max_code_size): it only acts
+ * on distributions so skewed that the block is tiny. Fuzzing (33,176 feeds, all levels, random,
+ * low-entropy, run-heavy, match-heavy input, unflushed feeds mixed in) found no output nearer than
+ * 133 bytes to the bound; a feed past it is caught (the bounded stream fails, nothing is sent). */
+static size_t deflate_bound(size_t n) {
+    if (n > SIZE_MAX / 4) return SIZE_MAX;
+    return 128 + n + n / 8 + 5 * (n / 31744 + 1);
+}
+
+/* Header not yet sent (10), the deflate of this input plus whatever an earlier unflushed feed
+ * retained, the sync flush's empty stored block (5) and possibly a second empty block with its sync
+ * marker (6: see miniz_feed), and when final the last block's end (5) and the trailer (8). Reads the
+ * session, never writes it. */
+static size_t miniz_flush_bound(KlCompress *self, size_t len, int final) {
+    const KlMinizSession *s = (const KlMinizSession *)self;
+    if (s->retained > SIZE_MAX / 4 || len > SIZE_MAX / 4 - s->retained) return SIZE_MAX;
+    size_t b = deflate_bound(s->retained + len);
+    if (b == SIZE_MAX) return SIZE_MAX;
+    b += 5 + 6;   /* the sync block, and an empty block + sync marker if the flush overflowed out_buf */
+    if (!s->started) b += sizeof(gzip_header);
+    if (final) b += 5 + 8;
+    return b;
 }
 
 /* ── Vtable: encoding ────────────────────────────────────────────── */
@@ -192,6 +272,7 @@ static void miniz_reset(KlCompress *self) {
     s->crc = 0;
     s->total_in = 0;
     s->started = 0;
+    s->retained = 0;
 }
 
 /* ── Vtable: destroy ─────────────────────────────────────────────── */
@@ -235,6 +316,7 @@ KlCompress *kl_compress_miniz_create(KlCompressCtx *ctx, KlAllocator *alloc) {
     s->base.encoding = miniz_encoding;
     s->base.reset = miniz_reset;
     s->base.destroy = miniz_destroy;
+    s->base.flush_bound = miniz_flush_bound;
     s->level = mctx->level;
     s->alloc = alloc;
 

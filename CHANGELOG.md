@@ -24,6 +24,17 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `WOULD_BLOCK` and resume it on the edge with memory bounded by the capacity, not the body
   (`docs/contracts/streaming.md`, "Bounded streaming"). The existing writer keeps its fatal
   semantics.
+- **Bounded compressed streaming.** `kl_http_compress_stream_try_write` and
+  `kl_http_compress_stream_try_end` give a compressed chunked response the same statuses, capacity
+  and writable edge. A write is admitted against the codec's worst case for it before the codec is
+  touched (a refused write changes nothing), then compressed and flushed whole, so each write
+  reaches the client at once and decodes on arrival. It needs a codec that supplies the new optional
+  `KlCompress.flush_bound` op, which also declares support for `KL_COMPRESS_FLUSH_SYNC`; the miniz
+  integration does. Other codecs are refused (`kl_http_compress_stream_bounded` reports it) and
+  everything else about compression is unchanged. `kl_http_compress_stream_release` abandons a
+  stream without writing (from `on_cancel`). `KlCompress` and `KlHttpCompressStream` each gain
+  trailing members: a custom codec needs no source change but must be recompiled, as for any
+  appended member (`docs/contracts/compatibility.md`).
 
 ### Changed
 

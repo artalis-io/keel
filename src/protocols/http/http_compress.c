@@ -1,4 +1,6 @@
 #include <keel/http_compress.h>
+#include "http_response_internal.h"   /* kl_http_response_stream_admit */
+#include <stdint.h>
 #include <string.h>
 
 /* True iff every REQUIRED KlCompress op is present. Core calls compress (single-shot),
@@ -85,6 +87,127 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
     return 0;
 }
 
+/* ── Bounded streaming: one flush's output, staged, then admitted as one chunk ────────────── */
+
+static void stage_release(KlHttpCompressStream *cs) {
+    if (cs->stage) kl_free(cs->alloc, cs->stage, cs->stage_cap);
+    cs->stage = NULL;
+    cs->stage_cap = 0;
+}
+
+/* Grow the staging buffer to `need` before the codec is touched, so a failed allocation leaves the
+ * codec as it was. It only grows (to the largest bound admitted), and is freed when the stream ends. */
+static int stage_reserve(KlHttpCompressStream *cs, size_t need) {
+    if (need <= cs->stage_cap) return 0;
+    char *nb = kl_malloc(cs->alloc, need);
+    if (!nb) return -1;
+    stage_release(cs);
+    cs->stage = nb;
+    cs->stage_cap = need;
+    return 0;
+}
+
+typedef struct {
+    char  *buf;
+    size_t cap;   /* the bound the output was admitted against */
+    size_t len;
+} StageSink;
+
+/* Collect the codec's output for one feed. More than its bound is a codec defect: refuse it, which
+ * fails the feed (and the stream), rather than let the chunk outgrow what was admitted. */
+static int stage_emit(void *ctx, const char *data, size_t len) {
+    StageSink *k = ctx;
+    if (len > k->cap - k->len) return -1;
+    if (len) memcpy(k->buf + k->len, data, len);
+    k->len += len;
+    return 0;
+}
+
+/* A bounded write that failed once admitted: the stream and the response's stream both fail, so the
+ * connection closes rather than carry a body the client cannot decode (a later write through the
+ * response itself is refused too). */
+static KlHttpStreamStatus bounded_fail(KlHttpCompressStream *cs) {
+    cs->error = 1;
+    cs->res->stream_error = 1;
+    return KL_HTTP_STREAM_ERROR;
+}
+
+/* Admit the codec's worst case for (len, final), then feed it, flushing, into the staging buffer and
+ * hand the output to the response as one chunk. Everything that can refuse runs before the feed. */
+static KlHttpStreamStatus bounded_feed(KlHttpCompressStream *cs, const char *data, size_t len,
+                                       int final) {
+    size_t bound = cs->comp->flush_bound(cs->comp, len, final);
+    KlHttpStreamStatus st = kl_http_response_stream_admit(cs->res, bound);
+    if (st != KL_HTTP_STREAM_ACCEPTED) {
+        if (st == KL_HTTP_STREAM_ERROR) cs->error = 1;
+        return st;
+    }
+    if (stage_reserve(cs, bound) < 0) return bounded_fail(cs);
+    StageSink k = { cs->stage, bound, 0 };
+    if (cs->comp->feed(cs->comp, data, len, final ? 1 : KL_COMPRESS_FLUSH_SYNC, stage_emit, &k) < 0)
+        return bounded_fail(cs);             /* the codec may have advanced: nothing can resume it */
+    /* At most `bound` bytes, which were admitted with nothing changed since: this is ACCEPTED (a
+     * zero-length one emits nothing and disarms the edge, as an accepted write does). Anything else
+     * means the output is lost while the codec has moved on. */
+    st = kl_http_response_stream_try_write(cs->res, k.buf, k.len);
+    if (st != KL_HTTP_STREAM_ACCEPTED) return bounded_fail(cs);
+    return KL_HTTP_STREAM_ACCEPTED;
+}
+
+void kl_http_compress_stream_release(KlHttpCompressStream *cs) {
+    if (!cs || !cs->comp) return;
+    cs->comp->destroy(cs->comp);
+    cs->comp = NULL;
+    stage_release(cs);
+}
+
+int kl_http_compress_stream_bounded(const KlHttpCompressStream *cs) {
+    return cs && cs->comp && cs->comp->flush_bound;
+}
+
+KlHttpStreamStatus kl_http_compress_stream_try_write(KlHttpCompressStream *cs, const char *data,
+                                                      size_t len) {
+    if (!cs) return KL_HTTP_STREAM_ERROR;
+    if (!cs->comp) return KL_HTTP_STREAM_CLOSED;
+    if (cs->error) return KL_HTTP_STREAM_ERROR;
+    if ((len > 0 && !data) || !cs->comp->flush_bound) {
+        cs->error = 1;
+        return KL_HTTP_STREAM_ERROR;
+    }
+    /* Nothing to send (an empty write, or a HEAD response, whose body never leaves): the response's
+     * own answer for it (ACCEPTED, or CLOSED / ERROR), without running or sizing the codec. */
+    if (len == 0 || cs->res->head_request) return kl_http_response_stream_try_write(cs->res, NULL, 0);
+    return bounded_feed(cs, data, len, 0);
+}
+
+KlHttpStreamStatus kl_http_compress_stream_try_end(KlHttpCompressStream *cs) {
+    if (!cs) return KL_HTTP_STREAM_ERROR;
+    if (!cs->comp) return KL_HTTP_STREAM_CLOSED;
+    KlHttpStreamStatus st;
+    if (cs->error || !cs->comp->flush_bound) {
+        cs->error = 1;
+        st = KL_HTTP_STREAM_ERROR;
+    } else if (cs->res->head_request) {
+        /* No body leaves a HEAD response: end it without sizing or running the codec (whatever
+         * a legacy write left in it is never sent either). */
+        st = kl_http_response_stream_try_write(cs->res, NULL, 0);
+        if (st == KL_HTTP_STREAM_ACCEPTED && kl_http_response_end_stream(cs->res) < 0) {
+            cs->error = 1;
+            st = KL_HTTP_STREAM_ERROR;
+        }
+    } else {
+        st = bounded_feed(cs, NULL, 0, 1);
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK || st == KL_HTTP_STREAM_TOO_LARGE) return st;
+        /* The terminal chunk is never refused by the capacity (a reserved allowance). */
+        if (st == KL_HTTP_STREAM_ACCEPTED && kl_http_response_end_stream(cs->res) < 0) {
+            cs->error = 1;
+            st = KL_HTTP_STREAM_ERROR;
+        }
+    }
+    kl_http_compress_stream_release(cs);
+    return st;
+}
+
 /* Emit callback for streaming: forwards compressed data to chunked stream */
 static int stream_emit(void *ctx, const char *data, size_t len) {
     KlHttpCompressStream *cs = ctx;
@@ -168,6 +291,7 @@ int kl_http_compress_stream_end(KlHttpCompressStream *cs) {
     /* Destroy compression session */
     cs->comp->destroy(cs->comp);
     cs->comp = NULL;
+    stage_release(cs);
 
     /* End chunked stream */
     if (rc == 0) {
