@@ -25,14 +25,15 @@ The body below is the assessment as written against 3.5.0 and is kept unchanged 
 
 | Item | Where | State |
 |---|---|---|
-| P0-1 peer credentials only for AF_UNIX | #510 | open, needs a rebase on `main` and merge approval |
-| P0-2 deadline sweep survives a released op | #511 | open, as #510 |
-| P0-3 gateway-grade graceful drain | #512 | open, as #510 |
+| P0-1 peer credentials only for AF_UNIX | #510 | merged |
+| P0-2 deadline sweep survives a released op | #511 | merged |
+| P0-3 gateway-grade graceful drain | #512 | merged |
 | P0-4a suspended streams progress on readiness | #514 | merged |
 | Windows readiness on `select()` (replaces WSAPoll, found while doing P0-4a) | #515 | merged |
 | P0-4b-a legacy `on_drain` bypass, `end_stream` at the cap | #516 | merged |
-| P0-4b-b bounded admission and the writable edge | this branch | implemented; see [http_stream_backpressure.md](http_stream_backpressure.md) |
-| P0-4b-c compression-aware admission | none yet | waits for P0-4b-b |
+| P0-4b-b bounded admission and the writable edge | #517 | merged; see [http_stream_backpressure.md](http_stream_backpressure.md) |
+| Graceful drain over a backpressured relay (release acceptance) | this branch | `stream_relay.a_drain_*`: resumes byte-exact; past its deadline, cancelled once |
+| P0-4b-c compression-aware admission | none yet | design open: the codec vtable gives no output bound |
 
 Where section E names WSAPoll, read the Windows `select()` backend
 ([windows_readiness_backend.md](windows_readiness_backend.md)): write readiness now survives a
