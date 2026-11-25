@@ -217,6 +217,10 @@ Upgrade notes:
   re-init the server to serve again. `KlHttpServer` has also grown (an appended internal field);
   recompile.
 
+- **Two defaults are tightened to close resource-exhaustion defects** (`header_timeout_ms` and
+  `max_headers_size`, below), under the compatibility contract's narrow clause for that case
+  (`docs/contracts/compatibility.md`, "Tightening a default to close a resource-exhaustion defect"):
+  each has a documented opt-out restoring the old behavior.
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
   capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
   keeps every default.

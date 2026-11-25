@@ -96,6 +96,33 @@ growth with less apparatus. Each config and vtable header states its own
 required-versus-optional members and its append point, so this contract is not
 restated per type.
 
+## Tightening a default to close a resource-exhaustion defect
+
+The rules above forbid changing an existing field's documented semantics, and require an appended
+field's zero to preserve behavior, within a major version. One narrow exception applies: a MINOR
+(or PATCH) release may tighten a **default** resource limit or timeout, including the default an
+existing field's zero selects or an appended field's zero enables, only when all of these hold:
+
+1. **A demonstrated defect.** The old default lets a peer exhaust CPU, memory, connection slots or
+   another bounded resource, shown by a reproduction recorded with the change (issue, test or
+   CHANGELOG entry), not a hypothetical.
+2. **A default only.** Every explicitly configured non-zero value keeps its meaning; only what the
+   zero (or the absence of a config) selects changes, and the new default is generous enough for
+   legitimate traffic, consistent with Keel's existing limits.
+3. **A prominent upgrade note.** The CHANGELOG lists it under "Upgrade notes" as a behavior change,
+   with the old and new defaults.
+4. **An explicit opt-out.** A documented value restores the previous behavior exactly, or to no
+   practical limit, without a new configuration mechanism.
+
+Applied in the release after 3.5.0:
+
+| Field | Old zero | New zero | Opt-out |
+|---|---|---|---|
+| `KlHttpMultipartConfig.max_headers_size` | unlimited | `KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE` (8 KiB) | `SIZE_MAX` |
+| `KlHttpServerConfig.header_timeout_ms` (appended) | n/a (no head deadline existed) | `read_timeout_ms` | any negative value |
+
+Anything else that changes documented semantics remains a MAJOR change.
+
 ## Integrations
 
 The first-party adapters in `integrations/` implement **existing core vtables**
