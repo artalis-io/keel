@@ -251,6 +251,15 @@ finish the same way and then appends the terminal chunk outside the bound. A cod
 refused, never fed; nothing else about compression changes. No conservative generic fallback: it
 could not be sound for a codec whose retention Keel cannot see.
 
+After review: a failure once a write is admitted (staging allocation, codec, output past its bound)
+fails the response's stream too, since the codec may have advanced; a HEAD response takes writes
+without running the codec (nothing is sent, and the staging buffer must stay under the capacity);
+`kl_http_compress_stream_release` abandons a stream without writing (`on_cancel`, or a finish that
+can never fit). The miniz sync flush is complete only after a call that compressed with nothing
+left in the lookahead: a call that only copies out an earlier block's output does not flush, and
+stopping there lost up to 258 bytes of a write between about 31 and 33 KB (found by review; a test
+now decodes every size across that window).
+
 ## 9. Revised PR decomposition
 
 | PR | Content | Depends on | Public API |

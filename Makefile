@@ -2065,9 +2065,18 @@ decompress-miniz-test: $(KEEL_LIB)
 	  integrations/codec/miniz/tests/test_compress_bounded_miniz.c \
 	  integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c \
 	  $$mzobj -L. -lkeel -lpthread; \
-	./integrations/codec/miniz/tests/test_compress_bounded_miniz
+	./integrations/codec/miniz/tests/test_compress_bounded_miniz; \
+	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -Wno-unused-function \
+	  -fsanitize=address,undefined -fno-sanitize-recover=all -D_DEFAULT_SOURCE \
+	  -Iinclude -Iintegrations/codec/miniz -I$(MINIZ_DIR) -Ivendor -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
+	  -o integrations/codec/miniz/tests/test_http_gzip_backpressure \
+	  integrations/codec/miniz/tests/test_http_gzip_backpressure.c \
+	  integrations/codec/miniz/compress_miniz.c integrations/codec/miniz/decompress_miniz.c \
+	  $$mzobj -L. -lkeel -lpthread; \
+	./integrations/codec/miniz/tests/test_http_gzip_backpressure
 	@rm -f integrations/codec/miniz/tests/mz_*.o integrations/codec/miniz/tests/test_decompress_trailer \
-	  integrations/codec/miniz/tests/test_http_gzip_pause integrations/codec/miniz/tests/test_compress_bounded_miniz
+	  integrations/codec/miniz/tests/test_http_gzip_pause integrations/codec/miniz/tests/test_compress_bounded_miniz \
+	  integrations/codec/miniz/tests/test_http_gzip_backpressure
 
 fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \
       fuzz/fuzz_proxy fuzz/fuzz_url

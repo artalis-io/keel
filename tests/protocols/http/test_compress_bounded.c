@@ -10,6 +10,7 @@
 #include "event_caps.h"
 #include "http_response_internal.h"
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Mock codec: "C:" + input per feed, "|S" per sync flush, "[END]" on finish ──────────────── */
@@ -85,6 +86,19 @@ static kl_ssize_t gate_send(void *ctx, KlSocketHandle fd, const void *buf, size_
 }
 static unsigned gate_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_CAP_READINESS; }
 
+/* The default allocator, except that an allocation of exactly g_fail_size bytes fails. */
+static size_t g_fail_size;
+static void *fail_malloc(void *ctx, size_t size) {
+    (void)ctx;
+    if (g_fail_size && size == g_fail_size) return NULL;
+    return malloc(size);
+}
+static void *fail_realloc(void *ctx, void *ptr, size_t old, size_t size) {
+    (void)ctx; (void)old;
+    return realloc(ptr, size);
+}
+static void fail_free(void *ctx, void *ptr, size_t size) { (void)ctx; (void)size; free(ptr); }
+
 typedef struct {
     GateSend g;
     KlSocketProvider provider;
@@ -104,7 +118,7 @@ static int gate_begin(Gate *t, size_t cap) {
     t->provider = (KlSocketProvider){ .ops = &g_gate_ops, .context = &t->g };
     t->ev.loop.ops = &g_gate_ev;
     t->ev.sockets = &t->provider;
-    t->alloc = kl_allocator_default();
+    t->alloc = (KlAllocator){ .malloc = fail_malloc, .realloc = fail_realloc, .free = fail_free };
     if (kl_http_response_init(&t->res, &t->alloc) < 0) return -1;
     t->res.conn_fd = 1;
     t->res.ctx = &t->ev;
@@ -215,6 +229,8 @@ UTEST(compress_bounded, a_codec_past_its_bound_fails_the_stream_before_any_byte_
     EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "abc", 3), KL_HTTP_STREAM_ERROR);
     EXPECT_EQ(t.g.wire_len, (size_t)0);                    /* the over-long output never went out */
     EXPECT_TRUE(t.cs.error);
+    EXPECT_TRUE(t.res.stream_error);                       /* the response failed with it */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "raw", 3), KL_HTTP_STREAM_ERROR);
     g_m.overshoot = 0;
     EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "abc", 3), KL_HTTP_STREAM_ERROR);
     gate_free(&t);
@@ -281,6 +297,69 @@ UTEST(compress_bounded, try_end_on_an_ended_response_releases_without_feeding) {
     EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_CLOSED);
     EXPECT_EQ(g_m.feeds, 0);
     EXPECT_TRUE(g_m.destroyed);
+    gate_free(&t);
+}
+
+UTEST(compress_bounded, a_failed_staging_allocation_feeds_nothing_and_fails_the_stream) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    g_fail_size = 2 + 77 + 2;                              /* the stage for a 77-byte write */
+    static char p[77];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, p, 77), KL_HTTP_STREAM_ERROR);
+    g_fail_size = 0;
+    EXPECT_EQ(g_m.feeds, 0);                               /* refused before the codec ran */
+    EXPECT_EQ(t.g.wire_len, (size_t)0);
+    EXPECT_TRUE(t.res.stream_error);
+    kl_http_compress_stream_release(&t.cs);
+    EXPECT_TRUE(g_m.destroyed);
+    gate_free(&t);
+}
+
+UTEST(compress_bounded, a_head_response_takes_writes_without_running_the_codec) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 64), 0);
+    t.res.head_request = 1;
+    t.g.open = 1;
+    static char big[100000];                               /* far past the capacity */
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, big, sizeof big), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(g_m.feeds, 0);
+    EXPECT_TRUE(t.cs.stage == NULL);                       /* nothing staged for a body never sent */
+    EXPECT_EQ(t.g.wire_len, (size_t)0);
+    EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_TRUE(g_m.destroyed);
+    gate_free(&t);
+}
+
+UTEST(compress_bounded, release_writes_nothing_and_is_idempotent) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[600];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, p, 600), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
+    gate_free(&t);
+
+    /* A full stream abandoned (the on_cancel path): the finish is never written. */
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, p, 600), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
+    gate_free(&t);
+    ASSERT_EQ(gate_begin(&t, 620), 0);
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, p, 600), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_WOULD_BLOCK);
+    size_t pending = kl_http_response_stream_pending(&t.res);
+    int feeds = g_m.feeds;
+    kl_http_compress_stream_release(&t.cs);
+    EXPECT_TRUE(g_m.destroyed);
+    EXPECT_EQ(g_m.feeds, feeds);                           /* no finish fed */
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), pending);   /* nothing written */
+    EXPECT_TRUE(t.cs.comp == NULL);
+    EXPECT_TRUE(t.cs.stage == NULL);
+    kl_http_compress_stream_release(&t.cs);                /* idempotent */
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "x", 1), KL_HTTP_STREAM_CLOSED);
+    kl_http_compress_stream_release(NULL);
     gate_free(&t);
 }
 

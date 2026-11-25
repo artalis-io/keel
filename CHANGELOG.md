@@ -31,7 +31,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   reaches the client at once and decodes on arrival. It needs a codec that supplies the new optional
   `KlCompress.flush_bound` op, which also declares support for `KL_COMPRESS_FLUSH_SYNC`; the miniz
   integration does. Other codecs are refused (`kl_http_compress_stream_bounded` reports it) and
-  everything else about compression is unchanged.
+  everything else about compression is unchanged. `kl_http_compress_stream_release` abandons a
+  stream without writing (from `on_cancel`). `KlCompress` and `KlHttpCompressStream` each gain
+  trailing members: a custom codec needs no source change but must be recompiled, as for any
+  appended member (`docs/contracts/compatibility.md`).
 
 ### Changed
 

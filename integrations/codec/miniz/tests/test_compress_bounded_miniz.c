@@ -195,6 +195,91 @@ UTEST(miniz_bounded, incompressible_writes_stay_within_the_bound) {
     kl_compress_miniz_ctx_destroy(ctx);
 }
 
+/* A block closes part way through a large write (about 31 KiB of literals, or a full code buffer)
+ * with lookahead left: the flush must still complete. Every size across that window, decoded. */
+UTEST(miniz_bounded, a_sync_flush_across_a_block_boundary_delivers_every_byte) {
+    KlAllocator al = kl_allocator_default();
+    static char r[34000];
+    for (size_t j = 0; j < sizeof r; j++) r[j] = (char)(rnd() & 0xff);
+    int levels[] = { 1, 6, 9 };
+    for (int li = 0; li < 3; li++) {
+        for (size_t n = 31000; n <= 33000; n += 7) {
+            KlCompressCtx *ctx;
+            KlCompress *c = new_codec(&ctx, &al, levels[li]);
+            ASSERT_TRUE(c != NULL);
+            size_t bound = c->flush_bound(c, n, 0);
+            Buf out = { 0 };
+            ASSERT_EQ(c->feed(c, r, n, KL_COMPRESS_FLUSH_SYNC, buf_emit, &out), 0);
+            ASSERT_LE(out.len, bound);
+            Inflater f;
+            ASSERT_EQ(infl_init(&f), 0);
+            ASSERT_EQ(infl_feed(&f, out.p, out.len), 0);
+            ASSERT_EQ(f.out.len, n);                               /* nothing held back */
+            ASSERT_EQ(memcmp(f.out.p, r, n), 0);
+            Buf tail = { 0 };
+            size_t fb = c->flush_bound(c, 0, 1);
+            ASSERT_EQ(c->feed(c, NULL, 0, 1, buf_emit, &tail), 0);
+            ASSERT_LE(tail.len, fb);
+            free(tail.p);
+            free(out.p);
+            infl_free(&f);
+            c->destroy(c);
+            kl_compress_miniz_ctx_destroy(ctx);
+        }
+    }
+}
+
+/* Random sizes (to 140 KB), random content mixes and levels, with unflushed (legacy) feeds mixed
+ * in: every sync feed and finish stays within the bound asked just before it, and the stream
+ * decodes to exactly the input after every sync feed. */
+UTEST(miniz_bounded, randomized_feeds_stay_within_the_bound_and_decode_exactly) {
+    KlAllocator al = kl_allocator_default();
+    static char in[140000];
+    for (int round = 0; round < 60; round++) {
+        KlCompressCtx *ctx;
+        KlCompress *c = new_codec(&ctx, &al, 1 + (int)(rnd() % 9));
+        ASSERT_TRUE(c != NULL);
+        Inflater f;
+        ASSERT_EQ(infl_init(&f), 0);
+        Buf all = { 0 };
+        for (int w = 0; w < 12; w++) {
+            size_t n = (rnd() % 4 == 0) ? rnd() % sizeof in : rnd() % 4096;
+            int kind = (int)(rnd() % 4);
+            for (size_t j = 0; j < n; j++) {
+                unsigned x = rnd();
+                in[j] = kind == 0 ? (char)(x & 0xff)                      /* random */
+                      : kind == 1 ? (char)('a' + x % 4)                    /* low entropy */
+                      : kind == 2 ? (char)(j % 251)                        /* long matches */
+                      : (char)((x & 7) ? 'q' : (x >> 8));                  /* mostly runs */
+            }
+            int legacy = rnd() % 5 == 0;
+            size_t bound = c->flush_bound(c, n, 0);
+            Buf out = { 0 };
+            ASSERT_EQ(c->feed(c, in, n, legacy ? 0 : KL_COMPRESS_FLUSH_SYNC, buf_emit, &out), 0);
+            if (!legacy) ASSERT_LE(out.len, bound);
+            ASSERT_EQ(buf_put(&all, in, n), 0);
+            ASSERT_EQ(infl_feed(&f, out.p, out.len), 0);
+            if (!legacy) {
+                ASSERT_EQ(f.out.len, all.len);
+                ASSERT_EQ(memcmp(f.out.p, all.p, all.len), 0);
+            }
+            free(out.p);
+        }
+        Buf tail = { 0 };
+        size_t fb = c->flush_bound(c, 0, 1);
+        ASSERT_EQ(c->feed(c, NULL, 0, 1, buf_emit, &tail), 0);
+        ASSERT_LE(tail.len, fb);
+        ASSERT_EQ(infl_feed(&f, tail.p, tail.len > 8 ? tail.len - 8 : 0), 0);
+        ASSERT_EQ(f.out.len, all.len);
+        ASSERT_EQ(memcmp(f.out.p, all.p, all.len), 0);
+        free(tail.p);
+        free(all.p);
+        infl_free(&f);
+        c->destroy(c);
+        kl_compress_miniz_ctx_destroy(ctx);
+    }
+}
+
 /* ── Over HTTP: bounded writes over a socket, read back, de-chunked, decoded ─────────────────── */
 
 /* Read whatever the socket holds (non-blocking) and de-chunk it into `body`. */

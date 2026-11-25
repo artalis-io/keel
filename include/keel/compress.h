@@ -16,7 +16,9 @@ extern "C" {
  * not pre-allocated per connection (deflate state is ~300KB).
  *
  * Append-only vtable (see docs/contracts/compatibility.md): implementers
- * zero-initialize and recompile per major version. Required (core calls them):
+ * zero-initialize and recompile against the header they build with (an appended
+ * op grows the struct, so an object compiled against an older header must be
+ * rebuilt even if it supplies no new op). Required (core calls them):
  * compress, feed, encoding, destroy. Optional (NULL = not supplied): reset,
  * flush_bound. New ops are appended after flush_bound.
  */

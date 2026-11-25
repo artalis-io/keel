@@ -149,6 +149,9 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         unsigned char out_buf[4096];
         size_t in_bytes = remaining;
         size_t out_bytes = sizeof(out_buf);
+        /* With output of an earlier block still to copy out, tdefl only copies: it neither
+         * compresses nor flushes in that call. */
+        int drain_only = s->comp.m_output_flush_remaining != 0;
 
         tdefl_status status = tdefl_compress(&s->comp,
                                               p, &in_bytes,
@@ -165,9 +168,14 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
         remaining -= in_bytes;
 
         if (status == TDEFL_STATUS_DONE) break;
-        /* A sync flush is complete once tdefl has taken all the input and has no flushed output
-         * left to copy out. Asking again would append another empty sync block. */
-        if (flush_type == TDEFL_SYNC_FLUSH && remaining == 0 && s->comp.m_output_flush_remaining == 0)
+        /* A sync flush is complete after a call that compressed (not a copy-only one) with all the
+         * input taken, nothing left in the lookahead, and its output copied out: tdefl flushes only
+         * in such a call. A block closed part way (a full block of input, a full code buffer) leaves
+         * output to copy and lookahead to compress, so that call's flush did not happen yet and the
+         * loop must go on. Where the flush did overflow out_buf, one more call after the copy adds
+         * only an empty sync block (5 bytes, covered by miniz_flush_bound). */
+        if (flush_type == TDEFL_SYNC_FLUSH && !drain_only && remaining == 0 &&
+            s->comp.m_lookahead_size == 0 && s->comp.m_output_flush_remaining == 0)
             break;
         /* Input left, or (finishing) the final block may still be inside tdefl: keep draining it
          * through out_buf until tdefl reports DONE. */
@@ -203,14 +211,14 @@ static size_t deflate_bound(size_t n) {
 }
 
 /* Header not yet sent (10), the deflate of this input plus whatever an earlier unflushed feed
- * retained, the sync flush's empty stored block (5), and when final the last block's end (5) and
- * the trailer (8). Reads the session, never writes it. */
+ * retained, the sync flush's empty stored block (5, twice: see miniz_feed), and when final the last
+ * block's end (5) and the trailer (8). Reads the session, never writes it. */
 static size_t miniz_flush_bound(KlCompress *self, size_t len, int final) {
     const KlMinizSession *s = (const KlMinizSession *)self;
     if (s->retained > SIZE_MAX / 4 || len > SIZE_MAX / 4 - s->retained) return SIZE_MAX;
     size_t b = deflate_bound(s->retained + len);
     if (b == SIZE_MAX) return SIZE_MAX;
-    b += 5;
+    b += 5 + 5;   /* the sync block, and a second empty one if the flush overflowed the copy buffer */
     if (!s->started) b += sizeof(gzip_header);
     if (final) b += 5 + 8;
     return b;

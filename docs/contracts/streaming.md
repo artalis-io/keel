@@ -96,18 +96,40 @@ response:
   by the bound, so pending can exceed the capacity. Framing and order stay intact either way (both
   append whole chunks to one ordered pipeline); a bounded write then returns `WOULD_BLOCK` until
   pending falls back under the capacity, and its edge fires when it does.
-- *Compressed streams* (`kl_http_compress_stream_try_write` / `_try_end`, `<keel/http_compress.h>`):
-  the same statuses, capacity and edge. A write is admitted against the codec's worst case for that
-  input (`KlCompress.flush_bound`, framed as one chunk) before the codec is touched, so a refused
-  write leaves the codec and the output unchanged. An accepted write is compressed and flushed
-  whole (`KL_COMPRESS_FLUSH_SYNC`): its bytes go out as one chunk at once, decodable on arrival, and
-  the codec retains nothing for later output. The finish is admitted the same way (`WOULD_BLOCK`
-  until room frees), then the terminal chunk follows outside the bound as above. A codec without
-  `flush_bound` is refused (`ERROR`) and never fed. Memory adds one staging buffer per stream, at most
-  the largest admitted bound (under the capacity). The cost of flushing every write is ratio on very
-  small writes: measured with miniz at level 6, a stream of ~180-byte SSE events became about 15% of
-  its size on the wire instead of 1.4% unflushed, while 1 to 4 KiB writes cost 1.6 points and 64 KiB
-  writes nothing measurable; the unflushed stream delivered none of those events until it ended.
+- *Compressed streams* (`kl_http_compress_stream_try_write` / `_try_end` / `_release`,
+  `<keel/http_compress.h>`): the same statuses, capacity and edge.
+  - *Admission.* A write is admitted against the codec's worst case for that input
+    (`KlCompress.flush_bound`, framed as one chunk) before the codec is touched, so a refused write
+    leaves the codec and the output unchanged. The bound's overflow value, `SIZE_MAX`, is
+    `TOO_LARGE`. An accepted write is compressed and flushed whole (`KL_COMPRESS_FLUSH_SYNC`): its
+    bytes go out as one chunk at once, decodable on arrival, and the codec retains nothing for later
+    output. A HEAD response takes writes without running the codec.
+  - *Failure.* A codec without `flush_bound` is refused (`ERROR`) and never fed. Once a write is
+    admitted, a failed staging allocation, a codec failure, or output past the codec's own bound is
+    `ERROR` for the compressed stream and the response's stream alike (sticky; the connection
+    closes): the codec may have advanced, so nothing could resume it.
+  - *Finish.* `_try_end` admits the codec's finish the same way: `WOULD_BLOCK` arms the edge and
+    leaves the codec untouched however often it is retried; the finish's worst case is fixed once
+    nothing more is written, so it fits once pending drains far enough. `TOO_LARGE` means it never
+    can (a capacity below the codec's finish, a few dozen bytes for gzip): permanent, and the
+    stream is released with `_release`, which writes nothing (also the way to abandon a stream from
+    `on_cancel`). The terminal chunk then follows outside the bound as above.
+  - *Mixing with the legacy compressed writer* (`kl_http_compress_stream_write`, which does not
+    flush): `flush_bound` counts the output still owed for input such a write left in the codec, so
+    a later bounded write or finish stays within what it was admitted against. The capacity bound
+    itself holds, as for uncompressed streams, only for a response written exclusively through the
+    bounded API: the legacy writer is not refused by it.
+  - *Memory.* In addition to the stream's own terms above: the codec's session (fixed; miniz's
+    deflate state is 319,352 bytes) and one staging buffer holding a flush's output before it is
+    admitted, at most the largest admitted bound and so under C (kept and reused, freed when the
+    stream ends or is released). Nothing else is retained: with every accepted write flushed the codec
+    holds no input or output for later. So a compressed stream adds at most C plus the codec's fixed
+    state, independent of the body's length. (Measured: 12 MiB through a stalled reader at
+    C = 64 KiB peaked at 458 KB of server allocations in all, codec state included.)
+  - *Cost.* Flushing every write costs ratio on very small writes: measured with miniz at level 6, a
+    stream of ~180-byte SSE events became about 15% of its size on the wire instead of 1.4%
+    unflushed, while 1 to 4 KiB writes cost 1.6 points and 64 KiB writes nothing measurable; the
+    unflushed stream delivered none of those events until it ended.
 
 **Producing later: suspend.** A stream belongs to its producer only while the handler runs or the
 connection is suspended (`kl_async_suspend`). To push events later (an SSE feed driven by a timer,

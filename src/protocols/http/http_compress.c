@@ -123,6 +123,15 @@ static int stage_emit(void *ctx, const char *data, size_t len) {
     return 0;
 }
 
+/* A bounded write that failed once admitted: the stream and the response's stream both fail, so the
+ * connection closes rather than carry a body the client cannot decode (a later write through the
+ * response itself is refused too). */
+static KlHttpStreamStatus bounded_fail(KlHttpCompressStream *cs) {
+    cs->error = 1;
+    cs->res->stream_error = 1;
+    return KL_HTTP_STREAM_ERROR;
+}
+
 /* Admit the codec's worst case for (len, final), then feed it, flushing, into the staging buffer and
  * hand the output to the response as one chunk. Everything that can refuse runs before the feed. */
 static KlHttpStreamStatus bounded_feed(KlHttpCompressStream *cs, const char *data, size_t len,
@@ -133,24 +142,23 @@ static KlHttpStreamStatus bounded_feed(KlHttpCompressStream *cs, const char *dat
         if (st == KL_HTTP_STREAM_ERROR) cs->error = 1;
         return st;
     }
-    if (stage_reserve(cs, bound) < 0) {
-        cs->error = 1;
-        return KL_HTTP_STREAM_ERROR;
-    }
+    if (stage_reserve(cs, bound) < 0) return bounded_fail(cs);
     StageSink k = { cs->stage, bound, 0 };
-    if (cs->comp->feed(cs->comp, data, len, final ? 1 : KL_COMPRESS_FLUSH_SYNC, stage_emit, &k) < 0) {
-        cs->error = 1;                        /* the codec may have advanced: nothing can resume it */
-        return KL_HTTP_STREAM_ERROR;
-    }
+    if (cs->comp->feed(cs->comp, data, len, final ? 1 : KL_COMPRESS_FLUSH_SYNC, stage_emit, &k) < 0)
+        return bounded_fail(cs);             /* the codec may have advanced: nothing can resume it */
     /* At most `bound` bytes, which were admitted with nothing changed since: this is ACCEPTED (a
      * zero-length one emits nothing and disarms the edge, as an accepted write does). Anything else
      * means the output is lost while the codec has moved on. */
     st = kl_http_response_stream_try_write(cs->res, k.buf, k.len);
-    if (st != KL_HTTP_STREAM_ACCEPTED) {
-        cs->error = 1;
-        return KL_HTTP_STREAM_ERROR;
-    }
+    if (st != KL_HTTP_STREAM_ACCEPTED) return bounded_fail(cs);
     return KL_HTTP_STREAM_ACCEPTED;
+}
+
+void kl_http_compress_stream_release(KlHttpCompressStream *cs) {
+    if (!cs || !cs->comp) return;
+    cs->comp->destroy(cs->comp);
+    cs->comp = NULL;
+    stage_release(cs);
 }
 
 int kl_http_compress_stream_bounded(const KlHttpCompressStream *cs) {
@@ -166,7 +174,9 @@ KlHttpStreamStatus kl_http_compress_stream_try_write(KlHttpCompressStream *cs, c
         cs->error = 1;
         return KL_HTTP_STREAM_ERROR;
     }
-    if (len == 0) return kl_http_response_stream_try_write(cs->res, NULL, 0);
+    /* Nothing to send (an empty write, or a HEAD response, whose body never leaves): the response's
+     * own answer for it (ACCEPTED, or CLOSED / ERROR), without running or sizing the codec. */
+    if (len == 0 || cs->res->head_request) return kl_http_response_stream_try_write(cs->res, NULL, 0);
     return bounded_feed(cs, data, len, 0);
 }
 
@@ -186,9 +196,7 @@ KlHttpStreamStatus kl_http_compress_stream_try_end(KlHttpCompressStream *cs) {
             st = KL_HTTP_STREAM_ERROR;
         }
     }
-    cs->comp->destroy(cs->comp);
-    cs->comp = NULL;
-    stage_release(cs);
+    kl_http_compress_stream_release(cs);
     return st;
 }
 
