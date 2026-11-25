@@ -9,6 +9,21 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 - **`kl_http_server_draining()`** reports whether a graceful drain is in progress, from any thread,
   so an application no longer has to read the server's internal `draining` field.
+- **Bounded response streaming: non-fatal, atomic writes and a writable edge.** A chunked response
+  begun with `kl_http_response_begin_stream` can now be written with
+  `kl_http_response_stream_try_writev` / `_try_write`, which return a `KlHttpStreamStatus` with
+  KlStream's write semantics: `ACCEPTED` (the whole chunk taken), `WOULD_BLOCK` (nothing taken,
+  retry later), `TOO_LARGE` (it can never fit), `CLOSED`, `ERROR`. A write is one framed chunk,
+  admitted whole or not at all, against one bound over everything Keel holds for the response: its
+  outbound buffer and, on a completion loop, the connection's output queue
+  (`kl_http_response_stream_pending`, `kl_http_response_stream_capacity`; the capacity is
+  `KlHttpServerConfig.stream_capacity`, 1 MiB by default, per response).
+  `kl_http_response_stream_on_writable` installs the writable edge: armed by `WOULD_BLOCK`, fired at
+  most once, from a progress point, when pending falls below the capacity, while the connection is
+  suspended; a retry that still does not fit re-arms it. A relay can now pause its upstream on
+  `WOULD_BLOCK` and resume it on the edge with memory bounded by the capacity, not the body
+  (`docs/contracts/streaming.md`, "Bounded streaming"). The existing writer keeps its fatal
+  semantics.
 
 ### Changed
 
@@ -99,6 +114,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   drain from the write completion and are unchanged.
 
 Upgrade notes:
+
+- **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
+  capacity and writable edge, `stream_capacity`); recompile. A zeroed config keeps every default.
+- **`KlHttpServerConfig.stream_capacity` also sets the existing writer's outbound-buffer cap** (it
+  was a fixed 1 MiB, which stays the default).
 
 - **Windows readiness loops no longer advertise `KL_EVENT_CAP_HANGUP`.** `select()` reports a FIN
   only as readability, like data, so it cannot express a hang-up-only watch. A `KL_EVENT_HANGUP`

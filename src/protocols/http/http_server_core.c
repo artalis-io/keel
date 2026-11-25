@@ -329,6 +329,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].router = &s->router;
         s->pool.conns[i].stream.ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
         s->pool.conns[i].max_body_size = s->config.max_body_size;
+        s->pool.conns[i].stream_capacity = s->config.stream_capacity;
         s->pool.conns[i].reject_drain_max_bytes = s->config.reject_drain_max_bytes;
         s->pool.conns[i].reject_drain_timeout_ms = s->config.reject_drain_timeout_ms;
         s->pool.conns[i].max_header_size = s->config.max_header_size;

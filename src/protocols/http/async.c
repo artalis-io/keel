@@ -19,6 +19,7 @@
 #include "socket.h"           /* kl_sock_recv_peek / kl_sock_io_status: the sweep's probe */
 #include "completion_io.h"   /* kl_comp_run (neutral generic tick, via kl_event_ctx_run) */
 #include "completion_http.h" /* kl_http_comp_resume: completion resume */
+#include "http_response_internal.h" /* kl_http_response_stream_progress: the writable edge */
 
 /* ── Client hang-up while suspended ────────────────────────────────────
  * HTTP decides what abandonment means; the event layer only reports it. While a connection is
@@ -175,7 +176,14 @@ static void async_stream_progress(KlHttpServer *s, KlHttpConn *conn) {
         kl_async_cancel(s, op);                 /* the send failed: the client is gone */
         return;
     }
-    if (!async_stream_pending(conn))
+    /* Output moved: a producer refused with WOULD_BLOCK may write again (bounded streaming). */
+    if (conn->res.stream_writable_armed) {
+        kl_http_response_stream_progress(&conn->res);
+        if (conn->async_op != op || conn->state != KL_HTTP_CONN_SUSPENDED)
+            return;                             /* the callback completed or cancelled the op */
+    }
+    if (!async_stream_pending(conn) &&
+        !(conn->res.stream_writable_armed && conn->res.stream_writable_fn))
         async_stream_watch_write(s, conn, 0);
 }
 
@@ -187,7 +195,12 @@ void kl_async_sync_stream_interest(KlHttpServer *s) {
     for (KlAsyncOp *op = s->async_ops; op; op = op->next) {
         KlHttpConn *c = op->conn;
         if (!c || c->async_op != op || c->state != KL_HTTP_CONN_SUSPENDED) continue;
-        async_stream_watch_write(s, c, async_stream_pending(c));
+        /* Also while the writable edge is armed with nothing pending: a WOULD_BLOCK followed by a
+         * write through the legacy writer can empty the drain, and with no watch no progress point
+         * would come to fire the edge. A writable socket then reports at once. Only with a callback
+         * to fire: an armed edge nobody listens for would hold a watch on an always-writable socket. */
+        async_stream_watch_write(s, c, async_stream_pending(c) ||
+                                       (c->res.stream_writable_armed && c->res.stream_writable_fn));
     }
 }
 

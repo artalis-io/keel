@@ -325,3 +325,8 @@ kl_anon_pipe_end_close	anon_pipe.h	direct-assertion	tests/test_anon_pipe.c:329 e
 kl_anon_pipe_end_fd	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:129 ASSERT_EQ(kl_anon_pipe_end_fd(&e), -1) (POSIX)
 kl_anon_pipe_end_handle	anon_pipe_native.h	direct-assertion	tests/test_anon_pipe.c:285 the child HANDLE is a non-inheritable pipe (Windows)
 kl_http_server_draining	http_server.h	direct-assertion	tests/protocols/http/test_http_server_integration.c:987 (0 before stop, 1 while draining)
+kl_http_response_stream_capacity	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:1129 EXPECT_EQ(...,1u<<20)
+kl_http_response_stream_on_writable	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:952 ASSERT_EQ(gate_begin(...),0) returns its result
+kl_http_response_stream_pending	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:1104 EXPECT_EQ(...,1024)
+kl_http_response_stream_try_write	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:971 EXPECT_EQ(...,KL_HTTP_STREAM_ACCEPTED)
+kl_http_response_stream_try_writev	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:1019 EXPECT_EQ(...,KL_HTTP_STREAM_WOULD_BLOCK)

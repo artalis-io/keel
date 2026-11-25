@@ -899,4 +899,273 @@ static void end_stream_at_cap_case(int *utest_result, int poisoned) {
 UTEST(http_response, end_stream_is_not_refused_by_a_full_drain) { end_stream_at_cap_case(utest_result, 0); }
 UTEST(http_response, end_stream_on_a_failed_drain_still_fails) { end_stream_at_cap_case(utest_result, 1); }
 
+/* ── Bounded streaming: kl_http_response_stream_try_writev and the writable edge ───────────────────
+ * A response over a fake socket provider whose send takes everything or nothing on demand, and
+ * records what reached the wire. The progress point (kl_http_response_stream_progress) is called
+ * directly, as the server's flush points do. */
+typedef struct {
+    int open;                 /* 1 = send takes everything, 0 = takes nothing (would-block) */
+    char wire[1 << 16];
+    size_t wire_len;
+} GateSend;
+static kl_ssize_t gate_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    GateSend *g = ctx;
+    (void)fd;
+    if (!g->open) return 0;
+    size_t room = sizeof g->wire - g->wire_len;
+    size_t n = len < room ? len : room;
+    memcpy(g->wire + g->wire_len, buf, n);
+    g->wire_len += n;
+    return (kl_ssize_t)n;
+}
+static unsigned gate_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_CAP_READINESS; }
+
+typedef struct {
+    GateSend g;
+    KlSocketProvider provider;
+    KlEventCtx ev;
+    KlAllocator alloc;
+    KlHttpResponse res;
+    int fired;
+} Gate;
+static const KlSocketOps g_gate_ops = { .send = gate_send, .name = "gate" };
+static const KlEventOps g_gate_ev = { .caps = gate_caps };
+static void gate_on_writable(void *ctx) { ((Gate *)ctx)->fired++; }
+
+/* A begun stream with capacity `cap`; the head is on the wire (gate open), then the gate closes. */
+static int gate_begin(Gate *t, size_t cap) {
+    memset(t, 0, sizeof *t);
+    t->provider = (KlSocketProvider){ .ops = &g_gate_ops, .context = &t->g };
+    t->ev.loop.ops = &g_gate_ev;
+    t->ev.sockets = &t->provider;
+    t->alloc = kl_allocator_default();
+    if (kl_http_response_init(&t->res, &t->alloc) < 0) return -1;
+    t->res.conn_fd = 1;
+    t->res.ctx = &t->ev;
+    t->res.stream_capacity = cap;
+    t->g.open = 1;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    if (kl_http_response_begin_stream(&t->res, 200, &w, &wc) < 0) return -1;
+    t->g.wire_len = 0;                      /* forget the head: the tests look at chunks */
+    t->g.open = 0;
+    return kl_http_response_stream_on_writable(&t->res, gate_on_writable, t);
+}
+/* Let the socket take everything again, flush, and run the progress point. */
+static void gate_progress(Gate *t) {
+    t->g.open = 1;
+    (void)kl_drain_flush(&t->res.drain);
+    kl_http_response_stream_progress(&t->res);
+}
+
+UTEST(stream_admission, statuses_before_begin_after_end_and_on_null) {
+    EXPECT_EQ(kl_http_response_stream_try_write(NULL, "x", 1), KL_HTTP_STREAM_ERROR);
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &a), 0);
+    EXPECT_EQ(kl_http_response_stream_try_write(&res, "x", 1), KL_HTTP_STREAM_CLOSED);  /* not begun */
+    kl_http_response_free(&res);
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "abc", 3), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "x", 1), KL_HTTP_STREAM_CLOSED); /* ended */
+    EXPECT_EQ(t.g.wire_len, (size_t)(3 + 3 + 2 + 5));     /* "3\r\nabc\r\n" + "0\r\n\r\n" */
+    EXPECT_EQ(memcmp(t.g.wire, "3\r\nabc\r\n0\r\n\r\n", t.g.wire_len), 0);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, zero_length_is_accepted_and_emits_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, NULL, 0), KL_HTTP_STREAM_ACCEPTED);
+    KlIoVec v[2] = { { (void *)"", 0 }, { NULL, 0 } };
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, v, 2), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(t.g.wire_len, (size_t)0);                   /* never a zero-size chunk */
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, too_large_is_permanent_and_takes_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char big[2048];
+    memset(big, 'b', sizeof big);
+    t.g.open = 1;
+    /* 1024 payload bytes frame to 1024 + "400\r\n" + "\r\n": past a 1024 capacity. */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, big, 1024), KL_HTTP_STREAM_TOO_LARGE);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, big, 1024 - 6), KL_HTTP_STREAM_TOO_LARGE);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, big, 1024 - 7), KL_HTTP_STREAM_ACCEPTED);
+    KlIoVec huge[2] = { { big, SIZE_MAX / 2 }, { big, SIZE_MAX / 2 } };   /* overflows */
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, huge, 2), KL_HTTP_STREAM_TOO_LARGE);
+    EXPECT_EQ(t.g.wire_len, (size_t)1024);                 /* only the one accepted chunk */
+    EXPECT_FALSE(t.res.stream_error);                      /* TOO_LARGE does not poison */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "ok", 2), KL_HTTP_STREAM_ACCEPTED);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, would_block_takes_nothing_then_the_edge_fires_once) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[600];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, sizeof p), KL_HTTP_STREAM_ACCEPTED);
+    size_t pending = kl_http_response_stream_pending(&t.res);
+    EXPECT_EQ(pending, (size_t)(5 + 600 + 2));             /* "258\r\n" + 600 + "\r\n" buffered */
+    /* A three-piece vector (500 bytes, 507 framed) that does not fit the 417 left: nothing of it,
+     * framing included, is taken. */
+    KlIoVec v[3] = { { p, 200 }, { p, 200 }, { p, 100 } };
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, v, 3), KL_HTTP_STREAM_WOULD_BLOCK);
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), pending);   /* no header, payload or CRLF */
+    EXPECT_TRUE(t.res.stream_writable_armed);
+    EXPECT_EQ(t.fired, 0);                                 /* never from inside the write */
+    gate_progress(&t);                                     /* drained: fires */
+    EXPECT_EQ(t.fired, 1);
+    EXPECT_FALSE(t.res.stream_writable_armed);             /* firing disarmed it */
+    gate_progress(&t);
+    EXPECT_EQ(t.fired, 1);                                 /* at most once per arming */
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, v, 3), KL_HTTP_STREAM_ACCEPTED);
+    /* The chunk went out whole, in order after the first: framing intact. */
+    EXPECT_EQ(memcmp(t.g.wire + 607, "1f4\r\n", 5), 0);
+    EXPECT_EQ(t.g.wire_len, (size_t)(607 + 5 + 500 + 2));
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, no_edge_while_pending_is_at_capacity) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[1024];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 1024 - 7), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "x", 1), KL_HTTP_STREAM_WOULD_BLOCK);
+    kl_http_response_stream_progress(&t.res);              /* pending == capacity: no edge */
+    EXPECT_EQ(t.fired, 0);
+    EXPECT_TRUE(t.res.stream_writable_armed);
+    gate_progress(&t);
+    EXPECT_EQ(t.fired, 1);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, a_retry_that_still_does_not_fit_re_arms) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[700];
+    memset(p, 'p', sizeof p);
+    /* 520 payload bytes frame to 527: one fits a 1024 capacity, two do not. */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 520), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 520), KL_HTTP_STREAM_WOULD_BLOCK);
+    /* A little room frees (10 bytes leave): below capacity, so the edge fires... */
+    t.g.open = 1;
+    t.g.wire_len = sizeof t.g.wire - 10;                   /* the "socket" takes 10 bytes */
+    (void)kl_drain_flush(&t.res.drain);
+    t.g.open = 0;
+    kl_http_response_stream_progress(&t.res);
+    EXPECT_EQ(t.fired, 1);
+    /* ...but the retry still does not fit (517 + 527 > 1024): WOULD_BLOCK again, which re-arms. */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 520), KL_HTTP_STREAM_WOULD_BLOCK);
+    EXPECT_TRUE(t.res.stream_writable_armed);
+    t.g.wire_len = 0;
+    gate_progress(&t);
+    EXPECT_EQ(t.fired, 2);                                 /* the next progress point fires again */
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 520), KL_HTTP_STREAM_ACCEPTED);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, accepted_disarms_and_no_edge_after_end_or_reset) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[600];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 600), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 600), KL_HTTP_STREAM_WOULD_BLOCK);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 10), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_FALSE(t.res.stream_writable_armed);             /* an accepted write disarms */
+    gate_progress(&t);
+    EXPECT_EQ(t.fired, 0);
+    t.g.open = 0;
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 600), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 600), KL_HTTP_STREAM_WOULD_BLOCK);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);     /* ended with the edge armed */
+    gate_progress(&t);
+    EXPECT_EQ(t.fired, 0);                                 /* an ended stream has no edge */
+    kl_http_response_reset(&t.res);                        /* reset clears edge and callback */
+    EXPECT_FALSE(t.res.stream_writable_armed);
+    EXPECT_TRUE(t.res.stream_writable_fn == NULL);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, end_stream_fits_behind_a_full_stream) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    static char p[1024];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, 1024 - 7), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), (size_t)1024);   /* exactly at capacity */
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);     /* the terminal chunk still fits */
+    t.g.open = 1;
+    (void)kl_drain_flush(&t.res.drain);
+    EXPECT_EQ(t.g.wire_len, (size_t)(1024 + 5));
+    EXPECT_EQ(memcmp(t.g.wire + 1024, "0\r\n\r\n", 5), 0);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, invalid_arguments_fail_the_stream) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    KlIoVec v[1] = { { NULL, 3 } };
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, v, 1), KL_HTTP_STREAM_ERROR);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "x", 1), KL_HTTP_STREAM_ERROR);  /* sticky */
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), -1);
+    kl_http_response_free(&t.res);
+    ASSERT_EQ(gate_begin(&t, 1024), 0);
+    EXPECT_EQ(kl_http_response_stream_try_writev(&t.res, NULL, 2), KL_HTTP_STREAM_ERROR);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, capacity_defaults_and_a_smaller_drain_cap_bounds_it) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 0), 0);
+    EXPECT_EQ(kl_http_response_stream_capacity(&t.res), (size_t)(1u << 20));   /* the default */
+    kl_http_response_free(&t.res);
+    /* A drain the caller enabled with a smaller hard cap: admission never lets it refuse part of a
+     * chunk, so the capacity is that cap. */
+    memset(&t, 0, sizeof t);
+    t.provider = (KlSocketProvider){ .ops = &g_gate_ops, .context = &t.g };
+    t.ev.loop.ops = &g_gate_ev;
+    t.ev.sockets = &t.provider;
+    t.alloc = kl_allocator_default();
+    ASSERT_EQ(kl_http_response_init(&t.res, &t.alloc), 0);
+    t.res.conn_fd = 1;
+    t.res.ctx = &t.ev;
+    ASSERT_EQ(kl_http_response_enable_drain(&t.res, &t.alloc, 300), 0);
+    EXPECT_EQ(kl_http_response_stream_capacity(&t.res), (size_t)300);
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, the_stream_capacity_also_caps_the_legacy_writer) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    EXPECT_EQ(t.res.drain.max_size, (size_t)4096);         /* begin_stream used the capacity */
+    static char p[4096];
+    memset(p, 'p', sizeof p);
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, p, 3000), 0);
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, p, 3000), -1);   /* past it: fatal, as before */
+    EXPECT_TRUE(t.res.stream_error);
+    kl_http_response_free(&t.res);
+    ASSERT_EQ(gate_begin(&t, 0), 0);
+    EXPECT_EQ(t.res.drain.max_size, (size_t)(1u << 20));  /* unset: the 1 MiB it always was */
+    kl_http_response_free(&t.res);
+}
+
+UTEST(stream_admission, a_head_response_takes_everything_and_emits_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 64), 0);
+    t.res.head_request = 1;
+    static char p[4096];
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, sizeof p), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), (size_t)0);
+    kl_http_response_free(&t.res);
+}
+
 UTEST_MAIN();

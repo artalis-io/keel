@@ -2384,4 +2384,372 @@ UTEST(completion_output, a_legacy_on_drain_tls_producer_is_bounded) { legacy_dra
 UTEST(completion_output, a_legacy_on_drain_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 0, 1); }
 UTEST(completion_output, a_legacy_on_drain_tls_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 1, 1); }
 
+/* ── Bounded streaming on a live connection: try_write and the writable edge ─────────────────────
+ * A suspended producer that writes only through kl_http_response_stream_try_write and waits for the
+ * writable edge on WOULD_BLOCK: the whole stream arrives byte-exact (the client de-chunks and checks
+ * every byte), the response's pending output never exceeds its capacity, and the edge does the
+ * pacing. Both axes; plaintext and (mock) TLS. */
+#define SA_TOTAL  (8u * 1024u * 1024u)
+#define SA_CHUNK  (16u * 1024u)
+#define SA_CAP    (64u * 1024u)
+static unsigned char sa_byte(size_t k) { return (unsigned char)((k * 131u) ^ (k >> 10)); }
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    size_t sent, total, max_pending, cap;
+    size_t max_held;               /* independent of the API: drain + output queue, read directly */
+    KlHttpConn *conn;
+    int mixed;                     /* after each WOULD_BLOCK, write one byte through the legacy writer */
+    KlHttpResponseWriteFn w;
+    void *wc;
+    int would_blocks, edges, edges_after_end, cancelled, ended, completed;
+    KlHttpStreamStatus failed;     /* 0 (ACCEPTED) = none */
+} SaStream;
+static SaStream g_sa;
+static int g_sa_mixed;
+static KlHttpServer sa_srv;
+
+static void sa_pump(void);
+static void sa_on_writable(void *ud) {
+    (void)ud;
+    g_sa.edges++;
+    if (g_sa.ended || g_sa.cancelled) { g_sa.edges_after_end++; return; }
+    sa_pump();                                       /* a progress point: writing here is allowed */
+}
+static void sa_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sa.completed = 1; }
+static void sa_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sa.cancelled++; }
+static void sa_pump(void) {
+    static unsigned char chunk[SA_CAP];
+    /* Mixed: chunks that frame to exactly the capacity ("fff8\r\n" + 65528 + CRLF), so any byte
+     * still pending makes the write WOULD_BLOCK, and the drain is often nearly empty when it does. */
+    const size_t csz = g_sa.mixed ? SA_CAP - 8 : SA_CHUNK;
+    while (g_sa.sent < g_sa.total) {
+        size_t n = g_sa.total - g_sa.sent < csz ? g_sa.total - g_sa.sent : csz;
+        for (size_t i = 0; i < n; i++) chunk[i] = sa_byte(g_sa.sent + i);
+        KlHttpStreamStatus st = kl_http_response_stream_try_write(g_sa.res, chunk, n);
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK) {
+            g_sa.would_blocks++;
+            /* Only when it fits: the legacy writer fails fatally at its cap (a chunk of 1 frames to
+             * 6 bytes), and a drain can sit exactly at the capacity (Windows took none of it). */
+            if (g_sa.mixed && kl_drain_buffered(&g_sa.res->drain) + 6 <= g_sa.cap) {
+                /* A legacy write meanwhile (the next payload byte, so the stream stays exact): it
+                 * can empty the drain while the edge is armed, which must still fire. */
+                unsigned char one = sa_byte(g_sa.sent);
+                if (g_sa.w(g_sa.wc, (const char *)&one, 1) < 0) {
+                    g_sa.failed = KL_HTTP_STREAM_ERROR;
+                    kl_async_cancel(&sa_srv, &g_sa.op);
+                    return;
+                }
+                g_sa.sent += 1;
+            }
+            return;                                  /* wait for the edge */
+        }
+        if (st != KL_HTTP_STREAM_ACCEPTED) {
+            g_sa.failed = st;
+            kl_async_cancel(&sa_srv, &g_sa.op);      /* as an application would on a failed write */
+            return;
+        }
+        g_sa.sent += n;
+        size_t p = kl_http_response_stream_pending(g_sa.res);
+        if (p > g_sa.max_pending) g_sa.max_pending = p;
+        /* What Keel really holds, read from the structures themselves (white-box), so a pending
+         * count that missed a queue could not hide it. */
+        size_t held = kl_drain_buffered(&g_sa.res->drain) +
+                      (size_t)(g_sa.conn->comp_tlsq_appended - g_sa.conn->comp_tlsq_sent);
+        if (held > g_sa.max_held) g_sa.max_held = held;
+    }
+    g_sa.ended = 1;
+    kl_http_response_end_stream(g_sa.res);
+    kl_async_complete(&sa_srv, &g_sa.op);
+}
+static void sa_start(void *ud) { (void)ud; sa_pump(); }
+static void handle_sa(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    int mixed = g_sa_mixed;
+    memset(&g_sa, 0, sizeof g_sa);
+    g_sa.mixed = mixed;
+    g_sa.res = res;
+    g_sa.total = SA_TOTAL;
+    KlHttpConn *c = kl_http_request_conn(req);
+    g_sa.conn = c;
+    shrink_sndbuf(c);
+    if (kl_http_response_begin_stream(res, 200, &g_sa.w, &g_sa.wc) < 0) return;
+    g_sa.cap = kl_http_response_stream_capacity(res);
+    (void)kl_http_response_stream_on_writable(res, sa_on_writable, NULL);
+    g_sa.op.on_resume = sa_resume;
+    g_sa.op.on_cancel = sa_cancel;
+    if (kl_async_suspend(&sa_srv, c, &g_sa.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&sa_srv), 0, sa_start, NULL);
+}
+
+/* De-chunk `raw` (after the head) into `out`; returns payload bytes, or -1 on a framing error.
+ * *ended = 1 when the terminating chunk was seen. */
+static long sa_dechunk(const char *raw, size_t n, unsigned char *out, size_t cap, int *ended) {
+    const char *p = raw, *end = raw + n;
+    const char *body = NULL;
+    for (const char *q = p; q + 3 < end; q++)
+        if (q[0] == '\r' && q[1] == '\n' && q[2] == '\r' && q[3] == '\n') { body = q + 4; break; }
+    if (!body) return -1;
+    p = body;
+    size_t got = 0;
+    *ended = 0;
+    while (p < end) {
+        size_t sz = 0;
+        int digits = 0;
+        while (p < end && *p != '\r') {
+            char ch = *p++;
+            int v = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 :
+                    ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
+            if (v < 0) return -1;
+            sz = sz * 16 + (size_t)v;
+            digits++;
+        }
+        if (!digits || end - p < 2 || p[1] != '\n') return -1;
+        p += 2;
+        if (sz == 0) { *ended = 1; break; }
+        if ((size_t)(end - p) < sz + 2 || got + sz > cap) return -1;
+        memcpy(out + got, p, sz);
+        got += sz;
+        p += sz;
+        if (p[0] != '\r' || p[1] != '\n') return -1;
+        p += 2;
+    }
+    return (long)got;
+}
+
+static void bounded_stream_case(int *utest_result, int tls, int mixed) {
+    g_sa_mixed = mixed;
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP,
+                               .tls = tls ? &tls_cfg : NULL };
+    ASSERT_EQ(0, kl_http_server_init(&sa_srv, &cfg));
+    kl_http_server_route(&sa_srv, "GET", "/sa", handle_sa, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &sa_srv);
+    wait_for_bind(&sa_srv);
+    size_t raw_cap = SA_TOTAL + SA_TOTAL / 8 + 65536;
+    char *raw = malloc(raw_cap);
+    unsigned char *body = malloc(SA_TOTAL);
+    ASSERT_TRUE(raw && body);
+    size_t raw_len = 0;
+    int fd = connect_rcvbuf(sa_srv.bound_port, 8192);
+    if (fd >= 0) {
+        const char *rq = "GET /sa HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        /* Not reading at first: the producer meets its bound (some loopbacks, e.g. Windows, take
+         * everything inline from a client that reads at once). Then mixed reads continuously, so the
+         * socket often has room when a legacy byte follows a refusal. */
+        kl_test_sleep_ms(300);
+        uint64_t start = kl_monotonic_ms();
+        while (kl_monotonic_ms() - start < 30000 && raw_len < raw_cap) {
+            if (kl_test_poll1(fd, 0, 500) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, raw + raw_len, raw_cap - raw_len);
+            if (n <= 0) break;
+            raw_len += (size_t)n;
+            if (raw_len >= 5 && memcmp(raw + raw_len - 5, "0\r\n\r\n", 5) == 0) break;
+        }
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&sa_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&sa_srv);
+    int ended = 0;
+    long got = sa_dechunk(raw, raw_len, body, SA_TOTAL, &ended);
+    size_t mismatch = (size_t)-1;
+    for (long i = 0; got > 0 && i < got; i++)
+        if (body[i] != sa_byte((size_t)i)) { mismatch = (size_t)i; break; }
+    printf("  bounded stream (%s): %ld payload bytes, ended %d, %d would-blocks, %d edges, "
+           "max pending %zu (held %zu) of %zu, failed %d, cancelled %d\n", tls ? "tls" : "plain", got,
+           ended, g_sa.would_blocks, g_sa.edges, g_sa.max_pending, g_sa.max_held, g_sa.cap,
+           (int)g_sa.failed, g_sa.cancelled);
+    free(raw);
+    free(body);
+    ASSERT_EQ(g_sa.cap, (size_t)SA_CAP);
+    ASSERT_EQ((int)g_sa.failed, 0);
+    ASSERT_EQ(g_sa.cancelled, 0);
+    ASSERT_TRUE(g_sa.completed);
+    ASSERT_EQ(got, (long)SA_TOTAL);                  /* every byte ... */
+    ASSERT_EQ(mismatch, (size_t)-1);                 /* ... in order, exact */
+    ASSERT_TRUE(ended);
+    ASSERT_GT(g_sa.would_blocks, 0);                 /* the bound was met ... */
+    ASSERT_GE(g_sa.edges, g_sa.would_blocks);        /* ... and every WOULD_BLOCK got its edge */
+    if (!mixed) {                                    /* mixing forfeits the bound (documented) */
+        ASSERT_LE(g_sa.max_pending, (size_t)SA_CAP); /* one bound, never exceeded ... */
+        ASSERT_LE(g_sa.max_held, (size_t)SA_CAP);    /* ... by what is really held either */
+    }
+    ASSERT_EQ(g_sa.edges_after_end, 0);
+}
+UTEST(completion_output, a_bounded_stream_is_paced_by_the_writable_edge) { bounded_stream_case(utest_result, 0, 0); }
+UTEST(completion_output, a_bounded_tls_stream_is_paced_by_the_writable_edge) { bounded_stream_case(utest_result, 1, 0); }
+/* Mixed writers: a legacy write after each WOULD_BLOCK. The edge must still come every time (on
+ * readiness the legacy write could empty the drain, and the write watch went with it). */
+UTEST(completion_output, a_bounded_stream_mixed_with_legacy_writes_still_gets_its_edge) {
+    bounded_stream_case(utest_result, 0, 1);
+}
+
+/* The client goes away while the producer waits for the edge: the op is cancelled once and the edge
+ * never fires after it. */
+UTEST(completion_output, a_bounded_stream_whose_client_leaves_is_cancelled_without_an_edge) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP };
+    ASSERT_EQ(0, kl_http_server_init(&sa_srv, &cfg));
+    kl_http_server_route(&sa_srv, "GET", "/sa", handle_sa, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &sa_srv);
+    wait_for_bind(&sa_srv);
+    int fd = connect_rcvbuf(sa_srv.bound_port, 4096);
+    size_t got = 0;
+    if (fd >= 0) {
+        const char *rq = "GET /sa HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        static char buf[64 * 1024];
+        while (got < 32 * 1024) {                    /* read a little, so the stream is moving */
+            if (kl_test_poll1(fd, 0, 2000) <= 0) break;
+            kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        kl_test_sleep_ms(200);                       /* the producer is now blocked on its bound */
+        kl_test_closesock(fd);                       /* unread data: the close resets */
+        for (int i = 0; i < 300 && !g_sa.cancelled; i++) kl_test_sleep_ms(10);
+        kl_test_sleep_ms(100);                       /* any late edge would fire meanwhile */
+    }
+    int cancelled = g_sa.cancelled, edges_after = g_sa.edges_after_end, wb = g_sa.would_blocks;
+    kl_http_server_stop(&sa_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&sa_srv);
+    ASSERT_TRUE(got > 0);
+    ASSERT_GT(wb, 0);                                /* it really was waiting on the edge */
+    ASSERT_EQ(cancelled, 1);
+    ASSERT_EQ(edges_after, 0);
+    ASSERT_FALSE(g_sa.completed);
+}
+
+/* After the writable edge, a producer that writes nothing more for a while: the edge fired exactly
+ * once, the connection stays suspended and idle (no writes, no further callbacks), the WRITE
+ * interest is gone once nothing needs it (white-box: no write watch), and the loop does not spin
+ * (process CPU stays far below the idle window's wall time). Then the stream ends normally. */
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    KlHttpConn *conn;
+    volatile int edges, would_blocks, writes_after_edge, ended, completed, cancelled;
+} IdStream;
+static IdStream g_id;
+static KlHttpServer id_srv;
+
+static void id_finish(void *ud) {
+    (void)ud;
+    if (g_id.cancelled) return;
+    g_id.ended = 1;
+    kl_http_response_end_stream(g_id.res);
+    kl_async_complete(&id_srv, &g_id.op);
+}
+static void id_on_writable(void *ud) {
+    (void)ud;
+    g_id.edges++;                                    /* and write nothing: idle from here */
+    (void)kl_timer_add(kl_http_server_event_ctx(&id_srv), 1500, id_finish, NULL);
+}
+static void id_fill(void *ud) {
+    (void)ud;
+    static unsigned char chunk[SA_CHUNK];
+    memset(chunk, 'i', sizeof chunk);
+    for (int i = 0; i < 64; i++) {
+        KlHttpStreamStatus st = kl_http_response_stream_try_write(g_id.res, chunk, sizeof chunk);
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK) { g_id.would_blocks++; return; }
+        if (st != KL_HTTP_STREAM_ACCEPTED) { kl_async_cancel(&id_srv, &g_id.op); return; }
+        if (g_id.edges) g_id.writes_after_edge++;
+    }
+}
+static void id_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_id.completed = 1; }
+static void id_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_id.cancelled = 1; }
+static int g_id_no_callback;
+static void handle_idle_after_edge(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset((void *)&g_id, 0, sizeof g_id);
+    g_id.res = res;
+    KlHttpConn *c = kl_http_request_conn(req);
+    g_id.conn = c;
+    shrink_sndbuf(c);
+    KlHttpResponseWriteFn w;
+    void *wc;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    if (!g_id_no_callback) (void)kl_http_response_stream_on_writable(res, id_on_writable, NULL);
+    else (void)kl_timer_add(kl_http_server_event_ctx(&id_srv), 1500, id_finish, NULL);
+    g_id.op.on_resume = id_resume;
+    g_id.op.on_cancel = id_cancel;
+    if (kl_async_suspend(&id_srv, c, &g_id.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&id_srv), 0, id_fill, NULL);
+}
+
+static void idle_case(int *utest_result, int no_callback) {
+    g_id_no_callback = no_callback;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP };
+    ASSERT_EQ(0, kl_http_server_init(&id_srv, &cfg));
+    kl_http_server_route(&id_srv, "GET", "/idle", handle_idle_after_edge, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &id_srv);
+    wait_for_bind(&id_srv);
+    int fd = connect_rcvbuf(id_srv.bound_port, 8192);
+    int ended = 0, watched_idle = -1, suspended_idle = 0, edges_at_start = 0;
+    double cpu_ms = 0, wall_ms = 0;
+    if (fd >= 0) {
+        const char *rq = "GET /idle HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(200);                       /* not reading: the producer is refused */
+        static char buf[64 * 1024];
+        char tail[8] = {0};
+        int measured = 0;
+        uint64_t start = kl_monotonic_ms(), edge_seen = 0;
+        while (kl_monotonic_ms() - start < 10000) {
+            /* With no callback there is no edge: idle from the refusal on (the client reads it). */
+            if ((g_id.edges || (no_callback && g_id.would_blocks)) && !edge_seen)
+                edge_seen = kl_monotonic_ms();
+            if (edge_seen && !measured && kl_monotonic_ms() - edge_seen >= 200) {
+                /* Everything the producer wrote has been read; it now waits on nothing. */
+                measured = 1;
+                edges_at_start = g_id.edges;
+                watched_idle = g_id.conn->stream_write_watched;   /* white-box: no WRITE interest */
+                suspended_idle = g_id.conn->state == KL_HTTP_CONN_SUSPENDED;
+                double c0 = process_cpu_ms();
+                uint64_t t0 = kl_monotonic_ms();
+                kl_test_sleep_ms(800);               /* the idle window (the stream ends at 1.5 s) */
+                cpu_ms = process_cpu_ms() - c0;
+                wall_ms = (double)(kl_monotonic_ms() - t0);
+            }
+            if (kl_test_poll1(fd, 0, 50) <= 0) continue;
+            kl_ssize_t n = kl_test_sockread(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            size_t keep = (size_t)n < 5 ? (size_t)n : 5;
+            memmove(tail, tail + keep, 5 - keep);
+            memcpy(tail + 5 - keep, buf + n - keep, keep);
+            if (memcmp(tail, "0\r\n\r\n", 5) == 0) { ended = 1; break; }
+        }
+        kl_test_closesock(fd);
+    }
+    int edges = g_id.edges, wb = g_id.would_blocks, writes_after = g_id.writes_after_edge;
+    int completed = g_id.completed, cancelled = g_id.cancelled;
+    kl_http_server_stop(&id_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&id_srv);
+    printf("  idle after edge: %d edges, %d would-blocks, write watch %d, suspended %d, "
+           "%.0f ms CPU over %.0f ms idle\n", edges, wb, watched_idle, suspended_idle, cpu_ms, wall_ms);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(wb, 1);                                /* refused once ... */
+    ASSERT_EQ(edges, no_callback ? 0 : 1);           /* ... so exactly one edge (none: no callback) */
+    ASSERT_EQ(edges_at_start, no_callback ? 0 : 1);
+    ASSERT_EQ(writes_after, 0);                      /* the producer wrote nothing after it */
+    ASSERT_EQ(watched_idle, 0);                      /* no WRITE interest left */
+    ASSERT_TRUE(suspended_idle);                     /* still suspended, just idle */
+    ASSERT_LT(cpu_ms, wall_ms * 0.25);               /* no spin */
+    ASSERT_TRUE(ended);
+    ASSERT_TRUE(completed);
+    ASSERT_FALSE(cancelled);
+}
+
+UTEST(completion_output, after_the_writable_edge_an_idle_producer_costs_nothing) { idle_case(utest_result, 0); }
+/* The same refusal with no writable callback installed (a producer that paces itself on
+ * kl_http_response_stream_pending from a timer): the armed edge has nobody to call, so it must not
+ * hold a write watch on an always-writable socket. */
+UTEST(completion_output, a_refused_producer_without_a_writable_callback_costs_nothing) { idle_case(utest_result, 1); }
+
 UTEST_MAIN();

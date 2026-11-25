@@ -412,6 +412,7 @@ static int conn_init_response(KlHttpConn *c) {
     c->res.tls = c->tls;
     c->res.ctx = c->stream.ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
     c->res.stream_inflight = 1;   /* this response is the connection's own (see the field) */
+    c->res.stream_capacity = c->stream_capacity;   /* 0 = the default */
     c->res.keep_alive = c->req.keep_alive;
     /* A graceful drain ends keep-alive: this response says so, and the connection closes after it. */
     if (conn_server_draining(c)) {
