@@ -26,6 +26,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/un.h>
 #include "unix_socket_node.h"   /* substrate AF_UNIX filesystem-node lifecycle (transport axis) */
 
@@ -168,10 +169,26 @@ void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
 
 /* ── Peer credentials ────────────────────────────────────────────────── */
 
+/* Peer credentials exist only for a UNIX-domain socket. Querying any other socket is not an error
+ * the OS reports reliably: on Linux SO_PEERCRED of a TCP socket succeeds with the kernel's
+ * "no credentials" values, and on macOS getpeereid() of a TCP socket succeeds with uid 0 and gid 0
+ * (LOCAL_PEERCRED is read at level SOL_LOCAL, which equals IPPROTO_IP). Check the family first, so a
+ * remote peer is never reported as a local identity. */
+static int peer_is_unix(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    memset(&ss, 0, sizeof(ss));
+    if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0)
+        return 0;
+    return ss.ss_family == AF_UNIX;
+}
+
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
    platform branches below (invisible to cppcheck's default config). */
 int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
     if (!kl_handle_valid(fd) || !out)
+        return -1;
+    if (!peer_is_unix((int)fd))
         return -1;
 
 #if defined(__linux__) && defined(SO_PEERCRED)

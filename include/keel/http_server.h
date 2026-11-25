@@ -219,9 +219,11 @@ typedef struct KlHttpServerConfig {
 /**
  * @brief Peer credentials of a UNIX-domain-socket client.
  *
- * Populated by kl_http_request_peer_cred(). On Linux all three fields are
- * available (SO_PEERCRED). On macOS/BSD only uid/gid are available
- * (getpeereid) and has_pid is 0.
+ * Populated by kl_http_request_peer_cred() for a connection accepted on a
+ * UNIX-domain socket (any other socket yields -1, never credentials). On Linux
+ * all three fields are available (SO_PEERCRED). On macOS uid/gid come from
+ * getpeereid and the pid from LOCAL_PEERPID (has_pid = 1 when it is available).
+ * On the BSDs only uid/gid are available and has_pid is 0.
  */
 typedef struct {
     long uid;       /**< Peer effective user id */
@@ -501,12 +503,14 @@ int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out);
  * @brief Read peer credentials directly from a connected socket fd.
  *
  * The building block behind kl_http_request_peer_cred / kl_ws_server_peer_cred.
- * Meaningful for AF_UNIX sockets. On macOS the pid is filled via LOCAL_PEERPID
- * (has_pid = 1); Linux uses SO_PEERCRED.
+ * Only an AF_UNIX socket has peer credentials: for any other socket (TCP, UDP)
+ * this returns -1 and leaves `out` untouched. On macOS the pid is filled via
+ * LOCAL_PEERPID (has_pid = 1); Linux uses SO_PEERCRED.
  *
  * @param fd   Connected socket fd.
  * @param out  Receives the peer credentials on success.
- * @return 0 on success, -1 if unavailable.
+ * @return 0 on success, -1 if unavailable (not an AF_UNIX socket, unsupported
+ *         platform, or no credentials).
  */
 int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out);
 
