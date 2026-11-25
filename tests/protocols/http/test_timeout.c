@@ -374,4 +374,180 @@ UTEST(timeout, concurrent_timeouts) {
     kl_http_server_free(&timeout_server);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Header deadline (slow-drip request heads)
+ *
+ * read_timeout_ms is an inactivity timeout: every fragment refreshes it,
+ * so a head dripped a byte at a time never trips it. The header deadline
+ * (header_timeout_ms, 0 = read_timeout_ms) is absolute from the head's
+ * first bytes, restarts with each keep-alive request, and stops once the
+ * head is parsed.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void start_server(KlHttpServerConfig *cfg, KlPlatThread *tid, int *port) {
+    *port = 0;
+    if (kl_http_server_init(&timeout_server, cfg) != 0) return;
+    kl_http_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+    kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok, NULL, kl_http_body_reader_buffer);
+    kl_plat_thread_create(tid, server_thread, NULL);
+    wait_for_bind(&timeout_server);
+    *port = timeout_server.bound_port;
+}
+
+static void stop_server(KlPlatThread *tid) {
+    kl_http_server_stop(&timeout_server);
+    kl_plat_thread_join(tid);
+    kl_http_server_free(&timeout_server);
+}
+
+/* Send `s` in `frags` roughly equal fragments, `gap_ms` apart. Returns -1 as soon as
+ * the server has answered (or closed) before the last fragment, else 0. */
+static int send_fragmented(int fd, const char *s, int frags, int gap_ms) {
+    size_t len = strlen(s), off = 0;
+    for (int i = 0; i < frags; i++) {
+        size_t end = (i == frags - 1) ? len : len * (size_t)(i + 1) / (size_t)frags;
+        if (end > off && kl_test_sockwrite(fd, s + off, end - off) != (long)(end - off)) return -1;
+        off = end;
+        if (i < frags - 1 && kl_test_poll1(fd, 0, gap_ms) != 0) return -1;   /* waits gap_ms */
+    }
+    return 0;
+}
+
+/* Read one response (up to its blank line + a short body) into buf. */
+static kl_ssize_t read_response(int fd, char *buf, size_t cap, int ms) {
+    kl_ssize_t total = 0, n;
+    while ((size_t)total < cap - 1 &&
+           (n = read_with_timeout(fd, buf + total, cap - (size_t)total - 1, ms)) > 0) {
+        total += n;
+        buf[total] = '\0';
+        if (strstr(buf, "{\"ok\":true}") || strstr(buf, "Content-Length: 0\r\n\r\n")) break;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+UTEST(timeout, header_slow_drip_gets_408_at_deadline) {
+    /* Bytes 150 ms apart never trip the 1000 ms idle timeout; the header deadline,
+     * defaulting to read_timeout_ms, ends the request ~1 s after its first byte. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 1000 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\nX-Slow: dripdripdripdrip\r\n\r\n";
+    uint64_t t0 = kl_monotonic_ms();
+    int answered_early = 0;
+    for (size_t i = 0; i < strlen(req); i++) {
+        if (kl_test_poll1(fd, 0, 150) != 0) { answered_early = 1; break; }
+        if (kl_test_sockwrite(fd, req + i, 1) != 1) { answered_early = 1; break; }
+    }
+    char buf[4096];
+    kl_ssize_t n = read_response(fd, buf, sizeof(buf), 3000);
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+    EXPECT_TRUE(answered_early);              /* cut off before the head was complete */
+    EXPECT_TRUE(n > 0 && strstr(buf, "408") != NULL);
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);  /* deadline + one sweep + scheduling slack */
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_explicit_deadline_shorter_than_idle) {
+    /* header_timeout_ms is independent of read_timeout_ms: a 600 ms head deadline under
+     * a 5 s idle timeout cuts the drip off long before the idle timeout could. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 5000, .header_timeout_ms = 600 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\nX-Slow: dripdripdripdrip\r\n\r\n";
+    uint64_t t0 = kl_monotonic_ms();
+    for (size_t i = 0; i < strlen(req); i++) {
+        if (kl_test_poll1(fd, 0, 100) != 0) break;
+        if (kl_test_sockwrite(fd, req + i, 1) != 1) break;
+    }
+    char buf[4096];
+    kl_ssize_t n = read_response(fd, buf, sizeof(buf), 3000);
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+    EXPECT_TRUE(n > 0 && strstr(buf, "408") != NULL);
+    EXPECT_TRUE(elapsed < 600 + 1000 + 1000);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_fragmented_within_deadline_succeeds) {
+    /* An ordinary head in five fragments over ~1.6 s, inside a 2 s deadline (the
+     * default: read_timeout_ms). Each gap is well inside the idle timeout. The sweep
+     * runs as each fragment arrives, so it sees the head incomplete at ~1.2 s. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 2000 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+
+    ASSERT_EQ(send_fragmented(fd, "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                              5, 400), 0);
+    char buf[4096];
+    ASSERT_TRUE(read_response(fd, buf, sizeof(buf), 2000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_deadline_restarts_per_keepalive_request) {
+    /* Two keep-alive requests, each head fragmented over ~900 ms of a 2000 ms deadline,
+     * 600 ms apart. The second head is still incomplete at ~2.1 s after the first began
+     * (the sweep runs as each fragment arrives), so a deadline carried over from the first
+     * request would cut the second off. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 2000 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\nX-Pad: abcdefghijklmnop\r\n\r\n";
+    char buf[4096];
+    for (int r = 0; r < 2; r++) {
+        ASSERT_EQ(send_fragmented(fd, req, 4, 300), 0);
+        ASSERT_TRUE(read_response(fd, buf, sizeof(buf), 2000) > 0);
+        EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+        kl_test_sleep_ms(600);                  /* idle between requests, under read_timeout_ms */
+    }
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_deadline_does_not_apply_to_body) {
+    /* A 300 ms head deadline must not cut off a body that takes ~1.5 s under a 4 s body
+     * deadline: the header deadline stops once the head is parsed. The head itself comes
+     * in two fragments, so its deadline did start. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 1000, .header_timeout_ms = 300,
+                               .body_timeout_ms = 4000 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *head = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n"
+                       "Connection: close\r\n\r\n";
+    ASSERT_EQ(send_fragmented(fd, head, 2, 100), 0);
+    ASSERT_EQ(send_fragmented(fd, "0123456789", 10, 150), 0);
+    char buf[4096];
+    ASSERT_TRUE(read_response(fd, buf, sizeof(buf), 2000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
 UTEST_MAIN();

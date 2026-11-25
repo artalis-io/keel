@@ -106,6 +106,10 @@ struct KlHttpConn {
     uint64_t last_active_ms;
     uint64_t request_start_ms;
     uint64_t body_start_ms;
+    /* Header deadline: when the current request's head was first seen incomplete (0 = no partial
+     * head pending). Set and cleared by kl_http_conn_parse_headers, checked by the timeout sweep
+     * against header_timeout_ms while the connection is READING. */
+    uint64_t hdr_start_ms;
     /* Request-body framing progress. The post-rejection drain terminates on FRAMING COMPLETION, not
      * on a byte count: for chunked, wire bytes and decoded bytes differ, so only the decoder knows
      * when the request is actually finished (terminal chunk, trailers, or a malformed chunk). The

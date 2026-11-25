@@ -80,6 +80,30 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   loops already did through the write watch: once, never from inside the install, and never after the
   op was completed or cancelled.
 
+- **Security: a request head dripped a byte at a time no longer holds a connection indefinitely
+  (slowloris).** `read_timeout_ms` is an inactivity timeout, and every fragment of a request head
+  refreshed it, so a client sending one byte just inside it kept a connection (and its pool slot)
+  for as long as the head took: a 47-byte request at one byte every 800 ms was served after 39 s
+  with `read_timeout_ms = 1000`, and at the defaults (8 KiB heads, 30 s) one connection could be
+  held for about 66 hours, so a few hundred such clients exhausted the pool. A request head now
+  also has an absolute deadline, the new `KlHttpServerConfig.header_timeout_ms` (0 = use
+  `read_timeout_ms`, 30 s by default). It starts when the first partial head of a request is seen
+  (a head that arrives whole never starts it), is not extended by further fragments, restarts with
+  each keep-alive request, and stops once the head is parsed, so request bodies (`body_timeout_ms`),
+  responses, streams and suspended ops are unaffected. The existing timeout sweep enforces it on
+  readiness and completion loops alike: 408, then close.
+- **Security: multipart part headers are searched in linear time, and capped by default.** Each
+  `kl_http_multipart_next` searched a part's whole accumulated header block for its blank line from
+  the first byte, so a part whose headers never ended, delivered in ordinary 8 KiB reads, cost
+  quadratic CPU on the loop thread (2.7 s at 8 MiB, 42.8 s at 32 MiB). The search now resumes
+  where the previous one stopped. Separately, `max_headers_size = 0` (and a NULL config) meant no
+  cap, so such a part also grew the header buffer without bound; zero now selects
+  `KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE` (8 KiB). See the upgrade notes.
+- **`max_header_size` below 8192 is enforced.** The 431 check ran only once the 8 KiB read buffer
+  was full, so a smaller configured limit was silently 8 KiB. An incomplete header block that
+  reaches `max_header_size` now gets a 431 on readiness and completion loops. (The limit applies to
+  an incomplete block: a head that arrives complete in one read is accepted up to the read
+  buffer's size, as before.)
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
   the backend's last completions without dispatching them. A client freed from such an op's
@@ -179,7 +203,22 @@ Upgrade notes:
   recompile.
 
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
-  capacity and writable edge, `stream_capacity`); recompile. A zeroed config keeps every default.
+  capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
+  keeps every default.
+- **Behavior change: a request head must now arrive within `header_timeout_ms` of its first bytes**
+  (default: `read_timeout_ms`, 30 s unless configured). Before, only the gap between fragments was
+  bounded. A client that needs longer for a head is answered 408; raise `header_timeout_ms` for it.
+  A server with a short `read_timeout_ms` (say 1 s) now also bounds a whole head to that, so set
+  `header_timeout_ms` separately if heads legitimately trickle in over a slow link.
+- **Behavior change: `KlHttpMultipartConfig.max_headers_size = 0` is now 8 KiB, not unlimited**
+  (`KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`, the HTTP server's own default header limit), and so is
+  the multipart factory with a NULL config. A part whose header block exceeds it fails with
+  `KL_HTTP_MP_ERR_HEADERS_TOO_LARGE`. Real part headers (`Content-Disposition` with a filename,
+  `Content-Type`) are well under 1 KiB. To keep the old behavior set `max_headers_size = SIZE_MAX`,
+  which is no practical limit; any other non-zero value is a cap as before. The other multipart caps
+  keep 0 = unlimited.
+- **A `max_header_size` below 8192 now takes effect** (it was 8 KiB in practice): check that such a
+  configured value really is the intended limit.
 - **`KlHttpServerConfig.stream_capacity` also sets the existing writer's outbound-buffer cap** (it
   was a fixed 1 MiB, which stays the default).
 

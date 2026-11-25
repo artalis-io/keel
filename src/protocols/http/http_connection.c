@@ -175,6 +175,7 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->async_op = NULL;
     c->suspend_start_ms = 0;
     c->body_start_ms = 0;          /* a reused slot's stale value would fire the body deadline */
+    c->hdr_start_ms = 0;           /* likewise the header deadline */
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
@@ -1079,8 +1080,13 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
     if (consumed > len) consumed = len;           /* a parser over-report must not walk past the data */
     if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
         c->hdr_parsed += consumed;                /* the parser holds its place; feed only new bytes next */
+        /* A partial head starts the header deadline (once per request): the idle timeout alone is
+         * refreshed by every fragment, so a head dripped a byte at a time would never time out. */
+        if (c->hdr_start_ms == 0 && c->stream.read_len > 0)
+            c->hdr_start_ms = kl_monotonic_ms();
     } else {
         c->hdr_parsed = 0;                        /* header phase over (dispatched, or the conn closes) */
+        c->hdr_start_ms = 0;                      /* the next request's head gets a fresh deadline */
         if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
             *rest = start + consumed;
             *rest_len = len - consumed;
@@ -1177,6 +1183,9 @@ read_more_headers: ;
         KlHttp1ParseResult pr = kl_http_conn_parse_headers(c, &rest, &rest_len);
 
         if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
+            /* A max_header_size below the read buffer's size is reached before the buffer fills. */
+            if (c->stream.read_len >= c->max_header_size)
+                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             /* TLS may buffer multiple records; drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++hdr_drains < KL_TLS_DRAIN_MAX)

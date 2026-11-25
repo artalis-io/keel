@@ -662,6 +662,9 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
                             : timeout;
+    uint64_t header_timeout = s->config.header_timeout_ms > 0
+                              ? (uint64_t)s->config.header_timeout_ms
+                              : timeout;
     /* Completion: an accept post that failed for a moment left the listener paused with nothing
      * posted, and no connection may be left to free a slot and resume it. Try again every sweep
      * (a no-op while accepts are posted, or while the pool is full). */
@@ -780,6 +783,14 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         if (!timed_out && tc->state == KL_HTTP_CONN_READING_BODY &&
             tc->body_start_ms > 0 &&
             now - tc->body_start_ms > body_timeout) {
+            timed_out = 1;
+        }
+        /* Header deadline: absolute time from the first partial head of this request, not
+         * resettable by further fragments (which do refresh last_active_ms). Only while READING:
+         * once the head is complete the body deadline and the other phases' rules apply. */
+        if (!timed_out && tc->state == KL_HTTP_CONN_READING &&
+            tc->hdr_start_ms > 0 &&
+            now - tc->hdr_start_ms > header_timeout) {
             timed_out = 1;
         }
         if (timed_out) {

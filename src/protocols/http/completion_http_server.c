@@ -763,7 +763,14 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
     const char *rest = NULL;
     size_t rest_len = 0;
     KlHttp1ParseResult pr = kl_http_conn_parse_headers(c, &rest, &rest_len);
-    if (pr == KL_HTTP1_PARSE_INCOMPLETE) return 1;
+    if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
+        /* A max_header_size below the read buffer's size is reached before the buffer fills. */
+        if (c->stream.read_len >= c->max_header_size) {
+            comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
+            return 0;
+        }
+        return 1;
+    }
     if (pr == KL_HTTP1_PARSE_ERROR) { kl_comp_close(s, c); return 0; }
 
     KlHttpConnState st = (pr == KL_HTTP1_PARSE_HEADERS_OK)
