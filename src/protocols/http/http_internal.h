@@ -146,6 +146,11 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
 /* Release a connection and resume listening if paused (defined in http_server.c) */
 void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
 
+/* Peer credentials of a server connection (kl_http_request_peer_cred / kl_ws_server_peer_cred):
+ * -1, `out` untouched, unless the connection's socket provider hands out host OS descriptors
+ * (kl_http_server_plat_peer_cred_readable); otherwise kl_peer_cred_fd on its handle. */
+int  kl_http_conn_peer_cred(const KlHttpConn *c, KlPeerCred *out);
+
 /* Cancel an async op (on_cancel, the op leaves the list) without releasing its connection: for the
  * server's own teardown paths, which release the connection themselves (async.c). */
 void kl_async_cancel_detached(KlHttpServer *s, KlAsyncOp *op);

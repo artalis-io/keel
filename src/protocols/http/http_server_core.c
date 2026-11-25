@@ -855,8 +855,11 @@ static void server_drain_stop_listening(KlHttpServer *s) {
 #endif
 }
 
+/* The draining flag stays set once a drain ends (and a stop after the run would set it again), so
+ * the public query also requires the loop to be running: 0 once the drain has finished and the run
+ * has returned. Both are lock-free atomic loads, so this stays safe from any thread. */
 int kl_http_server_draining(const KlHttpServer *s) {
-    return s ? kl_atomic_load_int(&s->draining) : 0;
+    return s ? (kl_atomic_load_int(&s->draining) && kl_atomic_load_int(&s->running)) : 0;
 }
 
 int kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms) {

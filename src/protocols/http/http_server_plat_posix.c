@@ -183,6 +183,13 @@ static int peer_is_unix(int fd) {
     return ss.ss_family == AF_UNIX;
 }
 
+int kl_http_server_plat_peer_cred_readable(const KlSocketProvider *p) {
+    /* Identity of the ops table, not the NATIVE_FD capability: lwIP's BSD provider advertises
+     * NATIVE_FD for its own (lwIP-numbered) sockets, and a decorator may route I/O elsewhere. */
+    return !p || (p->ops == kl_socket_provider_posix()->ops &&
+                  kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD));
+}
+
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
    platform branches below (invisible to cppcheck's default config). */
 int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {

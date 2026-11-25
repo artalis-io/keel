@@ -124,20 +124,26 @@ static int kl_http_server_bind_listener(KlHttpServer *s) {
     return kl_http_server_bind_tcp(s);
 }
 
+/* Fail closed off the built-in provider: the handle of an lwIP, UEFI or injected transport is not a
+ * host descriptor, and querying it as one could report an unrelated host socket's identity. */
+int kl_http_conn_peer_cred(const KlHttpConn *c, KlPeerCred *out) {
+    if (!c || !kl_http_server_plat_peer_cred_readable(conn_provider(c)))
+        return -1;
+    return kl_peer_cred_fd(c->stream.fd, out);
+}
+
 int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
     if (!req)
         return -1;
-    const KlHttpConn *conn = kl_http_request_conn(req);
-    if (!conn)
-        return -1;
-    return kl_peer_cred_fd(conn->stream.fd, out);
+    return kl_http_conn_peer_cred(kl_http_request_conn(req), out);
 }
 
 int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
     const KlHttpConn *conn = kl_http_request_conn(req);
-    if (!conn || !kl_handle_valid(conn->stream.fd))
+    if (!conn || !kl_handle_valid(conn->stream.fd) ||
+        !kl_http_server_plat_peer_cred_readable(conn_provider(conn)))
         return -1;
 
     return kl_http_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
@@ -303,6 +309,16 @@ static int server_start_failed(KlHttpServer *s) {
 int kl_http_server_run(KlHttpServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
     (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
+
+    /* Run once per init. A drain closed the listener (an adopted listen_fd too), so re-adopting
+     * config.listen_fd could listen on, register and later close an unrelated socket now holding that
+     * number; a rerun after a plain stop would leak the first listener. Refused before any state or
+     * descriptor is touched, so a running first run is undisturbed. */
+    if (s->run_started) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    s->run_started = 1;
 
     /* Mark the server running BEFORE anything another thread can observe (bound_port, the
      * "listening" log). A kl_http_server_stop issued once a caller has seen the server start (from

@@ -138,8 +138,33 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   is moving, a client's half-close is not reported on its own (a reset still is, through the failed
   send), and the hang-up watch is back once the output has gone. Completion loops already moved the
   drain from the write completion and are unchanged.
+- **Security: peer credentials fail closed off the built-in socket provider.**
+  `kl_http_request_peer_cred`, `kl_ws_server_peer_cred` and `kl_http_request_peer_label` queried
+  the connection's handle as a host descriptor whatever `KlHttpServerConfig.sockets` provider served
+  it. A handle from lwIP's BSD provider, the UEFI provider or an injected transport is not a host
+  descriptor, and the same number could name an unrelated host socket, possibly an AF_UNIX one whose
+  uid/gid would then be reported for a remote peer. They now return -1, leaving `out` untouched,
+  unless the provider is the built-in one (NULL, or its ops table, as the io_uring and pollcomp
+  providers use); advertising `KL_SOCK_CAP_NATIVE_FD` is not enough, since lwIP's provider does.
+  `kl_peer_cred_fd` takes a raw descriptor and cannot check a provider: it is now documented as
+  host-descriptor only.
+- **`kl_http_server_draining` reads 0 once the drain is over.** It stayed 1 after a drain had
+  finished and `kl_http_server_run` had returned (and a stop after the run set it again). It now
+  reports 1 only while a drain is running the loop.
+- **`kl_http_server_run` enforces run-once-per-init.** The contract was documented but not
+  enforced: after a drain closed an adopted `listen_fd`, a second run re-adopted that descriptor
+  number, which might by then belong to an unrelated socket (it listened on it, registered it, and
+  closed it at its own drain); a second run after a plain stop opened a new listener and leaked the
+  first. Any run after the first now returns -1 with `last_error` `KL_ERR_INVALID_ARG` and touches
+  no descriptor.
 
 Upgrade notes:
+
+- **A second `kl_http_server_run` on the same instance now fails.** Code that stopped a server and
+  ran it again without `kl_http_server_free` + `kl_http_server_init` got a second listener (after a
+  plain stop, leaking the first) or a re-adopted descriptor; it now gets -1 at once. Free and
+  re-init the server to serve again. `KlHttpServer` has also grown (an appended internal field);
+  recompile.
 
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
   capacity and writable edge, `stream_capacity`); recompile. A zeroed config keeps every default.

@@ -35,6 +35,15 @@ int  kl_http_server_plat_bind_unix(KlHttpServer *s);
  * s->unix_socket_owned / config.unix_socket_unlink). No-op if not owned. */
 void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s);
 
+/* 1 iff the peer-credential and peer-label queries below may be run on a connection handle from
+ * socket provider @p, i.e. the handle is a host OS descriptor. POSIX: the built-in platform provider
+ * (NULL, or one whose ops table is the built-in one, as the completion backends' overlapped providers'
+ * are). 0 for any other provider (lwIP, UEFI, an injected or decorating transport), even one that
+ * advertises KL_SOCK_CAP_NATIVE_FD: its handle need not name a host descriptor, and the same number
+ * may be an unrelated host socket whose credentials would be reported for a remote peer. Windows has
+ * no such query, so 0 there. Callers fail closed (-1) on 0. */
+int  kl_http_server_plat_peer_cred_readable(const KlSocketProvider *p);
+
 /* Peer security label of a connected AF_UNIX peer (Linux SO_PEERSEC,
  * SELinux/AppArmor). Writes a NUL-terminated string to @buf; returns 0 on
  * success, -1 if unavailable (non-Linux, or no label). */

@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -526,6 +527,129 @@ UTEST(unix_socket, http_request_over_tcp_has_no_peer_credentials) {
     EXPECT_TRUE(cred_is_sentinel(&g_captured_cred));
 }
 
+/* A socket provider other than the built-in one: its own ops table (a copy of the backend's, so the
+ * descriptors stay real host sockets and the server works), as an lwIP, injected or decorating
+ * transport has. The server cannot know such a handle names a host descriptor (lwIP's advertises
+ * KL_SOCK_CAP_NATIVE_FD for lwIP-numbered sockets), so peer credentials must fail closed, even on an
+ * AF_UNIX connection whose credentials the OS would report. Built from the provider this backend
+ * auto-wires (NULL = the built-in POSIX one), so the server accepts it on every engine. */
+static KlSocketOps      g_deco_ops;
+static KlSocketProvider g_deco_provider;
+static const KlSocketProvider *decorating_provider(void) {
+    KlHttpServer probe;
+    KlHttpServerConfig pc = { .bind_addr = "127.0.0.1", .port = 0, .max_connections = 1 };
+    if (kl_http_server_init(&probe, &pc) != 0) return NULL;
+    const KlSocketProvider *base = probe.ev.sockets ? probe.ev.sockets : kl_socket_provider_posix();
+    g_deco_ops = *base->ops;
+    g_deco_provider = *base;
+    g_deco_provider.ops = &g_deco_ops;
+    kl_http_server_free(&probe);
+    return &g_deco_provider;
+}
+
+UTEST(unix_socket, peer_credentials_fail_closed_off_the_builtin_provider) {
+    const KlSocketProvider *deco = decorating_provider();
+    ASSERT_TRUE(deco != NULL);
+    char path[108];
+    test_sock_path(path, sizeof(path), "credprov");
+    unlink(path);
+    g_cred_rc = -2;
+    g_label_rc = -2;
+    cred_sentinel(&g_captured_cred);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+        .sockets = deco,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    const char *req =
+        "GET /whoami HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    char buf[1024];
+    buf[0] = '\0';
+    ssize_t n = read_unix_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);      /* served through the provider */
+    EXPECT_EQ(-1, g_cred_rc);
+    EXPECT_TRUE(cred_is_sentinel(&g_captured_cred)); /* out untouched */
+    EXPECT_EQ(-1, g_label_rc);
+}
+
+/* The post-upgrade WebSocket query fails closed the same way. */
+UTEST(unix_socket, ws_peer_credentials_fail_closed_off_the_builtin_provider) {
+    const KlSocketProvider *deco = decorating_provider();
+    ASSERT_TRUE(deco != NULL);
+    char path[108];
+    test_sock_path(path, sizeof(path), "wscredprov");
+    unlink(path);
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+        .sockets = deco,
+    };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    g_ws_srv_cred_rc = -2;
+    cred_sentinel(&g_ws_srv_cred);
+    KlWsServerConfig ws_cfg;
+    kl_ws_server_config_init(&ws_cfg);
+    ws_cfg.callbacks.on_open = ws_srv_on_open;
+    ws_cfg.callbacks.on_message = ws_srv_on_message;
+    ASSERT_EQ(0, kl_http_server_ws_upgrade(&srv, "/ws", &ws_cfg));
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "ws+unix://%s/ws", enc);
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    WsCliCtx wc;
+    memset(&wc, 0, sizeof(wc));
+    KlWsClientCallbacks cbs = {
+        .on_open = ws_cli_on_open,
+        .on_message = ws_cli_on_message,
+        .on_close = ws_cli_on_close,
+    };
+    KlWsClientConn *ws = kl_ws_client_connect(&ev, &a, NULL, url, &cbs, &wc);
+    ASSERT_TRUE(ws != NULL);
+    for (int elapsed = 0; !wc.got_msg && elapsed < 3000; elapsed += 50)
+        if (kl_event_ctx_run(&ev, 16, 50) < 0) break;
+
+    kl_ws_client_free(ws);
+    kl_event_ctx_free(&ev);
+    kl_http_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_http_server_free(&srv);
+
+    ASSERT_TRUE(wc.got_msg);                          /* the upgrade ran through the provider */
+    EXPECT_EQ(-1, g_ws_srv_cred_rc);
+    EXPECT_TRUE(cred_is_sentinel(&g_ws_srv_cred));
+}
+
 UTEST(unix_socket, adopts_inherited_listen_fd) {
     char path[108];
     test_sock_path(path, sizeof(path), "adopt");
@@ -567,6 +691,85 @@ UTEST(unix_socket, adopts_inherited_listen_fd) {
     kl_http_server_free(&srv);
     /* Adopted socket path is not unlinked by KEEL (supervisor owns it). */
     unlink(path);
+}
+
+/* Run once per init. A drain closes an adopted listen_fd; that number may then name an unrelated
+ * socket, which a second run would adopt, listen on, register and close at its own drain. The second
+ * run must return -1 (KL_ERR_INVALID_ARG) without touching it. Run on a thread with a stop fallback
+ * so an unenforced contract fails the expectations instead of hanging the suite. */
+typedef struct { KlHttpServer *srv; int rc; _Atomic int done; } UnixRerunArg;
+static void *unix_rerun_thread(void *arg) {
+    UnixRerunArg *r = arg;
+    r->rc = kl_http_server_run(r->srv);
+    atomic_store(&r->done, 1);
+    return NULL;
+}
+
+UTEST(unix_socket, second_run_after_drain_leaves_a_reused_listen_fd_alone) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "rerun");
+    unlink(path);
+    int lfd = create_bound_unix_socket(path);
+    ASSERT_TRUE(lfd >= 0);
+    ASSERT_EQ(0, listen(lfd, 16));
+
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .listen_fd = lfd, .max_connections = 4, .drain_timeout_ms = 1000 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    /* A served request, not just a connect (the adopted fd already listens before run starts):
+     * the run loop is up, so the stop below is not overwritten by run's entry. */
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    char buf[1024];
+    buf[0] = '\0';
+    ASSERT_TRUE(read_unix_response(fd, buf, sizeof(buf)) > 0);
+    close(fd);
+    kl_http_server_stop(&srv);                       /* drain: closes the adopted descriptor */
+    pthread_join(tid, NULL);
+    unlink(path);
+
+    /* An unrelated listening TCP socket takes the freed number (open until it does). */
+    int other = -1, spare[64], nspare = 0;
+    while (nspare < 64) {
+        int t = socket(AF_INET, SOCK_STREAM, 0);
+        if (t < 0) break;
+        if (t == lfd) { other = t; break; }
+        spare[nspare++] = t;
+    }
+    for (int i = 0; i < nspare; i++) close(spare[i]);
+    if (other < 0) {
+        kl_http_server_free(&srv);
+        UTEST_SKIP("the drained listen_fd number was not reused");
+    }
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(0, bind(other, (struct sockaddr *)&a, sizeof(a)));
+    ASSERT_EQ(0, listen(other, 4));
+
+    UnixRerunArg r = { &srv, -2, 0 };
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_rerun_thread, &r));
+    for (int i = 0; i < 100 && !atomic_load(&r.done); i++) usleep(10000);
+    int returned = atomic_load(&r.done);
+    if (!returned) kl_http_server_stop(&srv);        /* unenforced: it adopted `other` */
+    pthread_join(tid, NULL);
+
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(-1, r.rc);
+    EXPECT_EQ(KL_ERR_INVALID_ARG, srv.last_error);
+    kl_http_server_free(&srv);
+    /* `other` is untouched: still open and still the caller's listening socket. */
+    EXPECT_NE(-1, fcntl(other, F_GETFD));
+    socklen_t al = sizeof(a);
+    EXPECT_EQ(0, getsockname(other, (struct sockaddr *)&a, &al));
+    EXPECT_EQ(AF_INET, (int)a.sin_family);
+    close(other);
 }
 
 UTEST(unix_socket, systemd_listen_fd_protocol) {

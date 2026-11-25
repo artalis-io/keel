@@ -86,11 +86,14 @@ int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
  *
  * The post-upgrade equivalent of kl_http_request_peer_cred: lets a handler
  * identify the process on the other end of a UNIX-socket WebSocket after the
- * HTTP upgrade, when there is no longer a KlHttpRequest.
+ * HTTP upgrade, when there is no longer a KlHttpRequest. Fails closed (-1,
+ * `out` untouched) off the built-in platform socket provider, exactly as
+ * kl_http_request_peer_cred.
  *
  * @param ws   The WebSocket server connection.
  * @param out  Receives the peer credentials on success.
- * @return 0 on success, -1 if unavailable (not a UNIX socket / unsupported).
+ * @return 0 on success, -1 if unavailable (not a UNIX socket / unsupported /
+ *         a non-built-in socket provider).
  */
 int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out);
 

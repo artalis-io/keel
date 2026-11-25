@@ -103,7 +103,7 @@ static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
 int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out) {
     if (!ws || !ws->conn)
         return -1;
-    return kl_peer_cred_fd(ws->conn->stream.fd, out);
+    return kl_http_conn_peer_cred(ws->conn, out);   /* fails closed off the built-in provider */
 }
 
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
