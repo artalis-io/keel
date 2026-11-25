@@ -173,7 +173,7 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
          * in such a call. A block closed part way (a full block of input or code buffer) leaves
          * output to copy and lookahead to compress, so that call's flush did not happen yet and the
          * loop must go on. Where the flush did overflow out_buf, one more call after the copy adds
-         * only an empty sync block (5 bytes, covered by miniz_flush_bound). */
+         * only an empty block and a sync marker (6 bytes, covered by miniz_flush_bound). */
         if (flush_type == TDEFL_SYNC_FLUSH && !drain_only && remaining == 0 &&
             s->comp.m_lookahead_size == 0 && s->comp.m_output_flush_remaining == 0)
             break;
@@ -228,9 +228,10 @@ static int miniz_feed(KlCompress *self, const char *data, size_t len,
  *   header.
  * - Output an earlier unflushed feed left owed (blocks still in tdefl, or closed, not copied out)
  *   belongs to blocks of that input, so B(retained + len) covers it with the same per-block sums.
- * miniz_flush_bound adds the sync flush's empty stored block (5), a second one when the flush
- * overflowed the copy buffer (5, see miniz_feed), the gzip header before the first feed (10), and
- * for the finish its last block (at most 10 bits and a pad: 5 allowed) and the trailer (8).
+ * miniz_flush_bound adds the sync flush's empty stored block (5), an empty fixed block and a
+ * second sync marker when the flush overflowed the copy buffer (6, see miniz_feed), the gzip
+ * header before the first feed (10), and for the finish its last block (at most 10 bits and a pad:
+ * 5 allowed) and the trailer (8).
  * The one assumption is miniz's length limiting (tdefl_huffman_enforce_max_code_size): it only acts
  * on distributions so skewed that the block is tiny. Fuzzing (33,176 feeds, all levels, random,
  * low-entropy, run-heavy, match-heavy input, unflushed feeds mixed in) found no output nearer than
@@ -241,14 +242,15 @@ static size_t deflate_bound(size_t n) {
 }
 
 /* Header not yet sent (10), the deflate of this input plus whatever an earlier unflushed feed
- * retained, the sync flush's empty stored block (5, twice: see miniz_feed), and when final the last
- * block's end (5) and the trailer (8). Reads the session, never writes it. */
+ * retained, the sync flush's empty stored block (5) and possibly a second empty block with its sync
+ * marker (6: see miniz_feed), and when final the last block's end (5) and the trailer (8). Reads the
+ * session, never writes it. */
 static size_t miniz_flush_bound(KlCompress *self, size_t len, int final) {
     const KlMinizSession *s = (const KlMinizSession *)self;
     if (s->retained > SIZE_MAX / 4 || len > SIZE_MAX / 4 - s->retained) return SIZE_MAX;
     size_t b = deflate_bound(s->retained + len);
     if (b == SIZE_MAX) return SIZE_MAX;
-    b += 5 + 5;   /* the sync block, and a second empty one if the flush overflowed out_buf */
+    b += 5 + 6;   /* the sync block, and an empty block + sync marker if the flush overflowed out_buf */
     if (!s->started) b += sizeof(gzip_header);
     if (final) b += 5 + 8;
     return b;

@@ -327,7 +327,15 @@ UTEST(compress_bounded, a_head_response_takes_writes_without_running_the_codec) 
     EXPECT_EQ(g_m.feeds, 0);
     EXPECT_TRUE(t.cs.stage == NULL);                       /* nothing staged for a body never sent */
     EXPECT_EQ(t.g.wire_len, (size_t)0);
+    /* A legacy write still feeds the codec (its output is dropped on HEAD); the finish must not
+     * then size staging for what the codec owes, nor run the codec at all. */
+    EXPECT_EQ(kl_http_compress_stream_write(&t.cs, big, sizeof big), 0);
+    int feeds = g_m.feeds;
     EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(g_m.feeds, feeds);                           /* no finish fed */
+    EXPECT_TRUE(t.cs.stage == NULL);
+    EXPECT_TRUE(t.res.stream_ended);
+    EXPECT_EQ(t.g.wire_len, (size_t)0);
     EXPECT_TRUE(g_m.destroyed);
     gate_free(&t);
 }

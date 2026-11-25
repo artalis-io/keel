@@ -71,7 +71,9 @@ static int infl_feed(Inflater *f, const char *d, size_t n) {
         if (buf_put(&f->out, (const char *)tmp, got) < 0) return -1;
         if (rc == MZ_STREAM_END) return 0;
         if (rc != MZ_OK && rc != MZ_BUF_ERROR) return -1;
-        if (f->z.avail_in == 0 && got < sizeof tmp) return 0;
+        /* mz_inflate can stop at its window's end with output still to give: done only once a
+         * call with no input left produced nothing. */
+        if (f->z.avail_in == 0 && got == 0) return 0;
     }
 }
 static void infl_free(Inflater *f) { mz_inflateEnd(&f->z); free(f->out.p); }
@@ -227,6 +229,66 @@ UTEST(miniz_bounded, a_sync_flush_across_a_block_boundary_delivers_every_byte) {
             kl_compress_miniz_ctx_destroy(ctx);
         }
     }
+}
+
+/* A complete sync flush ends with the sync marker (00 00 ff ff). Around every point where tdefl
+ * closes a block on its own (found by feeding unflushed, a byte at a time), a single sync feed of
+ * each nearby size must end with it and decode exactly. A flush cut short can still decode but
+ * leave the marker unwritten (the stream is then not flushed to a byte boundary). */
+UTEST(miniz_bounded, a_sync_flush_near_any_block_close_ends_with_the_sync_marker) {
+    KlAllocator al = kl_allocator_default();
+    static char data[400000];
+    static tdefl_compressor probe;
+    static unsigned char ob[100000];
+    int kinds = 4, checked = 0;
+    for (int kind = 0; kind < kinds; kind++) {
+        for (size_t j = 0; j < sizeof data; j++) {
+            unsigned x = rnd();
+            data[j] = kind == 0 ? (char)('a' + x % 4) : kind == 1 ? (char)('a' + x % 16)
+                    : kind == 2 ? (char)((x & 7) ? 'q' : (x >> 8)) : (char)(" etaoinshrdlu"[x % 13]);
+        }
+        for (int lv = 1; lv <= 9; lv += 4) {
+            tdefl_init(&probe, NULL, NULL, tdefl_create_comp_flags_from_zip_params(lv, -15, 0));
+            size_t pos = 0;
+            mz_uint bi = probe.m_block_index;
+            int closes = 0;
+            while (pos < sizeof data && closes < 2) {
+                size_t ib = 1, obs = sizeof ob;
+                tdefl_compress(&probe, data + pos, &ib, ob, &obs, TDEFL_NO_FLUSH);
+                pos += ib;
+                while (probe.m_output_flush_remaining) {
+                    size_t z0 = 0, o2 = sizeof ob;
+                    tdefl_compress(&probe, NULL, &z0, ob, &o2, TDEFL_NO_FLUSH);
+                }
+                if (probe.m_block_index == bi) continue;
+                bi = probe.m_block_index;
+                closes++;
+                size_t at = probe.m_lookahead_pos;
+                for (size_t n = at > 40 ? at - 40 : 1; n <= at + 40 && n < sizeof data; n++) {
+                    KlCompressCtx *ctx;
+                    KlCompress *c = new_codec(&ctx, &al, lv);
+                    ASSERT_TRUE(c != NULL);
+                    size_t bound = c->flush_bound(c, n, 0);
+                    Buf out = { 0 };
+                    ASSERT_EQ(c->feed(c, data, n, KL_COMPRESS_FLUSH_SYNC, buf_emit, &out), 0);
+                    ASSERT_LE(out.len, bound);
+                    ASSERT_GE(out.len, (size_t)14);
+                    ASSERT_EQ(memcmp(out.p + out.len - 4, "\0\0\xff\xff", 4), 0);
+                    Inflater f;
+                    ASSERT_EQ(infl_init(&f), 0);
+                    ASSERT_EQ(infl_feed(&f, out.p, out.len), 0);
+                    ASSERT_EQ(f.out.len, n);
+                    ASSERT_EQ(memcmp(f.out.p, data, n), 0);
+                    infl_free(&f);
+                    free(out.p);
+                    c->destroy(c);
+                    kl_compress_miniz_ctx_destroy(ctx);
+                    checked++;
+                }
+            }
+        }
+    }
+    ASSERT_GT(checked, 1000);
 }
 
 /* Random sizes (to 140 KB), random content mixes and levels, with unflushed (legacy) feeds mixed

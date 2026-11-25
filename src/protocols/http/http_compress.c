@@ -187,6 +187,14 @@ KlHttpStreamStatus kl_http_compress_stream_try_end(KlHttpCompressStream *cs) {
     if (cs->error || !cs->comp->flush_bound) {
         cs->error = 1;
         st = KL_HTTP_STREAM_ERROR;
+    } else if (cs->res->head_request) {
+        /* No body leaves a HEAD response: end it without sizing or running the codec (whatever
+         * a legacy write left in it is never sent either). */
+        st = kl_http_response_stream_try_write(cs->res, NULL, 0);
+        if (st == KL_HTTP_STREAM_ACCEPTED && kl_http_response_end_stream(cs->res) < 0) {
+            cs->error = 1;
+            st = KL_HTTP_STREAM_ERROR;
+        }
     } else {
         st = bounded_feed(cs, NULL, 0, 1);
         if (st == KL_HTTP_STREAM_WOULD_BLOCK || st == KL_HTTP_STREAM_TOO_LARGE) return st;

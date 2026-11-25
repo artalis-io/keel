@@ -121,7 +121,9 @@ int kl_http_compress_stream_end(KlHttpCompressStream *cs);
  * @brief Release the stream's codec and staging buffer, writing nothing.
  *
  * For a stream that will not be finished: from the op's on_cancel, or after try_end answered
- * TOO_LARGE. The response is left as it is (end or reset it as usual). Safe on a released stream.
+ * TOO_LARGE. The response is left as it is. Do not end it afterwards (the client would get a
+ * cleanly terminated body holding a truncated gzip member): close the connection instead, which
+ * on_cancel already does and kl_async_cancel does otherwise. Safe on a released stream.
  */
 void kl_http_compress_stream_release(KlHttpCompressStream *cs);
 
