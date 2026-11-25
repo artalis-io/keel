@@ -578,8 +578,12 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Bound the tick by the nearest async-op deadline / timer so they fire on time
      * (the completion loop is a full event loop; watchers relayed via
      * KL_COMP_WATCHER; timers + async deadlines serviced here). */
+    /* Last tick's dispatch, sweeps and timers may have installed a writable callback on a stream
+     * whose output already went: its edge fires here, before the wait, as readiness's write watch
+     * (kl_async_sync_stream_interest) would. */
+    const int edge_due = kl_http_comp_stream_edges(s);
     uint64_t cnow = kl_monotonic_ms();
-    int cwait = KL_POLL_TIMEOUT_MS;
+    int cwait = edge_due ? 0 : KL_POLL_TIMEOUT_MS;
     for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
         if (aop->deadline_ms > 0) {
             if (cnow >= aop->deadline_ms) { cwait = 0; break; }

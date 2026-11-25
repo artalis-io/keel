@@ -2754,4 +2754,186 @@ UTEST(completion_output, after_the_writable_edge_an_idle_producer_costs_nothing)
  * hold a write watch on an always-writable socket. */
 UTEST(completion_output, a_refused_producer_without_a_writable_callback_costs_nothing) { idle_case(utest_result, 1); }
 
+/* ── A writable callback installed after the refusal, once the output has gone ───────────────────
+ * The producer's first WOULD_BLOCK comes with no callback installed. It waits (polling pending from a
+ * timer, test side only) until everything it wrote has gone, then installs the callback. The refusal
+ * is remembered, so the loop must deliver one deferred edge with nothing in flight and no further
+ * client I/O. Completion loops lost it (only a send completion fired the edge, and none was left);
+ * readiness keeps it through the write watch. Variants: the callback replaced before the edge (only
+ * the second one fires), the op cancelled right after the install (no edge at all), and a callback
+ * that is refused again and must get its next edge. Never from inside the install call. */
+enum { LA_LATE, LA_REPLACE, LA_CANCEL, LA_REARM };
+#define LA_CHUNK      (16u * 1024u)
+#define LA_RAW_CAP    (16u * 1024u * 1024u)
+typedef struct {
+    KlAsyncOp op;
+    KlHttpResponse *res;
+    int mode;
+    size_t sent, total;
+    volatile int would_blocks, a_fires, b_fires, fires_in_install, fires_after_end;
+    volatile int installed, in_install, ended, completed, cancelled, failed;
+} LaStream;
+static LaStream g_la;
+static int g_la_mode;
+static KlHttpServer la_srv;
+
+static void la_pump(void);
+static void la_fn_a(void *ud) {
+    (void)ud;
+    g_la.a_fires++;
+    if (g_la.in_install) g_la.fires_in_install++;
+}
+static void la_fn_b(void *ud) {
+    (void)ud;
+    g_la.b_fires++;
+    if (g_la.in_install) g_la.fires_in_install++;
+    if (g_la.ended || g_la.cancelled) { g_la.fires_after_end++; return; }
+    la_pump();
+}
+static void la_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_la.completed = 1; }
+static void la_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_la.cancelled++; }
+static void la_install(void *ud) {
+    (void)ud;
+    if (g_la.ended || g_la.cancelled) return;
+    if (kl_http_response_stream_pending(g_la.res) > 0) {       /* not drained yet: look again */
+        (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 5, la_install, NULL);
+        return;
+    }
+    g_la.in_install = 1;
+    if (g_la.mode == LA_REPLACE)
+        (void)kl_http_response_stream_on_writable(g_la.res, la_fn_a, NULL);
+    (void)kl_http_response_stream_on_writable(g_la.res, la_fn_b, NULL);
+    g_la.in_install = 0;
+    g_la.installed = 1;
+    if (g_la.mode == LA_CANCEL)
+        kl_async_cancel(&la_srv, &g_la.op);                     /* before the deferred edge */
+}
+static void la_pump(void) {
+    static unsigned char chunk[LA_CHUNK];
+    while (g_la.sent < g_la.total) {
+        size_t n = g_la.total - g_la.sent < LA_CHUNK ? g_la.total - g_la.sent : LA_CHUNK;
+        for (size_t i = 0; i < n; i++) chunk[i] = sa_byte(g_la.sent + i);
+        KlHttpStreamStatus st = kl_http_response_stream_try_write(g_la.res, chunk, n);
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK) {
+            g_la.would_blocks++;
+            if (!g_la.installed) {
+                /* Refused with no callback: the rest of the stream is one chunk (or, re-arming, enough
+                 * to be refused again), and the callback comes once the output has gone. */
+                g_la.total = g_la.sent + (g_la.mode == LA_REARM ? 2u * 1024u * 1024u : LA_CHUNK);
+                (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 5, la_install, NULL);
+            }
+            return;
+        }
+        if (st != KL_HTTP_STREAM_ACCEPTED) {
+            g_la.failed = (int)st;
+            kl_async_cancel(&la_srv, &g_la.op);
+            return;
+        }
+        g_la.sent += n;
+    }
+    g_la.ended = 1;
+    kl_http_response_end_stream(g_la.res);
+    kl_async_complete(&la_srv, &g_la.op);
+}
+static void la_start(void *ud) { (void)ud; la_pump(); }
+static void handle_la(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&g_la, 0, sizeof g_la);
+    g_la.mode = g_la_mode;
+    g_la.res = res;
+    g_la.total = LA_RAW_CAP / 2;                    /* until the first refusal decides the rest */
+    KlHttpConn *c = kl_http_request_conn(req);
+    shrink_sndbuf(c);
+    KlHttpResponseWriteFn w;
+    void *wc;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return;
+    g_la.op.on_resume = la_resume;
+    g_la.op.on_cancel = la_cancel;
+    if (kl_async_suspend(&la_srv, c, &g_la.op) < 0) return;
+    (void)kl_timer_add(kl_http_server_event_ctx(&la_srv), 0, la_start, NULL);
+}
+
+static void late_install_case(int *utest_result, int mode) {
+    g_la_mode = mode;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP };
+    ASSERT_EQ(0, kl_http_server_init(&la_srv, &cfg));
+    kl_http_server_route(&la_srv, "GET", "/la", handle_la, NULL, NULL);
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &la_srv);
+    wait_for_bind(&la_srv);
+    char *raw = malloc(LA_RAW_CAP);
+    unsigned char *body = malloc(LA_RAW_CAP);
+    ASSERT_TRUE(raw && body);
+    size_t raw_len = 0;
+    int fd = connect_rcvbuf(la_srv.bound_port, 8192);
+    if (fd >= 0) {
+        const char *rq = "GET /la HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(300);                       /* not reading: the producer is refused */
+        /* Then read, paced, until the end, the close, or 5 s with nothing (a lost edge). */
+        while (raw_len < LA_RAW_CAP) {
+            if (kl_test_poll1(fd, 0, 5000) <= 0) break;
+            size_t room = LA_RAW_CAP - raw_len < 16384 ? LA_RAW_CAP - raw_len : 16384;
+            kl_ssize_t n = kl_test_sockread(fd, raw + raw_len, room);
+            if (n <= 0) break;
+            raw_len += (size_t)n;
+            if (raw_len >= 5 && memcmp(raw + raw_len - 5, "0\r\n\r\n", 5) == 0) break;
+            kl_test_sleep_ms(1);
+        }
+        kl_test_closesock(fd);
+        for (int i = 0; i < 300 && mode == LA_CANCEL && !g_la.cancelled; i++) kl_test_sleep_ms(10);
+        kl_test_sleep_ms(100);                       /* any late edge would fire meanwhile */
+    }
+    kl_http_server_stop(&la_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&la_srv);
+    int ended = 0;
+    long got = raw_len ? sa_dechunk(raw, raw_len, body, LA_RAW_CAP, &ended) : -1;
+    size_t mismatch = (size_t)-1;
+    for (long i = 0; got > 0 && i < got; i++)
+        if (body[i] != sa_byte((size_t)i)) { mismatch = (size_t)i; break; }
+    printf("  late install (mode %d): %ld of %zu payload bytes, ended %d, %d would-blocks, "
+           "A %d, B %d, in-install %d, after-end %d, cancelled %d, completed %d, failed %d\n", mode,
+           got, g_la.total, ended, g_la.would_blocks, g_la.a_fires, g_la.b_fires,
+           g_la.fires_in_install, g_la.fires_after_end, g_la.cancelled, g_la.completed, g_la.failed);
+    free(raw);
+    free(body);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_GE(g_la.would_blocks, 1);                 /* refused before any callback was there */
+    ASSERT_TRUE(g_la.installed);
+    ASSERT_EQ(g_la.fires_in_install, 0);             /* never from inside the install */
+    ASSERT_EQ(g_la.a_fires, 0);                      /* a replaced callback never fires */
+    ASSERT_EQ(g_la.fires_after_end, 0);
+    ASSERT_EQ(g_la.failed, 0);
+    if (mode == LA_CANCEL) {
+        ASSERT_EQ(g_la.cancelled, 1);
+        ASSERT_EQ(g_la.b_fires, 0);                  /* cancelled before the deferred edge: none */
+        ASSERT_FALSE(g_la.completed);
+        return;
+    }
+    ASSERT_EQ(g_la.cancelled, 0);
+    ASSERT_TRUE(g_la.completed);
+    ASSERT_EQ(got, (long)g_la.total);                /* every byte, after the late install ... */
+    ASSERT_EQ(mismatch, (size_t)-1);                 /* ... in order, exact */
+    ASSERT_TRUE(ended);
+    if (mode == LA_REARM)
+        ASSERT_GE(g_la.would_blocks, 2);             /* refused again from the callback ... */
+    else
+        ASSERT_EQ(g_la.would_blocks, 1);
+    ASSERT_EQ(g_la.b_fires, g_la.would_blocks);      /* ... and each refusal got exactly one edge */
+}
+
+UTEST(completion_output, a_writable_callback_installed_after_the_output_went_gets_its_edge) {
+    late_install_case(utest_result, LA_LATE);
+}
+UTEST(completion_output, a_writable_callback_replaced_before_its_late_edge_fires_only_the_new_one) {
+    late_install_case(utest_result, LA_REPLACE);
+}
+UTEST(completion_output, a_late_writable_callback_whose_op_is_cancelled_never_fires) {
+    late_install_case(utest_result, LA_CANCEL);
+}
+UTEST(completion_output, a_late_writable_callback_refused_again_gets_its_next_edge) {
+    late_install_case(utest_result, LA_REARM);
+}
+
 UTEST_MAIN();

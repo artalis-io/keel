@@ -1399,6 +1399,39 @@ void kl_http_comp_resume(struct KlHttpServer *s, struct KlHttpConn *conn) {
     comp_after_state(s, conn, conn->state);
 }
 
+/* A suspended streamed response whose writable edge is armed, has a callback, and has no send in flight
+ * to fire it: the edge was refused (WOULD_BLOCK) while no callback was installed, every completion since
+ * found nobody to call, and the queue went idle. Only this tick pass can fire it now. */
+static int comp_stream_edge_idle(const KlAsyncOp *op) {
+    const KlHttpConn *c = op->conn;
+    return c && c->async_op == op && c->comp_driven && !c->comp_closing &&
+           c->state == KL_HTTP_CONN_SUSPENDED && c->res.body_mode == KL_HTTP_BODY_STREAM &&
+           c->res.stream_writable_armed && c->res.stream_writable_fn && !c->comp_tlsq_inflight &&
+           kl_http_response_stream_pending(&c->res) < kl_http_response_stream_capacity(&c->res);
+}
+
+/* completion_http.h: the completion loop's counterpart of kl_async_sync_stream_interest, run by the
+ * server's tick just before it waits. A send completion is the usual progress point (comp_tls_on_write);
+ * this one covers an edge whose callback was installed after the last completion. Everything that can
+ * install a callback ran in the previous tick (dispatch, sweeps, deadlines, timers), so the edge fires
+ * before the loop waits: no completion is needed and nothing polls. Callbacks are user code and may
+ * complete or cancel ops (changing the list), so restart from the head after each; each firing disarms
+ * its edge, and the budget bounds the pass even if callbacks keep arming others. */
+int kl_http_comp_stream_edges(struct KlHttpServer *s) {
+    unsigned budget = 0;
+    for (const KlAsyncOp *op = s->async_ops; op; op = op->next) budget++;
+    while (budget-- > 0) {
+        KlAsyncOp *hit = NULL;
+        for (KlAsyncOp *op = s->async_ops; op; op = op->next)
+            if (comp_stream_edge_idle(op)) { hit = op; break; }
+        if (!hit) return 0;
+        kl_http_response_stream_progress(&hit->conn->res);   /* disarms, then calls */
+    }
+    for (const KlAsyncOp *op = s->async_ops; op; op = op->next)
+        if (comp_stream_edge_idle(op)) return 1;      /* armed meanwhile: the wait must not block */
+    return 0;
+}
+
 /* Re-arm a body read after read-side flow control resumes (kl_http_request_resume_body → the
  * completion seam on a completion loop): post a fresh recv; on failure release via the normal
  * completion path. Mirrors comp_start_body_read's post, window reset included. */

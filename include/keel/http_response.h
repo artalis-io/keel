@@ -296,7 +296,9 @@ typedef void (*KlHttpStreamWritableFn)(void *ctx);
  * it needs more room than has freed, which re-arms). Only a WOULD_BLOCK arms it and an ACCEPTED
  * write disarms it; draining alone never fires it.
  *
- * A refusal before @p fn was installed is remembered: once it is installed, it fires as above.
+ * A refusal before @p fn was installed is remembered: once it is installed, it fires as above. If
+ * the output already went (no progress point is left to come), the loop delivers the edge itself on
+ * its next iteration, before it waits: never from inside this call, and with no further I/O needed.
  *
  * It fires only while the connection is suspended (kl_async_suspend: a producer owns the stream),
  * from the point where output progressed (a writable socket's flush, a completed send), never from

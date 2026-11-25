@@ -72,6 +72,13 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **A `kl_http_server_stop` issued before `kl_http_server_run` starts is honoured.** A stop from a
   signal handler during startup used to be overwritten by the run's own `running = 1`, so the
   server ran on; that run now returns 0 at once, without listening.
+- **Completion loops: a writable callback installed after its stream's output went now fires.**
+  `kl_http_response_stream_on_writable` promises that a `WOULD_BLOCK` refused before a callback was
+  installed is remembered. On io_uring, IOCP and pollcomp only a send completion fired the edge, so a
+  producer that installed its callback once everything had been sent was never told and the response
+  stalled. The server's completion tick now fires such an edge itself before it waits, as readiness
+  loops already did through the write watch: once, never from inside the install, and never after the
+  op was completed or cancelled.
 
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps

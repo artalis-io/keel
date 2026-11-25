@@ -60,6 +60,11 @@ response:
   ended, failed or was reset, or after the op completed or was cancelled: `on_cancel` is the terminal
   signal. No wakeup is lost: `WOULD_BLOCK` means bytes are pending, so a progress point is coming (the
   suspended connection's write watch on readiness, the in-flight send's completion on completion).
+  A refusal is remembered while no callback is installed. A callback installed after the output has
+  gone fires from the loop's next iteration, before it waits, with no further I/O: readiness arms the
+  write watch for it (`kl_async_sync_stream_interest`), and a completion loop's tick fires it when no
+  send is in flight (`kl_http_comp_stream_edges`). Never from inside the install, and never once the
+  op was completed or cancelled before that iteration.
 - *End of stream.* `kl_http_response_end_stream` is never refused by the bound: its 5-byte terminal
   chunk goes behind everything accepted, outside the admission check.
 - *Memory.* The capacity bounds pending bytes, not memory. Allocated capacity, for capacity C, the
