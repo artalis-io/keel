@@ -4,7 +4,8 @@
  * handler writes with kl_http_compress_stream_try_write and resumes on the writable edge; a client
  * with a small receive buffer stalls, then reads everything. Checked: the producer is refused
  * (WOULD_BLOCK) and resumes, pending never exceeds the capacity, the body decodes byte-exact and
- * incrementally, the finish waits for room and then ends the stream, every allocation is returned,
+ * incrementally, the stream finishes (waiting for room at the finish is covered by
+ * tests/protocols/http/test_compress_bounded.c), every allocation is returned,
  * and a client that leaves mid-stall gets the op cancelled and the stream released. POSIX only.
  * Opt-in (bring-your-own miniz): built via `make decompress-miniz-test MINIZ_DIR=...`.
  */
@@ -120,6 +121,8 @@ static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void *server_thread(void *arg) { kl_http_server_run(arg); return NULL; }
+static int g_ready;
+static void mark_ready(void *ud) { (void)ud; __atomic_store_n(&g_ready, 1, __ATOMIC_SEQ_CST); }
 static pthread_t g_tid;
 static int server_up(void) {
     memset(&g_p, 0, sizeof g_p);                         /* no state left from an earlier case */
@@ -128,9 +131,14 @@ static int server_up(void) {
                                .alloc = &g_alloc };
     if (!g_cctx || kl_http_server_init(&g_srv, &cfg) != 0) return -1;
     kl_http_server_route(&g_srv, "GET", "/gz", handle, NULL, NULL);
+    /* Ordered startup: this zero-delay timer runs on the loop's first tick, once the listener is
+     * bound and listening; the test reads the port only after seeing its flag (polling the port
+     * raced with the server thread writing it, and could connect between bind and listen). */
+    __atomic_store_n(&g_ready, 0, __ATOMIC_SEQ_CST);
+    if (kl_timer_add(kl_http_server_event_ctx(&g_srv), 0, mark_ready, NULL) < 0) return -1;
     if (pthread_create(&g_tid, NULL, server_thread, &g_srv) != 0) return -1;
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) usleep(10000);
-    return g_srv.bound_port ? 0 : -1;
+    for (int i = 0; i < 500 && !__atomic_load_n(&g_ready, __ATOMIC_SEQ_CST); i++) usleep(10000);
+    return __atomic_load_n(&g_ready, __ATOMIC_SEQ_CST) && kl_http_server_bound_port(&g_srv) > 0 ? 0 : -1;
 }
 static void server_down(void) {
     kl_http_server_stop(&g_srv);

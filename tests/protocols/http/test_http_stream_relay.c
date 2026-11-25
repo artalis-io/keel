@@ -30,6 +30,8 @@
 #include "event_caps.h"
 #include "http_conn_internal.h"   /* white-box: shrink the server-side send buffer */
 #include "platform_thread.h"
+#include "kl_atomic.h"       /* the startup flag the test waits on */
+#include <stdatomic.h>       /* state the servers write and the test thread reads */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,13 +77,24 @@ static int g_mode;
 
 static unsigned char rl_byte(size_t k) { return (unsigned char)((k * 131u) ^ (k >> 10)); }
 
-static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+/* Server startup, ordered. A zero-delay timer added before the server thread starts runs on the
+ * loop's first tick, after the listener is bound and listening; it sets the flag with an atomic store,
+ * which the test waits on, so the test reads the bound port only after the server thread wrote it
+ * (polling the port itself raced with that write, and could connect between bind and listen). */
+static void mark_ready(void *ud) { kl_atomic_store_int((int *)ud, 1); }
+static int arm_ready(KlHttpServer *s, int *flag) {
+    kl_atomic_store_int(flag, 0);
+    return kl_timer_add(kl_http_server_event_ctx(s), 0, mark_ready, flag) < 0 ? -1 : 0;
 }
+static int wait_ready(const int *flag) {
+    for (int i = 0; i < 500 && !kl_atomic_load_int(flag); i++) kl_test_sleep_ms(10);
+    return kl_atomic_load_int(flag);
+}
+static int g_up_ready, g_rl_ready;
 static void server_thread_fn(void *arg) { kl_http_server_run((KlHttpServer *)arg); }
 /* The relay server's run, and when it returned by itself (a drain ends it without a second stop). */
-static volatile int g_rl_run_done;
-static volatile uint64_t g_rl_run_done_ms;
+static _Atomic int g_rl_run_done;
+static _Atomic uint64_t g_rl_run_done_ms;
 static void rl_thread_fn(void *arg) {
     kl_http_server_run((KlHttpServer *)arg);
     g_rl_run_done_ms = kl_monotonic_ms();
@@ -124,7 +137,7 @@ static size_t peak_rss(void) {
 /* A counting allocator for the relay server: live and peak bytes of everything it allocates through
  * its KlAllocator (the response's outbound buffer, the connection's output queue, headers). Only the
  * relay server's loop thread allocates through it. */
-typedef struct { size_t live, peak; } CountAlloc;
+typedef struct { _Atomic size_t live, peak; } CountAlloc;   /* read by the test thread */
 static CountAlloc g_ca;
 static void *ca_malloc(void *ctx, size_t n) {
     CountAlloc *c = ctx;
@@ -152,9 +165,10 @@ static KlAllocator g_rl_alloc = { ca_malloc, ca_realloc, ca_free, &g_ca };
 typedef struct {
     KlAsyncOp op;
     KlHttpResponse *res;
-    volatile size_t sent;      /* read by the test thread while the transfer runs */
-    size_t max_pending;        /* the upstream response's own bound (ciphertext with real TLS) */
-    int would_blocks, cancelled, ended;
+    /* Written by the upstream server's thread, read by the test thread: atomic. */
+    _Atomic size_t sent;
+    _Atomic size_t max_pending;   /* the upstream response's own bound (ciphertext with real TLS) */
+    _Atomic int would_blocks, cancelled, ended;
 } UpStream;
 static UpStream g_up;
 static KlHttpServer up_srv;
@@ -181,7 +195,6 @@ static void up_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_up.cancel
 static void up_start(void *ud) { (void)ud; up_pump(); }
 static void handle_up(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    memset(&g_up, 0, sizeof g_up);
     g_up.res = res;
     KlHttpConn *c = kl_http_request_conn(req);
     shrink_sndbuf(c);
@@ -199,16 +212,17 @@ static void handle_up(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 typedef struct {
     KlAsyncOp op;
     KlHttpResponse *res;
-    KlHttpClient *cli;
+    KlHttpClient *_Atomic cli;    /* atomic: the test thread checks it went away */
     unsigned char held[KL_HTTP_CLIENT_RECV_BUF_SIZE];   /* the fragment refused downstream */
     size_t held_len;
-    size_t relayed, max_pending;
-    size_t max_held;          /* white-box: drain + output queue, read from the structures */
-    size_t hdr_cap;           /* the response's header buffer, allocated before the transfer */
+    /* Counters below: written by the relay server's thread, read by the test thread: atomic. */
+    _Atomic size_t relayed, max_pending;
+    _Atomic size_t max_held;  /* white-box: drain + output queue, read from the structures */
+    _Atomic size_t hdr_cap;   /* the response's header buffer, allocated before the transfer */
     KlHttpConn *conn;
-    int pauses, resumes, edges, edges_after_end, cancelled, finished, completed, upstream_err;
-    int resume_failed;
-    KlHttpStreamStatus failed;
+    _Atomic int pauses, resumes, edges, edges_after_end, cancelled, finished, completed;
+    _Atomic int upstream_err, resume_failed;
+    _Atomic KlHttpStreamStatus failed;
 } Relay;
 static Relay g_rl;
 static KlHttpServer rl_srv;
@@ -285,7 +299,6 @@ static void rl_cancel(KlAsyncOp *op, void *ud) {
 }
 static void handle_relay(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    memset(&g_rl, 0, sizeof g_rl);
     g_rl.res = res;
     KlHttpConn *c = kl_http_request_conn(req);
     g_rl.conn = c;
@@ -374,6 +387,8 @@ static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode
     /* Each case starts from zero: the handlers reset these only once a request arrives, and a case
      * that waits on them (pauses, would-blocks) before then would read the previous case's values.
      * The run order differs per platform (MinGW runs the cases in reverse). */
+    /* The per-case reset, before either server thread starts: the handlers do not reset this
+     * state, as the test thread may already be polling it while they run. */
     memset(&g_rl, 0, sizeof g_rl);
     memset(&g_up, 0, sizeof g_up);
     tls_cfg = (KlTlsConfig){ .ctx = NULL, .factory = mock_tls_create };
@@ -410,11 +425,11 @@ static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode
     kl_http_server_route(&up_srv, "GET", "/up", handle_up, NULL, NULL);
     if (kl_http_server_init(&rl_srv, &rcfg) != 0) return -1;
     kl_http_server_route(&rl_srv, "GET", "/relay", handle_relay, NULL, NULL);
+    if (arm_ready(&up_srv, &g_up_ready) < 0 || arm_ready(&rl_srv, &g_rl_ready) < 0) return -1;
     kl_plat_thread_create(up_tid, server_thread_fn, &up_srv);
     g_rl_run_done = 0;
     kl_plat_thread_create(rl_tid, rl_thread_fn, &rl_srv);
-    wait_for_bind(&up_srv);
-    wait_for_bind(&rl_srv);
+    if (!wait_ready(&g_up_ready) || !wait_ready(&g_rl_ready)) return -1;
     snprintf(g_up_url, sizeof g_up_url, "%s://127.0.0.1:%d/up",
              (mode & RL_UP_REAL) ? "https" : "http", up_srv.bound_port);
     return 0;
