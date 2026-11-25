@@ -162,7 +162,8 @@ Upgrade notes:
 
 - **A second `kl_http_server_run` on the same instance now fails.** Code that stopped a server and
   ran it again without `kl_http_server_free` + `kl_http_server_init` got a second listener (after a
-  plain stop, leaking the first) or a re-adopted descriptor; it now gets -1 at once. Free and
+  plain stop, leaking the first) or a re-adopted descriptor; it now gets -1 at once. This includes
+  retrying `kl_http_server_run` after it failed to start (for example the port was in use): free and
   re-init the server to serve again. `KlHttpServer` has also grown (an appended internal field);
   recompile.
 
