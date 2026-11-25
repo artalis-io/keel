@@ -167,6 +167,9 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
  * while its output waits (async.c). */
 void kl_async_sync_stream_interest(KlHttpServer *s);
 
+/* Bound a loop wait by the remaining graceful-drain time, so the drain ends on time (http_server_core.c). */
+int  kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms);
+
 /* How long accepting pauses after an accept fails for lack of a descriptor or kernel memory. The
  * connection stays queued in the kernel, so retrying at once fails the same way and spins the loop;
  * retrying ten times a second costs nothing and resumes promptly once a descriptor frees. The pause

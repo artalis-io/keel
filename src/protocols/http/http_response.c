@@ -4,6 +4,7 @@
 #include "socket.h"
 #include "http_response_internal.h"
 #include "platform.h"
+#include "kl_cstr.h"          /* kl_ascii_strncasecmp: an existing Connection header */
 #include "../../allocator_validate.h"   /* kl_allocator_ops_valid: valid-allocator gate */
 #include <string.h>
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
@@ -456,6 +457,26 @@ static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls
 /* ── Send: headers + body with partial-send resume ───────────────── */
 
 static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
+static const char kl_close_hdr[] = "Connection: close\r\n";
+
+/* The handler (or middleware) set a Connection header itself. */
+static int res_has_connection_header(const KlHttpResponse *res) {
+    static const char name[] = "connection:";
+    const size_t n = sizeof(name) - 1;
+    size_t i = 0;
+    while (i + n <= res->hdr_len) {   /* each header line starts at 0 or after a '\n' */
+        if (kl_ascii_strncasecmp(res->hdr_buf + i, name, n) == 0) return 1;
+        while (i < res->hdr_len && res->hdr_buf[i] != '\n') i++;
+        i++;
+    }
+    return 0;
+}
+
+/* Say Connection: close in the head: the server closes after this response for its own reason (a
+ * graceful drain) and the handler did not already say what happens to the connection. */
+static int res_close_notice(const KlHttpResponse *res) {
+    return res->close_notice && !res->keep_alive && !res_has_connection_header(res);
+}
 
 /* Assemble the buffered-response wire bytes into iov: the single source of truth
  * for the byte layout, shared by kl_http_response_send (synchronous seam writev) and the
@@ -492,6 +513,10 @@ int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
         iov[n].base = (void *)kl_keepalive_hdr;
         iov[n].len = sizeof(kl_keepalive_hdr) - 1;
         total += sizeof(kl_keepalive_hdr) - 1; n++;
+    } else if (res_close_notice(res)) {
+        iov[n].base = (void *)kl_close_hdr;
+        iov[n].len = sizeof(kl_close_hdr) - 1;
+        total += sizeof(kl_close_hdr) - 1; n++;
     }
     iov[n].base = (void *)"\r\n"; iov[n].len = 2; total += 2; n++;
 
@@ -573,6 +598,10 @@ int kl_http_response_send(KlHttpResponse *res) {
         if (res->keep_alive) {
             iov[iovcnt].base = (void *)kl_keepalive_hdr;
             iov[iovcnt].len = sizeof(kl_keepalive_hdr) - 1;
+            iovcnt++;
+        } else if (res_close_notice(res)) {
+            iov[iovcnt].base = (void *)kl_close_hdr;
+            iov[iovcnt].len = sizeof(kl_close_hdr) - 1;
             iovcnt++;
         }
 
@@ -831,7 +860,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
 
     KlStatusLine sl = status_line_for(res->status);
 
-    KlIoVec iov[3];
+    KlIoVec iov[4];
     int iovcnt = 0;
 
     iov[iovcnt].base = (void *)sl.str;
@@ -841,6 +870,12 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
     if (res->hdr_len > 0) {
         iov[iovcnt].base = res->hdr_buf;
         iov[iovcnt].len = res->hdr_len;
+        iovcnt++;
+    }
+
+    if (res_close_notice(res)) {
+        iov[iovcnt].base = (void *)kl_close_hdr;
+        iov[iovcnt].len = sizeof(kl_close_hdr) - 1;
         iovcnt++;
     }
 
