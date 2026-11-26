@@ -1,6 +1,7 @@
 #include <keel/http1_chunked.h>
 #include <stdint.h>
 #include <string.h>
+#include "http1_chunked_internal.h"
 
 void kl_http1_chunked_init(KlHttp1ChunkedDecoder *dec) {
     dec->state = KL_HTTP1_CHUNK_SIZE;
@@ -32,8 +33,9 @@ static int chunk_field_byte(unsigned char ch) {
  *   In TRAILER/TRAILER_CR states: 1 = at start of line (no content yet)
  *   In DATA_CR state: 1 = already saw CR, expecting LF
  */
-int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
-                      KlHttpBodyReader *reader) {
+int kl_http1_chunked_decode_used(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
+                                 KlHttpBodyReader *reader, size_t *used) {
+    if (used) *used = len;
     size_t i = 0;
 
     while (i < len) {
@@ -202,6 +204,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             if (dec->trailer_cr) {
                 /* Empty line (\r\n at start of line): done */
                 dec->state = KL_HTTP1_CHUNK_DONE;
+                if (used) *used = i;            /* the bytes from here on are not this body's */
                 return 1;
             }
             /* End of a non-empty trailer line; next line starts fresh */
@@ -210,6 +213,7 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
             break;
 
         case KL_HTTP1_CHUNK_DONE:
+            if (used) *used = i;
             return 1;
 
         case KL_HTTP1_CHUNK_ERROR:
@@ -217,8 +221,15 @@ int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t
         }
     }
 
-    if (dec->state == KL_HTTP1_CHUNK_DONE)
+    if (dec->state == KL_HTTP1_CHUNK_DONE) {
+        if (used) *used = i;
         return 1;
+    }
 
     return 0;  /* need more data */
+}
+
+int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
+                      KlHttpBodyReader *reader) {
+    return kl_http1_chunked_decode_used(dec, data, len, reader, NULL);
 }

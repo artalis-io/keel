@@ -5,6 +5,35 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **`kl_http_response_end_stream` without `kl_http_response_begin_stream` now returns -1** and writes
+  nothing (it wrote a bare terminating chunk and returned 0), as it does on a response that was reset
+  or released.
+- **The stream writer refuses a response with no open stream.** `kl_http_response_stream_write` (the
+  writer `begin_stream` returns), SSE writes and `kl_http_compress_stream_write` return -1 and write
+  nothing unless the stream was begun with `kl_http_response_begin_stream` (or SSE / compressed
+  begin) and not yet ended. Code that drives a response by hand (setting `body_mode`, writing chunks
+  without a begin) breaks: begin the stream.
+- **A second begin is refused.** `kl_http_response_begin_stream`, `kl_http_sse_begin` and
+  `kl_http_compress_stream_begin` return -1 and change nothing on a response that already began or
+  ended a stream, or that its connection reset for the next request.
+- **`kl_http_compress_stream_end` returns -1 after the response was ended directly** with
+  `kl_http_response_end_stream`, and writes no codec finish (it releases the codec).
+- **Pipelined and over-sent requests close the connection.** A request read together with bytes of a
+  further one, or a body longer than its framing, gets a response that says `Connection: close`, then
+  the connection ends through the bounded post-response drain. Clients resend on a new connection.
+- **A streamed response is finished by the connection, and an ended one keeps it alive.** A stream
+  the handler (or a resumed async op) began and ended was closed directly once its buffer was empty;
+  it now goes through the same completion as a buffered response: the connection is kept alive when
+  the stream ended on an HTTP/1.1 request that permits persistence, or ends through the bounded
+  drain. A streamed (chunked) response to an HTTP/1.0 request always closes the connection after it,
+  whatever Connection header the client sent. A client
+  that read to end-of-connection after a streamed response must use its framing or
+  `Connection: close`.
+- **Completion loops: a producer writing from `on_drain` after its op completed is delivered in
+  full**, up to its end of stream; it used to be cut short.
+
 ### Added
 
 - **`KlHttpServerConfig.header_timeout_ms`**: an absolute deadline for a request's head (see
@@ -162,6 +191,70 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   without progress, only when nothing but such probes is outstanding, and retains their records
   rather than free memory the kernel or another port may still touch. The del-before-close
   contract and each backend's behaviour when it is broken are documented at `kl_event_del`.
+- **Security: nothing is appended to a streamed response after its terminating chunk.** The writer
+  returned by `kl_http_response_begin_stream` (and SSE and the legacy compressed writer, which use
+  it) checked only for a failed stream: a write after `kl_http_response_end_stream` returned 0 and
+  put a chunk after `0\r\n\r\n`, where a client or relay reads it as the start of the next
+  response on the connection (desync, response splitting behind a proxy). It now returns -1 and
+  writes nothing, as it does for a response whose stream was never begun, was reset or was released;
+  the ended body is left intact. `kl_http_compress_stream_end` after the response was ended directly
+  no longer writes the codec's finish after the terminator: it releases the codec and returns -1
+  (the client got a truncated member). `kl_http_compress_stream_write` refuses an ended stream
+  without feeding the codec. `kl_http_response_end_stream` on a response with no stream (never
+  begun, or reset or released) now returns -1 and writes nothing, where it wrote a bare terminating
+  chunk.
+- **A stream ended from the drain's `on_drain` is sent in full before its connection is reused.**
+  When an async op completed with the response's outbound buffer still holding bytes, and the
+  `on_drain` callback then wrote the last chunk and ended the stream, those bytes landed in the
+  buffer that had just been judged empty: the response was treated as complete, the connection was
+  kept alive, and the reset for the next request discarded the tail and the terminating chunk, so
+  the next response appeared inside the first body (readiness and completion loops alike). The
+  response now completes only once everything its producer wrote is out, and a connection whose
+  response still holds unsent output is never kept alive.
+- **A streamed response sent in full inside its handler is no longer reset away.** It was released
+  with a direct close whatever request input was still unread (a pipelined tail, an unread body), so
+  the client got a reset instead of the response; on Windows also when the client's next request
+  arrived as the connection closed. It now ends through the bounded drain, or is kept alive.
+- **A second `begin_stream` no longer writes a second head after the terminating chunk** (and left a
+  response that could never be ended, on a kept-alive connection); a stale producer's begin between
+  requests no longer writes a head onto the next request's connection.
+- **No rejection after a streamed answer, and the answer is finished first.** A streaming handler
+  that already sent its response head when its body then failed (413, or the idle sweep's 408) no
+  longer gets a raw error response written after it. The answer is sent before the connection ends
+  (on readiness loops the half-close used to cut off what was still buffered, and the 408 sweep closed
+  at once), and meanwhile the rest of the body is read and discarded within
+  `reject_drain_max_bytes` / `reject_drain_timeout_ms`, so a client that writes its whole body before
+  reading gets the answer instead of stalling to the idle timeout. Past those bounds the server stops
+  reading, never the answer: a client that reads while it uploads gets the whole answer; one that
+  will not read before an over-long upload is taken waits until `read_timeout_ms`, as before. After
+  the answer the connection half-closes and lingers: it discards up to
+  max(`reject_drain_max_bytes`, `max_body_size`) more bytes, then reads no more; on readiness loops
+  with hang-up detection the client's hang-up makes it read on to the client's end of stream, then
+  close cleanly; other loops (completion, macOS poll, Windows select()) wait for the deadline; at
+  most `read_timeout_ms`. A close over unread input is a reset, which drops the
+  server's send queue (and a Windows client discards what it has received but not read), so closing
+  at the drain's bound used to cut off an answer still queued in the kernel.
+- **Readiness TLS: a pipelined request already decrypted in the engine is served.** After
+  keep-alive the connection waited for socket data that would never come; it now reads the engine's
+  input on at once, as completion loops do.
+- **Pipelined HTTP/1.1 requests no longer hang the client.** Bytes of a further request read
+  together with the current one were discarded when the connection was reused, so the client waited
+  for a response until its timeout. Pipelining is still not supported, but now the response to the
+  first request says `Connection: close` (unless the handler set a Connection header), is sent in
+  full, and the connection then ends through the bounded drain instead of being reused. Empty lines
+  after a request (a CRLF after a body) do not count.
+- **A released response answers every stream call as closed, and refuses a new stream.**
+  `kl_http_response_free` left the stream state in place, so `kl_http_response_stream_try_write` on
+  a released response returned `ERROR` (documented: `CLOSED`) and the legacy writer could write to
+  the socket handle the response had held. A released response now has no stream and no write
+  target: `CLOSED` / -1, nothing written, and `begin_stream` is refused before it changes anything,
+  until the response is initialized again. This is a lifecycle state, not stale-pointer protection:
+  a `KlHttpResponse` pointer is not a handle, and after the op's `on_cancel`, or once the op
+  completed and the response ended, it belongs to the connection, whose next request reuses it
+  (`docs/contracts/streaming.md`, "Lifetime").
+- **`kl_http_compress_stream_try_write` releases the codec when it answers `CLOSED`**, as
+  `kl_http_compress_stream_try_end` already did, instead of holding it (about 300 KiB with miniz)
+  until the caller released it.
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
   the backend's last completions without dispatching them. A client freed from such an op's

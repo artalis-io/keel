@@ -50,7 +50,9 @@ typedef struct KlHttpResponse {
     uint64_t file_offset;   /**< File offset for sendfile resume */
 
     int stream_error;       /**< Streaming error flag */
-    int stream_ended;       /**< 1 = end_stream called, drain flush will close */
+    int stream_ended;       /**< 1 = end_stream called (drain flush will close), or the response
+                                 was released or reset between a connection's requests: no stream
+                                 can be begun or written until it is initialized again */
     int stream_inflight;    /**< Internal (historical name): 1 while the response is the one embedded in
                                  a pooled server connection, whose output queue a completion loop
                                  sends a stream through; 0 for any other response (an HTTP/2 stream's,
@@ -146,7 +148,19 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
  */
 void kl_http_response_file(KlHttpResponse *res, int fd, uint64_t size);
 
-/** @brief Free response resources (header buffer, close file fd). */
+/**
+ * @brief Free response resources (header buffer, close file fd).
+ *
+ * The response is left with no stream and no write target (only its allocator kept): every stream
+ * call on it answers KL_HTTP_STREAM_CLOSED (or -1) and writes nothing, and a begin_stream is refused
+ * before it changes anything, until kl_http_response_init() initializes it again. A second free is
+ * harmless. This is a lifecycle state, not stale-pointer protection: once the storage is initialized
+ * for another response, a pointer kept from before acts on that response. A server connection's
+ * response is freed when the connection is released, and initialized again for the slot's next
+ * connection: a producer must not use the pointer after its op's on_cancel, or once the op
+ * completed and the response ended
+ * (docs/contracts/streaming.md, "Lifetime").
+ */
 void kl_http_response_free(KlHttpResponse *res);
 
 /**
@@ -186,6 +200,15 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
  * response of an HTTP/2 stream, whose connection is framed by the HTTP/2 session rather than by
  * HTTP/1.1, and any response never bound to a socket. Check the return value before writing.
  *
+ * The writer returns 0 when the chunk was accepted and -1 otherwise. It refuses, writing nothing,
+ * once the stream has ended (kl_http_response_end_stream succeeded): termination is final, and a
+ * chunk after the terminating chunk would be read as the start of the next response on the
+ * connection. That refusal leaves the ended body intact. It refuses too when the response was reset
+ * or released, and fails (stickily) on a transport or allocation error.
+ *
+ * One stream per response: refused (-1, nothing written or changed) once the response's head was
+ * sent or a stream was begun or ended on it, and on a server connection's response between requests.
+ *
  * @param res       Response.
  * @param status    HTTP status code.
  * @param out_write Receives the write callback function.
@@ -214,7 +237,16 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
  * A call that *failed* is not a completed one: it returns -1, and a retry still reports the failure
  * rather than being swallowed as "already ended".
  *
- * @return 0 on success (including "already ended"), -1 on error (including no HTTP/1.1 write target).
+ * Once it succeeded no body byte can follow: every stream writer (the one from
+ * kl_http_response_begin_stream, kl_http_response_stream_try_writev, the compressed writers) refuses.
+ * The connection is reused for another request only after everything, the terminating chunk
+ * included, was sent.
+ *
+ * With no stream to end (never begun, or the response was reset or released) it returns -1 and
+ * writes nothing.
+ *
+ * @return 0 on success (including "already ended"), -1 on error (including no HTTP/1.1 write target
+ *         and no stream).
  */
 int kl_http_response_end_stream(KlHttpResponse *res);
 
@@ -261,7 +293,10 @@ typedef enum {
  * - WOULD_BLOCK: the framed chunk fits the capacity but not the room left now. It arms the writable
  *   edge (kl_http_response_stream_on_writable).
  * - TOO_LARGE: the framed chunk exceeds the capacity (or its size overflows): it can never fit.
- * - CLOSED: the stream was not begun, was ended, or the response was reset or released.
+ * - CLOSED: the stream was not begun, was ended, or the response was reset or released. A
+ *   released or reset response answers CLOSED to every stream call until a new stream is begun on
+ *   it; on a server connection that is the slot's next request, so a pointer kept past the op's
+ *   on_cancel or completion is not safe to use (docs/contracts/streaming.md, "Lifetime").
  * - ERROR: the stream failed earlier or now; every later write and kl_http_response_end_stream()
  *   fail too, and the connection closes. Invalid arguments (a NULL vector with a count, more than
  *   32 entries) are ERROR as well.

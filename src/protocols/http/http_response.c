@@ -248,6 +248,18 @@ void kl_http_response_free(KlHttpResponse *res) {
         kl_free(res->alloc, res->hdr_buf, res->hdr_cap);
         res->hdr_buf = NULL;
     }
+    /* A released response has no stream and no write target: every stream call on it answers
+     * CLOSED (or -1) and writes nothing, rather than reading a stream state that outlived its
+     * buffers (a released stream used to answer ERROR, and the legacy writer spun on a socket
+     * handle that was no longer this response's). Only the allocator is kept: a pooled connection
+     * initializes the response again with it before its next request. */
+    KlAllocator *alloc = res->alloc;
+    memset(res, 0, sizeof(*res));
+    res->alloc = alloc;
+    res->conn_fd = KL_INVALID_SOCKET;
+    res->file_fd = -1;
+    res->status = 200;
+    res->stream_ended = 1;   /* sealed: a stale begin_stream is refused before it changes anything */
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -622,6 +634,12 @@ int kl_http_response_send(KlHttpResponse *res) {
         int r = kl_drain_flush(&res->drain);
         if (r < 0) return -1;
         if (r == 1) return 1;  /* more pending */
+        /* kl_drain_flush decides "drained" before it calls the drain's on_drain, which may write
+         * more (and end the stream) into the drain it just emptied. Those bytes are this response's:
+         * it is not finished, and its connection must not be reused, until they are out too. The
+         * response outlives the callback (it is the connection's, or the caller's), so re-check it. */
+        if (res->stream_error) return -1;
+        if (kl_drain_pending(&res->drain)) return 1;
         /* Fully drained; if stream ended, we're done */
         if (res->stream_ended) return 0;
         /* Not ended: a producer may write more. The server's driver knows whether one can (a
@@ -749,6 +767,10 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
 
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
+int kl_http_response_stream_open(const KlHttpResponse *res) {
+    return res && res->body_mode == KL_HTTP_BODY_STREAM && res->headers_sent && !res->stream_ended;
+}
+
 /* ── Stream capacity: one bound over everything Keel holds for the response ───────────────────── */
 
 size_t kl_http_response_stream_capacity(const KlHttpResponse *res) {
@@ -834,6 +856,11 @@ static int drain_writev_coalesced(KlDrain *drain, const KlIoVec *iov, int iovcnt
 int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int iovcnt) {
     if (!res) return -1;
     if (res->stream_error) return -1;
+    /* Only an open stream takes body bytes: one that was begun, has not been ended, and whose
+     * response was not reset or released since. A chunk after the terminating chunk is not part of
+     * this body at all: the client reads it as the start of whatever comes next on the connection.
+     * Refused before anything is written, and not sticky: the ended response stays intact. */
+    if (!kl_http_response_stream_open(res)) return -1;
     if (res->head_request) return 0;
     if (iovcnt < 0 || iovcnt > KL_HTTP_STREAM_IOV_MAX || (iovcnt > 0 && !iov)) {
         res->stream_error = 1;
@@ -894,8 +921,7 @@ KlHttpStreamStatus kl_http_response_stream_try_writev(KlHttpResponse *res, const
                                                       int iovcnt) {
     if (!res) return KL_HTTP_STREAM_ERROR;
     if (res->stream_error) return KL_HTTP_STREAM_ERROR;
-    if (res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent || res->stream_ended)
-        return KL_HTTP_STREAM_CLOSED;
+    if (!kl_http_response_stream_open(res)) return KL_HTTP_STREAM_CLOSED;
     if (iovcnt < 0 || iovcnt > KL_HTTP_STREAM_IOV_MAX || (iovcnt > 0 && !iov)) {
         res->stream_error = 1;
         return KL_HTTP_STREAM_ERROR;
@@ -952,8 +978,7 @@ KlHttpStreamStatus kl_http_response_stream_try_write(KlHttpResponse *res, const 
 KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len) {
     if (!res) return KL_HTTP_STREAM_ERROR;
     if (res->stream_error) return KL_HTTP_STREAM_ERROR;
-    if (res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent || res->stream_ended)
-        return KL_HTTP_STREAM_CLOSED;
+    if (!kl_http_response_stream_open(res)) return KL_HTTP_STREAM_CLOSED;
     if (len == 0 || res->head_request) return KL_HTTP_STREAM_ACCEPTED;
     if (!res->drain_enabled) {
         res->stream_error = 1;
@@ -971,8 +996,18 @@ KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len
     return KL_HTTP_STREAM_ACCEPTED;
 }
 
+int kl_http_response_stream_can_begin(const KlHttpResponse *res) {
+    return res && !res->headers_sent && !res->stream_ended && res->body_mode != KL_HTTP_BODY_STREAM;
+}
+
 int kl_http_response_begin_stream(KlHttpResponse *res, int status,
                              KlHttpResponseWriteFn *out_write, void **out_ctx) {
+    /* One stream per response. A second begin (after the first, or after its end) wrote a second
+     * head after the terminating chunk, and left a response that could never be ended (stream_ended
+     * was already set): the connection was then kept alive behind it. A response that was reset
+     * between requests is sealed the same way until its next request initializes it. Refused before
+     * anything changes. */
+    if (!kl_http_response_stream_can_begin(res)) return -1;
     res->body_mode = KL_HTTP_BODY_STREAM;
     /* Refuse before the status line, the headers and the first chunk are written: this function
      * emits as it is called, so the check has to precede the first write rather than follow it.
@@ -1038,10 +1073,15 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
 int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_error) return -1;
     if (!res_has_wire(res)) return -1;   /* nothing to write the terminating chunk to */
+    /* No stream to end: never begun, or the response was reset (a kept-alive connection's next
+     * request) or released since. A terminating chunk there would be framing on a connection
+     * whose current response is not a stream, or not this caller's. */
+    if (res->body_mode != KL_HTTP_BODY_STREAM) return -1;
     if (res->head_request) {          /* no body to end, but the stream is over all the same */
         res->stream_ended = 1;
         return 0;
     }
+    if (!res->headers_sent) return -1;   /* its head never went out: no body was begun */
 
     /* Already ended: there is nothing left to do, and nothing to emit. The terminating chunk is what
      * *ends* a chunked body, so writing a second one does not repeat a harmless step -- it puts

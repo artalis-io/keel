@@ -368,11 +368,13 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
      * connection in PROCESSING, which neither drive path acts on. The readiness path
      * below would re-register no fd (silent hang) and the completion path's
      * comp_after_state() would take its CLOSED arm (socket closed, no response). A
-     * streaming response was already written by the handler, so it follows the
-     * streaming transition instead: keep SENDING only while a drain is pending. */
+     * streaming response follows the same transition as after a handler
+     * (http_connection.c, conn_stream_handed_over): SENDING, so the driver sends what is
+     * still buffered and then keeps the connection (an ended stream) or ends it through
+     * the bounded drain; only a stream whose head never went out, or that failed, closes. */
     if (conn->state == KL_HTTP_CONN_PROCESSING) {
         if (conn->res.body_mode == KL_HTTP_BODY_STREAM &&
-            !(conn->res.drain_enabled && kl_drain_pending(&conn->res.drain)))
+            (conn->res.stream_error || !conn->res.headers_sent))
             conn->state = KL_HTTP_CONN_CLOSED;
         else
             conn->state = KL_HTTP_CONN_SENDING;
@@ -416,6 +418,10 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     /* Try immediate send if response is ready */
     if (new_state == KL_HTTP_CONN_SENDING)
         new_state = kl_http_conn_on_writable(conn);
+
+    /* Kept alive with the next request already decrypted in the TLS engine: read it now. */
+    if (new_state == KL_HTTP_CONN_READING)
+        new_state = kl_http_conn_redrive_tls(conn, &s->router, new_state);
 
     /* Re-register FD with appropriate mask. Exhaustive over KlHttpConnState with no default: a new
      * member must be a compile error here, not a connection that matches no arm (which is precisely

@@ -174,10 +174,18 @@ KlHttpStreamStatus kl_http_compress_stream_try_write(KlHttpCompressStream *cs, c
         cs->error = 1;
         return KL_HTTP_STREAM_ERROR;
     }
+    KlHttpStreamStatus st;
     /* Nothing to send (an empty write, or a HEAD response, whose body never leaves): the response's
      * own answer for it (ACCEPTED, or CLOSED / ERROR), without running or sizing the codec. */
-    if (len == 0 || cs->res->head_request) return kl_http_response_stream_try_write(cs->res, NULL, 0);
-    return bounded_feed(cs, data, len, 0);
+    if (len == 0 || cs->res->head_request)
+        st = kl_http_response_stream_try_write(cs->res, NULL, 0);
+    else
+        st = bounded_feed(cs, data, len, 0);
+    /* CLOSED is final: the response's stream ended or was reset or released, and no later call on
+     * this stream can write again. Release the codec and staging now, as try_end does, rather than
+     * hold them (miniz: about 300 KiB) until the caller thinks to. Releasing again is safe. */
+    if (st == KL_HTTP_STREAM_CLOSED) kl_http_compress_stream_release(cs);
+    return st;
 }
 
 KlHttpStreamStatus kl_http_compress_stream_try_end(KlHttpCompressStream *cs) {
@@ -223,6 +231,8 @@ static int stream_emit(void *ctx, const char *data, size_t len) {
 int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
                               int status, KlHttpCompressStream *cs) {
     if (!res || !cfg || !cfg->factory || !cs) return -1;
+    /* Refused before the codec is made or a header added: the response already has a stream. */
+    if (!kl_http_response_stream_can_begin(res)) return -1;
 
     KlAllocator *alloc = res->alloc;
     memset(cs, 0, sizeof(*cs));
@@ -264,6 +274,9 @@ int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
     if (!cs || !cs->comp) return -1;
     if (cs->error) return -1;
     if (len > 0 && !data) return -1;
+    /* The response's stream ended (or was reset or released): nothing may be appended to it, and
+     * the codec is not fed input whose output could never be sent. */
+    if (!kl_http_response_stream_open(cs->res)) return -1;
     if (len == 0) return 0;
 
     if (cs->comp->feed(cs->comp, data, len, 0, stream_emit, cs) < 0) {
@@ -278,8 +291,14 @@ int kl_http_compress_stream_end(KlHttpCompressStream *cs) {
 
     int rc = 0;
 
-    /* Final flush: emit remaining compressed data + trailer */
-    if (!cs->error) {
+    /* Final flush: emit remaining compressed data + trailer. Not once the response's stream has
+     * ended (kl_http_response_end_stream called directly) or was reset or released: the codec's
+     * finish would follow the terminating chunk on the wire, where the client reads it as the start
+     * of the next response. The body the client got is then a truncated member, so this fails. */
+    if (!kl_http_response_stream_open(cs->res)) {
+        cs->error = 1;
+        rc = -1;
+    } else if (!cs->error) {
         if (cs->comp->feed(cs->comp, NULL, 0, 1, stream_emit, cs) < 0) {
             cs->error = 1;
             rc = -1;

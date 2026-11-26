@@ -2127,7 +2127,8 @@ UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeou
     buf[0] = '\0';
     int fd = connect_rcvbuf(is_srv.bound_port, 0);
     if (fd >= 0) {
-        const char *rq = "GET /events HTTP/1.1\r\nHost: x\r\n\r\n";
+        /* Connection: close: an ended stream is otherwise kept alive for the next request. */
+        const char *rq = "GET /events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
         (void)read_until_close(fd, buf, sizeof buf, 2000, &closed);
         kl_test_closesock(fd);
@@ -2359,14 +2360,18 @@ static void legacy_drain_case(int *utest_result, int tls, int early) {
     ASSERT_FALSE(g_ld.failed);
     ASSERT_GT(g_ld.calls, 1);
     if (early) {
-        /* Once the op has completed the response is the driver's alone: it ends when its buffer
-         * empties (http_connection.c, conn_stream_given_up), so a producer writing on from on_drain
-         * is outside the contract and may be cut short. What must hold is the bound: those writes
-         * used to be taken without limit (128 chunks in one callback). */
+        /* Once the op has completed the response is the driver's: it ends when its buffer empties
+         * with nothing more written (http_connection.c, conn_stream_given_up). What on_drain writes
+         * before it returns, the end of the stream included, is still this response's, and is sent
+         * before the response completes (it used to complete at the old end mark, with the rest
+         * still in the drain). Those writes are bounded too: they used to be taken without limit
+         * (128 chunks in one callback). */
         ASSERT_TRUE(g_ld.completing);
         ASSERT_TRUE(g_ld.completed_pending);           /* the op completed with the drain holding bytes */
         ASSERT_GE(g_ld.calls_after, 1);                /* and on_drain was called after it: the path */
         ASSERT_LE(g_ld.max_per_call, 40);
+        ASSERT_EQ(g_ld.total, LD_TOTAL);
+        ASSERT_GE(got, (size_t)LD_TOTAL * BIG_CHUNK);  /* all of it went out, in full */
         ASSERT_TRUE(closed);
         return;
     }
@@ -2380,8 +2385,8 @@ static void legacy_drain_case(int *utest_result, int tls, int early) {
 UTEST(completion_output, a_legacy_on_drain_producer_is_bounded) { legacy_drain_case(utest_result, 0, 0); }
 UTEST(completion_output, a_legacy_on_drain_tls_producer_is_bounded) { legacy_drain_case(utest_result, 1, 0); }
 /* The same producer after its op completed with bytes still in the drain: the connection's send
- * path moves them, and the on_drain it fires must be bounded too (writing on after the completion
- * is outside the contract, so delivery in full is not asserted). */
+ * path moves them, the on_drain it fires is bounded too, and what it writes (up to the end of the
+ * stream) is delivered in full before the response completes. */
 UTEST(completion_output, a_legacy_on_drain_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 0, 1); }
 UTEST(completion_output, a_legacy_on_drain_tls_producer_after_completion_is_bounded) { legacy_drain_case(utest_result, 1, 1); }
 

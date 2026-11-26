@@ -407,6 +407,8 @@ UTEST(sse, drain_path_coalesces_each_sse_chunk_into_one_send) {
     res.conn_fd = 1;
     res.ctx = &event_ctx;
     ASSERT_EQ(kl_http_response_enable_drain(&res, &alloc, 0), 0);
+    res.body_mode = KL_HTTP_BODY_STREAM;   /* a begun stream (its head taken as sent): the writer */
+    res.headers_sent = 1;                  /* refuses a response with no open stream */
 
     KlHttpSse sse = {
         .write_fn = kl_http_response_stream_write,

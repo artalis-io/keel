@@ -24,6 +24,16 @@
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out);
 
+/* 1 while the response has a stream that takes body bytes: begun (its head written), not ended, and
+ * not reset or released since. Every stream write, legacy or bounded, compressed or not, is refused
+ * when it is 0, so nothing follows the terminating chunk. */
+int kl_http_response_stream_open(const KlHttpResponse *res);
+
+/* 1 while kl_http_response_begin_stream() would accept the response: no head sent, no stream begun
+ * or ended. Wrappers that add headers first (SSE, compression) check it before touching the
+ * response, so a refused begin changes nothing. */
+int kl_http_response_stream_can_begin(const KlHttpResponse *res);
+
 /* The built-in chunked stream writer and its scatter-gather form. The latter emits one HTTP chunk
  * whose payload is the concatenation of iov[0..iovcnt). Kept internal so protocol helpers can batch
  * logical output without changing KlHttpResponseWriteFn or the public response ABI. */

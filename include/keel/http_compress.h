@@ -63,6 +63,9 @@ int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
  *
  * @param res    Response.
  * @param cfg    Compression config.
+ * Refused before the codec is created or a header added (-1) on a response that already has a
+ * stream (begun or ended), like kl_http_response_begin_stream().
+ *
  * @param status HTTP status code.
  * @param cs     Compress stream handle to initialize (caller-owned).
  * @return 0 on success, -1 on error.
@@ -75,6 +78,8 @@ int kl_http_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
  *
  * Feeds data through the compressor and emits compressed chunks
  * to the underlying chunked stream.
+ *
+ * Refused (-1, the codec not fed) once the response's stream has ended or was reset or released.
  *
  * @param cs   Compress stream handle.
  * @param data Data to compress and write.
@@ -94,8 +99,13 @@ int kl_http_compress_stream_write(KlHttpCompressStream *cs, const char *data,
  * terminal chunk through the legacy writer, outside the capacity. To abandon a
  * bounded stream use kl_http_compress_stream_release(), which writes nothing.
  *
+ * When the response's stream has already ended (kl_http_response_end_stream was called directly),
+ * or was reset or released, it writes nothing: the codec's finish would follow the terminating
+ * chunk, where the client reads it as the start of the next response. The session is released and
+ * it returns -1 (the body the client got ends in a truncated member).
+ *
  * @param cs  Compress stream handle.
- * @return 0 on success, -1 on error.
+ * @return 0 on success, -1 on error (including a response stream already ended).
  */
 int kl_http_compress_stream_end(KlHttpCompressStream *cs);
 
@@ -121,7 +131,8 @@ int kl_http_compress_stream_end(KlHttpCompressStream *cs);
  * @brief Release the stream's codec and staging buffer, writing nothing.
  *
  * For a stream that will not be finished: from the op's on_cancel, or after try_end answered
- * TOO_LARGE. The response is left as it is. Do not end it afterwards (the client would get a
+ * TOO_LARGE. (try_end releases it itself on ACCEPTED, ERROR and CLOSED, and try_write on CLOSED;
+ * releasing again is safe.) The response is left as it is. Do not end it afterwards (the client would get a
  * cleanly terminated body holding a truncated gzip member): close the connection instead, which
  * on_cancel already does and kl_async_cancel does otherwise. Safe on a released stream.
  */
@@ -137,7 +148,8 @@ int kl_http_compress_stream_bounded(const KlHttpCompressStream *cs);
  * - WOULD_BLOCK: the worst case fits the capacity but not the room left; nothing was fed. Arms the
  *   writable edge.
  * - TOO_LARGE: the worst case exceeds the capacity (or does not fit a size_t): split the input.
- * - CLOSED: the stream has ended or the response is gone.
+ * - CLOSED: the stream has ended or the response is gone. Final: the codec and staging buffer are
+ *   released before it returns (later calls answer CLOSED; kl_http_compress_stream_release is safe).
  * - ERROR: sticky. The codec lacks flush_bound or data is NULL with a length (nothing was fed); or,
  *   once admitted, the staging buffer could not be allocated, the codec failed or emitted more than
  *   its bound: the response's stream then fails as well and the connection closes. Also when the

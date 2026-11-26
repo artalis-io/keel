@@ -108,8 +108,13 @@ int kl_drain_write(KlDrain *d, const char *data, size_t len);
  *
  * Loops write_fn on buffered data. Fires on_drain when buffer empties.
  *
+ * The result is decided before on_drain runs (on_drain may free the drain, so nothing reads it
+ * afterwards): a callback that writes again can leave bytes buffered although this returned 0. An
+ * owner whose drain outlives the callback re-checks kl_drain_pending() before treating 0 as
+ * "everything is out".
+ *
  * @param d Drain handle.
- * @return 0=drained, 1=more pending, -1=error.
+ * @return 0=drained (before on_drain ran), 1=more pending, -1=error.
  */
 int kl_drain_flush(KlDrain *d);
 

@@ -24,7 +24,8 @@ typedef struct {
  * @brief Begin an SSE stream.
  *
  * Sets Content-Type: text/event-stream, Cache-Control: no-cache,
- * and starts a chunked streaming response at status 200.
+ * and starts a chunked streaming response at status 200. Refused, changing nothing, on a response
+ * that already has a stream (begun or ended), like kl_http_response_begin_stream().
  *
  * @param res  Response to stream on.
  * @param sse  SSE handle to initialize (caller-owned).
