@@ -44,11 +44,24 @@ assert the client received the response. It is not an incomplete test and it is 
 the drain unlimited would make it pass and would hand any peer an unbounded hold on a
 single-threaded loop. Do not "fix" it.
 
-### After a rejected request's streamed answer
+### After a rejected request's committed answer
 
-When the rejection meets a streaming answer whose head already went out (a streaming handler that
-answered before its body failed, or the idle sweep's 408 on one), there is no rejection response to
-send; the answer itself is finished first. Two phases, each bounded:
+> Once a response head has been committed, a subsequent request-body rejection must not inject
+> another response or discard pending response output merely because the response is buffered,
+> file-backed or streamed.
+
+When the rejection meets an answer whose head already went out (a streaming handler that answered
+before its body failed, or the idle sweep's 408 on one), there is no rejection response to send; the
+answer itself is finished first, through the output driver that began it. This holds for every
+response type alike: a streamed answer, and a buffered or file-backed one the handler sent directly
+with `kl_http_response_send` (which returned 1, partly sent) before parking on its body. The
+connection is never reused after it, whatever its head said (a buffered head may already have said
+`Connection: keep-alive`): it ends with a close. An answer that was already sent in full before the
+rejection has nothing left to finish, and the connection simply ends through the drain below.
+On a completion loop the direct send is refused (a response has one output driver), so a buffered or
+file-backed response has no head out when its body fails, and the rejection is answered as usual.
+Finishing is attempted within the existing resource and deadline constraints, not guaranteed. Two
+phases, each bounded:
 
 - **While the answer is sent**, the body is read and discarded within `reject_drain_max_bytes` and
   `reject_drain_timeout_ms`. Past either, the server **stops reading** (it never stops the answer).

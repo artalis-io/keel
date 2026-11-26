@@ -416,9 +416,13 @@ static kl_ssize_t try_writev(const KlSocketProvider *p, KlSocketHandle fd, KlTls
 
 /* ── stream_writev_all: spin-write for streaming (small chunks) ── */
 
-static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
-                             KlIoVec *iov, int iovcnt) {
+/* `*sent` (when non-NULL) counts the bytes that went out, also on failure: a write cut off part way
+ * has put some of them on the wire. */
+static int stream_writev_sent(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+                              KlIoVec *iov, int iovcnt, size_t *sent) {
     int spins = 0;
+    size_t total = 0;
+    if (sent) *sent = 0;
 
     if (!tls) {
         while (iovcnt > 0) {
@@ -434,6 +438,8 @@ static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls
             }
             spins = 0;
             size_t written = (size_t)nw;
+            total += written;
+            if (sent) *sent = total;
             while (iovcnt > 0 && written >= iov[0].len) {
                 written -= iov[0].len;
                 iov++;
@@ -461,9 +467,16 @@ static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls
             spins = 0;
             seg += nw;
             remaining -= (size_t)nw;
+            total += (size_t)nw;
+            if (sent) *sent = total;
         }
     }
     return 0;
+}
+
+static int stream_writev_all(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+                             KlIoVec *iov, int iovcnt) {
+    return stream_writev_sent(p, fd, tls, iov, iovcnt, NULL);
 }
 
 /* ── Send: headers + body with partial-send resume ───────────────── */
@@ -596,6 +609,9 @@ int kl_http_response_send_driven(KlHttpResponse *res) {
         return 1;  /* partial: yield to event loop */
     }
 
+    /* A head cut off part way (below) failed the response: nothing more of it may be sent. */
+    if (res->body_mode == KL_HTTP_BODY_FILE && res->stream_error) return -1;
+
     if (!res->headers_sent) {
         KlStatusLine sl = status_line_for(res->status);
 
@@ -638,8 +654,20 @@ int kl_http_response_send_driven(KlHttpResponse *res) {
         iov[iovcnt].len = 2;
         iovcnt++;
 
-        if (stream_writev_all(res_provider(res), res->conn_fd, res->tls, iov, iovcnt) < 0)
+        size_t head_sent = 0;
+        if (stream_writev_sent(res_provider(res), res->conn_fd, res->tls, iov, iovcnt,
+                               &head_sent) < 0) {
+            /* Once any response head byte has been transmitted, nothing may be injected after it
+             * and its layout is immutable. A head cut off part way (the spin gave up on a full
+             * socket) is on the wire in part: mark the response committed (headers_sent) and failed
+             * (stream_error), so no rejection is written into it, its layout is not changed, and
+             * the connection closes rather than resume it. Nothing sent: still uncommitted. */
+            if (head_sent > 0) {
+                res->headers_sent = 1;
+                res->stream_error = 1;
+            }
             return -1;
+        }
         res->headers_sent = 1;
 
         if (res->head_request)

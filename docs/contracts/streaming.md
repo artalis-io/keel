@@ -164,9 +164,12 @@ suspended, the response is over. What such a callback writes before it returns (
 terminating chunk) is still this response's: the response is over only once that is sent too, on
 both axes, and a connection is never reused while its response holds unsent output.
 
-**A rejected request's streamed answer.** When a streaming handler already sent its answer's head and
-the request body then fails (a reader's limit, the body deadline), no error response follows it: the
-answer is finished, and meanwhile the rest of the body is read and discarded within the post-rejection
+**A rejected request's streamed answer.** Once a response head has been committed, a subsequent
+request-body rejection must not inject another response or discard pending response output merely
+because the response is buffered, file-backed or streamed. When a streaming handler already sent its
+answer's head (a stream, or a buffered or file-backed response sent directly with
+`kl_http_response_send`) and the request body then fails (a reader's limit, the body deadline), no
+error response follows it: the answer is finished, never kept alive, and meanwhile the rest of the body is read and discarded within the post-rejection
 drain's bounds (`reject_drain_max_bytes`, `reject_drain_timeout_ms`), so a client that uploads before
 it reads is not left blocked behind it. Past those bounds the server stops reading, never sending:
 the answer still goes out whole. Once it is handed to the kernel the connection half-closes and,
@@ -213,11 +216,19 @@ or release clears the response's callbacks, so none of it reaches a later reques
 **Pipelined requests are not supported.** HTTP/1.1 requests are served one at a time per
 connection. When bytes of a further request arrive together with the current one (read in the same
 receive), the connection is not reused: the current response says `Connection: close` (unless the
-handler set a Connection header itself, or its head was already sent), is sent in full, and the
+handler set a Connection header itself, or any byte of its head was already sent), is sent in full, and the
 connection then ends through the bounded post-response drain (`docs/contracts/early_rejection_drain.md`)
 rather than a close that could reset the response away. The client resends the later requests on a
 new connection. Empty lines after a request (a CRLF after a body) are not a request and do not end
 keep-alive.
+
+**A committed head is immutable.** Once any response header bytes have been transmitted, the
+serialized response layout must remain immutable. Deciding after that point that the connection
+ends with this response (a pipelined request, an unread or failed body, a short-circuit) changes
+only whether the connection is reused, never the response: a head that went out saying
+`Connection: keep-alive` keeps saying it, the rest of the response (a buffered send resumed from
+where it stopped, including part way through its head) follows in that same layout, and the
+connection then closes. A head not yet begun says `Connection: close` instead.
 
 ## Read side (request-body streaming / inbound)
 

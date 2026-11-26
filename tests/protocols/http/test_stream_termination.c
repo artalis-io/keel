@@ -32,6 +32,8 @@
 #include <keel/clock.h>
 #if !defined(_WIN32)
 #include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 /* ── Server plumbing ─────────────────────────────────────────────────────────────────────────── */
@@ -508,6 +510,96 @@ static void handle_big_then_await(KlHttpRequest *req, KlHttpResponse *res, void 
     g_answer_conn = kl_http_request_conn(req);       /* white-box: its discard counter, read later */
     kl_http_request_await_body(req);
 }
+/* A streaming-async handler that sends a buffered (or file-backed) answer larger than the socket
+ * takes directly, then parks on the body, which then fails (its reader's 8-byte cap, or the body
+ * deadline). Once a response head has been committed, a subsequent request-body rejection must not
+ * inject another response or discard pending response output merely because the response is
+ * buffered, file-backed or streamed: the whole answer goes out, then the connection closes. A
+ * completion loop refuses the direct send (one output driver per response), so nothing is committed
+ * there and the rejection is answered as usual. */
+#define COMMITTED_LEN (4u * 1024u * 1024u)
+static char g_committed[COMMITTED_LEN];
+static int  g_committed_rc;
+static size_t g_committed_len = COMMITTED_LEN;   /* the buffered answer's length */
+static void committed_init(void) {
+    for (size_t i = 0; i < COMMITTED_LEN; i++) g_committed[i] = (char)('a' + (i * 7u) % 26u);
+}
+static void handle_buffered_then_await(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    shrink_sndbuf(kl_http_request_conn(req)->stream.fd);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, g_committed, g_committed_len);
+    g_committed_rc = kl_http_response_send(res);
+    kl_http_request_await_body(req);
+}
+#if !defined(_WIN32)   /* a temp file through POSIX open; the buffered cases cover Windows */
+static char g_committed_path[64];
+/* The default send buffer, not a 4 KiB one: a file response corks the socket (macOS TCP_NOPUSH),
+ * and a corked loopback socket holding less than a segment does not send it until it is uncorked.
+ * 4 MiB is still far more than the socket buffers take. */
+static void handle_file_then_await(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    int fd = open(g_committed_path, O_RDONLY);
+    if (fd < 0) { g_committed_rc = -2; kl_http_request_await_body(req); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, fd, COMMITTED_LEN);
+    g_committed_rc = kl_http_response_send(res);
+    kl_http_request_await_body(req);
+}
+#endif
+/* A streaming-async handler that sends its answer directly and returns with it partly sent, the
+ * request (its body already read with the head) left to the connection: the connection then decides
+ * it is the last response on it. Once any response header bytes have been transmitted, the
+ * serialized response layout must remain immutable: the rest of the answer is resumed from where it
+ * stopped in that same layout, then the connection closes. Modes: a large buffered body (the head
+ * out, the body partly), a head larger than the socket takes (the head itself partly out), a file. */
+enum { LAYOUT_BODY, LAYOUT_HEAD, LAYOUT_FILE };
+#define LAYOUT_PAD (64u * 1024u)
+static int    g_layout_mode;
+static size_t g_layout_off;        /* send_offset after the handler's send */
+static char   g_layout_pad[LAYOUT_PAD + 1];
+static void handle_send_then_return(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    if (g_layout_mode != LAYOUT_FILE) shrink_sndbuf(kl_http_request_conn(req)->stream.fd);
+    kl_http_response_status(res, 200);
+    if (g_layout_mode == LAYOUT_HEAD) {
+        memset(g_layout_pad, 'p', LAYOUT_PAD);
+        g_layout_pad[LAYOUT_PAD] = '\0';
+        (void)kl_http_response_header(res, "X-Pad", g_layout_pad);
+    }
+#if !defined(_WIN32)
+    if (g_layout_mode == LAYOUT_FILE) {
+        int fd = open(g_committed_path, O_RDONLY);
+        if (fd < 0) { g_committed_rc = -2; return; }
+        kl_http_response_file(res, fd, COMMITTED_LEN);
+    } else
+#endif
+    kl_http_response_body_borrow(res, g_committed, COMMITTED_LEN);
+    g_committed_rc = kl_http_response_send(res);
+    /* TLS writes one segment per call: send on until the body has begun (the head whole), except
+     * where the head is to stay cut. */
+    while (g_layout_mode == LAYOUT_BODY && g_committed_rc == 1 && res->send_offset < 256)
+        g_committed_rc = kl_http_response_send(res);
+    g_layout_off = res->send_offset;
+}
+#if !defined(_WIN32)
+/* A file response whose head (64 KiB of padding) is larger than the socket takes: the head write
+ * gives up part way (rc -1) with some of the head on the wire. The handler ignores that and parks on
+ * the body, which then fails its reader's cap. */
+static void handle_file_head_cut(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    shrink_sndbuf(kl_http_request_conn(req)->stream.fd);
+    kl_http_response_status(res, 200);
+    memset(g_layout_pad, 'p', LAYOUT_PAD);
+    g_layout_pad[LAYOUT_PAD] = '\0';
+    (void)kl_http_response_header(res, "X-Pad", g_layout_pad);
+    int fd = open(g_committed_path, O_RDONLY);
+    if (fd < 0) { g_committed_rc = -2; return; }
+    kl_http_response_file(res, fd, COMMITTED_LEN);
+    g_committed_rc = kl_http_response_send(res);
+    kl_http_request_await_body(req);
+}
+#endif
 /* Per-test server settings (0 = the defaults). */
 static size_t   g_cfg_drain_bytes;
 static uint32_t g_cfg_drain_ms;
@@ -538,6 +630,18 @@ static int server_start(size_t capacity, int tls) {
                                          (void *)(size_t)8, kl_http_body_reader_buffer);
     kl_http_server_route_streaming_async(&g_srv, "POST", "/await3", handle_large_then_await,
                                          (void *)(size_t)8, kl_http_body_reader_buffer);
+    kl_http_server_route_streaming_async(&g_srv, "POST", "/await_buf", handle_buffered_then_await,
+                                         (void *)(size_t)8, kl_http_body_reader_buffer);
+    kl_http_server_route_streaming_async(&g_srv, "POST", "/sendret", handle_send_then_return,
+                                         (void *)(size_t)1024, kl_http_body_reader_buffer);
+#if !defined(_WIN32)
+    kl_http_server_route_streaming_async(&g_srv, "POST", "/fhead", handle_file_head_cut,
+                                         (void *)(size_t)8, kl_http_body_reader_buffer);
+#endif
+#if !defined(_WIN32)
+    kl_http_server_route_streaming_async(&g_srv, "POST", "/await_file", handle_file_then_await,
+                                         (void *)(size_t)8, kl_http_body_reader_buffer);
+#endif
     kl_plat_thread_create(&g_tid, server_thread_fn, &g_srv);
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
     return g_srv.bound_port;
@@ -810,6 +914,357 @@ UTEST(stream_termination, a_body_failing_after_a_buffered_streamed_answer_sends_
     EXPECT_EQ(p.wire_len, (size_t)p.first_len);      /* no rejection after it */
     pair_free(&p);
 }
+
+/* A buffered or file-backed answer whose head (Connection: keep-alive) and part of its body went out
+ * before the body failed: the 413 at the reader's cap, or the body deadline's 408. Readiness: the
+ * whole declared Content-Length arrives byte-exact, then a clean end of stream (no reset), and no
+ * rejection after it, even though the head said keep-alive. (Was: a few KB, then the half-close cut
+ * it off.) Completion: the direct send is refused, so the rejection itself is the answer. */
+static long first_status(const Pair *p) {
+    return (p->wire_len >= 12 && memcmp(p->wire, "HTTP/1.1 ", 9) == 0) ? strtol(p->wire + 9, NULL, 10)
+                                                                       : 0;
+}
+static void committed_case(int *utest_result, const char *path, int body_timeout) {
+    memset(&g_p, 0, sizeof g_p);
+    committed_init();
+    g_committed_rc = 0;
+    if (body_timeout) { g_cfg_body_to = 300; g_cfg_read_to = 3000; }
+    int port = server_start(0, 0);
+    g_cfg_body_to = 0;
+    g_cfg_read_to = 0;
+    ASSERT_GT(port, 0);
+    int completion = (kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    Pair p;
+    memset(&p, 0, sizeof p);
+    p.wire = malloc(WIRE_CAP);
+    p.body = malloc(BODY_CAP);
+    int fd = connect_rcvbuf(port, 8192);
+    if (fd >= 0 && p.wire && p.body) {
+        char rq[160];
+        snprintf(rq, sizeof rq, "POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n", path);
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(100);                       /* the answer is begun, awaiting the body */
+        if (body_timeout) {
+            (void)kl_test_sockwrite(fd, "0123", 4);
+            kl_test_sleep_ms(900);                   /* the body deadline passes; not reading */
+        } else {
+            (void)kl_test_sockwrite(fd, "0123456789012345678901234567890123456789012345678901234567890123", 64);
+            kl_test_sleep_ms(300);                   /* the reader refused it; not reading */
+        }
+        p.first_len = read_response(fd, &p, 0, p.body, &p.body_len, &p.first_close, 3000);
+        read_to_close(fd, &p, 3000);
+        kl_test_closesock(fd);
+    }
+    server_stop();
+    long status = first_status(&p);
+    printf("  %s: send rc %d; wire %zu, status %ld, first %ld, body %zu, closed %d, reset %d\n",
+           completion ? "completion" : "readiness", g_committed_rc, p.wire_len, status, p.first_len,
+           p.body_len, p.closed, p.reset);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_GT(p.first_len, 0L);                      /* was: cut off at the half-close */
+    if (completion) {
+        EXPECT_EQ(g_committed_rc, -1);               /* refused: the driver owns the output */
+        EXPECT_EQ(status, body_timeout ? 408L : 413L);
+    } else {
+#if defined(_WIN32)
+        /* A Windows socket may take the whole send at once, whatever its send buffer: then the
+         * answer was complete before the body failed, and nothing is owed. */
+        EXPECT_TRUE(g_committed_rc == 1 || g_committed_rc == 0);
+#else
+        EXPECT_EQ(g_committed_rc, 1);                /* the path: committed, partly sent */
+#endif
+        EXPECT_EQ(status, 200L);
+        EXPECT_TRUE(has_header(p.wire, (size_t)p.first_len, "\r\nConnection: keep-alive\r\n"));
+        EXPECT_EQ(p.body_len, (size_t)COMMITTED_LEN);
+        if (p.body_len == COMMITTED_LEN)
+            EXPECT_EQ(memcmp(p.body, g_committed, COMMITTED_LEN), 0);
+    }
+    EXPECT_FALSE(p.reset);
+    EXPECT_TRUE(p.closed);                           /* never kept alive after it */
+    EXPECT_EQ(p.wire_len, (size_t)p.first_len);      /* no rejection after (or inside) it */
+    pair_free(&p);
+}
+UTEST(stream_termination, a_body_failing_after_a_committed_buffered_answer_sends_it_all) {
+    committed_case(utest_result, "/await_buf", 0);
+}
+UTEST(stream_termination, a_body_timeout_after_a_committed_buffered_answer_sends_it_all) {
+    committed_case(utest_result, "/await_buf", 1);
+}
+#if !defined(_WIN32)
+static int committed_file_make(void) {
+    snprintf(g_committed_path, sizeof g_committed_path, "/tmp/keel_st_commit_XXXXXX");
+    int fd = mkstemp(g_committed_path);
+    if (fd < 0) return -1;
+    committed_init();
+    size_t off = 0;
+    while (off < COMMITTED_LEN) {
+        ssize_t n = write(fd, g_committed + off, COMMITTED_LEN - off);
+        if (n <= 0) { close(fd); unlink(g_committed_path); return -1; }
+        off += (size_t)n;
+    }
+    close(fd);
+    return 0;
+}
+UTEST(stream_termination, a_body_failing_after_a_committed_file_answer_sends_it_all) {
+    ASSERT_EQ(committed_file_make(), 0);
+    committed_case(utest_result, "/await_file", 0);
+    unlink(g_committed_path);
+}
+UTEST(stream_termination, a_body_timeout_after_a_committed_file_answer_sends_it_all) {
+    ASSERT_EQ(committed_file_make(), 0);
+    committed_case(utest_result, "/await_file", 1);
+    unlink(g_committed_path);
+}
+#endif
+
+/* Bounded: a client that never reads the committed answer does not hold the rejection handling
+ * open. Readiness: the server keeps trying to finish the answer (it does not close at once under
+ * it, as it did), and the idle timeout (read_timeout_ms, 1 s here) ends it. Completion: the 413 is
+ * the answer, and the connection ends at once. */
+UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the_idle_timeout) {
+#if !defined(_WIN32)
+    signal(SIGPIPE, SIG_IGN);
+#endif
+    memset(&g_p, 0, sizeof g_p);
+    committed_init();
+    g_committed_rc = 0;
+    g_cfg_read_to = 1000;
+    int port = server_start(0, 0);
+    g_cfg_read_to = 0;
+    ASSERT_GT(port, 0);
+    int completion = (kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    int fd = connect_rcvbuf(port, 8192);
+    ASSERT_TRUE(fd >= 0);
+    const char *rq = "POST /await_buf HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    kl_test_sleep_ms(100);
+    (void)kl_test_sockwrite(fd, "0123456789012345678901234567890123456789012345678901234567890123", 64);
+    uint64_t t0 = kl_monotonic_ms();
+    kl_test_sleep_ms(400);
+    KlHttpServerStats st;
+    kl_http_server_stats(&g_srv, &st);
+    int held = st.active_connections;
+    uint64_t t1 = t0;
+    for (;;) {
+        kl_http_server_stats(&g_srv, &st);
+        t1 = kl_monotonic_ms();
+        if (st.active_connections == 0 || t1 - t0 > 10000) break;
+        kl_test_sleep_ms(20);
+    }
+    char head[16] = {0};
+    long n = kl_test_sockread(fd, head, sizeof head - 1);
+    kl_test_closesock(fd);
+    server_stop();
+    printf("  %s: send rc %d; held at 400 ms %d, released after %llu ms; first bytes %.12s\n",
+           completion ? "completion" : "readiness", g_committed_rc, held,
+           (unsigned long long)(t1 - t0), n > 0 ? head : "");
+    EXPECT_EQ(st.active_connections, 0);
+    EXPECT_LT(t1 - t0, (uint64_t)4000);              /* the idle timeout, plus the sweep's tick */
+    if (completion) {
+        EXPECT_EQ(memcmp(head, "HTTP/1.1 413", 12), 0);
+    } else {
+#if defined(_WIN32)
+        if (g_committed_rc == 0) {                   /* the whole send taken at once: nothing owed */
+            EXPECT_EQ(memcmp(head, "HTTP/1.1 200", 12), 0);
+            return;
+        }
+#endif
+        EXPECT_EQ(g_committed_rc, 1);
+        EXPECT_EQ(held, 1);                          /* was: closed at once, the answer cut off */
+        EXPECT_GE(t1 - t0, (uint64_t)900);           /* held to the idle timeout, not past it */
+        EXPECT_EQ(memcmp(head, "HTTP/1.1 200", 12), 0);   /* never a rejection */
+    }
+}
+
+/* A buffered answer sent in full before the body failed keeps the behaviour it had: nothing is owed,
+ * no rejection follows it, and the connection ends with a clean close. */
+UTEST(stream_termination, a_body_failing_after_a_completed_buffered_answer_just_ends) {
+    committed_init();
+    g_committed_rc = 0;
+    g_committed_len = 16;
+    int port = server_start(0, 0);
+    ASSERT_GT(port, 0);
+    int completion = (kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    Pair p;
+    memset(&p, 0, sizeof p);
+    p.wire = malloc(WIRE_CAP);
+    p.body = malloc(BODY_CAP);
+    int fd = connect_rcvbuf(port, 0);
+    if (fd >= 0 && p.wire && p.body) {
+        const char *rq = "POST /await_buf HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(100);
+        (void)kl_test_sockwrite(fd, "0123456789012345678901234567890123456789012345678901234567890123", 64);
+        p.first_len = read_response(fd, &p, 0, p.body, &p.body_len, &p.first_close, 3000);
+        read_to_close(fd, &p, 3000);
+        kl_test_closesock(fd);
+    }
+    server_stop();
+    g_committed_len = COMMITTED_LEN;
+    long status = first_status(&p);
+    printf("  %s: send rc %d; wire %zu, status %ld, first %ld, closed %d, reset %d\n",
+           completion ? "completion" : "readiness", g_committed_rc, p.wire_len, status, p.first_len,
+           p.closed, p.reset);
+    ASSERT_GT(p.first_len, 0L);
+    if (completion) {
+        EXPECT_EQ(g_committed_rc, -1);
+        EXPECT_EQ(status, 413L);
+    } else {
+        EXPECT_EQ(g_committed_rc, 0);                /* complete before the body failed */
+        EXPECT_EQ(status, 200L);
+        EXPECT_EQ(p.body_len, (size_t)16);
+    }
+    EXPECT_FALSE(p.reset);
+    EXPECT_TRUE(p.closed);
+    EXPECT_EQ(p.wire_len, (size_t)p.first_len);      /* no rejection after it */
+    pair_free(&p);
+}
+
+/* The answer to a request whose connection ends after it, sent partly before the connection decided
+ * so: the declared Content-Length arrives byte-exact in the layout the head began with (Connection:
+ * keep-alive, which it says although the connection then closes), then a clean close, and nothing
+ * after it. (Was: the keep-alive line dropped from the layout mid-send. With the body begun, the
+ * resumed bytes were shifted by its 24 bytes: a short, corrupted answer; with the head cut, the line
+ * vanished from a head already begun.) TLS writes one segment per call, so its first send leaves
+ * the head partly out. A file response's head goes out whole in one write and its body resumes from
+ * file_offset, so it has no layout to shift: its case pins that it is finished the same way.
+ * Completion loops refuse the direct send: the driver sends the answer whole, then closes. */
+static void layout_case(int *utest_result, int mode, int tls) {
+    committed_init();
+    g_committed_rc = 0;
+    g_layout_off = 0;
+    g_layout_mode = mode;
+    int port = server_start(0, tls);
+    ASSERT_GT(port, 0);
+    int completion = (kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    Pair p;
+    memset(&p, 0, sizeof p);
+    p.wire = malloc(WIRE_CAP);
+    p.body = malloc(BODY_CAP);
+    int fd = connect_rcvbuf(port, 8192);
+    if (fd >= 0 && p.wire && p.body) {
+        const char *rq = "POST /sendret HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n"
+                         "0123456789012345678901234567890123456789012345678901234567890123";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));   /* head and body together */
+        kl_test_sleep_ms(200);                         /* not reading: the answer backs up */
+        p.first_len = read_response(fd, &p, 0, p.body, &p.body_len, &p.first_close, 3000);
+        read_to_close(fd, &p, 3000);
+        kl_test_closesock(fd);
+    }
+    server_stop();
+    g_layout_mode = LAYOUT_BODY;
+    long status = first_status(&p);
+    const char *hend = p.wire ? find(p.wire, p.wire_len, "\r\n\r\n") : NULL;
+    size_t hlen = hend ? (size_t)(hend - p.wire) + 4 : 0;
+    printf("  %s%s: send rc %d, send_offset %zu; wire %zu, head %zu, status %ld, first %ld, body %zu, "
+           "closed %d, reset %d\n", completion ? "completion" : "readiness", tls ? " tls" : "",
+           g_committed_rc, g_layout_off, p.wire_len, hlen, status, p.first_len, p.body_len, p.closed,
+           p.reset);
+    ASSERT_TRUE(fd >= 0);
+    if (completion) {
+        EXPECT_EQ(g_committed_rc, -1);               /* refused: the driver owns the output */
+    } else {
+#if defined(_WIN32)
+        /* A Windows socket may take the whole send at once: then nothing was left to resume. */
+        EXPECT_TRUE(g_committed_rc == 1 || g_committed_rc == 0);
+        if (g_committed_rc == 1)
+#else
+        EXPECT_EQ(g_committed_rc, 1);                /* the path: committed, partly sent */
+#endif
+        {
+            if (mode == LAYOUT_HEAD)
+                EXPECT_LT(g_layout_off, hlen);       /* the head itself was cut */
+            if (mode == LAYOUT_BODY)
+                EXPECT_GT(g_layout_off, hlen);       /* the head whole, the body cut */
+        }
+        if (mode != LAYOUT_FILE)
+            EXPECT_TRUE(has_header(p.wire, hlen, "\r\nConnection: keep-alive\r\n"));
+    }
+    ASSERT_GT(p.first_len, 0L);                      /* was: short of its Content-Length */
+    EXPECT_EQ(status, 200L);
+    EXPECT_EQ(p.body_len, (size_t)COMMITTED_LEN);
+    if (p.body_len == COMMITTED_LEN)
+        EXPECT_EQ(memcmp(p.body, g_committed, COMMITTED_LEN), 0);
+    if (mode == LAYOUT_HEAD) {                       /* the padding header intact, in place */
+        const char *pad = find(p.wire, hlen, "\r\nX-Pad: ");
+        ASSERT_TRUE(pad != NULL);
+        size_t at = (size_t)(pad - p.wire) + 9;
+        ASSERT_LE(at + LAYOUT_PAD + 2, hlen);
+        EXPECT_EQ(memcmp(p.wire + at, g_layout_pad, LAYOUT_PAD), 0);
+        EXPECT_EQ(memcmp(p.wire + at + LAYOUT_PAD, "\r\n", 2), 0);
+    }
+    EXPECT_FALSE(p.reset);
+    EXPECT_TRUE(p.closed);                           /* never reused */
+    EXPECT_EQ(p.wire_len, (size_t)p.first_len);      /* nothing after it */
+    pair_free(&p);
+}
+UTEST(stream_termination, a_partly_sent_buffered_body_keeps_its_layout) {
+    layout_case(utest_result, LAYOUT_BODY, 0);
+}
+UTEST(stream_termination, a_partly_sent_head_keeps_its_layout) {
+    layout_case(utest_result, LAYOUT_HEAD, 0);
+}
+UTEST(stream_termination, a_partly_sent_tls_body_keeps_its_layout) {
+    layout_case(utest_result, LAYOUT_BODY, 1);
+}
+UTEST(stream_termination, a_partly_sent_tls_head_keeps_its_layout) {
+    layout_case(utest_result, LAYOUT_HEAD, 1);
+}
+#if !defined(_WIN32)
+UTEST(stream_termination, a_partly_sent_file_answer_keeps_its_layout) {
+    ASSERT_EQ(committed_file_make(), 0);
+    layout_case(utest_result, LAYOUT_FILE, 0);
+    unlink(g_committed_path);
+}
+/* Once any response head byte has been transmitted, nothing may be injected after it and its layout
+ * is immutable. A file head cut off part way (the write gave up on a full socket, rc -1) has failed
+ * the response: when its body then fails, the connection closes after the part already sent, and
+ * never writes the 413 into it. Exactly one status line reaches the client. (Was: two, the 413
+ * inside the 200's head.) A completion loop refuses the direct send before anything is written, and
+ * answers with the 413 alone. */
+UTEST(stream_termination, a_body_failing_after_a_cut_file_head_injects_nothing) {
+    ASSERT_EQ(committed_file_make(), 0);
+    g_committed_rc = 0;
+    int port = server_start(0, 0);
+    ASSERT_GT(port, 0);
+    int completion = (kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    Pair p;
+    memset(&p, 0, sizeof p);
+    p.wire = malloc(WIRE_CAP);
+    p.body = malloc(BODY_CAP);
+    int fd = connect_rcvbuf(port, 8192);
+    if (fd >= 0 && p.wire && p.body) {
+        const char *body = "0123456789012345678901234567890123456789012345678901234567890123";
+        const char *rq = "POST /fhead HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n";
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        kl_test_sleep_ms(200);                       /* not reading: the head backs up */
+        (void)kl_test_sockwrite(fd, body, 64);       /* fails the reader's 8-byte cap */
+        kl_test_sleep_ms(200);
+        p.first_len = read_response(fd, &p, 0, p.body, &p.body_len, &p.first_close, 3000);
+        read_to_close(fd, &p, 3000);
+        kl_test_closesock(fd);
+    }
+    server_stop();
+    unlink(g_committed_path);
+    size_t lines = 0;
+    for (size_t i = 0; p.wire && i + 9 <= p.wire_len; i++)
+        if (memcmp(p.wire + i, "HTTP/1.1 ", 9) == 0) lines++;
+    printf("  %s: send rc %d; wire %zu, status lines %zu, first %ld, closed %d, reset %d\n",
+           completion ? "completion" : "readiness", g_committed_rc, p.wire_len, lines, p.first_len,
+           p.closed, p.reset);
+    ASSERT_TRUE(fd >= 0);
+    EXPECT_EQ(g_committed_rc, -1);                   /* cut off (readiness) or refused (completion) */
+    EXPECT_EQ(lines, (size_t)1);                     /* was: 2, the second inside the first head */
+    EXPECT_TRUE(p.wire_len >= 12 && memcmp(p.wire, "HTTP/1.1 ", 9) == 0);
+    if (!completion) {
+        EXPECT_EQ(memcmp(p.wire, "HTTP/1.1 200", 12), 0);
+        EXPECT_TRUE(find(p.wire, p.wire_len, "\r\n\r\n") == NULL);   /* only the head's part */
+    }
+    EXPECT_TRUE(p.closed);                           /* the connection ends: never reused */
+    EXPECT_FALSE(p.reset);
+    pair_free(&p);
+}
+#endif
 
 /* A client that writes its whole (rejected) body before it reads the answer: the server keeps
  * discarding the body while it sends the streamed answer, so neither side blocks. Within the drain's
