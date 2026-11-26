@@ -18,8 +18,7 @@ changed by the audit. Probes ran on scratch copies (`git archive 65568ff`).
   client, HTTP/2).
 
 **Historical versus current.** Section 1 describes `main` at `65568ff`, before any fix. Sections 2
-to 5 describe `main` after the fixes, at `74ead39` (#523 to #528 merged); #529 is open at time of
-writing and its defect is **not** resolved on `main`.
+to 5 describe `main` after the fixes, at `6689f32` (#523 to #529 merged).
 
 **Result at `65568ff`:** no Critical. Four release-relevant correctness defects (R1 to R4), four
 Medium DoS or protocol defects (D1 to D4), and a set of Lows. These audits, the sanitizer runs
@@ -103,7 +102,7 @@ of audit B's probe was stopped unfinished and is not claimed.
 - **Parsers:** llhttp CL+TE and duplicate Content-Length rejected (live); chunked, router, PROXY
   v1/v2 and CIDR, WebSocket, DNS, client and HTTP/2 bounds.
 
-### 2. Corrections and their PRs (state on `main` at `74ead39`)
+### 2. Corrections and their PRs (state on `main` at `6689f32`)
 
 | Finding | Correction | PR |
 |---|---|---|
@@ -138,7 +137,7 @@ completion on both models.
 | HTTP/1.0 requests got a chunked, kept-alive streamed response | in review of #528 | #528: HTTP/1.0 streams always close |
 | Rejection after a streamed answer: a raw error written after the answer, the half-close cutting off buffered output, a close over unread input truncating a queued answer | while fixing R2/D3 | #528: discard while sending, a bounded post-answer linger, read on to EOF after a hang-up report |
 | Readiness TLS: a pipelined request already decrypted in the engine waited for socket data | while fixing D3 | #528 |
-| Completion-driven double send: a handler's direct `kl_http_response_send` was rebuilt and re-posted by the driver (plaintext twice; TLS a head inside the head; a timer send after reset wrote a stray 200) on io_uring, IOCP and pollcomp | while fixing; pre-existing | **#529, open at time of writing**: one output driver per response; not resolved on `main` |
+| Completion-driven double send: a handler's direct `kl_http_response_send` was rebuilt and re-posted by the driver (plaintext twice; TLS a head inside the head; a timer send after reset wrote a stray 200) on io_uring, IOCP and pollcomp | while fixing; pre-existing | #529 (`6689f32`): one output driver per response |
 | CI step timeouts left no headroom with the new suites | n/a | readiness matrix Test step 5 to 10 min (#526); MSVC runtime-probe step 5 to 10 min (#528) |
 
 ### 3. Remaining platform and API limitations (documented limits)
@@ -192,10 +191,36 @@ completion on both models.
 | #526 | multipart linearity (internal work counter), terminator split at every position, 8192/8193 boundary (`test_http_multipart_stream.c`); head-deadline drips incl. TLS record, handshake, h2 preface, keep-alive restart (`test_timeout.c`, `test_tls_integration.c`); `max_header_size` below the read buffer and `head_rejected_while_the_client_still_sends_gets_its_431` (`test_http_split_request.c`); `fuzz_multipart` interleaved pulls with allocation-failure injection | every new test fails with its fix reverted; the 431 test fails 5/5 on Windows without the fix; fuzz coverage 281 to 1018, 3.25M runs, no crash |
 | #527 | `tests/test_event_fairness.c`; IOCP reuse, owner-tag and OOM cases in `test_iocp_engine.c`; additions to `test_event_hangup.c` | each fix mutation-checked on edge |
 | #528 | `tests/protocols/http/test_stream_termination.c`, 27 cases, each checking the next response starts on the next byte (pipelining, overruns, stale begin, TLS in the engine, a flood past the cap, a half-closing slow reader) | each fix mutation-checked |
-| #529 (open) | two cases in `test_completion_output.c`, plaintext and TLS | both fail on pollcomp and io_uring without the fix; a reviewer's 17-case probe (async resume, middleware, file, HEAD, TLS, stale timer send) duplicated before it |
+| #529 | two cases in `test_completion_output.c`, plaintext and TLS | both fail on pollcomp and io_uring without the fix; a reviewer's 17-case probe (async resume, middleware, file, HEAD, TLS, stale timer send) duplicated before it |
 
 Sanitizer runs reported in the PRs, all ASan/UBSan clean on Linux: `debug-test` (#523, #525,
 #526), `debug-iouring` (#524), the core lanes of #528 and #529.
+
+### 6. Convergence audit (state on `main` at `6689f32`)
+
+A focused re-check of the corrected invariants and their interactions. It ran on `f775e46`
+(#529's head), whose tree is identical to `6689f32`. It covered: framing and termination,
+connection reuse, one output driver, rejection and drain bounds, multipart linearity, head
+deadlines, server lifecycle, HTTP and `KlStream` notification liveness, IOCP teardown and
+dispatch fairness.
+- **Linux (core):** every suite passed on epoll, poll, io_uring and pollcomp, including the
+  ASan/UBSan lanes.
+- **macOS:** kqueue, poll and pollcomp passed.
+- **Windows (edge):** IOCP and select() passed.
+- **Probes:** a probe server drove each invariant on kqueue, epoll, pollcomp and io_uring. A
+  `KlStream` stress harness ran on all eight backends: every refusal got exactly one edge, with no
+  spurious edge and no idle spin.
+- **High:** none found.
+
+| Item | Result | Disposition |
+|---|---|---|
+| M1 (new, Medium; readiness only; pre-existing, narrowed by #528). Shape: a buffered or file response whose head was already sent is truncated when the request body then fails (413 at the reader cap, or the body-timeout 408). Cause: `kl_http_conn_reject_final` finished first only for streams, and half-closed under the unsent rest. | probe: `Content-Length: 4194304`, then 4 to 6 KiB and FIN on kqueue and epoll; a clean 413 on completion loops (#529 refuses the direct send) | PR8 (open at time of writing) |
+| B-I1 (stream ended from `on_resume`: kept alive on readiness, closed on completion at `65568ff`) | kept alive on both axes, next response on the next byte | resolved by #528 |
+| B-L3 (two concurrent `kl_http_server_stop` calls write `drain_deadline_ms`, a plain `uint64_t`) | a genuine C11 data race, so undefined behaviour. **Observed behaviour, not a language guarantee:** 64-bit aligned stores do not tear; on 32-bit a torn value needs the two clocks to straddle a 2^32 ms boundary. No crash, missed stop or unbounded hang was observed. The language gives no bound on the consequences. | deferred (Low by practical exposure) |
+| `drain_push` quadratic copy | bounded by `KlDrain.max_size` (1 MiB default). A peer cannot force byte-sized writes (at least about 1 KiB per send on loopback). Worst case about 20 to 30 ms CPU per MB, against 0.4 ms normally. `kl_ws_server_enable_drain(ws, 0)` has no cap, as already for memory. | Low, accepted |
+| `pipe_ready` ignores a `pipe_watch` failure | unreachable: in readiness mode every narrowing is a `kl_watcher_del`, which cannot fail. Latent only for a future duplex readiness stream. | Informational |
+| L1: on readiness, a stale `kl_http_response_send` between requests writes a stray response (documented misuse; completion refuses it) | reproduced | deferred |
+| L2: an idle keep-alive connection is sent `408 Connection: close` at `read_timeout_ms` | reproduced on all four loops (predates 3.6) | deferred |
 
 ## Low-finding triage after the twentieth pass (2026-10-08)
 

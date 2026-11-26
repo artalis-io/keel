@@ -15,8 +15,8 @@ and its writable edge, compressed streaming, the graceful drain, the Windows sel
 the Windows default) and the IOCP watch lifecycle; a re-check of the eighteenth pass's open items.
 
 **Historical versus current.** Sections 1 to 6 are the findings against `main` at `65568ff`,
-before any fix. Sections 7 to 10 describe `main` after the fixes, at `74ead39` (#523 to #528
-merged); #529 is open at time of writing and its defect is not resolved on `main`.
+before any fix. Sections 7 to 10 describe `main` after the fixes, at `6689f32` (#523 to #529
+merged).
 
 **Verdict at `65568ff`:** the three-axis separation holds. No protocol TU calls an event engine or
 includes an engine header; the codec (`compress_miniz.c`) and HTTP (`http_compress.c`, through the
@@ -132,7 +132,7 @@ green; `smoke-iouring-asan` and `smoke-pollcomp-asan` on core exit 0 with no san
 - The per-backend behaviour of a handle closed without `kl_event_del` is undocumented and differs
   between the two Windows backends (C audit C L1/L2).
 
-### 7. Corrections and their PRs (state on `main` at `74ead39`)
+### 7. Corrections and their PRs (state on `main` at `6689f32`)
 
 | Finding | Correction | PR |
 |---|---|---|
@@ -144,8 +144,7 @@ green; `smoke-iouring-asan` and `smoke-pollcomp-asan` on core exit 0 with no san
 | C audit R4 (IOCP stale watch, teardown hang) | probes only on a handle verifiably on this port, owner tag per op, bounded close | #527 |
 
 The completion-driven double send (a handler's direct `kl_http_response_send` re-sent by the driver
-on io_uring, IOCP and pollcomp), found while fixing, is **#529, open at time of writing**, and is
-not resolved on `main`. Its fix reads ownership from connection state (`stream_inflight`,
+on io_uring, IOCP and pollcomp), found while fixing, is fixed by **#529** (`6689f32`). Its fix reads ownership from connection state (`stream_inflight`,
 `comp_driven`), not from the backend type, so it adds no engine branching.
 
 ### 8. Remaining platform and API limitations (documented limits)
@@ -178,6 +177,37 @@ not resolved on `main`. Its fix reads ownership from connection state (`stream_i
 
 Full per-PR evidence for the C-audit fixes is in the twenty-first pass of
 [keel_audit.md](keel_audit.md).
+
+### 11. Convergence audit (state on `main` at `6689f32`)
+
+The convergence audit ran on `f775e46`, whose tree is identical to `6689f32`, and re-checked the
+corrected event-axis invariants. Results:
+- **Coverage:** every suite passed on kqueue, epoll, poll, io_uring, pollcomp, IOCP and select(),
+  including the Linux ASan/UBSan lanes.
+- **`KlStream` stress harness:** an anonymous pipe, a slow random reader, 32 MiB byte-exact. It
+  covered a callback reinstalled on every refusal, a late install, and a callback freeing the pipe,
+  including from inside the deferred fire. On all eight backends every refusal got exactly one edge,
+  with no spurious edge, no corruption, no sanitizer report and no idle spin.
+- **IOCP:** `kl_event_ctx_free` with a pipe `WriteFile` still posted returned at once.
+- **`KlEventCtx.rearming`:** trailing, zero by default (the full handle check), written only by
+  `kl_watcher_rearm`; compliant with `docs/contracts/compatibility.md`.
+- **Severity:** no Medium or higher.
+- **C-L1, corrected in this documentation change:** the `kl_event_del` text overstated what each
+  backend does when del-before-close is breached.
+  - **Windows select():** in 198 of 200 trials Winsock reused a closed handle's value at once, and
+    every one of those reported the new socket's readiness to the old owner.
+  - **epoll:** a `dup`'d file keeps reporting to its old owner.
+  - **poll and pollcomp:** spin while a closed descriptor stays registered.
+  - `include/keel/event.h`, `docs/architecture/windows_readiness_backend.md` and the CHANGELOG now
+    state that Keel's registration guarantees hold only for the register, del, close lifecycle.
+    They now describe each backend's actual behaviour when it is breached.
+- **Lows, deferred:**
+  - IOCP: at least `max` errored watches whose owners never call del can fill a drain before the
+    port is read.
+  - The HTTP completion edge pass is O(N^2) when many edges come due at once (bounded by
+    `max_connections`).
+  - IOCP close-time quiesce: another loop's packets reset its 2 s give-up budget, and a port that
+    has failed while non-probe ops are outstanding never gives up.
 
 ## Eighteenth pass: separation holds after the audit-19 fixes (2026-10-07)
 
