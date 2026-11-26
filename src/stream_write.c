@@ -10,6 +10,8 @@
 #include "drain_reserve.h"     /* kl_drain_prealloc / reserve_write / low-water */
 #include "allocator_validate.h"
 #include <keel/drain.h>
+#include <keel/timer.h>        /* kl_timer_add: the late-install deferred edge */
+#include "timer_internal.h"    /* kl_timer_cancel_match: cancel only our own entry */
 
 /* Map an internal drain reservation result to the public-ish stream write status. */
 static KlStreamWriteStatus map_drain(KlDrainWriteStatus s) {
@@ -37,6 +39,8 @@ int kl_stream_write_init(KlStream *s, KlAllocator *alloc, size_t capacity) {
     s->in_writable      = 0;
     s->on_writable      = NULL;
     s->writable_ctx     = NULL;
+    s->wr_defer_armed   = 0;
+    s->wr_defer_id      = -1;
     return 0;
 }
 
@@ -64,22 +68,41 @@ int kl_stream_set_submit(KlStream *s, KlStreamSubmitFn fn, void *ctx, int copyin
     return 0;
 }
 
-int kl_stream_on_writable(KlStream *s, KlStreamWritableFn fn, void *ctx) {
-    if (!s || !s->wq_inited) return -1;
-    s->on_writable  = fn;
-    s->writable_ctx = ctx;
-    if (!fn) s->wr_blocked = 0;
+/* Has the condition a refused producer waits on already ended? Total pending (in-flight included)
+ * below capacity, or the write side failed so waiting is futile. */
+static int stream_block_ended(const KlStream *s) {
+    return s->wq_err || kl_stream_write_pending(s) < s->wq.max_size;
+}
+
+/* Can no progress point ever come for this stream's write side? Only then is a late-installed edge
+ * delivered by a deferred check: the write side failed, or nothing at all is pending (no flush or
+ * completion will follow). With any byte pending a flush or completion will come and fires the edge
+ * as usual, so deferring then would only add a tick-driven fire with no progress behind it (and,
+ * for a producer that reinstalls on every refusal, a zero-delay loop). With nothing pending a retry
+ * of a write within capacity cannot be refused, so the deferred fire cannot feed itself. */
+static int stream_no_progress_coming(const KlStream *s) {
+    return s->wq_err || kl_stream_write_pending(s) == 0;
+}
+
+int kl_stream_set_owner_hold(KlStream *s, void (*retain)(void *ctx), void (*release)(void *ctx),
+                             void *ctx) {
+    if (!s) return -1;
+    s->owner_retain  = retain;
+    s->owner_release = release;
+    s->owner_ctx     = ctx;
     return 0;
 }
 
 /* The writable edge, evaluated at a physical progress point AFTER all state is updated. Returns 1
  * (and disarms) when the blocked producer must be told it may write again: the total pending count,
  * in-flight bytes included, is below capacity, or the write side has failed so waiting is futile.
- * Never while closing: the close owns the stream's end. */
+ * Never while closing: the close owns the stream's end. Firing here supersedes any pending deferred
+ * late-install check (at most once per arming). */
 static int stream_writable_edge(KlStream *s) {
     if (!s->wr_blocked || !s->on_writable || s->wq_closing) return 0;
-    if (!s->wq_err && kl_stream_write_pending(s) >= s->wq.max_size) return 0;
+    if (!stream_block_ended(s)) return 0;
     s->wr_blocked = 0;
+    kl_stream_writable_defer_cancel(s);
     return 1;
 }
 
@@ -90,6 +113,60 @@ static void stream_fire_writable(KlStream *s) {
     s->in_writable++;
     s->on_writable(s->writable_ctx);
     s->in_writable--;
+}
+
+static void stream_writable_deferred(void *vp);
+
+void kl_stream_writable_defer_cancel(KlStream *s) {
+    if (!s->wr_defer_armed) return;
+    s->wr_defer_armed = 0;
+    /* Match id, callback and stream: a stale id (the ctx freed and re-initialised, ids restarting)
+     * can then never cancel another owner's timer. */
+    (void)kl_timer_cancel_match(s->ctx, s->wr_defer_id, stream_writable_deferred, s);
+    s->wr_defer_id = -1;
+}
+
+/* The late-install deferred check (scheduled by kl_stream_on_writable). Runs from the loop's timer
+ * pass. Every way the arming can end before this point (an ACCEPTED write, a progress-point fire, the
+ * callback removed or replaced, a close begun, the queue freed) cancels the timer, so a run here
+ * always belongs to a live stream; the edge is still re-evaluated against current state. */
+static void stream_writable_deferred(void *vp) {
+    KlStream *s = vp;
+    s->wr_defer_armed = 0;
+    s->wr_defer_id    = -1;
+    if (!stream_writable_edge(s)) return;
+    /* No adapter frame is on the stack here: hold the adapter's storage across the callback (which
+     * may release it, e.g. kl_pipe_free) and the finalize, as its own progress paths do. The release
+     * pair is captured first; after it nothing touches s. */
+    void (*release)(void *) = s->owner_release;
+    void *owner = s->owner_ctx;
+    if (s->owner_retain) s->owner_retain(owner);
+    stream_fire_writable(s);
+    /* The callback may have begun a close whose finalize it deferred: finish it (may detach; on_close
+     * may free s when no adapter holds it, so nothing touches s afterwards). */
+    if (s->on_retire) s->on_retire(s);
+    if (release) release(owner);           /* may be the final release */
+}
+
+int kl_stream_on_writable(KlStream *s, KlStreamWritableFn fn, void *ctx) {
+    if (!s || !s->wq_inited) return -1;
+    /* A refusal seen before any callback was installed is remembered (wr_blocked). If no progress
+     * point can come any more (nothing pending, or the write side failed), the edge is delivered by a
+     * deferred check on the stream's loop: never from inside this call. Otherwise the next flush or
+     * completion fires it as usual. The check is scheduled BEFORE any state changes, so a scheduling
+     * failure leaves the stream as it was. */
+    int64_t id = -1;
+    int defer = fn && s->wr_blocked && !s->wq_closing && s->ctx && stream_no_progress_coming(s);
+    if (defer) {
+        id = kl_timer_add(s->ctx, 0, stream_writable_deferred, s);
+        if (id < 0) return -1;
+    }
+    kl_stream_writable_defer_cancel(s);   /* a replaced or removed callback never sees the old check */
+    s->on_writable  = fn;
+    s->writable_ctx = ctx;
+    if (!fn) s->wr_blocked = 0;
+    if (defer) { s->wr_defer_armed = 1; s->wr_defer_id = id; }
+    return 0;
 }
 
 /* Retire the in-flight send's bytes and state after a successful completion. */
@@ -167,6 +244,7 @@ KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
         if (ds == KL_DRAIN_WOULD_BLOCK) s->wr_blocked = 1;
         if (ds != KL_DRAIN_ACCEPTED) return map_drain(ds);
         s->wr_blocked = 0;                         /* no longer blocked; before any inline completion */
+        kl_stream_writable_defer_cancel(s);
         if (stream_pump_completion(s) < 0) return KL_STREAM_ERROR;  /* submit failed; bytes owned */
         return KL_STREAM_ACCEPTED;
     }
@@ -177,7 +255,7 @@ KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
      * record it so later writes report it and a graceful close does not wait on the queue. */
     if (ds == KL_DRAIN_WERROR) s->wq_err = 1;
     if (ds == KL_DRAIN_WOULD_BLOCK) s->wr_blocked = 1;
-    if (ds == KL_DRAIN_ACCEPTED) s->wr_blocked = 0;
+    if (ds == KL_DRAIN_ACCEPTED) { s->wr_blocked = 0; kl_stream_writable_defer_cancel(s); }
     return map_drain(ds);
 }
 
@@ -252,6 +330,7 @@ size_t kl_stream_write_pending(const KlStream *s) {
 int kl_stream_write_free(KlStream *s) {
     if (!s) return 0;
     if (s->send_inflight) return -1;   /* op outstanding; freeing would UAF provider storage */
+    kl_stream_writable_defer_cancel(s);   /* the deferred check must never run on a freed queue */
     kl_drain_free(&s->wq);
     s->wq_inited     = 0;
     s->inflight_len  = 0;

@@ -105,10 +105,24 @@ typedef void (*KlStreamWritableFn)(void *ctx);
  *      needs more room than has freed, which re-arms);
  *    - terminal failure: the write side failed and capacity will never be useful again; the retry
  *      returns KL_STREAM_ERROR.
- *  ARMING: only a WOULD_BLOCK arms it; an ACCEPTED write disarms it. Bytes draining alone never fire
- *  it. It fires only from a later progress point (kl_stream_flush, kl_stream_on_write_complete),
- *  never from inside kl_stream_write, and never once a close has begun (on_close is the terminal
- *  signal). Firing disarms it whether or not the callback retries.
+ *  ARMING: only a WOULD_BLOCK arms it; an ACCEPTED write disarms it, and so does removing the
+ *  callback. Bytes draining alone never fire it. It fires only from a later progress point
+ *  (kl_stream_flush, kl_stream_on_write_complete), never from inside kl_stream_write, and never once
+ *  a close has begun (on_close is the terminal signal). Firing disarms it whether or not the callback
+ *  retries.
+ *  LATE INSTALL: a refusal before `fn` was installed is remembered: once it is installed, it fires as
+ *  above. While any byte is still pending, the next progress point fires it as usual. If NOTHING is
+ *  pending when `fn` is installed (the output drained completely), or the write side has failed, no
+ *  progress point will ever come, so the stream schedules a deferred check on its loop (a 0 ms timer
+ *  on the stream's KlEventCtx) and fires `fn` from there: never from inside this call, at most once
+ *  for that refusal, with no further transport I/O. At most one check is pending per stream.
+ *  Replacing or removing `fn`, an ACCEPTED write, a progress-point fire, a close beginning, or
+ *  kl_stream_write_free cancels it (a replacement fires only the new `fn`). The check is owned by
+ *  the stream and the loop: free the stream (kl_stream_write_free, or its adapter's free) BEFORE its
+ *  loop, as for every object attached to a KlEventCtx; a check still pending when the loop is freed
+ *  simply never fires. A stream with no loop (no KlEventCtx) cannot defer: the refusal stays armed for
+ *  the next progress point, if any. Returns -1, with nothing changed, if the check cannot be
+ *  scheduled. Loop thread only, like every KlStream call.
  *  REENTRANCY: the callback may call kl_stream_write (a buffered remainder is flushed at the next
  *  progress point; kl_stream_flush returns 1 while bytes remain) and may begin a close; any
  *  detachment that close causes is deferred until the callback returns. It must not free the

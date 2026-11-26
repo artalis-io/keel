@@ -62,6 +62,7 @@
 #include "completion_pipe.h"
 #include "platform_pipe.h"
 #include "completion_life.h"
+#include "stream_write.h"          /* kl_stream_set_owner_hold (internal) */
 
 #include <string.h>
 
@@ -170,6 +171,11 @@ static void pipe_deliver(void *vp, const char *buf, size_t len, int ok) {
     }
     if (!p->freed && p->on_data) p->on_data(p->user_data, buf, len, ok);
 }
+
+/* The stream's owner-hold pair: the late-install writable check fires from a loop timer, outside
+ * pipe_ready / a completion, so the stream holds the token across that callback as they do. */
+static void pipe_hold(void *vp)    { kl_comp_life_retain(((KlPipeStream *)vp)->life); }
+static void pipe_unhold(void *vp)  { kl_comp_life_release(((KlPipeStream *)vp)->life); }
 
 static void pipe_on_close(void *vp) {
     KlPipeStream *p = vp;
@@ -323,6 +329,7 @@ static KlPipeStatus pipe_new(struct KlEventCtx *ctx, KlPipeHandle *h, size_t rca
 
     p->stream.alloc = alloc;
     p->stream.ctx   = ctx;
+    (void)kl_stream_set_owner_hold(&p->stream, pipe_hold, pipe_unhold, p);
     if (facets & PIPE_FACET_WRITE) {
         if (kl_stream_write_init(&p->stream, alloc, wcap) != 0) {
             kl_comp_life_release(p->life);

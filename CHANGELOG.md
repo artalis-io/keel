@@ -255,6 +255,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - **`kl_http_compress_stream_try_write` releases the codec when it answers `CLOSED`**, as
   `kl_http_compress_stream_try_end` already did, instead of holding it (about 300 KiB with miniz)
   until the caller released it.
+- **KlStream: a writable callback installed after the refusal no longer waits forever.** A producer
+  refused (`KL_STREAM_WOULD_BLOCK`) before it called `kl_stream_on_writable`, whose queued output
+  then drained completely, was never told to retry: the edge fired only from a progress point, and
+  with nothing pending none came again. The refusal is now remembered as documented for the HTTP
+  streaming edge: if nothing at all is pending when the callback is installed (or the write side
+  failed), the stream fires it once from a deferred check on its loop, never inside the install,
+  never once a close has begun, with no further I/O; while bytes are pending the next progress point
+  fires it as before. Replacing or removing the callback, an accepted write, a close or freeing the
+  write queue cancels the check, and a `KlPipeStream` stays alive across it, so its callback may
+  `kl_pipe_free` the pipe (`docs/contracts/stream.md`, "Writable-again edge").
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
   the backend's last completions without dispatching them. A client freed from such an op's

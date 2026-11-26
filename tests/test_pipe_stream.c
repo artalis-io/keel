@@ -544,6 +544,69 @@ UTEST_F(pipe_iocp, producer_resumes_only_on_the_writable_edge) {
     rec_free(&r);
 }
 
+/* Late install over the completion path: refused before any callback existed, the output then drains
+ * completely (every send retired), so no completion will ever come again. Installing the callback
+ * afterwards fires it once from the loop. `free_in_cb` makes the callback kl_pipe_free its own stream
+ * (no read posted, so no op holds the stream: only the deferred fire's own hold keeps it alive). */
+typedef struct { KlPipeStream *p; int edges; int free_in_cb; } LateEdge;
+static void late_edge(void *ud) {
+    LateEdge *l = ud;
+    l->edges++;
+    if (l->free_in_cb) { kl_pipe_free(l->p); l->p = NULL; }
+}
+static int cond_late_edge(void *a) { return ((LateEdge *)a)->edges > 0; }
+static int late_install_case(KlEventCtx *ev, const char *tag, int free_in_cb) {
+    char name[128]; pipe_name(name, sizeof name, tag);
+    Srv s; memset(&s, 0, sizeof s);
+    s.h = server_create(name, 1, 4096, NULL); s.mode = SRV_SINK_THEN_CLOSE;
+    if (s.h == INVALID_HANDLE_VALUE) return 0;
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 4096, 16 * 1024);
+    KlPipeStream *p = NULL;
+    if (kl_pipe_connect(ev, name, &cfg, &p) != KL_PIPE_OK) return 0;
+    KlStream *st = kl_pipe_stream(p);
+    /* The server is not reading yet: fill until refused, with no callback installed. */
+    static char chunk[4096];
+    memset(chunk, 'q', sizeof chunk);
+    size_t sent = 0; int blocked = 0;
+    for (int i = 0; i < 1000 && !blocked; i++) {
+        KlStreamWriteStatus ws = kl_stream_write(st, chunk, sizeof chunk);
+        if (ws == KL_STREAM_WOULD_BLOCK) blocked = 1;
+        else if (ws == KL_STREAM_ACCEPTED) sent += sizeof chunk;
+        else return 0;
+    }
+    if (!blocked) return 0;
+    s.sink_want = sent;
+    srv_start(&s);                                  /* now it drains everything */
+    ULONGLONG end = GetTickCount64() + 10000;
+    while (kl_stream_write_pending(st) > 0 && GetTickCount64() < end)
+        (void)kl_event_ctx_run(ev, 16, 5);
+    if (kl_stream_write_pending(st) != 0) return 0;
+    pump_for(ev, 20);
+    LateEdge l = { p, 0, free_in_cb };
+    if (kl_stream_on_writable(st, late_edge, &l) != 0) return 0;
+    if (l.edges != 0) return 0;                     /* never inside the install */
+    if (!pump_until(ev, cond_late_edge, &l, 2000)) return 0;
+    pump_for(ev, 50);
+    if (l.edges != 1) return 0;                     /* once */
+    if (!free_in_cb) kl_pipe_free(p);
+    pump_for(ev, 50);
+    srv_join(&s);
+    if (!s.ok) return 0;
+    rec_free(&r);
+    return 1;
+}
+
+UTEST_F(pipe_iocp, late_installed_edge_fires_after_the_queue_drained) {
+    NEED_IOCP();
+    ASSERT_TRUE(late_install_case(&utest_fixture->ev, "late", 0));
+}
+
+UTEST_F(pipe_iocp, late_installed_edge_callback_may_free_its_pipe) {
+    NEED_IOCP();
+    ASSERT_TRUE(late_install_case(&utest_fixture->ev, "latefree", 1));
+}
+
 UTEST_F(pipe_iocp, server_orderly_disconnect_delivers_data_then_eof) {
     NEED_IOCP();
     char name[128]; pipe_name(name, sizeof name, "orderly");

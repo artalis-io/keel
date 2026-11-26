@@ -1,4 +1,5 @@
 #include <keel/timer.h>
+#include "timer_internal.h"
 #include <keel/clock.h>            /* kl_monotonic_ms */
 #include "event_ctx_internal.h"   /* KlTimerEntry layout (opaque on the public surface) */
 #include <limits.h>                /* INT_MAX */
@@ -84,7 +85,9 @@ int64_t kl_timer_add(KlEventCtx *ctx, uint64_t delay_ms,
     return id;
 }
 
-int kl_timer_cancel(KlEventCtx *ctx, int64_t timer_id) {
+/* Remove the entry for timer_id; with match set, only if its callback and user_data also match. */
+static int timer_cancel(KlEventCtx *ctx, int64_t timer_id, int match, KlTimerFn cb,
+                        const void *user_data) {
     if (!ctx) return -1;
 
     /* Linear scan for the ID */
@@ -96,6 +99,7 @@ int kl_timer_cancel(KlEventCtx *ctx, int64_t timer_id) {
         }
     }
     if (idx < 0) return -1;
+    if (match && (ctx->timers[idx].cb != cb || ctx->timers[idx].user_data != user_data)) return -1;
 
     /* Swap with last and shrink */
     ctx->timer_count--;
@@ -107,6 +111,14 @@ int kl_timer_cancel(KlEventCtx *ctx, int64_t timer_id) {
     }
 
     return 0;
+}
+
+int kl_timer_cancel(KlEventCtx *ctx, int64_t timer_id) {
+    return timer_cancel(ctx, timer_id, 0, NULL, NULL);
+}
+
+int kl_timer_cancel_match(KlEventCtx *ctx, int64_t timer_id, KlTimerFn cb, const void *user_data) {
+    return timer_cancel(ctx, timer_id, 1, cb, user_data);
 }
 
 int kl_timer_next_timeout(KlEventCtx *ctx, int max_ms) {
