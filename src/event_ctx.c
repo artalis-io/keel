@@ -46,6 +46,7 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->dispatch_depth = 0;          /* batch-dispatch reclamation */
     ctx->retired = NULL;
     ctx->watcher_gen = 0;
+    ctx->rearming = 0;                /* set only around kl_watcher_rearm's kl_event_mod */
     ctx->last_error = KL_ERR_NONE;
     ctx->timers = NULL;
     ctx->timer_count = 0;
@@ -241,7 +242,10 @@ int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
     while (w && w->fd != fd) w = w->next;
     if (!w) return 0;  /* removed during callback: safe no-op */
 
-    return kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
+    ctx->rearming = 1;   /* a repeat of the registration, not a new one (see KlEventCtx.rearming) */
+    int r = kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
+    ctx->rearming = 0;
+    return r;
 }
 
 void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {

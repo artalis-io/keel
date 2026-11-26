@@ -126,7 +126,38 @@ int  kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *
 /** @brief Modify the event mask for a registered fd. */
 int  kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);
 
-/** @brief Remove a file descriptor from the event loop. */
+/**
+ * @brief Remove a file descriptor from the event loop.
+ *
+ * Remove a handle BEFORE closing it. A handle closed while still registered leaves a stale
+ * registration, and the OS may give its handle value to an unrelated socket. That breaks this
+ * contract, and what follows is damage limitation per backend, not a guarantee:
+ *   - epoll, kqueue: the kernel drops the registration with the descriptor.
+ *   - poll, pollcomp (watches): the registration stays. Until the descriptor number is reused,
+ *     poll() flags it invalid (POLLNVAL; poll reports nothing for it, pollcomp may deliver an event
+ *     with an empty ready mask). Once POSIX reuses the number (it reuses the lowest free one at
+ *     once), the stale registration reports the new descriptor's readiness to its old owner.
+ *   - io_uring (watches): an outstanding poll holds its own reference to the closed file, so what
+ *     it reports afterwards is unspecified; a later re-arm by the owner polls whatever the number
+ *     names by then.
+ *   - Windows select(): never reported again; kl_event_del or kl_event_close still releases it.
+ *   - IOCP (watches): never reported again and no I/O is posted on the handle, until a
+ *     registration (kl_event_add / kl_event_mod) names it again AND the handle is verifiably on
+ *     this loop's port: freshly associated by that call, or recorded as associated by this loop
+ *     (a record can outlive a socket closed without telling the loop). A socket owned by another
+ *     loop is otherwise refused (the call fails). kl_event_del or kl_event_close still releases
+ *     the stale registration. Not covered: a close and reuse of the value during a watch's IDLE
+ *     period (from a completion being dequeued to the probe being posted again: inside the
+ *     watcher's own callback, in an earlier callback of the same batch, between ticks for a watch
+ *     whose socket is in error, or before a retried post). The repeat post in that period (the
+ *     re-arm of the unchanged registration by kl_watcher_rearm, which the dispatch calls after
+ *     the callback, and the retry) is not re-checked and may land on the new socket, completing on
+ *     no port or on another loop's; any other registration in that period (kl_watcher_add or
+ *     kl_watcher_mod, even with the same interest) is checked. kl_event_close then gives up on such
+ *     probes (after about 2 s without progress, and only if nothing but such probes is
+ *     outstanding) and retains, never frees, their small operation records (no caller memory is
+ *     involved); another loop that dequeues one recognises it as foreign and drops it untouched.
+ */
 int  kl_event_del(KlEventLoop *loop, KlSocketHandle fd);
 
 /**

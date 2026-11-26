@@ -38,6 +38,7 @@
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local: pktinfo local addr (POSIX) */
 #include "dgram_send_classify.h" /* kl_dgram_send_err_is_per_datagram: a failed send's own errno */
 #include "event_caps.h"
+#include "event_turn.h"
 #include "event_hangup.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
@@ -106,12 +107,15 @@ typedef struct KlPcWatch {
     KlSocketHandle    fd;
     KlEventMask       mask;
     void             *udata;   /* the tagged KlWatcher pointer */
+    KlEventTurn       turn;    /* fairness stamp (event_turn.h) */
 } KlPcWatch;
 
 typedef struct {
     KlAllocator   *alloc;
-    KlPcOp        *ops;                    /* singly-linked pending-op list */
-    KlPcWatch     *watches;                /* registered readiness watches */
+    KlPcOp        *ops;                    /* singly-linked pending-op list, newest first */
+    KlPcWatch     *watches;                /* registered readiness watches, in registration order */
+    KlEventTurns    turns;                 /* fairness: the watches' current lap (event_turn.h) */
+    int             watches_first;         /* fairness: the last drain filled `max`; watches go first */
     KlSocketHandle  listen_fd;
     int             primed;
 } KlPcState;
@@ -136,15 +140,17 @@ int kl_pollcomp_ev_init(KlEventLoop *loop) {
 int kl_pollcomp_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;   /* connection: posted ops, no readiness watch */
     KlPcState *st = loop->_backend;
-    for (KlPcWatch *w = st->watches; w; w = w->next)
-        if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }   /* idempotent */
+    KlPcWatch **tail = &st->watches;
+    for (; *tail; tail = &(*tail)->next)
+        if ((*tail)->fd == fd) { (*tail)->mask = mask; (*tail)->udata = udata; return 0; }   /* idempotent */
     KlPcWatch *w = kl_malloc(st->alloc, sizeof(*w));
     if (!w) return -1;
     w->fd = fd;
     w->mask = mask;
     w->udata = udata;
-    w->next = st->watches;
-    st->watches = w;
+    kl_turn_join(&st->turns, &w->turn);
+    w->next = NULL;
+    *tail = w;
     return 0;
 }
 int kl_pollcomp_ev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
@@ -750,9 +756,18 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
     struct pollfd *pfds = kl_malloc(st->alloc, nfds * sizeof(*pfds));
     if (!pfds) return -1;
     KlPcOp **oref = NULL;
+    KlPcWatch **wref = NULL;
     if (nops) {
         oref = kl_malloc(st->alloc, nops * sizeof(*oref));
         if (!oref) { kl_free(st->alloc, pfds, nfds * sizeof(*pfds)); return -1; }
+    }
+    if (nwatch) {
+        wref = kl_malloc(st->alloc, nwatch * sizeof(*wref));
+        if (!wref) {
+            if (oref) kl_free(st->alloc, oref, nops * sizeof(*oref));
+            kl_free(st->alloc, pfds, nfds * sizeof(*pfds));
+            return -1;
+        }
     }
 
     size_t i = 0;
@@ -762,62 +777,89 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
         pfds[i].revents = 0;
         oref[i] = o;
     }
-    for (const KlPcWatch *w = st->watches; w; w = w->next, i++) {
+    for (KlPcWatch *w = st->watches; w; w = w->next, i++) {
         pfds[i].fd = w->fd;
         pfds[i].events = pc_watch_events(w->mask);
         pfds[i].revents = 0;
+        wref[i - nops] = w;
     }
 
     int pr = poll(pfds, (nfds_t)nfds, timeout_ms);
     if (pr > 0) {
-        /* Completed ops (pfds[0..nops)). */
-        for (i = 0; i < nops && count < max; i++) {
-            KlPcOp *op = oref[i];
-            short re = pfds[i].revents;
-            if (!re) continue;
-            /* POLLERR/POLLHUP without our event still lets the syscall report the
-             * error/EOF; pc_complete surfaces ok=0 for TCP so the driver closes. */
-            int r = pc_complete(op, &out[count]);
-            if (r == 0) continue;                 /* partial/spurious: keep the op */
-            count++;                              /* r == 1 (done) or -1 (failed) */
-            /* Unlink and free the completed op. */
-            KlPcOp **ulink = &st->ops;
-            while (*ulink && *ulink != op) ulink = &(*ulink)->next;
-            if (*ulink) *ulink = op->next;
-            pc_op_free(op);
-        }
-        /* Ready watches (pfds[nops..nfds)): level-triggered, persistent. Surface a
-         * KL_COMP_WATCHER for each; the driver routes it to kl_event_dispatch. The
-         * watch list is unmodified during processing, so a parallel re-walk is safe. */
-        size_t j = nops;
-        for (const KlPcWatch *w = st->watches; w && count < max; w = w->next, j++) {
-            short re = pfds[j].revents;
-            if (!re) continue;
-            KlEventMask ready = 0;
-            if (kl_hup_wanted(w->mask)) {
-#if KL_PC_HANGUP
-                /* Hang-up watch, level-triggered like the rest of this double: the consumer removes
-                 * the watch once it has acted. */
-                ready = kl_hup_ready(re & POLLRDHUP, re & POLLHUP, re & POLLERR, 1);
-                if (!ready) continue;
-#else
-                continue;   /* no POLLRDHUP: the capability is not advertised, nothing to report */
-#endif
-            } else {
-                if (re & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
-                if (re & POLLOUT) ready |= KL_EVENT_WRITE;
+        /* Fairness (the results are cut off at `max`, so their order decides who waits):
+         *  - ops are taken OLDEST first. The list is newest first and a completed op's successor is
+         *    posted at its head, so a ready op that misses this drain is ahead of every op posted
+         *    since, and an op that stays ready completes within ceil(ops / max) drains. Taken newest
+         *    first, the reposts of the first `max` ready connections won every drain and the rest
+         *    were never completed;
+         *  - watches are picked by laps (event_turn.h), as the readiness poll backend picks;
+         *  - when a drain fills `max`, the next one takes watches before ops, so a busy set of ops
+         *    cannot starve a watcher (a thread-pool wakeup, a timer) or the reverse. */
+        const int watches_first = st->watches_first;
+        for (int pass = 0; pass < 2; pass++) {
+            if ((pass == 0) == !watches_first) {
+                /* Completed ops (pfds[0..nops)), oldest first. */
+                for (size_t k = nops; k > 0 && count < max; k--) {
+                    KlPcOp *op = oref[k - 1];
+                    short re = pfds[k - 1].revents;
+                    if (!re) continue;
+                    /* POLLERR/POLLHUP without our event still lets the syscall report the
+                     * error/EOF; pc_complete surfaces ok=0 for TCP so the driver closes. */
+                    int r = pc_complete(op, &out[count]);
+                    if (r == 0) continue;                 /* partial/spurious: keep the op */
+                    count++;                              /* r == 1 (done) or -1 (failed) */
+                    /* Unlink and free the completed op. */
+                    KlPcOp **ulink = &st->ops;
+                    while (*ulink && *ulink != op) ulink = &(*ulink)->next;
+                    if (*ulink) *ulink = op->next;
+                    pc_op_free(op);
+                }
+                continue;
             }
-            memset(&out[count], 0, sizeof(out[count]));
-            out[count].kind = KL_COMP_WATCHER;
-            out[count].target = w->udata;         /* the tagged KlWatcher */
-            out[count].bytes = (size_t)ready;      /* carry the ready mask */
-            out[count].ok = 1;
-            count++;
+            /* Ready watches (pfds[nops..nfds)): level-triggered, persistent. Surface a
+             * KL_COMP_WATCHER for each; the driver routes it to kl_event_dispatch. The watch list
+             * is not modified during the drain, so wref stays valid. */
+            if (nwatch == 0) continue;
+            kl_turns_begin(&st->turns);
+            for (int lap = 0; lap < 2 && count < max; lap++) {
+                if (lap == 1)
+                    kl_turns_next_lap(&st->turns);   /* nothing due was left ready: the lap is over */
+                for (size_t j = 0; j < nwatch && count < max; j++) {
+                    KlPcWatch *w = wref[j];
+                    if (!kl_turn_due(&st->turns, &w->turn)) continue;
+                    short re = pfds[nops + j].revents;
+                    if (!re) continue;
+                    KlEventMask ready = 0;
+                    if (kl_hup_wanted(w->mask)) {
+#if KL_PC_HANGUP
+                        /* Hang-up watch, level-triggered like the rest of this double: the consumer
+                         * removes the watch once it has acted. */
+                        ready = kl_hup_ready(re & POLLRDHUP, re & POLLHUP, re & POLLERR, 1);
+                        if (!ready) continue;
+#else
+                        continue;   /* no POLLRDHUP: the capability is not advertised, nothing to report */
+#endif
+                    } else {
+                        if (re & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
+                        if (re & POLLOUT) ready |= KL_EVENT_WRITE;
+                    }
+                    memset(&out[count], 0, sizeof(out[count]));
+                    out[count].kind = KL_COMP_WATCHER;
+                    out[count].target = w->udata;         /* the tagged KlWatcher */
+                    out[count].bytes = (size_t)ready;      /* carry the ready mask */
+                    out[count].ok = 1;
+                    count++;
+                    kl_turn_take(&st->turns, &w->turn);
+                }
+            }
         }
     }
+    /* A drain that filled `max` may have left ready work behind: alternate which class goes first. */
+    st->watches_first = count >= max ? !st->watches_first : 0;
 
     kl_free(st->alloc, pfds, nfds * sizeof(*pfds));
     if (oref) kl_free(st->alloc, oref, nops * sizeof(*oref));
+    if (wref) kl_free(st->alloc, wref, nwatch * sizeof(*wref));
     return count;
 }
 

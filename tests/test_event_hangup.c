@@ -571,6 +571,33 @@ UTEST(event_hangup, a_reused_socket_handle_is_polled_again) {
     kl_test_closesock(s2);
     kl_test_closesock(c2);
 }
+
+/* A watched socket closed without kl_watcher_del (a contract breach) is never reported again, on both
+ * Windows engines: select() marks the handle dead, and IOCP orphans the watch when the close cancels
+ * its probe. IOCP used to deliver the cancelled probe as readiness and then re-report the watch on
+ * every drain, running the stale callback on a handle value that may by then name another socket. */
+static int g_stale_calls;
+static void stale_on_ready(KlSocketHandle fd, KlEventMask ready, void *ud) {
+    (void)fd; (void)ready; (void)ud;
+    g_stale_calls++;
+}
+UTEST(event_hangup, a_socket_closed_without_del_is_not_reported_again) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
+    int s, c;
+    ASSERT_EQ(tcp_pair(&s, &c), 0);
+    g_stale_calls = 0;
+    ASSERT_EQ(kl_watcher_add(&ev, s, KL_EVENT_READ, stale_on_ready, NULL), 0);
+    for (int i = 0; i < 3; i++) kl_event_ctx_run(&ev, 8, 10);   /* nothing to read: no report */
+    ASSERT_EQ(g_stale_calls, 0);
+    kl_test_closesock(s);                                       /* closed without kl_watcher_del */
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ev, 8, 20);
+    EXPECT_EQ(g_stale_calls, 0);
+    kl_watcher_del(&ev, s);                                     /* still releases the registration */
+    kl_event_ctx_free(&ev);
+    kl_test_closesock(c);
+}
 #endif
 
 UTEST_MAIN();

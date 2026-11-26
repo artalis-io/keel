@@ -88,7 +88,27 @@ typedef struct {
     struct KlIocpOp          *ops;         /* global registry of ALL outstanding ops */
     int                       quiescing;   /* teardown: drain must not re-post any op */
     KlAllocator              *alloc;
+    /* Registration identity (see "Watch ownership"): the handles this port associated itself, each
+     * with the serial of that association. ERROR_INVALID_PARAMETER from CreateIoCompletionPort says
+     * only "associated with SOME port"; a handle is taken to be on this one only if it is here. */
+    struct KlIocpAssoc       *assoc;
+    size_t                    assoc_cap;   /* power of two (0 = not allocated) */
+    size_t                    assoc_n;
+    uint64_t                  assoc_serial;
+    /* Owner tag every op carries (op->owner / op->owner_gen): a packet this port dequeues for an op
+     * it does not own (another loop's probe that reached it) is dropped untouched. gen is unique per
+     * state in the process, so a new state at a freed one's address does not match its ops. */
+    uint64_t                  gen;
+    /* The ctx this loop is driven by, learned at the first drain (every watcher dispatch comes from
+     * one), so kl_event_mod can tell the re-arm of an unchanged registration (ctx->rearming) from
+     * a new registration. NULL for a loop never drained through a ctx. */
+    const KlEventCtx         *ctx;
 } KlIocpState;
+
+typedef struct KlIocpAssoc {
+    SOCKET   s;
+    uint64_t serial;   /* 0 = empty slot */
+} KlIocpAssoc;
 
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
@@ -131,12 +151,25 @@ typedef struct KlIocpOp {
     union {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
     };
+    /* WATCHER state. A watch op is in exactly one of these states (see "Watch ownership" below):
+     *   PENDING   watch_rearm == 0: its zero-byte probe is in the kernel (kernel-owned OVERLAPPED);
+     *   IDLE      watch_rearm == 1: it owns NO kernel I/O. Sub-states: waiting for its owner's re-arm
+     *             after a dispatch (no flag), a transient post failure to retry (watch_retry), a
+     *             live socket in error (watch_dead), or a closed socket (watch_orphan);
+     *   REMOVED   watcher_removed == 1: deleted or retargeted while PENDING; its cancelled completion
+     *             frees it. */
     int           watcher_removed;             /* WATCHER: kl_event_del'd; free, don't re-post */
-    int           watch_dead;                  /* WATCHER: its re-post failed (the socket is dead):
+    int           watch_dead;                  /* WATCHER: its post failed on a live socket (a reset):
                                                 * reported ready on every drain, level-triggered,
-                                                * until kl_event_del, and never re-posted */
-    int           watch_rearm;                 /* WATCHER: dispatched; re-post at the next drain, not
-                                                * before the callback has had a chance to consume */
+                                                * until kl_event_del; each re-arm tries the post again */
+    int           watch_orphan;                /* WATCHER: its socket was closed without kl_event_del
+                                                * (the probe was cancelled by the close, or the post
+                                                * found no socket). Never posted, never reported
+                                                * again: the handle value may name another socket by
+                                                * now. Only an explicit re-registration (kl_event_add /
+                                                * kl_event_mod naming the handle) revives it */
+    int           watch_rearm;                 /* WATCHER: IDLE (owns no kernel I/O); see above */
+    int           watch_retry;                 /* WATCHER: a transient post failure; the drain retries */
     int           watch_retries;               /* WATCHER: consecutive transient re-post failures
                                                 * (diagnostic; a transient failure never kills it) */
     KlEventMask   watch_mask;                  /* WATCHER: the interest this probe covers */
@@ -160,6 +193,12 @@ typedef struct KlIocpOp {
                                           * own zero-byte packet so the drain issues it again */
     struct KlIocpOp   *g_next;
     struct KlIocpOp  **g_link;
+    /* Owner tag, set by iocp_op_register: the state that posted this op and its generation. A drain
+     * reads these two fields of every dequeued op BEFORE anything else and drops (never frees,
+     * never dispatches) one that is not its own. */
+    const void        *owner;
+    uint64_t           owner_gen;
+    uint64_t           assoc_serial;   /* WATCHER: the association of its handle it was posted under */
 } KlIocpOp;
 
 /* The object CancelIoEx must name for this op: the pipe HANDLE for a pipe op, else the socket. */
@@ -179,8 +218,125 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     memset(st, 0, sizeof(*st));
     st->port = port;
     st->alloc = loop->alloc;
+    static volatile LONG64 g_iocp_gen;
+    st->gen = (uint64_t)InterlockedIncrement64(&g_iocp_gen);
     loop->_backend = st;
     return 0;
+}
+
+/* ── Registration identity ─────────────────────────────────────────────────────────────────── */
+
+static size_t assoc_slot(SOCKET s, size_t cap) {
+    uint64_t x = (uint64_t)(uintptr_t)s;
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+    return (size_t)x & (cap - 1);
+}
+
+/* The serial under which this port associated `s`, or 0 if it has no record of doing so. */
+static uint64_t assoc_find(const KlIocpState *st, SOCKET s) {
+    if (!st->assoc_cap) return 0;
+    for (size_t i = assoc_slot(s, st->assoc_cap); st->assoc[i].serial; i = (i + 1) & (st->assoc_cap - 1))
+        if (st->assoc[i].s == s) return st->assoc[i].serial;
+    return 0;
+}
+
+static int assoc_grow(KlIocpState *st) {
+    size_t ncap = st->assoc_cap ? st->assoc_cap * 2 : 64;
+    if (ncap > SIZE_MAX / sizeof(KlIocpAssoc)) return -1;
+    KlIocpAssoc *n = kl_malloc(st->alloc, ncap * sizeof(*n));
+    if (!n) return -1;
+    memset(n, 0, ncap * sizeof(*n));
+    for (size_t i = 0; i < st->assoc_cap; i++) {
+        if (!st->assoc[i].serial) continue;
+        size_t j = assoc_slot(st->assoc[i].s, ncap);
+        while (n[j].serial) j = (j + 1) & (ncap - 1);
+        n[j] = st->assoc[i];
+    }
+    if (st->assoc) kl_free(st->alloc, st->assoc, st->assoc_cap * sizeof(*st->assoc));
+    st->assoc = n;
+    st->assoc_cap = ncap;
+    return 0;
+}
+
+/* Make room for one more record, so the assoc_put that follows a successful association cannot fail
+ * (a socket on the port with no record would have every later registration refused). */
+static int assoc_reserve(KlIocpState *st) {
+    return ((st->assoc_n + 1) * 2 > st->assoc_cap) ? assoc_grow(st) : 0;
+}
+
+/* Record a fresh association of `s` with this port (replacing any older record of the value: it
+ * named a socket that is gone). Returns its serial; cannot fail after a successful assoc_reserve. */
+static uint64_t assoc_put(KlIocpState *st, SOCKET s) {
+    if (!assoc_find(st, s) && assoc_reserve(st) < 0) return 0;   /* an existing slot needs no room */
+    size_t i = assoc_slot(s, st->assoc_cap);
+    while (st->assoc[i].serial && st->assoc[i].s != s) i = (i + 1) & (st->assoc_cap - 1);
+    if (!st->assoc[i].serial) st->assoc_n++;
+    st->assoc[i].s = s;
+    st->assoc[i].serial = ++st->assoc_serial;
+    return st->assoc[i].serial;
+}
+
+/* Forget the association of `s`, if it is still the one made under `serial` (the socket it named
+ * is known to be closed). Backward-shift deletion keeps every probe sequence intact. */
+static void assoc_drop(KlIocpState *st, SOCKET s, uint64_t serial) {
+    if (!st->assoc_cap || !serial) return;
+    const size_t mask = st->assoc_cap - 1;
+    size_t i = assoc_slot(s, st->assoc_cap);
+    while (st->assoc[i].serial && st->assoc[i].s != s) i = (i + 1) & mask;
+    if (!st->assoc[i].serial || st->assoc[i].serial != serial) return;
+    st->assoc[i].serial = 0;
+    st->assoc_n--;
+    for (size_t j = (i + 1) & mask; st->assoc[j].serial; j = (j + 1) & mask) {
+        size_t home = assoc_slot(st->assoc[j].s, st->assoc_cap);
+        /* Move j into the hole at i unless its home lies cyclically in (i, j]. */
+        int stays = (i <= j) ? (home > i && home <= j) : (home > i || home <= j);
+        if (stays) continue;
+        st->assoc[i] = st->assoc[j];
+        st->assoc[j].serial = 0;
+        i = j;
+    }
+}
+
+/* Forget whatever association of `s` is recorded (the owner removed its registration). */
+static void assoc_forget(KlIocpState *st, SOCKET s) {
+    assoc_drop(st, s, assoc_find(st, s));
+}
+
+/* Try to put `s` on this port. 1: freshly associated (it was on no port, so it is a socket nobody
+ * else's port knows) and recorded, *serial set; 0: already on SOME port (ERROR_INVALID_PARAMETER,
+ * which cannot say whose); -1: no socket, or an unrecorded handle with no memory for its record. */
+static int iocp_try_fresh(KlIocpState *st, SOCKET s, ULONG_PTR key, uint64_t *serial) {
+    /* A recorded value has its slot already (assoc_put updates it in place), so the association is
+     * still tried when the table cannot grow: a stale entry must not stand in for the check. Only an
+     * unrecorded handle with no room for its record is refused, so a socket is never left on the
+     * port unrecorded. */
+    if (assoc_reserve(st) < 0 && !assoc_find(st, s)) return -1;
+    if (CreateIoCompletionPort((HANDLE)(uintptr_t)s, st->port, key, 0)) {
+        *serial = assoc_put(st, s);
+        return 1;
+    }
+    return GetLastError() == ERROR_INVALID_PARAMETER ? 0 : -1;
+}
+
+/* Put `s` on this port, or confirm this port put it there. Returns the association serial, or 0
+ * when the handle cannot be shown to be on this port: no socket, out of memory, or associated with
+ * a port this one has no live record of associating (possibly another loop's: a probe posted on it
+ * would complete there).
+ *
+ * What the record guarantees, precisely: an entry means this port associated a socket with this
+ * handle value and has not since learned that socket is gone. It learns that from closure evidence
+ * on a watch (the watch is orphaned) and from kl_event_del of a handle that has no watch (a
+ * connection leaving). It does NOT learn of a connection or watched socket closed silently, so an
+ * entry can outlive its socket; a later registration of another loop's socket on that value would
+ * then be accepted, which takes a del-before-close breach or a socket registered on the wrong loop.
+ * kl_event_del of a WATCH keeps the entry: the socket usually lives on (a pooled client
+ * connection is watched again later). The record only turns such mistakes into refusals where it
+ * can; memory safety rests on the owner tag and on retention (see "Watch ownership"). */
+static uint64_t iocp_associate(KlIocpState *st, SOCKET s, ULONG_PTR key) {
+    uint64_t serial = 0;
+    const int r = iocp_try_fresh(st, s, key, &serial);
+    if (r > 0) return serial;
+    return r == 0 ? assoc_find(st, s) : 0;
 }
 
 static void iocp_op_free(KlIocpOp *op);
@@ -202,10 +358,9 @@ static int iocp_watch_reinterest(KlIocpState *st, struct KlIocpWatch *w, KlEvent
  * discard), but the async client watches its own connection socket, and a consuming probe would
  * eat response bytes. WRITE is tested first: a watcher carries one interest at a time.
  *
- * KNOWN WART (#265): the caller re-posts from the completion, before the callback has drained the
- * socket, so a still-ready socket completes again at once and delivers the same readiness twice.
- * That is one spurious callback per signal, harmless for the wakeup (its drain finds nothing) but
- * real; tests/test_wakeup.c drained_channel_stops_firing is the oracle for fixing it. */
+ * A probe is re-posted only after its callback has run (the dispatch re-arm, kl_event_mod), so a
+ * socket the callback drained does not complete again at once and report the same readiness twice
+ * (tests/test_wakeup.c drained_channel_stops_firing). */
 static int iocp_watch_post(KlIocpOp *op) {
     WSABUF b = { 0, NULL };   /* zero-byte: readiness only, consumes nothing */
     DWORD n = 0, flags = 0;
@@ -217,24 +372,199 @@ static int iocp_watch_post(KlIocpOp *op) {
     int err = WSAGetLastError();
     if (err == WSA_IO_PENDING) return 0;
     /* Out of buffers or memory for the moment: the socket itself is fine, so try again later
-     * rather than declaring it dead. Anything else (a reset, a closed socket) is permanent. */
+     * rather than declaring it dead. */
     if (err == WSAENOBUFS || err == WSA_NOT_ENOUGH_MEMORY || err == WSAEINTR ||
         err == WSAEINPROGRESS || err == WSAEWOULDBLOCK || err == ERROR_NO_SYSTEM_RESOURCES)
         return -2;
-    return -1;
+    /* No socket behind the handle: it was closed without kl_event_del. */
+    if (err == WSAENOTSOCK || err == WSA_INVALID_HANDLE)
+        return -3;
+    return -1;   /* a live socket in error (a reset): permanent for this socket */
 }
 
-/* A re-registration of a watched handle value (kl_watcher_add or kl_watcher_mod on a descriptor
- * already watched) may name a NEW socket: Winsock reuses handle values, and a socket closed without
- * kl_event_del leaves its watch behind. So associate the socket with the port again; for the
- * socket already associated this fails with ERROR_INVALID_PARAMETER and changes nothing. Without
- * it the probe re-posted on the new socket completed nowhere: its readiness was never reported,
- * and kl_event_close's quiesce waited for that completion forever. A watch whose re-post failed
- * (dead) is revived, so the next drain posts it on the new socket; if the handle is still no
- * socket, that post fails and marks it dead again. */
-static void iocp_watch_renew(KlIocpState *st, KlIocpWatch *w, void *udata) {
-    (void)CreateIoCompletionPort((HANDLE)(uintptr_t)w->fd, st->port, (ULONG_PTR)udata, 0);
-    w->op->watch_dead = 0;   /* a dead op waits to be re-armed (watch_rearm): the drain re-posts it */
+/* ── Watch ownership ─────────────────────────────────────────────────────────────────────────
+ *
+ * A watch probe is a zero-byte WSARecv/WSASend whose OVERLAPPED lives in its KlIocpOp. While it is
+ * PENDING the kernel owns that OVERLAPPED: it writes the completion status into it, and the packet
+ * that carries its address is queued to the port of the SOCKET THE PROBE WAS POSTED ON. Only after
+ * the packet is dequeued from this port may the op be freed or posted again.
+ *
+ * A probe names its socket by handle value, and Winsock reuses handle values. A socket closed
+ * without kl_event_del (the caller's contract is del-before-close) leaves its watch behind, and the
+ * value may then name an unrelated socket: one no port knows (a probe on it completes on no port),
+ * one another loop's port owns (that loop would dequeue an OVERLAPPED it does not own), or one this
+ * loop associated for something else (the stale watcher would fire on it). Four rules keep that
+ * from reaching freed memory or the wrong owner:
+ *
+ *  1. Identity: a registration posts a probe only on a handle verifiably on THIS port: freshly
+ *     associated by that call (CreateIoCompletionPort succeeded: no port had the socket), or
+ *     recorded in this port's identity record (st->assoc: the handles it associated itself, with a
+ *     serial per association; what an entry guarantees is spelled out at iocp_associate).
+ *     ERROR_INVALID_PARAMETER alone ("some port") is never enough. The exception is the IDLE
+ *     period below.
+ *  2. Naming: a probe is posted only when its owner names the handle: kl_event_add (a new watch),
+ *     kl_event_mod / a repeat kl_event_add (every explicit re-registration, and the dispatch re-arm
+ *     after the owner's own callback), or the drain's retry of a transient post failure. The drain
+ *     never re-posts on a value nobody named since the last completion.
+ *  3. Orphaning: evidence the socket is gone (a probe ended by the close, iocp_watch_closed, or a
+ *     post that finds no socket) makes the watch ORPHANED: no kernel I/O, never posted or reported
+ *     again (the select() backend's behaviour for the same breach), revived only by a registration
+ *     that passes rule 1. A registration of a NEW socket on the value that arrives while the old
+ *     probe is still PENDING (the close not yet dequeued) is recognised by a fresh association
+ *     succeeding, and gets a new probe; the old one is retired by its own completion.
+ *  4. Owner tag: every op carries its state and that state's generation (iocp_op_owned). A drain
+ *     that dequeues an op it does not own drops it untouched: not freed, not dispatched.
+ *
+ * What rules 1 and 2 cannot see is the IDLE period: from the dequeue of a probe's completion (or a
+ * failed post) to the next post. Three posts in it repeat an earlier registration without
+ * re-checking the handle, because checking would cost a failing CreateIoCompletionPort each time:
+ * the re-arm of an unchanged registration (kl_watcher_rearm, which the dispatch calls after the
+ * watcher's callback), that re-arm after each report of a watch in error (watch_dead, which may
+ * stay IDLE across many ticks), and the drain's retry of a transient post failure. Any other
+ * registration made while IDLE is checked, the same interest included. If the socket was closed
+ * without del and the value reused during that period (in the watcher's own callback, in an earlier
+ * callback of the same batch, or between ticks), that post lands on the new socket, and the probe
+ * may complete on no port or on another loop's. An
+ * interest change on a PENDING watch (iocp_watch_reinterest) relies on the record alone, which a
+ * silently closed socket leaves stale (see iocp_associate). In all of these kl_event_close gives up
+ * on what cannot reach this port (iocp_quiesce_port_for_close) and retains (leaks) the op record,
+ * never frees it: the kernel may still write its OVERLAPPED, and another port's drain, which may
+ * dequeue it at any later time, reads only its tag (rule 4). No other kind of op is ever given up
+ * on, and every one of these needs a del-before-close breach. */
+
+/* Post the probe of an IDLE watch (it owns no kernel I/O) on behalf of the owner who just named its
+ * handle. Updates the IDLE sub-state on failure; a successful post makes it PENDING. */
+static void iocp_watch_arm(KlIocpState *st, KlIocpOp *op) {
+    if (st->quiescing) return;   /* teardown: never post; close frees it as IDLE */
+    int pr = iocp_watch_post(op);
+    if (pr == 0) {
+        op->watch_rearm = 0;
+        op->watch_dead = op->watch_orphan = op->watch_retry = 0;
+        op->watch_retries = 0;
+        return;
+    }
+    op->watch_rearm = 1;
+    if (pr == -2) {
+        /* Transient (no buffers or memory for now): the socket is healthy, so it is neither
+         * reported (that would spin the loop on a socket with nothing to read) nor given up on. The
+         * next drain tries again, and comes within a short wait while the pressure lasts. A count of
+         * attempts used to mark it dead after 64 failures, which a busy loop burns through in
+         * milliseconds; the dead watcher was then reported on every drain, a 100% CPU spin for good,
+         * since nothing deletes a wakeup or pool watcher. */
+        if (op->watch_retries < INT_MAX) op->watch_retries++;   /* saturates */
+        op->watch_retry = 1;
+        return;
+    }
+    op->watch_retry = 0;
+    if (pr == -3) {
+        op->watch_orphan = 1;   /* closed without kl_event_del: see "Watch ownership" */
+        assoc_drop(st, op->accept_sock, op->assoc_serial);   /* the socket it was recorded for is gone */
+        op->watch_dead = 0;
+    } else {
+        op->watch_dead = 1;     /* a live socket in error: reported on every drain */
+    }
+}
+
+/* Did this dequeued (not removed) probe end because its socket was closed under it? A closesocket
+ * completes a pending probe with STATUS_LOCAL_DISCONNECT, and a CancelIoEx nobody here issued (the
+ * loop's own ones mark the op removed first) with STATUS_CANCELLED; a peer reset is
+ * STATUS_REMOTE_DISCONNECT, a live socket in error, and is reported as readiness (measured on
+ * Windows 10.0.26300). Read from the OVERLAPPED's status rather than with WSAGetOverlappedResult,
+ * which would consult the handle value, and that may already name another socket. */
+static int iocp_watch_closed(const KlIocpOp *op) {
+    const DWORD status = (DWORD)op->ov.Internal;
+    return status == (DWORD)0xC000013BL ||   /* STATUS_LOCAL_DISCONNECT: closed locally */
+           status == (DWORD)0xC0000120L;     /* STATUS_CANCELLED */
+}
+
+/* A new probe op for watch handle `fd`, posted under association `serial`. NULL on failure (nothing
+ * left behind). */
+static KlIocpOp *iocp_watch_new_op(KlIocpState *st, SOCKET fd, KlEventMask mask, void *udata,
+                                   uint64_t serial) {
+    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return NULL;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_WATCHER;
+    op->alloc = st->alloc;
+    op->accept_sock = fd;
+    op->watcher_udata = udata;
+    op->watch_mask = mask;
+    op->assoc_serial = serial;
+    iocp_op_register(st, op, fd);
+    if (iocp_watch_post(op) < 0) { iocp_op_free(op); return NULL; }
+    return op;
+}
+
+/* kl_event_mod, or a kl_event_add of an already watched handle, for watch `w`: its owner names the
+ * handle. */
+static int iocp_watch_update(KlIocpState *st, KlIocpWatch *w, KlEventMask mask, void *udata) {
+    KlIocpOp *op = w->op;
+    if (op->watch_orphan) {
+        /* The socket the watch was made for was closed without kl_event_del; the handle value now
+         * names some other socket. Post on it only if it is verifiably on THIS port: freshly
+         * associated now, or associated by this port since (iocp_associate). A socket another
+         * loop's port owns is refused, and the watch stays orphaned. */
+        const uint64_t serial = iocp_associate(st, w->fd, (ULONG_PTR)udata);
+        if (!serial) return -1;
+        op->watch_orphan = 0;
+        op->assoc_serial = serial;
+        op->watch_mask = mask;
+        op->watcher_udata = udata;
+        iocp_watch_arm(st, op);
+        return op->watch_orphan ? -1 : 0;
+    }
+    if (op->watch_rearm) {
+        /* IDLE: between a dispatched completion and its re-arm (or retrying, or in error). Arm the
+         * probe for the (possibly new) interest now: this call is the owner naming the handle, after
+         * its callback has consumed what it was told about.
+         *
+         * The re-arm of an unchanged registration (kl_watcher_rearm: the dispatch re-arm after a
+         * callback, ctx->rearming) is not checked: that would cost a failing CreateIoCompletionPort
+         * on every dispatch. Every other registration (kl_watcher_mod, or kl_watcher_add upserting
+         * the node, even with the same interest: typically a callback that closed the socket without
+         * del and registered a new one on the reused value) is held to rule 1: a fresh association
+         * (the value now names a socket no port had) or this port's record. A handle that passes
+         * neither is refused and the watch orphaned, rather than a probe posted where it may never
+         * complete. */
+        const int repeat = st->ctx && st->ctx->rearming &&
+                           mask == op->watch_mask && udata == op->watcher_udata;
+        if (!repeat) {
+            const uint64_t serial = iocp_associate(st, w->fd, (ULONG_PTR)udata);
+            if (!serial) {
+                op->watch_orphan = 1;
+                op->watch_dead = op->watch_retry = 0;
+                return -1;
+            }
+            op->assoc_serial = serial;
+        }
+        op->watcher_udata = udata;
+        op->watch_mask = mask;
+        iocp_watch_arm(st, op);
+        return 0;
+    }
+    /* PENDING, and this is kl_watcher_rearm repeating the unchanged registration (the callback
+     * already re-armed it): nothing to do, and no CreateIoCompletionPort call. A close and reuse
+     * since that post is caught by the old probe's own completion (it ends with the close). */
+    if (st->ctx && st->ctx->rearming && mask == op->watch_mask && udata == op->watcher_udata)
+        return 0;
+    op->watcher_udata = udata;
+    /* PENDING. A fresh association succeeding proves the handle now names a NEW socket: the one the
+     * probe sits on (associated with this port) was closed without kl_event_del, and the close's
+     * completion has not been dequeued yet. The owner is registering the new socket: post a probe on
+     * it and retire the old op, whose completion (it arrives here) frees it instead of orphaning the
+     * watch. Otherwise (ERROR_INVALID_PARAMETER) it is the same socket, and only an interest change
+     * acts. */
+    uint64_t serial = 0;
+    const int fr = iocp_try_fresh(st, w->fd, (ULONG_PTR)udata, &serial);
+    if (fr < 0) return -1;
+    if (fr > 0) {
+        KlIocpOp *fresh = st->quiescing ? NULL : iocp_watch_new_op(st, w->fd, mask, udata, serial);
+        if (!fresh) return -1;
+        w->op = fresh;
+        op->watcher_removed = 1;   /* its socket is gone; the pending completion frees it */
+        return 0;
+    }
+    return iocp_watch_reinterest(st, w, mask, udata);
 }
 
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
@@ -249,30 +579,18 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
      * tag, not on any IOCP specific. */
     if ((uintptr_t)udata & 1) {
         for (KlIocpWatch *w = st->watches; w; w = w->next)
-            if (w->fd == (SOCKET)fd) {   /* idempotent re-add; the interest may have changed */
-                iocp_watch_renew(st, w, udata);
-                w->op->watcher_udata = udata;
-                return iocp_watch_reinterest(st, w, mask, udata);
-            }
-        /* A socket the completion connect already posted ConnectEx on is ALREADY associated with
-         * the port, and a repeat association fails with ERROR_INVALID_PARAMETER. That is benign:
-         * the original association stands, and a watcher completion is routed by
-         * op->watcher_udata, not by the completion key. Treating it as fatal is what stopped the
-         * client's detached connect watcher from ever being armed for the send phase.
-         * Any other failure is real. */
-        if (!CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port, (ULONG_PTR)udata, 0) &&
-            GetLastError() != ERROR_INVALID_PARAMETER)
-            return -1;
-        KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+            if (w->fd == (SOCKET)fd)     /* idempotent re-add; the interest may have changed */
+                return iocp_watch_update(st, w, mask, udata);
+        /* A socket the completion connect already posted ConnectEx on (or that this port associated
+         * as a connection) is ALREADY associated, and a repeat association fails with
+         * ERROR_INVALID_PARAMETER; that the client's detached connect watcher must still be armed
+         * for the send phase is why the error is not fatal. But the error says only "some port", so
+         * it is accepted only for a handle this port's identity record holds (iocp_associate): a
+         * probe on another loop's socket would complete on that loop's port. */
+        const uint64_t serial = iocp_associate(st, (SOCKET)fd, (ULONG_PTR)udata);
+        if (!serial) return -1;
+        KlIocpOp *op = iocp_watch_new_op(st, (SOCKET)fd, mask, udata, serial);
         if (!op) return -1;
-        memset(op, 0, sizeof(*op));
-        op->type = KL_IOCP_WATCHER;
-        op->alloc = st->alloc;
-        op->accept_sock = (SOCKET)fd;
-        op->watcher_udata = udata;
-        op->watch_mask = mask;
-        iocp_op_register(st, op, (SOCKET)fd);
-        if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
         KlIocpWatch *w = kl_malloc(st->alloc, sizeof(*w));
         if (!w) { op->watcher_removed = 1; CancelIoEx((HANDLE)(uintptr_t)fd, &op->ov); return -1; }
         w->fd = (SOCKET)fd;
@@ -282,41 +600,31 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         return 0;
     }
 
-    HANDLE h = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port,
-                                      (ULONG_PTR)udata, 0);
-    return h ? 0 : -1;
+    /* A connection: associate it, and record that (so a later watch on it is accepted). It must be a
+     * fresh association, as it always had to be: a handle already on some port is refused, since
+     * the connection's receives and sends would complete on that port. */
+    uint64_t serial = 0;
+    return iocp_try_fresh(st, (SOCKET)fd, (ULONG_PTR)udata, &serial) > 0 ? 0 : -1;
 }
 
-/* Retarget a watch onto a new interest. An outstanding probe covers the OLD mask and would never
- * fire for the new one (a pending zero-byte WSARecv on a socket that is writable but not readable
- * never completes), so cancel it and post a fresh one. The cancelled probe still completes later,
- * aborted; watcher_removed makes the drain retire it instead of dispatching or re-posting, the
- * same retirement kl_event_del uses. An unchanged mask needs nothing: the probe already covers it
- * and the drain keeps re-posting it. */
+/* Retarget a PENDING watch onto a new interest. The outstanding probe covers the OLD mask and would
+ * never fire for the new one (a pending zero-byte WSARecv on a socket that is writable but not
+ * readable never completes), so cancel it and post a fresh one on the same socket (same association).
+ * The cancelled probe still completes later, aborted; watcher_removed makes the drain retire it
+ * instead of dispatching or re-posting, the same retirement kl_event_del uses. An unchanged mask
+ * needs nothing: the probe already covers it and the dispatch re-arm keeps re-posting it. (An IDLE
+ * watch never gets here: iocp_watch_update retargets it in place.) */
 static int iocp_watch_reinterest(KlIocpState *st, KlIocpWatch *w, KlEventMask mask, void *udata) {
-    if (w->op->watch_mask == mask) return 0;
-    if (w->op->watch_rearm) {
-        /* Between a dispatched completion and its re-arm (the usual case: an interest change made
-         * from inside the watcher's own callback) the op owns NO kernel I/O, so there is nothing to
-         * cancel, and a cancelled-but-idle op would never complete to be freed. Retarget it in place:
-         * the next drain's re-arm posts the probe for the new mask. */
-        w->op->watch_mask = mask;
-        w->op->watcher_udata = udata;
-        return 0;
-    }
-
     KlIocpOp *old = w->op;
-    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    old->watcher_udata = udata;
+    if (old->watch_mask == mask) return 0;
+    if (st->quiescing) return -1;
+    /* The same socket, as far as anything can tell (the association attempt just said "some port"):
+     * post on it only while this port's record still holds the handle. */
+    const uint64_t serial = assoc_find(st, w->fd);
+    if (!serial) return -1;
+    KlIocpOp *op = iocp_watch_new_op(st, w->fd, mask, udata, serial);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
-    op->type = KL_IOCP_WATCHER;
-    op->alloc = st->alloc;
-    op->accept_sock = w->fd;
-    op->watcher_udata = udata;
-    op->watch_mask = mask;
-    iocp_op_register(st, op, w->fd);
-    if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
-
     /* Retarget the watch BEFORE cancelling, so the aborted completion cannot match this watch
      * and unlink it during teardown. */
     w->op = op;
@@ -329,11 +637,8 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     if (!((uintptr_t)udata & 1)) return 0;
     KlIocpState *st = loop->_backend;
     for (KlIocpWatch *w = st->watches; w; w = w->next)
-        if (w->fd == (SOCKET)fd) {
-            iocp_watch_renew(st, w, udata);
-            w->op->watcher_udata = udata;
-            return iocp_watch_reinterest(st, w, mask, udata);
-        }
+        if (w->fd == (SOCKET)fd)
+            return iocp_watch_update(st, w, mask, udata);
     /* No watch yet: a DETACHED watcher being armed for the first time. kl_watcher_add_detached
      * registers the ctx node with no kl_event_add, because the completion connect fires its tagged
      * pointer directly; its contract is that a later kl_watcher_mod arms the real relay for the
@@ -361,6 +666,9 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
             kl_free(st->alloc, w, sizeof(*w));
             return 0;
         }
+    /* Not a watch: a connection leaving its registration. Its socket stays on the port until it
+     * closes, but this loop no longer vouches for the handle value (see iocp_associate). */
+    assoc_forget(st, (SOCKET)fd);
     return 0;   /* a connection socket leaves the port when closed */
 }
 
@@ -382,10 +690,10 @@ void kl_event_close_builtin(KlEventLoop *loop) {
          * tracked lists empty (cancelled I/O always completes → terminating). */
         st->quiescing = 1;
         iocp_quiesce_port_for_close(st);
-        /* Anything still tracked here means the drain hit a fatal port error (catastrophic only):
-         * free our tracker nodes but intentionally LEAK each op record: its OVERLAPPED was never
-         * dequeued, so it may still be kernel-owned. closesocket reclaims an accept fd. Memory-safe
-         * over leak-free on that path. */
+        /* Anything still tracked here is a watch probe the quiesce gave up on (its completion cannot
+         * reach this port): free our tracker nodes but intentionally LEAK each op record: its
+         * OVERLAPPED was never dequeued, so the kernel may still write it and another port may
+         * still dequeue it (and read its owner tag). Memory-safe over leak-free on that path. */
         KlIocpWatch *w = st->watches;
         while (w) { KlIocpWatch *n = w->next; kl_free(st->alloc, w, sizeof(*w)); w = n; }
         KlIocpConnect *tr = st->connects;
@@ -395,6 +703,7 @@ void kl_event_close_builtin(KlEventLoop *loop) {
                      kl_free(st->alloc, at, sizeof(*at)); at = n; }
         st->watches = NULL; st->connects = NULL; st->accepts = NULL;
         if (st->port) CloseHandle(st->port);
+        if (st->assoc) kl_free(st->alloc, st->assoc, st->assoc_cap * sizeof(*st->assoc));
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
     }
@@ -442,11 +751,21 @@ const KlSocketProvider *kl_socket_provider_iocp(void) {
  * recording the socket its overlapped I/O runs on (for CancelIoEx at teardown). Call once, right
  * after memset, at every post site. O(1). */
 static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock) {
+    op->owner = st;
+    op->owner_gen = st->gen;
     op->op_sock = op_sock;
     op->g_next  = st->ops;
     op->g_link  = &st->ops;
     if (st->ops) st->ops->g_link = &op->g_next;
     st->ops = op;
+}
+
+/* Is a dequeued op this state's own? Reads only the two tag fields. A packet for another loop's op
+ * (a watch probe it posted on a handle value that, by a del-before-close breach, named a socket on
+ * this port) is not this drain's to free or dispatch: its owner either still tracks it or, having
+ * given up on it at teardown, leaked it (never freed it), so reading the tag is safe. */
+static int iocp_op_owned(const KlIocpState *st, const KlIocpOp *op) {
+    return op->owner == (const void *)st && op->owner_gen == st->gen;
 }
 
 static void iocp_op_free(KlIocpOp *op) {
@@ -1025,8 +1344,9 @@ static int iocp_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 
     /* Associate the connecting socket with the port (untagged key is fine; dispatch is by
      * OVERLAPPED/CONTAINING_RECORD, not key; use the watcher for symmetry). */
-    if (!CreateIoCompletionPort((HANDLE)(uintptr_t)s, st->port,
-                                (ULONG_PTR)watcher_udata, 0))
+    /* Recorded too, so the client's watcher on it is accepted later. */
+    uint64_t serial = 0;
+    if (iocp_try_fresh(st, s, (ULONG_PTR)watcher_udata, &serial) <= 0)
         return -1;
 
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -1144,48 +1464,26 @@ static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
     }
 }
 
-/* Re-arm every watcher probe whose previous completion has now been dispatched. Called at the top of
- * the drain, so it runs after the driver has delivered the last batch to its callbacks: the socket
- * has had its chance to be drained, and a fresh probe reports the CURRENT readiness rather than
- * repeating the one already handled. */
-/* Re-arm every watcher dispatched in the previous drain, and report the dead ones. Returns the
- * number of KL_COMP_WATCHER events written to `out` (at most `max`). */
-static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, int max,
-                                       int *retry_pending) {
+/* The drain's part in the watch lifecycle (see "Watch ownership"): retry the transient post
+ * failures, and report the watches whose socket is in error. A watch waiting for its owner's re-arm
+ * is left alone: the dispatch re-arm (kl_event_mod) posts it, and an orphan is never posted. Returns
+ * the number of KL_COMP_WATCHER events written to `out` (at most `max`). */
+static int iocp_watch_service(KlIocpState *st, KlCompletionEvent *out, int max, int *retry_pending) {
     *retry_pending = 0;
     if (st->quiescing) return 0;
     int count = 0;
     for (KlIocpWatch *w = st->watches; w; w = w->next) {
         KlIocpOp *op = w->op;
-        if (!op || !op->watch_rearm || op->watcher_removed) continue;
-        if (!op->watch_dead) {
-            op->watch_rearm = 0;
-            int pr = iocp_watch_post(op);
-            if (pr == 0) { op->watch_retries = 0; continue; }
-            if (pr == -2) {
-                /* Transient (no buffers or memory for now): the socket is healthy, so it is neither
-                 * reported (that would spin the loop on a socket with nothing to read) nor given up
-                 * on. The re-post is tried again on the next drain, which the caller makes come
-                 * within a short wait, for as long as the pressure lasts. A count of attempts used
-                 * to mark it dead after 64 failures, which a busy loop burns through in
-                 * milliseconds; the dead watcher was then reported on every drain, a 100% CPU spin
-                 * for good, since nothing deletes a wakeup or pool watcher. */
-                if (op->watch_retries < INT_MAX) op->watch_retries++;   /* saturates */
-                op->watch_rearm = 1;
-                *retry_pending = 1;
-                continue;
-            }
-            /* Re-post failed (typically the peer reset the connection): the op owns no kernel I/O
-             * and never will. It stays in the waiting-to-re-arm state, which kl_event_del and
-             * kl_event_close's quiesce pre-pass free directly (with watch_rearm cleared, del would
-             * CancelIoEx nothing and close would wait forever). */
-            op->watch_rearm = 1;
-            op->watch_dead = 1;
+        if (!op || !op->watch_rearm || op->watcher_removed || op->watch_orphan) continue;
+        if (op->watch_retry) {
+            iocp_watch_arm(st, op);
+            if (op->watch_retry) *retry_pending = 1;
+            if (!op->watch_dead) continue;   /* posted, retrying, or found orphaned */
         }
-        /* A dead socket is reported ready on every drain, as a readiness backend reports one
+        /* A socket in error is reported ready on every drain, as a readiness backend reports one
          * (level-triggered), so its owner's next read or write sees the error. Retiring it silently
          * left the owner waiting for an event that would never come. */
-        if (count < max) {
+        if (op->watch_dead && count < max) {
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = op->watcher_udata;
@@ -1199,9 +1497,10 @@ static int iocp_watch_rearm_dispatched(KlIocpState *st, KlCompletionEvent *out, 
 
 static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
+    st->ctx = ctx;   /* watcher dispatches come from here: see KlIocpState.ctx */
 
     int retry_pending = 0;
-    int count = iocp_watch_rearm_dispatched(st, out, max, &retry_pending);
+    int count = iocp_watch_service(st, out, max, &retry_pending);
     if (count >= max) return count;
     if (count > 0) timeout_ms = 0;   /* events are already due: do not wait for more */
     else if (retry_pending && (timeout_ms < 0 || timeout_ms > 10))
@@ -1222,6 +1521,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
     for (ULONG i = 0; i < got && count < max; i++) {
         KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+        if (!iocp_op_owned(st, op)) continue;   /* another loop's op: drop it untouched */
         DWORD bytes = entries[i].dwNumberOfBytesTransferred;
 
         if (op->type == KL_IOCP_ACCEPT) {
@@ -1414,6 +1714,16 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 iocp_op_free(op);
                 continue;
             }
+            op->watch_rearm = 1;   /* dequeued: the op owns no kernel I/O from here */
+            if (iocp_watch_closed(op)) {
+                /* Ended by a close (or a cancel) that was not kl_event_del or an interest change
+                 * (watcher_removed): the socket was closed without kl_event_del. Orphan the watch,
+                 * silently: the handle value may already name another socket, so it is neither
+                 * reported nor posted again. */
+                op->watch_orphan = 1;
+                assoc_drop(st, op->accept_sock, op->assoc_serial);
+                continue;
+            }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = op->watcher_udata;
@@ -1425,9 +1735,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * what consumes the readable bytes. A zero-byte WSARecv posted now would find the socket
              * still readable and complete immediately, delivering the same readiness a second time.
              * A readiness backend reports a level-triggered fd once per wait, not twice, so the probe
-             * is re-armed at the top of the NEXT drain instead, which is after the dispatch. The op is
-             * no longer kernel-owned at this point, so holding it across the gap is safe. */
-            op->watch_rearm = 1;
+             * is re-armed by the dispatch's own re-arm (kl_watcher_rearm -> kl_event_mod), after the
+             * callback. The op stays IDLE (no kernel I/O) across the gap, which is safe. */
         } else if (op->type == KL_IOCP_CONNECT) {
             /* ConnectEx finished. Untrack it; if the client aborted the attempt
              * (watcher_removed, set by iocp_comp_cancel) drop it silently; the detached
@@ -1497,14 +1806,30 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
     return count;
 }
 
+/* Teardown's wait for cancelled ops to complete: polled in slices. A cancelled op on this port
+ * completes in microseconds; only a probe whose completion cannot reach this port stalls it. */
+#define KL_IOCP_QUIESCE_SLICE_MS 100
+#define KL_IOCP_QUIESCE_STALL_MS 2000
+
 /* Cancel + DEQUEUE every tracked outstanding overlapped op, then free it; so kl_event_close_builtin
  * never frees an OVERLAPPED the kernel still owns. CancelIoEx forces each pending
  * watcher/connect I/O to complete; the listen socket is already closed so AcceptEx are completing
  * too. Then drain the port until the tracked lists empty, freeing each op AFTER its completion is
  * dequeued. Untracked conn read/write completions that happen to arrive are freed too (dequeued →
- * safe). Terminating: cancelled/closed I/O always completes → posts → is dequeued. On a port error
- * it returns with lists non-empty; the caller then frees the tracker nodes but leaks those op
- * records (never freeing an un-dequeued OVERLAPPED). No dispatch/callbacks: pure teardown. */
+ * safe). Cancelled/closed I/O always completes, but its packet goes to the port of the socket it was
+ * posted on, which for a probe posted on a reused handle value (see "Watch ownership") may not be
+ * this one. So when nothing is dequeued for KL_IOCP_QUIESCE_STALL_MS (or the port fails) AND only
+ * watch probes are left, it returns with them still registered; the caller then frees the tracker
+ * nodes and the state but RETAINS (leaks) those op records: never freed, so the kernel's write and a
+ * foreign drain's tag check (iocp_op_owned) only ever touch live memory. While any other op is
+ * outstanding it keeps waiting. No dispatch/callbacks: pure teardown. */
+/* Is every op this state still has outstanding a watch probe? */
+static int iocp_only_probes_left(const KlIocpState *st) {
+    for (const KlIocpOp *op = st->ops; op; op = op->g_next)
+        if (op->type != KL_IOCP_WATCHER) return 0;
+    return 1;
+}
+
 static void iocp_quiesce_port_for_close(KlIocpState *st) {
     /* Cancel EVERY outstanding op (the global registry covers conn READ/WRITE/SENDFILE + UDP too,
      * not just watch/connect/accept) on its owning socket, so all their completions post. The
@@ -1528,15 +1853,32 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
      * Terminating: cancelled/closed I/O always completes → posts. Per-type teardown cleanup
      * (free the tracker node, close a pre-created accept socket) then free the op (which unlinks it
      * from the registry). No dispatch/callbacks. */
+    DWORD stalled = 0;   /* ms waited since the last completion was dequeued */
     while (st->ops) {
         OVERLAPPED_ENTRY entries[KL_IOCP_ACCEPT_BACKLOG];
         ULONG got = 0;
         if (!GetQueuedCompletionStatusEx(st->port, entries,
                                          (ULONG)(sizeof entries / sizeof entries[0]),
-                                         &got, INFINITE, FALSE))
-            return;   /* fatal port error: caller frees trackers + leaks the un-dequeued ops */
+                                         &got, KL_IOCP_QUIESCE_SLICE_MS, FALSE)) {
+            const int fatal = GetLastError() != WAIT_TIMEOUT;
+            if (!fatal) stalled += KL_IOCP_QUIESCE_SLICE_MS;
+            /* Give up only when (a) the port is broken or nothing has been dequeued for a whole
+             * stall budget, AND (b) every op still outstanding is a watch probe. A probe is the only
+             * op that can complete on another port (it is the only one ever posted on a handle this
+             * port did not just associate; see "Watch ownership"), and the only one whose loss is
+             * memory-safe: it moves no data, so the kernel can write nothing but its own OVERLAPPED,
+             * inside the op record, which is then retained (leaked), never freed. Any other op (a
+             * receive into a caller's buffer, a send, an accept, a connect) completes on this port,
+             * and its caller frees that buffer after the close, so the wait for it never gives up. */
+            if ((fatal || stalled >= KL_IOCP_QUIESCE_STALL_MS) && iocp_only_probes_left(st))
+                return;   /* caller frees the trackers and leaks the remaining probe ops */
+            if (fatal) Sleep(KL_IOCP_QUIESCE_SLICE_MS);
+            continue;
+        }
+        stalled = 0;   /* progress: a slow but live teardown keeps its full budget */
         for (ULONG i = 0; i < got; i++) {
             KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+            if (!iocp_op_owned(st, op)) continue;   /* another loop's op: drop it untouched */
             if (op->type == KL_IOCP_WATCHER) {
                 for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
                     if ((*l)->op == op) {

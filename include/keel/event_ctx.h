@@ -78,6 +78,10 @@ typedef struct KlEventCtx {
     /* Watcher registration identity: the last generation handed to a new watcher node (see
      * KlWatcher.gen in event_ctx_internal.h). Monotonic per ctx. */
     uint64_t    watcher_gen;
+    /* Set only while kl_watcher_rearm re-arms a registration unchanged (the dispatch re-arm after a
+     * callback, or an explicit kl_watcher_rearm): a backend may treat that kl_event_mod as a repeat
+     * of the registration rather than a new one (the IOCP engine then skips its handle check). */
+    int         rearming;
     /* Datagram completions (DGRAM_RECV/DGRAM_SEND) are routed by each token's own KlCompLifeDispatchFn
      * (life->dispatch), not a ctx-global hook. */
 } KlEventCtx;
@@ -163,6 +167,9 @@ int  kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask);
 
 /**
  * @brief Remove a watcher and deregister its FD from the event loop.
+ *
+ * Call it BEFORE closing the FD: a watched FD closed without it is a contract breach whose
+ * per-backend consequences are described at kl_event_del.
  */
 void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd);
 
