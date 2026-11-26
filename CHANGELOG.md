@@ -5,21 +5,96 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+## [3.6.0]
+
+Minor release that makes Keel's HTTP server usable as a streaming gateway. A streamed response, plain
+or compressed, can now be written without blocking and without failing on a full stream: each write
+is admitted whole or not at all against one bound over everything Keel holds for the response, a
+refused write arms a writable notification, and a relay can therefore carry backpressure end to end,
+pausing its upstream client while the downstream client is slow, with memory bounded by the stream
+capacity rather than the body. Compressed streams flush every accepted write, so incremental output
+such as server-sent events reaches the client at once. A graceful stop now stops listening and ends
+keep-alive at once, so a fleet fails over during the drain. On Windows, the readiness backend is
+Winsock `select()` instead of WSAPoll.
+
+The release also carries the fixes of a pre-release audit. Protocol integrity: a response has one
+output driver, and once its head is committed nothing is injected into it or appended after its
+terminating chunk; a second begin, and on completion loops a direct send, are refused; pipelined and
+over-sent requests close the connection instead of desynchronizing it. Resource exhaustion: a
+request head has an absolute deadline (slowloris), multipart parsing is linear and caps part headers
+by default, and `max_header_size` below 8 KiB is enforced. Completion ownership: on io_uring, IOCP
+and pollcomp an `on_drain` producer meets the stream's bound, and a late-installed writable edge
+fires. Event fairness: poll, Windows `select()` and pollcomp no longer starve ready registrations
+past the first `max` of a wait. IOCP teardown: a watch whose socket was closed without
+`kl_watcher_del`, or whose handle Windows reused, no longer hangs `kl_event_ctx_free` or reaches
+another loop. Server and connection lifecycle: run-once-per-init is enforced, a stop issued before
+the run is honoured, and a readiness event batched behind its connection's release is dropped
+instead of releasing the connection twice. Peer credentials are reported only for UNIX-domain
+sockets on the built-in provider.
+
+The layering is unchanged: event backends move I/O, socket providers carry it, the generic drain and
+`KlStream` provide bounded buffering and streaming semantics, HTTP adds admission, framing and
+lifecycle on top, and a codec contributes only compression and its own output bound. The public API
+grows by appended functions, fields, a macro and one optional codec op; see the upgrade notes.
+
 ### Upgrade notes
 
-- **`kl_http_response_end_stream` without `kl_http_response_begin_stream` now returns -1** and writes
-  nothing (it wrote a bare terminating chunk and returned 0), as it does on a response that was reset
-  or released.
+Every program must be recompiled, since several public structs and one vtable have grown. Most
+need nothing more, but some code must change (a direct `kl_http_response_send` on a completion
+loop, a stream written or ended without a begin, a server run twice), and some behavior and two
+defaults change observably, each default with an option that restores the old behavior. The notes
+are grouped by the kind of change; each says what to do where there is something to do.
+
+**Source compatibility (code that must change):**
+
+- **Completion loops: `kl_http_response_send` is refused while the server owns the response's
+  transmission.** On io_uring, IOCP and pollcomp it returns -1 and writes nothing for a buffered,
+  empty or file response (and a streamed one without an outbound buffer) of a server connection; the
+  server sends the response itself once the handler returns. Building the response is enough on
+  every loop: drop the call. Readiness loops are unchanged.
+- **A server runs once per `kl_http_server_init`.** A second `kl_http_server_run` on the same
+  instance now returns -1 at once: code that stopped a server and ran it again without
+  `kl_http_server_free` + `kl_http_server_init` got a second listener (after a plain stop, leaking
+  the first) or a re-adopted descriptor. This includes retrying `kl_http_server_run` after it failed
+  to start (for example the port was in use): free and re-init the server to serve again.
 - **The stream writer refuses a response with no open stream.** `kl_http_response_stream_write` (the
   writer `begin_stream` returns), SSE writes and `kl_http_compress_stream_write` return -1 and write
   nothing unless the stream was begun with `kl_http_response_begin_stream` (or SSE / compressed
   begin) and not yet ended. Code that drives a response by hand (setting `body_mode`, writing chunks
   without a begin) breaks: begin the stream.
+- **`kl_http_response_end_stream` without `kl_http_response_begin_stream` now returns -1** and writes
+  nothing (it wrote a bare terminating chunk and returned 0), as it does on a response that was reset
+  or released.
 - **A second begin is refused.** `kl_http_response_begin_stream`, `kl_http_sse_begin` and
   `kl_http_compress_stream_begin` return -1 and change nothing on a response that already began or
   ended a stream, or that its connection reset for the next request.
 - **`kl_http_compress_stream_end` returns -1 after the response was ended directly** with
   `kl_http_response_end_stream`, and writes no codec finish (it releases the codec).
+- **Do not change a committed response.** Once any byte of its head has been sent (by
+  `kl_http_response_send` on a readiness loop, or by the server), a response's serialized layout is
+  immutable: the status, header, body, file, JSON, error and body-compression setters must all come
+  before that. They are not refused, but a change no longer matches what is on the wire and the
+  resumed send corrupts it (`kl_http_response_send` in `<keel/http_response.h>`). Keel itself no
+  longer alters a committed response (see Fixed).
+
+**Binary compatibility (recompile):**
+
+- **`KlHttpResponse`, `KlHttpServerConfig`, `KlHttpServer` and `KlEventCtx` have grown** (appended
+  fields: the response's stream capacity and writable edge, `stream_capacity`,
+  `header_timeout_ms`, the server's internal drain and run-once state, and the context's trailing
+  internal `rearming` flag); recompile everything that declares, embeds or allocates them. A zeroed
+  config keeps every default except the two tightened below.
+- **`KlCompress` and `KlHttpCompressStream` have grown** (the optional `flush_bound` op; the stream's
+  staging buffer). A custom codec needs no source change but must be recompiled: a codec object
+  built against the 3.5 header is smaller than the 3.6 vtable. A codec without `flush_bound` keeps
+  working with every existing compression API, and is refused (never fed) by the bounded compressed
+  API; only the bundled miniz integration supplies it.
+
+**Observable behavior changes and changed defaults:**
+
+- **A graceful drain closes the listener at its start.** New connections are refused (or, with an
+  adopted `listen_fd`, queue for the next instance) and keep-alive ends, so a load balancer fails
+  over at once. After a drain, start a new server rather than running this one again (above).
 - **Pipelined and over-sent requests close the connection.** A request read together with bytes of a
   further one, or a body longer than its framing, gets a response that says `Connection: close`, then
   the connection ends through the bounded post-response drain. Clients resend on a new connection.
@@ -28,16 +103,58 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   it now goes through the same completion as a buffered response: the connection is kept alive when
   the stream ended on an HTTP/1.1 request that permits persistence, or ends through the bounded
   drain. A streamed (chunked) response to an HTTP/1.0 request always closes the connection after it,
-  whatever Connection header the client sent. A client
-  that read to end-of-connection after a streamed response must use its framing or
-  `Connection: close`.
+  whatever Connection header the client sent. A client that read to end-of-connection after a
+  streamed response must use its framing or `Connection: close`.
 - **Completion loops: a producer writing from `on_drain` after its op completed is delivered in
   full**, up to its end of stream; it used to be cut short.
-- **Completion loops: `kl_http_response_send` is refused while the server owns the response's
-  transmission.** On io_uring, IOCP and pollcomp it returns -1 and writes nothing for a buffered,
-  empty or file response (and a streamed one without an outbound buffer) of a server connection; the
-  server sends the response itself once the handler returns. Building the response is enough on
-  every loop: drop the call. Readiness loops are unchanged.
+- **The default Windows readiness backend is `select()`.** `BACKEND=winselect` selects it explicitly;
+  `BACKEND=wsapoll` remains as an alias for it. WSAPoll itself is gone.
+- **Windows readiness loops no longer advertise `KL_EVENT_CAP_HANGUP`.** `select()` reports a FIN
+  only as readability, like data, so it cannot express a hang-up-only watch. A `KL_EVENT_HANGUP`
+  registration is accepted and never reported; the HTTP server's suspended-connection hang-up
+  detection uses its 1 s peek sweep there, as on IOCP (best effort: a FIN behind unread bytes is
+  invisible to a peek). Linux, macOS and BSD loops are unchanged. This is a capability regression
+  against 3.5.0's WSAPoll backend, accepted because WSAPoll could not keep write readiness across a
+  peer's half-close.
+- **`KlHttpServerConfig.stream_capacity` also sets the existing writer's outbound-buffer cap** (it
+  was a fixed 1 MiB, which stays the default).
+- **The capacity bound holds only for a response written exclusively through the bounded API.** The
+  writer returned by `kl_http_response_begin_stream` keeps its fatal semantics (it fails at its
+  outbound buffer's cap; on a completion loop the output queue does not count against it), and its
+  writes count toward pending output without being refused. The same holds for
+  `kl_http_compress_stream_write` beside `kl_http_compress_stream_try_write`; the bounded writes' own
+  codec bound still accounts for what an earlier legacy compressed write left in the codec.
+- **The legacy compressed writer does not flush.** `kl_http_compress_stream_write` lets the codec
+  buffer, so small writes (server-sent events) can be held until the stream ends; the bounded
+  `kl_http_compress_stream_try_write` flushes every write.
+- **Memory of a bounded stream** is bounded by its capacity C, not by the body: on readiness loops
+  about C plus headers and fixed TLS buffers, on completion loops about 5C + 64 KiB + min(256 KiB, C).
+  A bounded compressed stream adds the codec's session (319,352 bytes for miniz) and one staging
+  buffer of at most C. Exact terms are in `docs/contracts/streaming.md`, "Bounded streaming".
+- **A `max_header_size` below 8192 now takes effect.** This is a bug fix toward the field's documented
+  meaning, not a default change (the default stays 8192): a smaller configured value was silently
+  8 KiB in practice and is now the limit it always said it was. Check that such a value really is
+  the intended limit.
+- **Two defaults are tightened to close resource-exhaustion defects**, under the compatibility
+  contract's rule for such changes (`docs/contracts/compatibility.md`, "Correctness, security and
+  default behavior"); each has a documented option restoring the old behavior:
+  - **A request head must now arrive within `header_timeout_ms`** (default: `read_timeout_ms`, 30 s
+    unless configured), counted from the accept for a connection's first request (TLS handshake
+    included) and from the first bytes of each later keep-alive request. Before, only the gap
+    between fragments was bounded, so a head dripped a byte at a time could hold a connection
+    indefinitely (see Fixed). A client that needs longer is answered 408 (closed, mid-handshake);
+    raise `header_timeout_ms` for it. A server with a short `read_timeout_ms` (say 1 s) now also
+    bounds a whole handshake plus head to that, so set `header_timeout_ms` separately if they
+    legitimately trickle in over a slow link. To keep the old behavior set `header_timeout_ms` to a
+    negative value.
+  - **`KlHttpMultipartConfig.max_headers_size = 0` is now 8 KiB, not unlimited**
+    (`KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`, the HTTP server's own default header limit), and so is
+    the multipart factory with a NULL config; an unterminated part header used to grow its buffer
+    without bound (see Fixed). A part whose header block exceeds it fails with
+    `KL_HTTP_MP_ERR_HEADERS_TOO_LARGE`. Real part headers (`Content-Disposition` with a filename,
+    `Content-Type`) are well under 1 KiB. To keep the old behavior set `max_headers_size =
+    SIZE_MAX`, which is no practical limit; any other non-zero value is a cap as before. The other
+    multipart caps keep 0 = unlimited.
 
 ### Added
 
@@ -367,8 +484,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the backlog (after each completed send, and when the connection starts sending after its async op
   completes) now fire `on_drain` after the move, under the same conditions as before (the drain held
   bytes and is now empty), and its writes meet the same bound as any other write. Readiness loops
-  were not affected. (A producer writing on after its op completed is outside the contract: the
-  response is then the driver's, and ends when its buffer empties, on every loop.)
+  were not affected. (A producer that goes on writing from `on_drain` after its op completed is
+  delivered in full up to its end of stream, under the same bound, on every loop: see "A stream
+  ended from the drain's `on_drain` is sent in full" above.)
 - **`kl_http_response_end_stream` no longer fails on a drain within 5 bytes of `max_size`.** The
   5-byte terminating chunk was refused like a body write when fewer than 5 bytes of room were left
   (typically a producer whose chunk size divides the cap exactly), and the stream failed. The
@@ -407,50 +525,6 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   closed it at its own drain); a second run after a plain stop opened a new listener and leaked the
   first. Any run after the first now returns -1 with `last_error` `KL_ERR_INVALID_ARG` and touches
   no descriptor.
-
-Upgrade notes:
-
-- **A second `kl_http_server_run` on the same instance now fails.** Code that stopped a server and
-  ran it again without `kl_http_server_free` + `kl_http_server_init` got a second listener (after a
-  plain stop, leaking the first) or a re-adopted descriptor; it now gets -1 at once. This includes
-  retrying `kl_http_server_run` after it failed to start (for example the port was in use): free and
-  re-init the server to serve again. `KlHttpServer` has also grown (an appended internal field);
-  recompile.
-
-- **Two defaults are tightened to close resource-exhaustion defects** (`header_timeout_ms` and
-  `max_headers_size`, below), under the compatibility contract's rule for such changes
-  (`docs/contracts/compatibility.md`, "Correctness, security and default behavior"): each has a
-  documented option restoring the old behavior.
-- **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
-  capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
-  keeps every default except the two tightened under that rule (the first note above).
-- **Behavior change: a request head must now arrive within `header_timeout_ms`** (default:
-  `read_timeout_ms`, 30 s unless configured), counted from the accept for a connection's first
-  request (TLS handshake included) and from the first bytes of each later keep-alive request.
-  Before, only the gap between fragments was bounded. A client that needs longer is answered 408
-  (closed, mid-handshake); raise `header_timeout_ms` for it. A server with a short
-  `read_timeout_ms` (say 1 s) now also bounds a whole handshake plus head to that, so set
-  `header_timeout_ms` separately if they legitimately trickle in over a slow link. To keep the old
-  behavior set `header_timeout_ms` to a negative value.
-- **Behavior change: `KlHttpMultipartConfig.max_headers_size = 0` is now 8 KiB, not unlimited**
-  (`KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE`, the HTTP server's own default header limit), and so is
-  the multipart factory with a NULL config. A part whose header block exceeds it fails with
-  `KL_HTTP_MP_ERR_HEADERS_TOO_LARGE`. Real part headers (`Content-Disposition` with a filename,
-  `Content-Type`) are well under 1 KiB. To keep the old behavior set `max_headers_size = SIZE_MAX`,
-  which is no practical limit; any other non-zero value is a cap as before. The other multipart caps
-  keep 0 = unlimited.
-- **A `max_header_size` below 8192 now takes effect.** This is a bug fix toward the field's documented
-  meaning, not a default change (the default stays 8192): a smaller configured value was silently
-  8 KiB in practice and is now the limit it always said it was. Check that such a value really is
-  the intended limit.
-- **`KlHttpServerConfig.stream_capacity` also sets the existing writer's outbound-buffer cap** (it
-  was a fixed 1 MiB, which stays the default).
-
-- **Windows readiness loops no longer advertise `KL_EVENT_CAP_HANGUP`.** `select()` reports a FIN
-  only as readability, like data, so it cannot express a hang-up-only watch. A `KL_EVENT_HANGUP`
-  registration is accepted and never reported; the HTTP server's suspended-connection hang-up
-  detection uses its 1 s peek sweep there, as on IOCP (best effort: a FIN behind unread bytes is
-  invisible to a peek). Linux, macOS and BSD loops are unchanged.
 
 ## [3.5.0]
 
