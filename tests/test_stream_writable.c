@@ -12,7 +12,11 @@
  *   - a terminal write failure wakes an armed producer once, and its retry reports ERROR; once
  *     whether the callback retries or not;
  *   - it never fires once a close has begun;
- *   - the callback may write, and may begin a close whose detachment waits for it to return.
+ *   - the callback may write, and may begin a close whose detachment waits for it to return;
+ *   - a refusal seen before the callback was installed is remembered: installed after the queue has
+ *     drained, it fires once from the stream's loop (a deferred check), never inside the install, with
+ *     no further I/O; a replacement, a removal, an accepted write, a close or a free before that
+ *     check cancels it.
  * The last case drives a producer purely by the edge over a real loopback socket (the readiness
  * writer path, so it runs on every engine). The completion counterpart over a named pipe lives in
  * test_pipe_stream.c.
@@ -23,9 +27,13 @@
 #include <keel/stream_detail.h>
 #include <keel/sockaddr.h>
 #include <keel/handle.h>
+#include <keel/event_ctx.h>
+#include <keel/timer.h>           /* kl_timer_fire: counts the deferred checks still pending */
+#include "../src/stream_write.h"  /* kl_stream_set_owner_hold (internal adapter hook) */
 #include "../src/socket.h"        /* kl_sockdef_*: the default socket seam (live section) */
 #include "net_compat.h"           /* AF_INET / SOCK_STREAM */
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Mocks ──────────────────────────────────────────────────────────────────────────────────── */
@@ -58,7 +66,8 @@ typedef struct {
     int in_write;          /* set by the test around its own kl_stream_write calls */
     int fired_in_write;
     int action;            /* 0 none, 1 write `wlen` bytes, 2 close_begin, 3 cancel,
-                            * 4 stall the readiness writer `rw` then write `wlen` bytes */
+                            * 4 stall the readiness writer `rw` then write `wlen` bytes,
+                            * 5 stall it, write `wlen` bytes, then `wlen` more (refused again) */
     RW *rw;
     size_t wlen;
     KlStreamWriteStatus wst;
@@ -75,6 +84,11 @@ static void prod_writable(void *ctx) {
     if (p->action == 2) (void)kl_stream_close_begin(p->s);
     if (p->action == 3) (void)kl_stream_cancel(p->s);
     if (p->action == 4) { p->rw->mode = 2; p->wst = kl_stream_write(p->s, fill, p->wlen); }
+    if (p->action == 5) {                  /* stall the writer, fill the queue, be refused again */
+        p->rw->mode = 2;
+        (void)kl_stream_write(p->s, fill, p->wlen);
+        p->wst = kl_stream_write(p->s, fill, p->wlen);
+    }
     if (g_closes) p->closed_during_cb = 1;
 }
 static KlStreamWriteStatus pw(Prod *p, size_t len) {
@@ -438,6 +452,416 @@ UTEST(stream_writable, cancel_from_readiness_callback_detaches_after_it_returns)
     ASSERT_EQ(p.closed_during_cb, 0);
     ASSERT_EQ(g_closes, 1);                                /* abortive: the queue does not hold it */
     ASSERT_EQ(kl_stream_write_free(&s), 0);                /* no send left in flight */
+}
+
+/* ── Late install: a refusal before the callback existed is remembered ─────────────────────────── */
+
+static KlEventCtx g_ev;
+static KlAllocator g_ev_alloc;
+static int ev_init(void) { g_ev_alloc = kl_allocator_default(); return kl_event_ctx_init(&g_ev, &g_ev_alloc); }
+
+/* As readiness()/completion(), on a real loop, with NO callback installed yet. */
+static void late_readiness(KlStream *s, RW *w, Prod *p, size_t cap) {
+    g_alloc = kl_allocator_default();
+    memset(w, 0, sizeof *w); memset(p, 0, sizeof *p); p->s = s;
+    g_closes = 0;
+    kl_stream_init(s, g_rbuf, sizeof g_rbuf);
+    s->ctx = &g_ev;
+    kl_stream_write_init(s, &g_alloc, cap);
+    kl_stream_set_writer(s, rw_write, w);
+    kl_stream_close_init(s, on_close, NULL);
+}
+static void late_completion(KlStream *s, CS *c, Prod *p, size_t cap) {
+    g_alloc = kl_allocator_default();
+    memset(c, 0, sizeof *c); c->s = s;
+    memset(p, 0, sizeof *p); p->s = s;
+    g_closes = 0;
+    kl_stream_init(s, g_rbuf, sizeof g_rbuf);
+    s->ctx = &g_ev;
+    kl_stream_write_init(s, &g_alloc, cap);
+    kl_stream_set_submit(s, cs_submit, c, /*copying=*/1);
+    kl_stream_close_init(s, on_close, NULL);
+}
+/* Refused with no callback, then the queue drains completely: the last progress point passes with
+ * nobody to tell. */
+static void refuse_then_drain(KlStream *s, RW *w, Prod *p) {
+    w->mode = 2;
+    (void)pw(p, 64);                                       /* queue exactly full */
+    (void)pw(p, 1);                                        /* WOULD_BLOCK, nobody installed */
+    w->mode = 0;
+    (void)kl_stream_flush(s);                              /* fully drained */
+}
+
+UTEST(stream_writable, late_install_after_full_drain_fires_once_from_the_loop) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    w.mode = 2;
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    w.mode = 0;
+    ASSERT_EQ(kl_stream_flush(&s), 0);
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);         /* nothing left: no progress point to come */
+    size_t wrote = w.len;
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(p.fired, 0);                                  /* never inside the install */
+    for (int i = 0; i < 4; i++) ASSERT_GE(kl_event_ctx_run(&g_ev, 8, 0), 0);
+    ASSERT_EQ(p.fired, 1);                                  /* exactly once, from the loop */
+    ASSERT_EQ(w.len, wrote);                                /* no further transport I/O needed */
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_ACCEPTED);     /* the retry fits */
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_completion_fires_once_without_another_submit) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; CS c; Prod p; late_completion(&s, &c, &p, 64);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);    /* submitted; in flight */
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);    /* queued behind it */
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);  /* nobody installed */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);       /* pumps the second batch */
+    ASSERT_EQ(c.submits, 2);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);       /* the last progress point */
+    ASSERT_EQ((int)kl_stream_write_pending(&s), 0);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);                     /* the single deferred check */
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(c.submits, 2);                                /* no further I/O */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_while_still_full_waits_for_progress) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    w.mode = 2;
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);   /* bytes pending: progress will come */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);                     /* nothing deferred */
+    ASSERT_EQ(p.fired, 0);
+    w.mode = 0;
+    ASSERT_EQ(kl_stream_flush(&s), 0);
+    ASSERT_EQ(p.fired, 1);                                  /* the ordinary progress-point edge */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_after_terminal_failure_fires_and_retry_errors) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    w.mode = 2;
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    w.mode = 3;
+    ASSERT_EQ(kl_stream_flush(&s), -1);                     /* the write side failed, nobody told */
+    p.action = 1; p.wlen = 1;
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ((int)p.wst, (int)KL_STREAM_ERROR);            /* the retry tells it apart */
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_replaced_before_the_check_fires_only_the_new_fn) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    Prod q; memset(&q, 0, sizeof q); q.s = &s;
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &q), 0);   /* replaced before the loop ran */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);                     /* the old check was cancelled */
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(q.fired, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_removed_before_the_check_fires_nothing) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_on_writable(&s, NULL, NULL), 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);                     /* cancelled, not merely ignored */
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);   /* removal disarmed the refusal */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_accepted_write_before_the_check_disarms) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_ACCEPTED);     /* the producer moved on by itself */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* Close begun before the check: on_close is the terminal signal, and the owner may free the stream
+ * right after it (heap-allocated, so ASan catches a check that still ran). */
+UTEST(stream_writable, late_install_close_before_the_check_never_fires) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream *s = malloc(sizeof *s); ASSERT_TRUE(s != NULL);
+    RW w; Prod p; late_readiness(s, &w, &p, 64);
+    refuse_then_drain(s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_close_begin(s), 0);
+    ASSERT_EQ(g_closes, 1);                                 /* nothing pending: detached at once */
+    ASSERT_EQ(kl_timer_next_timeout(&g_ev, 1000), 1000);   /* the close itself cancelled the check */
+    ASSERT_EQ(kl_stream_write_free(s), 0);
+    free(s);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+UTEST(stream_writable, late_install_close_from_completion_before_the_check_never_fires) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; CS c; Prod p; late_completion(&s, &c, &p, 64);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 64), (int)KL_STREAM_ACCEPTED);
+    ASSERT_EQ((int)pw(&p, 1), (int)KL_STREAM_WOULD_BLOCK);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_cancel(&s), 0);                     /* abortive; nothing in flight */
+    ASSERT_EQ(g_closes, 1);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* Freed with the check pending: it is cancelled, so the loop never touches the freed stream. */
+UTEST(stream_writable, late_install_freed_before_the_check_never_fires) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream *s = malloc(sizeof *s); ASSERT_TRUE(s != NULL);
+    RW w; Prod p; late_readiness(s, &w, &p, 64);
+    refuse_then_drain(s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_write_free(s), 0);
+    free(s);
+    ASSERT_EQ(kl_timer_next_timeout(&g_ev, 1000), 1000);   /* the check was cancelled, not left due */
+    for (int i = 0; i < 4; i++) ASSERT_GE(kl_event_ctx_run(&g_ev, 8, 0), 0);
+    ASSERT_EQ(p.fired, 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* The loop torn down with the check pending (a contract breach: free the stream first): the check
+ * never fires, and the stream's later free finds nothing to cancel and leaks nothing. */
+UTEST(stream_writable, late_install_ctx_teardown_with_the_check_pending) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    kl_event_ctx_free(&g_ev);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    ASSERT_EQ(p.fired, 0);
+}
+
+UTEST(stream_writable, late_install_repeated_keeps_one_check_pending) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    for (int i = 0; i < 5; i++) ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);                     /* each install superseded the last */
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* A progress point that comes first fires the edge itself; the pending check is then void. */
+UTEST(stream_writable, late_install_progress_before_the_check_fires_once) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_stream_flush(&s), 0);                      /* an adapter's (empty) flush */
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);                     /* the check was cancelled, not re-run */
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* The deferred callback is refused again: it re-arms for the next progress point, and the check does
+ * not reschedule itself (no zero-delay loop without progress). */
+UTEST(stream_writable, late_install_refused_again_rearms_without_rescheduling) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    p.action = 5; p.wlen = 40; p.rw = &w;
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ((int)p.wst, (int)KL_STREAM_WOULD_BLOCK);      /* 40 queued, 40 more do not fit */
+    p.action = 0;
+    for (int i = 0; i < 3; i++) ASSERT_EQ(kl_timer_fire(&g_ev), 0);   /* nothing rescheduled */
+    ASSERT_EQ(p.fired, 1);
+    w.mode = 0;
+    ASSERT_EQ(kl_stream_flush(&s), 0);                      /* progress: the re-armed edge */
+    ASSERT_EQ(p.fired, 2);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* The deferred callback begins a close, and its owner frees the stream from on_close: detachment waits
+ * for the callback to return, and nothing touches the stream after on_close (ASan). */
+static int g_owner_freed;
+static void owner_free_on_close(void *ctx) {
+    KlStream *s = ctx;
+    g_owner_freed = (s->in_writable == 0) ? 1 : -1;        /* never mid-callback */
+    (void)kl_stream_write_free(s);
+    free(s);
+}
+UTEST(stream_writable, late_install_callback_closes_and_owner_frees_on_close) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream *s = malloc(sizeof *s); ASSERT_TRUE(s != NULL);
+    RW w; Prod p;
+    g_alloc = kl_allocator_default();
+    memset(&w, 0, sizeof w); memset(&p, 0, sizeof p); p.s = s;
+    g_closes = 0; g_owner_freed = 0;
+    kl_stream_init(s, g_rbuf, sizeof g_rbuf);
+    s->ctx = &g_ev;
+    kl_stream_write_init(s, &g_alloc, 64);
+    kl_stream_set_writer(s, rw_write, &w);
+    kl_stream_close_init(s, owner_free_on_close, s);
+    refuse_then_drain(s, &w, &p);
+    p.action = 2;                                           /* close_begin from the callback */
+    ASSERT_EQ(kl_stream_on_writable(s, prod_writable, &p), 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);
+    ASSERT_EQ(p.fired, 1);
+    ASSERT_EQ(g_owner_freed, 1);                            /* detached after the callback returned */
+    ASSERT_EQ(kl_timer_fire(&g_ev), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* A producer that reinstalls its callback on every refusal, with bytes still pending below capacity
+ * and the transport stalled: a progress point will come, so nothing is deferred and nothing fires per
+ * loop tick (no zero-delay loop without progress). The next flush fires it once. */
+typedef struct { KlStream *s; int fired; } Spin;
+static const char spin_fill[64];
+static void spin_cb(void *ud) {
+    Spin *sp = ud; sp->fired++;
+    if (kl_stream_write(sp->s, spin_fill, 40) == KL_STREAM_WOULD_BLOCK)
+        (void)kl_stream_on_writable(sp->s, spin_cb, sp);   /* install-on-refusal pattern */
+}
+UTEST(stream_writable, late_install_reinstall_on_refusal_does_not_spin) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    w.mode = 2;                                             /* transport stalled */
+    ASSERT_EQ((int)pw(&p, 40), (int)KL_STREAM_ACCEPTED);    /* 40 pending < 64 */
+    Spin sp = { &s, 0 };
+    ASSERT_EQ((int)kl_stream_write(&s, spin_fill, 40), (int)KL_STREAM_WOULD_BLOCK);
+    ASSERT_EQ(kl_stream_on_writable(&s, spin_cb, &sp), 0);
+    int total = 0;
+    for (int i = 0; i < 100; i++) total += kl_timer_fire(&g_ev);
+    ASSERT_EQ(total, 0);                                    /* nothing deferred: progress will come */
+    ASSERT_EQ(sp.fired, 0);
+    ASSERT_EQ(w.len, (size_t)0);
+    w.mode = 1; w.budget = 30;                              /* progress: 10 pending */
+    ASSERT_EQ(kl_stream_flush(&s), 1);
+    ASSERT_EQ(sp.fired, 1);                                 /* the edge; its retry of 40 fits */
+    for (int i = 0; i < 10; i++) total += kl_timer_fire(&g_ev);
+    ASSERT_EQ(total, 0);
+    ASSERT_EQ(sp.fired, 1);
+    (void)kl_stream_on_writable(&s, NULL, NULL);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* An adapter's owner hold brackets the deferred fire: a callback that drops the adapter's last
+ * reference (as kl_pipe_free does) frees the stream only after the stream's last access. */
+typedef struct { KlStream *s; int refs; int freed_in_cb; int in_cb; int released; } Owner;
+static void owner_unref(Owner *o) {
+    if (--o->refs > 0) return;
+    if (o->in_cb) o->freed_in_cb = 1;
+    (void)kl_stream_write_free(o->s);
+    free(o->s);
+    o->s = NULL;
+}
+static void owner_retain(void *ud)  { ((Owner *)ud)->refs++; }
+static void owner_release(void *ud) { Owner *o = ud; o->released++; owner_unref(o); }
+static void owner_drop_cb(void *ud) {
+    Owner *o = ud;
+    o->in_cb = 1;
+    (void)kl_stream_cancel(o->s);                           /* what kl_pipe_free does first */
+    owner_unref(o);                                         /* ... then it drops the owner ref */
+    o->in_cb = 0;
+}
+static void owner_on_close(void *ud) { (void)ud; g_closes++; }
+UTEST(stream_writable, late_install_owner_hold_keeps_the_stream_alive_across_the_callback) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream *s = malloc(sizeof *s); ASSERT_TRUE(s != NULL);
+    RW w; Prod p;
+    g_alloc = kl_allocator_default();
+    memset(&w, 0, sizeof w); memset(&p, 0, sizeof p); p.s = s;
+    g_closes = 0;
+    Owner o = { s, 1, 0, 0, 0 };
+    kl_stream_init(s, g_rbuf, sizeof g_rbuf);
+    s->ctx = &g_ev;
+    kl_stream_write_init(s, &g_alloc, 64);
+    kl_stream_set_writer(s, rw_write, &w);
+    kl_stream_close_init(s, owner_on_close, &o);
+    ASSERT_EQ(kl_stream_set_owner_hold(s, owner_retain, owner_release, &o), 0);
+    refuse_then_drain(s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(s, owner_drop_cb, &o), 0);
+    ASSERT_EQ(kl_timer_fire(&g_ev), 1);
+    ASSERT_EQ(o.freed_in_cb, 0);                            /* the hold kept it alive */
+    ASSERT_EQ(o.released, 1);                               /* ... and its release freed it */
+    ASSERT_TRUE(o.s == NULL);
+    ASSERT_EQ(g_closes, 1);                                 /* detached before the release */
+    kl_event_ctx_free(&g_ev);
+}
+
+/* Contract-breach guard: a stream that outlives its loop (it must be freed first) holds a stale
+ * timer id. If the ctx storage is re-initialised, ids restart, and the stale id may name another
+ * owner's timer; the stream's later free must not cancel it. */
+static int g_other_fired;
+static void other_timer(void *ud) { (void)ud; g_other_fired++; }
+UTEST(stream_writable, late_install_stale_id_cannot_cancel_a_reused_timer) {
+    ASSERT_EQ(ev_init(), 0);
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    int64_t stale = s.wr_defer_id;
+    kl_event_ctx_free(&g_ev);
+    ASSERT_EQ(ev_init(), 0);
+    g_other_fired = 0;
+    int64_t other = -1;
+    for (int i = 0; i <= stale && i < 64; i++) other = kl_timer_add(&g_ev, 0, other_timer, NULL);
+    ASSERT_EQ(other, stale);                                /* the id was reused */
+    ASSERT_EQ(kl_stream_write_free(&s), 0);                 /* must not cancel it */
+    ASSERT_EQ(kl_timer_fire(&g_ev), (int)stale + 1);
+    ASSERT_EQ(g_other_fired, (int)stale + 1);
+    ASSERT_EQ(p.fired, 0);
+    kl_event_ctx_free(&g_ev);
+}
+
+/* A stream with no loop (ctx NULL, as the mock streams above) cannot defer: the late install is
+ * accepted and the refusal stays armed for the next progress point, if any. */
+UTEST(stream_writable, late_install_without_a_loop_defers_nothing) {
+    KlStream s; RW w; Prod p; late_readiness(&s, &w, &p, 64);
+    s.ctx = NULL;
+    refuse_then_drain(&s, &w, &p);
+    ASSERT_EQ(kl_stream_on_writable(&s, prod_writable, &p), 0);
+    ASSERT_EQ(p.fired, 0);
+    ASSERT_EQ(kl_stream_write_free(&s), 0);
 }
 
 /* ── Live: a producer driven only by the edge, over a real socket ───────────────────────────── */

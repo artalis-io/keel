@@ -66,11 +66,33 @@ WOULD_BLOCK ─► terminal write failure (capacity never useful) ─► fn ─�
 "Physical progress" is `kl_stream_flush` (readiness) or `kl_stream_on_write_complete` (completion).
 "Total pending" is `kl_stream_write_pending`, in-flight bytes included.
 
-- Only `WOULD_BLOCK` arms it; an `ACCEPTED` write disarms it. Bytes draining never fire it on their
-  own: the producer must have observed the blocked state.
+- Only `WOULD_BLOCK` arms it; an `ACCEPTED` write disarms it, and so does removing the callback
+  (`fn` NULL). Bytes draining never fire it on their own: the producer must have observed the blocked
+  state.
+- A refusal before `fn` was installed is remembered: once it is installed, it fires. While any byte
+  is still pending (`kl_stream_write_pending > 0`, in-flight included), nothing is deferred: the next
+  progress point fires it as usual. Only when **nothing** is pending at install time (the queue
+  drained completely while no callback was installed), or the write side has failed, can no progress
+  point ever come; then the stream schedules a deferred check on its own loop (a 0 ms `kl_timer_add`
+  on the stream's `KlEventCtx`) and fires `fn` from that tick: never from inside
+  `kl_stream_on_writable`, at most once for that refusal, with no further transport I/O. With
+  nothing pending a retry within capacity cannot be refused, so the deferred fire cannot feed a
+  zero-delay loop; a producer that reinstalls `fn` on every refusal while bytes are pending schedules
+  nothing and waits for progress.
+- At most one check is pending per stream. Replacing `fn` (only the new one fires), removing it, an
+  `ACCEPTED` write, a progress-point fire, a close beginning, and `kl_stream_write_free` each cancel
+  it. Free the stream before its loop, as for every object attached to a `KlEventCtx`; a check still
+  pending when the loop is freed never fires. A stream with no loop cannot defer, and its refusal
+  stays armed for the next progress point. If the check cannot be scheduled, `kl_stream_on_writable`
+  returns -1 and changes nothing.
+- The deferred fire runs from a loop timer, outside any adapter frame. An adapter whose storage is
+  reference-counted (a `KlPipeStream`) holds it across that fire exactly as across its own readiness
+  and completion callbacks, so a callback may release the adapter (`kl_pipe_free`); the stream is not
+  touched after that hold is dropped.
 - It fires once per arming, whether or not the callback retries. A retry that returns `WOULD_BLOCK`
   again (the write needs more room than has freed) re-arms it, and the next progress point fires it
-  again; progress is guaranteed because a `WOULD_BLOCK` means bytes are pending. A retry that
+  again; progress is guaranteed because a `WOULD_BLOCK` means bytes are pending (or, for a refusal
+  whose output drained completely before the callback existed, by the deferred check above). A retry that
   returns `KL_STREAM_ERROR` does not arm it.
 - It never fires from inside `kl_stream_write`.
 - In-flight bytes count toward "full". That is why the stream's internal `KlDrain` low-water callback
@@ -243,7 +265,7 @@ set) and the `pollcomp` double (`make smoke-pollcomp-asan`), plus IOCP on the Wi
 | Area | Suites |
 |---|---|
 | Stream write/read/close | `tests/test_stream.c`, `test_stream_read.c`, `test_stream_close.c`, `test_stream_single_shot.c` |
-| Writable-again edge | `tests/test_stream_writable.c` (rules, plus a live socket producer); `test_pipe_stream.c` (`producer_resumes_only_on_the_writable_edge`, IOCP) |
+| Writable-again edge | `tests/test_stream_writable.c` (rules, the late-install deferred check, plus a live socket producer); `test_pipe_stream.c` (`producer_resumes_only_on_the_writable_edge` and `late_installed_edge_*`, IOCP); `test_anon_pipe.c` (`late_installed_edge_*`, POSIX readiness) |
 | Public transport surface | `tests/test_stream_transport.c`, `test_transport_public.c` |
 | Listener | `tests/test_listener.c` |
 | Connect op | `tests/test_connect_op.c` |

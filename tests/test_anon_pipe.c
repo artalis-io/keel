@@ -951,6 +951,109 @@ UTEST_F(anon_px, blocked_writer_peer_gone_wakes_once_errors_and_closes) {
     ASSERT_RECLAIMED();                                       /* includes: no SIGPIPE delivered */
 }
 
+/* A producer refused before it installed its callback, whose output then drains completely: the last
+ * flush passes with nobody to tell and nothing stays queued, so no writable signal will ever come
+ * again. Installing the callback afterwards still delivers the remembered refusal, once, from the
+ * loop and not inside the install. */
+UTEST_F(anon_px, late_installed_edge_fires_after_the_queue_drained) {
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 0, 16 * 1024);
+    cfg.on_data = NULL;
+    KlPipeStream *p = NULL; KlAnonPipeEnd e;
+    ASSERT_EQ(kl_anon_pipe_create(&utest_fixture->ev, KL_ANON_PIPE_WRITES, &cfg, &p, &e), KL_PIPE_OK);
+    KlStream *st = kl_pipe_stream(p);
+    int cfd = kl_anon_pipe_end_fd(&e);
+    ASSERT_EQ(fcntl(cfd, F_SETFL, fcntl(cfd, F_GETFL) | O_NONBLOCK), 0);   /* the test drains it */
+
+    static char chunk[4096];
+    memset(chunk, 'f', sizeof chunk);
+    size_t sent = 0; int blocked = 0;
+    for (int i = 0; i < 100000 && !blocked; i++) {
+        KlStreamWriteStatus ws = kl_stream_write(st, chunk, sizeof chunk);
+        if (ws == KL_STREAM_WOULD_BLOCK) blocked = 1;
+        else { ASSERT_EQ((int)ws, (int)KL_STREAM_ACCEPTED); sent += sizeof chunk; }
+    }
+    ASSERT_TRUE(blocked);                                     /* refused; no callback installed */
+
+    static char in[65536];
+    size_t got = 0;
+    uint64_t end = now_ms() + 10000;
+    while ((got < sent || kl_stream_write_pending(st) > 0) && now_ms() < end) {
+        ssize_t k = read(cfd, in, sizeof in);
+        if (k > 0) got += (size_t)k;
+        (void)kl_event_ctx_run(&utest_fixture->ev, 16, 1);    /* the adapter flushes the queue */
+    }
+    ASSERT_EQ(got, sent);
+    ASSERT_EQ((int)kl_stream_write_pending(st), 0);           /* fully drained: no progress to come */
+    pump_for(&utest_fixture->ev, 20);
+
+    Edge g = { 0, 0 };
+    ASSERT_EQ(kl_stream_on_writable(st, edge_writable, &g), 0);
+    ASSERT_EQ(g.edges, 0);                                    /* never inside the install */
+    ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_edge, &g, 2000));
+    ASSERT_EQ(g.edges, 1);
+    ASSERT_EQ((int)kl_stream_write(st, "x", 1), (int)KL_STREAM_ACCEPTED);   /* the retry goes out */
+    pump_for(&utest_fixture->ev, 50);
+    ASSERT_EQ(g.edges, 1);                                    /* once */
+    ASSERT_EQ(read(cfd, in, sizeof in), 1);
+
+    ASSERT_EQ(kl_stream_close_begin(st), 0);
+    ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_closed, &r, 2000));
+    ASSERT_EQ(r.closes, 1);
+    kl_pipe_free(p);
+    kl_anon_pipe_end_close(&e);
+    rec_free(&r);
+    pump_for(&utest_fixture->ev, 30);
+    /* The deferred check grew the loop's timer heap, which the loop keeps until it is freed: recycle
+     * the loop so the accounting below sees only what the stream itself owned. */
+    kl_event_ctx_free(&utest_fixture->ev);
+    ASSERT_EQ(kl_event_ctx_init(&utest_fixture->ev, &g_alloc), 0);
+    ASSERT_RECLAIMED();
+}
+
+/* The late-installed callback frees its own pipe (kl_pipe_free is legal at any time). A write-only
+ * readiness pipe with nothing queued has no op in flight, so only the deferred fire's own hold keeps
+ * the stream alive until the stream is done with it (ASan proves no access after the free). */
+typedef struct { KlPipeStream *p; int edges; } FreeEdge;
+static void free_edge(void *ud) { FreeEdge *f = ud; f->edges++; kl_pipe_free(f->p); f->p = NULL; }
+static int cond_free_edge(void *a) { return ((FreeEdge *)a)->edges > 0; }
+UTEST_F(anon_px, late_installed_edge_callback_may_free_its_pipe) {
+    Rec r; memset(&r, 0, sizeof r);
+    KlPipeConfig cfg = rec_cfg(&r, 0, 16 * 1024);
+    cfg.on_data = NULL;
+    KlPipeStream *p = NULL; KlAnonPipeEnd e;
+    ASSERT_EQ(kl_anon_pipe_create(&utest_fixture->ev, KL_ANON_PIPE_WRITES, &cfg, &p, &e), KL_PIPE_OK);
+    KlStream *st = kl_pipe_stream(p);
+    int cfd = kl_anon_pipe_end_fd(&e);
+    ASSERT_EQ(fcntl(cfd, F_SETFL, fcntl(cfd, F_GETFL) | O_NONBLOCK), 0);
+    static char chunk[4096]; memset(chunk, 'f', sizeof chunk);
+    size_t sent = 0; int blocked = 0;
+    for (int i = 0; i < 100000 && !blocked; i++) {
+        KlStreamWriteStatus ws = kl_stream_write(st, chunk, sizeof chunk);
+        if (ws == KL_STREAM_WOULD_BLOCK) blocked = 1; else sent += sizeof chunk;
+    }
+    ASSERT_TRUE(blocked);
+    static char in[65536]; size_t got = 0; uint64_t end = now_ms() + 10000;
+    while ((got < sent || kl_stream_write_pending(st) > 0) && now_ms() < end) {
+        ssize_t k = read(cfd, in, sizeof in); if (k > 0) got += (size_t)k;
+        (void)kl_event_ctx_run(&utest_fixture->ev, 16, 1);
+    }
+    ASSERT_EQ(got, sent);
+    ASSERT_EQ((int)kl_stream_write_pending(st), 0);
+    FreeEdge f = { p, 0 };
+    ASSERT_EQ(kl_stream_on_writable(st, free_edge, &f), 0);
+    ASSERT_EQ(f.edges, 0);
+    ASSERT_TRUE(pump_until(&utest_fixture->ev, cond_free_edge, &f, 2000));
+    pump_for(&utest_fixture->ev, 30);
+    ASSERT_EQ(f.edges, 1);
+    ASSERT_EQ(r.closes, 0);                                   /* freed: no consumer callback */
+    kl_anon_pipe_end_close(&e);
+    rec_free(&r);
+    kl_event_ctx_free(&utest_fixture->ev);                   /* drop the timer heap (see above) */
+    ASSERT_EQ(kl_event_ctx_init(&utest_fixture->ev, &g_alloc), 0);
+    ASSERT_RECLAIMED();
+}
+
 UTEST_F(anon_px, write_after_child_gone_errors_without_sigpipe) {
     Rec r; memset(&r, 0, sizeof r);
     KlPipeConfig cfg = rec_cfg(&r, 0, 0);

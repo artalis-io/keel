@@ -101,6 +101,7 @@ static int stream_close_common(KlStream *s, int abort) {
     if (s->close_state == KL_STREAM_STATE_OPEN) {
         s->close_state = KL_STREAM_STATE_CLOSING;
         s->wq_closing  = 1;                            /* refuse new writes (kl_stream_write → CLOSED) */
+        kl_stream_writable_defer_cancel(s);            /* on_close is the terminal signal now */
         if (s->read_inited)
             kl_stream_read_close(s);                   /* logical read close; readiness retires recv */
     }

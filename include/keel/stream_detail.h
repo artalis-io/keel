@@ -11,6 +11,7 @@
 #define KEEL_STREAM_DETAIL_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <keel/stream.h>      /* KlStream typedef + the write/read/close contract */
 #include <keel/allocator.h>   /* KlAllocator */
 #include <keel/handle.h>      /* KlSocketHandle */
@@ -54,6 +55,11 @@ struct KlStream {
     int                in_writable;      /**< DEPTH: inside on_writable; defer close finalize */
     void             (*on_writable)(void *ctx);
     void              *writable_ctx;
+    int                wr_defer_armed;   /**< a late-install deferred edge check is scheduled */
+    int64_t            wr_defer_id;      /**< its kl_timer_add id on ctx (valid while armed) */
+    void             (*owner_retain)(void *ctx);   /**< adapter keep-alive around a deferred fire */
+    void             (*owner_release)(void *ctx);  /**< ...its matching release (may free) */
+    void              *owner_ctx;
 
     /* ── Strict read pause/resume (contract: kl_stream_read_* in <keel/stream.h>) ─────────── */
     void             (*read_deliver)(void *ctx, const char *buf, size_t len, int ok);
