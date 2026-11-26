@@ -5,6 +5,217 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Nineteenth pass: 3.6.0 pre-release audit; separation holds, one completion-edge Medium (2026-11-25)
+
+**Revision:** `main` `65568ff` (#521, bounded compressed streaming; the changes since v3.5.0).
+Read-only; no source changed by the audit. It ran alongside four C audits (twenty-first pass in
+[keel_audit.md](keel_audit.md)).
+**Scope:** the event, socket and protocol seams in the 3.6.0 release candidate: bounded streaming
+and its writable edge, compressed streaming, the graceful drain, the Windows select() backend (now
+the Windows default) and the IOCP watch lifecycle; a re-check of the eighteenth pass's open items.
+
+**Historical versus current.** Sections 1 to 6 are the findings against `main` at `65568ff`,
+before any fix. Sections 7 to 10 describe `main` after the fixes, at `021dd0a` (#523 to #531
+merged).
+
+**Verdict at `65568ff`:** the three-axis separation holds. No protocol TU calls an event engine or
+includes an engine header; the codec (`compress_miniz.c`) and HTTP (`http_compress.c`, through the
+`KlCompress` vtable only) stay ignorant of each other. **One confirmed Medium (M1)**, a completion
+loop gap in a contract the protocol layer promises on both models. Three Lows, five Informational.
+
+### 1. Architecture map (drift since `cd17c9c`)
+
+- **Windows default readiness backend** is now `event_winselect.c` (Winsock `select()`);
+  `event_wsapoll.c` is gone. `event_hangup.h`, `platform.h` and `completion_pipe_absent.c` changed
+  only in comments.
+- **Bounded streaming:** `kl_http_response_stream_capacity`, `stream_try_write` and the writable
+  edge (`kl_http_response_stream_on_writable`), driven on readiness by
+  `kl_async_sync_stream_interest` (`async.c`) and on completion by `comp_tls_on_write`
+  (`completion_http_server.c`).
+- **`KlCompress.flush_bound`** appended to the vtable (I5).
+- **`http_server_plat_posix.c`** newly includes `<sys/socket.h>` (`peer_is_unix`): a
+  platform-service TU, so allowed (L3 concerns what it queries, not the include).
+
+### 2. Traces (changes only)
+
+- **Send and backpressure, readiness:** a refusal arms the edge; the write watch fires it on the
+  next writable report once a callback is installed.
+- **Send and backpressure, completion:** the edge fires only from `comp_tls_on_write`, after a send
+  completes. `kl_http_response_stream_on_writable` only stores the callback, and
+  `kl_http_response_stream_progress` returns early with no callback (M1).
+- **Graceful drain:** the readiness listener is disarmed synchronously; the completion path cancels
+  posted accepts (io_uring by operation, not fd). The drain deadline is published before the
+  seq-cst store of the draining flag.
+- **Windows wait:** `event_winselect.c` and `event_poll.c` scan registrations from index 0 and stop
+  at `max` (L2).
+
+### 3. Findings (state at `65568ff`)
+
+**Eighteenth-pass re-check (by grep):** N1, F2, F4, I2 and I3 resolved. F3 and I1 were not
+re-checked.
+
+**Medium**
+- **M1 (confirmed): on completion loops a writable callback installed after the refusal never
+  fires once the queue is idle.**
+  - Contract: `include/keel/http_response.h`, "A refusal before @p fn was installed is remembered:
+    once it is installed, it fires." Readiness keeps it; completion does not.
+  - Reproduction: `a_bounded_stream_is_paced_by_the_writable_edge` modified to install
+    `on_writable` from a 1 s timer after the first WOULD_BLOCK. kqueue delivered 8 MiB (1810
+    edges); pollcomp and io_uring (core) stalled at 49,152 bytes with 0 edges until the client's
+    30 s timeout. IOCP shares the driver; not run.
+  - Impact: a relay that installs its callback lazily stalls forever; a suspended op is exempt from
+    the idle sweep, so the slot is held until the client hangs up (or longer under `RESET_ONLY` /
+    `OFF`).
+
+**Low**
+- **L1: the Windows sync client still waits with WSAPoll.** `platform_win.c` `kl_plat_poll1`
+  (`WSAPoll(POLLWRNORM)`), used by `http_client_sync.c`. The readiness backend moved to select()
+  because WSAPoll reports HUP on every call after a peer FIN
+  (`docs/architecture/windows_readiness_backend.md` section 2). Inferred: an upload to a peer that
+  half-closed but still reads spins on each would-block. Not reproduced.
+- **L2: fixed-order scan starves registrations past `max`.** `event_winselect.c` and
+  `event_poll.c:224` start at slot 0 and stop at `KL_EVENTS_PER_TICK` (64). Pre-existing in poll;
+  now on the Windows default. Same defect as C audit C M3 (D4 in the consolidated list).
+- **L3: peer credentials bypass the socket provider.** `http_server_plat_posix.c` runs
+  `getsockname` and `SO_PEERCRED` / `getpeereid` on the raw handle whatever the provider; with lwIP
+  or an injected transport that number can name an unrelated host AF_UNIX socket, whose uid/gid is
+  then reported for a remote peer. Also C audit B I3.
+
+**Informational**
+- **I1:** progress past the 1 MiB queue limit relies on `drain_writev_coalesced` always sending the
+  chunk header with the first 4 KiB, so a send is in flight. Verified: 2 MiB chunks, 4 MiB capacity,
+  16 MiB delivered on pollcomp.
+- **I2:** idle keep-alive close during a drain differs per model (readiness resets a just-arrived
+  request; completion may serve it with `Connection: close`). Both acceptable; unstated.
+- **I3:** completion TLS pending counts ciphertext (already documented in
+  `docs/contracts/streaming.md`).
+- **I4:** `iocp_watch_renew` makes one extra, normally failing, `CreateIoCompletionPort` per add or
+  mod (also C audit C L3).
+- **I5:** `KlCompress.flush_bound` changes the vtable size; fits the minor-version recompile rule
+  in `compatibility.md` but deserves an upgrade note.
+
+**Checked equivalent across readiness and completion:** `on_drain` held back while the driver moves
+buffered output past the queue limit, with a liveness check after every callback; cancel paths (a
+failed readiness flush cancels the op, a failed completion send closes the connection); the shared
+deadline sweep cursor; the 5-byte terminating chunk always admitted; drain deadline published
+before the flag.
+
+### 4. Protocol independence (mechanical)
+
+`grep -rnE '<sys/epoll\.h>|<sys/event\.h>|io_uring|WSA|OVERLAPPED|epoll_|kevent' src/protocols/`:
+the only non-comment hits are the platform-service TUs `http_server_plat_posix.c` and
+`dns_sys_win.c`. Gates run and passing: check-substrate-purity, check-protocol-no-integration,
+check-integration-seam, check-readiness-identity, check-pipe-seam, check-sockaddr-neutral,
+check-cloexec.
+
+**Local runs:** macOS kqueue `make test` green except one parallel-run flake of
+`cloexec.every_descriptor_keel_creates_is_close_on_exec` (passes alone); macOS `test-pollcomp`
+green; `smoke-iouring-asan` and `smoke-pollcomp-asan` on core exit 0 with no sanitizer report.
+
+### 5. Compatibility matrix (at `65568ff`)
+
+| Pairing | Status | Evidence |
+|---|---|---|
+| Linux sockets + epoll | supported default | CI full suite, ASan/UBSan |
+| Linux + poll | supported fallback | CI full suite; L2 applies |
+| Linux + io_uring | supported; curated suite | CI `test-iouring`, ASan smokes (re-run green on core); M1 reproduced |
+| Darwin + kqueue | supported | CI, local `make test` |
+| Winsock + select() (new Windows default) | supported; subset; no hang-up capability (1 s peek sweep) | CI `test-win`, MSVC; L1, L2 |
+| Winsock + IOCP | supported; subset | CI `test-win-iocp`; M1 applies (same driver; not run) |
+| pollcomp double | test double | local and CI; M1 reproduced |
+| lwIP raw / UEFI | integration-tested / mock-firmware-tested | unchanged; the graceful drain does not close their listener |
+
+### 6. Contract deltas needed (at `65568ff`)
+
+- The "refusal is remembered" promise needs a completion-side check before each wait (M1); the
+  same promise on `KlStream` was later found to have the same gap.
+- The per-backend behaviour of a handle closed without `kl_event_del` is undocumented and differs
+  between the two Windows backends (C audit C L1/L2).
+
+### 7. Corrections and their PRs (state on `main` at `021dd0a`)
+
+| Finding | Correction | PR |
+|---|---|---|
+| M1 (HTTP writable edge, completion) | `kl_http_comp_stream_edges` fires an armed, installed, idle edge once per completion tick, before the wait; no engine change | #524 (`b4e1fab`) |
+| M1 sibling: `KlStream` late-installed edge | a deferred zero-delay check on the stream's own ctx; `stream.h` states the same promise | #525 (`74ead39`) |
+| L2 (fixed-order scan) | lap-based reporting in poll, Windows select() and pollcomp (`src/event_turn.h`) | #527 (`3f47f2d`) |
+| L3 (peer credentials) | fail closed unless the provider is NULL or the built-in ops table; `KL_SOCK_CAP_NATIVE_FD` is not used, since lwIP advertises it | #523 (`180f905`) |
+| I4 (association call per re-arm) | the unchanged re-arm skips it (`KlEventCtx.rearming`); add and mod still make one | #527 |
+| C audit R4 (IOCP stale watch, teardown hang) | probes only on a handle verifiably on this port, owner tag per op, bounded close | #527 |
+
+The completion-driven double send (a handler's direct `kl_http_response_send` re-sent by the driver
+on io_uring, IOCP and pollcomp), found while fixing, is fixed by **#529** (`6689f32`). Its fix reads ownership from connection state (`stream_inflight`,
+`comp_driven`), not from the backend type, so it adds no engine branching.
+
+### 8. Remaining platform and API limitations (documented limits)
+
+- I3: completion TLS pending counts ciphertext (`docs/contracts/streaming.md`).
+- I5: `KlCompress.flush_bound` changes the vtable size; the 3.6.0 CHANGELOG entry for bounded
+  compressed streaming (#521) already says a custom codec must be recompiled.
+- IOCP IDLE-period posts are not re-checked, and the per-backend behaviour of a handle closed
+  without `kl_event_del` is damage limitation only; both documented at `kl_event_del` (#527).
+- Edge timing per model: readiness fires on the next wait's writable report, completion before its
+  next wait (`http_response.h`, `docs/contracts/streaming.md`, #524).
+- Loops without a hang-up report (completion, macOS poll, Windows select()) hold the post-answer
+  linger to the deadline (#528).
+
+### 9. Low-severity findings deliberately deferred
+
+- L1: the Windows sync client still waits with WSAPoll (fix: `select()` on the one socket).
+- I1: accept a write over 1 MiB when the completion queue is idle (behaviour correct today).
+- I2: state in the drain contract that a request racing the keep-alive close may be served or
+  dropped, per model.
+
+### 10. Regression and mutation evidence (as reported in the PR bodies)
+
+| PR | New tests | Reverts and mutants caught |
+|---|---|---|
+| #524 | eight `late_install_case` cases in `test_completion_output.c`, run on readiness, poll, select(), IOCP, io_uring, pollcomp | fix reverted; synchronous fire; replacement ignored; fire regardless of op state; unconditional pass; pass moved after the wait; spin guard removed |
+| #525 | 19 late-install cases in `tests/test_stream_writable.c`, plus `test_anon_pipe.c` and `test_pipe_stream.c` (IOCP) | no deferral; no owner hold (ASan use-after-free); deferral with bytes pending; id-only cancel |
+| #527 | `tests/test_event_fairness.c`; IOCP reuse, owner-tag and OOM cases in `test_iocp_engine.c` | each fix mutation-checked on edge |
+| #523 | peer-credential fail-closed cases in `tests/test_unix_socket.c` | fail on `main` without the fix |
+
+Full per-PR evidence for the C-audit fixes is in the twenty-first pass of
+[keel_audit.md](keel_audit.md).
+
+### 11. Convergence audit (audited at `6689f32`; dispositions on `main` at `021dd0a`)
+
+The convergence audit ran on `f775e46`, whose tree is identical to `6689f32`, and re-checked the
+corrected event-axis invariants. Results:
+- **Coverage:** every suite passed on kqueue, epoll, poll, io_uring, pollcomp, IOCP and select(),
+  including the Linux ASan/UBSan lanes.
+- **`KlStream` stress harness:** an anonymous pipe, a slow random reader, 32 MiB byte-exact. It
+  covered a callback reinstalled on every refusal, a late install, and a callback freeing the pipe,
+  including from inside the deferred fire. On all eight backends every refusal got exactly one edge,
+  with no spurious edge, no corruption, no sanitizer report and no idle spin.
+- **IOCP:** `kl_event_ctx_free` with a pipe `WriteFile` still posted returned at once.
+- **`KlEventCtx.rearming`:** trailing, zero by default (the full handle check), written only by
+  `kl_watcher_rearm`; compliant with `docs/contracts/compatibility.md`.
+- **Severity:** no Medium or higher.
+- **C-L1, corrected in this documentation change:** the `kl_event_del` text overstated what each
+  backend does when del-before-close is breached.
+  - **Windows select():** in 198 of 200 trials Winsock reused a closed handle's value at once, and
+    every one of those reported the new socket's readiness to the old owner.
+  - **epoll:** a `dup`'d file keeps reporting to its old owner.
+  - **poll and pollcomp:** spin while a closed descriptor stays registered.
+  - `include/keel/event.h`, `docs/architecture/windows_readiness_backend.md` and the CHANGELOG now
+    state that Keel's registration guarantees hold only for the register, del, close lifecycle.
+    They now describe each backend's actual behaviour when it is breached.
+- **Lows, deferred:**
+  - IOCP: at least `max` errored watches whose owners never call del can fill a drain before the
+    port is read.
+  - The HTTP completion edge pass is O(N^2) when many edges come due at once (bounded by
+    `max_connections`).
+  - IOCP close-time quiesce: another loop's packets reset its 2 s give-up budget, and a port that
+    has failed while non-probe ops are outstanding never gives up.
+- **Found by the reviews of the convergence fixes (details in the C audit's twenty-first pass):**
+  F1 is a High regression introduced by #528. It is a lifetime defect in the readiness dispatch:
+  kqueue delivers read and write as two events in one batch, and a connection released by the first
+  was released again by the second. #530 fixes it with the existing release generation
+  (`comp_gen`), which every batched connection event records. The fix is backend-neutral and adds
+  no kqueue policy to HTTP. Completion loops were not affected: a slot is returned only when no
+  operation is posted on it.
+
 ## Eighteenth pass: separation holds after the audit-19 fixes (2026-10-07)
 
 **Revision:** `main` `cd17c9c` (after #464 to #474). Read-only; no source changed.

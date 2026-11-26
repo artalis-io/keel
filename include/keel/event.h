@@ -129,18 +129,34 @@ int  kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *
 /**
  * @brief Remove a file descriptor from the event loop.
  *
- * Remove a handle BEFORE closing it. A handle closed while still registered leaves a stale
- * registration, and the OS may give its handle value to an unrelated socket. That breaks this
- * contract, and what follows is damage limitation per backend, not a guarantee:
- *   - epoll, kqueue: the kernel drops the registration with the descriptor.
+ * Remove a handle BEFORE closing it. Keel's registration guarantees hold only for that lifecycle
+ * (register, del, then close); no backend protects a registration against its handle being closed,
+ * duplicated or reused behind the loop's back. A handle closed while still registered leaves a
+ * stale registration, and the OS may give its handle value to an unrelated socket. That breaks
+ * this contract, and what follows is damage limitation per backend, not a guarantee. Registrations
+ * are named by handle VALUE: once the value is reused and registered again, the old owner's
+ * kl_event_del / kl_event_mod / kl_event_add acts on the new owner's registration.
+ *   - epoll: the registration belongs to the open file, not the descriptor; the kernel drops it
+ *     only when the last descriptor for that file closes. While another one keeps the file open
+ *     (dup, fork, descriptor passing) it goes on reporting to its old owner, and kl_event_del by
+ *     the closed number can no longer remove it.
+ *   - kqueue: the kernel drops the registration with the descriptor.
  *   - poll, pollcomp (watches): the registration stays. Until the descriptor number is reused,
- *     poll() flags it invalid (POLLNVAL; poll reports nothing for it, pollcomp may deliver an event
- *     with an empty ready mask). Once POSIX reuses the number (it reuses the lowest free one at
- *     once), the stale registration reports the new descriptor's readiness to its old owner.
+ *     poll() flags it invalid (POLLNVAL) and returns at once, so a wait does not block for its
+ *     timeout and the loop spins; poll reports no event for it, pollcomp delivers an event with an
+ *     empty ready mask to the stale watcher on every drain. Once POSIX reuses the number (it
+ *     reuses the lowest free one at once), the stale registration reports the new descriptor's
+ *     readiness to its old owner.
  *   - io_uring (watches): an outstanding poll holds its own reference to the closed file, so what
  *     it reports afterwards is unspecified; a later re-arm by the owner polls whatever the number
  *     names by then.
- *   - Windows select(): never reported again; kl_event_del or kl_event_close still releases it.
+ *   - Windows select(): the registration stays and is polled by handle value. Only a wait whose
+ *     select() fails with WSAENOTSOCK detects it; from then on it is not reported until a
+ *     kl_event_add or kl_event_mod names the value. If Winsock gives the value to another socket
+ *     before such a wait (it commonly reuses a closed handle's value at once), select() accepts it
+ *     and the stale registration reports the new socket's readiness to its old owner, as on poll.
+ *     A wait whose select() still fails after that check returns -1. kl_event_del or
+ *     kl_event_close releases the registration.
  *   - IOCP (watches): never reported again and no I/O is posted on the handle, until a
  *     registration (kl_event_add / kl_event_mod) names it again AND the handle is verifiably on
  *     this loop's port: freshly associated by that call, or recorded as associated by this loop

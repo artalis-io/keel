@@ -93,12 +93,16 @@ int  kl_http_response_init(KlHttpResponse *res, KlAllocator *alloc);
 /** @brief Fast reinit for keep-alive: reuses header buffer, no alloc. */
 void kl_http_response_reset(KlHttpResponse *res);
 
-/** @brief Set the HTTP status code (default 200). */
+/**
+ * @brief Set the HTTP status code (default 200).
+ *        Only before the response head is committed (see kl_http_response_send()).
+ */
 void kl_http_response_status(KlHttpResponse *res, int code);
 
 /**
  * @brief Append a header. Both name and value must be null-terminated.
  *        Strings containing CR or LF are rejected (header injection guard).
+ *        Only before the response head is committed (see kl_http_response_send()).
  * @return 0 on success, -1 on failure (CRLF injection, NULL args, alloc failure).
  */
 int kl_http_response_header(KlHttpResponse *res, const char *name, const char *value);
@@ -367,6 +371,16 @@ int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritabl
  * the connection's output queue, which the server sends.) A handler needs no call to send its
  * response on any loop: building it is enough. On a readiness loop the call stays a direct flush,
  * and the server resumes from what it wrote.
+ *
+ * Once any byte of the response head has been sent (by this call or by the server), the response
+ * is committed and its serialized layout is immutable. Do not call kl_http_response_status,
+ * kl_http_response_header, the body setters, kl_http_response_file, kl_http_response_json,
+ * kl_http_response_error or kl_http_response_body_compress on it afterwards. They are not
+ * refused, but a change to a committed response no longer matches what is already on the wire,
+ * and the resumed send corrupts it. Keel itself never alters a committed response: when it must
+ * end the connection it clears only the request's keep-alive and closes after the response. A
+ * response is valid for its producer only while its request is being handled (see
+ * docs/contracts/streaming.md, "Lifetime").
  *
  * @return 0 when done, positive if more to send, -1 on error (including no write target, and a
  *         response whose transmission the completion machinery owns).

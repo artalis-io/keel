@@ -247,10 +247,12 @@ completions and also has no hang-up-only watch).
   `BACKEND=winselect` or the old `BACKEND=wsapoll` select it.
 * The descriptor sets are sized at run time to the registrations: no registration is dropped because
   a fixed `FD_SETSIZE` ran out, and an `add` that cannot grow them fails.
-* A socket closed without `kl_event_del` makes `select()` fail with `WSAENOTSOCK`; the backend then
-  marks the handles the stack no longer knows as dead (never reported, as WSAPoll's `POLLNVAL` was)
-  and waits again, so one stale registration cannot stop the loop. The IOCP engine behaves the same
-  way for a watcher: a closed watched socket orphans its watch, which is never reported or posted
+* A socket closed without `kl_event_del` is detected only when a `select()` fails with
+  `WSAENOTSOCK`: the backend then marks the handles the stack no longer knows as dead (not reported
+  until a registration names the value again) and waits again, so one stale registration cannot
+  stop the loop. If Winsock has already reused the value for another socket, `select()` does not
+  fail, and the stale registration reports that socket's readiness to its old owner. The IOCP
+  engine goes further for a watcher: a closed watched socket orphans its watch, which is never reported or posted
   again until a registration names the handle and the handle is verifiably on that loop's port
   (freshly associated, or associated by that loop itself), so a probe is never re-posted on a
   handle value that may by then name an unrelated socket (see `kl_event_del` in

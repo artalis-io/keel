@@ -225,19 +225,20 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   alternates the two classes when a drain fills `max`. epoll, kqueue, io_uring and IOCP queue ready
   work in kernel order and were not affected.
 - **IOCP: a watched socket closed without `kl_watcher_del` can no longer hang `kl_event_ctx_free`,
-  or reach another loop.** The backend re-posted the watch's probe on the bare handle value, and every
-  dispatch re-arm revived a dead watch, so once Winsock gave the value to a socket no port knew, the
-  probe completed nowhere and the close waited for it forever (if this loop had associated the new
-  socket, the stale watcher fired on it instead). Probes are now posted only when the owner names the
-  handle (`kl_event_add`, `kl_event_mod`, the dispatch re-arm) and only on a handle verifiably on this
-  loop's port: freshly associated, or recorded as associated by this loop (ERROR_INVALID_PARAMETER,
-  which cannot tell this port from another, is no longer trusted on its own). A probe ended by the
-  close, or a post that finds no socket, orphans the watch, which is then never posted or reported
-  again until a registration passes that check, as on the select() backend; a registration of a new
-  socket on the value before the close is drained gets its own probe. Every operation carries an
-  owner tag, and a drain drops another loop's operation untouched. The re-arm of an unchanged
-  registration (`kl_watcher_rearm`, which the dispatch calls after each callback) no longer makes a
-  failing `CreateIoCompletionPort` call; every other registration (`kl_watcher_add`,
+  or reach another loop.** The backend re-posted the watch's probe on the bare handle value, and
+  every dispatch re-arm revived a dead watch, so once Winsock gave the value to a socket no port
+  knew, the probe completed nowhere and the close waited for it forever (if this loop had
+  associated the new socket, the stale watcher fired on it instead). Probes are now posted only
+  when the owner names the handle (`kl_event_add`, `kl_event_mod`, the dispatch re-arm) and only
+  on a handle verifiably on this loop's port: freshly associated, or recorded as associated by
+  this loop (ERROR_INVALID_PARAMETER, which cannot tell this port from another, is no longer
+  trusted on its own). A probe ended by the close, or a post that finds no socket, orphans the
+  watch, which is then never posted or reported again until a registration passes that check, as
+  on the select() backend once it has detected the closed handle; a registration of a new socket
+  on the value before the close is drained gets its own probe. Every operation carries an owner
+  tag, and a drain drops another loop's operation untouched. The re-arm of an unchanged
+  registration (`kl_watcher_rearm`, which the dispatch calls after each callback) no longer makes
+  a failing `CreateIoCompletionPort` call; every other registration (`kl_watcher_add`,
   `kl_watcher_mod`, even with the same interest) makes one. A watch's IDLE period (from a
   completion to the next post: that re-arm, an error watch's re-arm, a retried post) is not
   re-checked; for a close and reuse of the value inside it, `kl_event_close` gives up after 2 s

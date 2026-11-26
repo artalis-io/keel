@@ -5,6 +5,247 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Twenty-first pass: 3.6.0 pre-release audit (2026-11-25)
+
+**Revision:** `main` `65568ff` (#521; the changes since v3.5.0). Read-only; no repository file was
+changed by the audit. Probes ran on scratch copies (`git archive 65568ff`).
+**Scope:** four parallel C audits, with the axis audit alongside (nineteenth pass in
+[keel_axis_audit.md](keel_axis_audit.md)):
+- **A:** bounded streaming and compression (`http_response.c`, `http_compress.c`, miniz).
+- **B:** server lifecycle (graceful drain, writable edge, hang-up watch, run and stop).
+- **C:** Windows event backends (`event_winselect.c` whole file; `event_iocp.c` watch lifecycle).
+- **D:** untrusted-input parsers (HTTP/1, multipart, chunked, router, PROXY, WebSocket, DNS,
+  client, HTTP/2).
+
+**Historical versus current.** Section 1 describes `main` at `65568ff`, before any fix. Sections 2
+to 5 describe `main` after the fixes, at `021dd0a` (#523 to #531 merged); section 6 records the
+convergence audit and the defects its reviews found.
+
+**Result at `65568ff`:** no Critical. Four release-relevant correctness defects (R1 to R4), four
+Medium DoS or protocol defects (D1 to D4), and a set of Lows. These audits, the sanitizer runs
+listed below and fuzzing found no memory-safety defect in the audited revision (no out-of-bounds
+access, use-after-free or double free); this is not a claim of formal memory safety. One of the
+corrections then introduced one: a remotely triggerable connection-pool corruption (F1, a High
+regression from #528), found by the convergence reviews and fixed by #530 before release
+(section 6).
+
+**Engines run:** macOS kqueue and pollcomp; Linux epoll, poll and io_uring on core; Windows
+select() and IOCP on edge (MSYS2 UCRT64). v3.5.0 was also run on kqueue and pollcomp to classify
+regressions. Sanitizers: `smoke-iouring-asan` and `smoke-pollcomp-asan` clean on core; an ASan run
+of audit B's probe was stopped unfinished and is not claimed.
+
+### 1. Findings against the audited revision `65568ff`
+
+#### Release-relevant correctness (state at `65568ff`)
+
+| ID | Source | Location | Defect | Status | Regression? |
+|---|---|---|---|---|---|
+| R1 | A H1 | `http_response.c` `kl_http_response_stream_writev`; `http_compress.c` `kl_http_compress_stream_end` | The legacy writer checks only `stream_error` and `head_request`, never `stream_ended`, `body_mode` or `headers_sent`; the compressed end runs its final feed without checking `stream_ended`. A write after `end_stream` puts `0\r\n\r\n4\r\nlate\r\n` on the wire and returns 0. On a kept-alive connection the stray chunk sits where the next response starts: desync, response splitting behind a relay. | confirmed by probe | root cause pre-3.5; the new compressed path reaches it |
+| R2 | B H1 | `drain.c` `drain_notify`; `http_response.c` stream branch of `kl_http_response_send`; `http_connection.c` `conn_send_complete`; `completion_http_server.c` `comp_tls_on_write` | A stream ended from `on_drain` after its op completed loses its tail and the connection is kept alive. Readiness: `drain_notify` decides "drained" before calling `on_drain`, which refills it. Completion: `comp_tls_on_write` completes the send with the drain refilled. The keep-alive reset frees the tail and terminator; the next response is parsed as chunk data. | confirmed on kqueue, epoll, pollcomp, io_uring | completion new in 3.6.0; readiness pre-existing (v3.5.0 kqueue desyncs) |
+| R3 | axis M1 | `completion_http_server.c` `comp_tls_on_write`; `http_response.c` `kl_http_response_stream_progress` | Completion loops: a writable callback installed after the WOULD_BLOCK never fires once the queue is idle, against the header's "a refusal before fn was installed is remembered". pollcomp and io_uring stall at 48 KiB. | confirmed | new API in 3.6.0 |
+| R4 | C M1, M2 | `event_iocp.c` `iocp_watch_rearm_dispatched`, `iocp_watch_renew`, `iocp_quiesce_port_for_close` | A watched socket closed without `kl_watcher_del`: each dispatch re-arm revives the dead watch (renew clears `watch_dead`) and re-posts on the bare handle value. Once the value is reused by a socket no port knows, readiness is lost and `kl_event_ctx_free` blocks in `GetQueuedCompletionStatusEx(INFINITE)`. M2 (speculative): reuse by a socket on the same port fires the stale watcher on it. | M1 confirmed on edge; M2 not probed | #519 covered only reuse followed by re-registration; needs a del-before-close breach |
+
+#### Medium: DoS and protocol (state at `65568ff`)
+
+| ID | Source | Location | Defect | Status |
+|---|---|---|---|---|
+| D1 | D M1 | `http_body_reader_multipart.c` HEADERS state | Each `kl_http_multipart_next` re-searches the accumulated part header from offset 0; default `max_headers_size` 0 is unlimited. 8 MiB 2.7 s, 16 MiB 10.7 s, 32 MiB 42.8 s of loop-thread CPU. | confirmed; pre-existing |
+| D2 | D M3 | `http_connection.c` READING (`last_active_ms` reset per readable event); `http_server_core.c` sweep | No absolute header-phase deadline. A 47-byte request at one byte per 800 ms with `read_timeout_ms = 1000` was served after 39 s; at the defaults one connection is held about 66 hours. | confirmed; pre-existing |
+| D3 | D M2, B M1 | `http_connection.c` `conn_keepalive_reset` (`read_len = 0`) and the completion equivalent | Pipelined HTTP/1.1 requests are silently discarded; the client hangs to its read timeout (RFC 9112 section 9.3). Fails closed, no smuggling. | confirmed; pre-existing |
+| D4 | C M3, axis L2 | `event_winselect.c` wait scan; `event_poll.c:224` | The scan starts at slot 0 and stops at `max` (64): 236 of 300 continuously ready sockets never served in 50 waits; the idle sweep then times out active clients. | confirmed; pre-existing in poll, now the Windows default |
+
+#### Low (state at `65568ff`)
+
+- **A (streaming, compression):** A-L1 the response head goes through the drain capped at
+  `stream_capacity`, with no minimum capacity (capacity 64 and a 200-byte head: `begin_stream`
+  fails); A-L2 `kl_http_response_free` leaves the stream fields, so `try_write` after release
+  returns ERROR (header promises CLOSED) and stale producers could write into a reused slot; A-L3
+  compressed `try_write` answering CLOSED keeps the codec (about 300 KB with miniz); A-L4
+  `kl_http_response_enable_drain` on an enabled drain leaks the buffer and drops buffered bytes.
+  Informational: duplicate `Connection` header when the handler set one; a buffered response begun
+  before a drain says keep-alive then closes; `kl_http_response_stream_admit` sets sticky
+  `stream_error` with no drain.
+- **B (lifecycle):** B-L1 run-once-per-init documented but not enforced (a second run re-adopts a
+  closed `listen_fd` number); B-L2 `kl_http_server_draining()` stays 1 after the run returns; B-L3
+  two threads stopping at once race on non-atomic `drain_deadline_ms` (torn on 32-bit); B-L4 the
+  drain keep-alive close re-issues `kl_comp_cancel` every sweep tick; B-L5 `on_drain` re-entrancy
+  undocumented; B-L6 `kl_watcher_mod` failure leaves `KlWatcher.mask` and `stream_write_watched`
+  disagreeing. Informational: a stream ended from `on_resume` with the drain pending is kept alive
+  on readiness but closed on completion; peer credentials query a non-host handle (B-I3, axis L3).
+- **C (Windows backends):** C-L1 winselect dispatches a stale registration with the old udata when
+  its value is reused by an unregistered socket; C-L2 the two Windows backends disagree on dead
+  registrations; C-L3 one extra `CreateIoCompletionPort` per watcher dispatch; C-L4
+  `ERROR_INVALID_PARAMETER` read as "already on this port" although another port also returns it;
+  C-L5 winselect `kl_event_add` failures leave errno unset.
+- **D (parsers):** D-L1 `max_header_size` below 8192 ignored (a 6000-byte header with a 1024 limit
+  got 200); D-L2 body-reader routes unbounded by default (HTTP/2 applies `max_body_size`); D-L3 a
+  partial PROXY header from a trusted peer spins on level-triggered backends; D-L4 response-parser
+  and h2-client header strings freed at `strlen()+1`; D-L5 WebSocket client accepts
+  `HTTP/1.1 1010` as 101; D-L6 CORS origins over 255 bytes truncated; D-L7 h2 response header names
+  keep HTTP/1 case and headers past 64 drop silently; D-L8 gzip one-shot accepts bytes between the
+  deflate end and the trailer; D-L9 DNS answer owner and class unchecked (mitigated by id, 0x20,
+  question echo, source check and cookies); D-L10 redirect A to B to A re-sends A's credentials to A.
+- **Axis:** axis-L1 the Windows sync client waits with WSAPoll.
+
+#### Verified sound (state at `65568ff`)
+
+- **Streaming arithmetic:** `chunk_framed_len` and its `SIZE_MAX/2` guards, `format_chunk_hdr` (16
+  hex digits in `hdr[24]`), saturating `stream_pending`, 32-bit `size_t`; the admission invariant
+  pending + framed <= capacity <= `drain.max_size`; the 5-byte terminator allowance.
+- **Compressed staging:** `stage_reserve` / `stage_release` pairing, `stage_emit` bounds, admission
+  before allocation and before the codec; `try_end` release rules; miniz `retained` and
+  `flush_bound` overflow to TOO_LARGE.
+- **Reset and edge:** `kl_http_response_reset` clears every new field; writable-edge arm and disarm;
+  liveness re-checks after each callback.
+- **Lifecycle:** deadline sweep cursor (`async_retire` advances it before `on_cancel`); exactly one
+  terminal callback; queue accounting overflow guards; quiesce life release; drain deadline stored
+  before the seq-cst flag; listener close on both axes.
+- **winselect:** `KlWinFdSet` layout, growth and its `INT_MAX/2` guard, all-or-nothing `resize()`
+  under OOM, WSAENOTSOCK retry, WRITE-only reset reporting, non-consuming except-set `SO_ERROR`,
+  timeouts. **IOCP:** renew, reinterest, del and the quiesce pre-pass for the re-registration path.
+- **Parsers:** llhttp CL+TE and duplicate Content-Length rejected (live); chunked, router, PROXY
+  v1/v2 and CIDR, WebSocket, DNS, client and HTTP/2 bounds.
+
+### 2. Corrections and their PRs (state on `main` at `021dd0a`)
+
+| Finding | Correction | PR |
+|---|---|---|
+| R1 | writers (legacy, SSE, compressed) refuse an ended, reset or released stream; `end_stream` with no stream writes nothing; compressed end on a closed response releases the codec | #528 (`ee827fd`) |
+| R2 | readiness re-checks the drain after `on_drain`; the completion end mark follows appended drain bytes; a response with unsent output is never kept alive | #528 |
+| R3 | HTTP: `kl_http_comp_stream_edges` fires an armed, installed, idle edge once per completion tick before the wait | #524 (`b4e1fab`) |
+| R3, `KlStream` sibling | a deferred zero-delay check on the stream's ctx when a callback is installed with nothing pending | #525 (`74ead39`) |
+| R4 (C-M1, C-M2) | IOCP probes posted only when the owner names the handle and only on a handle verifiably on this port; an owner tag per op; `kl_event_close` bounded at 2 s for orphaned probes | #527 (`3f47f2d`) |
+| D1 | resumed in-place header search; offset consume (a second quadratic path found in review); default `max_headers_size` 8 KiB | #526 (`2791a2f`) |
+| D2 | `KlHttpServerConfig.header_timeout_ms`: absolute head deadline from accept (first request, covering TLS handshake, PROXY header, h2 preface) or from first bytes (keep-alive) | #526 |
+| D3 | mitigated, not implemented: a request with bytes after it is answered with `Connection: close`, then a half-close drain | #528 |
+| D4 | lap-based fair reporting in poll, Windows select() and pollcomp (`src/event_turn.h`) | #527 |
+| A-L2 | `kl_http_response_free` seals the response: every stream call answers CLOSED / -1 | #528 |
+| A-L3 | compressed `try_write` releases the codec when it answers CLOSED | #528 |
+| B-L1 | a second `kl_http_server_run` returns -1 (`KL_ERR_INVALID_ARG`) before touching any descriptor | #523 (`180f905`) |
+| B-L2 | `kl_http_server_draining()` returns `draining && running` | #523 |
+| B-I3 / axis-L3 | peer credentials and label fail closed unless the provider is NULL or the built-in ops table | #523 |
+| C-L3 | the unchanged re-arm skips the association call (`KlEventCtx.rearming`); add and mod still make one | #527 |
+| C-L4 | `ERROR_INVALID_PARAMETER` no longer trusted alone; another loop's ops dropped by owner tag | #527 |
+| D-L1 | `max_header_size` below 8 KiB enforced on every read on both loops | #526 |
+
+B-I1 (a stream ended from `on_resume` with the drain pending: kept alive on readiness, closed on
+completion): #528 routes every finished stream through the connection's send completion on both
+models; the convergence audit (section 6) verified that both now keep the connection alive.
+
+**Defects found while fixing and reviewing:**
+
+| Defect | Found | Correction |
+|---|---|---|
+| Header-phase rejections skipped the reject drain: with nothing parsed the request looked complete, so a 431 was followed by a close while the client still sent, and on Windows the RST discarded the 431 | while fixing D-L1; pre-existing | #526: 431s and a 408 on a partial head half-close and drain |
+| A `kl_http_server_stop` before `kl_http_server_run` published `running` was overwritten, so the server ran on | while fixing B-L1/B-L2 | #523 (`stop_requested`) |
+| HTTP/1.0 requests got a chunked, kept-alive streamed response | in review of #528 | #528: HTTP/1.0 streams always close |
+| Rejection after a streamed answer: a raw error written after the answer, the half-close cutting off buffered output, a close over unread input truncating a queued answer | while fixing R2/D3 | #528: discard while sending, a bounded post-answer linger, read on to EOF after a hang-up report |
+| Readiness TLS: a pipelined request already decrypted in the engine waited for socket data | while fixing D3 | #528 |
+| Completion-driven double send: a handler's direct `kl_http_response_send` was rebuilt and re-posted by the driver (plaintext twice; TLS a head inside the head; a timer send after reset wrote a stray 200) on io_uring, IOCP and pollcomp | while fixing; pre-existing | #529 (`6689f32`): one output driver per response |
+| CI step timeouts left no headroom with the new suites | n/a | readiness matrix Test step 5 to 10 min (#526); MSVC runtime-probe step 5 to 10 min (#528) |
+
+### 3. Remaining platform and API limitations (documented limits)
+
+- **IOCP, del-before-close breached:** posts in a watch's IDLE period (the unchanged re-arm, an
+  error watch's re-arm, a retried post) are not re-checked; `kl_event_close` gives up on such
+  probes after about 2 s and retains their records. Documented at `kl_event_del` (#527).
+- **Closed-without-del behaviour per backend** (C-L2): documented at `kl_event_del` (#527);
+  violating the contract is damage limitation, not a guarantee.
+- **Pipelining is not supported** (D3): the client resends on a new connection (#528,
+  CHANGELOG upgrade notes).
+- **No hang-up report** on completion loops, macOS poll and Windows select(): the post-answer
+  linger runs to the read deadline (`docs/contracts/early_rejection_drain.md`, #528).
+- **`max_header_size`** applies to an incomplete header block; a head that arrives complete in one
+  read is accepted up to the read buffer (#526).
+- **Tightened defaults with opt-outs:** `header_timeout_ms < 0` disables the head deadline;
+  `max_headers_size = SIZE_MAX` restores unlimited multipart part headers
+  (`docs/contracts/compatibility.md`, "Correctness, security and default behavior"; #526).
+- **Peer credentials** return -1 off the built-in provider; `kl_peer_cred_fd` is host-descriptor
+  only (#523).
+- **`KlStream`** must be freed before its event ctx; a check still pending at `kl_event_ctx_free`
+  never fires (#525).
+- **Completion TLS** pending counts ciphertext (`docs/contracts/streaming.md`).
+
+### 4. Low-severity findings deliberately deferred
+
+- **From the audit:** A-L1 (no minimum `stream_capacity`; head held against the cap), A-L4
+  (`enable_drain` twice leaks and drops bytes), the A informationals (duplicate `Connection`
+  header; drain-race keep-alive head; `stream_admit` sticky error), B-L3 (concurrent stop from two
+  threads races on `drain_deadline_ms`, torn on 32-bit), B-L4 (`kl_comp_cancel` every sweep tick),
+  B-L5 (`on_drain` re-entrancy undocumented), B-L6 (`kl_watcher_mod` failure bookkeeping), C-L1
+  (select(): reuse before any wait sees WSAENOTSOCK still reports to the old owner; noted only in a
+  source comment), C-L5 (errno unset on add failures), D-L2 to D-L10, axis-L1 (the Windows sync
+  client still waits with WSAPoll).
+- **From the fix reviews:** quadratic `drain_push`; `pipe_ready` ignores a `pipe_watch` failure;
+  stale IOCP identity records retained (#527); a stray CRLF holds a slot about 500 ms, a TLS
+  partial record at the head deadline gets 408, and no test covers the 408-with-head-bytes rule
+  (#526); a custom parser reporting HTTP version 0.0 (#528); no TLS close_notify on the SHUT_WR
+  drain path (pre-existing); completion loops hold the linger slot to the deadline (#528).
+- **From the #529 review:** the refusal's -1 is indistinguishable from a transport error; readiness
+  HEAD file responses sent directly by a handler emit the body (pre-existing); pre-body middleware
+  that sends directly advertises keep-alive and then closes (pre-existing).
+
+### 5. Regression and mutation evidence (as reported in the PR bodies)
+
+| PR | New tests | Reverts and mutants caught |
+|---|---|---|
+| #523 | `peer_credentials_fail_closed_off_the_builtin_provider`, `ws_peer_credentials_fail_closed_off_the_builtin_provider`, `second_run_after_drain_leaves_a_reused_listen_fd_alone` (`tests/test_unix_socket.c`); `a_second_run_is_refused_and_opens_no_listener`; `draining_reads_zero_once_the_loop_has_stopped` | each fails on `main` without the fix (independent review); the label assertion is exercised only on Linux with an active LSM |
+| #524 | eight `late_install_case` cases in `test_completion_output.c` (late install, replacement, cancel, complete, re-arm, mock TLS, white-box spin), run on readiness, poll, select(), IOCP, io_uring, pollcomp | fix reverted; synchronous fire; replacement ignored; fire regardless of op state; unconditional pass; pass moved after the wait; spin guard removed (22,114 fires) |
+| #525 | 19 late-install cases in `tests/test_stream_writable.c`; live cases in `test_anon_pipe.c`; IOCP cases in `test_pipe_stream.c` | without the deferral the late-install tests fail; without the owner hold ASan reports a use-after-free; deferring with bytes pending fails the no-spin test; an id-only cancel fails the stale-id test (Linux, ASan; the Windows free case is not sanitizer-checked) |
+| #526 | multipart linearity (internal work counter), terminator split at every position, 8192/8193 boundary (`test_http_multipart_stream.c`); head-deadline drips incl. TLS record, handshake, h2 preface, keep-alive restart (`test_timeout.c`, `test_tls_integration.c`); `max_header_size` below the read buffer and `head_rejected_while_the_client_still_sends_gets_its_431` (`test_http_split_request.c`); `fuzz_multipart` interleaved pulls with allocation-failure injection | every new test fails with its fix reverted; the 431 test fails 5/5 on Windows without the fix; fuzz coverage 281 to 1018, 3.25M runs, no crash |
+| #527 | `tests/test_event_fairness.c`; IOCP reuse, owner-tag and OOM cases in `test_iocp_engine.c`; additions to `test_event_hangup.c` | each fix mutation-checked on edge |
+| #528 | `tests/protocols/http/test_stream_termination.c`, 27 cases, each checking the next response starts on the next byte (pipelining, overruns, stale begin, TLS in the engine, a flood past the cap, a half-closing slow reader) | each fix mutation-checked |
+| #529 | two cases in `test_completion_output.c`, plaintext and TLS | both fail on pollcomp and io_uring without the fix; a reviewer's 17-case probe (async resume, middleware, file, HEAD, TLS, stale timer send) duplicated before it |
+
+Sanitizer runs reported in the PRs, all ASan/UBSan clean on Linux: `debug-test` (#523, #525,
+#526), `debug-iouring` (#524), the core lanes of #528 and #529.
+
+### 6. Convergence audit (audited at `6689f32`; dispositions on `main` at `021dd0a`)
+
+A focused re-check of the corrected invariants and their interactions. It ran on `f775e46`
+(#529's head), whose tree is identical to `6689f32`. It covered: framing and termination,
+connection reuse, one output driver, rejection and drain bounds, multipart linearity, head
+deadlines, server lifecycle, HTTP and `KlStream` notification liveness, IOCP teardown and
+dispatch fairness.
+- **Linux (core):** every suite passed on epoll, poll, io_uring and pollcomp, including the
+  ASan/UBSan lanes.
+- **macOS:** kqueue, poll and pollcomp passed.
+- **Windows (edge):** IOCP and select() passed.
+- **Probes:** a probe server drove each invariant on kqueue, epoll, pollcomp and io_uring. A
+  `KlStream` stress harness ran on all eight backends: every refusal got exactly one edge, with no
+  spurious edge and no idle spin.
+- **High:** none found.
+
+| Item | Result | Disposition |
+|---|---|---|
+| M1 (new, Medium; readiness only; pre-existing, narrowed by #528). Shape: a buffered or file response whose head was already sent is truncated when the request body then fails (413 at the reader cap, or the body-timeout 408). Cause: `kl_http_conn_reject_final` finished first only for streams, and half-closed under the unsent rest. | probe: `Content-Length: 4194304`, then 4 to 6 KiB and FIN on kqueue and epoll; a clean 413 on completion loops (#529 refuses the direct send) | fixed by #531 (`021dd0a`) |
+| B-I1 (stream ended from `on_resume`: kept alive on readiness, closed on completion at `65568ff`) | kept alive on both axes, next response on the next byte | resolved by #528 |
+| B-L3 (two concurrent `kl_http_server_stop` calls write `drain_deadline_ms`, a plain `uint64_t`) | a genuine C11 data race, so undefined behaviour. **Observed behaviour, not a language guarantee:** 64-bit aligned stores do not tear; on 32-bit a torn value needs the two clocks to straddle a 2^32 ms boundary. No crash, missed stop or unbounded hang was observed. The language gives no bound on the consequences. | deferred (Low by practical exposure) |
+| `drain_push` quadratic copy | bounded by `KlDrain.max_size` (1 MiB default). A peer cannot force byte-sized writes (at least about 1 KiB per send on loopback). Worst case about 20 to 30 ms CPU per MB, against 0.4 ms normally. `kl_ws_server_enable_drain(ws, 0)` has no cap, as already for memory. | Low, accepted |
+| `pipe_ready` ignores a `pipe_watch` failure | unreachable: in readiness mode every narrowing is a `kl_watcher_del`, which cannot fail. Latent only for a future duplex readiness stream. | Informational |
+| L1: on readiness, a stale `kl_http_response_send` between requests writes a stray response (documented misuse; completion refuses it) | reproduced | deferred |
+| L2: an idle keep-alive connection is sent `408 Connection: close` at `read_timeout_ms` | reproduced on all four loops (predates 3.6) | deferred |
+
+**Defects found by the focused reviews of the convergence fixes.** These were found while
+reviewing #531 (the M1 fix) and #530. F1 is a regression one of the corrections introduced; F2 and
+the cut file head predate 3.6.
+
+| Defect | Origin | Disposition |
+|---|---|---|
+| F1 (High, remotely triggerable; macOS/BSD kqueue). kqueue reports read and write readiness as two events in one batch. During a rejected request's answer (`SENDING` with `reject_discard`, both armed), a client reset made the first event release the connection, and the second released it again. `active_count` went negative, the free list looped on one slot, and later accepts shared one `KlHttpConn`, so concurrent clients overwrote each other's state. | regression introduced by #528 (discard-while-sending); not in any release | fixed by #530 (`a46bf76`): each batched connection event records the connection's release generation (`comp_gen`), and dispatch drops an event whose connection was released, or released and re-accepted, since the wait |
+| F2 (Medium). After a partial direct send, 16 sites cleared `res.keep_alive` and the overrun path could add a close notice. That changed the head layout `send_offset` counts into, so a body arrived 24 bytes short and shifted, or a head lost its keep-alive line. | pre-existing | fixed by #531: once any head byte is sent only `req.keep_alive` is cleared; the layout of a committed response is immutable |
+| Cut file head (Low to Medium). A file response's head write could fail after some bytes went out while the head still counted as unsent, and a later rejection wrote a 413 inside the half-sent 200 head. | pre-existing | fixed by #531: such a response counts as committed and failed |
+
+Evidence:
+- **F1:** before the fix it reproduced on `6689f32` (3/3, `active_count -1`, free-list self-loop). The three new tests fail on `main` on kqueue, and the two batch-shaping ones also on poll. ASan/UBSan were clean with the fix on macOS (Homebrew clang) and Linux. A stress run on #531's branch with #530 applied was clean: 20 interleaved resets, `max_connections=1` with a queued client, and 150 keep-alive and reset races.
+- **M1, F2 and the cut file head:** each test fails on the unfixed code on kqueue and epoll, guards excepted.
+
+Further Lows from these reviews, deferred:
+- a macOS file response stalls when the application sets SO_SNDBUF below the loopback MSS (TCP_NOPUSH is not lifted on EAGAIN; the idle timeout ends it);
+- a partial head write inside `kl_http_response_begin_stream` (narrowed by #531, not tested);
+- a second `kl_http_conn_release` of one slot is not refused loudly (defence in depth);
+- the public response mutators are not refused after the head is committed. Their contract is now documented at `kl_http_response_send`: a committed response's layout is immutable.
+
 ## Low-finding triage after the twentieth pass (2026-10-08)
 
 **Revision:** `main` `9679885` (after #475 to #485). Records a decision for every Low left open by
