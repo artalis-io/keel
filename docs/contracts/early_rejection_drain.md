@@ -63,6 +63,11 @@ HTTP decides only *"this is a terminal rejection with potentially live inbound i
 gated on unread input remaining, not on which status code it is, so an ordinary successful
 keep-alive response (whose body is already consumed) never enters the drain.
 
+A rejection **before the request head is parsed** (a 431, a 408 that cuts off a partial head) has no
+framing at all: its zero Content-Length says nothing about what is still coming, and the rest of the
+head may be in flight. Such a rejection (`kl_http_conn_reject_head`) always enters the drain, which
+then has no completion signal: the peer's EOF, the byte cap and the deadline end it.
+
 ## Dispatching the state, for implementers
 
 `DRAINING` is a state the connection drivers **return**, so every consumer of a returned

@@ -1,6 +1,8 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/http_body_reader_multipart.h>
+#include "http_body_reader_multipart_internal.h"   /* white-box: parser work counter */
+#include <stdint.h>  /* SIZE_MAX */
 #include <stdio.h>   /* fprintf */
 #include <stdlib.h>  /* abort */
 #include <string.h>
@@ -599,8 +601,7 @@ UTEST(mp, max_input_buffer_exceeded) {
 }
 
 UTEST(mp, headers_oversize) {
-    /* Set an explicit per-part headers cap; the streaming parser has
-     * no built-in default limit. */
+    /* Set an explicit per-part headers cap, tighter than the default. */
     KlAllocator a = kl_allocator_default();
     KlHttpMultipartConfig cfg = {0};
     cfg.max_headers_size = 512;
@@ -1178,6 +1179,311 @@ UTEST(mp, wrong_reader_kind_in_next_yields_error) {
     ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
     ASSERT_EQ(kl_http_multipart_last_error(bufr), KL_HTTP_MP_ERR_NONE);
     bufr->destroy(bufr);
+}
+
+/* ── Part-header search cost and cap ─────────────────────────────── */
+
+/* Drive the iterator until it asks for more input (or ends); body slices are
+ * copied before the next on_data, as the borrowed-slice contract requires. */
+static KlHttpMultipartEvent collect_until_need(KlHttpBodyReader *br, Collector *c) {
+    for (;;) {
+        KlHttpMultipartPartMeta meta;
+        const char *data = NULL;
+        size_t      data_len = 0;
+        KlHttpMultipartEvent e = kl_http_multipart_next(br, &meta, &data, &data_len);
+        c->last_event = e;
+        if (e == KL_HTTP_MP_EVT_PART_BEGIN) collector_add_part(c, &meta);
+        else if (e == KL_HTTP_MP_EVT_PART_DATA) collector_append_body(c, data, data_len);
+        else if (e == KL_HTTP_MP_EVT_PART_END) continue;
+        else {
+            if (e == KL_HTTP_MP_EVT_ERROR) c->last_error = kl_http_multipart_last_error(br);
+            return e;
+        }
+    }
+}
+
+/* Feed `frags` fragments of `frag_len` header bytes that never end, running the
+ * parser after each one (as the server does per read), and return the bytes the
+ * terminator search examined. */
+static size_t mp_unterminated_header_work(int frags, size_t frag_len) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpMultipartConfig cfg = {0};
+    cfg.max_headers_size = SIZE_MAX;   /* no practical limit: measure the search, not the cap */
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=LIN");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
+    if (!br) return 0;
+    char *frag = kl_malloc(&a, frag_len);
+    if (!frag) mp_test_oom();
+    memset(frag, 'h', frag_len);
+    frag[frag_len - 2] = '\r';         /* line ends but the block never does */
+    frag[frag_len - 1] = '\n';
+    const char *opener = "--LIN\r\n";
+    size_t work = 0;
+    if (br->on_data(br, opener, strlen(opener)) == 0) {
+        for (int i = 0; i < frags; i++) {
+            if (br->on_data(br, frag, frag_len) != 0) break;
+            if (kl_http_multipart_next(br, NULL, NULL, NULL) != KL_HTTP_MP_EVT_NEED_DATA) break;
+        }
+        work = keel__http_multipart_work(br);
+    }
+    kl_free(&a, frag, frag_len);
+    br->destroy(br);
+    return work;
+}
+
+UTEST(mp, part_header_search_is_linear_in_bytes_received) {
+    /* An unterminated header block arriving in many fragments used to be
+     * rescanned from its first byte on every fragment: quadratic CPU on the
+     * loop thread. Each search now resumes where the last one stopped (less 3
+     * bytes), so the work is the bytes received plus a constant per fragment,
+     * and 4x the input costs about 4x the work, not 16x. */
+    const size_t frag_len = 1024;
+    size_t w1 = mp_unterminated_header_work(256, frag_len);    /* 256 KiB */
+    size_t w4 = mp_unterminated_header_work(1024, frag_len);   /*   1 MiB */
+    ASSERT_GT(w1, (size_t)0);
+    ASSERT_LE(w1, 256 * (frag_len + 3));
+    ASSERT_LE(w4, 1024 * (frag_len + 3));
+    ASSERT_LE(w4, 4 * w1 + 4096);
+}
+
+/* The body after which every split below is checked. */
+static const char mp_split_body[] =
+    "--SPL\r\n"
+    "Content-Disposition: form-data; name=\"f\"\r\n"
+    "X-Pad: a\r\n\r\n"
+    "value\r\n--SPL--\r\n";
+
+static void mp_check_split_parts(int *utest_result, const Collector *c) {
+    ASSERT_EQ(c->last_event, KL_HTTP_MP_EVT_DONE);
+    ASSERT_EQ(c->count, 1);
+    ASSERT_STREQ(c->parts[0].name, "f");
+    ASSERT_STREQ(c->parts[0].body, "value");
+}
+
+UTEST(mp, header_terminator_split_at_every_position) {
+    /* Two fragments, split at every byte position, with the parser run between
+     * them: every split of "\r\n\r\n" (1+3, 2+2, 3+1) and every split inside the
+     * header lines must still find the end of the headers exactly once. */
+    KlAllocator a = kl_allocator_default();
+    const size_t len = sizeof(mp_split_body) - 1;
+    for (size_t k = 1; k < len; k++) {
+        KlHttpRequest req = make_mp_request("multipart/form-data; boundary=SPL");
+        KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
+        ASSERT_TRUE(br != NULL);
+        Collector c; collector_init(&c, &a);
+        ASSERT_EQ(br->on_data(br, mp_split_body, k), 0);
+        KlHttpMultipartEvent e = collect_until_need(br, &c);
+        /* DONE once the closing delimiter is complete (its CRLF is epilogue). */
+        ASSERT_TRUE(e == KL_HTTP_MP_EVT_NEED_DATA || e == KL_HTTP_MP_EVT_DONE);
+        ASSERT_EQ(br->on_data(br, mp_split_body + k, len - k), 0);
+        br->on_complete(br);
+        collect_until_need(br, &c);
+        mp_check_split_parts(utest_result, &c);
+        collector_free(&c);
+        br->destroy(br);
+    }
+}
+
+UTEST(mp, header_terminator_found_fed_byte_by_byte) {
+    /* One byte per fragment, parser run after each: the terminator's four bytes
+     * arrive in four separate searches. */
+    KlAllocator a = kl_allocator_default();
+    const size_t len = sizeof(mp_split_body) - 1;
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=SPL");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
+    ASSERT_TRUE(br != NULL);
+    Collector c; collector_init(&c, &a);
+    for (size_t i = 0; i < len; i++) {
+        ASSERT_EQ(br->on_data(br, mp_split_body + i, 1), 0);
+        KlHttpMultipartEvent e = collect_until_need(br, &c);
+        ASSERT_TRUE(e == KL_HTTP_MP_EVT_NEED_DATA || e == KL_HTTP_MP_EVT_DONE);
+    }
+    br->on_complete(br);
+    collect_until_need(br, &c);
+    mp_check_split_parts(utest_result, &c);
+    collector_free(&c);
+    br->destroy(br);
+}
+
+/* A one-part body whose header block is exactly `hdr_bytes` long (terminator
+ * included). The caller frees *out_len + 1 bytes. */
+static char *mp_body_with_header_block(KlAllocator *a, size_t hdr_bytes, size_t *out_len) {
+    static const char opener[] = "--CAP\r\n";
+    static const char disp[]   = "Content-Disposition: form-data; name=\"c\"\r\nX-Pad: ";
+    static const char tail[]   = "\r\n\r\n";
+    static const char rest[]   = "ok\r\n--CAP--\r\n";
+    size_t fixed = (sizeof(disp) - 1) + (sizeof(tail) - 1);
+    if (hdr_bytes < fixed) mp_test_oom();
+    size_t pad = hdr_bytes - fixed;
+    size_t n = (sizeof(opener) - 1) + hdr_bytes + (sizeof(rest) - 1);
+    char *b = kl_malloc(a, n + 1);
+    if (!b) mp_test_oom();
+    char *p = b;
+    memcpy(p, opener, sizeof(opener) - 1); p += sizeof(opener) - 1;
+    memcpy(p, disp, sizeof(disp) - 1);     p += sizeof(disp) - 1;
+    memset(p, 'p', pad);                   p += pad;
+    memcpy(p, tail, sizeof(tail) - 1);     p += sizeof(tail) - 1;
+    memcpy(p, rest, sizeof(rest) - 1);     p += sizeof(rest) - 1;
+    *p = '\0';
+    *out_len = n;
+    return b;
+}
+
+static KlHttpMultipartErrorCode mp_parse_header_block(size_t hdr_bytes, const KlHttpMultipartConfig *cfg,
+                                                      KlHttpMultipartEvent *last) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=CAP");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, (void *)cfg);
+    if (!br) { *last = KL_HTTP_MP_EVT_ERROR; return KL_HTTP_MP_ERR_NOMEM; }
+    size_t n = 0;
+    char *body = mp_body_with_header_block(&a, hdr_bytes, &n);
+    /* 512-byte reads, parser run after each, as a server delivers them. */
+    Collector c; collector_init(&c, &a);
+    KlHttpMultipartEvent e = KL_HTTP_MP_EVT_NEED_DATA;
+    for (size_t off = 0; off < n && e == KL_HTTP_MP_EVT_NEED_DATA; off += 512) {
+        size_t m = n - off < 512 ? n - off : 512;
+        if (br->on_data(br, body + off, m) != 0) { e = KL_HTTP_MP_EVT_ERROR; break; }
+        e = collect_until_need(br, &c);
+    }
+    if (e == KL_HTTP_MP_EVT_NEED_DATA) {
+        br->on_complete(br);
+        e = collect_until_need(br, &c);
+    }
+    *last = e;
+    KlHttpMultipartErrorCode err = kl_http_multipart_last_error(br);
+    collector_free(&c);
+    kl_free(&a, body, n + 1);
+    br->destroy(br);
+    return err;
+}
+
+UTEST(mp, default_header_cap_is_8k) {
+    /* A zero (or absent) max_headers_size is a finite 8 KiB cap, not unlimited:
+     * a header block of exactly the cap parses, one byte more is refused. */
+    KlHttpMultipartEvent last;
+    ASSERT_EQ(mp_parse_header_block(KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE, NULL, &last),
+              KL_HTTP_MP_ERR_NONE);
+    ASSERT_EQ(last, KL_HTTP_MP_EVT_DONE);
+    ASSERT_EQ(mp_parse_header_block(KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE + 1, NULL, &last),
+              KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
+    ASSERT_EQ(last, KL_HTTP_MP_EVT_ERROR);
+
+    KlHttpMultipartConfig zero = {0};
+    ASSERT_EQ(mp_parse_header_block(KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE + 1, &zero, &last),
+              KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
+}
+
+UTEST(mp, header_cap_explicit_values_are_honoured) {
+    KlHttpMultipartEvent last;
+    KlHttpMultipartConfig big = {0};
+    big.max_headers_size = 64 * 1024;          /* above the default */
+    ASSERT_EQ(mp_parse_header_block(32 * 1024, &big, &last), KL_HTTP_MP_ERR_NONE);
+    ASSERT_EQ(last, KL_HTTP_MP_EVT_DONE);
+
+    KlHttpMultipartConfig unlimited = {0};
+    unlimited.max_headers_size = SIZE_MAX;     /* the documented "no practical limit" */
+    ASSERT_EQ(mp_parse_header_block(100 * 1024, &unlimited, &last), KL_HTTP_MP_ERR_NONE);
+    ASSERT_EQ(last, KL_HTTP_MP_EVT_DONE);
+}
+
+/* ── Many parts, buffered and interleaved: linear work, intact parts ── */
+
+/* Body for part i: a deterministic pattern of a size that varies with i (0 included). */
+static size_t mp_gen_body_len(int i) { return (size_t)((i * 37) % 300); }
+static char mp_gen_body_byte(int i, size_t j) { return (char)('a' + (char)((i * 7 + (int)j) % 26)); }
+
+/* A body of `parts` parts named p<i>; the caller frees *out_len + 1 bytes. */
+static char *mp_gen_many_parts(KlAllocator *a, int parts, size_t *out_len) {
+    size_t cap = 64, n = 0;
+    for (int i = 0; i < parts; i++) cap += 96 + mp_gen_body_len(i);
+    char *b = kl_malloc(a, cap + 1);
+    if (!b) mp_test_oom();
+    for (int i = 0; i < parts; i++) {
+        n += (size_t)snprintf(b + n, cap - n,
+                              "--MANY\r\nContent-Disposition: form-data; name=\"p%d\"\r\n\r\n", i);
+        for (size_t j = 0; j < mp_gen_body_len(i); j++) b[n++] = mp_gen_body_byte(i, j);
+        b[n++] = '\r'; b[n++] = '\n';
+    }
+    n += (size_t)snprintf(b + n, cap - n, "--MANY--\r\n");
+    *out_len = n;
+    return b;
+}
+
+/* Feed the body in `chunk`-byte on_data calls; pull after each one (interleaved) or only
+ * after on_complete. Checks every part's name and bytes; returns the parser's work, or 0
+ * on any mismatch. */
+static size_t mp_run_many_parts(int parts, size_t chunk, int interleaved, size_t max_input) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpMultipartConfig cfg = {0};
+    cfg.max_input_buffer = max_input;
+    KlHttpRequest req = make_mp_request("multipart/form-data; boundary=MANY");
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
+    if (!br) return 0;
+    size_t n = 0;
+    char *body = mp_gen_many_parts(&a, parts, &n);
+    Collector c; collector_init(&c, &a);
+    KlHttpMultipartEvent e = KL_HTTP_MP_EVT_NEED_DATA;
+    int bad = 0;
+    for (size_t off = 0; off < n; off += chunk) {
+        size_t m = n - off < chunk ? n - off : chunk;
+        if (br->on_data(br, body + off, m) != 0) { bad = 1; break; }
+        if (interleaved) {
+            e = collect_until_need(br, &c);
+            if (e != KL_HTTP_MP_EVT_NEED_DATA && e != KL_HTTP_MP_EVT_DONE) { bad = 1; break; }
+        }
+    }
+    br->on_complete(br);
+    if (!bad) e = collect_until_need(br, &c);
+    if (bad || e != KL_HTTP_MP_EVT_DONE || c.count != parts) bad = 1;
+    for (int i = 0; !bad && i < parts; i++) {
+        char want[16];
+        snprintf(want, sizeof want, "p%d", i);
+        if (!c.parts[i].name || strcmp(c.parts[i].name, want) != 0 ||
+            c.parts[i].body_len != mp_gen_body_len(i)) { bad = 1; break; }
+        for (size_t j = 0; j < c.parts[i].body_len; j++)
+            if (c.parts[i].body[j] != mp_gen_body_byte(i, j)) { bad = 1; break; }
+    }
+    size_t work = bad ? 0 : keel__http_multipart_work(br);
+    if (bad) fprintf(stderr, "many-parts mismatch: parts=%d chunk=%zu interleaved=%d max_input=%zu\n",
+                     parts, chunk, interleaved, max_input);
+    collector_free(&c);
+    kl_free(&a, body, n + 1);
+    br->destroy(br);
+    return work;
+}
+
+UTEST(mp, many_parts_buffered_whole_is_linear) {
+    /* All of the body buffered before the first pull: consuming each event used to move the
+     * whole remaining input to the front, quadratic in the number of events. Consumption now
+     * advances an offset, so 4x the parts costs about 4x the work. */
+    size_t w1 = mp_run_many_parts(1000, 8192, 0, 0);
+    size_t w4 = mp_run_many_parts(4000, 8192, 0, 0);
+    ASSERT_GT(w1, (size_t)0);
+    ASSERT_GT(w4, (size_t)0);
+    ASSERT_LE(w4, 4 * w1 + 65536);
+}
+
+UTEST(mp, many_parts_interleaved_is_linear) {
+    /* Pulling after each 8 KiB read: the consumed prefix is compacted only when on_data needs
+     * the room and it is at least as large as what remains, so each moved byte is paid for. */
+    size_t w1 = mp_run_many_parts(1000, 8192, 1, 0);
+    size_t w4 = mp_run_many_parts(4000, 8192, 1, 0);
+    ASSERT_GT(w1, (size_t)0);
+    ASSERT_GT(w4, (size_t)0);
+    ASSERT_LE(w4, 4 * w1 + 65536);
+}
+
+UTEST(mp, parts_intact_across_compactions) {
+    /* Odd read sizes, so delimiters, header blocks and bodies straddle reads and the buffer is
+     * compacted mid-part; and a tight max_input_buffer, which forces compaction to make room
+     * rather than growth. */
+    const size_t chunks[] = { 1, 7, 100, 1000, 4093, 8192, 65536 };
+    for (size_t k = 0; k < sizeof chunks / sizeof chunks[0]; k++) {
+        EXPECT_GT(mp_run_many_parts(300, chunks[k], 1, 0), (size_t)0);
+        EXPECT_GT(mp_run_many_parts(300, chunks[k], 0, 0), (size_t)0);
+    }
+    EXPECT_GT(mp_run_many_parts(300, 1000, 1, 2048), (size_t)0);
+    EXPECT_GT(mp_run_many_parts(300, 1500, 1, 2048), (size_t)0);
 }
 
 UTEST_MAIN();

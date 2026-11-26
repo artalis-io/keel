@@ -1015,4 +1015,120 @@ UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
     ASSERT_EQ(g_er_errors, sent ? 0 : 1);                  /* was (readiness): closed, reader not told */
 }
 
+/* ── Header deadline over TLS ───────────────────────────────────────────
+ * The deadline must hold while no plaintext exists yet: a handshake dripped a byte at a time,
+ * and on a keep-alive connection a request whose first TLS record is dripped (the engine takes
+ * the bytes and decrypts nothing). Both mock record emulations are set, so this runs on the
+ * readiness (socket-mode) and completion (fed-ring) transports alike. */
+
+static KlHttpServer hdl_srv;
+
+static void hdl_reset_mock(void) {
+    mock_tls_split_record = 0;
+    mock_tls_split_after = 0;
+    mock_tls_comp_record = 0;
+    mock_tls_comp_record_after = 0;
+    mock_tls_handshake_bytes = 0;
+}
+
+static int hdl_start(int read_timeout_ms, KlPlatThread *tid) {
+    static KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .tls = &tls_cfg, .read_timeout_ms = read_timeout_ms };
+    if (kl_http_server_init(&hdl_srv, &cfg) != 0) return -1;
+    kl_http_server_route(&hdl_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_plat_thread_create(tid, server_thread_fn, &hdl_srv);
+    wait_for_bind(&hdl_srv);
+    return hdl_srv.bound_port;
+}
+
+static void hdl_stop(KlPlatThread *tid) {
+    kl_http_server_stop(&hdl_srv);
+    kl_plat_thread_join(tid);
+    kl_http_server_free(&hdl_srv);
+    hdl_reset_mock();
+}
+
+/* Drip `n` bytes of `s` one every `gap_ms`, stopping once the server answers or closes.
+ * Returns the ms from the first byte until then (or the end of the drip); *answered says
+ * which, and buf holds what was read. */
+static uint64_t hdl_drip(int fd, const char *s, size_t n, int gap_ms, int *answered,
+                         char *buf, size_t cap) {
+    uint64_t t0 = kl_monotonic_ms();
+    *answered = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (kl_test_sockwrite(fd, s + i, 1) != 1) { *answered = 1; break; }
+        if (kl_test_poll1(fd, 0, gap_ms) != 0) { *answered = 1; break; }
+    }
+    buf[0] = '\0';
+    if (*answered) (void)read_response(fd, buf, cap, 2000);
+    return kl_monotonic_ms() - t0;
+}
+
+UTEST(tls_integration, header_deadline_covers_a_dripped_record) {
+    KlPlatThread tid;
+    int port = hdl_start(1000, &tid);           /* header deadline: read_timeout_ms */
+    ASSERT_TRUE(port > 0);
+    const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    /* The first request decrypts normally; after it, a record never completes. */
+    mock_tls_split_after = strlen(req);
+    mock_tls_split_record = 100000;
+    mock_tls_comp_record_after = strlen(req);
+    mock_tls_comp_record = 100000;
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    static char buf[4096];
+    ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
+    ASSERT_TRUE(read_one_response(fd, buf, sizeof buf, 3000) > 0);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    static const char drip[] = "GET /hello HTTP/1.1\r\nHost: localhost\r\nX-Slow: dripdripdrip\r\n";
+    int answered = 0;
+    uint64_t elapsed = hdl_drip(fd, drip, sizeof drip - 1, 150, &answered, buf, sizeof buf);
+    kl_test_closesock(fd);
+    hdl_stop(&tid);
+    EXPECT_TRUE(answered);                      /* cut off mid-drip (the drip takes ~9 s) */
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);
+    EXPECT_TRUE(buf[0] == '\0' || strstr(buf, "408") != NULL);
+}
+
+UTEST(tls_integration, header_deadline_covers_a_dripped_handshake) {
+    KlPlatThread tid;
+    int port = hdl_start(1000, &tid);
+    ASSERT_TRUE(port > 0);
+    mock_tls_handshake_bytes = 100;             /* the handshake wants 100 bytes; they drip */
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    static char drip[101];
+    memset(drip, 'h', 100);
+    static char buf[256];
+    int answered = 0;
+    uint64_t elapsed = hdl_drip(fd, drip, 100, 150, &answered, buf, sizeof buf);
+    kl_test_closesock(fd);
+    hdl_stop(&tid);
+    EXPECT_TRUE(answered);                      /* closed mid-handshake (the drip takes ~15 s) */
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);
+}
+
+UTEST(tls_integration, a_slow_handshake_within_the_deadline_is_served) {
+    KlPlatThread tid;
+    int port = hdl_start(2000, &tid);
+    ASSERT_TRUE(port > 0);
+    mock_tls_handshake_bytes = 8;               /* 8 handshake bytes over ~0.9 s, then the request */
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    int ok = 1;
+    for (int i = 0; i < 4 && ok; i++) {
+        ok = kl_test_sockwrite(fd, "hh", 2) == 2;
+        if (kl_test_poll1(fd, 0, 300) != 0) ok = 0;
+    }
+    const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if (ok) ok = kl_test_sockwrite(fd, req, strlen(req)) == (long)strlen(req);
+    static char buf[4096];
+    if (ok) (void)read_one_response(fd, buf, sizeof buf, 3000);
+    kl_test_closesock(fd);
+    hdl_stop(&tid);
+    EXPECT_TRUE(ok);
+    EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+}
+
 UTEST_MAIN();

@@ -147,6 +147,7 @@ static void conn_request_body_reset(KlHttpConn *c) {
     c->request_body_received = 0;
     c->request_body_complete = 0;
     c->drain_framing_usable  = 0;
+    c->drain_unframed        = 0;
     c->body_kept             = 0;   /* kept body bytes belong to the request that read them */
     c->stream.read_paused    = 0;   /* a pause belongs to the request that asked for it */
 }
@@ -175,6 +176,10 @@ KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     c->async_op = NULL;
     c->suspend_start_ms = 0;
     c->body_start_ms = 0;          /* a reused slot's stale value would fire the body deadline */
+    /* The first request's header deadline runs from the accept, so it covers a TLS handshake, a
+     * PROXY header and an HTTP/2 preface as well as the head itself, ciphertext included. Set here
+     * rather than left to the previous connection in this slot. */
+    c->hdr_start_ms = c->last_active_ms;
     c->file_io_phase = FILE_IO_IDLE;
     c->comp_recv_posted = 0;
     c->comp_in_body_drive = 0;
@@ -1079,8 +1084,24 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
     if (consumed > len) consumed = len;           /* a parser over-report must not walk past the data */
     if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
         c->hdr_parsed += consumed;                /* the parser holds its place; feed only new bytes next */
+        /* A partial head starts the header deadline (once per request) if the arrival of its bytes
+         * has not already (kl_http_conn_note_head_bytes): the idle timeout alone is refreshed by every
+         * fragment, so a head dripped a byte at a time would never time out. */
+        if (c->hdr_start_ms == 0 && c->stream.read_len > 0)
+            c->hdr_start_ms = kl_monotonic_ms();
+        /* RFC 9112 2.2: a server SHOULD ignore an empty line received before a request, so ONE empty
+         * line on an idle keep-alive connection ("\r\n", a bare "\n", or a "\r" still waiting for
+         * its "\n") does not start the next request's deadline. Anything else, a second empty line
+         * included, counts as the start of a request. */
+        if (c->served_request &&
+            ((c->stream.read_len == 1 &&
+              (c->stream.read_buf[0] == '\r' || c->stream.read_buf[0] == '\n')) ||
+             (c->stream.read_len == 2 &&
+              c->stream.read_buf[0] == '\r' && c->stream.read_buf[1] == '\n')))
+            c->hdr_start_ms = 0;
     } else {
         c->hdr_parsed = 0;                        /* header phase over (dispatched, or the conn closes) */
+        c->hdr_start_ms = 0;                      /* the next request's head gets a fresh deadline */
         if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
             *rest = start + consumed;
             *rest_len = len - consumed;
@@ -1096,6 +1117,11 @@ int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st) {
            c->tls->pending(c->tls) > 0;
 }
 
+void kl_http_conn_note_head_bytes(KlHttpConn *c, uint64_t now) {
+    if (c->state == KL_HTTP_CONN_READING && c->hdr_start_ms == 0)
+        c->hdr_start_ms = now;
+}
+
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
@@ -1106,18 +1132,18 @@ read_more_headers: ;
         size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) {
             if (c->stream.read_cap >= c->max_header_size) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             size_t new_cap = c->stream.read_cap * 2;
             if (new_cap > c->max_header_size)
                 new_cap = c->max_header_size;
             if (new_cap < c->stream.read_cap || new_cap > SIZE_MAX / 2) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf,
                                    c->stream.read_cap, new_cap);
             if (!nb) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             c->stream.read_buf = nb;
             c->stream.read_cap = new_cap;
@@ -1135,12 +1161,18 @@ read_more_headers: ;
             if (status == KL_IO_WOULD_BLOCK) return c->state;
             if (status == KL_IO_INTERRUPTED) goto read_more_headers;
         }
-        if (nr == 0 && c->tls)
+        /* Bytes for a new request start its header deadline as soon as they are received, before
+         * any of them can be parsed: plaintext, or ciphertext the TLS engine took without yet
+         * yielding a record (which a spurious wakeup cannot be told apart from). */
+        if (nr == 0 && c->tls) {
+            kl_http_conn_note_head_bytes(c, c->last_active_ms);
             return c->state;   /* TLS WANT_READ: part of a record arrived; wait for the rest */
+        }
         if (nr <= 0) {
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
+        kl_http_conn_note_head_bytes(c, c->last_active_ms);
         c->stream.read_len += (size_t)nr;
 
         /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
@@ -1177,6 +1209,9 @@ read_more_headers: ;
         KlHttp1ParseResult pr = kl_http_conn_parse_headers(c, &rest, &rest_len);
 
         if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
+            /* A max_header_size below the read buffer's size is reached before the buffer fills. */
+            if (c->stream.read_len >= c->max_header_size)
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             /* TLS may buffer multiple records; drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++hdr_drains < KL_TLS_DRAIN_MAX)
@@ -1264,6 +1299,7 @@ static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     c->num_params = 0;
     c->route_result = 0;
     c->body_start_ms = 0;
+    c->hdr_start_ms = 0;     /* the next request's deadline starts with its first bytes */
     c->file_io_phase = FILE_IO_IDLE;
     c->last_active_ms = kl_monotonic_ms();
     c->state = KL_HTTP_CONN_READING;
@@ -1483,6 +1519,7 @@ static size_t conn_body_remaining_hint(const KlHttpConn *c) {
  * request is complete or irrecoverably malformed (both mean stop draining), 0 to keep going. */
 static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
     c->request_body_received += (uint64_t)len;
+    if (c->drain_unframed) return 0;   /* no framing to finish: bounds and EOF only */
     if (c->req.chunked) {
         /* A chunked rejection is OFTEN the decoder itself reporting an error (malformed framing, or a
          * body reader refusing), so the decoder can already be dead when the drain starts. Error is
@@ -1553,7 +1590,7 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * peek. Nothing queued means the ordinary case, and the drain is skipped exactly as before: this
      * does NOT route every close through the drain. (#281: declaring 4096, sending 40960 and being
      * rejected on the first read reproduced the lost response 8 times out of 8 before this.) */
-    if (conn_body_framing_complete(c) || remaining == 0) {
+    if (!c->drain_unframed && (conn_body_framing_complete(c) || remaining == 0)) {
         /* The declared framing says nothing more is coming. That is a statement about the PROTOCOL,
          * not about the socket: a peer that over-sends its Content-Length satisfies the framing while
          * leaving bytes queued, and closing on those is the abortive teardown this exists to prevent.
@@ -1666,6 +1703,11 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
 KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_t len) {
     best_effort_conn_write(c, resp, len);
     return kl_http_conn_begin_drain(c);
+}
+
+KlHttpConnState kl_http_conn_reject_head(KlHttpConn *c, const char *resp, size_t len) {
+    c->drain_unframed = 1;
+    return kl_http_conn_reject_final(c, resp, len);
 }
 
 static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread);

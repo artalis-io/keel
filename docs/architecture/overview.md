@@ -387,9 +387,13 @@ Matching is segment-based (split on `/`). Each segment is compared with `memcmp`
  │                                                           │
  │  1. kl_event_wait(timeout=1000ms)                        │
  │  2. Process up to 64 ready events                        │
- │  3. Every ~400ms: sweep all active connections            │
- │     └─ if (now - conn.last_active_ms > read_timeout_ms)  │
- │        └─ send 408 → close                               │
+ │  3. Sweep all active connections (every iteration)        │
+ │     ├─ if (now - conn.last_active_ms > read_timeout_ms)  │
+ │     ├─ or, before the head is parsed,                    │
+ │     │    now - conn.hdr_start_ms > header_timeout_ms     │
+ │     ├─ or, reading the body,                             │
+ │     │    now - conn.body_start_ms > body_timeout_ms      │
+ │     └─ send 408 → close                                  │
  └───────────────────────────────────────────────────────────┘
 ```
 
@@ -397,7 +401,7 @@ Matching is segment-based (split on `/`). Each segment is compared with `memcmp`
 - **Stamping**: `last_active_ms` is updated on every successful `read(2)` or `write(2)`; so active transfers are never timed out
 - **Sweep**: Runs after processing events, not on every connection operation; amortized O(n) over the pool
 
-**Slow-loris protection**: An attacker sending one byte per second keeps the connection in READING state but never completes headers. The timeout sweep catches this: `last_active_ms` advances on each read, but if the total time from connection open exceeds the timeout without completing a request, the connection is closed.
+**Slow-loris protection**: An attacker sending one byte per second keeps the connection in READING state but never completes headers, and `last_active_ms` advances on each read, so the idle timeout alone never fires. The header deadline (`header_timeout_ms`, default `read_timeout_ms`) does: it is absolute, running from the accept for a connection's first request (so it also covers a TLS handshake, a PROXY header and an HTTP/2 preface) and from a keep-alive request's first received bytes (ciphertext included), and it stops once the head is parsed. A dripped request body is bounded the same way by `body_timeout_ms`.
 
 ## Memory Model
 

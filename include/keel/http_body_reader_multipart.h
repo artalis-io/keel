@@ -46,6 +46,10 @@ extern "C" {
 /** RFC 2046 maximum boundary length. */
 #define KL_HTTP_MP_MAX_BOUNDARY 70
 
+/** Per-part header cap selected by KlHttpMultipartConfig.max_headers_size == 0
+ * (and by a NULL config): 8 KiB, the HTTP server's default max_header_size. */
+#define KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE 8192
+
 /** Events returned by kl_http_multipart_next(). */
 typedef enum {
     KL_HTTP_MP_EVT_PART_BEGIN = 1,
@@ -79,8 +83,11 @@ typedef struct {
     size_t      content_type_len;
 } KlHttpMultipartPartMeta;
 
-/** Parser caps. All fields default to 0 = unlimited; the caller is
- * responsible for setting sensible limits for adversarial input.
+/** Parser caps. Every field but max_headers_size defaults to 0 = unlimited;
+ * the caller is responsible for setting sensible limits for adversarial input.
+ * max_headers_size is finite by default, because a part's header block is
+ * buffered whole until its blank line: 0 selects
+ * KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE, and SIZE_MAX gives no practical limit.
  *
  * Append-only config (see docs/contracts/compatibility.md): callers
  * zero-initialize and recompile per major version; every member is optional and
@@ -91,7 +98,8 @@ typedef struct {
     size_t max_part_size;     /**< per-part body bytes; 0 = unlimited */
     size_t max_total_size;    /**< total bytes received; 0 = unlimited */
     int    max_parts;         /**< distinct parts; 0 = unlimited */
-    size_t max_headers_size;  /**< per-part header bytes; 0 = unlimited */
+    size_t max_headers_size;  /**< per-part header bytes; 0 = KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE
+                               *   (8 KiB); SIZE_MAX = no practical limit */
     size_t max_input_buffer;  /**< unconsumed bytes held by reader; 0 = unlimited */
 } KlHttpMultipartConfig;
 

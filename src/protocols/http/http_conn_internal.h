@@ -106,6 +106,12 @@ struct KlHttpConn {
     uint64_t last_active_ms;
     uint64_t request_start_ms;
     uint64_t body_start_ms;
+    /* Header deadline: when the current request's head began (0 = none pending). The first request's
+     * is the accept (kl_http_conn_acquire), so it spans the TLS handshake and a PROXY header; a
+     * keep-alive request's is the arrival of its first bytes (kl_http_conn_note_head_bytes, or
+     * kl_http_conn_parse_headers for bytes already buffered). Cleared once the head is parsed and by
+     * the keep-alive reset; checked by the timeout sweep against header_timeout_ms before dispatch. */
+    uint64_t hdr_start_ms;
     /* Request-body framing progress. The post-rejection drain terminates on FRAMING COMPLETION, not
      * on a byte count: for chunked, wire bytes and decoded bytes differ, so only the decoder knows
      * when the request is actually finished (terminal chunk, trailers, or a malformed chunk). The
@@ -116,6 +122,9 @@ struct KlHttpConn {
     int      comp_in_body_drive;        /* completion: the body core is consuming read_buf right now */
     int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
                                         * cleared on decoder error, after which only the bounds apply */
+    int      drain_unframed;           /* the rejection came before the head was parsed (431, a 408
+                                        * mid-head): no framing is known, so the drain has no
+                                        * completion signal and only peer EOF and the bounds end it */
     uint64_t request_body_received;    /* body bytes accounted so far */
     /* Body bytes read with the headers and kept at read_buf[0] while a streaming-async handler that
      * suspended at dispatch waits on its op; fed to the body core when it resumes into READING_BODY
@@ -257,6 +266,9 @@ KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, kl_ssize_t result, 
  * header parser runs. On KL_HTTP1_PARSE_HEADERS_OK, *rest / *rest_len are the bytes after the header
  * block (the start of the body, if any). */
 KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, size_t *rest_len);
+/* Bytes arrived on a READING connection (any transport, before decryption): start the header
+ * deadline of the request they begin, if it has not started. */
+void kl_http_conn_note_head_bytes(KlHttpConn *c, uint64_t now);
 
 KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len);
@@ -285,6 +297,12 @@ int kl_http_conn_tls_body_pending(const KlHttpConn *c, KlHttpConnState st);
  * still be unread, so closing now would RST the response away) and CLOSED. Ordinary keep-alive
  * completions never come through here. */
 KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_t len);
+/* kl_http_conn_reject_final for a rejection before the request head was parsed (a 431, a 408 on a
+ * partial head). There is no framing yet, so the zero Content-Length must not read as "nothing more
+ * is coming": the request's remaining bytes are unknown and may still be in flight. The drain runs
+ * on its bounds alone, and the peer's EOF, so a client still sending gets the response rather than
+ * a reset that discards it. */
+KlHttpConnState kl_http_conn_reject_head(KlHttpConn *c, const char *resp, size_t len);
 
 /* Begin drain teardown for a connection whose final response is ALREADY fully flushed (the
  * send path's counterpart to kl_http_conn_reject_final). On a completion backend the caller must

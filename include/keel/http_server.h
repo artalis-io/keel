@@ -145,7 +145,9 @@ typedef struct KlHttpServerConfig {
      * docs/contracts/early_rejection_drain.md */
     size_t   reject_drain_max_bytes;   /**< cap on post-rejection drained bytes; default 64 KiB */
     uint32_t reject_drain_timeout_ms;  /**< cap on post-rejection drain time; default 500 ms */
-    size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
+    size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192).
+                                 *   An incomplete block that reaches it gets a 431, a value below
+                                 *   8192 included */
     KlCompressConfig *compress; /**< compression config: NULL = disabled (default) */
     KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
@@ -218,6 +220,20 @@ typedef struct KlHttpServerConfig {
     size_t stream_capacity;   /**< each streamed response's bound on pending output (0 = 1 MiB; see
                                *   kl_http_response_stream_try_writev). Per response, not a
                                *   server-wide budget. */
+    int header_timeout_ms;    /**< request-head deadline: how long a request may take to deliver its
+                               *   complete header block, however steadily its bytes trickle in
+                               *   (each fragment refreshes only the idle read_timeout_ms). The
+                               *   first request's clock starts at the accept, so it also covers a
+                               *   TLS handshake, a PROXY header and an HTTP/2 preface; a keep-alive
+                               *   request's starts when its first bytes arrive (ciphertext
+                               *   included; one empty line, CRLF or bare LF, before it is
+                               *   ignored, RFC 9112 2.2). It stops once the head is parsed, so
+                               *   request bodies (body_timeout_ms) and responses are not
+                               *   affected. 0 = use read_timeout_ms; < 0 =
+                               *   no header deadline (the behaviour before this field existed).
+                               *   Checked by the timeout sweep, which runs on every loop iteration
+                               *   (an idle loop wakes at least once a second): 408 (a bare close
+                               *   during a TLS handshake or PROXY header), then close. */
 } KlHttpServerConfig;
 
 /**

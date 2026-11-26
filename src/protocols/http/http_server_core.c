@@ -662,6 +662,11 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
                             : timeout;
+    /* < 0 disables the header deadline (the idle timeout alone, as before it existed). */
+    const int header_deadline = s->config.header_timeout_ms >= 0;
+    uint64_t header_timeout = s->config.header_timeout_ms > 0
+                              ? (uint64_t)s->config.header_timeout_ms
+                              : timeout;
     /* Completion: an accept post that failed for a moment left the listener paused with nothing
      * posted, and no connection may be left to free a slot and resume it. Try again every sweep
      * (a no-op while accepts are posted, or while the pool is full). */
@@ -782,6 +787,17 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             now - tc->body_start_ms > body_timeout) {
             timed_out = 1;
         }
+        /* Header deadline: absolute time from the accept (first request) or the request's first
+         * bytes (keep-alive), not extended by further fragments (which do refresh last_active_ms).
+         * Only before dispatch: once the head is complete the body deadline and the other phases'
+         * rules apply. */
+        if (!timed_out && header_deadline &&
+            (tc->state == KL_HTTP_CONN_READING || tc->state == KL_HTTP_CONN_TLS_HANDSHAKE ||
+             tc->state == KL_HTTP_CONN_PROXY_HEADER) &&
+            tc->hdr_start_ms > 0 &&
+            now - tc->hdr_start_ms > header_timeout) {
+            timed_out = 1;
+        }
         if (timed_out) {
             /* Cancel pending async file read before release (readiness io_uring path) */
             if (tc->file_io_phase == 1 && tc->file_io) {
@@ -801,9 +817,12 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             if (tc->state == KL_HTTP_CONN_READING ||
                 tc->state == KL_HTTP_CONN_READING_BODY) {
                 /* 408 is a final response too, so it goes through the same ownership point; a
-                 * timed-out upload is precisely the case with unread body left (#278). */
-                KlHttpConnState rs = kl_http_conn_reject_final(tc, kl_408_response,
-                                                              sizeof(kl_408_response) - 1);
+                 * timed-out upload is precisely the case with unread body left (#278). A partial
+                 * head (a slow drip cut off by the header deadline) has no framing yet, and its
+                 * sender may still be sending. */
+                KlHttpConnState rs = (tc->state == KL_HTTP_CONN_READING && tc->stream.read_len > 0)
+                    ? kl_http_conn_reject_head(tc, kl_408_response, sizeof(kl_408_response) - 1)
+                    : kl_http_conn_reject_final(tc, kl_408_response, sizeof(kl_408_response) - 1);
                 /* Completion: the 408 is on the output queue (with TLS, possibly still in the
                  * engine), and the receive that is posted may never complete: send it now, then
                  * drain or close once it is out. */
