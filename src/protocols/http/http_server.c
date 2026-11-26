@@ -393,6 +393,12 @@ int kl_http_server_run(KlHttpServer *s) {
 
     /* running / draining were set at entry, before the server could be seen to start. */
     KlEvent events[KL_EVENTS_PER_TICK];
+    /* The release generation (comp_gen) of each connection event's KlHttpConn, taken when the batch
+     * was captured. One batch can carry several events for one connection (kqueue reports READ and
+     * WRITE as two), and handling one may release the connection, after which the slot can be
+     * acquired again by an accept in the same batch. An event whose connection's generation moved
+     * belongs to a connection that no longer exists, so it is dropped instead of acting on the slot. */
+    unsigned event_gen[KL_EVENTS_PER_TICK];
 
     /* A completion loop (IOCP) is driven by the completion tick, not the readiness
      * wait/dispatch below. Detected once from the backend's advertised event model
@@ -469,6 +475,12 @@ int kl_http_server_run(KlHttpServer *s) {
             kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "event_wait");
             run_failed = 1;
             break;
+        }
+
+        for (int i = 0; i < n; i++) {
+            uintptr_t u = (uintptr_t)events[i].udata;
+            event_gen[i] = (u && !(u & 1))   /* a connection's stream: not the listener, not a watcher */
+                               ? kl_http_conn_from_stream((KlStream *)events[i].udata)->comp_gen : 0;
         }
 
         /* Dispatch async file I/O completions */
@@ -578,7 +590,9 @@ rearm_listen:
                 continue;
             }
 
-            /* Client connection event */
+            /* Client connection event, unless an earlier event in this batch released its
+             * connection (the slot may since hold a new one). */
+            if (c->comp_gen != event_gen[i]) continue;
             KlHttpConnState new_state = c->state;
 
             /* PROXY protocol header: read before TLS/HTTP */

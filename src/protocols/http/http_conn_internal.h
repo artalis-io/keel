@@ -188,7 +188,8 @@ struct KlHttpConn {
     int            comp_ops;               /* completion: posted recv/send ops not yet completed */
     int            comp_closing;           /* released with ops outstanding: the last completion releases */
     int            comp_edge_fired;        /* its writable edge fired in the current kl_http_comp_stream_edges pass */
-    unsigned       comp_gen;               /* bumped at every release (a caller can tell it was released) */
+    unsigned       comp_gen;               /* bumped at every release (a caller can tell it was released; the
+                                            * readiness dispatch drops a batched event of a released conn) */
     int            comp_tls_driving;       /* comp_tls_drive is running for this connection */
     int            comp_tls_redrive;       /* asked to drive again while it ran: the running drive loops */
 

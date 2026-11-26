@@ -107,6 +107,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A client reset during a rejected request's streamed answer releases its connection once.** In
+  the new rejection-after-answer path, a connection keeps sending its answer while it discards the
+  rest of the body, with READ and WRITE both armed. kqueue reports those as two events of one batch,
+  and when a reset made the first one close the connection, the second still reached its slot and
+  released it again: the active count went negative and the slot was put on the free list twice
+  (pointing at itself), so every later accept got the same connection state and concurrent clients
+  overwrote each other. Remotely triggerable by any client on the macOS/BSD readiness loop. The
+  readiness dispatch now records each connection event's release generation when the batch is
+  captured and drops an event whose connection was released since, so a stale event acts neither on
+  the released slot nor on a new connection accepted into it later in the same batch.
 - **A request head rejected while its client is still sending keeps its 431 (or 408).** A rejection
   before the head is parsed has no request framing, and its zero Content-Length read as "the
   request is complete", so the early-rejection drain was skipped and the connection closed with the
