@@ -1,8 +1,9 @@
 # Gateway readiness: what Keel still lacks for the Herding Sparks migration
 
-Status: **assessment, read-only.** It changes no code and proposes a roadmap for approval. Every
-claim cites source at the commits below; "ran" marks behavior a test or probe actually exercised,
-"source" marks a reading of the code that nothing executed.
+Status: **closed.** Every P0 item of section F shipped in Keel 3.6.0 (tag `v3.6.0`, commit
+`bedc7c63`); see the status table below. The rest of the document is the original assessment, kept
+as the record: every claim cites source at the commits below; "ran" marks behavior a test or probe
+actually exercised, "source" marks a reading of the code that nothing executed.
 
 | Repository | Commit | Notes |
 |---|---|---|
@@ -19,7 +20,7 @@ io_uring). IOCP, WSAPoll, Cosmopolitan, lwIP and UEFI were read, not run. Probe 
 the tree (session scratch); the commands and results are summarized where they are used.
 
 
-## Status (2026-11-24)
+## Status (2026-11-26, closed)
 
 The body below is the assessment as written against 3.5.0 and is kept unchanged as the record. Since:
 
@@ -34,6 +35,12 @@ The body below is the assessment as written against 3.5.0 and is kept unchanged 
 | P0-4b-b bounded admission and the writable edge | #517 | merged; see [http_stream_backpressure.md](http_stream_backpressure.md) |
 | Graceful drain over a backpressured relay (release acceptance) | #518 | merged: `stream_relay.a_drain_*`: resumes byte-exact; past its deadline, cancelled once |
 | P0-4b-c compression-aware admission | #521 | merged; flush per accepted write, see [http_stream_backpressure.md](http_stream_backpressure.md) section 8 |
+| Pre-release audit corrections (protocol integrity, resource exhaustion, event fairness, IOCP teardown) | #523 to #532 | merged; recorded in [the audit archive](../archive/audits/keel_audit.md) and [the axis audit](../archive/audits/keel_axis_audit.md) |
+| Release | `v3.6.0` | published 2026-11-26 |
+
+The roadmap is closed with 3.6.0. The P2 and deferred items of section F stay unscheduled: any further
+Keel change for the gateway is to be justified by a demonstrated consumer requirement from the Hull
+integration (section G), not taken from this list.
 
 Where section E names WSAPoll, read the Windows `select()` backend
 ([windows_readiness_backend.md](windows_readiness_backend.md)): write readiness now survives a
