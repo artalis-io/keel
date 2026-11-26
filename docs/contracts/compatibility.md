@@ -52,8 +52,8 @@ consumer that relinks a newer Keel can verify it at runtime.
   (Phase 4): internal, zero-initialized, set only by Keel.
 - **New functions** (e.g. `kl_async_cancel` in Phase 4, `kl_version` in Phase 6).
 - **New enum values appended** at the end.
-- **New optional config knobs** as trailing fields (0 = prior default; the one exception is
-  [tightening a default to close a resource-exhaustion defect](#tightening-a-default-to-close-a-resource-exhaustion-defect)).
+- **New optional config knobs** as trailing fields (0 = prior default; the exception is
+  [correctness, security and default behavior](#correctness-security-and-default-behavior)).
 
 Because callers embed structs like `KlHttpServerConfig`, `KlAsyncOp`, and `KlHttpClientConfig`
 by value, appending a field changes `sizeof`; hence the recompile. Never insert
@@ -71,8 +71,8 @@ the rejected alternatives are recorded in `docs/archive/f2/f2_c_extensibility_de
 2. **Zero is the default.** Every appended member's zero/NULL value MUST be a
    valid, behavior-preserving default ("not supplied" / "use the built-in
    default"). A feature whose off-state is not zero needs a new function or an
-   opt-in flag, not a silent field. (Sole exception, MINOR releases only:
-   [tightening a default to close a resource-exhaustion defect](#tightening-a-default-to-close-a-resource-exhaustion-defect).)
+   opt-in flag, not a silent field. (Exception, minor releases only:
+   [correctness, security and default behavior](#correctness-security-and-default-behavior).)
 3. **Callers zero-initialize and recompile.** Consumers zero-initialize (`= {0}`,
    a designated initializer, or `memset`) and recompile against the header they
    build against. That recompile, already required by source + static-relink, is
@@ -98,33 +98,32 @@ growth with less apparatus. Each config and vtable header states its own
 required-versus-optional members and its append point, so this contract is not
 restated per type.
 
-## Tightening a default to close a resource-exhaustion defect
+## Correctness, security and default behavior
 
-The rules above forbid changing an existing field's documented semantics, and require an appended
-field's zero to preserve behavior, within a major version. One narrow exception applies: a MINOR
-release (never a PATCH release) may tighten a **default** resource limit or timeout, including the
-default an existing field's zero selects or an appended field's zero enables, only when all of
-these hold:
+Correctness and security fixes may change observable behavior where previous behavior violated a
+documented contract, permitted malformed protocol output, compromised resource bounds, or resulted
+in unsafe or indefinite operation. Such changes must be documented in the release notes. Where
+practical, an explicit configuration option may preserve previous behavior, provided doing so does
+not compromise protocol integrity or memory safety.
 
-1. **A demonstrated defect.** The old default lets a peer exhaust CPU, memory, connection slots or
-   another bounded resource, shown by a reproduction recorded with the change (issue, test or
-   CHANGELOG entry), not a hypothetical.
-2. **A default only.** Every explicitly configured non-zero value keeps its meaning; only what the
-   zero (or the absence of a config) selects changes, and the new default is generous enough for
-   legitimate traffic, consistent with Keel's existing limits.
-3. **A prominent upgrade note.** The CHANGELOG lists it under "Upgrade notes" as a behavior change,
-   with the old and new defaults.
-4. **An explicit opt-out.** A documented value restores the previous behavior exactly, or to no
-   practical limit, without a new configuration mechanism.
+Changes to existing defaults in a minor release are permitted when all of the following conditions
+hold:
 
-Applied in the release after 3.5.0:
+1. The change addresses a demonstrated correctness, security or resource-exhaustion problem rather
+   than a preference or speculative improvement.
+2. The new default is appropriate for ordinary applications and consistent with the library's
+   documented guarantees.
+3. Existing explicit configurations retain their meaning wherever doing so remains safe, and an
+   explicit compatibility option is provided where practical.
+4. The behavioral change, its rationale and any required migration steps are documented in the
+   CHANGELOG and applicable public API documentation.
 
-| Field | Old zero | New zero | Opt-out |
+Defaults changed under this section in the release after 3.5.0:
+
+| Field | Old zero | New zero | Compatibility option |
 |---|---|---|---|
 | `KlHttpMultipartConfig.max_headers_size` | unlimited | `KL_HTTP_MP_DEFAULT_MAX_HEADERS_SIZE` (8 KiB) | `SIZE_MAX` |
 | `KlHttpServerConfig.header_timeout_ms` (appended) | n/a (no head deadline existed) | `read_timeout_ms` | any negative value |
-
-Anything else that changes documented semantics remains a MAJOR change.
 
 ## Integrations
 

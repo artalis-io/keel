@@ -219,13 +219,12 @@ Upgrade notes:
   recompile.
 
 - **Two defaults are tightened to close resource-exhaustion defects** (`header_timeout_ms` and
-  `max_headers_size`, below), under the compatibility contract's narrow clause for that case
-  (`docs/contracts/compatibility.md`, "Tightening a default to close a resource-exhaustion defect"):
-  each has a documented opt-out restoring the old behavior.
+  `max_headers_size`, below), under the compatibility contract's rule for such changes
+  (`docs/contracts/compatibility.md`, "Correctness, security and default behavior"): each has a
+  documented option restoring the old behavior.
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
   capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
-  keeps every default except the two tightened under the resource-exhaustion clause (the first
-  note above).
+  keeps every default except the two tightened under that rule (the first note above).
 - **Behavior change: a request head must now arrive within `header_timeout_ms`** (default:
   `read_timeout_ms`, 30 s unless configured), counted from the accept for a connection's first
   request (TLS handshake included) and from the first bytes of each later keep-alive request.
