@@ -3048,7 +3048,7 @@ UTEST(completion_output, a_late_edge_rearmed_with_nothing_in_flight_does_not_spi
  * owns the transmission of a pooled connection's response: once the handler returns it builds the
  * response's bytes and posts them itself. A handler that also called kl_http_response_send() put the
  * response on the wire twice (the direct write, then the driver's post, which ignores send_offset):
- * 2 x 106 bytes for a 106-byte response. The direct send is refused there and writes nothing, so the
+ * the whole response arrived twice. The direct send is refused there and writes nothing, so the
  * driver's copy is the only one. On a readiness loop the call is the established direct flush and the
  * driver resumes from send_offset, so it stays legitimate. Either way the client gets exactly one
  * response per request, and the next one starts on the next byte. */

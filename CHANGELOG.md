@@ -121,9 +121,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   completion-driven server machinery owns transmission of that response. A handler that called
   `kl_http_response_send` wrote the response itself, and then the completion driver (io_uring,
   IOCP, pollcomp) built and posted it again from the start, ignoring what was already sent: the
-  client got the response twice (212 bytes for a 106-byte response), and with TLS a second head
-  inside the first. The call is now refused there before anything is written, so the driver's send
-  is the only one and the next response on the connection starts on the next byte.
+  whole response arrived twice, and with TLS a second head inside the first. The call is now refused
+  there before anything is written, so the driver's send is the only one and the next response on
+  the connection starts on the next byte.
 - **A `kl_http_server_stop` issued before `kl_http_server_run` starts is honoured.** A stop from a
   signal handler during startup used to be overwritten by the run's own `running = 1`, so the
   server ran on; that run now returns 0 at once, without listening.
