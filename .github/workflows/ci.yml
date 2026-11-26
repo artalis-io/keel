@@ -60,7 +60,9 @@ jobs:
         run: make ${{ matrix.backend }}
 
       - name: Test
-        timeout-minutes: 5
+        # make test compiles every suite before running it, and the suites now include multi-second
+        # request-head deadline drips: 5 minutes left no headroom (the no-completion lane reached it).
+        timeout-minutes: 10
         run: make test ${{ matrix.backend }}
 
       - name: Smoke test examples
