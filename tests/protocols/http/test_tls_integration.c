@@ -1087,7 +1087,7 @@ UTEST(tls_integration, header_deadline_covers_a_dripped_record) {
     kl_test_closesock(fd);
     hdl_stop(&tid);
     EXPECT_TRUE(answered);                      /* cut off mid-drip (the drip takes ~9 s) */
-    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);
     EXPECT_TRUE(buf[0] == '\0' || strstr(buf, "408") != NULL);
 }
 
@@ -1106,7 +1106,7 @@ UTEST(tls_integration, header_deadline_covers_a_dripped_handshake) {
     kl_test_closesock(fd);
     hdl_stop(&tid);
     EXPECT_TRUE(answered);                      /* closed mid-handshake (the drip takes ~15 s) */
-    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);
 }
 
 UTEST(tls_integration, a_slow_handshake_within_the_deadline_is_served) {

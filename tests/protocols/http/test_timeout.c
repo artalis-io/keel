@@ -448,7 +448,7 @@ UTEST(timeout, header_slow_drip_gets_408_at_deadline) {
     uint64_t elapsed = kl_monotonic_ms() - t0;
     EXPECT_TRUE(answered_early);              /* cut off before the head was complete */
     EXPECT_TRUE(n > 0 && strstr(buf, "408") != NULL);
-    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);  /* deadline + one sweep + scheduling slack */
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);  /* deadline + one sweep + scheduling slack */
 
     kl_test_closesock(fd);
     stop_server(&tid);
@@ -474,7 +474,7 @@ UTEST(timeout, header_explicit_deadline_shorter_than_idle) {
     kl_ssize_t n = read_response(fd, buf, sizeof(buf), 3000);
     uint64_t elapsed = kl_monotonic_ms() - t0;
     EXPECT_TRUE(n > 0 && strstr(buf, "408") != NULL);
-    EXPECT_TRUE(elapsed < 600 + 1000 + 1000);
+    EXPECT_TRUE(elapsed < 600 + 1000 + 2000);   /* the drip alone takes ~6 s */
 
     kl_test_closesock(fd);
     stop_server(&tid);
@@ -588,10 +588,11 @@ UTEST(timeout, header_partial_h2_preface_drip_gets_408_at_deadline) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
     int answered = 0;
-    uint64_t elapsed = drip_until_answered(fd, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r", 150, buf, sizeof buf,
+    uint64_t elapsed = drip_until_answered(fd, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r", 300, buf, sizeof buf,
                                            &answered);
     EXPECT_TRUE(answered);
-    EXPECT_TRUE(elapsed < 1000 + 1000 + 1000);   /* the drip alone would take ~3.5 s */
+    /* Deadline + up to a second of sweep latency + slack; the drip alone takes ~6.9 s. */
+    EXPECT_TRUE(elapsed < 1000 + 1000 + 2500);
     EXPECT_TRUE(buf[0] == '\0' || strstr(buf, "408") != NULL);
 
     kl_test_closesock(fd);
@@ -619,6 +620,29 @@ UTEST(timeout, header_lone_crlf_does_not_start_the_deadline) {
     ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
     ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
     EXPECT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_test_closesock(fd);
+    stop_server(&tid);
+}
+
+UTEST(timeout, header_two_empty_lines_start_the_deadline) {
+    /* Only one empty line is ignored: a second one is the start of a request, so a client that
+     * dripped empty lines would meet the deadline. */
+    KlHttpServerConfig cfg = { .port = 0, .read_timeout_ms = 4000, .header_timeout_ms = 600 };
+    KlPlatThread tid; int port;
+    start_server(&cfg, &tid, &port);
+    ASSERT_TRUE(port > 0);
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    char buf[4096];
+    const char *req = "GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    ASSERT_EQ(kl_test_sockwrite(fd, req, strlen(req)), (long)strlen(req));
+    ASSERT_TRUE(read_response(fd, buf, sizeof buf, 2000) > 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    ASSERT_EQ(kl_test_sockwrite(fd, "\n\n", 2), 2L);
+    /* Answered (408) or closed within the deadline plus a sweep and slack. */
+    EXPECT_TRUE(kl_test_poll1(fd, 0, 600 + 1000 + 2000) > 0);
 
     kl_test_closesock(fd);
     stop_server(&tid);

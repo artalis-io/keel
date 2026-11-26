@@ -226,9 +226,10 @@ typedef struct KlHttpServerConfig {
                                *   first request's clock starts at the accept, so it also covers a
                                *   TLS handshake, a PROXY header and an HTTP/2 preface; a keep-alive
                                *   request's starts when its first bytes arrive (ciphertext
-                               *   included; one lone CRLF before it is ignored, RFC 9112 2.2). It
-                               *   stops once the head is parsed, so request bodies (body_timeout_ms)
-                               *   and responses are not affected. 0 = use read_timeout_ms; < 0 =
+                               *   included; one empty line, CRLF or bare LF, before it is
+                               *   ignored, RFC 9112 2.2). It stops once the head is parsed, so
+                               *   request bodies (body_timeout_ms) and responses are not
+                               *   affected. 0 = use read_timeout_ms; < 0 =
                                *   no header deadline (the behaviour before this field existed).
                                *   Checked by the timeout sweep, which runs on every loop iteration
                                *   (an idle loop wakes at least once a second): 408 (a bare close

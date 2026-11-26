@@ -1088,12 +1088,15 @@ KlHttp1ParseResult kl_http_conn_parse_headers(KlHttpConn *c, const char **rest, 
          * fragment, so a head dripped a byte at a time would never time out. */
         if (c->hdr_start_ms == 0 && c->stream.read_len > 0)
             c->hdr_start_ms = kl_monotonic_ms();
-        /* RFC 9112 2.2: a server SHOULD ignore an empty line received before a request, so a lone
-         * CRLF on an idle keep-alive connection does not start the next request's deadline. One
-         * only: more than two bytes of empty lines count as the start of a request. */
-        if (c->served_request && c->stream.read_len <= 2 &&
-            (c->stream.read_buf[0] == '\r' || c->stream.read_buf[0] == '\n') &&
-            (c->stream.read_len < 2 || c->stream.read_buf[1] == '\n'))
+        /* RFC 9112 2.2: a server SHOULD ignore an empty line received before a request, so ONE empty
+         * line on an idle keep-alive connection ("\r\n", a bare "\n", or a "\r" still waiting for
+         * its "\n") does not start the next request's deadline. Anything else, a second empty line
+         * included, counts as the start of a request. */
+        if (c->served_request &&
+            ((c->stream.read_len == 1 &&
+              (c->stream.read_buf[0] == '\r' || c->stream.read_buf[0] == '\n')) ||
+             (c->stream.read_len == 2 &&
+              c->stream.read_buf[0] == '\r' && c->stream.read_buf[1] == '\n')))
             c->hdr_start_ms = 0;
     } else {
         c->hdr_parsed = 0;                        /* header phase over (dispatched, or the conn closes) */
@@ -1120,9 +1123,6 @@ void kl_http_conn_note_head_bytes(KlHttpConn *c, uint64_t now) {
 
 KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
-    /* Bytes for a new request (plaintext, or ciphertext not yet a whole record) start its header
-     * deadline here, before any of them can be parsed. */
-    kl_http_conn_note_head_bytes(c, c->last_active_ms);
 
     if (c->state == KL_HTTP_CONN_READING) {
         int hdr_drains = 0;
@@ -1160,12 +1160,18 @@ read_more_headers: ;
             if (status == KL_IO_WOULD_BLOCK) return c->state;
             if (status == KL_IO_INTERRUPTED) goto read_more_headers;
         }
-        if (nr == 0 && c->tls)
+        /* Bytes for a new request start its header deadline as soon as they are received, before
+         * any of them can be parsed: plaintext, or ciphertext the TLS engine took without yet
+         * yielding a record (which a spurious wakeup cannot be told apart from). */
+        if (nr == 0 && c->tls) {
+            kl_http_conn_note_head_bytes(c, c->last_active_ms);
             return c->state;   /* TLS WANT_READ: part of a record arrived; wait for the rest */
+        }
         if (nr <= 0) {
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
+        kl_http_conn_note_head_bytes(c, c->last_active_ms);
         c->stream.read_len += (size_t)nr;
 
         /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
