@@ -296,7 +296,12 @@ typedef void (*KlHttpStreamWritableFn)(void *ctx);
  * it needs more room than has freed, which re-arms). Only a WOULD_BLOCK arms it and an ACCEPTED
  * write disarms it; draining alone never fires it.
  *
- * A refusal before @p fn was installed is remembered: once it is installed, it fires as above.
+ * A refusal before @p fn was installed is remembered: once it is installed, it fires as above, from
+ * a progress point, without the producer polling, even if the output had already gone by then. On a
+ * readiness loop the next wait watches the connection for writability and the edge fires from that
+ * report (at once if the socket has room, otherwise once the client reads). On a completion loop,
+ * where no send may be left to complete, the loop fires it on its next iteration, before it waits,
+ * with no transport event needed. Never from inside this call.
  *
  * It fires only while the connection is suspended (kl_async_suspend: a producer owns the stream),
  * from the point where output progressed (a writable socket's flush, a completed send), never from

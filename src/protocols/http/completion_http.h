@@ -70,6 +70,12 @@ int kl_http_comp_quiesce_accepts(struct KlHttpServer *server);
  * completion send path for the state on_resume produced. */
 void kl_http_comp_resume(struct KlHttpServer *server, KlHttpConn *conn);
 
+/* Fire the writable edge of every suspended streamed response that has a callback and no send in
+ * flight to fire it (a callback installed after the output went idle). Once per tick, before the wait,
+ * never from inside kl_http_response_stream_on_writable. Returns 1 when an edge is still due (the
+ * tick's wait must not block), else 0. */
+int kl_http_comp_stream_edges(struct KlHttpServer *server);
+
 /* Re-arm a body read on a completion loop after read-side flow control resumes: post a fresh recv.
  * */
 void kl_http_comp_post_read(KlHttpConn *conn);
