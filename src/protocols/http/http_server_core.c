@@ -333,6 +333,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
         s->pool.conns[i].stream_capacity = s->config.stream_capacity;
         s->pool.conns[i].reject_drain_max_bytes = s->config.reject_drain_max_bytes;
         s->pool.conns[i].reject_drain_timeout_ms = s->config.reject_drain_timeout_ms;
+        s->pool.conns[i].answer_linger_ms = (uint32_t)s->config.read_timeout_ms;
         s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
 
@@ -709,9 +710,19 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                     kl_http_server_conn_release(s, tc);   /* cancels the receive; released by its completion */
                 continue;
             }
+            int was_stopped = tc->answer_linger_stopped;
             if (kl_http_conn_drain_step(tc, now) == KL_HTTP_CONN_CLOSED) {   /* readiness */
                 kl_event_del(&s->ev.loop, tc->stream.fd);
                 kl_http_server_conn_release(s, tc);
+            } else if (tc->answer_linger_stopped && !was_stopped) {
+                /* This read reached the linger's cap: read no more, watch only for the hang-up
+                 * (where the loop can), as the dispatch's transition does. */
+                KlEventMask dm = (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP)
+                                     ? KL_EVENT_HANGUP : (KlEventMask)0;
+                if (kl_event_mod(&s->ev.loop, tc->stream.fd, dm, &tc->stream) < 0) {
+                    kl_event_del(&s->ev.loop, tc->stream.fd);
+                    kl_http_server_conn_release(s, tc);
+                }
             }
             continue;
         }
@@ -826,6 +837,22 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                 /* Completion: the 408 is on the output queue (with TLS, possibly still in the
                  * engine), and the receive that is posted may never complete: send it now, then
                  * drain or close once it is out. */
+                /* SENDING: the head of a streamed answer was already out, so no 408 was written; the
+                 * answer is finished first (reading and discarding the body meanwhile), then the
+                 * connection ends through the drain, on both loops. */
+                if (rs == KL_HTTP_CONN_SENDING) {
+                    if (completion_loop && tc->comp_driven) {
+                        kl_http_comp_resume(s, tc);
+                    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd,
+                                            (KlEventMask)(KL_EVENT_WRITE |
+                                                ((tc->reject_discard && !tc->reject_input_done)
+                                                     ? KL_EVENT_READ : 0)),
+                                            &tc->stream) < 0) {
+                        kl_event_del(&s->ev.loop, tc->stream.fd);
+                        kl_http_server_conn_release(s, tc);
+                    }
+                    continue;
+                }
                 if (completion_loop && tc->comp_driven) {
                     kl_http_comp_tls_finish(s, tc, rs == KL_HTTP_CONN_DRAINING);
                     continue;

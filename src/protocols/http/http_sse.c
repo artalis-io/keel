@@ -4,6 +4,7 @@
 
 int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse) {
     if (!res || !sse) return -1;
+    if (!kl_http_response_stream_can_begin(res)) return -1;   /* before any header is added */
     if (kl_http_response_header(res, "Content-Type", "text/event-stream") < 0)
         return -1;
     if (kl_http_response_header(res, "Cache-Control", "no-cache") < 0)

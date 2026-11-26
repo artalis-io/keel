@@ -194,9 +194,11 @@ static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHt
     case KL_HTTP_CONN_DRAINING:
         /* Final response physically retired and SEND half-closed: post a recv so each completion
          * discards one bounded chunk. The idle sweep enforces the byte and time bounds. The
-         * half-close was left to the output queue (empty by now): do it here. */
-        c->stream.read_len = 0;
+         * half-close was left to the output queue (empty by now): do it here. A receive may already
+         * be posted: the one that discarded the body while a streamed answer went out. */
         if (comp_tlsq_settle(s, c)) break;
+        if (c->comp_recv_posted) break;
+        c->stream.read_len = 0;
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         break;
     case KL_HTTP_CONN_CLOSED:             /* response was final and nothing is outstanding */
@@ -663,6 +665,11 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
 static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
     switch (st) {
     case KL_HTTP_CONN_SENDING:
+        /* The answer to a rejected request: discard the rest of its body meanwhile (one receive). */
+        if (c->reject_discard && !c->reject_input_done && !c->comp_recv_posted) {
+            c->stream.read_len = 0;
+            if (kl_comp_post_recv(c) < 0) { kl_comp_close(s, c); return; }
+        }
         if (c->res.body_mode == KL_HTTP_BODY_STREAM && (c->tls || c->res.drain_enabled)) {
             comp_tls_send_stream(s, c);        /* through the output queue */
         } else if (c->tls) {
@@ -1165,6 +1172,13 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         if (c->comp_ops == 0) { c->comp_closing = 0; kl_http_server_conn_release(s, c); }
         return;
     }
+    /* The client finished sending while the answer to its rejected request is still going out:
+     * stop reading, keep sending (the drain after it then has nothing left to read). */
+    if (ev->ok && ev->bytes == 0 && c->state == KL_HTTP_CONN_SENDING && c->reject_discard) {
+        c->reject_input_done = 1;
+        c->reject_input_eof = 1;
+        return;
+    }
     if (!ev->ok || ev->bytes == 0) {                           /* peer closed */
         /* A half-close (EOF) while a final response is still queued (a TLS 408 or 413): send it
          * first. An error closes now. */
@@ -1181,6 +1195,29 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     }
     c->last_active_ms = kl_monotonic_ms();      /* progress: an active transfer is not idle */
     kl_http_conn_note_head_bytes(c, c->last_active_ms);   /* a new request's bytes start its deadline */
+    /* The rest of a rejected request's body, read while its streamed answer is sent: discard it
+     * within the drain's bounds, then read on. TLS: ciphertext in comp_cipher, decrypted to read_buf
+     * as the drain below does. */
+    if (c->state == KL_HTTP_CONN_SENDING && c->reject_discard) {
+        KlHttpConnState st = KL_HTTP_CONN_SENDING;
+        if (c->tls) {
+            if (c->tls->feed_input(c->tls, c->comp_cipher, ev->bytes) < 0) { kl_comp_close(s, c); return; }
+            for (;;) {
+                kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
+                if (p < 0) { kl_comp_close(s, c); return; }
+                if (p == 0) break;                     /* WANT_READ */
+                st = kl_http_conn_discard_ingest(c, (size_t)p, kl_monotonic_ms());
+                if (st != KL_HTTP_CONN_SENDING || c->reject_input_done) break;
+            }
+        } else {
+            st = kl_http_conn_discard_ingest(c, ev->bytes, kl_monotonic_ms());
+        }
+        c->stream.read_len = 0;
+        (void)st;   /* SENDING: a bound reached only stops the reading (reject_input_done) */
+        if (c->reject_input_done) return;              /* the answer goes on; no more receives */
+        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        return;
+    }
     /* Post-rejection drain (#278): the bytes that just arrived are leftover request body after a
      * final response, so account for them and discard, never parse them as a new request. One
      * bounded recv was posted per completion, so this is the non-blocking drain progression. */
@@ -1195,9 +1232,12 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
             KlHttpConnState st = kl_http_conn_drain_ingest(c, (size_t)p, kl_monotonic_ms());
             c->stream.read_len = 0;
             if (st == KL_HTTP_CONN_CLOSED) { kl_comp_close_after_output(s, c); return; }
+            if (c->answer_linger_stopped) break;   /* past the linger's cap */
         }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
         if (comp_tlsq_settle(s, c)) return;
+        /* Past the linger's cap: no more receives; the idle sweep closes it at the deadline. */
+        if (c->answer_linger_stopped) return;
         /* The framing is complete and this receive did not fill its buffer: nothing more was queued,
          * the completion-side "would block". Close (after the queued response) instead of holding the
          * slot to the deadline; a client that over-sends fills the buffer and keeps being drained. */
@@ -1215,6 +1255,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         KlHttpConnState st = kl_http_conn_drain_ingest(c, ev->bytes, kl_monotonic_ms());
         c->stream.read_len = 0;
         if (st == KL_HTTP_CONN_CLOSED) { kl_comp_close(s, c); return; }
+        if (c->answer_linger_stopped) return;   /* past the linger's cap: held to the deadline */
         /* As for TLS above: framing complete and a short receive means nothing more is queued. */
         if (c->request_body_complete && ev->bytes < c->stream.read_cap) { kl_comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -1317,7 +1358,30 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
         if (c->tls && comp_tlsq_absorb_ring(c) < 0) { kl_comp_close(s, c); return; }
     }
     if (comp_tlsq_kick(c) < 0) { kl_comp_close(s, c); return; }   /* anything queued since */
-    if (c->comp_tlsq_resp_pending && c->comp_tlsq_sent >= c->comp_tlsq_resp_mark) {
+    /* A streamed response that is SENDING: what its producer wrote since the end mark was set (from
+     * the on_drain above, which may also have ended the stream) is this response's too. Its end is
+     * everything appended so far, and while the outbound buffer still holds bytes it is not over:
+     * completing it then would reset the response with its tail (the terminating chunk among it)
+     * still unsent, and keep the connection alive behind a truncated body. */
+    if (c->comp_tlsq_resp_pending && c->res.body_mode == KL_HTTP_BODY_STREAM) {
+        if (comp_tlsq_idle(c) && c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
+            /* Nothing in flight to bring a later completion: move the backlog now, as the driver
+             * does above (the producer's on_drain held back, the bound lifted for the move). */
+            KlDrainCb cb = c->res.drain.on_drain;
+            void *cb_ctx = c->res.drain.drain_ctx;
+            c->res.drain.on_drain = NULL;
+            c->comp_stream_flushing = 1;
+            int fr = kl_drain_flush(&c->res.drain);
+            c->comp_stream_flushing = 0;
+            c->res.drain.on_drain = cb;
+            c->res.drain.drain_ctx = cb_ctx;
+            if (fr < 0 || kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+        }
+        c->comp_tlsq_resp_mark = c->comp_tlsq_appended;
+    }
+    if (c->comp_tlsq_resp_pending && c->comp_tlsq_sent >= c->comp_tlsq_resp_mark &&
+        !(c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&
+          kl_drain_pending(&c->res.drain))) {
         c->comp_tlsq_resp_pending = 0;
         /* A file body: the head (or the previous chunk) is out; queue the next encrypted chunk.
          * HEAD requests carry no body. */

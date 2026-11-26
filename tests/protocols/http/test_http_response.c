@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/http_response.h>
+#include <keel/http_sse.h>
 #include <keel/event_ctx.h>
 #include <keel/socket.h>
 #include "event_caps.h"   /* kl_event_caps: the loop's drive model decides the stream writer */
@@ -22,6 +23,8 @@ UTEST(response, stream_writev_rejects_length_sum_overflow) {
     KlAllocator a = kl_allocator_default();
     KlHttpResponse res;
     kl_http_response_init(&res, &a);
+    res.body_mode = KL_HTTP_BODY_STREAM;   /* an open stream: one that was not is refused first */
+    res.headers_sent = 1;
     KlIoVec iov[2] = {
         { .base = (void *)"x", .len = SIZE_MAX },
         { .base = (void *)"y", .len = 1 },
@@ -763,11 +766,10 @@ UTEST(response, a_failed_termination_keeps_failing_and_emits_nothing) {
     kl_http_response_free(&res);
 }
 
-/* Characterization, not endorsement: end_stream() with no successful begin_stream() is a separate
- * pre-existing behavior. stream_ended stays 0, so an idempotence guard on stream_ended cannot
- * change it, and this test pins that. Whether a bare terminating chunk (no status line, no headers)
- * should go out at all is a different question, deliberately left out of this change. */
-UTEST(response, end_stream_without_a_begin_stream_is_unchanged_by_the_idempotence_guard) {
+/* end_stream() with no stream to end (never begun) is refused and writes nothing. It used to put a
+ * bare terminating chunk on the connection: the same bytes a stale end_stream() writes after the
+ * response was reset for the connection's next request, where they precede that response. */
+UTEST(response, end_stream_without_a_begin_stream_is_refused_and_writes_nothing) {
     KlAllocator a = kl_allocator_default();
     KlHttpResponse res;
     kl_http_response_init(&res, &a);
@@ -785,9 +787,9 @@ UTEST(response, end_stream_without_a_begin_stream_is_unchanged_by_the_idempotenc
 
     printf("  end_stream with no begin_stream: rc=%d, %zu byte(s), terminators=%d\n",
            rc, n, count_terminators(buf, n));
-    ASSERT_EQ(rc, 0);                        /* unchanged behavior */
-    ASSERT_EQ(ended_after, 1);
-    ASSERT_EQ(count_terminators(buf, n), 1); /* one bare terminator: pre-existing, see PR notes */
+    ASSERT_EQ(rc, -1);                       /* no stream: nothing to end */
+    ASSERT_EQ(ended_after, 0);
+    ASSERT_EQ(n, (size_t)0);                 /* was: a bare "0\r\n\r\n" */
 
     kl_http_response_free(&res);
 }
@@ -875,6 +877,8 @@ static void end_stream_at_cap_case(int *utest_result, int poisoned) {
     res.conn_fd = 1;
     res.ctx = &event_ctx;
     ASSERT_EQ(kl_http_response_enable_drain(&res, &alloc, 4096), 0);
+    res.body_mode = KL_HTTP_BODY_STREAM;   /* a begun stream (its head is taken as sent) */
+    res.headers_sent = 1;
     static char fill[4096];
     memset(fill, 'f', sizeof fill);
     ASSERT_EQ(kl_drain_write(&res.drain, fill, sizeof fill), 0);   /* the drain is at its cap */
@@ -1165,6 +1169,149 @@ UTEST(stream_admission, a_head_response_takes_everything_and_emits_nothing) {
     static char p[4096];
     EXPECT_EQ(kl_http_response_stream_try_write(&t.res, p, sizeof p), KL_HTTP_STREAM_ACCEPTED);
     EXPECT_EQ(kl_http_response_stream_pending(&t.res), (size_t)0);
+    kl_http_response_free(&t.res);
+}
+
+/* ── Termination is final: nothing follows the terminating chunk ─────────────────────────────────
+ * Once end_stream() succeeded, no writer may add body bytes: a chunk after the terminator is read by
+ * the client as the start of the next response on the connection. And a response that was reset (a
+ * kept-alive connection's next request) or released answers every stream call as closed and writes
+ * nothing. */
+
+UTEST(stream_termination, a_write_after_end_is_refused_and_emits_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "abc", 3), 0);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "late", 4), -1);   /* was 0, and on the wire */
+    KlIoVec v = { (void *)"late", 4 };
+    EXPECT_EQ(kl_http_response_stream_writev(&t.res, &v, 1), -1);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "late", 4), KL_HTTP_STREAM_CLOSED);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);                  /* still idempotent */
+    EXPECT_FALSE(t.res.stream_error);                                   /* the ended body is intact */
+    EXPECT_EQ(t.g.wire_len, (size_t)13);
+    EXPECT_EQ(memcmp(t.g.wire, "3\r\nabc\r\n0\r\n\r\n", 13), 0);
+    kl_http_response_free(&t.res);
+}
+
+/* on_drain writes the last chunk and ends the stream into the drain it was called for having
+ * emptied: the response is not done, and kl_http_response_send must say so (it said "done", and the
+ * connection was reset with the tail and the terminator still buffered). */
+static Gate *g_od;
+static int g_od_calls;
+static void od_end(void *ctx) {
+    (void)ctx;
+    if (g_od_calls++) return;
+    g_od->g.open = 0;                                 /* the socket is full again */
+    (void)kl_http_response_stream_write(&g_od->res, "TAIL", 4);
+    (void)kl_http_response_end_stream(&g_od->res);
+}
+UTEST(stream_termination, send_is_not_done_while_on_drain_refilled_the_drain) {
+    static Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    g_od = &t;
+    g_od_calls = 0;
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "abc", 3), 0);     /* buffered: gate closed */
+    kl_drain_on_drain(&t.res.drain, od_end, NULL);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_send(&t.res), 1);       /* was 0: the tail is still buffered */
+    EXPECT_EQ(g_od_calls, 1);
+    EXPECT_TRUE(t.res.stream_ended);
+    EXPECT_TRUE(kl_drain_pending(&t.res.drain));
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_send(&t.res), 0);       /* now it is all out */
+    EXPECT_EQ(t.g.wire_len, (size_t)(8 + 9 + 5));
+    EXPECT_EQ(memcmp(t.g.wire, "3\r\nabc\r\n4\r\nTAIL\r\n0\r\n\r\n", t.g.wire_len), 0);
+    kl_http_response_free(&t.res);
+}
+
+/* After kl_http_response_reset (keep-alive reuse) a stale producer's calls write nothing on the
+ * connection, which now carries the next request's response. */
+UTEST(stream_termination, stream_calls_after_reset_answer_closed_and_write_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "abc", 3), 0);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    size_t before = t.g.wire_len;
+    kl_http_response_reset(&t.res);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "x", 1), KL_HTTP_STREAM_CLOSED);
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "x", 1), -1);      /* was 0, a chunk on the wire */
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), -1);                /* was 0, a bare terminator */
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), (size_t)0);
+    EXPECT_EQ(t.g.wire_len, before);
+    kl_http_response_free(&t.res);
+}
+
+/* After kl_http_response_free (the connection was released) the same: CLOSED, -1, nothing written,
+ * rather than ERROR (a stream state that outlived its buffers) or a write to the old socket. */
+UTEST(stream_termination, stream_calls_after_free_answer_closed_and_write_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "abc", 3), 0);   /* begun, not ended */
+    size_t before = t.g.wire_len;
+    kl_http_response_free(&t.res);
+    EXPECT_EQ(kl_http_response_stream_try_write(&t.res, "x", 1), KL_HTTP_STREAM_CLOSED);  /* was ERROR */
+    EXPECT_FALSE(t.res.stream_error);
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "x", 1), -1);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), -1);
+    EXPECT_EQ(kl_http_response_stream_pending(&t.res), (size_t)0);
+    EXPECT_EQ(kl_http_response_stream_on_writable(&t.res, gate_on_writable, &t), 0);
+    kl_http_response_stream_progress(&t.res);                          /* never fires: no stream */
+    EXPECT_EQ(t.fired, 0);
+    KlHttpResponseWriteFn w;
+    void *wc;
+    EXPECT_EQ(kl_http_response_begin_stream(&t.res, 200, &w, &wc), -1);   /* refused ... */
+    EXPECT_EQ((int)t.res.body_mode, (int)KL_HTTP_BODY_NONE);              /* ... changing nothing */
+    EXPECT_EQ(t.g.wire_len, before);
+    kl_http_response_free(&t.res);                                     /* a second free is harmless */
+}
+
+/* One stream per response: a second begin (after the first, or after its end) is refused and writes
+ * nothing, for the response itself and for SSE. It used to write a whole second head after the
+ * terminating chunk and leave a response that could never be ended. */
+UTEST(stream_termination, a_second_begin_is_refused_and_writes_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);          /* begun (its head forgotten by the gate) */
+    t.g.open = 1;
+    KlHttpResponseWriteFn w;
+    void *wc;
+    size_t hdr_len = t.res.hdr_len;
+    EXPECT_EQ(kl_http_response_begin_stream(&t.res, 200, &w, &wc), -1);   /* begun: refused */
+    EXPECT_EQ(kl_http_response_stream_write(&t.res, "abc", 3), 0);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    size_t wire = t.g.wire_len;
+    EXPECT_EQ(kl_http_response_begin_stream(&t.res, 200, &w, &wc), -1);   /* ended: refused */
+    KlHttpSse sse;
+    EXPECT_EQ(kl_http_sse_begin(&t.res, &sse), -1);
+    EXPECT_EQ(t.g.wire_len, wire);                                        /* was: a second head */
+    EXPECT_EQ(t.res.hdr_len, hdr_len);                                    /* no header re-appended */
+    EXPECT_EQ(memcmp(t.g.wire + wire - 5, "0\r\n\r\n", 5), 0);
+    kl_http_response_free(&t.res);
+}
+
+/* The legitimate first begin still works, including on a HEAD response, and SSE's. */
+UTEST(stream_termination, a_first_begin_and_a_head_begin_still_work) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    kl_http_response_free(&t.res);
+    KlHttpSse sse;
+    memset(&t, 0, sizeof t);
+    t.provider = (KlSocketProvider){ .ops = &g_gate_ops, .context = &t.g };
+    t.ev.loop.ops = &g_gate_ev;
+    t.ev.sockets = &t.provider;
+    t.alloc = kl_allocator_default();
+    ASSERT_EQ(kl_http_response_init(&t.res, &t.alloc), 0);
+    t.res.conn_fd = 1;
+    t.res.ctx = &t.ev;
+    t.res.head_request = 1;
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_sse_begin(&t.res, &sse), 0);
+    EXPECT_TRUE(t.res.headers_sent);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    EXPECT_EQ(kl_http_sse_begin(&t.res, &sse), -1);
     kl_http_response_free(&t.res);
 }
 

@@ -62,6 +62,10 @@ static size_t mock_tls_comp_record_after = 0;
 /* The handshake consumes this many bytes from the peer (any bytes) before it completes; until then
  * it says WANT_READ. 0 = the 0-RTT default. Static-per-TU. */
 static size_t mock_tls_handshake_bytes = 0;
+/* Socket mode: the most of a gathered record (mock_tls_split_record) one read() returns (0 = no
+ * limit), leaving the rest pending in the engine, as a real one holds a later record it already
+ * decrypted. */
+static size_t mock_tls_sock_serve_max = 0;
 
 static int mock_tls_grow(KlAllocator *a, unsigned char **buf, size_t *cap, size_t need) {
     if (need <= *cap) return 0;
@@ -127,6 +131,7 @@ static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_
     if (m->in_pos < m->in_len) {                 /* serve the gathered record first */
         size_t avail = m->in_len - m->in_pos;
         size_t n = avail < len ? avail : len;
+        if (mock_tls_sock_serve_max && n > mock_tls_sock_serve_max) n = mock_tls_sock_serve_max;
         memcpy(buf, m->in + m->in_pos, n);
         m->in_pos += n;
         if (m->in_pos == m->in_len) m->in_pos = m->in_len = 0;

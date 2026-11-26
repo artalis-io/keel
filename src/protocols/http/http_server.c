@@ -634,7 +634,8 @@ rearm_listen:
              * EOFs, a bound is hit or the socket errors. Handled before the generic READ dispatch so
              * drained bytes are never parsed as a new request. */
             if (c->state == KL_HTTP_CONN_DRAINING) {
-                new_state = kl_http_conn_drain_step(c, kl_monotonic_ms());
+                new_state = c->answer_linger_stopped ? kl_http_conn_drain_hangup(c, events[i].ready)
+                                                     : kl_http_conn_drain_step(c, kl_monotonic_ms());
                 goto transition;
             }
 
@@ -650,7 +651,13 @@ rearm_listen:
                 goto transition;
             }
 
-            if (events[i].ready & KL_EVENT_READ) {
+            /* Sending the streamed answer to a rejected request: the readable side is the rest of
+             * its body, read and discarded within the drain's bounds, never parsed. */
+            if (c->state == KL_HTTP_CONN_SENDING && c->reject_discard) {
+                if (events[i].ready & (KL_EVENT_READ | KL_EVENT_HANGUP | KL_EVENT_ERROR))
+                    new_state = kl_http_conn_discard_step(c, kl_monotonic_ms());
+                if (new_state == KL_HTTP_CONN_CLOSED) goto transition;
+            } else if (events[i].ready & KL_EVENT_READ) {
                 new_state = kl_http_conn_on_readable(c, &s->router);
             }
 
@@ -665,6 +672,9 @@ rearm_listen:
             }
 
 transition:
+            /* A kept-alive TLS connection whose engine already holds its next request. */
+            if (new_state == KL_HTTP_CONN_READING)
+                new_state = kl_http_conn_redrive_tls(c, &s->router, new_state);
             /* Transition */
             switch (new_state) {
             case KL_HTTP_CONN_TLS_HANDSHAKE: {
@@ -679,7 +689,9 @@ transition:
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING: async read pending, no WRITE event */
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
-                                 KL_EVENT_WRITE, &c->stream) < 0) {
+                                 (KlEventMask)(KL_EVENT_WRITE |
+                                     ((c->reject_discard && !c->reject_input_done) ? KL_EVENT_READ : 0)),
+                                 &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s,c);
                 }
@@ -725,7 +737,13 @@ transition:
                 /* Post-rejection drain (#278): the response is flushed and SEND is half-closed; keep
                  * READ armed so each readable tick discards one bounded chunk. The sweep enforces the
                  * deadline, so a client that simply stops sending still gets closed. */
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, KL_EVENT_READ, &c->stream) < 0) {
+                /* A lingering drain past its cap reads no more: only the hang-up is watched (where
+                 * the loop can), else no interest at all until the deadline. */
+                KlEventMask dm = KL_EVENT_READ;
+                if (c->answer_linger_stopped)
+                    dm = (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) ? KL_EVENT_HANGUP
+                                                                            : (KlEventMask)0;
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, dm, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s, c);
                 }

@@ -116,6 +116,9 @@ response:
     admitted, a failed staging allocation, a codec failure, or output past the codec's own bound is
     `ERROR` for the compressed stream and the response's stream alike (sticky; the connection
     closes): the codec may have advanced, so nothing could resume it.
+  - *Closed.* A write that answers `CLOSED` (the response's stream ended, or was reset or
+    released) releases the codec and staging buffer at once, as `_try_end` does; later calls answer
+    `CLOSED` too, and `_release` remains safe.
   - *Finish.* `_try_end` admits the codec's finish the same way: `WOULD_BLOCK` arms the edge and
     leaves the codec untouched however often it is retried; the finish's worst case is fixed once
     nothing more is written, so it fits once pending drains far enough. `TOO_LARGE` means it never
@@ -146,12 +149,75 @@ stream from the resume (`on_resume`). A suspended connection is out of the event
 its hang-up, per `KlHttpServerConfig.suspended_hangup`, is watched; on a readiness loop, while stream
 output waits, so is its writability, which moves the output) and exempt from the idle timeout, so
 a quiet stream costs nothing and is not cut off at `read_timeout_ms`. A
-handler or resume that returns without suspending gives the response up: what it wrote is flushed
-(the outbound buffer, if anything is still in it) and the connection then ends, on both axes. A
-stream that was never ended (no terminating chunk) is never kept alive for another request. A
+handler or resume that returns without suspending gives the response up to the connection, which
+finishes it as it finishes a buffered response, on both axes: what it wrote is flushed (the outbound
+buffer, if anything is still in it); then a stream that was ended is kept alive for the next request
+only on an HTTP/1.1 request that permits persistence (HTTP/1.0 has no chunked framing, so a streamed
+response to it always closes, whatever Connection header it sent; a custom parser that reports no
+version, 0.0, is not treated as 1.0), and one that was never ended (no terminating chunk) ends the
+connection, never kept alive. A connection that ends after a response ends through the bounded
+post-response drain when request input may still be unread, never with a close that resets the
+response away. A
 drain callback registered on the response (`kl_drain_on_drain` on `res->drain`) does not keep an
 unsuspended stream open: once the drain empties with the stream unended and the connection not
-suspended, the response is over.
+suspended, the response is over. What such a callback writes before it returns (more chunks, the
+terminating chunk) is still this response's: the response is over only once that is sent too, on
+both axes, and a connection is never reused while its response holds unsent output.
+
+**A rejected request's streamed answer.** When a streaming handler already sent its answer's head and
+the request body then fails (a reader's limit, the body deadline), no error response follows it: the
+answer is finished, and meanwhile the rest of the body is read and discarded within the post-rejection
+drain's bounds (`reject_drain_max_bytes`, `reject_drain_timeout_ms`), so a client that uploads before
+it reads is not left blocked behind it. Past those bounds the server stops reading, never sending:
+the answer still goes out whole. Once it is handed to the kernel the connection half-closes and,
+unless the client already finished sending, lingers: it discards up to
+max(`reject_drain_max_bytes`, `max_body_size`) more bytes, then reads no more until the client
+hangs up (a FIN makes it read on to the client's end of stream, then close cleanly) or
+`read_timeout_ms` passes. A close over unread input would be a reset, which drops
+the server's send queue and so whatever of the answer is still queued in the kernel (and a Windows
+client discards what it has received but not read). Bounds in docs/contracts/early_rejection_drain.md. A client that reads while it
+uploads therefore always gets the whole answer; one that will not read before its whole (over-long)
+upload is taken waits, as it did before, until the idle timeout (`read_timeout_ms`) ends the
+connection.
+
+**Termination is final.** Once `kl_http_response_end_stream` succeeded, no writer may add body
+bytes: the legacy writer (and SSE and `kl_http_compress_stream_write`, built on it) returns -1, the
+bounded writes return `CLOSED`, and nothing reaches the wire, so no chunk ever follows the
+terminating chunk. The refusal is not sticky: the ended body stays intact. `kl_http_compress_stream_end`
+on a response that was already ended writes nothing (no codec finish after the terminator),
+releases the codec and returns -1. A connection is reused for another request only after the whole
+response framing was sent; a stream never ended is never kept alive.
+
+**Lifetime: the response is the connection's, not the producer's.** A `KlHttpResponse *` is a
+pointer into the connection's slot, not a handle with an identity, so it is valid for a producer
+only while the stream is its own: from the handler until the op completes or is cancelled. After
+`on_cancel`, or once the op completed (`kl_async_complete`) and the response ended, do not use the
+response, nor a `KlHttpCompressStream` or SSE handle over it. What a stream call does in each state:
+
+| State of the response | Body writes, `end_stream`, a new `begin_stream` |
+|---|---|
+| live, the application's (begun, not ended) | writes accepted; `end_stream` ends it |
+| ended (`end_stream` succeeded) | writes rejected (-1 / `CLOSED`), nothing written; `end_stream` returns 0 again; a new begin rejected |
+| reset for the connection's next request (`kl_http_response_reset`, keep-alive) | rejected, nothing written, until the next request initializes it |
+| released, storage still valid (`kl_http_response_free`, the connection closed) | rejected, nothing written |
+| storage re-initialized for another request (the slot's next request or connection) | the previous pointer is **invalid**: it cannot be told apart from the new response's own, so calls through it act on that response |
+
+The last row is a documented boundary, not a guarantee: nothing in the pointer says which request
+it was taken for, so that window is the caller's to avoid (stop producing from `on_cancel` and
+before completing the op). A response begins at most one stream: a begin after the first, or after
+its end, is refused and changes nothing. Keel's own deferred work (the writable edge, on_drain, the
+op's deadline and hang-up watch, completion callbacks) is tied to the connection and re-validated
+(the op still attached, the connection's generation unchanged, its state) before it acts, and a reset
+or release clears the response's callbacks, so none of it reaches a later request.
+
+**Pipelined requests are not supported.** HTTP/1.1 requests are served one at a time per
+connection. When bytes of a further request arrive together with the current one (read in the same
+receive), the connection is not reused: the current response says `Connection: close` (unless the
+handler set a Connection header itself, or its head was already sent), is sent in full, and the
+connection then ends through the bounded post-response drain (`docs/contracts/early_rejection_drain.md`)
+rather than a close that could reset the response away. The client resends the later requests on a
+new connection. Empty lines after a request (a CRLF after a body) are not a request and do not end
+keep-alive.
 
 ## Read side (request-body streaming / inbound)
 

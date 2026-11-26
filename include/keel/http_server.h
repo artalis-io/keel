@@ -98,6 +98,11 @@ typedef enum {
 } KlHttpSuspendHangup;
 
 /*
+ * HTTP/1.1 requests are served one at a time per connection; pipelining is not supported. When bytes
+ * of a further request are read together with the current one, the connection is not reused: the
+ * response says Connection: close (unless the handler set a Connection header or its head was
+ * already sent), is sent in full, and the connection ends after it (docs/contracts/streaming.md).
+ *
  * Append-only config (see docs/contracts/compatibility.md): callers
  * zero-initialize and recompile per major version; every member is optional and
  * its zero/NULL value selects the built-in default. New members are appended
@@ -140,9 +145,19 @@ typedef struct KlHttpServerConfig {
      * The effort is BOUNDED, and the bound wins: if the peer keeps transmitting past
      * reject_drain_max_bytes, Keel may terminate the connection even though doing so prevents
      * reliable delivery of the final response. Delivery and bounded resource consumption genuinely
-     * conflict under a flooding peer, and a server must choose the bound. Full contract, including
-     * why the byte-cap regression test deliberately does not assert delivery:
-     * docs/contracts/early_rejection_drain.md */
+     * conflict under a flooding peer, and a server must choose the bound.
+     *
+     * After a rejected request's STREAMED answer (its head was already out, so no rejection is
+     * written), the body is discarded within these bounds while the answer is sent, and past them
+     * only the reading stops. Once the answer is handed to the kernel the connection half-closes and
+     * lingers: it discards up to max(reject_drain_max_bytes, max_body_size) more bytes, then stops
+     * reading. On readiness loops with KL_EVENT_CAP_HANGUP the client's hang-up makes it read on to
+     * the client's end of stream (or the error of a reset); other loops (completion, macOS poll,
+     * Windows select()) wait for the deadline. It closes after read_timeout_ms at the latest (a close over unread input is a reset
+     * that would drop the answer still queued in the kernel).
+     *
+     * Full contract, including why the byte-cap regression test deliberately does not assert
+     * delivery: docs/contracts/early_rejection_drain.md */
     size_t   reject_drain_max_bytes;   /**< cap on post-rejection drained bytes; default 64 KiB */
     uint32_t reject_drain_timeout_ms;  /**< cap on post-rejection drain time; default 500 ms */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192).

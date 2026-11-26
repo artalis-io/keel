@@ -425,4 +425,60 @@ UTEST(compress_bounded, null_and_closed) {
     EXPECT_EQ(kl_http_compress_stream_try_end(&cs), KL_HTTP_STREAM_CLOSED);
 }
 
+/* The response was ended directly: the legacy finish must not put the codec's output after the
+ * terminating chunk, and a legacy write must not feed a codec whose output can never be sent. */
+UTEST(compress_bounded, the_legacy_end_after_the_response_ended_writes_nothing) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "abc", 3), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    size_t wire = t.g.wire_len;
+    int feeds = g_m.feeds;
+    EXPECT_EQ(kl_http_compress_stream_write(&t.cs, "late", 4), -1);
+    EXPECT_EQ(kl_http_compress_stream_end(&t.cs), -1);   /* was 0, with "[END]" after the end */
+    EXPECT_EQ(g_m.feeds, feeds);                         /* neither ran the codec */
+    EXPECT_TRUE(g_m.destroyed);                          /* the session is released all the same */
+    EXPECT_EQ(t.g.wire_len, wire);
+    EXPECT_EQ(memcmp(t.g.wire + wire - 5, "0\r\n\r\n", 5), 0);   /* the terminator is the last byte */
+    gate_free(&t);
+}
+
+/* CLOSED is final, so the codec and the staging buffer are released at once (as try_end does). */
+UTEST(compress_bounded, a_closed_write_releases_the_codec) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "abc", 3), KL_HTTP_STREAM_ACCEPTED);
+    EXPECT_TRUE(t.cs.stage != NULL);
+    EXPECT_EQ(kl_http_response_end_stream(&t.res), 0);
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "x", 1), KL_HTTP_STREAM_CLOSED);
+    EXPECT_TRUE(g_m.destroyed);
+    EXPECT_TRUE(t.cs.comp == NULL);
+    EXPECT_TRUE(t.cs.stage == NULL);
+    kl_http_compress_stream_release(&t.cs);              /* releasing again is safe */
+    EXPECT_EQ(kl_http_compress_stream_try_write(&t.cs, "x", 1), KL_HTTP_STREAM_CLOSED);
+    gate_free(&t);
+}
+
+/* A compressed begin on a response that already has a stream is refused before the codec is made
+ * or a header added, and writes nothing. */
+UTEST(compress_bounded, a_begin_on_a_begun_or_ended_response_is_refused) {
+    Gate t;
+    ASSERT_EQ(gate_begin(&t, 4096), 0);
+    t.g.open = 1;
+    KlHttpCompressStream cs2;
+    KlCompressConfig cfg = { .factory = bmock_factory };
+    size_t hdr_len = t.res.hdr_len;
+    g_m.destroyed = 0;
+    EXPECT_EQ(kl_http_compress_stream_begin(&t.res, &cfg, 200, &cs2), -1);
+    EXPECT_FALSE(g_m.destroyed);                         /* the factory never ran: g_m untouched */
+    EXPECT_EQ(kl_http_compress_stream_try_end(&t.cs), KL_HTTP_STREAM_ACCEPTED);
+    size_t wire = t.g.wire_len;
+    EXPECT_EQ(kl_http_compress_stream_begin(&t.res, &cfg, 200, &cs2), -1);
+    EXPECT_EQ(t.g.wire_len, wire);
+    EXPECT_EQ(t.res.hdr_len, hdr_len);
+    gate_free(&t);
+}
+
 UTEST_MAIN()

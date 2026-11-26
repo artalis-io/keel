@@ -118,6 +118,27 @@ struct KlHttpConn {
      * byte figures are an optimization for Content-Length, where remaining is knowable, so the drain
      * does not sit out its deadline waiting for bytes the client already finished sending. */
     int      request_body_complete;
+    /* Bytes past the end of this request arrived with it (a pipelined request), in read_buf, which
+     * the next request's read would start over. Pipelining is not supported: the connection is not
+     * reused (the response says Connection: close where its head is still to be sent), and it ends
+     * through the bounded drain rather than a close that could reset the response away. */
+    int      request_overrun;
+    /* A rejected request (413, 408, ...) whose streamed answer is still being sent: the request body
+     * keeps being read and discarded meanwhile, within the drain's bounds (drain_budget and
+     * drain_deadline_ms, set when it started), so a client that uploads before it reads is not left
+     * blocked with the answer stuck behind it. reject_input_done: the client finished sending (EOF),
+     * or the deadline passed with nothing more to read: stop reading. */
+    int      reject_discard;
+    int      reject_input_done;
+    int      reject_input_eof;     /* ... because the client finished sending (EOF) */
+    /* DRAINING after a rejected request's streamed answer: the answer may still be queued in the
+     * kernel, and a close over unread input is a reset that drops it (and that a Windows client
+     * answers by discarding what it has received). So the drain discards up to a cap and then, past
+     * it, stops reading (answer_linger_stopped) and waits for the client's hang-up or the deadline
+     * instead of closing. */
+    int      answer_linger;
+    int      answer_linger_stopped;
+    uint64_t drain_discarded;      /* bytes the drain and the answer's discard read and dropped */
     int      comp_recv_posted;          /* completion: a recv is posted (a paused body read has none) */
     int      comp_in_body_drive;        /* completion: the body core is consuming read_buf right now */
     int      drain_framing_usable;     /* DRAINING: the chunked decoder can still report completion;
@@ -134,6 +155,8 @@ struct KlHttpConn {
     size_t   drain_budget;        /* DRAINING: remaining byte budget */
     size_t   reject_drain_max_bytes;   /* per-conn copy of the server config */
     uint32_t reject_drain_timeout_ms;
+    uint32_t answer_linger_ms;          /* per-conn copy of read_timeout_ms (the drain after a
+                                           rejected request's streamed answer) */
     KlHttp1ChunkedDecoder chunked_dec;
 
     KlTls *tls;
@@ -319,5 +342,20 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms);
 
 /* Response fully sent: log access, then keep-alive reset (-> READING) or close (-> CLOSED). */
 KlHttpConnState kl_http_conn_send_complete(KlHttpConn *c);
+/* Readiness: a connection left READING with the next request's plaintext already in its TLS engine
+ * (no socket readiness will report it) is read on at once. Returns the state to register. */
+/* SENDING the streamed answer to a rejected request (reject_discard): readiness reads and discards one
+ * bounded chunk of the request body (kl_http_conn_discard_step); completion accounts a receive's
+ * `n` discarded bytes in read_buf (kl_http_conn_discard_ingest). Past the drain's byte budget or
+ * deadline the reading stops (reject_input_done), never the answer: it is sent whole, and the
+ * connection ends after it. CLOSED only when the connection itself failed. */
+KlHttpConnState kl_http_conn_discard_step(KlHttpConn *c, uint64_t now_ms);
+/* A lingering drain past its cap (answer_linger_stopped) got an event (`ready`): the client's FIN
+ * or a failure. It reads on (DRAINING, READ again, no byte cap: nothing new can arrive) to the end
+ * of stream or the read error, then closes. Any other connection is returned as it is. */
+KlHttpConnState kl_http_conn_drain_hangup(KlHttpConn *c, KlEventMask ready);
+KlHttpConnState kl_http_conn_discard_ingest(KlHttpConn *c, size_t n, uint64_t now_ms);
+
+KlHttpConnState kl_http_conn_redrive_tls(KlHttpConn *c, KlHttpRouter *router, KlHttpConnState st);
 
 #endif /* KEEL_SRC_HTTP_CONN_INTERNAL_H */

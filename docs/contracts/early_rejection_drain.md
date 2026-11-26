@@ -44,6 +44,37 @@ assert the client received the response. It is not an incomplete test and it is 
 the drain unlimited would make it pass and would hand any peer an unbounded hold on a
 single-threaded loop. Do not "fix" it.
 
+### After a rejected request's streamed answer
+
+When the rejection meets a streaming answer whose head already went out (a streaming handler that
+answered before its body failed, or the idle sweep's 408 on one), there is no rejection response to
+send; the answer itself is finished first. Two phases, each bounded:
+
+- **While the answer is sent**, the body is read and discarded within `reject_drain_max_bytes` and
+  `reject_drain_timeout_ms`. Past either, the server **stops reading** (it never stops the answer).
+- **After the answer** is handed to the kernel, the connection half-closes and **lingers**: it
+  discards up to max(`reject_drain_max_bytes`, `max_body_size`) more bytes (plus one receive window
+  on a completion loop, whose receive is posted whole), then stops reading. On readiness loops with
+  `KL_EVENT_CAP_HANGUP` it watches for the client's hang-up without reading; a hang-up (the client finished its
+  upload, and may still be reading the answer) makes it read on to the client's end of stream, or
+  to the read error a reset gives, and then close (after a FIN or a reset the client can add only
+  what is already buffered). The hang-up report cannot tell a FIN from a reset here, since this side
+  already half-closed, so the read decides. Readiness loops without `KL_EVENT_CAP_HANGUP` (macOS
+  poll, Windows select()) see neither a FIN nor a reset with no interest registered, and close at the
+  deadline; completion loops post no receive and wait for the deadline too. Either way it closes at
+  `read_timeout_ms` at the latest. It closes at once when the client already finished sending, or
+  the body's framing completed with nothing over-sent.
+
+Why it lingers instead of closing at the bound: the answer can still be queued in the kernel, and a
+close over unread input is a reset, which drops the server's send queue (and which a Windows client
+answers by discarding what it has received and not yet read). Lingering costs at most the byte cap
+above and one slot for `read_timeout_ms`, the idle timeout any connection has. A flooding client's
+FIN waits behind the upload the server no longer reads, so such a client is held to that deadline;
+a client that merely stalled (it neither reads, sends nor closes) is too. The byte cap is lifted only
+after the client's FIN, when nothing new can arrive: the total read for such a request is at most
+`reject_drain_max_bytes` + max(`reject_drain_max_bytes`, `max_body_size`) + two receive windows, plus
+what was already buffered when a FIN is seen.
+
 ## Ownership
 
 One internal entry point owns the whole transition, so no rejection site carries teardown policy
