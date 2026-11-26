@@ -5,6 +5,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent `kl_http_server_stop` calls.** Two stops that overlapped (a SIGTERM and a stop from
+  another thread, say) could both enter the drain: the later one rewrote the drain deadline the run
+  loop was already using, and a stop that saw the drain flag mid-entry ended the server at once
+  instead of draining it. Exactly one call now enters the drain and writes its deadline; a call that
+  overlaps that entry only wakes the loop, and a call made once the drain is established still stops
+  the server at once, as documented.
+- **A run that failed to start left its signal handlers behind.** With `install_signal_handlers`, a
+  `kl_http_server_run` whose accept path could not start after the handlers were installed returned
+  -1 with SIGTERM/SIGINT still routed to that server, so a later signal stopped a server the caller
+  may already have freed. The handlers are now restored on that path too.
+
 ## [3.6.0]
 
 Minor release that makes Keel's HTTP server usable as a streaming gateway. A streamed response, plain

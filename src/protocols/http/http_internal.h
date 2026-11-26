@@ -172,6 +172,16 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
  * while its output waits (async.c). */
 void kl_async_sync_stream_interest(KlHttpServer *s);
 
+/* kl_http_server_stop's drain entry, in its two steps (http_server.c). stop_requested moves
+ * NONE -> CLAIMED (kl_http_server_stop_claim: 1 for the one caller that wins) -> ESTABLISHED
+ * (kl_http_server_stop_publish: the winner writes the deadline, then publishes draining). Separate so a
+ * test can hold a claimer between the two steps; kl_http_server_stop is their only production caller. */
+#define KL_HTTP_STOP_NONE        0
+#define KL_HTTP_STOP_CLAIMED     1
+#define KL_HTTP_STOP_ESTABLISHED 2
+int  kl_http_server_stop_claim(KlHttpServer *s);
+void kl_http_server_stop_publish(KlHttpServer *s);
+
 /* Bound a loop wait by the remaining graceful-drain time, so the drain ends on time (http_server_core.c). */
 int  kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms);
 

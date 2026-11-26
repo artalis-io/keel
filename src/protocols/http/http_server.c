@@ -413,6 +413,9 @@ int kl_http_server_run(KlHttpServer *s) {
         if (server_accept_listener_start(s) < 0) {
             s->last_error = KL_ERR_EVENT_ADD;
             kl_http_server_close_listener(s);
+            /* The handlers installed above point at this server: a run that never started must not
+             * leave them behind, or a later SIGTERM stops a server the caller may have freed. */
+            kl_http_server_plat_signals_restore(s);
             return server_start_failed(s);
         }
         s->accept_via_listener = 1;
@@ -813,20 +816,39 @@ transition:
     return 0;
 }
 
+/* The drain is entered by exactly one caller, and the state each later caller observes decides what it
+ * does (stop_requested, KL_HTTP_STOP_*):
+ *   NONE         nothing has stopped the server; the caller claims the drain (compare-and-swap);
+ *   CLAIMED      a claimer is publishing the drain's deadline; the caller leaves the drain alone;
+ *   ESTABLISHED  the drain (or a plain stop) is in effect; the caller forces an immediate stop.
+ * So overlapping calls cannot rewrite the deadline (the claimer is its only writer) or escalate a drain
+ * that has not begun, while a second stop issued once the drain is established still stops at once. */
+int kl_http_server_stop_claim(KlHttpServer *s) {
+    return kl_atomic_cas_int(&s->stop_requested, KL_HTTP_STOP_NONE, KL_HTTP_STOP_CLAIMED);
+}
+
+void kl_http_server_stop_publish(KlHttpServer *s) {
+    /* The deadline is written before the flag is published (seq-cst stores): a loop tick that sees
+     * draining also sees its deadline, never the 0 that would end the drain at once. A caller that
+     * sees ESTABLISHED sees draining set. */
+    s->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)s->config.drain_timeout_ms;
+    kl_atomic_store_int(&s->draining, 1);
+    kl_atomic_store_int(&s->stop_requested, KL_HTTP_STOP_ESTABLISHED);
+}
+
 void kl_http_server_stop(KlHttpServer *s) {
-    /* Recorded first, for a run that has not published `running` yet (it checks this right after,
-     * so a stop is never lost to that run's own `running = 1`). */
-    kl_atomic_store_int(&s->stop_requested, 1);
-    if (s->config.drain_timeout_ms > 0 && !kl_atomic_load_int(&s->draining)) {
-        /* Enter drain mode: stop accepting, let in-flight finish. The deadline is written before the
-         * flag is published (a seq-cst store): a loop tick that sees draining also sees its deadline,
-         * never the 0 that would end the drain at once. */
-        s->drain_deadline_ms = kl_monotonic_ms() +
-                               (uint64_t)s->config.drain_timeout_ms;
-        kl_atomic_store_int(&s->draining, 1);
-    } else {
+    /* Recorded before `running` is touched, for a run that has not published `running` yet (it checks
+     * stop_requested right after, so a stop is never lost to that run's own `running = 1`). */
+    if (s->config.drain_timeout_ms <= 0) {
+        kl_atomic_store_int(&s->stop_requested, KL_HTTP_STOP_ESTABLISHED);
         kl_atomic_store_int(&s->running, 0);
+    } else if (kl_http_server_stop_claim(s)) {
+        kl_http_server_stop_publish(s);      /* enter drain mode: stop accepting, let in-flight finish */
+    } else if (kl_atomic_load_int(&s->stop_requested) == KL_HTTP_STOP_ESTABLISHED) {
+        kl_atomic_store_int(&s->running, 0); /* a second stop of an established drain ends it now */
     }
+    /* else CLAIMED: another caller is entering the drain; this call only wakes the loop. */
+
     /* Wake the run loop so it re-checks running/drain now instead of after the current
      * wait/drain tick. write() is async-signal-safe + thread-safe, so this is valid both
      * from the SIGTERM/SIGINT handler and from another thread (the common test pattern:
