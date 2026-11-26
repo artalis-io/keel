@@ -129,6 +129,39 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   reaches `max_header_size` now gets a 431 on readiness and completion loops. (The limit applies to
   an incomplete block: a head that arrives complete in one read is accepted up to the read
   buffer's size, as before.)
+- **poll, Windows select() and pollcomp: busy registrations past the first `max` are no longer
+  starved.** A wait returns at most `max` events (the HTTP server asks for 64), and these backends
+  scanned their registrations from the first one every time, so under sustained load the first 64
+  ready sockets took every wait: later connections were never served (and their idle timer then
+  closed them), and a thread-pool wakeup registered after them could starve too (measured on Windows:
+  236 of 300 continuously ready sockets never served in 50 waits). Which ready registrations a wait
+  reports is now decided by laps: each is reported once per lap, a lap ends when no unreported one
+  is ready, and new registrations join the next lap. A registration that stays ready is reported
+  within ceil(N / `max`) waits for a set registered together and within 2 * ceil(N / `max`) in
+  general, including under connection churn (every reported connection closed and replaced each
+  wait). pollcomp picks its watches the same way, takes its posted operations oldest first, and
+  alternates the two classes when a drain fills `max`. epoll, kqueue, io_uring and IOCP queue ready
+  work in kernel order and were not affected.
+- **IOCP: a watched socket closed without `kl_watcher_del` can no longer hang `kl_event_ctx_free`,
+  or reach another loop.** The backend re-posted the watch's probe on the bare handle value, and every
+  dispatch re-arm revived a dead watch, so once Winsock gave the value to a socket no port knew, the
+  probe completed nowhere and the close waited for it forever (if this loop had associated the new
+  socket, the stale watcher fired on it instead). Probes are now posted only when the owner names the
+  handle (`kl_event_add`, `kl_event_mod`, the dispatch re-arm) and only on a handle verifiably on this
+  loop's port: freshly associated, or recorded as associated by this loop (ERROR_INVALID_PARAMETER,
+  which cannot tell this port from another, is no longer trusted on its own). A probe ended by the
+  close, or a post that finds no socket, orphans the watch, which is then never posted or reported
+  again until a registration passes that check, as on the select() backend; a registration of a new
+  socket on the value before the close is drained gets its own probe. Every operation carries an
+  owner tag, and a drain drops another loop's operation untouched. The re-arm of an unchanged
+  registration (`kl_watcher_rearm`, which the dispatch calls after each callback) no longer makes a
+  failing `CreateIoCompletionPort` call; every other registration (`kl_watcher_add`,
+  `kl_watcher_mod`, even with the same interest) makes one. A watch's IDLE period (from a
+  completion to the next post: that re-arm, an error watch's re-arm, a retried post) is not
+  re-checked; for a close and reuse of the value inside it, `kl_event_close` gives up after 2 s
+  without progress, only when nothing but such probes is outstanding, and retains their records
+  rather than free memory the kernel or another port may still touch. The del-before-close
+  contract and each backend's behaviour when it is broken are documented at `kl_event_del`.
 - **Completion loops: an HTTP client freed while its server is being freed no longer leaks.** On
   io_uring, IOCP and pollcomp, `kl_http_server_free` cancels the suspended async ops and then reaps
   the backend's last completions without dispatching them. A client freed from such an op's

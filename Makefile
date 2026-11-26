@@ -615,7 +615,7 @@ test: $(TEST_BIN)
 WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output http_stream_relay platform_random fd_type_convention compress compress_bounded compress_vtable connect_op cross_module \
                    datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
-                   dgram_recv_classify dgram_send dgram_slots drain error event_hangup event event_caps event_ctx \
+                   dgram_recv_classify dgram_send dgram_slots drain error event_hangup event event_caps event_ctx event_fairness \
                    event_provider event_provider_vtable file_io http1_chunked http1_parser \
                    http1_parser_vtable http1_response_parser http2 http2_client http2_client_hostname_fail \
                    http2_client_vtable http2_overflow http_async http_body_reader http_body_reader_vtable \
@@ -654,7 +654,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output http_stream_relay platform_random fd_type_convention compress compress_bounded compress_vtable connect_op \
                         cross_module datagram_batch completion_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
-                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_hangup \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_fairness event_hangup \
                         event_provider event_provider_vtable file_io http1_chunked http1_parser \
                         http1_parser_vtable http1_response_parser http2 http2_client \
                         http2_client_hostname_fail http2_client_vtable http2_overflow http_async \
@@ -1040,7 +1040,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(KEEL_LIB)
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn anon_pipe async cloexec completion_output http_stream_relay compress compress_bounded cross_module datagram_batch completion_life datagram_live loop_teardown \
                           datagram_multicast datagram_public datagram_socket decompress dgram_close dgram_core \
-                          dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error event_hangup \
+                          dgram_recv dgram_recv_classify dgram_send dgram_slots dns_resolver drain error event_fairness event_hangup \
                           event_provider file_io http1_chunked http1_parser http1_response_parser http2 http2_client \
                           http2_overflow http_async http_body_reader http_client http_client_free_in_done http_client_happy_eyeballs \
                           http_client_pool http_client_alloc_sizes http_client_backpressure http_client_eof http_client_proxy http_client_stream http_connection http_cors \
@@ -1095,7 +1095,7 @@ COMPLETION_EXCLUDE ?=
 # COMPLETION_EXCLUDE, which is what the lanes actually run.
 POLLCOMP_ELIGIBLE ?= allocator alpn anon_pipe async cloexec completion_output http_stream_relay compress compress_bounded cross_module datagram_batch completion_life loop_teardown \
                         datagram_multicast datagram_public datagram_socket decompress dgram_close \
-                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_hangup \
+                        dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_fairness event_hangup \
                         event_provider file_io http1_chunked http1_parser http1_response_parser http2 \
                         http2_client http2_overflow http_async http_body_reader http_client \
                         http_client_free_in_done http_client_happy_eyeballs http_client_pool http_client_alloc_sizes http_client_backpressure http_client_eof http_client_proxy http_client_stream \

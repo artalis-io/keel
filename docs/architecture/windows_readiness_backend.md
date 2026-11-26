@@ -249,7 +249,20 @@ completions and also has no hang-up-only watch).
   a fixed `FD_SETSIZE` ran out, and an `add` that cannot grow them fails.
 * A socket closed without `kl_event_del` makes `select()` fail with `WSAENOTSOCK`; the backend then
   marks the handles the stack no longer knows as dead (never reported, as WSAPoll's `POLLNVAL` was)
-  and waits again, so one stale registration cannot stop the loop.
+  and waits again, so one stale registration cannot stop the loop. The IOCP engine behaves the same
+  way for a watcher: a closed watched socket orphans its watch, which is never reported or posted
+  again until a registration names the handle and the handle is verifiably on that loop's port
+  (freshly associated, or associated by that loop itself), so a probe is never re-posted on a
+  handle value that may by then name an unrelated socket (see `kl_event_del` in
+  `include/keel/event.h` for the one remaining window and what teardown retains for it).
+* A wait returns at most `max` events, and which of the ready registrations those are is decided
+  by laps (`src/event_turn.h`), not by position: a wait reports only registrations not yet reported
+  in the current lap, a lap ends when none of those is ready, and a new registration joins as
+  already reported, so arrivals wait for the next lap instead of extending this one. A registration
+  that stays ready is reported within ceil(N / `max`) waits for a set registered together and within
+  2 * ceil(N / `max`) waits in general, connection churn included (every reported registration
+  closed and replaced each wait). Scanning from slot 0 served the first `max` busy sockets on every
+  wait and starved the rest; a removal is a plain swap with the last slot, since order plays no part.
 * `KL_EVENT_HANGUP` alone is accepted and never reported. A failed connect (`select()` except set) is
   reported as WRITE, and the next operation sees the error.
 * No socket-provider change is needed: accepted sockets inherit nothing from `select()`.

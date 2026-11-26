@@ -108,6 +108,7 @@ tests/test_fd_type_convention.c
 tests/test_event.c
 tests/test_event_caps.c
 tests/test_event_ctx.c
+tests/test_event_fairness.c
 tests/test_event_hangup.c
 tests/test_event_provider.c
 tests/test_event_provider_vtable.c
