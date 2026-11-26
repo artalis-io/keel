@@ -24,6 +24,8 @@
 #include "http_conn_internal.h"   /* white-box: the server-side socket, to shrink its send buffer */
 #include "platform_thread.h"
 #include "event_caps.h"       /* kl_event_caps: which loop the server runs */
+#include "event_builtin.h"    /* the built-in backend, wrapped to shape one batch */
+#include "kl_atomic.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -510,10 +512,14 @@ static void handle_big_then_await(KlHttpRequest *req, KlHttpResponse *res, void 
 static size_t   g_cfg_drain_bytes;
 static uint32_t g_cfg_drain_ms;
 static int      g_cfg_read_to, g_cfg_body_to;
+static int      g_cfg_max_conns;
+static const KlEventProvider *g_cfg_provider;
+static void handle_where(KlHttpRequest *req, KlHttpResponse *res, void *ctx);
 
 static int server_start(size_t capacity, int tls) {
     static KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
-    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = capacity,
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = g_cfg_max_conns ? g_cfg_max_conns : 4,
+                               .event_provider = g_cfg_provider, .stream_capacity = capacity,
                                .tls = tls ? &tls_cfg : NULL,
                                .reject_drain_max_bytes = g_cfg_drain_bytes,
                                .reject_drain_timeout_ms = g_cfg_drain_ms,
@@ -525,6 +531,7 @@ static int server_start(size_t capacity, int tls) {
     kl_http_server_route(&g_srv, "POST", "/buf", handle_hello, NULL, kl_http_body_reader_buffer);
     kl_http_server_route(&g_srv, "GET", "/inline", handle_inline, NULL, NULL);
     kl_http_server_route(&g_srv, "GET", "/stale", handle_stale, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/where/:id", handle_where, NULL, NULL);
     kl_http_server_route_streaming_async(&g_srv, "POST", "/await", handle_answer_then_await,
                                          (void *)(size_t)8, kl_http_body_reader_buffer);
     kl_http_server_route_streaming_async(&g_srv, "POST", "/await2", handle_big_then_await,
@@ -1162,6 +1169,251 @@ UTEST(stream_termination, a_crlf_after_a_body_keeps_the_connection) {
     EXPECT_FALSE(p.first_close);
     ASSERT_TWO_RESPONSES(p);
     pair_free(&p);
+}
+
+/* ── A batch holding a second event for a connection the first released ─────────────────────────
+ * kqueue reports a connection's READ and WRITE as two events of one batch. Handling the first can
+ * release the connection; the second must then not act on the slot: not release it again (the pool's
+ * count goes negative and its free list loops on itself, so every later accept shares one slot), and
+ * not drive a new connection that an accept in the same batch put in that slot. */
+
+/* GET /where/:id answers {"id":"<id>"} and records which slot answered, in which batch. */
+#define WHERE_MAX 8
+static int        g_wait_seq;                /* batches returned by the wrapped wait */
+static int        g_where_n;
+static KlHttpConn *g_where_conn[WHERE_MAX];
+static int        g_where_seq[WHERE_MAX];
+static void handle_where(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)ctx;
+    size_t il = 0;
+    const char *id = kl_http_request_param(req, "id", &il);
+    int k = g_where_n++;
+    if (k < WHERE_MAX) {
+        g_where_conn[k] = kl_http_request_conn(req);
+        g_where_seq[k] = kl_atomic_load_int(&g_wait_seq);
+    }
+    char body[64];
+    int bl = snprintf(body, sizeof body, "{\"id\":\"%.*s\"}", (int)(il < 16 ? il : 16), id ? id : "");
+    kl_http_response_status(res, 200);
+    kl_http_response_body_copy(res, body, (size_t)bl);   /* the json helper borrows */
+}
+
+/* The built-in readiness backend, with its wait shaping one batch on request: the first connection
+ * event is followed by a second one for the same connection (DUP), or by a listen event and then the
+ * second one (REUSE). Listen events are held back while g_hold_listen is set, so a client connected
+ * meanwhile waits in the backlog until the REUSE batch accepts it. */
+enum { BATCH_PASS, BATCH_DUP, BATCH_REUSE };
+static int g_batch_mode, g_hold_listen, g_inject_seq;
+static int batch_wait(KlEventLoop *l, KlEvent *out, int max, int timeout_ms) {
+    int n = kl_event_wait_builtin(l, out, max, timeout_ms);
+    if (n <= 0) return n;
+    int seq = kl_atomic_load_int(&g_wait_seq) + 1;
+    kl_atomic_store_int(&g_wait_seq, seq);
+    int k = 0;
+    for (int i = 0; i < n; i++)
+        if (out[i].udata || !kl_atomic_load_int(&g_hold_listen)) out[k++] = out[i];
+    n = k;
+    int mode = kl_atomic_load_int(&g_batch_mode);
+    if (mode == BATCH_PASS) return n;
+    for (int i = 0; i < n && n + 2 <= max; i++) {
+        uintptr_t u = (uintptr_t)out[i].udata;
+        if (!u || (u & 1)) continue;                 /* the listener, or a watcher */
+        if (mode == BATCH_REUSE) {
+            out[n].udata = NULL;
+            out[n++].ready = KL_EVENT_READ;
+            kl_atomic_store_int(&g_hold_listen, 0);
+        }
+        out[n].udata = out[i].udata;
+        out[n++].ready = KL_EVENT_READ;
+        kl_atomic_store_int(&g_inject_seq, seq);
+        kl_atomic_store_int(&g_batch_mode, BATCH_PASS);
+        break;
+    }
+    return n;
+}
+static const KlEventOps batch_ops = {
+    kl_event_init_builtin, kl_event_add_builtin, kl_event_mod_builtin, kl_event_del_builtin,
+    batch_wait, kl_event_close_builtin, kl_event_caps_builtin, kl_event_native_provider_builtin, NULL,
+};
+static const KlEventProvider batch_provider = { &batch_ops, "builtin-batch-shaping" };
+
+static int built_in_is_completion(void) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventLoop probe = { 0 };
+    probe.alloc = &alloc;
+    if (kl_event_init(&probe) != 0) return 1;
+    unsigned caps = kl_event_caps(&probe);
+    kl_event_close(&probe);
+    return (caps & KL_EVENT_CAP_COMPLETION) != 0;
+}
+
+static int wait_active(int want, int ms) {
+    KlHttpServerStats st;
+    for (int i = 0; i * 10 < ms; i++) {
+        kl_http_server_stats(&g_srv, &st);
+        if (st.active_connections == want) return want;
+        kl_test_sleep_ms(10);
+    }
+    kl_http_server_stats(&g_srv, &st);
+    return st.active_connections;
+}
+
+/* The pool after the connections above it are gone: none active, and a free list that does not
+ * loop on its head. */
+static void expect_pool_sound(int *utest_result) {
+    int active = wait_active(0, 2000);
+    KlHttpConn *fl = g_srv.pool.free_list;
+    printf("  active %d, free list %p -> %p\n", active, (void *)fl, fl ? (void *)fl->next_free : NULL);
+    EXPECT_EQ(active, 0);
+    EXPECT_EQ(g_srv.pool.active_count, 0);
+    EXPECT_TRUE(fl != NULL && fl->next_free != fl);
+}
+
+/* Read one response and check it is the 200 for `id`. */
+static void expect_where(int *utest_result, int fd, const char *id) {
+    Pair p;
+    memset(&p, 0, sizeof p);
+    p.wire = malloc(WIRE_CAP);
+    p.body = malloc(BODY_CAP);
+    ASSERT_TRUE(p.wire && p.body);
+    p.first_len = read_response(fd, &p, 0, p.body, &p.body_len, &p.first_close, 2000);
+    char want[64];
+    int wl = snprintf(want, sizeof want, "{\"id\":\"%s\"}", id);
+    printf("  %s: response %ld, body %.*s\n", id, p.first_len, (int)(p.body_len < 40 ? p.body_len : 40),
+           p.body);
+    EXPECT_GT(p.first_len, 0L);
+    EXPECT_EQ(memcmp(p.wire, "HTTP/1.1 200", 12), 0);
+    EXPECT_EQ(p.body_len, (size_t)wl);
+    if (p.body_len == (size_t)wl) EXPECT_EQ(memcmp(p.body, want, (size_t)wl), 0);
+    pair_free(&p);
+}
+
+/* Several concurrent clients, interleaved: each gets its own answer, from its own slot. A third
+ * client only where the pool holds three. */
+static void expect_concurrent_clients(int *utest_result, int port, int three) {
+    int a = connect_rcvbuf(port, 0);
+    ASSERT_TRUE(a >= 0);
+    kl_test_sleep_ms(50);
+    (void)kl_test_sockwrite(a, "GET /where/A HTTP/1.1\r\n", 23);   /* half a head */
+    kl_test_sleep_ms(50);
+    int b = connect_rcvbuf(port, 0);
+    ASSERT_TRUE(b >= 0);
+    kl_test_sleep_ms(50);
+    int c = three ? connect_rcvbuf(port, 0) : -1;
+    ASSERT_TRUE(!three || c >= 0);
+    kl_test_sleep_ms(50);
+    const char *rb = "GET /where/B HTTP/1.1\r\nHost: x\r\n\r\n";
+    (void)kl_test_sockwrite(b, rb, strlen(rb));
+    kl_test_sleep_ms(100);
+    (void)kl_test_sockwrite(a, "Host: x\r\n\r\n", 11);             /* the rest of A's */
+    kl_test_sleep_ms(50);
+    const char *rc = "GET /where/C HTTP/1.1\r\nHost: x\r\n\r\n";
+    if (three) (void)kl_test_sockwrite(c, rc, strlen(rc));
+    expect_where(utest_result, a, "A");
+    expect_where(utest_result, b, "B");
+    if (three) expect_where(utest_result, c, "C");
+    kl_test_closesock(a);
+    kl_test_closesock(b);
+    if (three) kl_test_closesock(c);
+}
+
+/* A client resets while its rejected request's streamed answer is still going out, the rest of the
+ * body being discarded (READ and WRITE armed). On kqueue the reset arrives as two events of one
+ * batch; the first releases the connection. */
+UTEST(stream_termination, a_reset_during_a_discarding_answer_releases_its_slot_once) {
+#if !defined(_WIN32)
+    signal(SIGPIPE, SIG_IGN);
+#endif
+    memset(&g_p, 0, sizeof g_p);
+    g_where_n = 0;
+    g_cfg_read_to = 5000;
+    int port = server_start(0, 0);
+    g_cfg_read_to = 0;
+    ASSERT_GT(port, 0);
+    int fd = connect_rcvbuf(port, 8192);
+    ASSERT_TRUE(fd >= 0);
+    const char *rq = "POST /await2 HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n";
+    (void)kl_test_sockwrite(fd, rq, strlen(rq));
+    kl_test_sleep_ms(100);
+    (void)kl_test_sockwrite(fd, "0123456789012345678901234567890123456789012345678901234567890123", 64);
+    kl_test_sleep_ms(200);                           /* the answer backs up; the body is refused */
+    struct linger lg = { 1, 0 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg);
+    kl_test_closesock(fd);                           /* a reset */
+    expect_pool_sound(utest_result);
+    expect_concurrent_clients(utest_result, port, 1);
+    expect_pool_sound(utest_result);
+    server_stop();
+}
+
+/* The same, deterministically on every readiness loop: the batch carries a second event for a
+ * connection its first event closed (Connection: close). */
+UTEST(stream_termination, a_second_event_for_a_released_connection_is_dropped) {
+    if (built_in_is_completion()) UTEST_SKIP("the batch-shaping wrapper is readiness-only");
+    g_where_n = 0;
+    g_cfg_provider = &batch_provider;
+    int port = server_start(0, 0);
+    g_cfg_provider = NULL;
+    ASSERT_GT(port, 0);
+    int x = connect_rcvbuf(port, 0);
+    ASSERT_TRUE(x >= 0);
+    ASSERT_EQ(wait_active(1, 2000), 1);
+    kl_atomic_store_int(&g_batch_mode, BATCH_DUP);
+    const char *rq = "GET /where/X HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    (void)kl_test_sockwrite(x, rq, strlen(rq));
+    expect_where(utest_result, x, "X");
+    kl_test_closesock(x);
+    EXPECT_EQ(kl_atomic_load_int(&g_batch_mode), BATCH_PASS);   /* the batch was shaped */
+    expect_pool_sound(utest_result);
+    expect_concurrent_clients(utest_result, port, 1);
+    expect_pool_sound(utest_result);
+    server_stop();
+    kl_atomic_store_int(&g_batch_mode, BATCH_PASS);
+}
+
+/* The slot released by the first event is taken by a new connection accepted later in the same
+ * batch; the batch's second event, the old connection's, must not drive the new one. The new
+ * client's request is already waiting, so a stale event acting on it would answer it in that batch;
+ * the new connection's own readiness can only come in a later one. */
+UTEST(stream_termination, a_stale_event_does_not_act_on_a_connection_reusing_its_slot) {
+    if (built_in_is_completion()) UTEST_SKIP("the batch-shaping wrapper is readiness-only");
+    g_where_n = 0;
+    g_cfg_provider = &batch_provider;
+    g_cfg_max_conns = 2;
+    int port = server_start(0, 0);
+    g_cfg_provider = NULL;
+    g_cfg_max_conns = 0;
+    ASSERT_GT(port, 0);
+    int x = connect_rcvbuf(port, 0);
+    ASSERT_TRUE(x >= 0);
+    ASSERT_EQ(wait_active(1, 2000), 1);
+    kl_atomic_store_int(&g_hold_listen, 1);
+    int y = connect_rcvbuf(port, 0);                 /* waits in the backlog */
+    ASSERT_TRUE(y >= 0);
+    const char *ry = "GET /where/Y HTTP/1.1\r\nHost: x\r\n\r\n";
+    (void)kl_test_sockwrite(y, ry, strlen(ry));
+    kl_test_sleep_ms(100);
+    EXPECT_EQ(wait_active(1, 100), 1);               /* not accepted yet */
+    kl_atomic_store_int(&g_batch_mode, BATCH_REUSE);
+    const char *rx = "GET /where/X HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    (void)kl_test_sockwrite(x, rx, strlen(rx));
+    expect_where(utest_result, x, "X");
+    expect_where(utest_result, y, "Y");
+    kl_test_closesock(x);
+    kl_atomic_store_int(&g_hold_listen, 0);
+    int inject = kl_atomic_load_int(&g_inject_seq);
+    printf("  shaped batch %d; X answered in %d by %p, Y in %d by %p\n", inject, g_where_seq[0],
+           (void *)g_where_conn[0], g_where_seq[1], (void *)g_where_conn[1]);
+    ASSERT_EQ(g_where_n, 2);
+    ASSERT_TRUE(g_where_conn[0] == g_where_conn[1]);   /* Y did take X's slot in that batch */
+    EXPECT_EQ(g_where_seq[0], inject);
+    EXPECT_GT(g_where_seq[1], inject);                 /* answered on its own event, not X's */
+    kl_test_closesock(y);
+    expect_pool_sound(utest_result);
+    expect_concurrent_clients(utest_result, port, 0);
+    expect_pool_sound(utest_result);
+    server_stop();
+    kl_atomic_store_int(&g_batch_mode, BATCH_PASS);
 }
 
 UTEST_MAIN();
