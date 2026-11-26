@@ -291,7 +291,9 @@ jobs:
           make CC=cl
 
       - name: Run the MSVC runtime probes (PAL socket runtime, PAL threads, C11 atomics)
-        timeout-minutes: 5
+        # These run the whole MSVC suite set (about 4:40 on main before the stream-termination suite,
+        # which adds about 30 s): 5 minutes left no headroom.
+        timeout-minutes: 10
         run: |
           source scripts/msvc-env.sh
           make CC=cl test-msvc
