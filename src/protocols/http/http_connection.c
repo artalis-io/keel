@@ -12,6 +12,7 @@
 #include "http1_chunked_internal.h"   /* kl_http1_chunked_decode_used: where a body ended */
 #include "http_proto_hooks.h"        /* ws/h2 upgrade seam: core never names ws/h2 directly */
 #include "http_router_internal.h"     /* post-body middleware: match at header time, run after */
+#include "http_response_internal.h"   /* kl_http_response_build_iovec: a buffered response's length */
 #include <assert.h>
 #include <string.h>
 #include "internal_trace.h"
@@ -409,6 +410,24 @@ static int conn_server_draining(const KlHttpConn *c) {
     return c->server_draining && kl_atomic_load_int(c->server_draining);
 }
 
+/* Once any response header bytes have been transmitted, the serialized response layout must remain
+ * immutable. A buffered head carries its Connection line from res.keep_alive (and res.close_notice),
+ * and a partial send resumes at send_offset within that layout: changing either after the first byte
+ * went out drops or duplicates bytes on the wire. So the decision to close the connection after this
+ * response is the request's (req.keep_alive, which alone decides reuse: conn_send_complete), and the
+ * response's representation follows it only while nothing of the head is out. headers_sent is set
+ * by the first write of any part of a head (a partial buffered send included); send_offset covers a
+ * buffered send by itself. */
+static int conn_head_committed(const KlHttpConn *c) {
+    return c->res.headers_sent || c->res.send_offset > 0;
+}
+
+/* This response is the connection's last: never reuse the connection after it. */
+static void conn_end_keepalive(KlHttpConn *c) {
+    c->req.keep_alive = 0;
+    if (!conn_head_committed(c)) c->res.keep_alive = 0;
+}
+
 /*
  * Initialize response for the current request, so middleware can write headers/status before the handler runs.
  */
@@ -429,8 +448,7 @@ static int conn_init_response(KlHttpConn *c) {
     c->res.keep_alive = c->req.keep_alive;
     /* A graceful drain ends keep-alive: this response says so, and the connection closes after it. */
     if (conn_server_draining(c)) {
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+        conn_end_keepalive(c);
         c->res.close_notice = 1;   /* the head says Connection: close (http_response.c) */
     }
     c->res.head_request = (c->req.method_len == 4 &&
@@ -453,9 +471,8 @@ static void conn_note_overrun(KlHttpConn *c, const char *excess, size_t len) {
     while (i < len && (excess[i] == '\r' || excess[i] == '\n')) i++;
     if (i == len) return;
     c->request_overrun = 1;
-    c->req.keep_alive = 0;
-    c->res.keep_alive = 0;
-    c->res.close_notice = 1;
+    conn_end_keepalive(c);
+    if (!conn_head_committed(c)) c->res.close_notice = 1;   /* the head, if not yet begun, says so */
 }
 
 /* The handler (or middleware) returned with a streamed response: the connection driver finishes it
@@ -771,8 +788,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
     }
     if (kl_http_router_run_middleware(router, &c->req, &c->res) != 0) {
         /* Middleware short-circuited: body may be unread */
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+        conn_end_keepalive(c);
         if (c->res.body_mode == KL_HTTP_BODY_STREAM)
             return conn_stream_handed_over(c);   /* then the drain: the body may be unread */
         c->state = KL_HTTP_CONN_SENDING;
@@ -842,8 +858,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
              * still holds would go out ahead of the next write. The stream cannot carry a response
              * any more: close, telling the reader its body will not come. */
             if (c->req.body_reader) c->req.body_reader->on_error(c->req.body_reader);
-            c->req.keep_alive = 0;
-            c->res.keep_alive = 0;
+            conn_end_keepalive(c);
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
@@ -897,8 +912,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                  * into a re-used connection's next request. Mirror of
                  * the post-handler force-off at the READING_BODY rc<0
                  * and SENDING/CLOSED branches below. */
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
+                conn_end_keepalive(c);
                 return s;
             }
             /* Handler parked. Fall through to leftover processing
@@ -923,8 +937,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                         (c->state == KL_HTTP_CONN_SENDING ||
                          c->state == KL_HTTP_CONN_CLOSED ||
                          c->state == KL_HTTP_CONN_SUSPENDED)) {
-                        c->req.keep_alive = 0;
-                        c->res.keep_alive = 0;
+                        conn_end_keepalive(c);
                         return c->state;
                     }
                     /* Bytes that came with the headers fail as they would in a later read: 413,
@@ -963,8 +976,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                     (c->state == KL_HTTP_CONN_SENDING ||
                      c->state == KL_HTTP_CONN_CLOSED ||
                      c->state == KL_HTTP_CONN_SUSPENDED)) {
-                    c->req.keep_alive = 0;
-                    c->res.keep_alive = 0;
+                    conn_end_keepalive(c);
                     return c->state;
                 }
                 /* As in a later read: 413, then the drain. */
@@ -1003,8 +1015,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
                 return c->state;
             }
             if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
+                conn_end_keepalive(c);
                 return c->state;
             }
         }
@@ -1019,8 +1030,7 @@ static KlHttpConnState conn_dispatch_request_body(KlHttpConn *c, KlHttpRouter *r
             if (c->route->streaming_handler &&
                 (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
                  c->state == KL_HTTP_CONN_SUSPENDED)) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
+                conn_end_keepalive(c);
                 return c->state;
             }
             return kl_http_conn_reject_final(c, kl_500_response, sizeof(kl_500_response) - 1);
@@ -1359,24 +1369,21 @@ static KlHttpConnState conn_send_complete(KlHttpConn *c) {
     /* A chunked body that never got its terminating chunk has no end the client can see but the
      * connection's: never reuse it for another request. HEAD carries no body, so it is complete. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM && !c->res.stream_ended && !c->res.head_request) {
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+        conn_end_keepalive(c);
     }
     /* A streamed response carries no keep-alive signal in its head (kl_http_response_begin_stream
      * writes none), so an HTTP/1.0 client, for which keep-alive must be announced, reads it to the
      * end of the connection: close after it, as before streams were finished by the connection. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM &&
         c->req.version_major == 1 && c->req.version_minor == 0) {
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+        conn_end_keepalive(c);
     }
     /* Nor one whose response still holds output: whatever a driver's path missed (bytes written into
      * the outbound buffer after it was judged empty) would be discarded by the reset, and a cut-short
      * response must never be followed by another on the same connection. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled &&
         kl_drain_pending(&c->res.drain)) {
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+        conn_end_keepalive(c);
     }
     /* A response begun before a graceful drain started still ends its connection. */
     if (conn_server_draining(c))
@@ -1607,8 +1614,7 @@ static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
 
 KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     /* Terminating the request: the connection cannot be reused either way. */
-    c->req.keep_alive = 0;
-    c->res.keep_alive = 0;
+    conn_end_keepalive(c);
 
     /* Body bytes kept across a suspend that the resume never fed (it answered without awaiting the
      * body) are already accounted, but the chunked decoder has not seen them: feed them first, so
@@ -1806,17 +1812,44 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
     return c->state;
 }
 
+/* A buffered or file-backed response whose head is out (a streaming handler's direct
+ * kl_http_response_send) but whose readiness send has not finished: send_offset short of its wire
+ * length, or the file short of its size. Only the readiness driver's own progress counts: a completion
+ * loop refuses that direct send (one output driver per response), so its response has no head out
+ * here. HEAD carries no body, so its file is not owed. */
+static int conn_committed_unsent(KlHttpConn *c) {
+    if (!c->res.headers_sent || c->res.stream_error || c->comp_driven) return 0;
+    if (c->res.body_mode == KL_HTTP_BODY_BUFFER || c->res.body_mode == KL_HTTP_BODY_NONE) {
+        char cl_buf[48];
+        KlIoVec iov[7];
+        size_t total = 0;
+        if (kl_http_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof cl_buf, &total) < 0)
+            return 0;
+        return c->res.send_offset < total;
+    }
+    if (c->res.body_mode == KL_HTTP_BODY_FILE)
+        return !c->res.head_request && c->res.file_offset < c->res.file_size;
+    return 0;
+}
+
 KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_t len) {
-    /* A response whose head already went out (a streaming handler that began, or ended, its stream
-     * before the body failed) cannot be followed by another: the raw rejection would land after its
-     * terminating chunk or ahead of bytes still buffered for it. Nor may the connection end under it:
-     * the half-close would cut off what it still holds (a connection reading the body watches only
-     * READ, so nothing flushes it). Finish it first (SENDING), never kept alive: once it is out,
-     * kl_http_conn_send_complete() ends the connection through the drain (kl_http_conn_begin_drain),
-     * whichever caller rejected it (a body error, or the idle sweep's 408). */
-    if (c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.headers_sent && !c->res.stream_error) {
-        c->req.keep_alive = 0;
-        c->res.keep_alive = 0;
+    /* Once a response head has been committed, a subsequent request-body rejection must not inject
+     * another response or discard pending response output merely because the response is buffered,
+     * file-backed or streamed. A response whose head already went out (a streaming handler that
+     * began, or ended, its stream, or sent a buffered or file response directly, before the body
+     * failed) cannot be followed by another: the raw rejection would land after its terminating
+     * chunk, inside its body, or ahead of bytes still owed to it. Nor may the connection end under
+     * it: the half-close would cut off what it still owes (a connection reading the body watches
+     * only READ, so nothing flushes it). Finish it first (SENDING, through the same output driver
+     * that began it), never kept alive: once it is out, kl_http_conn_send_complete() ends the
+     * connection through the drain (kl_http_conn_begin_drain), whichever caller rejected it (a body
+     * error, or the idle sweep's 408). Finishing is attempted within the existing bounds (the
+     * discard caps below, the idle timeout of a client that does not read), not guaranteed. A
+     * response already sent in full has nothing to finish: the connection just ends, as before. */
+    int streamed = c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.headers_sent &&
+                   !c->res.stream_error;
+    if (streamed || conn_committed_unsent(c)) {
+        conn_end_keepalive(c);   /* the head is out: its layout stays as committed */
         /* Meanwhile keep reading and discarding the rest of the body, within the drain's bounds: a
          * client that uploads before it reads would otherwise block on its send with the answer
          * stuck behind it, until the idle timeout reset both. The reads reuse read_buf, so the
@@ -1886,8 +1919,7 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
             if (c->route && c->route->streaming_handler &&
                 (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
                  c->state == KL_HTTP_CONN_SUSPENDED)) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
+                conn_end_keepalive(c);
                 return c->state;
             }
             return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
@@ -1912,8 +1944,7 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
             if (c->state == KL_HTTP_CONN_SUSPENDED)
                 return c->state;
             if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
+                conn_end_keepalive(c);
                 return c->state;
             }
         }
@@ -1930,8 +1961,7 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
         if (c->route && c->route->streaming_handler &&
             (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED ||
              c->state == KL_HTTP_CONN_SUSPENDED)) {
-            c->req.keep_alive = 0;
-            c->res.keep_alive = 0;
+            conn_end_keepalive(c);
             return c->state;
         }
         return kl_http_conn_reject_final(c, kl_413_response, sizeof(kl_413_response) - 1);
@@ -1947,8 +1977,7 @@ static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread) {
         if (c->state == KL_HTTP_CONN_SUSPENDED)
             return c->state;
         if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
-            c->req.keep_alive = 0;
-            c->res.keep_alive = 0;
+            conn_end_keepalive(c);
             return c->state;
         }
     }

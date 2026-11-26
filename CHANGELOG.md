@@ -117,6 +117,36 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   readiness dispatch now records each connection event's release generation when the batch is
   captured and drops an event whose connection was released since, so a stale event acts neither on
   the released slot nor on a new connection accepted into it later in the same batch.
+- **A file response whose head was cut off part way is not followed by a rejection.** Once any
+  response head byte has been transmitted, nothing may be injected after it. A file response's head
+  write that gave up on a full socket (`kl_http_response_send` returning -1) left part of the head on
+  the wire while the response still counted as unsent, so a request-body rejection that followed
+  wrote its 413 inside that head (two status lines). The response now counts as sent and failed: no
+  rejection is written into it, nothing more of it is sent, and the connection closes.
+- **A partly sent buffered answer keeps the layout its head began with.** Once any response header
+  bytes have been transmitted, the serialized response layout must remain immutable. A handler that
+  sent a buffered response directly (`kl_http_response_send` returning 1) on a readiness loop, on a
+  request whose connection the server then decided to end (a body left unread or failed, a pipelined
+  request, a short-circuit), had the `Connection: keep-alive` line removed from that response mid-send.
+  The rest was resumed from the old offset in the new layout: with the body begun, the client got 24
+  bytes short of the declared Content-Length and a corrupted body; with the head part way out
+  (always so with TLS, whose first send writes one segment), the line vanished from a head already
+  begun. Only the decision to reuse the connection changes now: the response goes out as it began,
+  then the connection closes. File and streamed responses, whose heads go out whole, were not
+  affected; nor were completion loops, which refuse that direct send.
+- **A buffered or file-backed answer sent before its request body failed now arrives whole.** Once a
+  response head has been committed, a subsequent request-body rejection must not inject another
+  response or discard pending response output merely because the response is buffered, file-backed
+  or streamed. On readiness loops (epoll, kqueue, poll, Windows select()), a streaming-async handler
+  that sent a large buffered or file response directly (`kl_http_response_send` returning 1) and then
+  awaited its body lost the rest of that response when the body failed (the reader's 413, or the
+  body deadline's 408): the connection half-closed under the unsent remainder, so the client got the
+  head (which may say `Connection: keep-alive`), a few KB and a FIN. Such a response is now finished
+  first, exactly as a streamed one already was: the body is read and discarded within the
+  post-rejection drain's bounds meanwhile, the connection is never reused, and it ends with a close
+  (bounded by `reject_drain_max_bytes`, `max_body_size` and `read_timeout_ms`, so a client that never
+  reads is still released at the idle timeout). A response already sent in full is unchanged, and
+  completion loops, which refuse that direct send, still answer with the rejection.
 - **A request head rejected while its client is still sending keeps its 431 (or 408).** A rejection
   before the head is parsed has no request framing, and its zero Content-Length read as "the
   request is complete", so the early-rejection drain was skipped and the connection closed with the
