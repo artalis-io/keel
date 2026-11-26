@@ -33,6 +33,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `Connection: close`.
 - **Completion loops: a producer writing from `on_drain` after its op completed is delivered in
   full**, up to its end of stream; it used to be cut short.
+- **Completion loops: `kl_http_response_send` is refused while the server owns the response's
+  transmission.** On io_uring, IOCP and pollcomp it returns -1 and writes nothing for a buffered,
+  empty or file response (and a streamed one without an outbound buffer) of a server connection; the
+  server sends the response itself once the handler returns. Building the response is enough on
+  every loop: drop the call. Readiness loops are unchanged.
 
 ### Added
 
@@ -111,6 +116,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   read it). Header-phase rejections (431 on either loop, the 408 that cuts off a partial head) now
   always half-close and drain, bounded as every rejection drain is (`reject_drain_max_bytes`,
   `reject_drain_timeout_ms`), ending at the client's EOF.
+- **A response sent by its own handler goes out once on completion loops.** A response must have
+  exactly one output driver, and an application must not initiate direct transmission while the
+  completion-driven server machinery owns transmission of that response. A handler that called
+  `kl_http_response_send` wrote the response itself, and then the completion driver (io_uring,
+  IOCP, pollcomp) built and posted it again from the start, ignoring what was already sent: the
+  client got the response twice (212 bytes for a 106-byte response), and with TLS a second head
+  inside the first. The call is now refused there before anything is written, so the driver's send
+  is the only one and the next response on the connection starts on the next byte.
 - **A `kl_http_server_stop` issued before `kl_http_server_run` starts is honoured.** A stop from a
   signal handler during startup used to be overwritten by the run's own `running = 1`, so the
   server ran on; that run now returns 0 at once, without listening.

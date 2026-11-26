@@ -355,7 +355,21 @@ int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritabl
  * A response with none is refused rather than written to a handle that is not its own: an HTTP/2
  * stream's response, for instance, is sent by the HTTP/2 session, never flushed here.
  *
- * @return 0 when done, positive if more to send, -1 on error (including no write target).
+ * A response must have exactly one output driver. An application must not initiate direct
+ * transmission while the completion-driven server machinery owns transmission of that response.
+ * On a completion loop (io_uring, IOCP, pollcomp, and the completion integrations) the server owns
+ * the transmission of every response it hands a handler: it sends the response itself once the
+ * handler returns or the async op completes. There this call is refused for a buffered, empty or
+ * file response, and for a streamed one without an outbound buffer: it returns -1 and writes
+ * nothing, leaving the response and its send progress exactly as they were, so the server's send
+ * is the only one. (A streamed response with an outbound buffer, the default from
+ * kl_http_response_begin_stream(), is not refused: flushing it only moves its buffered bytes onto
+ * the connection's output queue, which the server sends.) A handler needs no call to send its
+ * response on any loop: building it is enough. On a readiness loop the call stays a direct flush,
+ * and the server resumes from what it wrote.
+ *
+ * @return 0 when done, positive if more to send, -1 on error (including no write target, and a
+ *         response whose transmission the completion machinery owns).
  */
 int kl_http_response_send(KlHttpResponse *res);
 

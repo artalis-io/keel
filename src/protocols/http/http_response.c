@@ -541,7 +541,24 @@ int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
     return n;
 }
 
+/* A response has exactly one output driver. On a completion loop the server's completion machinery
+ * owns the transmission of a pooled connection's response: once the handler returns (or the async op
+ * resumes) it builds the response's bytes from kl_http_response_build_iovec() and posts them itself,
+ * from the start. A direct send by the application as well put the response on the wire twice. So the
+ * public entry point refuses there, before anything is written: no byte, no send_offset, no
+ * headers_sent, no stream_error, so what the driver sends later is exactly what it would have sent
+ * without the call. A streamed response with an outbound buffer is the exception: flushing it moves
+ * the buffer onto that same connection's output queue, which the driver sends, so it stays one
+ * output driver. Decided from the response's own state (the pooled-connection mark and its
+ * connection's drive model), never from the backend's identity. */
 int kl_http_response_send(KlHttpResponse *res) {
+    if (kl_http_comp_owns_output(res) &&
+        !(res->body_mode == KL_HTTP_BODY_STREAM && res->drain_enabled))
+        return -1;
+    return kl_http_response_send_driven(res);
+}
+
+int kl_http_response_send_driven(KlHttpResponse *res) {
     /* No HTTP/1.1 transport: refuse before a status line is built, rather than write one to a
      * handle that is not this response's to write (an HTTP/2 stream's, or an unbound one). */
     if (!res_has_wire(res)) return -1;
@@ -1022,7 +1039,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
     /* Wire the transport-neutral outbound stream buffer by default: stream writes
      * go through KlDrain: a non-blocking inline send with the would-block remainder
      * buffered (bounded, backpressure), flushed by the transport (readiness:
-     * kl_http_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and the
+     * kl_http_conn_on_writable; completion: kl_http_response_send_driven in comp_send_stream, and the
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
      * on a slow client. If no allocator is available, fall back to the spin-write path. */
     if (!res->drain_enabled && res->alloc)

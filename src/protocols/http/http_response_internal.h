@@ -24,6 +24,19 @@
 int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out);
 
+/* The flush behind kl_http_response_send(), without its output-ownership check: for the server's own
+ * output drivers only. A completion loop's driver flushes a streamed response through it; the public
+ * function refuses an application's direct send while that driver owns the response's transmission
+ * (kl_http_comp_owns_output). Same return contract as kl_http_response_send(). */
+int kl_http_response_send_driven(KlHttpResponse *res);
+
+/* 1 when the completion machinery owns the transmission of this response: it is the one embedded in
+ * a pooled server connection (stream_inflight) and that connection is driven by a completion loop
+ * (comp_driven). A response has exactly one output driver, so the application must not then
+ * initiate direct transmission. Always 0 on readiness, for any other response, and in a build
+ * without the completion axis. */
+int kl_http_comp_owns_output(const KlHttpResponse *res);
+
 /* 1 while the response has a stream that takes body bytes: begun (its head written), not ended, and
  * not reset or released since. Every stream write, legacy or bounded, compressed or not, is refused
  * when it is 0, so nothing follows the terminating chunk. */

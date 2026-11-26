@@ -226,7 +226,7 @@ static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHt
  * stream; every other streamed response goes through the output queue (comp_tls_send_stream). */
 static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
-    do { r = kl_http_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
+    do { r = kl_http_response_send_driven(&c->res); } while (r == 1 && c->res.stream_ended);
     if (r < 0) { kl_comp_close(s, c); return; }
     comp_after_send_complete(s, c, kl_http_conn_send_complete(c));
 }
@@ -471,6 +471,15 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
     return kl_comp_queue_write(c, data, len);
 }
 
+/* http_response_internal.h: whether the completion machinery owns this response's transmission. Only
+ * the response embedded in a pooled connection has a driver here (the stream_inflight mark), and only
+ * a connection accepted on a completion loop is driven by it (comp_driven). */
+int kl_http_comp_owns_output(const KlHttpResponse *res) {
+    if (!res || !res->stream_inflight) return 0;
+    const KlHttpConn *c = (const KlHttpConn *)((const char *)res - offsetof(KlHttpConn, res));
+    return c->comp_driven;
+}
+
 /* http_response_internal.h: what the connection's output queue holds of a pooled, completion-driven
  * response and has not seen completed. While the response streams, the queue carries only its
  * output (the head, the chunks; ciphertext with TLS), so the appended-but-not-sent count is it. */
@@ -617,11 +626,11 @@ static void comp_tls_send_response(struct KlHttpServer *s, KlHttpConn *c) {
 }
 
 /* Chunked/streaming response (KL_HTTP_BODY_STREAM) through the output queue. The streaming write
- * path (kl_http_response_send → response_drain_writer) puts it there: with TLS by encrypting into the
- * engine's out ring, which is moved onto the queue after each send (making room in the ring); in
- * plaintext directly (kl_http_comp_stream_write). Then mark the end. The response completes
- * (comp_on_write) once the queue has sent up to the mark, so a client that reads slowly holds only
- * its own connection. */
+ * path (kl_http_response_send_driven → response_drain_writer) puts it there: with TLS by encrypting
+ * into the engine's out ring, which is moved onto the queue after each send (making room in the
+ * ring); in plaintext directly (kl_http_comp_stream_write). Then mark the end. The response
+ * completes (comp_on_write) once the queue has sent up to the mark, so a client that reads slowly
+ * holds only its own connection. */
 static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
     for (int pass = 0; ; pass++) {
@@ -636,7 +645,7 @@ static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
         if (cb) c->res.drain.on_drain = NULL;
         c->comp_stream_flushing = 1;                /* the outbound buffer goes onto the queue whole */
         do {
-            r = kl_http_response_send(&c->res);
+            r = kl_http_response_send_driven(&c->res);
             if (r < 0) break;
             if (kl_comp_tls_flush(c) < 0) { r = -1; break; }   /* ring → queue (TLS), then send */
         } while (r == 1 && c->res.stream_ended);
