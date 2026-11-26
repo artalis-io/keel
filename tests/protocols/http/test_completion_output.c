@@ -3043,4 +3043,129 @@ UTEST(completion_output, a_late_edge_rearmed_with_nothing_in_flight_does_not_spi
     late_install_case(utest_result, LA_SPIN, 0);
 }
 
+/* ── A handler that sends its own buffered response ──────────────────────────────────────────────
+ * A response has exactly one output driver. On a completion loop the server's completion machinery
+ * owns the transmission of a pooled connection's response: once the handler returns it builds the
+ * response's bytes and posts them itself. A handler that also called kl_http_response_send() put the
+ * response on the wire twice (the direct write, then the driver's post, which ignores send_offset):
+ * the whole response arrived twice. The direct send is refused there and writes nothing, so the
+ * driver's copy is the only one. On a readiness loop the call is the established direct flush and the
+ * driver resumes from send_offset, so it stays legitimate. Either way the client gets exactly one
+ * response per request, and the next one starts on the next byte. */
+static KlHttpServer dsend_srv;
+static int g_dsend_rc[2];
+static int g_dsend_calls;
+
+static void handle_direct_send(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int i = g_dsend_calls < 2 ? g_dsend_calls : 1;
+    g_dsend_calls++;
+    kl_http_response_status(res, 200);
+    (void)kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, i == 0 ? "first-body" : "second-body!", i == 0 ? 10 : 12);
+    g_dsend_rc[i] = kl_http_response_send(res);
+}
+
+/* Read one response: its head and then exactly Content-Length body bytes (or stop at 2 s). Returns
+ * the bytes read; *body points at the body inside buf. Bytes past the response stay unread. */
+static size_t dsend_read_one(int fd, char *buf, size_t cap, const char **body, size_t *body_len) {
+    size_t got = 0;
+    *body = NULL;
+    *body_len = 0;
+    while (got < cap - 1) {
+        size_t want = 1;                                   /* the head, a byte at a time */
+        char *eoh = NULL;
+        buf[got] = '\0';
+        if ((eoh = strstr(buf, "\r\n\r\n")) != NULL) {
+            const char *cl = strstr(buf, "Content-Length: ");
+            size_t clen = cl ? (size_t)strtoul(cl + 16, NULL, 10) : 0;
+            size_t head = (size_t)(eoh + 4 - buf);
+            if (got >= head + clen) { *body = buf + head; *body_len = clen; break; }
+            want = head + clen - got;
+        }
+        if (kl_test_poll1(fd, 0, 2000) <= 0) break;
+        kl_ssize_t n = kl_test_sockread(fd, buf + got, want < cap - 1 - got ? want : cap - 1 - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    return got;
+}
+
+/* Bytes that arrive within `ms` when nothing more is owed. */
+static size_t dsend_extra(int fd, int ms) {
+    char junk[1024];
+    size_t total = 0;
+    while (kl_test_poll1(fd, 0, ms) > 0) {
+        kl_ssize_t n = kl_test_sockread(fd, junk, sizeof junk);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    return total;
+}
+
+static void direct_send_case(int *utest_result, int use_tls) {
+    KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    if (use_tls) cfg.tls = &tls_cfg;
+    g_dsend_calls = 0;
+    g_dsend_rc[0] = g_dsend_rc[1] = 99;
+    ASSERT_EQ(0, kl_http_server_init(&dsend_srv, &cfg));
+    kl_http_server_route(&dsend_srv, "GET", "/direct", handle_direct_send, NULL, NULL);
+    const int completion =
+        (kl_event_caps(&kl_http_server_event_ctx(&dsend_srv)->loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &dsend_srv);
+    wait_for_bind(&dsend_srv);
+
+    char r1[1024], r2[1024];
+    const char *b1 = NULL, *b2 = NULL;
+    size_t b1_len = 0, b2_len = 0, extra1 = 0, extra2 = 0;
+    r1[0] = r2[0] = '\0';
+    int fd = connect_rcvbuf(dsend_srv.bound_port, 0);
+    if (fd >= 0) {
+        const char *rq = "GET /direct HTTP/1.1\r\nHost: x\r\n\r\n";      /* keep-alive */
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)dsend_read_one(fd, r1, sizeof r1, &b1, &b1_len);
+        extra1 = dsend_extra(fd, 300);                    /* was (completion): the response again */
+        (void)kl_test_sockwrite(fd, rq, strlen(rq));
+        (void)dsend_read_one(fd, r2, sizeof r2, &b2, &b2_len);
+        extra2 = dsend_extra(fd, 300);
+        kl_test_closesock(fd);
+    }
+    kl_http_server_stop(&dsend_srv);
+    kl_plat_thread_join(&tid);
+    kl_http_server_free(&dsend_srv);
+
+    printf("  direct send (%s): rc %d/%d, extra bytes %zu/%zu\n", completion ? "completion" : "readiness",
+           g_dsend_rc[0], g_dsend_rc[1], extra1, extra2);
+    ASSERT_EQ(0, strncmp(r1, "HTTP/1.1 200 OK\r\n", 17));
+    ASSERT_TRUE(strstr(r1 + 1, "HTTP/1.1") == NULL);     /* one status line, not a head inside it */
+    ASSERT_TRUE(b1 != NULL);
+    ASSERT_EQ((size_t)10, b1_len);
+    ASSERT_EQ(0, memcmp(b1, "first-body", 10));
+    ASSERT_EQ((size_t)0, extra1);
+    ASSERT_EQ(0, strncmp(r2, "HTTP/1.1 200 OK\r\n", 17)); /* the next response, on the next byte */
+    ASSERT_TRUE(strstr(r2 + 1, "HTTP/1.1") == NULL);
+    ASSERT_TRUE(b2 != NULL);
+    ASSERT_EQ((size_t)12, b2_len);
+    ASSERT_EQ(0, memcmp(b2, "second-body!", 12));
+    ASSERT_EQ((size_t)0, extra2);
+    ASSERT_EQ(2, g_dsend_calls);
+    if (completion) {                                      /* the driver owns it: refused */
+        ASSERT_EQ(-1, g_dsend_rc[0]);
+        ASSERT_EQ(-1, g_dsend_rc[1]);
+    } else {                                               /* a direct flush (TLS: partial) */
+        ASSERT_TRUE(g_dsend_rc[0] >= 0);
+        ASSERT_TRUE(g_dsend_rc[1] >= 0);
+    }
+}
+
+UTEST(completion_output, a_handler_that_sends_its_own_response_puts_it_on_the_wire_once) {
+    direct_send_case(utest_result, 0);
+}
+UTEST(completion_output, a_tls_handler_that_sends_its_own_response_puts_it_on_the_wire_once) {
+    direct_send_case(utest_result, 1);
+}
+
 UTEST_MAIN();

@@ -78,3 +78,5 @@ kl_ssize_t kl_http_comp_stream_write(KlHttpResponse *res, const char *data, size
 int kl_http_comp_stream_tls_flush(KlHttpResponse *res) { (void)res; return 0; }
 int kl_http_comp_stream_tls_full(KlHttpResponse *res) { (void)res; return 0; }
 size_t kl_http_comp_stream_queued(const KlHttpResponse *res) { (void)res; return 0; }
+/* No completion loop owns any response's transmission. */
+int kl_http_comp_owns_output(const KlHttpResponse *res) { (void)res; return 0; }
