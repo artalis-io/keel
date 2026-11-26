@@ -15,7 +15,7 @@ and its writable edge, compressed streaming, the graceful drain, the Windows sel
 the Windows default) and the IOCP watch lifecycle; a re-check of the eighteenth pass's open items.
 
 **Historical versus current.** Sections 1 to 6 are the findings against `main` at `65568ff`,
-before any fix. Sections 7 to 10 describe `main` after the fixes, at `6689f32` (#523 to #529
+before any fix. Sections 7 to 10 describe `main` after the fixes, at `021dd0a` (#523 to #531
 merged).
 
 **Verdict at `65568ff`:** the three-axis separation holds. No protocol TU calls an event engine or
@@ -132,7 +132,7 @@ green; `smoke-iouring-asan` and `smoke-pollcomp-asan` on core exit 0 with no san
 - The per-backend behaviour of a handle closed without `kl_event_del` is undocumented and differs
   between the two Windows backends (C audit C L1/L2).
 
-### 7. Corrections and their PRs (state on `main` at `6689f32`)
+### 7. Corrections and their PRs (state on `main` at `021dd0a`)
 
 | Finding | Correction | PR |
 |---|---|---|
@@ -178,7 +178,7 @@ on io_uring, IOCP and pollcomp), found while fixing, is fixed by **#529** (`6689
 Full per-PR evidence for the C-audit fixes is in the twenty-first pass of
 [keel_audit.md](keel_audit.md).
 
-### 11. Convergence audit (state on `main` at `6689f32`)
+### 11. Convergence audit (audited at `6689f32`; dispositions on `main` at `021dd0a`)
 
 The convergence audit ran on `f775e46`, whose tree is identical to `6689f32`, and re-checked the
 corrected event-axis invariants. Results:
@@ -208,6 +208,13 @@ corrected event-axis invariants. Results:
     `max_connections`).
   - IOCP close-time quiesce: another loop's packets reset its 2 s give-up budget, and a port that
     has failed while non-probe ops are outstanding never gives up.
+- **Found by the reviews of the convergence fixes (details in the C audit's twenty-first pass):**
+  F1 is a High regression introduced by #528. It is a lifetime defect in the readiness dispatch:
+  kqueue delivers read and write as two events in one batch, and a connection released by the first
+  was released again by the second. #530 fixes it with the existing release generation
+  (`comp_gen`), which every batched connection event records. The fix is backend-neutral and adds
+  no kqueue policy to HTTP. Completion loops were not affected: a slot is returned only when no
+  operation is posted on it.
 
 ## Eighteenth pass: separation holds after the audit-19 fixes (2026-10-07)
 

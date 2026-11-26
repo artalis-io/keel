@@ -18,12 +18,16 @@ changed by the audit. Probes ran on scratch copies (`git archive 65568ff`).
   client, HTTP/2).
 
 **Historical versus current.** Section 1 describes `main` at `65568ff`, before any fix. Sections 2
-to 5 describe `main` after the fixes, at `6689f32` (#523 to #529 merged).
+to 5 describe `main` after the fixes, at `021dd0a` (#523 to #531 merged); section 6 records the
+convergence audit and the defects its reviews found.
 
 **Result at `65568ff`:** no Critical. Four release-relevant correctness defects (R1 to R4), four
 Medium DoS or protocol defects (D1 to D4), and a set of Lows. These audits, the sanitizer runs
-listed below and fuzzing found no memory-safety defect (no out-of-bounds access, use-after-free or
-double free); this is not a claim of formal memory safety.
+listed below and fuzzing found no memory-safety defect in the audited revision (no out-of-bounds
+access, use-after-free or double free); this is not a claim of formal memory safety. One of the
+corrections then introduced one: a remotely triggerable connection-pool corruption (F1, a High
+regression from #528), found by the convergence reviews and fixed by #530 before release
+(section 6).
 
 **Engines run:** macOS kqueue and pollcomp; Linux epoll, poll and io_uring on core; Windows
 select() and IOCP on edge (MSYS2 UCRT64). v3.5.0 was also run on kqueue and pollcomp to classify
@@ -102,7 +106,7 @@ of audit B's probe was stopped unfinished and is not claimed.
 - **Parsers:** llhttp CL+TE and duplicate Content-Length rejected (live); chunked, router, PROXY
   v1/v2 and CIDR, WebSocket, DNS, client and HTTP/2 bounds.
 
-### 2. Corrections and their PRs (state on `main` at `6689f32`)
+### 2. Corrections and their PRs (state on `main` at `021dd0a`)
 
 | Finding | Correction | PR |
 |---|---|---|
@@ -125,8 +129,8 @@ of audit B's probe was stopped unfinished and is not claimed.
 | D-L1 | `max_header_size` below 8 KiB enforced on every read on both loops | #526 |
 
 B-I1 (a stream ended from `on_resume` with the drain pending: kept alive on readiness, closed on
-completion) was not re-tested; #528 now routes every finished stream through the connection's send
-completion on both models.
+completion): #528 routes every finished stream through the connection's send completion on both
+models; the convergence audit (section 6) verified that both now keep the connection alive.
 
 **Defects found while fixing and reviewing:**
 
@@ -196,7 +200,7 @@ completion on both models.
 Sanitizer runs reported in the PRs, all ASan/UBSan clean on Linux: `debug-test` (#523, #525,
 #526), `debug-iouring` (#524), the core lanes of #528 and #529.
 
-### 6. Convergence audit (state on `main` at `6689f32`)
+### 6. Convergence audit (audited at `6689f32`; dispositions on `main` at `021dd0a`)
 
 A focused re-check of the corrected invariants and their interactions. It ran on `f775e46`
 (#529's head), whose tree is identical to `6689f32`. It covered: framing and termination,
@@ -214,13 +218,33 @@ dispatch fairness.
 
 | Item | Result | Disposition |
 |---|---|---|
-| M1 (new, Medium; readiness only; pre-existing, narrowed by #528). Shape: a buffered or file response whose head was already sent is truncated when the request body then fails (413 at the reader cap, or the body-timeout 408). Cause: `kl_http_conn_reject_final` finished first only for streams, and half-closed under the unsent rest. | probe: `Content-Length: 4194304`, then 4 to 6 KiB and FIN on kqueue and epoll; a clean 413 on completion loops (#529 refuses the direct send) | PR8 (open at time of writing) |
+| M1 (new, Medium; readiness only; pre-existing, narrowed by #528). Shape: a buffered or file response whose head was already sent is truncated when the request body then fails (413 at the reader cap, or the body-timeout 408). Cause: `kl_http_conn_reject_final` finished first only for streams, and half-closed under the unsent rest. | probe: `Content-Length: 4194304`, then 4 to 6 KiB and FIN on kqueue and epoll; a clean 413 on completion loops (#529 refuses the direct send) | fixed by #531 (`021dd0a`) |
 | B-I1 (stream ended from `on_resume`: kept alive on readiness, closed on completion at `65568ff`) | kept alive on both axes, next response on the next byte | resolved by #528 |
 | B-L3 (two concurrent `kl_http_server_stop` calls write `drain_deadline_ms`, a plain `uint64_t`) | a genuine C11 data race, so undefined behaviour. **Observed behaviour, not a language guarantee:** 64-bit aligned stores do not tear; on 32-bit a torn value needs the two clocks to straddle a 2^32 ms boundary. No crash, missed stop or unbounded hang was observed. The language gives no bound on the consequences. | deferred (Low by practical exposure) |
 | `drain_push` quadratic copy | bounded by `KlDrain.max_size` (1 MiB default). A peer cannot force byte-sized writes (at least about 1 KiB per send on loopback). Worst case about 20 to 30 ms CPU per MB, against 0.4 ms normally. `kl_ws_server_enable_drain(ws, 0)` has no cap, as already for memory. | Low, accepted |
 | `pipe_ready` ignores a `pipe_watch` failure | unreachable: in readiness mode every narrowing is a `kl_watcher_del`, which cannot fail. Latent only for a future duplex readiness stream. | Informational |
 | L1: on readiness, a stale `kl_http_response_send` between requests writes a stray response (documented misuse; completion refuses it) | reproduced | deferred |
 | L2: an idle keep-alive connection is sent `408 Connection: close` at `read_timeout_ms` | reproduced on all four loops (predates 3.6) | deferred |
+
+**Defects found by the focused reviews of the convergence fixes.** These were found while
+reviewing #531 (the M1 fix) and #530. F1 is a regression one of the corrections introduced; F2 and
+the cut file head predate 3.6.
+
+| Defect | Origin | Disposition |
+|---|---|---|
+| F1 (High, remotely triggerable; macOS/BSD kqueue). kqueue reports read and write readiness as two events in one batch. During a rejected request's answer (`SENDING` with `reject_discard`, both armed), a client reset made the first event release the connection, and the second released it again. `active_count` went negative, the free list looped on one slot, and later accepts shared one `KlHttpConn`, so concurrent clients overwrote each other's state. | regression introduced by #528 (discard-while-sending); not in any release | fixed by #530 (`a46bf76`): each batched connection event records the connection's release generation (`comp_gen`), and dispatch drops an event whose connection was released, or released and re-accepted, since the wait |
+| F2 (Medium). After a partial direct send, 16 sites cleared `res.keep_alive` and the overrun path could add a close notice. That changed the head layout `send_offset` counts into, so a body arrived 24 bytes short and shifted, or a head lost its keep-alive line. | pre-existing | fixed by #531: once any head byte is sent only `req.keep_alive` is cleared; the layout of a committed response is immutable |
+| Cut file head (Low to Medium). A file response's head write could fail after some bytes went out while the head still counted as unsent, and a later rejection wrote a 413 inside the half-sent 200 head. | pre-existing | fixed by #531: such a response counts as committed and failed |
+
+Evidence:
+- **F1:** before the fix it reproduced on `6689f32` (3/3, `active_count -1`, free-list self-loop). The three new tests fail on `main` on kqueue, and the two batch-shaping ones also on poll. ASan/UBSan were clean with the fix on macOS (Homebrew clang) and Linux. A stress run on #531's branch with #530 applied was clean: 20 interleaved resets, `max_connections=1` with a queued client, and 150 keep-alive and reset races.
+- **M1, F2 and the cut file head:** each test fails on the unfixed code on kqueue and epoll, guards excepted.
+
+Further Lows from these reviews, deferred:
+- a macOS file response stalls when the application sets SO_SNDBUF below the loopback MSS (TCP_NOPUSH is not lifted on EAGAIN; the idle timeout ends it);
+- a partial head write inside `kl_http_response_begin_stream` (narrowed by #531, not tested);
+- a second `kl_http_conn_release` of one slot is not refused loudly (defence in depth);
+- the public response mutators are not refused after the head is committed. Their contract is now documented at `kl_http_response_send`: a committed response's layout is immutable.
 
 ## Low-finding triage after the twentieth pass (2026-10-08)
 
