@@ -94,9 +94,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `read_timeout_ms`, 30 s by default; < 0 = none). A connection's first request has it from the
   accept, so it also bounds a TLS handshake, a PROXY header and an HTTP/2 prior-knowledge preface,
   none of which yields parseable bytes when dripped; a keep-alive request has it from its first
-  received bytes, ciphertext included (one lone CRLF before a request is ignored, RFC 9112 2.2). It
-  is not extended by further fragments and stops once the head is parsed, so request bodies
-  (`body_timeout_ms`), responses, streams and suspended ops are unaffected. The existing timeout
+  received bytes, ciphertext included (one empty line before a request, CRLF or bare LF, is
+  ignored, RFC 9112 2.2). It is not extended by further fragments and stops once the head is
+  parsed, so request bodies (`body_timeout_ms`), responses, streams and suspended ops are
+  unaffected. The existing timeout
   sweep, which runs on every loop iteration, enforces it on readiness and completion loops alike:
   408 (a bare close during a TLS handshake or PROXY header), then close.
 - **Security: multipart part headers are searched in linear time, and capped by default.** Each
@@ -223,7 +224,8 @@ Upgrade notes:
   each has a documented opt-out restoring the old behavior.
 - **`KlHttpResponse` and `KlHttpServerConfig` have grown** (appended fields: the response's stream
   capacity and writable edge, `stream_capacity`, `header_timeout_ms`); recompile. A zeroed config
-  keeps every default.
+  keeps every default except the two tightened under the resource-exhaustion clause (the first
+  note above).
 - **Behavior change: a request head must now arrive within `header_timeout_ms`** (default:
   `read_timeout_ms`, 30 s unless configured), counted from the accept for a connection's first
   request (TLS handshake included) and from the first bytes of each later keep-alive request.
@@ -239,8 +241,10 @@ Upgrade notes:
   `Content-Type`) are well under 1 KiB. To keep the old behavior set `max_headers_size = SIZE_MAX`,
   which is no practical limit; any other non-zero value is a cap as before. The other multipart caps
   keep 0 = unlimited.
-- **A `max_header_size` below 8192 now takes effect** (it was 8 KiB in practice): check that such a
-  configured value really is the intended limit.
+- **A `max_header_size` below 8192 now takes effect.** This is a bug fix toward the field's documented
+  meaning, not a default change (the default stays 8192): a smaller configured value was silently
+  8 KiB in practice and is now the limit it always said it was. Check that such a value really is
+  the intended limit.
 - **`KlHttpServerConfig.stream_capacity` also sets the existing writer's outbound-buffer cap** (it
   was a fixed 1 MiB, which stays the default).
 

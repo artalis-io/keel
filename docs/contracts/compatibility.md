@@ -52,7 +52,8 @@ consumer that relinks a newer Keel can verify it at runtime.
   (Phase 4): internal, zero-initialized, set only by Keel.
 - **New functions** (e.g. `kl_async_cancel` in Phase 4, `kl_version` in Phase 6).
 - **New enum values appended** at the end.
-- **New optional config knobs** as trailing fields (0 = prior default).
+- **New optional config knobs** as trailing fields (0 = prior default; the one exception is
+  [tightening a default to close a resource-exhaustion defect](#tightening-a-default-to-close-a-resource-exhaustion-defect)).
 
 Because callers embed structs like `KlHttpServerConfig`, `KlAsyncOp`, and `KlHttpClientConfig`
 by value, appending a field changes `sizeof`; hence the recompile. Never insert
@@ -70,7 +71,8 @@ the rejected alternatives are recorded in `docs/archive/f2/f2_c_extensibility_de
 2. **Zero is the default.** Every appended member's zero/NULL value MUST be a
    valid, behavior-preserving default ("not supplied" / "use the built-in
    default"). A feature whose off-state is not zero needs a new function or an
-   opt-in flag, not a silent field.
+   opt-in flag, not a silent field. (Sole exception, MINOR releases only:
+   [tightening a default to close a resource-exhaustion defect](#tightening-a-default-to-close-a-resource-exhaustion-defect).)
 3. **Callers zero-initialize and recompile.** Consumers zero-initialize (`= {0}`,
    a designated initializer, or `memset`) and recompile against the header they
    build against. That recompile, already required by source + static-relink, is
@@ -100,8 +102,9 @@ restated per type.
 
 The rules above forbid changing an existing field's documented semantics, and require an appended
 field's zero to preserve behavior, within a major version. One narrow exception applies: a MINOR
-(or PATCH) release may tighten a **default** resource limit or timeout, including the default an
-existing field's zero selects or an appended field's zero enables, only when all of these hold:
+release (never a PATCH release) may tighten a **default** resource limit or timeout, including the
+default an existing field's zero selects or an appended field's zero enables, only when all of
+these hold:
 
 1. **A demonstrated defect.** The old default lets a peer exhaust CPU, memory, connection slots or
    another bounded resource, shown by a reproduction recorded with the change (issue, test or
