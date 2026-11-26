@@ -124,20 +124,26 @@ static int kl_http_server_bind_listener(KlHttpServer *s) {
     return kl_http_server_bind_tcp(s);
 }
 
+/* Fail closed off the built-in provider: the handle of an lwIP, UEFI or injected transport is not a
+ * host descriptor, and querying it as one could report an unrelated host socket's identity. */
+int kl_http_conn_peer_cred(const KlHttpConn *c, KlPeerCred *out) {
+    if (!c || !kl_http_server_plat_peer_cred_readable(conn_provider(c)))
+        return -1;
+    return kl_peer_cred_fd(c->stream.fd, out);
+}
+
 int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
     if (!req)
         return -1;
-    const KlHttpConn *conn = kl_http_request_conn(req);
-    if (!conn)
-        return -1;
-    return kl_peer_cred_fd(conn->stream.fd, out);
+    return kl_http_conn_peer_cred(kl_http_request_conn(req), out);
 }
 
 int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
     const KlHttpConn *conn = kl_http_request_conn(req);
-    if (!conn || !kl_handle_valid(conn->stream.fd))
+    if (!conn || !kl_handle_valid(conn->stream.fd) ||
+        !kl_http_server_plat_peer_cred_readable(conn_provider(conn)))
         return -1;
 
     return kl_http_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
@@ -304,6 +310,16 @@ int kl_http_server_run(KlHttpServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
     (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
 
+    /* Run once per init. A drain closed the listener (an adopted listen_fd too), so re-adopting
+     * config.listen_fd could listen on, register and later close an unrelated socket now holding that
+     * number; a rerun after a plain stop would leak the first listener. Refused before any state or
+     * descriptor is touched, so a running first run is undisturbed. */
+    if (s->run_started) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    s->run_started = 1;
+
     /* Mark the server running BEFORE anything another thread can observe (bound_port, the
      * "listening" log). A kl_http_server_stop issued once a caller has seen the server start (from
      * another thread, or the SIGTERM handler) then clears it, and the loop below sees the stop.
@@ -311,6 +327,15 @@ int kl_http_server_run(KlHttpServer *s) {
     kl_atomic_store_int(&s->running, 1);
     kl_atomic_store_int(&s->draining, 0);
     s->drain_listener_closed = 0;
+
+    /* A stop that came before the store above (a signal during startup) would be overwritten by it:
+     * honour it here, before anything listens. A stop after the store clears `running` or starts a
+     * drain as usual. Both are seq-cst, so one of the two always sees the stop. */
+    if (kl_atomic_load_int(&s->stop_requested)) {
+        kl_atomic_store_int(&s->running, 0);
+        kl_atomic_store_int(&s->draining, 0);
+        return 0;
+    }
 
     if (kl_http_server_bind_listener(s) < 0)
         return server_start_failed(s);
@@ -757,6 +782,9 @@ transition:
 }
 
 void kl_http_server_stop(KlHttpServer *s) {
+    /* Recorded first, for a run that has not published `running` yet (it checks this right after,
+     * so a stop is never lost to that run's own `running = 1`). */
+    kl_atomic_store_int(&s->stop_requested, 1);
     if (s->config.drain_timeout_ms > 0 && !kl_atomic_load_int(&s->draining)) {
         /* Enter drain mode: stop accepting, let in-flight finish. The deadline is written before the
          * flag is published (a seq-cst store): a loop tick that sees draining also sees its deadline,

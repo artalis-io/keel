@@ -148,6 +148,11 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
     return -1;
 }
 
+int kl_http_server_plat_peer_cred_readable(const KlSocketProvider *p) {
+    (void)p;
+    return 0;   /* no peer-credential or peer-label query on Windows */
+}
+
 unsigned kl_platform_caps(void) {
     return 0;   /* no SO_PEERCRED, no systemd socket activation on Windows */
 }

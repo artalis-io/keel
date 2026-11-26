@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
+#include "kl_atomic.h"        /* the rerun thread's done flag, read across threads */
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1010,6 +1011,7 @@ UTEST(server_integration, a_drain_refuses_new_connections_and_does_not_spin) {
     kl_test_closesock(holder);                                   /* the last active connection goes */
     kl_plat_thread_join(&tid);
     EXPECT_TRUE(kl_monotonic_ms() - t0 < 1500);                  /* well before the 3 s deadline */
+    EXPECT_EQ(0, kl_http_server_draining(&srv));                 /* the drain is over: run returned */
     kl_http_server_free(&srv);
 }
 
@@ -1141,5 +1143,71 @@ UTEST(server_integration, a_drain_ends_at_its_deadline) {
     kl_test_closesock(holder);
     kl_http_server_free(&srv);
 }
+
+/* ── A server runs once per init ────────────────────────────────────────────────────────────────
+ * A second kl_http_server_run after a plain stop returns -1 (KL_ERR_INVALID_ARG) at once, opening
+ * no second listener: the first one (kept until free) is still the server's. Run on a thread so an
+ * unenforced contract shows up as a failed expectation (it would serve on a new listener) rather
+ * than a hung suite. */
+typedef struct { KlHttpServer *srv; int rc; int done; } RerunArg;
+static void rerun_thread_fn(void *arg) {
+    RerunArg *r = arg;
+    r->rc = kl_http_server_run(r->srv);
+    kl_atomic_store_int(&r->done, 1);
+}
+
+UTEST(server_integration, a_second_run_is_refused_and_opens_no_listener) {
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    kl_http_server_stop(&srv);                                   /* no drain: listener kept until free */
+    kl_plat_thread_join(&tid);
+    KlSocketHandle first_listener = srv.listen_fd;
+    int first_port = srv.bound_port;
+
+    RerunArg r = { &srv, -2, 0 };
+    kl_plat_thread_create(&tid, rerun_thread_fn, &r);
+    for (int i = 0; i < 100 && !kl_atomic_load_int(&r.done); i++) kl_test_sleep_ms(10);
+    int returned = kl_atomic_load_int(&r.done);
+    KlSocketHandle second_listener = srv.listen_fd;
+    if (!returned) kl_http_server_stop(&srv);                    /* unenforced: it is serving again */
+    kl_plat_thread_join(&tid);
+
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(-1, r.rc);
+    EXPECT_EQ(KL_ERR_INVALID_ARG, srv.last_error);
+    EXPECT_TRUE(second_listener == first_listener);              /* no new listener was opened */
+    EXPECT_EQ(first_port, srv.bound_port);
+    EXPECT_EQ(0, kl_http_server_draining(&srv));
+    kl_http_server_free(&srv);
+}
+
+/* A stop requested before the run starts (a SIGTERM during startup) is honoured: the run returns 0
+ * at once and never listens, with and without a graceful drain configured. It used to be overwritten
+ * by the run's own `running = 1` and the server ran on. */
+static void early_stop_case(int *utest_result, int drain_ms) {
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .bind_addr = "127.0.0.1", .port = 0, .drain_timeout_ms = drain_ms };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_stop(&srv);                                   /* before kl_http_server_run */
+    RerunArg r = { &srv, -2, 0 };
+    KlPlatThread tid;
+    kl_plat_thread_create(&tid, rerun_thread_fn, &r);
+    for (int i = 0; i < 100 && !kl_atomic_load_int(&r.done); i++) kl_test_sleep_ms(10);
+    int returned = kl_atomic_load_int(&r.done);
+    if (!returned) kl_http_server_stop(&srv);                    /* lost stop: it is serving */
+    kl_plat_thread_join(&tid);
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(0, r.rc);
+    EXPECT_EQ(0, srv.bound_port);                                /* never bound */
+    EXPECT_EQ(0, kl_http_server_draining(&srv));
+    kl_http_server_free(&srv);
+}
+UTEST(server_integration, a_stop_before_run_is_honoured) { early_stop_case(utest_result, 0); }
+UTEST(server_integration, a_stop_before_run_is_honoured_with_a_drain) { early_stop_case(utest_result, 500); }
 
 UTEST_MAIN();

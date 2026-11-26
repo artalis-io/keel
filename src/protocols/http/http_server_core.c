@@ -127,7 +127,8 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * lock-free cannot offer the graceful-stop contract the rest of the API documents, and silently
      * downgrading to a potentially locking atomic on the handler path is the outcome this check exists
      * to prevent. First thing after the memset, so there is nothing acquired to unwind. */
-    if (!kl_atomic_int_is_lock_free(&s->running) || !kl_atomic_int_is_lock_free(&s->draining)) {
+    if (!kl_atomic_int_is_lock_free(&s->running) || !kl_atomic_int_is_lock_free(&s->draining) ||
+        !kl_atomic_int_is_lock_free(&s->stop_requested)) {
         s->last_error = KL_ERR_UNSUPPORTED;
         return -1;
     }
@@ -855,8 +856,11 @@ static void server_drain_stop_listening(KlHttpServer *s) {
 #endif
 }
 
+/* The draining flag stays set once a drain ends (and a stop after the run would set it again), so
+ * the public query also requires the loop to be running: 0 once the drain has finished and the run
+ * has returned. Both are lock-free atomic loads, so this stays safe from any thread. */
 int kl_http_server_draining(const KlHttpServer *s) {
-    return s ? kl_atomic_load_int(&s->draining) : 0;
+    return s ? (kl_atomic_load_int(&s->draining) && kl_atomic_load_int(&s->running)) : 0;
 }
 
 int kl_http_server_drain_wait(const KlHttpServer *s, uint64_t now, int wait_ms) {

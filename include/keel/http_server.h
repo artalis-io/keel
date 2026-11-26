@@ -309,6 +309,9 @@ typedef struct KlHttpServer {
     KlAsyncOp *deadline_sweep_next; /**< the deadline sweep's next op (async.c); NULL between sweeps */
     /* Appended after 3.5.0: graceful drain. INTERNAL. */
     int     drain_listener_closed; /**< 1 = this drain has stopped listening (http_server_core.c) */
+    /* Appended after 3.5.0: run-once enforcement. INTERNAL. */
+    int     run_started;           /**< 1 = kl_http_server_run has been entered since init */
+    int     stop_requested;        /**< 1 = kl_http_server_stop was called (atomic; honoured by a later run) */
 } KlHttpServer;
 
 /**
@@ -414,7 +417,15 @@ int  kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerC
 
 /**
  * @brief Start the event loop (blocks until stopped).
- * @return 0 on clean shutdown, -1 on fatal error.
+ *
+ * Runs once per kl_http_server_init: any later call, whether the first run
+ * served, failed to start, or was stopped, returns -1 at once with
+ * last_error KL_ERR_INVALID_ARG and touches no descriptor. (A drain closes
+ * the listener, an adopted `listen_fd` included, and that number may since
+ * name an unrelated socket.) To serve again, kl_http_server_free and
+ * kl_http_server_init a fresh instance.
+ *
+ * @return 0 on clean shutdown, -1 on fatal error or a repeated run.
  */
 int  kl_http_server_run(KlHttpServer *s);
 
@@ -441,14 +452,18 @@ int  kl_http_server_run(KlHttpServer *s);
  * kl_http_server_run returns once nothing is active or `drain_timeout_ms` has
  * passed; kl_http_server_free then cancels what remains (on_cancel once each).
  * A server is run once per kl_http_server_init: after a drain its listener is
- * gone. Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
+ * gone. A stop requested before kl_http_server_run starts (a signal during
+ * startup) is honoured: that run returns 0 at once, without listening.
+ * Async-signal-safe and thread-safe: it only sets flags and wakes the loop.
  */
 void kl_http_server_stop(KlHttpServer *s);
 
 /**
  * @brief Whether a graceful drain is in progress (kl_http_server_stop with a
  *        drain_timeout_ms). Safe from any thread.
- * @return 1 while draining, 0 otherwise.
+ * @return 1 while draining (from the stop that begins the drain until the run
+ *         loop stops), 0 otherwise, including once the drain has finished and
+ *         after kl_http_server_run has returned.
  */
 int  kl_http_server_draining(const KlHttpServer *s);
 
@@ -526,12 +541,18 @@ unsigned kl_platform_caps(void);
  * @brief Read the peer credentials of a request's connection.
  *
  * Only meaningful for connections accepted on a UNIX-domain socket, and only
- * where KL_PLATCAP_PEER_CRED is set (see kl_platform_caps()).
+ * where KL_PLATCAP_PEER_CRED is set (see kl_platform_caps()). Only a
+ * connection served through the built-in platform socket provider is queried:
+ * with any other KlHttpServerConfig.sockets provider (lwIP, UEFI, an injected
+ * or decorating transport) the handle is not known to be a host descriptor,
+ * so this fails closed with -1, even if the provider advertises
+ * KL_SOCK_CAP_NATIVE_FD. `out` is left untouched on every -1.
  *
  * @param req  The request (its connection fd is queried).
  * @param out  Receives the peer credentials on success.
  * @return 0 on success, -1 if unavailable (not a UNIX socket, unsupported
- *         platform, or the socket has no peer credentials).
+ *         platform, a non-built-in socket provider, or the socket has no
+ *         peer credentials).
  */
 int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out);
 
@@ -543,7 +564,13 @@ int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out);
  * this returns -1 and leaves `out` untouched. On macOS the pid is filled via
  * LOCAL_PEERPID (has_pid = 1); Linux uses SO_PEERCRED.
  *
- * @param fd   Connected socket fd.
+ * Native descriptors only: `fd` must be a host OS socket descriptor. It is
+ * queried as one, and this call cannot tell a handle from another socket
+ * provider (lwIP, UEFI, an injected transport) from the host descriptor with
+ * the same number, so never pass such a handle; the request/WebSocket
+ * wrappers above check the provider and refuse it.
+ *
+ * @param fd   Connected host socket descriptor.
  * @param out  Receives the peer credentials on success.
  * @return 0 on success, -1 if unavailable (not an AF_UNIX socket, unsupported
  *         platform, or no credentials).
@@ -557,8 +584,9 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out);
  * @param req     The request.
  * @param buf     Buffer to receive the NUL-terminated label.
  * @param buflen  Size of buf.
- * @return 0 on success, -1 if unavailable (non-Linux, no label, or not a
- *         UNIX socket).
+ * @return 0 on success, -1 if unavailable (non-Linux, no label, not a
+ *         UNIX socket, or a non-built-in socket provider, as for
+ *         kl_http_request_peer_cred).
  */
 int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen);
 

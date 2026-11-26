@@ -62,4 +62,26 @@ UTEST(server_state, stop_with_drain_then_stop) {
     ASSERT_EQ(kl_atomic_load_int(&s.draining), 1);
 }
 
+/* kl_http_server_draining reports a drain only while the loop runs: once the drain has stopped it
+ * (running cleared, draining left set), and after the run, a stop that sets draining again reads 0. */
+UTEST(server_state, draining_reads_zero_once_the_loop_has_stopped) {
+    KlHttpServer s;
+    memset(&s, 0, sizeof(s));
+    s.stop_wake_wr = KL_INVALID_SOCKET;
+    s.config.drain_timeout_ms = 100;
+    kl_atomic_store_int(&s.running, 1);
+    kl_atomic_store_int(&s.draining, 0);
+    ASSERT_EQ(0, kl_http_server_draining(&s));
+
+    kl_http_server_stop(&s);                        /* the drain begins */
+    ASSERT_EQ(1, kl_http_server_draining(&s));
+
+    kl_atomic_store_int(&s.running, 0);             /* the drain ends the loop, as drain_progress does */
+    ASSERT_EQ(0, kl_http_server_draining(&s));
+
+    kl_atomic_store_int(&s.draining, 0);            /* a stop after the run has returned */
+    kl_http_server_stop(&s);
+    ASSERT_EQ(0, kl_http_server_draining(&s));
+}
+
 UTEST_MAIN();

@@ -49,8 +49,11 @@ static struct sigaction    kl_old_term, kl_old_int;
 
 static void kl_signal_handler(int sig) {
     (void)sig;
+    int saved_errno = errno;   /* the wakeup write may set it (EAGAIN on a full pipe): keep the
+                                * interrupted code's errno intact */
     KlHttpServer *s = atomic_load(&kl_signal_server);
     if (s) kl_http_server_stop(s);
+    errno = saved_errno;
 }
 #endif
 
@@ -181,6 +184,13 @@ static int peer_is_unix(int fd) {
     if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0)
         return 0;
     return ss.ss_family == AF_UNIX;
+}
+
+int kl_http_server_plat_peer_cred_readable(const KlSocketProvider *p) {
+    /* Identity of the ops table, not the NATIVE_FD capability: lwIP's BSD provider advertises
+     * NATIVE_FD for its own (lwIP-numbered) sockets, and a decorator may route I/O elsewhere. */
+    return !p || (p->ops == kl_socket_provider_posix()->ops &&
+                  kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD));
 }
 
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
