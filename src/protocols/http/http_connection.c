@@ -147,6 +147,7 @@ static void conn_request_body_reset(KlHttpConn *c) {
     c->request_body_received = 0;
     c->request_body_complete = 0;
     c->drain_framing_usable  = 0;
+    c->drain_unframed        = 0;
     c->body_kept             = 0;   /* kept body bytes belong to the request that read them */
     c->stream.read_paused    = 0;   /* a pause belongs to the request that asked for it */
 }
@@ -1131,18 +1132,18 @@ read_more_headers: ;
         size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) {
             if (c->stream.read_cap >= c->max_header_size) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             size_t new_cap = c->stream.read_cap * 2;
             if (new_cap > c->max_header_size)
                 new_cap = c->max_header_size;
             if (new_cap < c->stream.read_cap || new_cap > SIZE_MAX / 2) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf,
                                    c->stream.read_cap, new_cap);
             if (!nb) {
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             }
             c->stream.read_buf = nb;
             c->stream.read_cap = new_cap;
@@ -1210,7 +1211,7 @@ read_more_headers: ;
         if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
             /* A max_header_size below the read buffer's size is reached before the buffer fills. */
             if (c->stream.read_len >= c->max_header_size)
-                return kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
+                return kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1);
             /* TLS may buffer multiple records; drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++hdr_drains < KL_TLS_DRAIN_MAX)
@@ -1518,6 +1519,7 @@ static size_t conn_body_remaining_hint(const KlHttpConn *c) {
  * request is complete or irrecoverably malformed (both mean stop draining), 0 to keep going. */
 static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
     c->request_body_received += (uint64_t)len;
+    if (c->drain_unframed) return 0;   /* no framing to finish: bounds and EOF only */
     if (c->req.chunked) {
         /* A chunked rejection is OFTEN the decoder itself reporting an error (malformed framing, or a
          * body reader refusing), so the decoder can already be dead when the drain starts. Error is
@@ -1588,7 +1590,7 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
      * peek. Nothing queued means the ordinary case, and the drain is skipped exactly as before: this
      * does NOT route every close through the drain. (#281: declaring 4096, sending 40960 and being
      * rejected on the first read reproduced the lost response 8 times out of 8 before this.) */
-    if (conn_body_framing_complete(c) || remaining == 0) {
+    if (!c->drain_unframed && (conn_body_framing_complete(c) || remaining == 0)) {
         /* The declared framing says nothing more is coming. That is a statement about the PROTOCOL,
          * not about the socket: a peer that over-sends its Content-Length satisfies the framing while
          * leaving bytes queued, and closing on those is the abortive teardown this exists to prevent.
@@ -1701,6 +1703,11 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
 KlHttpConnState kl_http_conn_reject_final(KlHttpConn *c, const char *resp, size_t len) {
     best_effort_conn_write(c, resp, len);
     return kl_http_conn_begin_drain(c);
+}
+
+KlHttpConnState kl_http_conn_reject_head(KlHttpConn *c, const char *resp, size_t len) {
+    c->drain_unframed = 1;
+    return kl_http_conn_reject_final(c, resp, len);
 }
 
 static KlHttpConnState conn_ingest_body(KlHttpConn *c, size_t nread);

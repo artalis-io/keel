@@ -284,4 +284,25 @@ UTEST(http_split_request, max_header_size_below_the_read_buffer) {
     srv_stop(&s);
 }
 
+/* A head rejected (431) while its sender is still sending: the server must not close with that input
+ * in flight. Closing with unread or late input makes TCP send RST, and on Windows an RST discards the
+ * 431 the client has not read yet. A head has no framing to finish, so the rejection drains on its
+ * bounds (and the client's EOF) like any other early rejection. Default limit: the 8 KiB buffer-full
+ * path. */
+UTEST(http_split_request, head_rejected_while_the_client_still_sends_gets_its_431) {
+    static Srv s; ASSERT_EQ(srv_start(&s, 0), 0);
+    static char big[12000];
+    int n = snprintf(big, sizeof big, "GET /echo HTTP/1.1\r\nHost: localhost\r\nX-Big: ");
+    memset(big + n, 'q', sizeof big - (size_t)n);              /* never terminated */
+    KlSocketHandle fd = connect_to(s.port);
+    ASSERT_TRUE(kl_handle_valid(fd));
+    size_t cuts[2] = { 9000, 10500 };                          /* past 8 KiB, then more, then more */
+    ASSERT_EQ(send_in_pieces(fd, big, sizeof big, cuts, 2, 20), 0);
+    int status = 0; char body[512];
+    ASSERT_GE(read_response(fd, &status, body, sizeof body), 0);
+    ASSERT_EQ(status, 431);
+    kl_test_closesock(fd);
+    srv_stop(&s);
+}
+
 UTEST_MAIN();

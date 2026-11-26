@@ -766,7 +766,7 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
     if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
         /* A max_header_size below the read buffer's size is reached before the buffer fills. */
         if (c->stream.read_len >= c->max_header_size) {
-            comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
+            comp_after_state(s, c, kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
             return 0;
         }
         return 1;
@@ -792,18 +792,18 @@ static int comp_grow_headers_or_431(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->stream.read_len < c->stream.read_cap)
         return 0;                                   /* room remains: read into it as-is */
     if (c->stream.read_cap >= c->max_header_size) {
-        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
+        comp_after_state(s, c, kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     size_t new_cap = c->stream.read_cap * 2;
     if (new_cap > c->max_header_size) new_cap = c->max_header_size;
     if (new_cap <= c->stream.read_cap || new_cap > SIZE_MAX / 2) {
-        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
+        comp_after_state(s, c, kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf, c->stream.read_cap, new_cap);
     if (!nb) {
-        comp_after_state(s, c, kl_http_conn_reject_final(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
+        comp_after_state(s, c, kl_http_conn_reject_head(c, KL_HTTP_431_RESPONSE, sizeof(KL_HTTP_431_RESPONSE) - 1));
         return -1;
     }
     c->stream.read_buf = nb;

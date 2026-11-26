@@ -817,9 +817,12 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             if (tc->state == KL_HTTP_CONN_READING ||
                 tc->state == KL_HTTP_CONN_READING_BODY) {
                 /* 408 is a final response too, so it goes through the same ownership point; a
-                 * timed-out upload is precisely the case with unread body left (#278). */
-                KlHttpConnState rs = kl_http_conn_reject_final(tc, kl_408_response,
-                                                              sizeof(kl_408_response) - 1);
+                 * timed-out upload is precisely the case with unread body left (#278). A partial
+                 * head (a slow drip cut off by the header deadline) has no framing yet, and its
+                 * sender may still be sending. */
+                KlHttpConnState rs = (tc->state == KL_HTTP_CONN_READING && tc->stream.read_len > 0)
+                    ? kl_http_conn_reject_head(tc, kl_408_response, sizeof(kl_408_response) - 1)
+                    : kl_http_conn_reject_final(tc, kl_408_response, sizeof(kl_408_response) - 1);
                 /* Completion: the 408 is on the output queue (with TLS, possibly still in the
                  * engine), and the receive that is posted may never complete: send it now, then
                  * drain or close once it is out. */

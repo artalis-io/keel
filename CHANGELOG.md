@@ -73,6 +73,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ### Fixed
 
+- **A request head rejected while its client is still sending keeps its 431 (or 408).** A rejection
+  before the head is parsed has no request framing, and its zero Content-Length read as "the
+  request is complete", so the early-rejection drain was skipped and the connection closed with the
+  rest of the head still arriving. TCP then sent RST, and on Windows an RST discards the response
+  the client has not read yet: a client sending an over-long header block got a reset instead of its
+  431 (reproduced every time on the Windows readiness and IOCP backends; POSIX clients usually still
+  read it). Header-phase rejections (431 on either loop, the 408 that cuts off a partial head) now
+  always half-close and drain, bounded as every rejection drain is (`reject_drain_max_bytes`,
+  `reject_drain_timeout_ms`), ending at the client's EOF.
 - **A `kl_http_server_stop` issued before `kl_http_server_run` starts is honoured.** A stop from a
   signal handler during startup used to be overwritten by the run's own `running = 1`, so the
   server ran on; that run now returns 0 at once, without listening.
