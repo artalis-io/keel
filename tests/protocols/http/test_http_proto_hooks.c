@@ -48,7 +48,7 @@ UTEST(proto_hooks, install_once_registry) {
 static const KlWsServerHooks concurrent_ws = {0};
 static const KlHttp2ServerHooks concurrent_h2 = {0};
 static const KlWsCompHooks concurrent_wsc = { drive_a };
-static const KlHttp2CompHooks concurrent_h2c = { drive_a };
+static const KlHttp2CompHooks concurrent_h2c = { .drive = drive_a };
 static const KlProxyHooks concurrent_proxy = {0};
 static atomic_int concurrent_ready, concurrent_bad;
 static void concurrent_install(void *ctx) {

@@ -424,6 +424,11 @@ int kl_comp_ws_queue_full(const KlHttpConn *c, size_t add) {
     return c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, add);
 }
 
+/* http_internal.h: an HTTP/2 connection's frames, under the same producer bound. */
+int kl_comp_http2_queue_full(const KlHttpConn *c, size_t add) {
+    return c->state == KL_HTTP_CONN_HTTP2 && comp_stream_queue_full(c, add);
+}
+
 /* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start
  * sending them; the queue takes everything (as the TLS engine's ring does once absorbed), so a frame
  * or a response is never cut short. len, or -1 on allocation failure or a closing connection. */
@@ -1363,6 +1368,22 @@ static void comp_tls_on_write(struct KlHttpServer *s, KlHttpConn *c) {
             if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
             kl_comp_close_after_output(s, c);
             return;
+        }
+        if (c->tls && comp_tlsq_absorb_ring(c) < 0) { kl_comp_close(s, c); return; }
+    }
+    /* HTTP/2 frames the session held back while the queue was at its bound: send them now. */
+    if (c->state == KL_HTTP_CONN_HTTP2) {
+        const KlHttp2CompHooks *h2 = kl_http2_comp_hooks();
+        if (h2 && h2->sent) {
+            const unsigned gen = c->comp_gen;
+            KlHttpConnState st = h2->sent(c);   /* may fire a producer's writable edge */
+            /* cppcheck-suppress knownConditionTrueFalse */
+            if (c->comp_gen != gen || c->comp_closing) return;
+            if (st != KL_HTTP_CONN_HTTP2) {
+                if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+                kl_comp_close_after_output(s, c);
+                return;
+            }
         }
         if (c->tls && comp_tlsq_absorb_ring(c) < 0) { kl_comp_close(s, c); return; }
     }

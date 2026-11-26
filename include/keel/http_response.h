@@ -80,6 +80,13 @@ typedef struct KlHttpResponse {
     int    stream_writable_armed;     /**< 1 = a WOULD_BLOCK armed the writable edge */
     void (*stream_writable_fn)(void *ctx); /**< the writable edge (a KlHttpStreamWritableFn) */
     void  *stream_writable_ctx;       /**< its argument */
+
+    /* Appended after 3.6.0: a stream carried by something other than HTTP/1.1 chunked framing (an
+     * HTTP/2 stream's response). Set by the server or by these functions; do not touch. */
+    const struct KlHttpStreamSink *stream_sink; /**< where the stream's body goes (NULL: chunked) */
+    void  *stream_sink_ctx;           /**< its argument */
+    void (*stream_close_fn)(void *ctx, int completed); /**< the close notification (a KlHttpStreamCloseFn) */
+    void  *stream_close_ctx;          /**< its argument */
 } KlHttpResponse;
 
 /**
@@ -200,9 +207,17 @@ int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
  *
  * Emits eagerly: the status line, the headers and the terminating framing go out through the
  * response's write target as this is called. A response with no HTTP/1.1 write target is therefore
- * refused before any byte is produced (and @p out_write / @p out_ctx are left untouched): the
- * response of an HTTP/2 stream, whose connection is framed by the HTTP/2 session rather than by
- * HTTP/1.1, and any response never bound to a socket. Check the return value before writing.
+ * refused before any byte is produced (and @p out_write / @p out_ctx are left untouched): any
+ * response never bound to a socket. Check the return value before writing.
+ *
+ * An HTTP/2 stream's response is the exception: its body is not chunked but sent as the stream's
+ * DATA by the HTTP/2 session. The begin submits the stream's HEADERS (the status and the headers
+ * set so far), and every stream call below works on it as on HTTP/1.1, with the same bound
+ * (counting payload bytes; there is no chunk framing). The stream stays open after the handler
+ * returns: a producer writes it later and learns of its end from kl_http_response_stream_on_close().
+ * This needs a session with the streaming ops (KlHttp2ServerSession::submit_stream_response; the
+ * bundled nghttp2 adapter has them); with one that lacks them the begin is refused and the stream
+ * is answered 500.
  *
  * The writer returns 0 when the chunk was accepted and -1 otherwise. It refuses, writing nothing,
  * once the stream has ended (kl_http_response_end_stream succeeded): termination is final, and a
@@ -351,6 +366,37 @@ typedef void (*KlHttpStreamWritableFn)(void *ctx);
  * @return 0, or -1 for a NULL response.
  */
 int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritableFn fn, void *ctx);
+
+/** Close notification: the stream's response is gone. @p completed is 1 when its body was ended and
+ *  all of it went out, 0 when it was cut short. */
+typedef void (*KlHttpStreamCloseFn)(void *ctx, int completed);
+
+/**
+ * @brief Install (or, with @p fn NULL, remove) the close notification of an HTTP/2 stream's response.
+ *
+ * An HTTP/2 handler returns while its streamed response stays open, and a producer outside the
+ * handler (a timer, a watcher, a thread pool's done_fn) writes the body later, with the same calls
+ * as on HTTP/1.1: kl_http_response_stream_try_writev() and its writable edge, the writer from
+ * kl_http_response_begin_stream(), kl_http_sse_*, the compressed writers, and
+ * kl_http_response_end_stream(). There is no KlAsyncOp: the connection carries other streams, so it
+ * is not suspended. This notification is the producer's terminal signal instead. It fires exactly
+ * once, when the stream is released: with @p completed 1 once the ended body went out (END_STREAM
+ * sent), with 0 when the client reset the stream, the connection closed, or the server was freed
+ * first. From then on the response pointer is not this producer's to use: stop writing and drop it.
+ * It fires from the loop, never from inside a response call, and no writable edge fires after it.
+ *
+ * Each stream on a connection is bounded and flow-controlled on its own: a stream whose client
+ * stops opening its window fills only its own buffer (the response's stream capacity), its writes
+ * answer WOULD_BLOCK, and the connection's other streams keep sending. Resetting that stream fires
+ * only its own notification.
+ *
+ * Install it after kl_http_response_begin_stream() succeeded (for an HTTP/2 response a begin
+ * submits the stream's HEADERS). Loop thread only.
+ *
+ * @return 0, or -1 for a NULL response or one that is not an HTTP/2 stream's begun stream (an
+ *         HTTP/1.1 producer has its KlAsyncOp's on_cancel instead).
+ */
+int kl_http_response_stream_on_close(KlHttpResponse *res, KlHttpStreamCloseFn fn, void *ctx);
 
 /**
  * @brief Flush headers + body to the connection fd.

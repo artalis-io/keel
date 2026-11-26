@@ -5,6 +5,30 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP/2 streamed responses, server-sent events included.** `kl_http_response_begin_stream()` on
+  an HTTP/2 stream's response used to be refused, and the stream was answered 500. It now submits
+  the stream's HEADERS and the body follows as DATA, through the same calls as on HTTP/1.1: the
+  writer, `kl_http_response_stream_try_writev()` and its writable edge, `kl_http_sse_*`, the
+  compressed writers and `kl_http_response_end_stream()`. Each stream is bounded on its own (the
+  stream capacity) and flow-controlled on its own: a client that stops opening one stream's window
+  stalls only that stream, whose producer gets WOULD_BLOCK, while the connection's other streams keep
+  sending. The handler returns with the stream open and a producer writes it later;
+  `kl_http_response_stream_on_close()` (new) tells the producer once that the stream ended, or that
+  the client reset it, which cancels only that stream's producer. A session provides three new
+  optional ops for this (`KlHttp2ServerSession::submit_stream_response`, `resume_body`,
+  `reset_stream`) and pulls the body through a new callback (`KlHttp2ServerCallbacks::read_body`);
+  the bundled nghttp2 adapter implements them. A session without them keeps the 500.
+
+### Changed
+
+- **Binary:** `KlHttpResponse`, `KlHttp2ServerSession` and `KlHttp2ServerCallbacks` have grown
+  (appended fields). Recompile everything, including custom HTTP/2 sessions.
+- On a completion loop (io_uring, IOCP, pollcomp), an HTTP/2 connection's frames are held to the
+  output queue's producer bound, as a WebSocket's are: a large response to a client that does not
+  read no longer queues without limit.
+
 ## [3.6.0]
 
 Minor release that makes Keel's HTTP server usable as a streaming gateway. A streamed response, plain

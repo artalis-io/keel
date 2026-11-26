@@ -1016,7 +1016,13 @@ size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len) {
 }
 
 int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add) {
-    return c->comp_driven && kl_comp_ws_queue_full(c, add);
+    return c->comp_driven && (kl_comp_ws_queue_full(c, add) || kl_comp_http2_queue_full(c, add));
+}
+
+void kl_http_conn_http2_request_write(KlHttpConn *c) {
+    if (!c || c->comp_driven || !c->stream.ctx || c->state != KL_HTTP_CONN_HTTP2) return;
+    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
+                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
 }
 
 void kl_http_conn_ws_request_write(KlHttpConn *c) {

@@ -376,6 +376,70 @@ static int ng_server_submit_response(KlHttp2ServerSession *self, uint32_t stream
     return rc == 0 ? 0 : -1;
 }
 
+/* ── Streamed responses: the body pulled from KEEL as flow control allows ── */
+
+/* nghttp2 calls this only while the stream's and the connection's windows have room: a stream whose
+ * client stops opening its window is simply not asked, and the other streams keep sending. */
+static ssize_t ng_stream_body_read_cb(nghttp2_session *ng, int32_t stream_id,
+                                      uint8_t *buf, size_t length, uint32_t *data_flags,
+                                      nghttp2_data_source *source, void *user_data) {
+    (void)ng; (void)source;
+    NgServerSession *s = user_data;
+    if (!s->cbs->read_body) { *data_flags |= NGHTTP2_DATA_FLAG_EOF; return 0; }
+    int eof = 0;
+    kl_ssize_t r = s->cbs->read_body(s->ud, (uint32_t)stream_id, buf, length, &eof);
+    if (r == KL_HTTP2_BODY_DEFERRED) return NGHTTP2_ERR_DEFERRED;   /* until resume_body */
+    if (r < 0) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;         /* resets this stream only */
+    if (eof) *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    return (ssize_t)r;
+}
+
+static int ng_server_submit_stream_response(KlHttp2ServerSession *self, uint32_t stream_id,
+                                            int status, const char **hdr_names,
+                                            const char **hdr_values, int num_headers) {
+    NgServerSession *s = (NgServerSession *)self;
+    if (num_headers < 0 || num_headers > INT_MAX - 1 ||
+        (num_headers > 0 && (!hdr_names || !hdr_values))) return -1;
+    for (int i = 0; i < num_headers; i++)
+        if (!hdr_names[i] || !hdr_values[i]) return -1;
+    int nv_cap = 1 + num_headers;
+    if ((size_t)nv_cap > SIZE_MAX / sizeof(nghttp2_nv)) return -1;
+    nghttp2_nv *nva = kl_malloc(s->alloc, (size_t)nv_cap * sizeof(nghttp2_nv));
+    if (!nva) return -1;
+    char status_str[8];
+    int sl = snprintf(status_str, sizeof(status_str), "%d", status);
+    if (sl < 0) { kl_free(s->alloc, nva, (size_t)nv_cap * sizeof(nghttp2_nv)); return -1; }
+    size_t nvlen = 0;
+    nva[nvlen].name = (uint8_t *)":status"; nva[nvlen].namelen = 7;
+    nva[nvlen].value = (uint8_t *)status_str; nva[nvlen].valuelen = (size_t)sl;
+    nva[nvlen].flags = NGHTTP2_NV_FLAG_NONE; nvlen++;
+    for (int i = 0; i < num_headers; i++) {
+        nva[nvlen].name = (uint8_t *)hdr_names[i]; nva[nvlen].namelen = strlen(hdr_names[i]);
+        nva[nvlen].value = (uint8_t *)hdr_values[i]; nva[nvlen].valuelen = strlen(hdr_values[i]);
+        nva[nvlen].flags = NGHTTP2_NV_FLAG_NONE; nvlen++;
+    }
+    nghttp2_data_provider prd;
+    prd.source.ptr = NULL;
+    prd.read_callback = ng_stream_body_read_cb;
+    int rc = nghttp2_submit_response(s->ng, (int32_t)stream_id, nva, nvlen, &prd);
+    kl_free(s->alloc, nva, (size_t)nv_cap * sizeof(nghttp2_nv));
+    return rc == 0 ? 0 : -1;
+}
+
+static int ng_server_resume_body(KlHttp2ServerSession *self, uint32_t stream_id) {
+    NgServerSession *s = (NgServerSession *)self;
+    /* Not deferred (still being pulled) or already closed: nothing to resume, not an error. */
+    int rc = nghttp2_session_resume_data(s->ng, (int32_t)stream_id);
+    return (rc == 0 || rc == NGHTTP2_ERR_INVALID_ARGUMENT) ? 0 : -1;
+}
+
+static int ng_server_reset_stream(KlHttp2ServerSession *self, uint32_t stream_id,
+                                  uint32_t error_code) {
+    NgServerSession *s = (NgServerSession *)self;
+    return nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE, (int32_t)stream_id, error_code) == 0
+               ? 0 : -1;
+}
+
 static int ng_server_want_write(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     return nghttp2_session_want_write(s->ng);
@@ -491,6 +555,9 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
     s->base.destroy = ng_server_destroy;
     s->base.want_read = ng_server_want_read;
     s->base.upgrade = ng_server_upgrade;
+    s->base.submit_stream_response = ng_server_submit_stream_response;
+    s->base.resume_body = ng_server_resume_body;
+    s->base.reset_stream = ng_server_reset_stream;
 
     nghttp2_session_callbacks *cbs = NULL;
     if (nghttp2_session_callbacks_new(&cbs) != 0) {

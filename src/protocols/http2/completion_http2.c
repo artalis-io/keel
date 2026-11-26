@@ -59,7 +59,10 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
 /* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches
  * HTTP/2-over-completion only through this table. The installer (called by
  * completion_http_server.c) registers it and pulls this object out of the archive. */
-static const KlHttp2CompHooks kl_http2_comp_hooks_table = { .drive = kl_comp_http2_drive };
+static const KlHttp2CompHooks kl_http2_comp_hooks_table = {
+    .drive = kl_comp_http2_drive,
+    .sent  = kl_http2_server_comp_sent,
+};
 
 void kl_http2_comp_hooks_install(void) {
     kl_http2_comp_hooks_set(&kl_http2_comp_hooks_table);

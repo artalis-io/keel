@@ -230,6 +230,39 @@ only whether the connection is reused, never the response: a head that went out 
 where it stopped, including part way through its head) follows in that same layout, and the
 connection then closes. A head not yet begun says `Connection: close` instead.
 
+## HTTP/2: one bounded stream per response
+
+An HTTP/2 stream's response streams with the same calls (`kl_http_response_begin_stream`, the
+writer it returns, `kl_http_response_stream_try_writev` and its writable edge, `kl_http_sse_*`, the
+compressed writers, `kl_http_response_end_stream`). The differences follow from the protocol:
+
+- **Framing.** No chunked framing: the body goes out as the stream's DATA, so admission counts
+  payload bytes only. The begin submits the HEADERS (`submit_stream_response`); the end lets the
+  session send END_STREAM once every accepted byte went out.
+- **Bound and flow control, per stream.** Each stream has its own buffer, bounded by the
+  response's stream capacity (`KlHttpServerConfig.stream_capacity`). The session pulls from it
+  (`read_body`) only while the stream's and the connection's flow-control windows have room, so a
+  client that stops opening one stream's window fills only that stream's buffer: its producer gets
+  WOULD_BLOCK and the connection's other streams keep sending. Memory is the capacity per streaming
+  stream, plus the session's own frame buffer. On a completion loop the connection's output queue
+  takes frames up to its producer bound; past it the session holds them and a send completion
+  resumes the flush.
+- **Producing later: no suspend.** The connection carries other streams, so it is not suspended
+  and there is no `KlAsyncOp`. The handler returns with the stream open; a producer on the loop
+  thread (a timer, a watcher, a thread pool's `done_fn`) writes it later. Output written outside
+  the connection's own events is sent on the next loop iteration.
+- **Termination: the close notification.** `kl_http_response_stream_on_close` fires exactly once
+  when the stream is released: `completed` 1 once the ended body went out, 0 when the client reset
+  the stream, the connection closed or the server was freed. A reset cancels only that stream's
+  producer. After it the response pointer is not the producer's; no writable edge follows it.
+- **Failure.** A write that cannot be buffered (allocation, or the legacy writer past the bound)
+  fails the stream: its response answers ERROR and the stream is reset (RST_STREAM
+  INTERNAL_ERROR); the close notification follows with `completed` 0.
+
+Tests: `tests/protocols/http/test_http_response.c` (the response layer over a stream sink) and
+`integrations/http2/nghttp2/tests/e2e_h2_stream_flow.c` (two streams on one connection, one with an
+exhausted window; resetting it cancels only its producer; a body past the completion queue bound).
+
 ## Read side (request-body streaming / inbound)
 
 A body reader (`KlHttpBodyReader`: `on_data` / `on_complete` / `on_error` / `destroy`) receives body

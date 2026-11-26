@@ -1315,4 +1315,166 @@ UTEST(stream_termination, a_first_begin_and_a_head_begin_still_work) {
     kl_http_response_free(&t.res);
 }
 
+/* ── A stream sink (an HTTP/2 stream's response): body bytes go to the sink, unframed ──────────── */
+
+typedef struct {
+    int begins, ends, fail_begin;
+    char buf[256];
+    size_t len, taken;          /* taken: bytes the "transport" pulled (pending = len - taken) */
+    int last_bounded;
+} FakeSink;
+
+static int fs_begin(void *ctx) { FakeSink *f = ctx; f->begins++; return f->fail_begin ? -1 : 0; }
+static int fs_write(void *ctx, const KlIoVec *iov, int iovcnt, size_t len, int bounded) {
+    FakeSink *f = ctx;
+    f->last_bounded = bounded;
+    if (!bounded && f->len - f->taken + len > 64) return -1;      /* the hard cap (= capacity) */
+    for (int i = 0; i < iovcnt; i++) {
+        if (f->len + iov[i].len > sizeof(f->buf)) return -1;
+        memcpy(f->buf + f->len, iov[i].base, iov[i].len);
+        f->len += iov[i].len;
+    }
+    return 0;
+}
+static int fs_end(void *ctx) { FakeSink *f = ctx; f->ends++; return 0; }
+static size_t fs_pending(const void *ctx) { const FakeSink *f = ctx; return f->len - f->taken; }
+static const KlHttpStreamSink fake_sink = { fs_begin, fs_write, fs_end, fs_pending };
+
+static int g_close_calls, g_close_completed;
+static void on_sink_close(void *ctx, int completed) {
+    (void)ctx;
+    g_close_calls++;
+    g_close_completed = completed;
+}
+static int g_sink_edges;
+static void on_sink_edge(void *ctx) { (void)ctx; g_sink_edges++; }
+
+static void sink_res(KlHttpResponse *res, KlAllocator *a, FakeSink *f) {
+    memset(f, 0, sizeof(*f));
+    kl_http_response_init(res, a);
+    res->conn_fd = KL_INVALID_SOCKET;               /* no HTTP/1.1 target, as an HTTP/2 stream */
+    res->stream_sink = &fake_sink;
+    res->stream_sink_ctx = f;
+    res->stream_capacity = 64;
+}
+
+/* The body reaches the sink unframed (no chunk size lines), admission is against the payload alone,
+ * and the end is the sink's, once. */
+UTEST(response, sink_takes_the_body_unframed_and_bounded) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    FakeSink f;
+    sink_res(&res, &a, &f);
+    KlHttpResponseWriteFn w; void *wc;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    ASSERT_EQ(1, f.begins);
+    ASSERT_EQ(-1, kl_http_response_begin_stream(&res, 200, &w, &wc));   /* one stream */
+    ASSERT_EQ(1, f.begins);
+    ASSERT_EQ(0, kl_http_response_stream_on_writable(&res, on_sink_edge, NULL));
+    g_sink_edges = 0;
+
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, "hello", 5));
+    ASSERT_EQ(1, f.last_bounded);
+    ASSERT_EQ((size_t)5, f.len);
+    ASSERT_EQ(0, memcmp(f.buf, "hello", 5));                           /* no "5\r\n" framing */
+    ASSERT_EQ((size_t)5, kl_http_response_stream_pending(&res));
+    ASSERT_EQ(KL_HTTP_STREAM_TOO_LARGE, kl_http_response_stream_try_write(&res, f.buf, 65));
+    char fill[59];
+    memset(fill, 'x', sizeof(fill));
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, fill, 59));  /* = 64 */
+    ASSERT_EQ(KL_HTTP_STREAM_WOULD_BLOCK, kl_http_response_stream_try_write(&res, "!", 1));
+    ASSERT_EQ(KL_HTTP_STREAM_WOULD_BLOCK, kl_http_response_stream_admit(&res, 1));
+    ASSERT_EQ((size_t)64, f.len);                                       /* nothing of it taken */
+    f.taken = 10;                                                       /* the transport pulled */
+    kl_http_response_stream_progress(&res);
+    ASSERT_EQ(1, g_sink_edges);                                         /* the edge fires once */
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, "!", 1));
+
+    ASSERT_EQ(0, kl_http_response_end_stream(&res));
+    ASSERT_EQ(0, kl_http_response_end_stream(&res));                   /* idempotent */
+    ASSERT_EQ(1, f.ends);
+    ASSERT_EQ(KL_HTTP_STREAM_CLOSED, kl_http_response_stream_try_write(&res, "x", 1));
+    kl_http_response_free(&res);
+}
+
+/* The legacy writer is not admitted against the bound but stops at the sink's cap: past it the
+ * stream fails (sticky), as an HTTP/1.1 drain fails at its cap. */
+UTEST(response, sink_legacy_writer_fails_past_the_cap) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    FakeSink f;
+    sink_res(&res, &a, &f);
+    KlHttpResponseWriteFn w; void *wc;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    char big[40];
+    memset(big, 'y', sizeof(big));
+    ASSERT_EQ(0, w(wc, big, sizeof(big)));
+    ASSERT_EQ(0, f.last_bounded);
+    ASSERT_EQ(-1, w(wc, big, sizeof(big)));                             /* 80 > 64 */
+    ASSERT_EQ(KL_HTTP_STREAM_ERROR, kl_http_response_stream_try_write(&res, "z", 1));
+    ASSERT_EQ(-1, kl_http_response_end_stream(&res));
+    ASSERT_EQ(0, f.ends);
+    kl_http_response_free(&res);
+}
+
+/* A refused begin leaves the response un-begun; HEAD takes everything, emits nothing, and its end
+ * is the head's (the sink is not asked to end a body it never had). */
+UTEST(response, sink_refused_begin_and_head) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    FakeSink f;
+    KlHttpResponseWriteFn w; void *wc;
+
+    sink_res(&res, &a, &f);
+    f.fail_begin = 1;
+    ASSERT_EQ(-1, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    ASSERT_EQ(0, res.headers_sent);
+    ASSERT_EQ(-1, kl_http_response_stream_on_close(&res, on_sink_close, NULL));  /* no stream */
+    kl_http_response_free(&res);
+
+    sink_res(&res, &a, &f);
+    res.head_request = 1;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, "body", 4));
+    ASSERT_EQ(0, w(wc, "body", 4));
+    ASSERT_EQ((size_t)0, f.len);
+    ASSERT_EQ(0, kl_http_response_end_stream(&res));
+    ASSERT_EQ(0, f.ends);
+    kl_http_response_free(&res);
+}
+
+/* The close notification: only on a begun sink stream (an HTTP/1.1 producer has its op's on_cancel),
+ * fired once by the transport, and no writable edge after it. */
+UTEST(response, stream_on_close_is_for_sink_streams_and_fires_once) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(-1, kl_http_response_stream_on_close(NULL, on_sink_close, NULL));
+
+    kl_http_response_init(&res, &a);                /* an HTTP/1.1 response */
+    ASSERT_EQ(-1, kl_http_response_stream_on_close(&res, on_sink_close, NULL));
+    kl_http_response_free(&res);
+
+    FakeSink f;
+    sink_res(&res, &a, &f);
+    ASSERT_EQ(-1, kl_http_response_stream_on_close(&res, on_sink_close, NULL));  /* not begun */
+    KlHttpResponseWriteFn w; void *wc;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    ASSERT_EQ(0, kl_http_response_stream_on_close(&res, on_sink_close, NULL));
+    ASSERT_EQ(0, kl_http_response_stream_on_writable(&res, on_sink_edge, NULL));
+    char fill[64];
+    memset(fill, 'q', sizeof(fill));
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, fill, 64));
+    ASSERT_EQ(KL_HTTP_STREAM_WOULD_BLOCK, kl_http_response_stream_try_write(&res, "q", 1));
+    g_close_calls = 0; g_sink_edges = 0;
+    res.stream_ended = 1;                            /* sealed, as the transport does first */
+    kl_http_response_stream_closed(&res, 0);
+    kl_http_response_stream_closed(&res, 1);         /* a second report is not a second call */
+    ASSERT_EQ(1, g_close_calls);
+    ASSERT_EQ(0, g_close_completed);
+    f.taken = 64;
+    kl_http_response_stream_progress(&res);
+    ASSERT_EQ(0, g_sink_edges);                       /* no edge after the close */
+    kl_http_response_free(&res);
+}
+
 UTEST_MAIN();

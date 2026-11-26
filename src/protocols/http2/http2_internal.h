@@ -51,6 +51,20 @@ struct KlHttp2ServerStream {
     int response_submitted;     /**< Non-zero after response submitted. */
     char *hdr_storage;          /**< Contiguous header name/value storage. */
     size_t hdr_storage_len;     /**< Length of hdr_storage in bytes. */
+    /* Slots are stable: a stream never moves while it lives, so its response (&res) can be held by
+     * a producer across events. */
+    int in_use;                 /**< The slot holds a live stream. */
+    struct KlHttp2ServerConn *h2c; /**< Owning connection (the stream sink's context needs it). */
+    /* A streamed response (kl_http_response_begin_stream): its HEADERS were submitted and the
+     * session pulls its body (read_body) from the buffer below as flow control allows. */
+    int streaming;              /**< Body pulled by the session; the stream lives until it closes. */
+    int body_end;               /**< The producer ended the body. */
+    int eof_sent;               /**< read_body reported the end (END_STREAM follows). */
+    int deferred;               /**< read_body answered DEFERRED: resume_body is owed on new data. */
+    int progress_due;           /**< The session took bytes: fire the writable edge after the flush. */
+    int reset_due;              /**< The stream failed: reset it (RST_STREAM) on the next flush. */
+    char *obuf;                 /**< Body bytes accepted and not yet pulled: [ooff, olen). */
+    size_t ooff, olen, ocap;
 };
 
 /* ── Per-connection HTTP/2 state ─────────────────────────────────── */
@@ -72,6 +86,18 @@ struct KlHttp2ServerConn {
      * ordered overlapped send at a time. */
     KlHttp2WriteFn out_write;         /**< Output sink for produced frames. */
     void       *out_ctx;           /**< Context for out_write. */
+    int slots_hwm;                 /**< One past the highest live slot (find scans [0, slots_hwm)). */
+    /* Streamed responses are written from outside the connection's own events (a timer, a watcher):
+     * their output is sent by a flush on the next loop iteration, from a zero-delay timer. */
+    int64_t flush_timer;           /**< The pending flush timer (valid while flush_armed). */
+    int flush_armed;               /**< 1 = a flush is scheduled. */
+    int out_refused;               /**< A completion output queue at its bound refused frames: flush
+                                        again once a send completes. */
 };
+
+/* A send completed on a completion-driven HTTP/2 connection: flush what the session holds back
+ * (frames the output queue refused at its bound) and fire due writable edges. Returns the next
+ * KlHttpConnState. Defined in http2_server.c. */
+KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c);
 
 #endif /* KEEL_SRC_HTTP2_INTERNAL_H */

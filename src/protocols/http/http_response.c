@@ -830,6 +830,7 @@ size_t kl_http_response_stream_capacity(const KlHttpResponse *res) {
 
 size_t kl_http_response_stream_pending(const KlHttpResponse *res) {
     if (!res) return 0;
+    if (res->stream_sink) return res->stream_sink->pending(res->stream_sink_ctx);
     size_t p = res->drain_enabled ? kl_drain_buffered(&res->drain) : 0;
     size_t q = kl_http_comp_stream_queued(res);
     return q > SIZE_MAX - p ? SIZE_MAX : p + q;
@@ -857,6 +858,25 @@ int kl_http_response_stream_on_writable(KlHttpResponse *res, KlHttpStreamWritabl
     res->stream_writable_ctx = fn ? ctx : NULL;
     if (!fn) res->stream_writable_armed = 0;
     return 0;
+}
+
+int kl_http_response_stream_on_close(KlHttpResponse *res, KlHttpStreamCloseFn fn, void *ctx) {
+    if (!res || !res->stream_sink || res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent)
+        return -1;
+    res->stream_close_fn = fn;
+    res->stream_close_ctx = fn ? ctx : NULL;
+    return 0;
+}
+
+void kl_http_response_stream_closed(KlHttpResponse *res, int completed) {
+    if (!res) return;
+    KlHttpStreamCloseFn fn = res->stream_close_fn;
+    void *ctx = res->stream_close_ctx;
+    res->stream_close_fn = NULL;                 /* once */
+    res->stream_close_ctx = NULL;
+    res->stream_writable_armed = 0;              /* and no edge after it */
+    res->stream_writable_fn = NULL;
+    if (fn) fn(ctx, completed);
 }
 
 void kl_http_response_stream_progress(KlHttpResponse *res) {
@@ -922,6 +942,14 @@ int kl_http_response_stream_writev(KlHttpResponse *res, const KlIoVec *iov, int 
     }
     if (len == 0) return 0;
 
+    if (res->stream_sink) {                     /* unframed: the sink's transport frames it */
+        if (res->stream_sink->write(res->stream_sink_ctx, iov, iovcnt, len, 0) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
+        return 0;
+    }
+
     char hdr[24];
     int hdr_len = format_chunk_hdr(hdr, len);
 
@@ -984,6 +1012,19 @@ KlHttpStreamStatus kl_http_response_stream_try_writev(KlHttpResponse *res, const
         res->stream_writable_armed = 0;
         return KL_HTTP_STREAM_ACCEPTED;
     }
+    if (res->stream_sink) {                     /* unframed: the payload is all that counts */
+        if (len > kl_http_response_stream_capacity(res)) return KL_HTTP_STREAM_TOO_LARGE;
+        if (!stream_room_for(res, len)) {
+            res->stream_writable_armed = 1;
+            return KL_HTTP_STREAM_WOULD_BLOCK;
+        }
+        if (res->stream_sink->write(res->stream_sink_ctx, iov, iovcnt, len, 1) < 0) {
+            res->stream_error = 1;
+            return KL_HTTP_STREAM_ERROR;
+        }
+        res->stream_writable_armed = 0;
+        return KL_HTTP_STREAM_ACCEPTED;
+    }
     /* Without an outbound buffer (no allocator) a write could only block: not this API. */
     if (!res->drain_enabled) {
         res->stream_error = 1;
@@ -1025,6 +1066,14 @@ KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len
     if (res->stream_error) return KL_HTTP_STREAM_ERROR;
     if (!kl_http_response_stream_open(res)) return KL_HTTP_STREAM_CLOSED;
     if (len == 0 || res->head_request) return KL_HTTP_STREAM_ACCEPTED;
+    if (res->stream_sink) {
+        if (len > kl_http_response_stream_capacity(res)) return KL_HTTP_STREAM_TOO_LARGE;
+        if (!stream_room_for(res, len)) {
+            res->stream_writable_armed = 1;
+            return KL_HTTP_STREAM_WOULD_BLOCK;
+        }
+        return KL_HTTP_STREAM_ACCEPTED;
+    }
     if (!res->drain_enabled) {
         res->stream_error = 1;
         return KL_HTTP_STREAM_ERROR;
@@ -1059,6 +1108,16 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
      * body_mode is left as STREAM, so an HTTP/2 stream still gets the 500 that
      * h2_submit_response() already reserves for a streaming body, and the caller sees the failure
      * in the return value it already checks. */
+    if (res->stream_sink) {
+        /* A sink's transport frames the body itself (HTTP/2 DATA): no chunked framing, no head
+         * bytes here. The sink commits the head (status + headers) as it is called. */
+        kl_http_response_status(res, status);
+        if (res->stream_sink->begin(res->stream_sink_ctx) < 0) return -1;
+        res->headers_sent = 1;
+        *out_write = kl_http_response_stream_write;
+        *out_ctx = res;
+        return 0;
+    }
     if (!res_has_wire(res)) return -1;
     kl_http_response_status(res, status);
     if (kl_http_response_header(res, "Transfer-Encoding", "chunked") < 0)
@@ -1117,6 +1176,18 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
 
 int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_error) return -1;
+    if (res->stream_sink) {
+        if (res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent) return -1;
+        if (res->stream_ended) return 0;        /* already ended: nothing more to say */
+        if (!res->head_request &&               /* a HEAD stream was ended by its head */
+            res->stream_sink->end(res->stream_sink_ctx) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
+        res->stream_ended = 1;
+        res->stream_writable_armed = 0;
+        return 0;
+    }
     if (!res_has_wire(res)) return -1;   /* nothing to write the terminating chunk to */
     /* No stream to end: never begun, or the response was reset (a kept-alive connection's next
      * request) or released since. A terminating chunk there would be framing on a connection

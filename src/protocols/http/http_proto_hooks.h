@@ -93,6 +93,9 @@ void kl_ws_comp_hooks_install(void);                  /* defined in completion_w
 
 typedef struct KlHttp2CompHooks {
     void (*drive)(struct KlHttpServer *s, KlHttpConn *c);
+    /* A send completed: flush frames the session held back at the queue's bound. Returns the next
+     * KlHttpConnState (anything but HTTP2 closes the connection once its output is out). */
+    KlHttpConnState (*sent)(KlHttpConn *c);
 } KlHttp2CompHooks;
 const KlHttp2CompHooks *kl_http2_comp_hooks(void);
 void kl_http2_comp_hooks_set(const KlHttp2CompHooks *hooks);

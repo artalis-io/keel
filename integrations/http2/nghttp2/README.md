@@ -168,7 +168,11 @@ container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
 - **Server:** request headers are accumulated per stream and delivered in a
   single `on_request` call (the driver copies out during that call); response
   bodies are copied at submit time because nghttp2 pulls DATA frames
-  asynchronously, and freed on stream close.
+  asynchronously, and freed on stream close. A streamed response
+  (`submit_stream_response`) has no copy here: its data provider pulls the
+  body from Keel (`read_body`), which holds it in the stream's own bounded
+  buffer; nghttp2 calls it only while the stream's flow-control windows have
+  room, and `NGHTTP2_ERR_DEFERRED` parks the stream until `resume_body`.
 - **Short writes:** nghttp2's send callback re-queues whatever the Keel `send`
   callback leaves unsent (`return < len` → nghttp2 buffers the tail), so frames
   are never truncated under backpressure.
