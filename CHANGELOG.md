@@ -63,6 +63,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   no longer cuts the later one off from console events (a later server's return still ends delivery
   to an earlier one, as only the last server to start receives them). Only Ctrl-C and Ctrl-Break leave the server time to drain:
   for a close, logoff or shutdown event Windows ends the process once the handler returns.
+- **POSIX: a SIGTERM or SIGINT could stop a server its caller had freed.** A process-directed signal
+  runs the handler on any thread that does not block it. A handler that had loaded the server just
+  before `kl_http_server_run` restored the old dispositions and returned could then call
+  `kl_http_server_stop` on a server the caller had freed: a write into freed memory, and a one-byte
+  `write()` to a descriptor number that may have been reused. The restore now waits for such a
+  handler to finish with the server. The handler takes no lock and never waits, so the change is
+  async-signal-safe, and a signal that interrupts the restoring thread itself cannot deadlock it.
+- **POSIX: two servers whose runs overlapped left SIGTERM and SIGINT routed to Keel for good.** The
+  second server's install saved the first's Keel handler as the disposition to restore, so after both
+  runs had returned those signals went to a handler with no server and the process ignored them.
+  The first server to return also stopped the other from receiving signals. The dispositions in place
+  before the first install are now saved once and put back when the server receiving signals (the
+  last to install) returns; an earlier server's return changes nothing.
 
 ## [3.6.0]
 
