@@ -3005,6 +3005,7 @@ UTEST(h2, a_write_after_a_failed_flush_is_refused) {
     int due = kl_http_server_settle_h2_due(&h2_sweep_srv);
     kl_http_server_settle_h2(&h2_sweep_srv);
     int told = g_sclose_calls[0];
+    int settled = kl_http_server_settle_h2_due(&h2_sweep_srv);   /* awaiting only the sweep's close */
 
     kl_http_server_free(&h2_sweep_srv);
     kl_test_closesock(pfd[0]);
@@ -3014,6 +3015,50 @@ UTEST(h2, a_write_after_a_failed_flush_is_refused) {
     ASSERT_TRUE(refused);                                  /* was ACCEPTED, into a dead session */
     ASSERT_EQ(1, due);                                     /* the pass is to end it promptly */
     ASSERT_EQ(1, told);
+    ASSERT_EQ(0, settled);                                 /* then no zero wait while it closes */
+}
+
+/* Output that is pending but cannot move (the session holds it for a full socket, a spent window or
+ * a full completion queue) is not output that is due: the settle check must not turn it into a
+ * zero wait, or the loop would spin until the client reads. Only a producer's write makes output
+ * due; what is held moves on the connection's own writable event or send completion. */
+UTEST(h2, held_output_does_not_make_the_wait_zero) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    mock.want_write_return = 1;                            /* the session keeps holding output */
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    char buf[64];
+    int eof = 0;
+    (void)mock.callbacks.read_body(mock.cb_user_data, 1, buf, sizeof buf, &eof);
+    kl_ssize_t dry = mock.callbacks.read_body(mock.cb_user_data, 1, buf, sizeof buf, &eof);
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    int flushes = mock.flush_count;
+    int held = 0;
+    for (int i = 0; i < 5; i++) {                          /* five idle iterations */
+        kl_http_server_settle_h2(&h2_sweep_srv);
+        held += kl_http_server_settle_h2_due(&h2_sweep_srv);
+    }
+    int idle_flushes = mock.flush_count - flushes;
+    c->h2->out_refused = 1;                                /* a completion queue at its bound */
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    held += kl_http_server_settle_h2_due(&h2_sweep_srv);
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP2_BODY_DEFERRED, dry);                /* the stream has nothing to send */
+    ASSERT_EQ(0, held);                                    /* never a zero wait for held output */
+    ASSERT_EQ(0, idle_flushes);                            /* and no flush retried for it */
 }
 
 UTEST_MAIN();
