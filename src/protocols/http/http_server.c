@@ -291,7 +291,7 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
 /* Test-only (a -DKEEL_HTTP_SERVER_TEST_HOOKS copy linked ahead of libkeel.a): nonzero makes the
  * readiness accept path fail to start, the one start-up failure after the signal handlers are
  * installed. */
-int kl_http_server_test_fail_listener_start;
+int kl_http_server_test_fail_listener_start = 0;
 #endif
 
 static int server_accept_listener_start(KlHttpServer *s) {
