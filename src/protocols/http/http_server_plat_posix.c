@@ -58,7 +58,8 @@ _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
  * completion before the wait resumes. The count is process-wide: a restore also waits out handlers
  * stopping another server, each a few microseconds. A process that forks while a handler is running
  * on another thread leaves the child a count that never drains; fork from a thread that is not in a
- * handler.
+ * handler, or while another thread is installing or restoring (the child would find this lock
+ * held for good).
  *
  * Both objects must be lock-free for the handler to use them: 0 fails the build here; 1 (object
  * dependent) is asked at runtime in the install, which then leaves the handlers uninstalled. */
@@ -79,9 +80,11 @@ static struct sigaction    kl_old_term, kl_old_int;
 
 static void kl_signal_lock_take(void) {
     int unheld = 0;
-    while (!atomic_compare_exchange_weak(&kl_signal_lock, &unheld, 1)) {
+    for (int spins = 0; !atomic_compare_exchange_weak(&kl_signal_lock, &unheld, 1); spins++) {
         unheld = 0;
-        sched_yield();
+        if (spins < 64) { sched_yield(); continue; }
+        struct timespec ts = { 0, 100000 };   /* as the restore's wait: a real-time spinner */
+        nanosleep(&ts, NULL);                  /* cannot starve the holder on its CPU */
     }
 }
 
