@@ -122,7 +122,10 @@ typedef struct KlHttpServerConfig {
     KlHttpServerLogFn log_fn;             /**< default: NULL (fprintf stderr) */
     void   *log_user_data;
     int install_signal_handlers; /**< install SIGTERM/SIGINT handlers (single instance only;
-                                  * only the last server to call kl_http_server_run() receives signals) */
+                                  * only the last server to call kl_http_server_run() receives signals).
+                                  * Windows: a console control handler instead; only Ctrl-C and
+                                  * Ctrl-Break leave time to drain, since for a close, logoff or
+                                  * shutdown event Windows ends the process once the handler returns */
     int drain_timeout_ms;        /**< graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /**< TLS config: NULL = plaintext (default) */
     KlHttp2ServerConfig *h2;             /**< HTTP/2 config: NULL = disabled (default) */

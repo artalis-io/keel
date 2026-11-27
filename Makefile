@@ -527,7 +527,7 @@ examples: $(EXAMPLES)
 # Discovery is recursive over the protocol test dirs (one family level deep, no `**`
 # needed; make-3.81-safe). Tests follow the ownership of the impl they exercise
 # (docs/archive/freezes/protocols_restructure_freeze.md §9).
-TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c tests/test_iouring_sqe_fail.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
+TEST_SRC = $(filter-out tests/test_iocp_engine.c tests/test_unix_socket_node_win.c tests/test_ctrl_handler_win.c tests/test_iouring_sqe_fail.c, $(wildcard tests/test_*.c tests/protocols/*/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -586,6 +586,16 @@ tests/test_server_start_fail: tests/test_server_start_fail.c $(KEEL_LIB) $(TEST_
 	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_TEST_HOOKS -Isrc -Isrc/protocols/http -c -o tests/http_server_hooked.o src/protocols/http/http_server.c
 	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/http_server_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
+# The console control handler cannot stop a server its caller has freed (Windows only; enrolled in
+# WIN_TEST_SUITES and WIN_IOCP_TEST_SUITES, excluded from the POSIX wildcard). Links a -DKEEL_HTTP_SERVER_PLAT_TEST_HOOKS copy
+# of http_server_plat_win.c ahead of libkeel.a (as test_server_start_fail does the server), which
+# exposes the handler and a hook it calls while it holds the server.
+CTRL_HOOKED_OBJ = $(OBJDIR)/tests/http_server_plat_win_hooked.o
+tests/test_ctrl_handler_win$(EXE): tests/test_ctrl_handler_win.c src/protocols/http/http_server_plat_win.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_PLAT_TEST_HOOKS -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -c $(OBJ_OUT)$(CTRL_HOOKED_OBJ) src/protocols/http/http_server_plat_win.c
+	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(CTRL_HOOKED_OBJ) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
+
 test: $(TEST_BIN)
 	@failed=0; \
 	for t in $(TEST_BIN); do \
@@ -619,7 +629,7 @@ test: $(TEST_BIN)
 # covered here meanwhile by smoke-dns.
 # (The real mbedTLS backend is validated separately by `make KEEL_TLS=mbedtls smoke-tls`;
 # mbedTLS is BYO and stays out of CI.)
-WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output http_stream_relay stream_termination platform_random fd_type_convention compress compress_bounded compress_vtable connect_op cross_module \
+WIN_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output ctrl_handler_win http_stream_relay stream_termination platform_random fd_type_convention compress compress_bounded compress_vtable connect_op cross_module \
                    datagram_batch completion_life datagram_multicast datagram_open datagram_ops_vtable \
                    datagram_public datagram_socket decompress dgram_close dgram_core dgram_recv \
                    dgram_recv_classify dgram_send dgram_slots drain error event_hangup event event_caps event_ctx event_fairness \
@@ -658,7 +668,7 @@ WIN_TEST_BIN = $(foreach s,$(WIN_TEST_SUITES),$(call test_bin_for,$(s)))
 #                     than broken. Enrolling the suite today would buy two cases of coverage at the
 #                     price of a ~37% flaky CI job. Tracked separately; enrol when that clears.
 # Enrol each as its fix lands, rather than widening the list past what actually passes.
-WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output http_stream_relay stream_termination platform_random fd_type_convention compress compress_bounded compress_vtable connect_op \
+WIN_IOCP_TEST_SUITES = allocator allocator_validate alpn anon_pipe async atomic_lock_free cloexec completion_output ctrl_handler_win http_stream_relay stream_termination platform_random fd_type_convention compress compress_bounded compress_vtable connect_op \
                         cross_module datagram_batch completion_life datagram_multicast datagram_open \
                         datagram_ops_vtable datagram_public datagram_socket decompress dgram_close \
                         dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots drain error event_fairness event_hangup \

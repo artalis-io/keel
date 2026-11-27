@@ -39,7 +39,7 @@ ifeq ($(TOOLCHAIN),msvc)
 # ---------------------------------------------------------------------------
 
 # /experimental:c11atomics is how MSVC exposes C11 <stdatomic.h>; without it the header hard-errors.
-# src/kl_atomic.h and src/protocols/http/http_server_plat_win.c both need it. Microsoft ships no
+# src/kl_atomic.h needs it. Microsoft ships no
 # stable alternative, so the flag is named here once rather than scattered. The source is NOT worked
 # around to avoid it (see src/kl_atomic.h for the lock-free contract that depends on it).
 # Suppresses the copyright banner AND the seven-line "experimental features" blurb that

@@ -20,14 +20,30 @@
 #include <windows.h>
 #include <string.h>
 #include <stddef.h>
-#include <stdatomic.h>
 
 _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
                "KlHttpServer.unix_node is too small for the AF_UNIX node-cleanup state");
 
 /* ── Signal handling (console control handler) ───────────────────────── */
 
-static _Atomic(KlHttpServer *) kl_signal_server = NULL;
+/* The handler runs on a thread the system creates for each console event, not on the loop thread.
+ * Windows does not document that unregistering it waits for a run already in progress (on the
+ * builds tested, SetConsoleCtrlHandler(FALSE) did wait for a running handler), so the server's
+ * lifetime does not rest on it. Each run holds the lock (shared) across its load of the server and its
+ * kl_http_server_stop; the restore clears the pointer under the lock (exclusive), so it returns only
+ * after any run that saw the server has finished with it, and the caller may then free the server.
+ * kl_http_server_stop only publishes a request and wakes the loop, so holding the lock across it
+ * costs the restore no more than that.
+ *
+ * For a close, logoff or shutdown event Windows ends the process once the handler returns, so only
+ * Ctrl-C and Ctrl-Break leave the server time to drain (see install_signal_handlers). */
+static SRWLOCK       kl_signal_lock   = SRWLOCK_INIT;
+static KlHttpServer *kl_signal_server = NULL;
+
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+/* Test-only: called by the handler after it has loaded the server, while it holds the lock. */
+void (*kl_http_server_test_ctrl_loaded)(void) = NULL;
+#endif
 
 static BOOL WINAPI kl_ctrl_handler(DWORD type) {
     switch (type) {
@@ -36,19 +52,31 @@ static BOOL WINAPI kl_ctrl_handler(DWORD type) {
         case CTRL_CLOSE_EVENT:
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT: {
-            KlHttpServer *s = atomic_load(&kl_signal_server);
-            if (s) { kl_http_server_stop(s); return TRUE; }
-            return FALSE;
+            AcquireSRWLockShared(&kl_signal_lock);
+            KlHttpServer *s = kl_signal_server;
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+            if (s && kl_http_server_test_ctrl_loaded) kl_http_server_test_ctrl_loaded();
+#endif
+            if (s) kl_http_server_stop(s);
+            ReleaseSRWLockShared(&kl_signal_lock);
+            return s ? TRUE : FALSE;
         }
         default:
             return FALSE;
     }
 }
 
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+/* Test-only: run the handler as the console's event thread would. */
+BOOL kl_http_server_test_ctrl_handler(DWORD type) { return kl_ctrl_handler(type); }
+#endif
+
 void kl_http_server_plat_signals_install(KlHttpServer *s) {
     /* No SIGPIPE on Windows; send() never raises it. */
     if (s->config.install_signal_handlers) {
-        atomic_store(&kl_signal_server, s);
+        AcquireSRWLockExclusive(&kl_signal_lock);
+        kl_signal_server = s;
+        ReleaseSRWLockExclusive(&kl_signal_lock);
         SetConsoleCtrlHandler(kl_ctrl_handler, TRUE);
     }
 }
@@ -56,8 +84,15 @@ void kl_http_server_plat_signals_install(KlHttpServer *s) {
 /* cppcheck-suppress constParameterPointer ; symmetric with kl_http_server_plat_signals_install */
 void kl_http_server_plat_signals_restore(KlHttpServer *s) {
     if (s->config.install_signal_handlers) {
+        /* Unregister first so no new event is routed here, then wait out any run already holding
+         * the server (see kl_signal_lock). Never call SetConsoleCtrlHandler with the lock held: the
+         * console may hold its own lock while it runs a handler, which then takes this one. */
         SetConsoleCtrlHandler(kl_ctrl_handler, FALSE);
-        atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
+        AcquireSRWLockExclusive(&kl_signal_lock);
+        /* Only its own: a server that installed later keeps receiving events, through the
+         * registration it added (registrations are counted, one per install). */
+        if (kl_signal_server == s) kl_signal_server = NULL;
+        ReleaseSRWLockExclusive(&kl_signal_lock);
     }
 }
 
