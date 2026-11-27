@@ -101,6 +101,8 @@ struct KlHttp2ServerConn {
                                         completion or connection event flushes. */
     int out_refused;               /**< A completion output queue at its bound refused frames: flush
                                         again once a send completes. */
+    int failed;                    /**< A flush failed: the session is unusable, every later flush
+                                        fails, and the sweep closes the connection. */
 };
 
 /* A send completed on a completion-driven HTTP/2 connection: flush what the session holds back

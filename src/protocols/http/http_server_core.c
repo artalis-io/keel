@@ -751,10 +751,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         }
         /* HTTP/2: streams in progress are the session's business, but a connection with none open
          * and nothing to send is idle, and is timed out like any other idle connection; one whose
-         * session is done (a graceful GOAWAY out, no stream left) is closed now. */
+         * session is done (a graceful GOAWAY out, no stream left) or failed is closed now. Output
+         * owed from outside the connection's events (no flush timer could be armed) is sent
+         * first. */
         if (tc->state == KL_HTTP_CONN_HTTP2) {
             const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
             if (!h2h) continue;
+            if (h2h->service) h2h->service(tc);   /* output owed outside its events (no timer) */
             int done = h2h->done && h2h->done(tc);
             if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
                 continue;

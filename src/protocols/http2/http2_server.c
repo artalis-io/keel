@@ -270,26 +270,33 @@ static int h2_session_streams(const KlHttp2ServerConn *h2c) {
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force);
 static int h2_flush(KlHttp2ServerConn *h2c) { return h2_flush_ex(h2c, 0); }
 
+/* A flush from outside the connection's own events (the flush timer, or the sweep for a flush
+ * that no timer could be armed for). Nothing here closes the connection: a failure marks the
+ * session failed (h2_flush_ex) and the sweep closes it, on readiness and completion alike. */
+static void h2_flush_outside(KlHttp2ServerConn *h2c) {
+    if (h2_flush(h2c) < 0) return;
+    /* Readiness: output that is still held (a full socket) needs WRITE interest, which only the
+     * connection's own events recompute. A completion loop sends from its queue. */
+    if (h2c->session->want_write(h2c->session))
+        kl_http_conn_http2_request_write(h2c->conn);
+}
+
 static void h2_flush_tick(void *ud) {
     KlHttp2ServerConn *h2c = ud;
     h2c->flush_armed = 0;
     KlHttpConn *c = h2c->conn;
     if (!c || c->h2 != h2c) return;
-    (void)h2_flush(h2c);
-    /* Readiness: output that is still held (a full socket) needs WRITE interest, which only the
-     * connection's own events recompute. A failed flush asks for it too: the writable flush then
-     * fails again and the connection closes there. A completion loop sends from its queue. */
-    if (h2c->session && h2c->session->want_write(h2c->session))
-        kl_http_conn_http2_request_write(c);
+    h2_flush_outside(h2c);
 }
 
 static void h2_schedule_flush(KlHttp2ServerConn *h2c) {
     if (h2c->flush_armed || !h2c->conn || !h2c->conn->stream.ctx) return;
     int64_t id = kl_timer_add(h2c->conn->stream.ctx, 0, h2_flush_tick, h2c);
     if (id < 0) {
-        /* No timer: the flush is owed. A readiness loop asks for WRITE, whose event flushes; a
-         * completion loop flushes on its next send completion (kl_http2_server_comp_sent) or input
-         * (a receive stays posted while the connection is HTTP/2). */
+        /* No timer: the flush is owed. The connection's next event flushes it (readiness asks
+         * for WRITE; completion flushes on a send completion, kl_http2_server_comp_sent, or on
+         * input), and failing those the sweep does, on the next loop iteration
+         * (kl_http2_server_service_hook): a silent client with nothing in flight would leave it. */
         h2c->flush_owed = 1;
         kl_http_conn_http2_request_write(h2c->conn);
         return;
@@ -325,7 +332,7 @@ static int h2_stream_fail(KlHttp2ServerStream *s) {
 static int h2_sink_begin(void *ctx) {
     KlHttp2ServerStream *s = ctx;
     KlHttp2ServerConn *h2c = s->h2c;
-    if (s->response_submitted) return -1;
+    if (s->response_submitted || h2c->failed) return -1;
     const char *names[H2_MAX_RESP_HEADERS];
     const char *values[H2_MAX_RESP_HEADERS];
     int n = h2_response_fields(&s->res, names, values);
@@ -351,6 +358,7 @@ static int h2_sink_begin(void *ctx) {
 static int h2_sink_write(void *ctx, const KlIoVec *iov, int iovcnt, size_t len, int bounded) {
     KlHttp2ServerStream *s = ctx;
     KlAllocator *a = s->h2c->alloc;
+    if (s->h2c->failed) return -1;              /* nothing more reaches a failed session */
     size_t pend = s->olen - s->ooff;
     size_t cap = kl_http_response_stream_capacity(&s->res);
     /* The legacy writer is not admitted against the bound, but the buffer stops at it (as an
@@ -382,6 +390,7 @@ static int h2_sink_write(void *ctx, const KlIoVec *iov, int iovcnt, size_t len, 
 
 static int h2_sink_end(void *ctx) {
     KlHttp2ServerStream *s = ctx;
+    if (s->h2c->failed) return -1;
     s->body_end = 1;
     h2_stream_body_ready(s);
     return 0;
@@ -447,7 +456,7 @@ static kl_ssize_t h2_cb_read_body(void *ud, uint32_t stream_id, void *buf, size_
  * fire the writable edge of every stream the session took bytes from. The edges run after the
  * session's send, outside it: a producer that writes from its edge only schedules the next flush. */
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
-    if (!h2c->session) return -1;
+    if (!h2c->session || h2c->failed) return -1;
     h2c->flush_owed = 0;
     for (int i = 0; i < h2c->slots_hwm; i++) {
         KlHttp2ServerStream *s = &h2c->streams[i];
@@ -463,6 +472,10 @@ static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
     h2c->out_refused = 0;
     if (force || h2c->session->want_write(h2c->session))   /* force: a writable event asked */
         rc = h2c->session->flush(h2c->session);
+    if (rc < 0) {
+        h2c->failed = 1;
+        return rc;
+    }
     for (int i = 0; i < h2c->slots_hwm; i++) {
         KlHttp2ServerStream *s = &h2c->streams[i];
         if (!s->in_use || !s->progress_due) continue;
@@ -474,7 +487,7 @@ static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
 
 KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
-    if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
+    if (!h2c || !h2c->session || h2c->failed) return KL_HTTP_CONN_CLOSED;
     if (!h2c->out_refused && !h2c->flush_owed) return KL_HTTP_CONN_HTTP2;
     if (h2_flush(h2c) < 0) return KL_HTTP_CONN_CLOSED;
     return KL_HTTP_CONN_HTTP2;
@@ -1250,10 +1263,33 @@ static int kl_http2_server_idle_hook(const KlHttpConn *c) {
            !(h2c->session && h2c->session->want_write(h2c->session));
 }
 
-/* Done: the session wants neither read nor write (a graceful GOAWAY with no stream left). The sweep
- * closes such a connection at once, whatever its idle time. */
+/* Done: the session wants neither read nor write (a graceful GOAWAY with no stream left), or a
+ * flush failed. The sweep closes such a connection at once, whatever its idle time; the close
+ * (kl_http2_server_cleanup) tells every open stream's producer it was cut short. */
 static int kl_http2_server_done_hook(const KlHttpConn *c) {
-    return c->h2 && c->h2->session && h2_session_done(c->h2);
+    return c->h2 && c->h2->session && (c->h2->failed || h2_session_done(c->h2));
+}
+
+/* Each sweep, before done/idle. A failed session's streams are released (each producer told once,
+ * `completed` 0), so producers hear at once on both event models. Otherwise a flush that is owed
+ * (no timer could be armed for it) or a body resume that failed is retried here, outside every
+ * connection event, as the timer would have. The sweep runs once per loop iteration, which waits
+ * at most a second, so a flush is never owed for longer than that, whatever the client does. */
+static void kl_http2_server_service_hook(KlHttpConn *c) {
+    KlHttp2ServerConn *h2c = c->h2;
+    if (!h2c || !h2c->session) return;
+    if (h2c->failed) {
+        /* Its streams end now, not when the connection is released: a completion close waits for
+         * the queued output, which a client that stopped reading never takes, and meanwhile the
+         * producers would go on writing into a session that sends nothing more. */
+        if (h2c->num_streams > 0) h2_streams_release_all(h2c);
+        return;
+    }
+    if (h2c->flush_armed) return;
+    int due = h2c->flush_owed;
+    for (int i = 0; !due && i < h2c->slots_hwm; i++)
+        due = h2c->streams[i].in_use && h2c->streams[i].resume_due;
+    if (due) h2_flush_outside(h2c);
 }
 
 static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
@@ -1266,6 +1302,7 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .drain_shutdown  = kl_http2_server_drain_shutdown,
     .idle            = kl_http2_server_idle_hook,
     .done            = kl_http2_server_done_hook,
+    .service         = kl_http2_server_service_hook,
 };
 
 /* No GCC constructor auto-installing this. kl_http_server_init() calls every installer

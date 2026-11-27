@@ -12,6 +12,7 @@
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts */
+#include "http_proto_hooks.h"  /* kl_http2_server_hooks: the sweep's HTTP/2 service step */
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
 #include <keel/clock.h>
 
@@ -2722,6 +2723,153 @@ UTEST(h2, a_body_refused_on_a_begun_stream_resets_it) {
     ASSERT_EQ(1, g_sclose_calls[0]);
     ASSERT_EQ(0, g_sclose_completed[0]);
     rig_close(&r);
+}
+
+/* ── A flush from outside the connection's events: no timer, or a failure ─────────────────────── */
+
+static void *nomem_malloc(void *ctx, size_t n) { (void)ctx; (void)n; return NULL; }
+static void *nomem_realloc(void *ctx, void *p, size_t o, size_t n) {
+    (void)ctx; (void)p; (void)o; (void)n;
+    return NULL;
+}
+static void nomem_free(void *ctx, void *p, size_t n) { (void)ctx; (void)p; (void)n; }
+static KlAllocator nomem_alloc = { .malloc = nomem_malloc, .realloc = nomem_realloc,
+                                   .free = nomem_free, .ctx = NULL };
+
+/* While refused, kl_timer_add on ev fails as it does out of memory (the heap cannot grow). */
+typedef struct { KlAllocator *alloc; int cap; } TimerRefusal;
+static TimerRefusal timers_refuse(KlEventCtx *ev) {
+    TimerRefusal t = { ev->alloc, ev->timer_cap };
+    ev->alloc = &nomem_alloc;
+    ev->timer_cap = ev->timer_count;
+    return t;
+}
+static void timers_allow(KlEventCtx *ev, TimerRefusal t) {
+    ev->alloc = t.alloc;
+    ev->timer_cap = t.cap;
+}
+
+/* Open stream `id` on the sweep server's connection, handled by streaming_handler. */
+static int sweep_open_stream(MockH2Session *m, uint32_t id) {
+    if (m->callbacks.on_request(m->cb_user_data, id, "GET", 3, "/s", 2,
+                                NULL, 0, NULL, NULL, NULL, NULL, 0) != 0) return -1;
+    return m->callbacks.on_stream_end(m->cb_user_data, id);
+}
+
+/* A producer writes from outside the connection's events (a timer, a watcher) when no flush timer
+ * can be armed: the flush is owed. On a completion loop with nothing in flight and a client that
+ * sends nothing, no event came to pay it, and the stream stalled for good. The sweep, which runs
+ * every loop iteration, now sends it. */
+UTEST(h2, an_owed_flush_is_sent_by_the_sweep_when_no_timer_can_be_armed) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    mock.want_write_return = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    ASSERT_EQ(1, g_nsres);
+    (void)kl_timer_fire(&h2_sweep_srv.ev);                 /* the begin's flush */
+
+    TimerRefusal t = timers_refuse(&h2_sweep_srv.ev);
+    int wr = kl_http_response_stream_try_write(g_sres[0], "more", 4);
+    timers_allow(&h2_sweep_srv.ev, t);
+    int armed = c->h2->flush_armed, owed = c->h2->flush_owed;
+    int flushes = mock.flush_count;
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now;                               /* not idle: only the owed flush acts */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int swept = mock.flush_count, owed_after = c->h2 ? c->h2->flush_owed : -1;
+    int closes = g_sclose_calls[0], destroyed = mock.destroy_count;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, wr);
+    ASSERT_EQ(0, armed);                                   /* no timer could be armed */
+    ASSERT_EQ(1, owed);
+    ASSERT_GT(swept, flushes);                             /* was equal: the flush stayed owed */
+    ASSERT_EQ(0, owed_after);
+    ASSERT_EQ(0, closes);                                  /* the stream goes on */
+    ASSERT_EQ(0, destroyed);
+}
+
+/* A flush the timer runs, outside the connection's events, fails (the session cannot send): on a
+ * completion loop nothing closed the connection until the client's next frame, so with a silent
+ * client every stream on it stalled and no producer heard. The failure now marks the session
+ * failed and the sweep closes the connection: every open stream's producer is told, once, that it
+ * was cut short, and no later flush reaches the failed session. */
+UTEST(h2, a_failed_flush_outside_the_connection_events_closes_it) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    mock.want_write_return = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    ASSERT_EQ(0, sweep_open_stream(&mock, 3));
+    ASSERT_EQ(2, g_nsres);
+    (void)kl_timer_fire(&h2_sweep_srv.ev);
+
+    mock.flush_return = -1;
+    int wr = kl_http_response_stream_try_write(g_sres[0], "more", 4);
+    int armed = c->h2->flush_armed;
+    (void)kl_timer_fire(&h2_sweep_srv.ev);                 /* the flush fails here */
+    int failed_flushes = mock.flush_count;
+    int closes_before = g_sclose_calls[0] + g_sclose_calls[1];
+    int refused = kl_http2_server_comp_sent(c) == KL_HTTP_CONN_CLOSED &&
+                  kl_http2_server_on_writable(c) == KL_HTTP_CONN_CLOSED;
+    int no_retry = mock.flush_count == failed_flushes;     /* the failed session is not flushed */
+    int write_refused = kl_http_response_stream_try_write(g_sres[1], "x", 1) == KL_HTTP_STREAM_ERROR;
+
+    /* The sweep's HTTP/2 step alone ends the streams, before any close: a completion close waits
+     * for queued output, which a client that stopped reading never takes. */
+    kl_http2_server_hooks()->service(c);
+    int closes_at_service = g_sclose_calls[0] + g_sclose_calls[1];
+    int streams_left = c->h2 ? c->h2->num_streams : -1;
+    int destroyed_at_service = mock.destroy_count;
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now;                               /* not idle: only the failure closes it */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int destroyed = mock.destroy_count;
+    int closes0 = g_sclose_calls[0], closes1 = g_sclose_calls[1];
+    int done0 = g_sclose_completed[0], done1 = g_sclose_completed[1];
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, wr);
+    ASSERT_EQ(1, armed);
+    ASSERT_EQ(0, closes_before);                           /* never from inside the flush */
+    ASSERT_TRUE(refused);
+    ASSERT_TRUE(no_retry);
+    ASSERT_TRUE(write_refused);                            /* was ACCEPTED, into a dead session */
+    ASSERT_EQ(2, closes_at_service);                       /* was 0: told only at the release */
+    ASSERT_EQ(0, streams_left);
+    ASSERT_EQ(0, destroyed_at_service);                    /* the connection itself is closed next */
+    ASSERT_EQ(1, destroyed);                               /* was 0: left open, every stream stalled */
+    ASSERT_EQ(1, closes0);
+    ASSERT_EQ(1, closes1);                                 /* the sibling is told too */
+    ASSERT_EQ(0, done0);
+    ASSERT_EQ(0, done1);
+    ASSERT_EQ(1, g_sclose_calls[0]);                       /* once each: not again at the free */
+    ASSERT_EQ(1, g_sclose_calls[1]);
 }
 
 UTEST_MAIN();

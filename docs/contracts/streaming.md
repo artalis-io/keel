@@ -255,7 +255,10 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
 - **Producing later: no suspend.** The connection carries other streams, so it is not suspended
   and there is no `KlAsyncOp`. The handler returns with the stream open; a producer on the loop
   thread (a timer, a watcher, a thread pool's `done_fn`) writes it later. Output written outside
-  the connection's own events is sent on the next loop iteration.
+  the connection's own events is sent on the next loop iteration, by a zero-delay timer. When no
+  timer can be armed (the timer heap cannot grow), the flush is owed: the connection's next event
+  sends it, and failing that the server's per-iteration sweep does, so it waits at most one
+  iteration (a second at most), whatever the client does.
 - **Termination: the close notification.** `kl_http_response_stream_on_close` fires exactly once
   when the stream is released: `completed` 1 once the ended body went out, 0 when the client reset
   the stream, the connection closed or the server was freed. A reset cancels only that stream's
@@ -276,11 +279,17 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
   afterwards, when its streamed response closes, is reset or is aborted.
 - **Failure.** A write that cannot be buffered (allocation, or the legacy writer past the bound)
   fails the stream: its response answers ERROR and the stream is reset (RST_STREAM
-  INTERNAL_ERROR); the close notification follows with `completed` 0.
+  INTERNAL_ERROR); the close notification follows with `completed` 0. A flush that fails (the
+  session cannot send) fails the connection, on both event models: no later flush reaches the
+  session, and every write, end or begin on its streams answers ERROR at once. The connection's
+  own next event or, at the latest, the next sweep ends every open stream (its close notification
+  fires once with `completed` 0, never from inside a producer's call) and closes the connection.
+  The streams end then even where the close itself waits for queued output (a completion loop).
 
 Tests: `tests/protocols/http/test_http_response.c` (the response layer over a stream sink, abort,
 the body setters' refusal), `tests/protocols/http2/test_http2.c` (middleware-begun streams, the
-body reader's lifecycle, abort against a mock session),
+body reader's lifecycle, abort, an owed flush the sweep sends, a failed flush that closes the
+connection, against a mock session),
 `integrations/http2/nghttp2/tests/e2e_h2_stream_flow.c` (two streams on one connection, one with an
 exhausted window; resetting it cancels only its producer; a body past the completion queue bound)
 and `integrations/http2/nghttp2/tests/e2e_h2_stream_control.c` (aborting a window-stalled stream
