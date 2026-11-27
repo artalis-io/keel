@@ -39,7 +39,6 @@ _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
 #if !defined(KL_NO_SIGNAL)
 #include <signal.h>
 #include <stdatomic.h>
-#include <pthread.h>
 #include <sched.h>   /* sched_yield */
 #include <time.h>    /* nanosleep */
 #endif
@@ -59,7 +58,7 @@ _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
  * completion before the wait resumes. The count is process-wide: a restore also waits out handlers
  * stopping another server, each a few microseconds. A process that forks while a handler is running
  * on another thread leaves the child a count that never drains; fork from a thread that is not in a
- * handler (as POSIX already requires for the mutex below).
+ * handler.
  *
  * Both objects must be lock-free for the handler to use them: 0 fails the build here; 1 (object
  * dependent) is asked at runtime in the install, which then leaves the handlers uninstalled. */
@@ -70,12 +69,21 @@ static _Atomic(KlHttpServer *) kl_signal_server   = NULL;
 static atomic_int              kl_signal_inflight = 0;
 
 /* Install and restore run on loop threads, possibly two servers' at once; the handler never takes
- * this lock. The dispositions in place before the first server installed are saved once and put
+ * this lock (a spin lock: it is held only across a few sigaction calls, and needs no libpthread
+ * static initialiser). The dispositions in place before the first server installed are saved once and put
  * back when the server currently receiving signals (the last to install) restores. Only that server
  * receives signals: if it returns while an earlier one still runs, the earlier one gets none. */
-static pthread_mutex_t     kl_signal_lock = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int          kl_signal_lock = 0;   /* 1 = held, only across a few sigactions */
 static int                 kl_signal_saved = 0;
 static struct sigaction    kl_old_term, kl_old_int;
+
+static void kl_signal_lock_take(void) {
+    int unheld = 0;
+    while (!atomic_compare_exchange_weak(&kl_signal_lock, &unheld, 1)) {
+        unheld = 0;
+        sched_yield();
+    }
+}
 
 #ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
 /* Test-only: called by the handler after it has loaded the server, before it stops it. */
@@ -116,7 +124,7 @@ void kl_http_server_plat_signals_install(KlHttpServer *s) {
         sa.sa_handler = kl_signal_handler;
         sa.sa_flags = 0;
         sigemptyset(&sa.sa_mask);
-        pthread_mutex_lock(&kl_signal_lock);
+        kl_signal_lock_take();
         atomic_store(&kl_signal_server, s);
         if (!kl_signal_saved) {
             sigaction(SIGTERM, &sa, &kl_old_term);
@@ -126,7 +134,7 @@ void kl_http_server_plat_signals_install(KlHttpServer *s) {
             sigaction(SIGTERM, &sa, NULL);   /* still the first server's saved dispositions */
             sigaction(SIGINT, &sa, NULL);
         }
-        pthread_mutex_unlock(&kl_signal_lock);
+        atomic_store(&kl_signal_lock, 0);
     }
 #else
     (void)s;
@@ -137,7 +145,7 @@ void kl_http_server_plat_signals_install(KlHttpServer *s) {
 void kl_http_server_plat_signals_restore(KlHttpServer *s) {
 #if !defined(KL_NO_SIGNAL)
     if (s->config.install_signal_handlers) {
-        pthread_mutex_lock(&kl_signal_lock);
+        kl_signal_lock_take();
         /* Only the server receiving signals puts the old dispositions back: one that installed
          * earlier and was superseded leaves the later server its signals. */
         if (atomic_load(&kl_signal_server) == s) {
@@ -146,7 +154,7 @@ void kl_http_server_plat_signals_restore(KlHttpServer *s) {
             kl_signal_saved = 0;
             atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
         }
-        pthread_mutex_unlock(&kl_signal_lock);
+        atomic_store(&kl_signal_lock, 0);
         /* Whether or not it was still installed, a handler may have loaded this server before the
          * pointer moved on: wait for every run in progress. */
         /* Yield first; then sleep, so a real-time restoring thread cannot starve a preempted
