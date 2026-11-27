@@ -26,12 +26,17 @@ _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
 
 /* ── Signal handling (console control handler) ───────────────────────── */
 
-/* The handler runs on a thread the system creates for each console event, not on the loop thread,
- * so unregistering it does not stop one that is already running. Each run holds the lock (shared)
- * across its load of the server and its kl_http_server_stop; the restore clears the pointer under the
- * lock (exclusive), so it returns only after any run that saw the server has finished with it, and
- * the caller may then free the server. kl_http_server_stop only publishes a request and wakes the
- * loop, so holding the lock across it costs the restore no more than that. */
+/* The handler runs on a thread the system creates for each console event, not on the loop thread.
+ * Windows does not document that unregistering it waits for a run already in progress (on the
+ * builds tested, SetConsoleCtrlHandler(FALSE) did wait for a running handler), so the server's
+ * lifetime does not rest on it. Each run holds the lock (shared) across its load of the server and its
+ * kl_http_server_stop; the restore clears the pointer under the lock (exclusive), so it returns only
+ * after any run that saw the server has finished with it, and the caller may then free the server.
+ * kl_http_server_stop only publishes a request and wakes the loop, so holding the lock across it
+ * costs the restore no more than that.
+ *
+ * For a close, logoff or shutdown event Windows ends the process once the handler returns, so only
+ * Ctrl-C and Ctrl-Break leave the server time to drain (see install_signal_handlers). */
 static SRWLOCK       kl_signal_lock   = SRWLOCK_INIT;
 static KlHttpServer *kl_signal_server = NULL;
 
@@ -84,7 +89,9 @@ void kl_http_server_plat_signals_restore(KlHttpServer *s) {
          * console may hold its own lock while it runs a handler, which then takes this one. */
         SetConsoleCtrlHandler(kl_ctrl_handler, FALSE);
         AcquireSRWLockExclusive(&kl_signal_lock);
-        kl_signal_server = NULL;
+        /* Only its own: a server that installed later keeps receiving events, through the
+         * registration it added (registrations are counted, one per install). */
+        if (kl_signal_server == s) kl_signal_server = NULL;
         ReleaseSRWLockExclusive(&kl_signal_lock);
     }
 }

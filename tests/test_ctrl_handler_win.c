@@ -30,9 +30,10 @@ static DWORD WINAPI restore_thread(LPVOID arg) {
     return 0;
 }
 
-/* A console event that arrived just before the restore could load the server, and the caller could
- * then free it while the handler's kl_http_server_stop was still to run. The restore now returns
- * only after a handler that saw the server is done with it. */
+/* Absent the console's own serialisation, which Windows does not document, a console event that
+ * arrived just before the restore could load the server, and the caller could then free it while the
+ * handler's kl_http_server_stop was still to run. The restore now returns only after a handler that
+ * saw the server is done with it. The handler is called directly here, not by the dispatcher. */
 UTEST(ctrl_handler, the_restore_waits_for_a_handler_that_saw_the_server) {
     KlHttpServer srv;
     KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
@@ -70,6 +71,32 @@ UTEST(ctrl_handler, the_restore_waits_for_a_handler_that_saw_the_server) {
     ASSERT_EQ((DWORD)WAIT_TIMEOUT, early);
     ASSERT_EQ(0, (int)restored_early);
     ASSERT_EQ(1u, (unsigned)handled);               /* the handler stopped the server it saw */
+    ASSERT_TRUE(after == FALSE);
+}
+
+/* Two servers: the one whose run returns first cleared the handler's only server pointer, so the
+ * other, still running and still registered, no longer received console events (each fell through
+ * to the default handler, which ends the process). A restore now clears the pointer only if it is
+ * still its own. */
+UTEST(ctrl_handler, a_restore_leaves_a_later_server_its_events) {
+    KlHttpServer a, b;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
+                               .install_signal_handlers = 1 };
+    ASSERT_EQ(0, kl_http_server_init(&a, &cfg));
+    ASSERT_EQ(0, kl_http_server_init(&b, &cfg));
+    kl_http_server_plat_signals_install(&a);
+    kl_http_server_plat_signals_install(&b);       /* the last to install receives the events */
+    kl_http_server_plat_signals_restore(&a);       /* a's run returns first */
+    BOOL to_b = kl_http_server_test_ctrl_handler(CTRL_C_EVENT);
+    int b_stopped = b.stop_requested != 0, a_stopped = a.stop_requested != 0;
+    kl_http_server_plat_signals_restore(&b);
+    BOOL after = kl_http_server_test_ctrl_handler(CTRL_C_EVENT);
+    kl_http_server_free(&a);
+    kl_http_server_free(&b);
+
+    ASSERT_TRUE(to_b == TRUE);                      /* was FALSE: b's events went to the default */
+    ASSERT_EQ(1, b_stopped);
+    ASSERT_EQ(0, a_stopped);
     ASSERT_TRUE(after == FALSE);
 }
 

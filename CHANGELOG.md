@@ -54,12 +54,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `kl_http_server_run` whose accept path could not start after the handlers were installed returned
   -1 with SIGTERM/SIGINT still routed to that server, so a later signal stopped a server the caller
   may already have freed. The handlers are now restored on that path too.
-- **Windows: a console event could stop a server its caller had freed.** The console control handler
-  runs on a thread the system creates for each event. Unregistering it at the end of
-  `kl_http_server_run` (or on a failed start) did not wait for a handler that was already running, so
-  a console event (Ctrl-C, Ctrl-Break, close, logoff or shutdown) that arrived just before could call
-  `kl_http_server_stop` on a server the caller had since freed. The restore now returns only after
-  such a handler has finished with the server.
+- **Windows: the console control handler no longer relies on undocumented behaviour to outlive its
+  server.** The handler runs on a thread the system creates for each event. Windows does not document
+  that unregistering it at the end of `kl_http_server_run` (or on a failed start) waits for a handler
+  that is already running. The builds tested do wait, but without that a console event that arrived
+  just before could call `kl_http_server_stop` on a server the caller had since freed. The restore
+  now waits for such a handler itself. With two servers, an earlier server whose run returns first
+  no longer cuts the later one off from console events (a later server's return still ends delivery
+  to an earlier one, as only the last server to start receives them). Only Ctrl-C and Ctrl-Break leave the server time to drain:
+  for a close, logoff or shutdown event Windows ends the process once the handler returns.
 
 ## [3.6.0]
 
