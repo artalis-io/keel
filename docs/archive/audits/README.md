@@ -11,8 +11,8 @@ The audit files retain stable names within this archive (`docs/archive/audits/`)
 
 | Audit | Scope | Latest pass |
 |---|---|---|
-| [keel_axis_audit.md](keel_axis_audit.md) | Networking three-axis separation (Transport / Engine / Provider); protocol independence; operation lifetime; compatibility matrix | Twentieth pass, 2026-11-27 (HTTP/2 streamed responses, `ff259280` + three unmerged branches; findings resolved in PR #538) |
-| [keel_audit.md](keel_audit.md) | C security/safety/quality (memory safety, overflow, resource management, build hardening) | Twenty-first pass, 2026-11-25 (3.6.0 pre-release audit at `65568ff`) |
+| [keel_axis_audit.md](keel_axis_audit.md) | Networking three-axis separation (Transport / Engine / Provider); protocol independence; operation lifetime; compatibility matrix | Twenty-first pass, 2026-11-27 (the HTTP/2 settle pass, PR #543 at `5586facf`; findings resolved in #543) |
+| [keel_audit.md](keel_audit.md) | C security/safety/quality (memory safety, overflow, resource management, build hardening) | Twenty-second pass, 2026-11-27 (PRs #542 and #543 before merge; findings resolved in those PRs and a separate POSIX signal PR; W1 open) |
 
 ## How to read a pass
 

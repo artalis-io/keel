@@ -5,6 +5,305 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Twenty-second pass: PRs #542 and #543 before merge (2026-11-27)
+
+**Revision:** PR #542 head `1d9f5d0b` (part A) and PR #543 head `5586facf` (part B), each over
+`main` `b43d3110`. Two independent read-only audits, with the axis audit of #543 alongside
+(twenty-first pass in [keel_axis_audit.md](keel_axis_audit.md)). Both PRs had passed their reviews
+and CI; neither was merged before these results were reported.
+
+**Result:** no Critical or High in either PR. The audits found:
+- **A proven regression** in #543 (axis A-M1, Medium): on readiness loops the graceful drain's
+  flush left producer output it could not send without WRITE interest. Reproduced on kqueue and
+  epoll; `main` with the flush timer did not have it.
+- **A pre-existing memory-safety defect** outside both PRs (P1): the POSIX SIGTERM/SIGINT handler
+  could stop a server its caller had freed. Reproduced (SIGSEGV) with a widened window. Its
+  practical severity is Low (it needs local signal delivery concurrent with teardown), but it is a
+  use-after-free and is fixed, not deferred.
+- **An inaccurate premise** in #542 (I1): on the Windows build tested, the console dispatcher already
+  serialises the restore with a running handler, so the use-after-free #542 guards against was not
+  reproduced through the real dispatcher. #542's lock remains as defence in depth against behaviour
+  Windows does not document; its comment, CHANGELOG entry and description now say so, and nothing
+  here records the Windows race as reproduced.
+- **Lows and documented behaviour:** a two-server lifecycle defect in #542 (C1), four Lows in #543
+  (one cost, one weakened guard, two pre-existing behaviours), a Windows deadlock with an
+  application's own console handler (W1, pre-existing) and Windows' process termination on close,
+  logoff and shutdown (W2, documented OS behaviour).
+
+**Classes used below:** *proven* (reproduced, against the audited head unless it says otherwise);
+*pre-existing* (present on `main` before the PR); *theoretical* (no caller reaches it today);
+*documented caller contract* or *documented platform behaviour* (the behaviour is specified, by Keel
+or by the OS).
+
+### Corrections after the pass
+
+All were made on the PR branches (and one new branch) and verified before the PRs were updated. No
+full re-audit was run; each correction had a focused review.
+
+| Finding | Correction | Verification |
+|---|---|---|
+| A-M1 (axis) | `kl_http2_server_drain_shutdown` flushes through `h2_flush_outside`, which asks for WRITE while output is held | `h2.output_held_by_the_drain_flush_is_sent_without_client_traffic`: WRITE is armed after the drain's flush, and the connection's writable event delivers the producer's bytes with no frame from the client; fails with the old line |
+| 543-L1..L4, H1 | see part B, section 4 | each new test fails with its fix reverted |
+| C1 | the Windows restore clears the pointer only while it is its own | `ctrl_handler.a_restore_leaves_a_later_server_its_events` |
+| I1, W2, T1 | #542 comment, header (`install_signal_handlers`), CHANGELOG and description reworded | review |
+| P1 | separate PR: the handler counts itself before it loads the server; the restore clears the pointer, then waits for the count to reach zero; the old dispositions are saved once and restored by the server receiving signals | `signal_handler.the_restore_waits_for_a_handler_that_saw_the_server` (a real SIGTERM sent to a chosen thread) and `signal_handler.overlapping_servers_put_the_original_dispositions_back`; each fails against the pre-fix code, and the first also with the count taken after the load. The audit's probe: SIGSEGV before, clean after (5 of 5) |
+| W1 | not changed; see below | |
+
+**P1 correction, why the count closes the race.** The handler's increment, its load of the server,
+the restore's store of NULL and the restore's read of the count are all sequentially consistent. A
+handler that loaded a server did so before the store of NULL in that single order, and its increment
+came before its load, so the restore's read, which follows the store, sees the increment until the
+handler's decrement, which follows its `kl_http_server_stop`. A handler that loads after the store
+sees NULL (or a later server) and touches nothing. The handler never waits, so a signal that
+interrupts the restoring thread runs to completion before the wait resumes. Both atomics must be
+lock-free: 0 fails the build, 1 is checked at runtime by the install, which then leaves the handlers
+uninstalled. Install and restore themselves take a mutex the handler never touches. The review of
+the correction found no defect; from its theoretical notes, the wait yields and then sleeps (so a
+real-time restoring thread cannot starve a preempted handler on its CPU), and the comment records
+two limits: a fork while a handler runs on another thread leaves the child a count that never
+drains, and only the last server to install receives signals.
+
+**W1 investigation.** Cause confirmed by the audit's probe: the console dispatcher holds its own lock
+across every handler call, and `SetConsoleCtrlHandler(..., FALSE)` in the restore waits for it, so an
+application handler that is called first and waits for `kl_http_server_run` to return deadlocks with
+the restore. Smallest structural fix: register Keel's handler once per process and never unregister
+it from the loop thread; the restore only clears the pointer under the lock (which #542 adds), and
+the handler returns FALSE with no server, so the event passes on. That also lets a later change wait
+in the handler for a graceful close (W2). Not implemented: it changes the handler's position in the
+chain and its lifetime, and is left for a decision.
+
+### Part A: PR #542, Windows console control handler lifetime
+
+**Revision:** PR #542 head `1d9f5d0b` (on `main` `b43d3110`); the change is
+`git diff origin/main...HEAD`. Read-only; no repository file was changed by the audit. Probes and
+scratch builds ran from a `git archive` copy on edge and from scratch copies of the two platform TUs.
+**Scope:** `src/protocols/http/http_server_plat_win.c` (the console handler, install and restore),
+its two callers in `kl_http_server_run` (`http_server.c:428` failed start, `:818` normal return),
+everything the handler calls under the new lock (`kl_http_server_stop`, `kl_http_server_stop_claim`
+/ `_publish`, `kl_plat_wakeup_signal` in `platform_wakeup_win.c`), `kl_http_server_free`'s wakeup
+teardown, the new test `tests/test_ctrl_handler_win.c`, its Makefile rule under MinGW and MSVC
+(`mk/toolchain.mk`), the derived suite lists, and the POSIX sibling
+`http_server_plat_posix.c` (unchanged by the PR, audited for the same defect class).
+
+**Result:** no Critical, High or Medium defect in the change. The lock is correct: every access to
+`kl_signal_server` is under `kl_signal_lock`, nothing under the lock blocks, re-enters or takes the
+lock, and `SetConsoleCtrlHandler` is never called with it held. Two observations change how the PR
+should be described, and one pre-existing defect of the same class remains on POSIX:
+- **On the tested Windows build the OS already serialises the restore with a running handler**
+  (I1). The console dispatcher holds its handler-list lock across the handler call, so
+  `SetConsoleCtrlHandler(..., FALSE)` waits for it. The pre-fix code, with a 300 ms gap widened
+  between the load and the stop and driven by a real console event, never faulted. The fix is
+  sound defence in depth against behaviour Microsoft does not document, but on this host #539 is
+  not reachable through the real dispatcher. The CHANGELOG sentence "did not wait for a handler
+  that was already running" holds only as an absence of any guarantee.
+- **The POSIX signal handler has the defect #539 describes, and the PR does not touch it** (P1).
+  Reproduced with a widened window: SIGSEGV.
+
+#### Findings
+
+| ID | Class / severity | Location | Finding | Reproduction | Smallest fix | Disposition |
+|---|---|---|---|---|---|---|
+| P1 | Theoretical in production, proven with a widened window. Low (narrow window; the consequence is a use-after-free write plus a 1-byte `write()` to a possibly reused fd) | `http_server_plat_posix.c:54-55` (handler) and `:82-84` (restore) | A process-directed SIGTERM/SIGINT can run on any thread that does not block it. If that thread is preempted between `atomic_load(&kl_signal_server)` and `kl_http_server_stop(s)`, the loop thread's restore (`sigaction` back, then pointer cleared) neither waits for it nor can tell it is there. `kl_http_server_run` returns, the caller frees the server, and the handler then writes `stop_requested`/`running`/`draining` into freed memory and `write()`s to `stop_wake_wr`, an fd number that may already belong to something else. Unlike Windows (I1), nothing in the OS serialises this. Pre-existing; the PR fixes only the Windows sibling. | `probe_posix_uaf.c`, macOS kqueue: a scratch copy of the POSIX TU with a 300 ms `nanosleep` between load and stop, linked ahead of `libkeel.a`. SIGTERM is unblocked on one thread only, the caller then stops, joins, frees and `munmap`s the server: exit 139 (SIGSEGV in the handler). | An async-signal-safe in-flight count. Handler: `atomic_fetch_add(&inflight,1)`, load, stop, `atomic_fetch_sub`. Restore: clear the pointer, then spin while `inflight != 0`. A handler that interrupts the restoring thread itself runs to completion before the spin resumes, so the spin cannot self-deadlock. `atomic_int` is already required lock-free here. | fixed by a separate PR (`fix/posix-signal-lifetime`); fixed rather than deferred, see the pass summary |
+| W1 | Proven (pre-existing, not introduced by the PR). Low | `http_server_plat_win.c:85` (restore calls `SetConsoleCtrlHandler`) | Because the dispatcher holds its lock across handler calls (I1), the restore blocks while any console handler in the chain is still running. Take an application handler registered after the server installed its own (so it is called first) that stops the server and waits for `kl_http_server_run` to return. That is the usual way to get a grace period on `CTRL_CLOSE_EVENT`, see W2. The run is now stuck in restore, waiting for that handler, which is waiting for the run: deadlock. With a bounded wait it ends at the timeout; with `INFINITE`, or until Windows kills the process on close, it does not. With `install_signal_handlers = 0` the same handler sees the run return at once. | `probe_userwait.c` on edge: "run DID NOT RETURN within 4 s (blocked in restore)" with handlers installed; "run returned" without. | Document it at `install_signal_handlers`: a console handler of the application's own must not wait for `kl_http_server_run` while Keel's handler is installed. Use one or the other. (A structural fix would be to not unregister from the loop thread, and leave the handler registered for the process lifetime with the pointer cleared under the lock. The lock this PR adds is exactly what makes that safe.) | investigated; open (structural fix proposed, see "W1 investigation" above) |
+| W2 | Pre-existing; documented OS behaviour. Informational to Low | `http_server_plat_win.c:46-57` | For `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT`, Windows ends the process once the handler returns. The handler returns `TRUE` right after publishing the stop, so the graceful drain the PR's comments and the CHANGELOG imply for "close, logoff or shutdown" does not run: in-flight requests are cut, `on_cancel` is not delivered, and an owned AF_UNIX node is not unlinked. `CTRL_LOGOFF`/`SHUTDOWN` also reach console processes only in some configurations. | Not driven (closing the console over ssh is not possible); from the `SetConsoleCtrlHandler`/`HandlerRoutine` documentation. | Either document that only Ctrl-C/Ctrl-Break drain gracefully, or wait in the handler (outside `kl_signal_lock`, bounded by the OS grace period) for an event the run sets after its drain. Waiting needs the restore not to unregister from the loop thread first, or it deadlocks exactly as W1 does. | documented in #542 |
+| C1 | Documented caller contract ("single instance only; only the last server to call `kl_http_server_run()` receives signals"), but the contract text is inaccurate. Low | `http_server_plat_win.c:69-90`; `include/keel/http_server.h:124-125` | With two servers, A's restore clears the single pointer even though B installed last. B's registration is still there but finds `NULL` and returns `FALSE`, so Ctrl-C falls through to the default handler (ExitProcess) while B runs. So the last server stops receiving console events as soon as any earlier server returns, contrary to the header. Concurrent install(B) and restore(A) can interleave the same way. POSIX is similar: A restores the `sigaction` it saved, possibly the default, and SIGTERM then kills the process. No use-after-free: the pointer is only ever the last installer, or `NULL` after any restore. Duplicate registrations are counted (add, add, remove, remove succeed, and a third remove fails with error 87), so the registration count stays balanced. | `probe_two_servers.c`: "B STILL RUNNING (Ctrl-Break not delivered to it); events that fell through to the next handler: 1". | Reword the header ("only one server at a time; once any server's run returns, none receives signals"), or clear the pointer only when it still equals `s` (`if (kl_signal_server == s)`), which keeps B reachable in the common case. | fixed in #542 |
+| I1 | Informational (premise of the PR) | `http_server_plat_win.c:28-33` comment; CHANGELOG entry | Measured on Windows 10.0.26300: while a dispatcher thread runs a handler, both `SetConsoleCtrlHandler(h, TRUE)` and `SetConsoleCtrlHandler(h, FALSE)` block until it returns (2000 ms against a 2000 ms handler). The pre-fix `origin/main` handler, with a 300 ms gap between load and stop and a real `CTRL_BREAK` event, then a stop, join, free and `VirtualFree`, completed cleanly: the run returned 234 ms after the stop, held in restore. The new test calls the handler directly on a test thread, not through the dispatcher, so it proves the lock's guarantee but not that #539 occurs in practice. The behaviour is undocumented and may differ across Windows versions, so the lock is still worth having. It also confirms the PR's rule "never call SetConsoleCtrlHandler with the lock held": doing so would deadlock against a dispatcher holding its lock and waiting for ours. | `probe_console_lock.c`, `probe_remove.c`, `probe_win_main_uaf.c`. | Reword the comment and CHANGELOG: "Windows does not document that unregistering waits for a running handler", rather than stating that it does not wait. | #542 corrected (comment, CHANGELOG, PR description) |
+| T1 | Informational | `tests/test_ctrl_handler_win.c` | Correct and not flaky: the 300 ms "still waiting" check cannot false-fail on the fixed code, because the handler holds the shared lock until `g_release` is set. On a failed `ASSERT` the parked threads are left behind and die with the process. It exercises only the direct-call path (see I1) and only `CTRL_C_EVENT`. 10/10 passes (5 under select(), 5 under IOCP). | Run on edge. | None required. | documented in #542; a C1 case added |
+
+#### Areas with no finding
+
+- **Memory safety and C11 UB in the change:** none. `SRWLOCK_INIT` static initialisation is valid.
+  The plain pointer has no data race: it is read and written only under the lock, whose
+  acquire/release give the ordering. Dropping `<stdatomic.h>` from the TU is sound, and the
+  `toolchain.mk` comment edit matches it: `/experimental:c11atomics` is still passed globally for
+  `kl_atomic.h`.
+- **Work under the lock:** `kl_http_server_stop` does atomics, one CAS, `kl_monotonic_ms`
+  (QueryPerformanceCounter) and a `send()` of one byte on a non-blocking loopback socket
+  (`platform_wakeup_win.c:94-110`; a full buffer returns WSAEWOULDBLOCK). Nothing blocks, logs,
+  calls a user callback, re-enters the handler or takes `kl_signal_lock`. `stop_wake_wr` is closed
+  only by `kl_http_server_free`, which by contract follows the restore.
+- **Lock order:** dispatcher lock, then `kl_signal_lock` shared (handler). Install takes the
+  exclusive lock and releases it before `SetConsoleCtrlHandler`; restore calls
+  `SetConsoleCtrlHandler` before taking the exclusive lock. No cycle. SRW writer starvation is not
+  a concern: console events are serialised by the dispatcher.
+- **Stop from another thread at the same time:** safe. `kl_http_server_stop` is thread-safe by its
+  CAS protocol (#536), and the handler's shared hold does not exclude other callers.
+- **Failed start:** install happens only after bind, listen, nonblocking, event registration and
+  the lock-free check. The one failure after install (`server_accept_listener_start`) restores
+  (`http_server.c:428`); the completion-loop failure breaks to the common restore (`:818`).
+  `kl_http_server_free` never installs or restores. Freeing while `run` is still executing is a
+  caller-contract violation, outside the PR.
+- **Repeated install/restore:** one server is run once per init (enforced by `run_started`).
+  Sequential servers are balanced: one registration and one removal each. 40 sequential
+  init/run/real-Ctrl-Break/free/poison cycles completed with `HeapValidate` clean.
+- **Makefile/MSVC:** the explicit rule wins over the Windows `tests/test_%$(EXE)` pattern rule.
+  The hooked object goes before `libkeel.a` (after `/link` on MSVC), defines every symbol of the
+  archive member, and so never pulls the archive's `http_server_plat_win.o`. There is no
+  duplicate-symbol risk under either GNU ld or link.exe. `OBJ_OUT`/`EXE_OUT`/`TEST_OBJ_TMP`/
+  `CC_FORCE_INC` are used as in the neighbouring Windows rules. The hooked `.o` name does not
+  collide with the `/Fo$(OBJDIR)/tests/` output of the test TU. The rule lists no header
+  prerequisites, but it rebuilds whenever `$(KEEL_LIB)` does. MSVC itself was not built (vcvars
+  does not initialise over ssh); the MSVC verdict comes from reading the rule.
+- **POSIX path:** unaffected by the PR. `TEST_SRC` filters the new suite out (`make -n test`
+  never names it), and the POSIX TU is untouched. The explicit target exists on POSIX but is
+  reachable only by naming it. The POSIX TU's own defect is P1.
+
+#### What was run
+
+- macOS: `make check-msvc-parity check-pollcomp-suite-list check-test-layout check-no-em-dash
+  check-no-milestones check-protocol-home check-substrate-purity`, all OK. `parity[winselect]`
+  enrols 126 of 127 and `parity[iocp]` 119 of 120, each with one documented exclusion. `make`
+  (kqueue). POSIX probe `probe_posix_uaf.c` (P1).
+- edge (MSYS2 UCRT64, Windows 10.0.26300): `make` and `make BACKEND=iocp`;
+  `tests/test_ctrl_handler_win.exe` passed 5/5 on select() and 5/5 on IOCP. Probes, each in its own
+  console process group (`CREATE_NEW_PROCESS_GROUP`, events sent only to that group):
+  `probe_console_lock` and `probe_remove` (I1, duplicate-registration semantics),
+  `probe_win_main_uaf` (I1), `probe_two_servers` (C1), `probe_userwait` (W1), and `probe_stress`
+  (40 real-event cycles, clean).
+- Not counted as a finding: an unbounded `CTRL_BREAK` flood (no sleep between
+  `GenerateConsoleCtrlEvent` calls) stalled a server run before bind. The no-Keel control
+  `probe_flood_thread` shows the same flood stops any newly created thread from running for more
+  than 3 s: each event injects a thread into the process. An earlier unbounded run also sent the
+  events to the whole ssh console group and left a hard-to-kill probe process, which later exited
+  on its own.
+- Not run: native MSVC, `make cppcheck`/`analyze`, the full `test-win` suite (the PR reports it),
+  CI.
+- Probe sources (`probe_*.c`, `selfgroup.h`, `plat_posix_delay.c`, `plat_win_main_delay.c`) were
+  kept outside the repository with the audit's scratch files.
+
+### Part B: PR #543, the HTTP/2 settle pass that replaces the flush timer
+
+**Revision:** PR #543 head `5586facf` (two commits over `main` `b43d3110`: `56968137` and
+`5586facf`); motivating issue #540. Read-only; no repository file was changed by the audit. Builds,
+probes and runs used scratch copies (`git archive 5586facf`) on macOS, a new `~/keel-aud543c` on
+core and a new `C:\Users\Mark\keel-aud543c` on edge.
+**Scope:** C safety and correctness of the change and of everything it reaches: the settle pass
+(`kl_http_server_settle_h2` / `_due`, `http_server_core.c:579-603`), its two call sites (readiness
+run loop `http_server.c:449-471`, `kl_http_server_run_completion_loop` `http_server_core.c:610-621`),
+the `settle` / `settle_due` hooks (`http2_server.c:1256-1275`), the stream sink, `h2_flush_ex`,
+`h2_flush_outside`, `h2_stream_resume`, `h2_streams_release_all`, `kl_http2_server_comp_sent`,
+`on_readable` / `on_writable` / `feed` / `cleanup` / `abandon`, `completion_http2.c`,
+`completion_http_server.c` close paths, the stream notifications in `http_response.c`, the sweep,
+`kl_http_server_conn_release`, `kl_http_conn_release` and the pool, and the merged
+`kl_http_conn_request_write` (`http_server_core.c:1056`). The axis audit of the same PR is a
+separate pass.
+
+**Result:** no Critical, High or Medium. No memory-safety defect, lost output, lost wakeup or busy
+spin was found in the change; the removal of the flush timer also removes a class of timer-outlives-
+`h2c` lifetimes. Four Lows (one PR-introduced cost, one PR-introduced weakening of a guard, two
+pre-existing behaviours the new pass leaves in place) and one hygiene note. Dispositions in section 4.
+
+**Engines run (all green unless stated):**
+- macOS kqueue: `make`, `make test` (one failure, `cloexec.every_descriptor_keel_creates_is_close_on_exec`,
+  only under `-j8` load; passes alone, unrelated to this change); nghttp2 `make e2e`
+  (`NGHTTP2_DIR=/opt/homebrew/opt/libnghttp2`); `make freestanding-lib-server` (x86_64 and aarch64
+  UEFI archives gated OK; HTTP/2 is not in the freestanding server, its hooks are NULL and both
+  settle functions return at once).
+- macOS pollcomp: `make BACKEND=pollcomp test-pollcomp` (same flaky cloexec only).
+- macOS ASan+UBSan: not obtained on this host. With `DEBUG_CFLAGS`, `test_allocator_validate` and
+  `test_http2` spin before `main` (`sample`: `__asan::InitializeShadowMemory` ->
+  `StaticSpinMutex::LockSlow` under `dyld_shared_cache_iterate_text_swift`); a Homebrew llvm@21
+  build of `test_http2` printed nothing in 120 s. An environment defect, not this change; sanitizer
+  coverage comes from Linux.
+- Linux core, ASan+UBSan: epoll full `make test` clean (`-O1 -fsanitize=address,undefined`); `test-pollcomp-san` clean; io_uring
+  `test-iouring-san` clean (`-luring` added to the overridden `LDFLAGS`); nghttp2 e2e
+  (`e2e_h2_stream_control`, `e2e_h2_stream_flow`, `e2e_socket`, `e2e_idle`, `e2e_h2c_upgrade`) clean under ASan on epoll, pollcomp and io_uring.
+- Windows edge (MSYS2 UCRT64): `test_http2` on IOCP (75 passed) and select() (74 passed, the
+  completion-only case skipped).
+
+#### 1. Findings
+
+| ID | Severity | Class | Location | Finding | Smallest fix |
+|---|---|---|---|---|---|
+| 543-L1 | Low | proven (measured cost; introduced by the PR) | `http_server_core.c:579-603`; called `http_server.c:449,451`, `http_server_core.c:613,619` | Two more full scans of the connection pool on every loop iteration, unconditional whenever `http2_server.c` is linked (every hosted server: `kl_http_server_init` installs the hooks), including servers with `config.h2 == NULL`, which can never hold an HTTP/2 connection. `KlHttpConn` is 4736 bytes, so each slot is a cache miss. Probe (10 000 slots, idle, macOS O2): the sweep costs 13.4 us per iteration, the two settle scans 18.7 us more, so the per-iteration pool cost is 2.4 times what it was. At the default 256 slots it is about 0.5 us and invisible; at 10 000 slots and tens of thousands of wake-ups per second it is a measurable share of a core. | `if (!s->config.h2) return;` (and `return 0;`) at the top of both functions. A per-server count of HTTP/2 connections, or a server flag set by `h2_schedule_flush`, would make it free for HTTP/2 servers too, but needs a back-pointer the h2 object lacks. |
+| 543-L2 | Low | theoretical (introduced by the PR) | `http_server_core.c:1056-1064` | Merging the two request-write seams dropped `kl_http_conn_http2_request_write`'s `c->state == KL_HTTP_CONN_HTTP2` check; the merged function checks only "not SUSPENDED". It re-registers READ\|WRITE, which is correct only for the WEBSOCKET and HTTP2 states (the comment says "call it for those two only"). Safe today: the only callers are `ws_send_frame` (state is WEBSOCKET before `on_open` runs, `http_server_ws.c:398`) and `h2_flush_outside`, reached only from the settle hook, which runs on state HTTP2 and nothing inside a flush changes `c->state` (stream requests carry no `_server_ctx`, so a producer cannot pause, resume or suspend the connection). A future caller in another state would install a WRITE watch the dispatch then acts on for the wrong state. | Replace the SUSPENDED test with `if (c->state != KL_HTTP_CONN_WEBSOCKET && c->state != KL_HTTP_CONN_HTTP2) return;`, which subsumes it and restores the guard both old functions had in effect. |
+| 543-L3 | Low | proven behaviour (pre-existing; the PR keeps the window) | `http2_server.c:1145-1162` (`kl_http2_server_feed`), `1256-1275` (settle hooks) | A session that failed (a flush returned -1) still takes the client's input: `kl_http2_server_feed` calls `session->recv` without checking `h2c->failed`, so new requests reach `h2_cb_on_request` and run their handlers on a session that can never answer them. When the failure happens in the settle pass, the pass ends the streams and `settle_due` then returns 0, so the loop waits a full iteration (up to `KL_POLL_TIMEOUT_MS`, 1 s) before the sweep closes the connection; a client frame in that wait runs a handler. Probe A (below): `failed=1`, then a request on stream 3 ran `handler_called` once. The same window existed on `main` (the flush timer fired after the sweep). Impact: a handler with side effects runs for a request whose answer is a connection close without GOAWAY. | `if (h2c->failed) return KL_HTTP_CONN_CLOSED;` at the top of `kl_http2_server_feed` (covers readiness `on_readable` and both completion drives). |
+| 543-L4 | Low | theoretical (pre-existing; the settle hook's comment overstates its coverage) | `completion_http2.c:31-37,49-53` with `http2_server.c:1153-1154`; `completion_http_server.c:535-545` | On a completion loop, a flush that fails inside the connection's own drive (`kl_http2_server_feed`, e.g. an output-queue reservation failure) returns CLOSED, and `kl_comp_close_after_output` moves the connection to state CLOSED while queued output remains. The settle pass only visits state HTTP2, so the streams are not released: their producers hear `completed 0` only at the slot release, after the queue drains or, for a client that stopped reading, after `read_timeout_ms`. Their writes are refused meanwhile (`h2c->failed`), so nothing accumulates. The settle hook's comment ("Their streams end here, not when the connection is released") holds only for failures first seen in the settle pass or the drain's GOAWAY flush. `main`'s sweep service hook had the same gate. | In `kl_http2_server_feed`, release the streams (`h2_streams_release_all`) when `h2_flush` fails, before returning CLOSED: that is after the flush has returned, inside the connection's own event, not inside a producer's call. |
+| 543-H1 | Info | hygiene | `http2_server.c:21` | `#include <keel/timer.h>  /* the deferred flush of a streamed response's output */` survives the removal of the flush timer; nothing in `src/protocols/http2/` calls `kl_timer_*` now. | Remove the include. |
+
+#### 2. Probes
+
+Scratch copy of `tests/protocols/http2/test_http2.c` with cases appended (mock session and rig as
+in the suite), built with the suite's own rule.
+
+- **Probe A** (`probe.failed_session_still_runs_handlers`): open stream 1, settle, set
+  `mock.flush_return = -1`, write, settle (the flush fails; streams released, `settle_due` 0), then
+  `kl_http2_server_feed` (it calls `session->recv` once on the failed session) and a new request on
+  stream 3 delivered through the session callbacks, as a real `recv` would. Output: `failed=1
+  left=0 due_after_settle=0 feed_state=CLOSED rc=0 handler_ran=1`. The assertion that no handler
+  runs fails: 543-L3.
+- **Probe C** (`probe.settle_scan_cost`, `probe.sweep_scan_cost`): `max_connections = 10000`, no
+  connection open, 10 000 iterations: settle + due 187 ms (18.7 us per iteration), sweep 134 ms
+  (13.4 us): 543-L1. With `config.h2 = NULL` the settle scans still cost 18.3 us per iteration.
+- **Fix check** (scratch tree only): with the three smallest fixes from the table applied (the
+  `config.h2` gate, the WEBSOCKET/HTTP2 state guard, the `failed` check in `kl_http2_server_feed`)
+  and the include removed, `test_http2` (74), `test_websocket` (55) and `test_stream_termination`
+  (42) pass on kqueue; Probe A's feed no longer reaches `session->recv` (0 calls, against 1 at
+  `5586facf`); Probe C with `config.h2 = NULL` drops to 0.0 us per iteration.
+
+#### 3. Categories with no finding
+
+- **Memory safety and C11 UB:** none. No new arithmetic, no new allocation. The pool is a fixed
+  array (`http_connection.c:74`, never reallocated while running), iterated by index with the state
+  re-read per slot; no pointer is held across iterations.
+- **Callback-triggered destruction and reentrancy in the pass.** Inside `h2_flush_outside` the
+  callbacks are the session's `send` (connection write: never releases, `kl_comp_queue_write` only
+  refuses a closing connection), `on_stream_reset` (one stream's close notification, slot left in
+  place), `read_body`, and after the send the writable edges (`kl_http_response_stream_progress`).
+  From a notification or edge a producer can write, end or abort any stream (each only sets
+  `flush_due` / `reset_due`), complete another connection's async op, or call
+  `kl_http_server_stop` (atomics and a wake-up write only; the drain's GOAWAY flush runs later from
+  `kl_http_server_drain_progress`, never synchronously). None of these releases the connection
+  being settled, frees `h2c`, `h2c->streams` or the session, or re-enters `h2_flush_ex` on it, so the
+  uses of `h2c` after the flush (`want_write`, `failed`, `num_streams`) are sound. Freeing the server
+  from a callback while `kl_http_server_run` is on the stack is a caller-contract violation, as for
+  every loop callback (`http_server.h:489`).
+- **Slot reuse and registration identity.** No accept happens during the pass, so no slot is
+  reacquired inside it. A connection released inside it (another connection's, through an async
+  completion) leaves state HTTP2 and `c->h2` is NULL after `kl_http2_server_cleanup`; a completion
+  connection whose release is deferred (`comp_closing`, state still HTTP2) is flushed into a
+  refusing queue, which marks the session failed and ends its streams early: benign. The readiness
+  re-registration in `h2_flush_outside` is made only for state HTTP2 on its own `&c->stream` and fd
+  (see 543-L2 for the guard). Every completion-loop connection is `comp_driven`, so the readiness
+  `kl_event_mod` is never issued on a completion engine.
+- **Lost output and wakeups.** Output written from dispatch, the sweep, async deadlines, timers or
+  the drain is flushed by the next iteration's pass before that iteration's wait, on both models.
+  Output written after the pass (writable-edge or close notifications it fires, HTTP/1.1 writable
+  edges in `kl_http_comp_stream_edges`, readiness `kl_async_sync_stream_interest` fires none) is
+  caught by `settle_due`, evaluated after everything that can run before the wait on both loops;
+  nothing between it and `kl_event_wait` / `kl_http_comp_run` runs user code. A connection settled
+  later in the same pass covers writes into it from an earlier one. `kl_http2_server_comp_sent` no
+  longer flushes for owed output, which is now always covered by the pass.
+- **Busy spinning and starvation.** `settle_due` reports only `flush_due` (set by a producer call)
+  or a failed session with streams left; held output (full socket, spent window, `out_refused`) and
+  a resume that failed again never force a zero wait. With nghttp2 a blocked send packs at most one
+  DATA frame, so a producer writing from every edge costs at most one extra zero-wait iteration
+  after the socket fills. A producer that keeps writing while the socket accepts keeps the wait at
+  zero, which is the work it asked for; events, the sweep and timers still run each iteration.
+  `h2_streams_release_all` always takes `num_streams` to 0 (no stream can be created from a
+  notification), so the failed-session report clears in one pass.
+- **Failed sessions, resume failures.** `flush_due` is cleared at the start of every flush;
+  `resume_due` is retried at the loop's pace (at most a second), skipped for a stream being reset.
+  The failed-session handling matches `main` apart from 543-L3 / 543-L4.
+- **Drain and stop.** Drain counts HTTP/2 connections as active; `drain_shutdown`'s flush failure is
+  settled on the next pass and the sweep closes. A stop that ends the run leaves `flush_due` output
+  unsent, as the timer did.
+- **h2c upgrade.** `flush_due` set while the HTTP/1.1 connection is mid-upgrade is cleared by the
+  upgrade's own flush; a connection is not visited until its state is HTTP2.
+- **Freestanding.** HTTP/2 is absent; both settle functions return on NULL hooks; archive gated OK.
+- **Error handling and resource ownership.** No new ownership. The removal of the timer removes the
+  cancel-on-cleanup and cancel-on-abandon obligations and the timer-heap-full mode entirely.
+
+#### 4. Dispositions
+
+| ID | Disposition |
+|---|---|
+| 543-L1 | fixed in #543: both settle functions return at once when `config.h2` is NULL |
+| 543-L2 | fixed in #543: `kl_http_conn_request_write` refuses every state but WEBSOCKET and HTTP2 (test `h2.request_write_leaves_other_states_alone`) |
+| 543-L3 | fixed in #543: `kl_http2_server_feed` refuses a failed session's input (test `h2.a_failed_session_reads_no_more_input`) |
+| 543-L4 | fixed in #543: a failed flush inside the connection's own event ends its streams, in `kl_http2_server_feed` and, for the same reason, in `kl_http2_server_comp_sent`; the correction's review found the same gap when the session's `recv` fails, fixed alike (tests `h2.a_failed_flush_in_the_connection_event_ends_its_streams`, `h2.a_failed_flush_in_a_send_completion_ends_its_streams`, `h2.a_fatal_session_error_ends_its_streams`) |
+| 543-H1 | fixed in #543: the include is removed |
+
 ## Twenty-first pass: 3.6.0 pre-release audit (2026-11-25)
 
 **Revision:** `main` `65568ff` (#521; the changes since v3.5.0). Read-only; no repository file was
