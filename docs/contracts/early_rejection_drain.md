@@ -82,8 +82,10 @@ Why it lingers instead of closing at the bound: the answer can still be queued i
 close over unread input is a reset, which drops the server's send queue (and which a Windows client
 answers by discarding what it has received and not yet read). Lingering costs at most the byte cap
 above and one slot for `read_timeout_ms`, the idle timeout any connection has. A flooding client's
-FIN waits behind the upload the server no longer reads, so such a client is held to that deadline;
-a client that merely stalled (it neither reads, sends nor closes) is too. The byte cap is lifted only
+FIN waits behind the upload the server no longer reads while that upload is more than the kernel's
+socket buffers hold, so such a client is held to that deadline; a client that merely stalled (it
+neither reads, sends nor closes) is too. When the unread upload fits those buffers, the FIN gets
+through and lifts the cap, as below. The byte cap is lifted only
 after the client's FIN, when nothing new can arrive: the total read for such a request is at most
 `reject_drain_max_bytes` + max(`reject_drain_max_bytes`, `max_body_size`) + two receive windows, plus
 what was already buffered when a FIN is seen.
