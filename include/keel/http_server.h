@@ -342,7 +342,7 @@ typedef struct KlHttpServer {
     int     drain_listener_closed; /**< 1 = this drain has stopped listening (http_server_core.c) */
     /* Appended after 3.5.0: run-once enforcement. INTERNAL. */
     int     run_started;           /**< 1 = kl_http_server_run has been entered since init */
-    int     stop_requested;        /**< 1 = kl_http_server_stop was called (atomic; honoured by a later run) */
+    int     stop_requested;        /**< nonzero = kl_http_server_stop was called (atomic; honoured by a later run) */
 } KlHttpServer;
 
 /**
@@ -463,6 +463,11 @@ int  kl_http_server_run(KlHttpServer *s);
 /**
  * @brief Request server shutdown. If drain_timeout_ms is configured,
  *        enters drain mode first; a second call stops at once.
+ *
+ * Exactly one call enters the drain and sets its deadline. A call that
+ * overlaps that entry (it runs before the first call has established the
+ * drain) leaves the drain and its deadline alone; a call made once the drain
+ * is established stops the server at once.
  *
  * A graceful drain, from the run loop's next tick:
  * - **stops listening**: the listen socket is closed (an owned AF_UNIX node is

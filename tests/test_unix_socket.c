@@ -1468,6 +1468,43 @@ UTEST(unix_socket, hardened_group_writable_parent_fails_closed) {
     rmdir(dir);
 }
 
+/* The bind() syscall itself denied (EACCES: a parent we own and trust, but cannot write), not a trust
+ * refusal. kl_http_server_run fails closed with KL_ERR_BIND, creates nothing, leaves the server not
+ * running, and the server tears down cleanly afterwards, through the stop + free a caller issues
+ * after a server thread returns. A sandbox that denies AF_UNIX bind takes this path. */
+UTEST(unix_socket, denied_bind_fails_closed_and_frees_cleanly) {
+    if (geteuid() == 0)
+        UTEST_SKIP("root ignores the directory permission that denies the bind");
+    for (int unlink_stale = 0; unlink_stale <= 1; unlink_stale++) {
+        char dir[80], path[160];
+        test_dir_path(dir, sizeof(dir), unlink_stale ? "denyu" : "deny");
+        rmdir(dir);
+        ASSERT_EQ(0, mkdir(dir, 0700));
+        ASSERT_EQ(0, chmod(dir, 0500));             /* trusted, but bind() cannot create the node */
+        snprintf(path, sizeof(path), "%s/x.sock", dir);
+
+        KlHttpServer srv;
+        KlHttpServerConfig cfg = {
+            .transport = KL_HTTP_SERVER_TRANSPORT_UNIX,
+            .unix_socket_path = path,
+            .unix_socket_unlink = unlink_stale,
+            .unix_socket_mode = 0600,               /* a post-bind mutation that must not be reached */
+            .max_connections = 4,
+        };
+        ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+        EXPECT_EQ(-1, kl_http_server_run(&srv));
+        EXPECT_EQ(srv.last_error, KL_ERR_BIND);
+        EXPECT_EQ(0, kl_http_server_draining(&srv));
+        EXPECT_EQ(-1, kl_http_server_run(&srv));    /* run once per init, even after a failed run */
+        kl_http_server_stop(&srv);                  /* what a caller does once its thread returns */
+        kl_http_server_free(&srv);
+
+        EXPECT_NE(0, access(path, F_OK));           /* nothing was created */
+        chmod(dir, 0700);
+        rmdir(dir);
+    }
+}
+
 /* Tier B: transferring ownership to a foreign uid rejects a sticky shared parent (which Tier A
  * would accept), because the foreign owner could then race entry substitution. */
 UTEST(unix_socket, hardened_tier_b_rejects_sticky_shared_parent) {

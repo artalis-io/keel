@@ -579,6 +579,13 @@ tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(KEEL_LIB) $(TEST_CO
 	$(CC) $(CFLAGS) -DKEEL_IOURING_TEST_HOOKS -c -o tests/event_iouring_hooked.o src/event_iouring.c
 	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
+# A failed start restores the signal handlers it installed. Links a -DKEEL_HTTP_SERVER_TEST_HOOKS
+# copy of the server ahead of libkeel.a (as test_iouring_sqe_fail does the io_uring backend), whose
+# hook makes the readiness accept path fail to start.
+tests/test_server_start_fail: tests/test_server_start_fail.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_TEST_HOOKS -Isrc -Isrc/protocols/http -c -o tests/http_server_hooked.o src/protocols/http/http_server.c
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/http_server_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
+
 test: $(TEST_BIN)
 	@failed=0; \
 	for t in $(TEST_BIN); do \
