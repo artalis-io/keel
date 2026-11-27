@@ -424,9 +424,15 @@ int kl_comp_ws_queue_full(const KlHttpConn *c, size_t add) {
     return c->state == KL_HTTP_CONN_WEBSOCKET && comp_stream_queue_full(c, add);
 }
 
-/* http_internal.h: an HTTP/2 connection's frames, under the same producer bound. */
+/* http_internal.h: an HTTP/2 connection's frames, under the same producer bound. The session hands
+ * over a frame whole and keeps a refused one, so a single frame larger than the bound itself would
+ * never fit and the connection would stall for good: an idle queue (nothing unposted) takes it, and
+ * everything after it waits for it as usual. (The bundled nghttp2 session writes at most one 16 KiB
+ * DATA frame or one header block at a time; a custom session may write more.) */
 int kl_comp_http2_queue_full(const KlHttpConn *c, size_t add) {
-    return c->state == KL_HTTP_CONN_HTTP2 && comp_stream_queue_full(c, add);
+    if (c->state != KL_HTTP_CONN_HTTP2) return 0;
+    if (add > KL_COMP_STREAM_QUEUE_MAX && comp_tlsq_unposted(c) == 0) return 0;
+    return comp_stream_queue_full(c, add);
 }
 
 /* http_internal.h: conn_write on a plaintext completion-driven connection. Queue the bytes and start

@@ -246,7 +246,9 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
   WOULD_BLOCK and the connection's other streams keep sending. Memory is the capacity per streaming
   stream, plus the session's own frame buffer. On a completion loop the connection's output queue
   takes frames up to its producer bound; past it the session holds them and a send completion
-  resumes the flush.
+  resumes the flush. A single frame larger than the whole bound (never written by the bundled
+  nghttp2 session, whose writes are at most one 16 KiB DATA frame or one header block) is taken
+  once nothing is waiting to be posted, rather than refused for good.
 - **Input while output is held.** The connection keeps reading its client while output is
   pending, on both event models: a readiness loop keeps READ armed, and a completion loop keeps one
   receive posted. A client's RST_STREAM, WINDOW_UPDATE or new request is read while another stream's

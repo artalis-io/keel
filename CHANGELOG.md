@@ -31,7 +31,8 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   (appended fields). Recompile everything, including custom HTTP/2 sessions.
 - On a completion loop (io_uring, IOCP, pollcomp), an HTTP/2 connection's frames are held to the
   output queue's producer bound, as a WebSocket's are: a large response to a client that does not
-  read no longer queues without limit.
+  read no longer queues without limit. A single frame larger than the whole bound, which only a
+  custom session can write, goes out once the queue has nothing waiting.
 - On a completion loop, an HTTP/2 connection keeps reading its client while output is queued, as a
   readiness loop does. It used to read only once its output queue was idle, so a client's
   RST_STREAM or WINDOW_UPDATE for one stream waited behind another stream's output, indefinitely for
