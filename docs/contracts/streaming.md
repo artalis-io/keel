@@ -257,10 +257,10 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
 - **Producing later: no suspend.** The connection carries other streams, so it is not suspended
   and there is no `KlAsyncOp`. The handler returns with the stream open; a producer on the loop
   thread (a timer, a watcher, a thread pool's `done_fn`) writes it later. Output written outside
-  the connection's own events is sent on the next loop iteration, by a zero-delay timer. When no
-  timer can be armed (the timer heap cannot grow), the flush is owed: the connection's next event
-  sends it, and failing that the server's per-iteration sweep does, so it waits at most one
-  iteration (a second at most), whatever the client does.
+  the connection's own events is sent before the loop next waits, by a pass the server runs once
+  per loop iteration on both event models; it needs no timer, so nothing can refuse it. A producer
+  that writes again from the writable edge that pass fires is sent on the next iteration, which
+  then does not wait.
 - **Termination: the close notification.** `kl_http_response_stream_on_close` fires exactly once
   when the stream is released: `completed` 1 once the ended body went out, 0 when the client reset
   the stream, the connection closed or the server was freed. A reset cancels only that stream's

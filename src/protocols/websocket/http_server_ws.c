@@ -199,7 +199,7 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
          * event of this connection is behind the send (a frame from another connection's
          * on_message, a timer, a thread-pool done_fn). */
         if (!was_pending && kl_drain_pending(&ws->drain))
-            kl_http_conn_ws_request_write(ws->conn);
+            kl_http_conn_request_write(ws->conn);
         return 0;
     }
 

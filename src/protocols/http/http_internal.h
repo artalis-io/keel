@@ -104,16 +104,18 @@ size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len);
  * bound (room comes only from a send completion). Always 0 on readiness, where the socket decides. */
 int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add);
 
-/* A WebSocket's drain just went from empty to holding bytes outside the connection's own event:
- * make sure they are flushed. Readiness arms READ|WRITE, the mask of the WebSocket state (the
- * connection keeps reading); that mask is wrong for any other state, hence WebSocket only. A
- * completion loop flushes from its send completions, so there is nothing to do. */
-void kl_http_conn_ws_request_write(KlHttpConn *c);
+/* Output a WebSocket or HTTP/2 connection holds was added outside the connection's own events (a
+ * WebSocket drain that went from empty to holding bytes; HTTP/2 output the session keeps for a full
+ * socket): make sure it is flushed. Readiness arms READ|WRITE, the mask of both states (the
+ * connection keeps reading); that mask is wrong for any other state, so call it for those two only.
+ * A completion loop sends from its queue, so there is nothing to do. */
+void kl_http_conn_request_write(KlHttpConn *c);
 
-/* The HTTP/2 counterpart: output a streamed response's producer added outside the connection's own
- * events is held by the session (a full socket). Readiness arms READ|WRITE, the HTTP/2 state's mask;
- * a completion loop sends from its queue, so there is nothing to do. */
-void kl_http_conn_http2_request_write(KlHttpConn *c);
+/* The HTTP/2 settle pass, once per loop iteration before the wait (both event models): flush
+ * HTTP/2 output written outside its connection's events. The check, run after everything else
+ * that precedes the wait: 1 = output became due since, and the wait must not block. */
+void kl_http_server_settle_h2(KlHttpServer *s);
+int  kl_http_server_settle_h2_due(const KlHttpServer *s);
 
 /* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.). A refusal nothing can clear
  * while this runs (a completion output queue at its producer bound) fails at once: retrying it
