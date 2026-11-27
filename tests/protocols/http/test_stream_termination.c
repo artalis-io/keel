@@ -1485,8 +1485,12 @@ static void fast_upload_slow_read_case(int *utest_result, int flood_ms, size_t b
         if (p.first_len == 0)
             p.first_len = parse_response(p.wire, p.wire_len, p.body, BODY_CAP, &p.body_len,
                                          &p.first_close);
-        kl_test_closesock(fd);
-        if (flood_ms) kl_test_sleep_ms(500);       /* the server notices the hang-up meanwhile */
+        /* A flooding client stays connected until the server's count is read: its FIN lifts the
+         * byte cap (the lingering server then reads what is already buffered, as the contract
+         * allows), and whether that FIN gets through before the count is read depends only on
+         * whether the unread upload fits the kernel's socket buffers, so on the client's speed. */
+        if (!flood_ms) kl_test_closesock(fd);
+        else kl_test_sleep_ms(200);                /* the server takes what is in flight, to its cap */
     }
     unsigned caps = kl_event_caps(&g_srv.ev.loop);
     server_stop_join();
@@ -1494,6 +1498,7 @@ static void fast_upload_slow_read_case(int *utest_result, int flood_ms, size_t b
     int released = g_answer_conn && g_answer_conn->state == KL_HTTP_CONN_CLOSED;
     size_t window = g_answer_conn ? g_answer_conn->stream.read_cap : 0;
     kl_http_server_free(&g_srv);
+    if (flood_ms && fd >= 0) kl_test_closesock(fd);
     printf("  sent %zu; wire %zu, first %ld, body %zu, closed %d, reset %d; server discarded %llu\n",
            sent, p.wire_len, p.first_len, p.body_len, p.closed, p.reset,
            (unsigned long long)discarded);
@@ -1507,9 +1512,9 @@ static void fast_upload_slow_read_case(int *utest_result, int flood_ms, size_t b
     } else {
         /* Defaults: 64 KiB while answering, max(64 KiB, 1 MB) lingering, a window each. */
         EXPECT_LE(discarded, (uint64_t)(64u * 1024u + 1024u * 1024u + 2u * (window + 65536u)));
-        /* Past the cap it reads no more. The flooding client's FIN waits behind the upload the
-         * server no longer reads, so no hang-up is seen: the slot is held to read_timeout_ms,
-         * bounded (it is still lingering here; nothing asserts when it goes). */
+        /* Past the cap it reads no more while the client is still sending (it has not hung up when
+         * the count is read). The slot is held to read_timeout_ms, bounded (nothing asserts when it
+         * goes). What a FIN releases afterwards is the half-closing case's business. */
         (void)caps;
         (void)released;
     }
