@@ -247,6 +247,11 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
   stream, plus the session's own frame buffer. On a completion loop the connection's output queue
   takes frames up to its producer bound; past it the session holds them and a send completion
   resumes the flush.
+- **Input while output is held.** The connection keeps reading its client while output is
+  pending, on both event models: a readiness loop keeps READ armed, and a completion loop keeps one
+  receive posted. A client's RST_STREAM, WINDOW_UPDATE or new request is read while another stream's
+  output fills the queue. (A completion loop used to read an HTTP/2 client only once its output
+  queue was idle.)
 - **Producing later: no suspend.** The connection carries other streams, so it is not suspended
   and there is no `KlAsyncOp`. The handler returns with the stream open; a producer on the loop
   thread (a timer, a watcher, a thread pool's `done_fn`) writes it later. Output written outside
@@ -255,13 +260,32 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
   when the stream is released: `completed` 1 once the ended body went out, 0 when the client reset
   the stream, the connection closed or the server was freed. A reset cancels only that stream's
   producer. After it the response pointer is not the producer's; no writable edge follows it.
+- **Abort.** `kl_http_response_stream_abort` is the producer's way to give up on a stream, typically
+  one whose client stopped opening its window (its writable edge never fires again). It needs no
+  edge or other progress: the stream's buffer is dropped at once and RST_STREAM CANCEL goes out on
+  the next loop iteration. Afterwards writes answer ERROR, the end returns -1, no edge fires, a
+  second abort returns -1, and the close notification fires once with `completed` 0. Other streams
+  are unaffected.
+- **Answered early.** Pre-body middleware that begins a stream and short-circuits has answered the
+  request: the rest of the request body is ignored, and at its end no post-body middleware, handler
+  or 404 runs. A body refused after the stream began (over `max_body_size`, or a reader that refuses
+  it) can no longer be answered 413, so the stream is reset (INTERNAL_ERROR). The body setters
+  (`kl_http_response_body_borrow` / `_copy`, `kl_http_response_file`, `kl_http_response_json`,
+  `kl_http_response_error`) refuse a response whose stream has begun.
+- **Body reader.** A request body that completed got `on_complete`; it never gets `on_error`
+  afterwards, when its streamed response closes, is reset or is aborted.
 - **Failure.** A write that cannot be buffered (allocation, or the legacy writer past the bound)
   fails the stream: its response answers ERROR and the stream is reset (RST_STREAM
   INTERNAL_ERROR); the close notification follows with `completed` 0.
 
-Tests: `tests/protocols/http/test_http_response.c` (the response layer over a stream sink) and
+Tests: `tests/protocols/http/test_http_response.c` (the response layer over a stream sink, abort,
+the body setters' refusal), `tests/protocols/http2/test_http2.c` (middleware-begun streams, the
+body reader's lifecycle, abort against a mock session),
 `integrations/http2/nghttp2/tests/e2e_h2_stream_flow.c` (two streams on one connection, one with an
-exhausted window; resetting it cancels only its producer; a body past the completion queue bound).
+exhausted window; resetting it cancels only its producer; a body past the completion queue bound)
+and `integrations/http2/nghttp2/tests/e2e_h2_stream_control.c` (aborting a window-stalled stream
+while its sibling streams; a WINDOW_UPDATE and a RST_STREAM read while another stream's output is
+held; portable, run on readiness and completion loops including IOCP and Windows select()).
 
 ## Read side (request-body streaming / inbound)
 

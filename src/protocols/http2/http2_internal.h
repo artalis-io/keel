@@ -63,6 +63,12 @@ struct KlHttp2ServerStream {
     int deferred;               /**< read_body answered DEFERRED: resume_body is owed on new data. */
     int progress_due;           /**< The session took bytes: fire the writable edge after the flush. */
     int reset_due;              /**< The stream failed: reset it (RST_STREAM) on the next flush. */
+    uint32_t reset_code;        /**< The RST_STREAM error code for reset_due (0: INTERNAL_ERROR). */
+    int resume_due;             /**< A resume_body failed: retry it on the next flush. */
+    int answered;               /**< Answered before its request ended (pre-body middleware began a
+                                     stream and short-circuited, or a refused body on a begun
+                                     stream): later DATA is ignored and no handler runs at its end. */
+    int body_done;              /**< The body reader got on_complete: it never gets on_error after. */
     char *obuf;                 /**< Body bytes accepted and not yet pulled: [ooff, olen). */
     size_t ooff, olen, ocap;
 };
@@ -91,6 +97,8 @@ struct KlHttp2ServerConn {
      * their output is sent by a flush on the next loop iteration, from a zero-delay timer. */
     int64_t flush_timer;           /**< The pending flush timer (valid while flush_armed). */
     int flush_armed;               /**< 1 = a flush is scheduled. */
+    int flush_owed;                /**< A flush could not be scheduled (no timer): the next send
+                                        completion or connection event flushes. */
     int out_refused;               /**< A completion output queue at its bound refused frames: flush
                                         again once a send completes. */
 };

@@ -286,18 +286,33 @@ static void h2_flush_tick(void *ud) {
 static void h2_schedule_flush(KlHttp2ServerConn *h2c) {
     if (h2c->flush_armed || !h2c->conn || !h2c->conn->stream.ctx) return;
     int64_t id = kl_timer_add(h2c->conn->stream.ctx, 0, h2_flush_tick, h2c);
-    if (id < 0) return;          /* no timer: the next event on the connection flushes it */
+    if (id < 0) {
+        /* No timer: the flush is owed. A readiness loop asks for WRITE, whose event flushes; a
+         * completion loop flushes on its next send completion (kl_http2_server_comp_sent) or input
+         * (a receive stays posted while the connection is HTTP/2). */
+        h2c->flush_owed = 1;
+        kl_http_conn_http2_request_write(h2c->conn);
+        return;
+    }
     h2c->flush_timer = id;
     h2c->flush_armed = 1;
 }
 
 /* New body bytes, or the end, for a stream: un-defer it with the session and send soon. */
+static void h2_stream_resume(KlHttp2ServerConn *h2c, KlHttp2ServerStream *s) {
+    /* Deferred until the resume succeeds: one that fails (no memory) is retried by the next flush,
+     * rather than leaving the session waiting for a resume that never comes. */
+    if (h2c->session->resume_body(h2c->session, s->stream_id) == 0) {
+        s->deferred = 0;
+        s->resume_due = 0;
+    } else {
+        s->resume_due = 1;
+    }
+}
+
 static void h2_stream_body_ready(KlHttp2ServerStream *s) {
     KlHttp2ServerConn *h2c = s->h2c;
-    if (s->deferred) {
-        s->deferred = 0;
-        (void)h2c->session->resume_body(h2c->session, s->stream_id);
-    }
+    if (s->deferred) h2_stream_resume(h2c, s);
     h2_schedule_flush(h2c);
 }
 
@@ -377,11 +392,28 @@ static size_t h2_sink_pending(const void *ctx) {
     return s->olen - s->ooff;
 }
 
+/* The producer gives up on the stream (kl_http_response_stream_abort): what it buffered is dropped
+ * now, the RST_STREAM (CANCEL) goes out with the next flush, and the producer's close notification
+ * follows when the session reports the stream closed. -1 when the stream is not open (closed,
+ * already reset, or failed). */
+static int h2_sink_abort(void *ctx) {
+    KlHttp2ServerStream *s = ctx;
+    if (!s->in_use || !s->streaming || s->reset_due || s->res.stream_error) return -1;
+    if (s->obuf) kl_free(s->h2c->alloc, s->obuf, s->ocap);
+    s->obuf = NULL;
+    s->ocap = s->olen = s->ooff = 0;
+    s->reset_due = 1;
+    s->reset_code = 8u;                        /* CANCEL (RFC 9113 7) */
+    h2_schedule_flush(s->h2c);
+    return 0;
+}
+
 static const KlHttpStreamSink h2_stream_sink = {
     .begin = h2_sink_begin,
     .write = h2_sink_write,
     .end = h2_sink_end,
     .pending = h2_sink_pending,
+    .abort = h2_sink_abort,
 };
 
 /* The session pulls a streamed body (from inside its flush). */
@@ -416,12 +448,16 @@ static kl_ssize_t h2_cb_read_body(void *ud, uint32_t stream_id, void *buf, size_
  * session's send, outside it: a producer that writes from its edge only schedules the next flush. */
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
     if (!h2c->session) return -1;
+    h2c->flush_owed = 0;
     for (int i = 0; i < h2c->slots_hwm; i++) {
         KlHttp2ServerStream *s = &h2c->streams[i];
-        if (!s->in_use || !s->reset_due) continue;
+        if (!s->in_use) continue;
+        if (s->resume_due && s->deferred && !s->reset_due) h2_stream_resume(h2c, s);
+        if (!s->reset_due) continue;
         s->reset_due = 0;
         s->res.stream_error = 1;
-        (void)h2c->session->reset_stream(h2c->session, s->stream_id, 2u /* INTERNAL_ERROR */);
+        (void)h2c->session->reset_stream(h2c->session, s->stream_id,
+                                         s->reset_code ? s->reset_code : 2u /* INTERNAL_ERROR */);
     }
     int rc = 0;
     h2c->out_refused = 0;
@@ -439,7 +475,7 @@ static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
 KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
-    if (!h2c->out_refused) return KL_HTTP_CONN_HTTP2;
+    if (!h2c->out_refused && !h2c->flush_owed) return KL_HTTP_CONN_HTTP2;
     if (h2_flush(h2c) < 0) return KL_HTTP_CONN_CLOSED;
     return KL_HTTP_CONN_HTTP2;
 }
@@ -452,8 +488,11 @@ KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c) {
  * releases moves slots too, so no stream pointer is held across the flush. 0, or -1 if the
  * session refused the response. */
 static int h2_answer_and_release(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
-    /* A streamed response stays: its body follows, and the stream is released when it closes. */
+    /* A streamed response stays: its body follows, and the stream is released when it closes. It
+     * is answered: a request that has not ended yet (pre-body middleware began the stream and
+     * short-circuited) gets no handler, no fallback and no body delivery at its end. */
     if (stream->streaming) {
+        stream->answered = 1;
         (void)h2_flush(h2c);
         return 0;
     }
@@ -741,19 +780,31 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     return 0;
 }
 
+/* A request refused after its response began streaming (a body over the limit, a reader that
+ * refused it): a 413 or 415 can no longer be sent, so the stream is reset instead (the producer
+ * hears completed=0), and the rest of its request is ignored. */
+static int h2_refuse_begun(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
+    stream->answered = 1;
+    stream->reset_due = 1;
+    (void)h2_flush(h2c);
+    return 0;
+}
+
 static int h2_cb_on_data(void *ud, uint32_t stream_id,
                           const char *data, size_t len) {
     KlHttp2ServerConn *h2c = ud;
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     /* A stream already answered (a rejected request, a refused stream) still receives the client's
-     * DATA: ignore it. A -1 is fatal to the whole session, and every other stream on it. */
-    if (!stream) return 0;
+     * DATA: ignore it. A -1 is fatal to the whole session, and every other stream on it. So does
+     * a stream answered before its request ended. */
+    if (!stream || stream->answered) return 0;
 
     if (stream->reader_lazy && !stream->body_reader) {     /* the first DATA of a length-less body */
         stream->reader_lazy = 0;
         KlHttpBodyReader *br = stream->route->body_reader(h2c->alloc, &stream->req,
                                                           stream->route->user_data);
         if (!br) {                                          /* refused on this stream only */
+            if (stream->streaming) return h2_refuse_begun(h2c, stream);
             kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
             return h2_answer_and_release(h2c, stream);
         }
@@ -775,7 +826,11 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
         stream->body_reader->on_data(stream->body_reader, data, len) < 0)
         refuse = 1;
     if (refuse) {
-        if (stream->body_reader) stream->body_reader->on_error(stream->body_reader);
+        if (stream->body_reader && !stream->body_done) {
+            stream->body_done = 1;
+            stream->body_reader->on_error(stream->body_reader);
+        }
+        if (stream->streaming) return h2_refuse_begun(h2c, stream);
         kl_http_response_error(&stream->res, 413, "Payload Too Large");
         return h2_answer_and_release(h2c, stream);
     }
@@ -786,9 +841,14 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     KlHttp2ServerConn *h2c = ud;
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return 0;                     /* already answered: see h2_cb_on_data */
+    /* Answered while its request was still arriving: the answer stands. No post-body middleware,
+     * no handler, no 404 (a buffered error body would replace the open stream's). */
+    if (stream->answered) return 0;
 
-    if (stream->body_reader)
+    if (stream->body_reader && !stream->body_done) {
+        stream->body_done = 1;                 /* on_complete is its last word: no on_error after */
         stream->body_reader->on_complete(stream->body_reader);
+    }
 
     if (kl_http_router_run_post_middleware(h2c->router, &stream->req,
                                       &stream->res) != 0)
@@ -813,8 +873,12 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
     KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return;
 
-    if (stream->body_reader)
+    /* A reader still taking the body hears it was cut short. One whose body completed does not: a
+     * streamed response outlives its request, and its close is not the body's error. */
+    if (stream->body_reader && !stream->body_done) {
+        stream->body_done = 1;
         stream->body_reader->on_error(stream->body_reader);
+    }
 
     /* A streamed response's producer hears that it is over: completed when its ended body went out
      * and the stream closed without error. Only this stream: the others are untouched. */

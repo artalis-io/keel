@@ -48,6 +48,9 @@ void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c);
 /* Post the next recv once the queued TLS output is out (or now, when nothing is queued). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c);
 
+/* HTTP/2: keep one receive posted whether or not output is queued (none when one already is). */
+void kl_comp_recv_alongside_output(struct KlHttpServer *s, KlHttpConn *c);
+
 /* ── the h2/ws drive functions the server dispatch calls ─────────────────── */
 
 /* Drive an established HTTP/2 connection over the completion loop. */

@@ -1318,7 +1318,7 @@ UTEST(stream_termination, a_first_begin_and_a_head_begin_still_work) {
 /* ── A stream sink (an HTTP/2 stream's response): body bytes go to the sink, unframed ──────────── */
 
 typedef struct {
-    int begins, ends, fail_begin;
+    int begins, ends, fail_begin, aborts;
     char buf[256];
     size_t len, taken;          /* taken: bytes the "transport" pulled (pending = len - taken) */
     int last_bounded;
@@ -1338,7 +1338,14 @@ static int fs_write(void *ctx, const KlIoVec *iov, int iovcnt, size_t len, int b
 }
 static int fs_end(void *ctx) { FakeSink *f = ctx; f->ends++; return 0; }
 static size_t fs_pending(const void *ctx) { const FakeSink *f = ctx; return f->len - f->taken; }
-static const KlHttpStreamSink fake_sink = { fs_begin, fs_write, fs_end, fs_pending };
+static int fs_abort(void *ctx) {
+    FakeSink *f = ctx;
+    if (f->aborts) return -1;                     /* the transport's own once */
+    f->aborts++;
+    f->len = f->taken = 0;                        /* the buffer is dropped */
+    return 0;
+}
+static const KlHttpStreamSink fake_sink = { fs_begin, fs_write, fs_end, fs_pending, fs_abort };
 
 static int g_close_calls, g_close_completed;
 static void on_sink_close(void *ctx, int completed) {
@@ -1474,6 +1481,77 @@ UTEST(response, stream_on_close_is_for_sink_streams_and_fires_once) {
     f.taken = 64;
     kl_http_response_stream_progress(&res);
     ASSERT_EQ(0, g_sink_edges);                       /* no edge after the close */
+    kl_http_response_free(&res);
+}
+
+/* A begun stream's body is the stream: the body setters refuse it and change nothing (they used to
+ * turn an open HTTP/2 stream into a buffered response that could never end). */
+UTEST(response, body_setters_refuse_a_begun_stream) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    FakeSink f;
+    sink_res(&res, &a, &f);
+    ASSERT_EQ(0, kl_http_response_error(&res, 404, "before"));          /* not begun: allowed */
+    kl_http_response_free(&res);
+
+    sink_res(&res, &a, &f);
+    KlHttpResponseWriteFn w; void *wc;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    size_t hdr_len = res.hdr_len;
+    ASSERT_EQ(-1, kl_http_response_error(&res, 404, "Not Found"));
+    ASSERT_EQ(-1, kl_http_response_json(&res, 500, "{}", 2));
+    ASSERT_EQ(-1, kl_http_response_body_copy(&res, "x", 1));
+    kl_http_response_body_borrow(&res, "y", 1);
+    kl_http_response_file(&res, 3, 10);
+    ASSERT_EQ(KL_HTTP_BODY_STREAM, res.body_mode);
+    ASSERT_EQ(200, res.status);
+    ASSERT_EQ(hdr_len, res.hdr_len);                                    /* no header added */
+    ASSERT_EQ(-1, res.file_fd);
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, "ok", 2));
+    ASSERT_EQ(0, kl_http_response_end_stream(&res));
+    ASSERT_EQ(1, f.ends);
+    kl_http_response_free(&res);
+}
+
+/* Abort: only a begun sink stream; it drops the buffer through the sink and terminates the stream
+ * (writes ERROR, end -1, no edge, a second abort -1); the close notification is the transport's. */
+UTEST(response, stream_abort_terminates_a_sink_stream_once) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(-1, kl_http_response_stream_abort(NULL));
+    kl_http_response_init(&res, &a);                /* an HTTP/1.1 response */
+    ASSERT_EQ(-1, kl_http_response_stream_abort(&res));
+    kl_http_response_free(&res);
+
+    FakeSink f;
+    sink_res(&res, &a, &f);
+    ASSERT_EQ(-1, kl_http_response_stream_abort(&res));                 /* not begun */
+    ASSERT_EQ(0, f.aborts);
+    KlHttpResponseWriteFn w; void *wc;
+    ASSERT_EQ(0, kl_http_response_begin_stream(&res, 200, &w, &wc));
+    ASSERT_EQ(0, kl_http_response_stream_on_close(&res, on_sink_close, NULL));
+    ASSERT_EQ(0, kl_http_response_stream_on_writable(&res, on_sink_edge, NULL));
+    char fill[64];
+    memset(fill, 'a', sizeof(fill));
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(&res, fill, 64));
+    ASSERT_EQ(KL_HTTP_STREAM_WOULD_BLOCK, kl_http_response_stream_try_write(&res, "a", 1));
+    g_close_calls = 0; g_sink_edges = 0;
+
+    ASSERT_EQ(0, kl_http_response_stream_abort(&res));
+    ASSERT_EQ(1, f.aborts);
+    ASSERT_EQ((size_t)0, kl_http_response_stream_pending(&res));        /* buffer dropped */
+    ASSERT_EQ(0, g_close_calls);                    /* never from inside the call */
+    ASSERT_EQ(-1, kl_http_response_stream_abort(&res));
+    ASSERT_EQ(1, f.aborts);
+    ASSERT_EQ(KL_HTTP_STREAM_ERROR, kl_http_response_stream_try_write(&res, "a", 1));
+    ASSERT_EQ(-1, w(wc, "a", 1));
+    ASSERT_EQ(-1, kl_http_response_end_stream(&res));
+    ASSERT_EQ(0, f.ends);
+    kl_http_response_stream_progress(&res);
+    ASSERT_EQ(0, g_sink_edges);                     /* the armed edge was dropped */
+    kl_http_response_stream_closed(&res, 0);        /* the transport reports the reset */
+    ASSERT_EQ(1, g_close_calls);
+    ASSERT_EQ(0, g_close_completed);
     kl_http_response_free(&res);
 }
 

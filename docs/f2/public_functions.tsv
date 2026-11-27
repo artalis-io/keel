@@ -187,6 +187,7 @@ kl_http_response_json	http_response.h
 kl_http_response_reset	http_response.h
 kl_http_response_send	http_response.h
 kl_http_response_status	http_response.h
+kl_http_response_stream_abort	http_response.h
 kl_http_response_stream_capacity	http_response.h
 kl_http_response_stream_on_close	http_response.h
 kl_http_response_stream_on_writable	http_response.h

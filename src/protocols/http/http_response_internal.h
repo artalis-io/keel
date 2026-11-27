@@ -115,6 +115,9 @@ typedef struct KlHttpStreamSink {
     int    (*end)(void *ctx);
     /* Bytes accepted and not yet taken by the transport. */
     size_t (*pending)(const void *ctx);
+    /* The producer gives up: drop what is buffered and reset the stream; its close notification
+     * follows from the loop. 0, or -1 when the stream is not open. May be NULL (no abort). */
+    int    (*abort)(void *ctx);
 } KlHttpStreamSink;
 
 /* The close notification: fire it once and clear it (the HTTP/2 stream is being released). */

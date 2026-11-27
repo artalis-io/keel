@@ -116,6 +116,12 @@ int kl_http_response_header(KlHttpResponse *res, const char *name, const char *v
 
 /**
  * @brief Set a buffered body (pointer is borrowed, not copied).
+ *
+ * The body setters below (this one, kl_http_response_body_copy(), kl_http_response_file(),
+ * kl_http_response_json(), kl_http_response_error()) refuse a response whose stream has begun
+ * (kl_http_response_begin_stream() succeeded): they change nothing, and those that return a value
+ * return -1. The stream is that response's body.
+ *
  * @param res  Response.
  * @param data Body bytes (must remain valid until send completes).
  * @param len  Length in bytes.
@@ -397,6 +403,29 @@ typedef void (*KlHttpStreamCloseFn)(void *ctx, int completed);
  *         HTTP/1.1 producer has its KlAsyncOp's on_cancel instead).
  */
 int kl_http_response_stream_on_close(KlHttpResponse *res, KlHttpStreamCloseFn fn, void *ctx);
+
+/**
+ * @brief Abort an HTTP/2 stream's begun streamed response: reset the stream (RST_STREAM CANCEL).
+ *
+ * The producer's way to give up on a stream, typically one its client stopped reading (a stream
+ * whose flow-control window stays closed never fires its writable edge again, and holds its buffer
+ * until it closes). It needs no writable edge or other progress on the stream: what the stream
+ * buffered is dropped at once, and the reset is sent from the next loop iteration. The connection
+ * and its other streams are unaffected.
+ *
+ * After a successful abort the stream is terminated: writes answer KL_HTTP_STREAM_ERROR (the
+ * writer from kl_http_response_begin_stream() returns -1), kl_http_response_end_stream() returns
+ * -1, no writable edge fires, and a second abort returns -1. The close notification
+ * (kl_http_response_stream_on_close()) still fires exactly once, from the loop, never from inside
+ * this call, with completed 0. The response pointer stays the producer's until then.
+ *
+ * Loop thread only.
+ *
+ * @return 0, or -1 for a NULL response, one that is not an HTTP/2 stream's begun stream (an
+ *         HTTP/1.1 producer cancels through its KlAsyncOp instead), or a stream that is no longer
+ *         open (already aborted, failed, or closed).
+ */
+int kl_http_response_stream_abort(KlHttpResponse *res);
 
 /**
  * @brief Flush headers + body to the connection fd.

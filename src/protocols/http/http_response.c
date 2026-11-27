@@ -292,8 +292,16 @@ int kl_http_response_header(KlHttpResponse *res, const char *name, const char *v
     return 0;
 }
 
+/* A begun stream's body is the stream. A buffered or file body set afterwards would replace a
+ * response whose head is already out: on HTTP/2 it turned the open stream into one that could
+ * never end (its writes refused, END_STREAM never sent). */
+static int res_stream_begun(const KlHttpResponse *res) {
+    return res->body_mode == KL_HTTP_BODY_STREAM && res->headers_sent;
+}
+
 void kl_http_response_body_borrow(KlHttpResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return;
+    if (res_stream_begun(res)) return;
     res->body_mode = KL_HTTP_BODY_BUFFER;
     res->body = data;
     res->body_len = len;
@@ -301,6 +309,7 @@ void kl_http_response_body_borrow(KlHttpResponse *res, const char *data, size_t 
 
 int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return -1;
+    if (res_stream_begun(res)) return -1;
 
     /* Free previous owned body if any */
     if (res->body_owned) {
@@ -328,6 +337,7 @@ int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len
 }
 
 void kl_http_response_file(KlHttpResponse *res, int fd, uint64_t size) {
+    if (res_stream_begun(res)) return;
     res->body_mode = KL_HTTP_BODY_FILE;
     res->file_fd = fd;
     res->file_size = size;
@@ -335,6 +345,7 @@ void kl_http_response_file(KlHttpResponse *res, int fd, uint64_t size) {
 }
 
 int kl_http_response_json(KlHttpResponse *res, int code, const char *json, size_t len) {
+    if (res_stream_begun(res)) return -1;    /* refused before anything changes */
     kl_http_response_status(res, code);
     if (kl_http_response_header(res, "Content-Type", "application/json") < 0)
         return -1;
@@ -343,6 +354,7 @@ int kl_http_response_json(KlHttpResponse *res, int code, const char *json, size_
 }
 
 int kl_http_response_error(KlHttpResponse *res, int code, const char *message) {
+    if (res_stream_begun(res)) return -1;    /* refused before anything changes */
     kl_http_response_status(res, code);
     if (kl_http_response_header(res, "Content-Type", "text/plain") < 0)
         return -1;
@@ -877,6 +889,17 @@ void kl_http_response_stream_closed(KlHttpResponse *res, int completed) {
     res->stream_writable_armed = 0;              /* and no edge after it */
     res->stream_writable_fn = NULL;
     if (fn) fn(ctx, completed);
+}
+
+int kl_http_response_stream_abort(KlHttpResponse *res) {
+    if (!res || !res->stream_sink || !res->stream_sink->abort ||
+        res->body_mode != KL_HTTP_BODY_STREAM || !res->headers_sent)
+        return -1;
+    if (res->stream_sink->abort(res->stream_sink_ctx) < 0) return -1;
+    res->stream_error = 1;                       /* terminated: every later write and end fails */
+    res->stream_ended = 1;
+    res->stream_writable_armed = 0;              /* no edge: on_close is what comes next */
+    return 0;
 }
 
 void kl_http_response_stream_progress(KlHttpResponse *res) {

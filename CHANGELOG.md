@@ -20,6 +20,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   optional ops for this (`KlHttp2ServerSession::submit_stream_response`, `resume_body`,
   `reset_stream`) and pulls the body through a new callback (`KlHttp2ServerCallbacks::read_body`);
   the bundled nghttp2 adapter implements them. A session without them keeps the 500.
+- **`kl_http_response_stream_abort()`**: a producer gives up on an HTTP/2 stream (one whose client
+  stopped opening its window, say) without waiting for a writable edge. The stream's buffer is
+  dropped, RST_STREAM CANCEL goes out on the next loop iteration, and the close notification fires
+  once with `completed` 0; the connection's other streams are unaffected.
 
 ### Changed
 
@@ -28,6 +32,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
 - On a completion loop (io_uring, IOCP, pollcomp), an HTTP/2 connection's frames are held to the
   output queue's producer bound, as a WebSocket's are: a large response to a client that does not
   read no longer queues without limit.
+- On a completion loop, an HTTP/2 connection keeps reading its client while output is queued, as a
+  readiness loop does. It used to read only once its output queue was idle, so a client's
+  RST_STREAM or WINDOW_UPDATE for one stream waited behind another stream's output, indefinitely for
+  a client that had stopped reading.
+- The body setters (`kl_http_response_body_borrow` / `_copy`, `kl_http_response_file`,
+  `kl_http_response_json`, `kl_http_response_error`) refuse a response whose stream has begun: they
+  change nothing, and those that return a value return -1. They used to replace the begun stream's
+  body, which on HTTP/2 left a stream that could never end.
 
 ## [3.6.0]
 

@@ -391,7 +391,7 @@ static int comp_tlsq_settle(struct KlHttpServer *s, KlHttpConn *c) {
     }
     if (c->comp_tlsq_then_recv) {
         c->comp_tlsq_then_recv = 0;
-        if (kl_comp_post_recv(c) < 0) { kl_comp_close(s, c); return 1; }
+        if (!c->comp_recv_posted && kl_comp_post_recv(c) < 0) { kl_comp_close(s, c); return 1; }
     }
     return 0;
 }
@@ -542,6 +542,19 @@ void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
  * now when nothing is queued. Exported (completion_internal.h). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c) {
     if (!comp_tlsq_idle(c)) { c->comp_tlsq_then_recv = 1; return; }
+    if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+}
+
+/* An HTTP/2 connection reads while its output is queued, as a readiness loop does (READ stays
+ * armed): one stream's output can keep the queue busy indefinitely (a streamed response), and the
+ * client's frames for its other streams (RST_STREAM, WINDOW_UPDATE, new requests) must not wait
+ * behind it. What the input can make the server hold is bounded by the session (concurrent streams,
+ * queued control-frame acknowledgements) and the output queue's producer bound
+ * (kl_comp_http2_queue_full). One receive at a time: it lands at read_buf[0] (the ciphertext
+ * scratch with TLS). */
+void kl_comp_recv_alongside_output(struct KlHttpServer *s, KlHttpConn *c) {
+    c->comp_tlsq_then_recv = 0;
+    if (c->comp_recv_posted) return;
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
@@ -716,7 +729,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * upgrade request must not be re-fed), then read h2 frames. */
         c->stream.read_len = 0;
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-        kl_comp_recv_after_output(s, c);
+        kl_comp_recv_alongside_output(s, c);
         break;
     case KL_HTTP_CONN_WEBSOCKET:
         /* WS upgrade done during dispatch: kl_ws_server_upgrade wrote the 101 handshake
