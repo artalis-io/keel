@@ -59,6 +59,11 @@ int kl_comp_tls_flush(KlHttpConn *c);
  * wait, as a full socket makes it wait on readiness (completion_http_server.c). */
 int kl_comp_ws_queue_full(const KlHttpConn *c, size_t add);
 
+/* The same producer bound for an HTTP/2 connection's frames: streamed bodies, refilled by their
+ * producers, would otherwise pile up on the queue for a client that does not read. The session
+ * holds them instead and a send completion flushes again (completion_http_server.c). */
+int kl_comp_http2_queue_full(const KlHttpConn *c, size_t add);
+
 static inline kl_ssize_t conn_write(KlHttpConn *c, const void *buf, size_t len) {
     if (c->tls) {
         /* A completion loop: the engine's output goes onto the queue at once (below), so it never
@@ -104,6 +109,11 @@ int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add);
  * connection keeps reading); that mask is wrong for any other state, hence WebSocket only. A
  * completion loop flushes from its send completions, so there is nothing to do. */
 void kl_http_conn_ws_request_write(KlHttpConn *c);
+
+/* The HTTP/2 counterpart: output a streamed response's producer added outside the connection's own
+ * events is held by the session (a full socket). Readiness arms READ|WRITE, the HTTP/2 state's mask;
+ * a completion loop sends from its queue, so there is nothing to do. */
+void kl_http_conn_http2_request_write(KlHttpConn *c);
 
 /* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.). A refusal nothing can clear
  * while this runs (a completion output queue at its producer bound) fails at once: retrying it

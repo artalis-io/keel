@@ -24,8 +24,8 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
         /* Decrypt + feed every currently-available record (the h2 session writes its
          * output ciphertext into the memory-BIO out ring via conn_write→tls->write),
          * then move that ring onto the connection's output queue (one ordered overlapped send
-         * at a time, so frames cannot reorder) and read the next frames once it is out (no new
-         * input while output is pending). */
+         * at a time, so frames cannot reorder) and keep reading the client's frames while it goes
+         * out (kl_comp_recv_alongside_output). */
         for (;;) {
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
@@ -39,27 +39,31 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
             /* Read again until WANT_READ: pending() misses whole records held as ciphertext. */
         }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
-        kl_comp_recv_after_output(s, c);
+        kl_comp_recv_alongside_output(s, c);
         return;
     }
     /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added this recv's
      * bytes). The session writes its frames through conn_write, which on a completion loop puts them
      * on the connection's output queue (one ordered overlapped send at a time, so frames cannot
      * reorder, and frames written between feeds, an upgrade's stream 1 or a drain's GOAWAY, join
-     * them in order). Read the next frames once that output is out. */
+     * them in order). Keep reading meanwhile: a busy stream must not hold back the client's frames
+     * for the others. */
     KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, c->stream.read_len);
     c->stream.read_len = 0;
     if (st != KL_HTTP_CONN_HTTP2) {                    /* send a GOAWAY the session queued, then close */
         kl_comp_close_after_output(s, c);
         return;
     }
-    kl_comp_recv_after_output(s, c);
+    kl_comp_recv_alongside_output(s, c);
 }
 
 /* Completion-drive seam registration (http_proto_hooks.h): completion_http_server.c reaches
  * HTTP/2-over-completion only through this table. The installer (called by
  * completion_http_server.c) registers it and pulls this object out of the archive. */
-static const KlHttp2CompHooks kl_http2_comp_hooks_table = { .drive = kl_comp_http2_drive };
+static const KlHttp2CompHooks kl_http2_comp_hooks_table = {
+    .drive = kl_comp_http2_drive,
+    .sent  = kl_http2_server_comp_sent,
+};
 
 void kl_http2_comp_hooks_install(void) {
     kl_http2_comp_hooks_set(&kl_http2_comp_hooks_table);

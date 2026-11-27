@@ -12,6 +12,7 @@
 #include "net_compat.h"
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts */
+#include "http_proto_hooks.h"  /* kl_http2_server_hooks: the sweep's HTTP/2 service step */
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
 #include <keel/clock.h>
 
@@ -77,6 +78,15 @@ typedef struct {
     uint32_t to_close[16];
     int n_to_close;
     int closes_reported;
+
+    /* Streamed responses: 1 = the factory installs submit_stream_response / resume_body /
+     * reset_stream. */
+    int with_stream;
+    int stream_submit_count;
+    int resume_count;
+    int reset_count;
+    uint32_t last_reset_id;
+    uint32_t last_reset_code;
 
     /* KEEL's callbacks (stored by factory) */
     KlHttp2ServerCallbacks callbacks;
@@ -170,6 +180,30 @@ static int mock_upgrade(KlHttp2ServerSession *self, const char *settings, size_t
     return m->upgrade_fail ? -1 : 0;
 }
 
+static int mock_submit_stream_response(KlHttp2ServerSession *self, uint32_t stream_id, int status,
+                                       const char **names, const char **values, int n) {
+    (void)names; (void)values; (void)n;
+    MockH2Session *m = (MockH2Session *)self;
+    m->stream_submit_count++;
+    m->last_stream_id = stream_id;
+    m->last_status = status;
+    return 0;
+}
+
+static int mock_resume_body(KlHttp2ServerSession *self, uint32_t stream_id) {
+    (void)stream_id;
+    ((MockH2Session *)self)->resume_count++;
+    return 0;
+}
+
+static int mock_reset_stream(KlHttp2ServerSession *self, uint32_t stream_id, uint32_t code) {
+    MockH2Session *m = (MockH2Session *)self;
+    m->reset_count++;
+    m->last_reset_id = stream_id;
+    m->last_reset_code = code;
+    return 0;
+}
+
 static void mock_destroy(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->destroy_count++;
@@ -193,6 +227,9 @@ static KlHttp2ServerSession *mock_factory(KlAllocator *alloc,
         m->base.destroy = mock_destroy;
         m->base.upgrade = m->with_upgrade ? mock_upgrade : NULL;
         m->base.want_read = m->with_want_read ? mock_want_read : NULL;
+        m->base.submit_stream_response = m->with_stream ? mock_submit_stream_response : NULL;
+        m->base.resume_body = m->with_stream ? mock_resume_body : NULL;
+        m->base.reset_stream = m->with_stream ? mock_reset_stream : NULL;
     }
 
     /* Store callbacks so tests can invoke them */
@@ -2451,6 +2488,388 @@ UTEST(h2, early_answers_closed_by_the_flush_are_destroyed_once) {
     ASSERT_EQ(rm, 0);
     ASSERT_EQ(status403, 403);
     ASSERT_EQ(streams403, 0);                     /* was -1 */
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Streamed responses: answered early, body-reader lifecycle, abort
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static KlHttpResponse *g_sres[8];
+static int g_nsres;
+static int g_sclose_calls[8], g_sclose_completed[8];
+static void sclose(void *ctx, int completed) {
+    int i = (int)(intptr_t)ctx;
+    g_sclose_calls[i]++;
+    g_sclose_completed[i] = completed;
+}
+
+/* Begin a stream on res, write "hi" into it, record it; `end` ends the body too. */
+static int begin_recorded(KlHttpResponse *res, int end) {
+    KlHttpResponseWriteFn w; void *wc;
+    if (kl_http_response_begin_stream(res, 200, &w, &wc) < 0) return -1;
+    int i = g_nsres++;
+    g_sres[i] = res;
+    g_sclose_calls[i] = 0;
+    g_sclose_completed[i] = -1;
+    kl_http_response_stream_on_close(res, sclose, (void *)(intptr_t)i);
+    if (kl_http_response_stream_try_write(res, "hi", 2) != KL_HTTP_STREAM_ACCEPTED) return -1;
+    if (end && kl_http_response_end_stream(res) < 0) return -1;
+    return 0;
+}
+
+static int mw_streams_and_stops(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    middleware_called++;
+    return begin_recorded(res, 1) == 0 ? 1 : 0;
+}
+
+static int mw_streams_and_continues(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    middleware_called++;
+    (void)begin_recorded(res, 0);
+    return 0;
+}
+
+static void streaming_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    handler_called++;
+    (void)begin_recorded(res, 0);
+}
+
+typedef struct { int pfd[2]; KlHttpConn conn; MockH2Session mock; } StreamRig;
+
+static void rig_open(StreamRig *r) {
+    test_setup();
+    g_nsres = 0;
+    mock_init(&r->mock);
+    r->mock.with_stream = 1;
+    g_mock_session = &r->mock;
+    kl_test_socketpair(r->pfd);
+    memset(&r->conn, 0, sizeof(r->conn));
+    r->conn.stream.fd = r->pfd[1];
+    r->conn.stream.alloc = &test_alloc;
+}
+
+static void rig_close(StreamRig *r) {
+    kl_http2_server_cleanup(&r->conn);
+    kl_test_closesock(r->pfd[0]);
+    kl_test_closesock(r->pfd[1]);
+    test_teardown();
+}
+
+static kl_ssize_t rig_pull(StreamRig *r, uint32_t id, char *buf, size_t cap, int *eof) {
+    return r->mock.callbacks.read_body(r->mock.cb_user_data, id, buf, cap, eof);
+}
+
+/* Pre-body middleware that begins a stream and short-circuits answers the request: the stream
+ * finishes exactly once, and neither the handler nor the 404 fallback runs at the request's end
+ * (they used to, and the 404's buffered body replaced the open stream, which then never ended). */
+static void middleware_stream_case(int *utest_result, const char *path, size_t path_len) {
+    StreamRig r;
+    rig_open(&r);
+    kl_http_router_add(&test_router, "POST", "/s", test_handler, NULL, NULL);
+    kl_http_router_use(&test_router, "*", "/*", mw_streams_and_stops, NULL);
+    kl_http2_server_upgrade(&r.conn, &test_router, &test_h2_cfg, NULL, 0);
+    r.conn.max_body_size = 2;            /* the body below is over it: ignored, not refused */
+
+    ASSERT_EQ(0, r.mock.callbacks.on_request(r.mock.cb_user_data, 1, "POST", 4, path, path_len,
+                                             NULL, 0, NULL, NULL, NULL, NULL, 0));
+    ASSERT_EQ(1, middleware_called);
+    ASSERT_EQ(1, r.mock.stream_submit_count);
+    ASSERT_EQ(1, r.conn.h2->num_streams);
+    ASSERT_EQ(0, r.mock.callbacks.on_data(r.mock.cb_user_data, 1, "body", 4));   /* ignored */
+    ASSERT_EQ(0, r.mock.reset_count);
+    ASSERT_EQ(0, r.mock.callbacks.on_stream_end(r.mock.cb_user_data, 1));
+    ASSERT_EQ(0, handler_called);
+    ASSERT_EQ(0, r.mock.submit_count);              /* no 404, no buffered answer */
+    ASSERT_EQ(0, r.mock.reset_count);
+
+    char buf[16];
+    int eof = 0;
+    ASSERT_EQ((kl_ssize_t)2, rig_pull(&r, 1, buf, sizeof(buf), &eof));
+    ASSERT_EQ(0, memcmp(buf, "hi", 2));
+    ASSERT_EQ(1, eof);                              /* the body ended: END_STREAM goes out */
+    r.mock.callbacks.on_stream_reset(r.mock.cb_user_data, 1, 0);   /* the session closes it */
+    ASSERT_EQ(1, g_sclose_calls[0]);
+    ASSERT_EQ(1, g_sclose_completed[0]);
+    ASSERT_EQ(0, r.conn.h2->num_streams);
+    rig_close(&r);
+}
+
+UTEST(h2, a_stream_begun_by_pre_body_middleware_finishes_without_the_handler) {
+    middleware_stream_case(utest_result, "/s", 2);
+}
+
+UTEST(h2, a_stream_begun_by_pre_body_middleware_finishes_without_the_404) {
+    middleware_stream_case(utest_result, "/none", 5);
+}
+
+/* A request body that completed gets on_complete once, and never on_error: not when its streamed
+ * response closes normally, and not when the producer aborts it. */
+UTEST(h2, a_completed_body_gets_no_on_error_when_its_stream_closes_or_aborts) {
+    StreamRig r;
+    rig_open(&r);
+    kl_http_router_add(&test_router, "POST", "/up", streaming_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&r.conn, &test_router, &test_h2_cfg, NULL, 0);
+    const char *hn[] = {"content-length"};
+    const char *hv[] = {"3"};
+    size_t hnl[] = {14}, hvl[] = {1};
+
+    for (int round = 0; round < 2; round++) {         /* 0: a normal close, 1: an abort */
+        uint32_t id = round == 0 ? 1u : 3u;
+        ASSERT_EQ(0, r.mock.callbacks.on_request(r.mock.cb_user_data, id, "POST", 4, "/up", 3,
+                                                 NULL, 0, hn, hv, hnl, hvl, 1));
+        ASSERT_EQ(0, r.mock.callbacks.on_data(r.mock.cb_user_data, id, "abc", 3));
+        ASSERT_EQ(0, r.mock.callbacks.on_stream_end(r.mock.cb_user_data, id));
+        ASSERT_EQ(round + 1, handler_called);
+        ASSERT_EQ(1, g_test_br.complete_count);
+        ASSERT_EQ(0, g_test_br.error_count);
+        if (round == 0) {
+            ASSERT_EQ(0, kl_http_response_end_stream(g_sres[0]));
+            char buf[8];
+            int eof = 0;
+            ASSERT_EQ((kl_ssize_t)2, rig_pull(&r, id, buf, sizeof(buf), &eof));
+            ASSERT_EQ(1, eof);
+            r.mock.callbacks.on_stream_reset(r.mock.cb_user_data, id, 0);
+            ASSERT_EQ(1, g_sclose_completed[0]);
+        } else {
+            ASSERT_EQ(0, kl_http_response_stream_abort(g_sres[1]));
+            ASSERT_EQ(0, kl_http2_server_on_writable(&r.conn) == KL_HTTP_CONN_CLOSED);
+            ASSERT_EQ(1, r.mock.reset_count);
+            ASSERT_EQ(8u, r.mock.last_reset_code);   /* CANCEL */
+            r.mock.callbacks.on_stream_reset(r.mock.cb_user_data, id, 8);
+            ASSERT_EQ(0, g_sclose_completed[1]);
+        }
+        ASSERT_EQ(1, g_test_br.complete_count);
+        ASSERT_EQ(0, g_test_br.error_count);          /* the close is not the body's error */
+        ASSERT_EQ(1, g_test_br.destroy_count);
+    }
+    rig_close(&r);
+}
+
+/* Abort needs no writable edge: the buffer is dropped at once and the next flush resets only that
+ * stream (CANCEL); its producer hears completed=0 once, from the session's close, never inside the
+ * call. Its sibling keeps its data and stays open. */
+UTEST(h2, abort_resets_only_its_stream_without_a_writable_edge) {
+    StreamRig r;
+    rig_open(&r);
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    kl_http2_server_upgrade(&r.conn, &test_router, &test_h2_cfg, NULL, 0);
+    for (uint32_t id = 1; id <= 3; id += 2) {
+        ASSERT_EQ(0, r.mock.callbacks.on_request(r.mock.cb_user_data, id, "GET", 3, "/s", 2,
+                                                 NULL, 0, NULL, NULL, NULL, NULL, 0));
+        ASSERT_EQ(0, r.mock.callbacks.on_stream_end(r.mock.cb_user_data, id));
+    }
+    ASSERT_EQ(2, g_nsres);
+    ASSERT_EQ((size_t)2, kl_http_response_stream_pending(g_sres[0]));
+
+    ASSERT_EQ(0, kl_http_response_stream_abort(g_sres[0]));
+    ASSERT_EQ((size_t)0, kl_http_response_stream_pending(g_sres[0]));
+    ASSERT_EQ(0, g_sclose_calls[0]);
+    ASSERT_EQ(-1, kl_http_response_stream_abort(g_sres[0]));
+    ASSERT_EQ(KL_HTTP_STREAM_ERROR, kl_http_response_stream_try_write(g_sres[0], "x", 1));
+    ASSERT_EQ(-1, kl_http_response_end_stream(g_sres[0]));
+
+    char buf[16];
+    int eof = 0;
+    ASSERT_TRUE(rig_pull(&r, 1, buf, sizeof(buf), &eof) < 0);   /* nothing more to pull */
+    ASSERT_NE(KL_HTTP_CONN_CLOSED, kl_http2_server_on_writable(&r.conn));
+    ASSERT_EQ(1, r.mock.reset_count);
+    ASSERT_EQ(1u, r.mock.last_reset_id);
+    ASSERT_EQ(8u, r.mock.last_reset_code);
+    ASSERT_NE(KL_HTTP_CONN_CLOSED, kl_http2_server_on_writable(&r.conn));
+    ASSERT_EQ(1, r.mock.reset_count);                /* reset once */
+
+    r.mock.callbacks.on_stream_reset(r.mock.cb_user_data, 1, 8);
+    ASSERT_EQ(1, g_sclose_calls[0]);
+    ASSERT_EQ(0, g_sclose_completed[0]);
+    ASSERT_EQ(0, g_sclose_calls[1]);
+    ASSERT_EQ(1, r.conn.h2->num_streams);
+    eof = 0;
+    ASSERT_EQ((kl_ssize_t)2, rig_pull(&r, 3, buf, sizeof(buf), &eof));   /* the sibling's data */
+    ASSERT_EQ(0, eof);
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, kl_http_response_stream_try_write(g_sres[1], "more", 4));
+    rig_close(&r);
+    ASSERT_EQ(1, g_sclose_calls[1]);                 /* cut short by the connection's close */
+    ASSERT_EQ(0, g_sclose_completed[1]);
+    ASSERT_EQ(1, g_sclose_calls[0]);
+}
+
+/* A body refused after the response began streaming (over the limit): a 413 can no longer be sent,
+ * so the stream is reset; the reader gets on_error once, and the request's end runs nothing. */
+UTEST(h2, a_body_refused_on_a_begun_stream_resets_it) {
+    StreamRig r;
+    rig_open(&r);
+    kl_http_router_add(&test_router, "POST", "/up", test_handler, NULL, test_br_factory);
+    kl_http_router_use(&test_router, "*", "/*", mw_streams_and_continues, NULL);
+    kl_http2_server_upgrade(&r.conn, &test_router, &test_h2_cfg, NULL, 0);
+    r.conn.max_body_size = 2;
+    const char *hn[] = {"content-length"};
+    const char *hv[] = {"3"};
+    size_t hnl[] = {14}, hvl[] = {1};
+    ASSERT_EQ(0, r.mock.callbacks.on_request(r.mock.cb_user_data, 1, "POST", 4, "/up", 3,
+                                             NULL, 0, hn, hv, hnl, hvl, 1));
+    ASSERT_EQ(1, g_nsres);
+    ASSERT_EQ(0, r.mock.callbacks.on_data(r.mock.cb_user_data, 1, "abc", 3));
+    ASSERT_EQ(1, g_test_br.error_count);
+    ASSERT_EQ(1, r.mock.reset_count);
+    ASSERT_EQ(2u, r.mock.last_reset_code);           /* INTERNAL_ERROR */
+    ASSERT_EQ(0, r.mock.submit_count);               /* no 413 over the begun stream */
+    ASSERT_EQ(0, r.mock.callbacks.on_stream_end(r.mock.cb_user_data, 1));
+    ASSERT_EQ(0, handler_called);
+    ASSERT_EQ(0, g_test_br.complete_count);
+    r.mock.callbacks.on_stream_reset(r.mock.cb_user_data, 1, 2);
+    ASSERT_EQ(1, g_test_br.error_count);             /* once */
+    ASSERT_EQ(1, g_sclose_calls[0]);
+    ASSERT_EQ(0, g_sclose_completed[0]);
+    rig_close(&r);
+}
+
+/* ── A flush from outside the connection's events: no timer, or a failure ─────────────────────── */
+
+static void *nomem_malloc(void *ctx, size_t n) { (void)ctx; (void)n; return NULL; }
+static void *nomem_realloc(void *ctx, void *p, size_t o, size_t n) {
+    (void)ctx; (void)p; (void)o; (void)n;
+    return NULL;
+}
+static void nomem_free(void *ctx, void *p, size_t n) { (void)ctx; (void)p; (void)n; }
+static KlAllocator nomem_alloc = { .malloc = nomem_malloc, .realloc = nomem_realloc,
+                                   .free = nomem_free, .ctx = NULL };
+
+/* While refused, kl_timer_add on ev fails as it does out of memory (the heap cannot grow). */
+typedef struct { KlAllocator *alloc; int cap; } TimerRefusal;
+static TimerRefusal timers_refuse(KlEventCtx *ev) {
+    TimerRefusal t = { ev->alloc, ev->timer_cap };
+    ev->alloc = &nomem_alloc;
+    ev->timer_cap = ev->timer_count;
+    return t;
+}
+static void timers_allow(KlEventCtx *ev, TimerRefusal t) {
+    ev->alloc = t.alloc;
+    ev->timer_cap = t.cap;
+}
+
+/* Open stream `id` on the sweep server's connection, handled by streaming_handler. */
+static int sweep_open_stream(MockH2Session *m, uint32_t id) {
+    if (m->callbacks.on_request(m->cb_user_data, id, "GET", 3, "/s", 2,
+                                NULL, 0, NULL, NULL, NULL, NULL, 0) != 0) return -1;
+    return m->callbacks.on_stream_end(m->cb_user_data, id);
+}
+
+/* A producer writes from outside the connection's events (a timer, a watcher) when no flush timer
+ * can be armed: the flush is owed. On a completion loop with nothing in flight and a client that
+ * sends nothing, no event came to pay it, and the stream stalled for good. The sweep, which runs
+ * every loop iteration, now sends it. */
+UTEST(h2, an_owed_flush_is_sent_by_the_sweep_when_no_timer_can_be_armed) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    mock.want_write_return = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    ASSERT_EQ(1, g_nsres);
+    (void)kl_timer_fire(&h2_sweep_srv.ev);                 /* the begin's flush */
+
+    TimerRefusal t = timers_refuse(&h2_sweep_srv.ev);
+    int wr = kl_http_response_stream_try_write(g_sres[0], "more", 4);
+    timers_allow(&h2_sweep_srv.ev, t);
+    int armed = c->h2->flush_armed, owed = c->h2->flush_owed;
+    int flushes = mock.flush_count;
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now;                               /* not idle: only the owed flush acts */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int swept = mock.flush_count, owed_after = c->h2 ? c->h2->flush_owed : -1;
+    int closes = g_sclose_calls[0], destroyed = mock.destroy_count;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, wr);
+    ASSERT_EQ(0, armed);                                   /* no timer could be armed */
+    ASSERT_EQ(1, owed);
+    ASSERT_GT(swept, flushes);                             /* was equal: the flush stayed owed */
+    ASSERT_EQ(0, owed_after);
+    ASSERT_EQ(0, closes);                                  /* the stream goes on */
+    ASSERT_EQ(0, destroyed);
+}
+
+/* A flush the timer runs, outside the connection's events, fails (the session cannot send): on a
+ * completion loop nothing closed the connection until the client's next frame, so with a silent
+ * client every stream on it stalled and no producer heard. The failure now marks the session
+ * failed and the sweep closes the connection: every open stream's producer is told, once, that it
+ * was cut short, and no later flush reaches the failed session. */
+UTEST(h2, a_failed_flush_outside_the_connection_events_closes_it) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    mock.want_write_return = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    ASSERT_EQ(0, sweep_open_stream(&mock, 3));
+    ASSERT_EQ(2, g_nsres);
+    (void)kl_timer_fire(&h2_sweep_srv.ev);
+
+    mock.flush_return = -1;
+    int wr = kl_http_response_stream_try_write(g_sres[0], "more", 4);
+    int armed = c->h2->flush_armed;
+    (void)kl_timer_fire(&h2_sweep_srv.ev);                 /* the flush fails here */
+    int failed_flushes = mock.flush_count;
+    int closes_before = g_sclose_calls[0] + g_sclose_calls[1];
+    int refused = kl_http2_server_comp_sent(c) == KL_HTTP_CONN_CLOSED &&
+                  kl_http2_server_on_writable(c) == KL_HTTP_CONN_CLOSED;
+    int no_retry = mock.flush_count == failed_flushes;     /* the failed session is not flushed */
+    int write_refused = kl_http_response_stream_try_write(g_sres[1], "x", 1) == KL_HTTP_STREAM_ERROR;
+
+    /* The sweep's HTTP/2 step alone ends the streams, before any close: a completion close waits
+     * for queued output, which a client that stopped reading never takes. */
+    kl_http2_server_hooks()->service(c);
+    int closes_at_service = g_sclose_calls[0] + g_sclose_calls[1];
+    int streams_left = c->h2 ? c->h2->num_streams : -1;
+    int destroyed_at_service = mock.destroy_count;
+
+    uint64_t now = kl_monotonic_ms();
+    c->last_active_ms = now;                               /* not idle: only the failure closes it */
+    kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
+    int destroyed = mock.destroy_count;
+    int closes0 = g_sclose_calls[0], closes1 = g_sclose_calls[1];
+    int done0 = g_sclose_completed[0], done1 = g_sclose_completed[1];
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, wr);
+    ASSERT_EQ(1, armed);
+    ASSERT_EQ(0, closes_before);                           /* never from inside the flush */
+    ASSERT_TRUE(refused);
+    ASSERT_TRUE(no_retry);
+    ASSERT_TRUE(write_refused);                            /* was ACCEPTED, into a dead session */
+    ASSERT_EQ(2, closes_at_service);                       /* was 0: told only at the release */
+    ASSERT_EQ(0, streams_left);
+    ASSERT_EQ(0, destroyed_at_service);                    /* the connection itself is closed next */
+    ASSERT_EQ(1, destroyed);                               /* was 0: left open, every stream stalled */
+    ASSERT_EQ(1, closes0);
+    ASSERT_EQ(1, closes1);                                 /* the sibling is told too */
+    ASSERT_EQ(0, done0);
+    ASSERT_EQ(0, done1);
+    ASSERT_EQ(1, g_sclose_calls[0]);                       /* once each: not again at the free */
+    ASSERT_EQ(1, g_sclose_calls[1]);
 }
 
 UTEST_MAIN();

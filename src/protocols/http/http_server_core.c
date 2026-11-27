@@ -751,10 +751,13 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         }
         /* HTTP/2: streams in progress are the session's business, but a connection with none open
          * and nothing to send is idle, and is timed out like any other idle connection; one whose
-         * session is done (a graceful GOAWAY out, no stream left) is closed now. */
+         * session is done (a graceful GOAWAY out, no stream left) or failed is closed now. Output
+         * owed from outside the connection's events (no flush timer could be armed) is sent
+         * first. */
         if (tc->state == KL_HTTP_CONN_HTTP2) {
             const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
             if (!h2h) continue;
+            if (h2h->service) h2h->service(tc);   /* output owed outside its events (no timer) */
             int done = h2h->done && h2h->done(tc);
             if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
                 continue;
@@ -1016,7 +1019,13 @@ size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len) {
 }
 
 int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add) {
-    return c->comp_driven && kl_comp_ws_queue_full(c, add);
+    return c->comp_driven && (kl_comp_ws_queue_full(c, add) || kl_comp_http2_queue_full(c, add));
+}
+
+void kl_http_conn_http2_request_write(KlHttpConn *c) {
+    if (!c || c->comp_driven || !c->stream.ctx || c->state != KL_HTTP_CONN_HTTP2) return;
+    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
+                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
 }
 
 void kl_http_conn_ws_request_write(KlHttpConn *c) {

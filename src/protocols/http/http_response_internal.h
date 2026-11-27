@@ -98,4 +98,29 @@ KlHttpStreamStatus kl_http_response_stream_admit(KlHttpResponse *res, size_t len
  * afterwards: the callback may write, end the stream, complete or cancel the op. */
 void kl_http_response_stream_progress(KlHttpResponse *res);
 
+/* Where a stream's body goes when it is not HTTP/1.1 chunked framing on the response's own write
+ * target: an HTTP/2 stream's response, whose body the HTTP/2 session frames as DATA
+ * (http2_server.c installs one before the handler runs). The response layer keeps its rules (one
+ * begin, nothing after the end, all-or-nothing admission against the stream capacity, the writable
+ * edge) and hands the sink unframed body bytes. No op calls back into the response or the producer:
+ * output moves, the edge fires and the stream closes later, from the loop. */
+typedef struct KlHttpStreamSink {
+    /* The head (status + the response's headers) is committed. 0, or -1 (the begin is refused). */
+    int    (*begin)(void *ctx);
+    /* Take `len` body bytes, the concatenation of iov[0..iovcnt). Admission was checked by the
+     * caller for a bounded write; the legacy writer passes bounded 0 and the sink then refuses only
+     * past its hard cap (the capacity). 0, or -1 (the stream fails). */
+    int    (*write)(void *ctx, const KlIoVec *iov, int iovcnt, size_t len, int bounded);
+    /* The body is complete. 0, or -1. */
+    int    (*end)(void *ctx);
+    /* Bytes accepted and not yet taken by the transport. */
+    size_t (*pending)(const void *ctx);
+    /* The producer gives up: drop what is buffered and reset the stream; its close notification
+     * follows from the loop. 0, or -1 when the stream is not open. May be NULL (no abort). */
+    int    (*abort)(void *ctx);
+} KlHttpStreamSink;
+
+/* The close notification: fire it once and clear it (the HTTP/2 stream is being released). */
+void kl_http_response_stream_closed(KlHttpResponse *res, int completed);
+
 #endif /* KEEL_SRC_HTTP_RESPONSE_INTERNAL_H */

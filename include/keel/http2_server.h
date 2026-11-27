@@ -66,7 +66,23 @@ struct KlHttp2ServerCallbacks {
     uint32_t max_concurrent_streams;   /**< SETTINGS_MAX_CONCURRENT_STREAMS */
     uint32_t initial_window_size;      /**< SETTINGS_INITIAL_WINDOW_SIZE (0: protocol default) */
     uint32_t max_header_list_size;     /**< SETTINGS_MAX_HEADER_LIST_SIZE, and the per-request cap */
+    /**
+     * Appended after 3.6.0 (streamed responses; see KlHttp2ServerSession::submit_stream_response).
+     * Pull the next bytes of a streamed response's body into @p buf, at most @p len. Returns:
+     * - the bytes copied (>= 0), with `*eof` set to 1 when they complete the body (the last bytes,
+     *   or none): the session then ends the stream (END_STREAM);
+     * - KL_HTTP2_BODY_DEFERRED when no byte is ready yet: the session asks no more for this stream
+     *   until KlHttp2ServerSession::resume_body names it;
+     * - -1 when the stream failed: the session resets it.
+     * The session calls it while it sends (from flush), only for a stream whose flow-control windows
+     * have room, so a stalled stream is simply not asked and every other stream keeps going. It
+     * never calls back into the session.
+     */
+    kl_ssize_t (*read_body)(void *ud, uint32_t stream_id, void *buf, size_t len, int *eof);
 };
+
+/** KlHttp2ServerCallbacks::read_body: nothing to send for the stream yet. */
+#define KL_HTTP2_BODY_DEFERRED (-2)
 
 /* ── KlHttp2ServerSession: user-provided vtable ───────────────────── */
 
@@ -126,6 +142,23 @@ struct KlHttp2ServerSession {
      */
     int (*upgrade)(KlHttp2ServerSession *self, const char *settings, size_t settings_len,
                    int head_request);
+    /* Appended after 3.6.0: streamed responses. Optional, as a set: a session that provides all
+     * three serves kl_http_response_begin_stream() (and SSE) over HTTP/2; with any of them NULL KEEL
+     * answers a streamed response 500, as before. None of them may call back into KEEL: a stream
+     * close they cause is reported (on_stream_reset) from a later flush or recv. */
+    /**
+     * Submit a streamed response's HEADERS for @p stream_id. Its body is then pulled through
+     * KlHttp2ServerCallbacks::read_body, as flow control allows, until read_body reports the end.
+     * The header fields are borrowed for the call only, as for submit_response. 0, or -1.
+     */
+    int (*submit_stream_response)(KlHttp2ServerSession *self, uint32_t stream_id, int status,
+                                  const char **hdr_names, const char **hdr_values, int num_headers);
+    /** read_body has bytes (or the end) again for a stream it answered KL_HTTP2_BODY_DEFERRED. A
+     *  stream that is not deferred, or no longer open, is not an error. 0, or -1. */
+    int (*resume_body)(KlHttp2ServerSession *self, uint32_t stream_id);
+    /** Reset a stream (RST_STREAM with @p error_code), a streamed response KEEL cannot finish. The
+     *  close is reported from a later flush (on_stream_reset). 0, or -1. */
+    int (*reset_stream)(KlHttp2ServerSession *self, uint32_t stream_id, uint32_t error_code);
 };
 
 /* ── Factory ─────────────────────────────────────────────────────── */

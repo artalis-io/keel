@@ -11,7 +11,7 @@ The audit files retain stable names within this archive (`docs/archive/audits/`)
 
 | Audit | Scope | Latest pass |
 |---|---|---|
-| [keel_axis_audit.md](keel_axis_audit.md) | Networking three-axis separation (Transport / Engine / Provider); protocol independence; operation lifetime; compatibility matrix | Nineteenth pass, 2026-11-25 (3.6.0 pre-release audit at `65568ff`) |
+| [keel_axis_audit.md](keel_axis_audit.md) | Networking three-axis separation (Transport / Engine / Provider); protocol independence; operation lifetime; compatibility matrix | Twentieth pass, 2026-11-27 (HTTP/2 streamed responses, `ff259280` + three unmerged branches; findings resolved in PR #538) |
 | [keel_audit.md](keel_audit.md) | C security/safety/quality (memory safety, overflow, resource management, build hardening) | Twenty-first pass, 2026-11-25 (3.6.0 pre-release audit at `65568ff`) |
 
 ## How to read a pass

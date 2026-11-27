@@ -334,3 +334,5 @@ kl_http_compress_stream_bounded	http_compress.h	direct-assertion	tests/protocols
 kl_http_compress_stream_release	http_compress.h	direct-assertion	tests/protocols/http/test_compress_bounded.c:354 (codec destroyed, no finish fed, pending unchanged; idempotent; NULL safe)
 kl_http_compress_stream_try_end	http_compress.h	direct-assertion	tests/protocols/http/test_compress_bounded.c:265 (ACCEPTED + final chunk + terminator after WOULD_BLOCK; TOO_LARGE permanent; CLOSED after)
 kl_http_compress_stream_try_write	http_compress.h	direct-assertion	tests/protocols/http/test_compress_bounded.c:150 (ACCEPTED + one flushed chunk; WOULD_BLOCK/TOO_LARGE feed nothing; ERROR paths)
+kl_http_response_stream_on_close	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:1469 ASSERT_EQ(0,kl_http_response_stream_on_close(...)) returns its result
+kl_http_response_stream_abort	http_response.h	direct-assertion	tests/protocols/http/test_http_response.c:1540 ASSERT_EQ(0,kl_http_response_stream_abort(...)); then -1 again, ERROR writes, -1 end

@@ -342,7 +342,8 @@ Grouped into independently reviewable PRs. No release numbers are assigned.
 
 ### Deferred (no consumer)
 
-HTTP/2 streaming responses and per-stream flow control; two-phase GOAWAY; hang-up detection while a
+HTTP/2 streaming responses and per-stream flow control (implemented after 3.6.0: see the CHANGELOG
+and `docs/contracts/streaming.md`, "HTTP/2"); two-phase GOAWAY; hang-up detection while a
 request body is paused; egress interface selection; a socket-backed raw `KlStream` adapter (Hull can
 compose `KlConnectOp` and `KlStream` itself); pooling and redirects for streaming client requests.
 

@@ -67,7 +67,8 @@ typedef struct KlHttp2ServerHooks {
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
     int  (*idle)(const KlHttpConn *c);                    /* no stream open, no output pending */
-    int  (*done)(const KlHttpConn *c);                    /* session wants neither read nor write */
+    int  (*done)(const KlHttpConn *c);                    /* session finished, or failed: close */
+    void (*service)(KlHttpConn *c);                       /* sweep: send output owed outside events */
 } KlHttp2ServerHooks;
 
 const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if http2_server.c absent */
@@ -93,6 +94,9 @@ void kl_ws_comp_hooks_install(void);                  /* defined in completion_w
 
 typedef struct KlHttp2CompHooks {
     void (*drive)(struct KlHttpServer *s, KlHttpConn *c);
+    /* A send completed: flush frames the session held back at the queue's bound. Returns the next
+     * KlHttpConnState (anything but HTTP2 closes the connection once its output is out). */
+    KlHttpConnState (*sent)(KlHttpConn *c);
 } KlHttp2CompHooks;
 const KlHttp2CompHooks *kl_http2_comp_hooks(void);
 void kl_http2_comp_hooks_set(const KlHttp2CompHooks *hooks);

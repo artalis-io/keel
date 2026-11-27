@@ -18,6 +18,7 @@
 #include "net_compat.h"
 #include "mock_tls.h"
 #include "event_caps.h"
+#include "http_internal.h"              /* kl_comp_http2_queue_full / kl_comp_ws_queue_full */
 #include "http_conn_internal.h"          /* white-box: the server-side socket, to shrink its send buffer */
 #include "websocket_server_internal.h"   /* white-box: the WebSocket's connection */
 #include <string.h>
@@ -573,6 +574,32 @@ static void ws_open_oversized_frame(KlWsServerConn *ws, void *ud) {
 }
 
 static KlHttpServer wso_srv;
+
+/* An HTTP/2 session hands over a frame whole and keeps one the queue refuses, so a frame larger than
+ * the whole bound was refused for good, even by an idle queue, and its connection never sent again.
+ * An idle queue now takes it; the bound still holds everything queued behind it. A WebSocket, whose
+ * drain splits a large backlog into pieces, keeps the strict bound. */
+UTEST(completion_output, one_http2_frame_larger_than_the_queue_bound_goes_out_when_idle) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 2 };
+    ASSERT_EQ(0, kl_http_server_init(&wso_srv, &cfg));
+    int completion = (kl_event_caps(&wso_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    kl_http_server_free(&wso_srv);
+    if (!completion) UTEST_SKIP("The transport queue allowance applies only to completion backends");
+
+    const size_t bound = (size_t)1 << 20;
+    KlHttpConn c;
+    memset(&c, 0, sizeof(c));
+    c.state = KL_HTTP_CONN_HTTP2;
+    EXPECT_EQ(0, kl_comp_http2_queue_full(&c, bound));
+    EXPECT_EQ(0, kl_comp_http2_queue_full(&c, 2 * bound));   /* was 1: refused while idle, forever */
+    c.comp_tlsq_len = 1;                                     /* one byte waiting to be posted */
+    EXPECT_EQ(1, kl_comp_http2_queue_full(&c, 2 * bound));
+    EXPECT_EQ(1, kl_comp_http2_queue_full(&c, bound));       /* the allowance, not the frame, is short */
+    EXPECT_EQ(0, kl_comp_http2_queue_full(&c, bound - 1));
+    c.comp_tlsq_len = 0;
+    c.state = KL_HTTP_CONN_WEBSOCKET;
+    EXPECT_EQ(1, kl_comp_ws_queue_full(&c, 2 * bound));      /* a WebSocket keeps the strict bound */
+}
 
 UTEST(completion_output, one_oversized_websocket_write_cannot_cross_the_queue_bound) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 2 };
