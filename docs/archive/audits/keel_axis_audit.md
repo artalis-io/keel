@@ -5,6 +5,198 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Twentieth pass: HTTP/2 streamed responses keep the separation; one completion input-gating Medium (2026-11-27)
+
+**Revision:** `main` `ff259280` with three unmerged branches combined locally: `fix/stop-drain-claim`
+(`c6462a16`), `fix/freestanding-link-cloexec` (`d0698f3d`, `098e526a`) and `feat/h2-streaming`
+(`377b9173`). Read-only; no source changed. It ran beside a C audit of the same tree, whose findings
+are referenced here as C-H1, C-M1 and so on rather than repeated.
+**Resolution:** the findings were then fixed on `feat/h2-streaming` (PR #538); section 9 maps each
+one to its fix and regression test.
+**Scope:** what changed since the nineteenth pass: HTTP/2 streamed responses (the response stream
+sink, per-stream buffers the session pulls, the zero-delay flush timer, the readiness
+`kl_http_conn_http2_request_write` seam, the completion queue bound and the `KlHttp2CompHooks.sent`
+resume), the `kl_http_server_stop` claim/publish, and the freestanding and UEFI link seams.
+
+**Verdict:** the three-axis separation holds. The HTTP/2 TU gained no event-engine call and no
+platform header: it reaches the event axis only through the substrate timer API and two core seams,
+and the completion axis only through a hook the completion TU registers. **One Medium (A-M1):**
+on a completion loop an HTTP/2 connection reads its client's frames only once its output queue is
+idle, which streaming makes observable (per-stream cancel and flow-control updates wait behind other
+streams' output); readiness reads concurrently. Two Lows, four Informational.
+
+### 1. Architecture map (drift since the nineteenth pass)
+
+- **Response stream sink.** `KlHttpStreamSink` (`src/protocols/http/http_response_internal.h`):
+  begin / write / end / pending over unframed body bytes. With `KlHttpResponse.stream_sink` set, the
+  response layer (`http_response.c`) keeps its rules (one begin, nothing after the end, admission,
+  the writable edge) and hands the sink the body instead of chunked framing on the write target.
+  New public `kl_http_response_stream_on_close()` is the producer's terminal signal on HTTP/2.
+- **HTTP/2 core.** `http2_server.c` installs the sink on each stream's response when the session has
+  the new optional ops (`KlHttp2ServerSession.submit_stream_response` / `resume_body` /
+  `reset_stream`, `KlHttp2ServerCallbacks.read_body`). Stream slots are stable (no swap-remove).
+  Output a producer writes outside the connection's events is flushed by a zero-delay
+  `kl_timer_add` on the connection's ctx (`h2_flush_tick`).
+- **Core seams (`http_server_core.c`).** `kl_http_conn_http2_request_write` (readiness: arm
+  READ|WRITE; completion: no-op), the HTTP/2 analogue of `kl_http_conn_ws_request_write`;
+  `kl_http_conn_out_would_block` now also covers HTTP/2 through `kl_comp_http2_queue_full`.
+- **Completion seam.** `KlHttp2CompHooks.sent` (registered by `completion_http2.c`), called from
+  the send completion in `completion_http_server.c` to resume frames held at the queue bound.
+- **Adapter.** `http2_nghttp2_server.c`: a data provider over `read_body`, `NGHTTP2_ERR_DEFERRED`
+  until `resume_body`, `nghttp2_submit_rst_stream` for `reset_stream`.
+- **Server stop.** `stop_requested` is three-state (none, claimed, established), claimed with the
+  new lock-free `kl_atomic_cas_int` (`src/kl_atomic.h`).
+- **Build.** `FREESTANDING_AR` / `FREESTANDING_NM` fall back to the LLVM tools beside the
+  freestanding clang; link stubs gained `kl_sockdef_set_cloexec` / `kl_sockdef_shutdown`; the UEFI
+  ARM64 `__chkstk`.
+
+### 2. Traces (new paths only)
+
+- **Streamed send, readiness:** producer `kl_http_response_stream_try_writev` -> admission against
+  `h2_sink_pending` -> `h2_sink_write` (copy into the stream buffer; `resume_body` if deferred) ->
+  `h2_schedule_flush` -> next tick `h2_flush_tick` -> session flush -> `read_body` pulls only while
+  the stream's and connection's windows allow -> `h2_cb_send` -> `h2_out_conn_write` -> `conn_write`
+  -> `kl_stream_send`. Would-block: the session keeps the tail, `want_write` is true, the tick calls
+  `kl_http_conn_http2_request_write` (READ|WRITE) -> writable event -> `kl_http2_server_on_writable`
+  -> forced flush -> `kl_http_response_stream_progress` fires the producer's edge.
+- **Streamed send, completion:** the same down to `conn_write` -> `kl_comp_queue_write` (or the TLS
+  engine then `kl_comp_tls_flush`) -> `comp_tlsq_kick` posts one send. Past the queue's producer
+  bound `h2_out_conn_write` refuses (`out_refused`); the session holds the frame; the send completion
+  (`comp_tls_on_write` path) calls `KlHttp2CompHooks.sent` -> `kl_http2_server_comp_sent` -> flush.
+- **Receive, completion (unchanged, now load-bearing):** `kl_comp_http2_drive` feeds the session,
+  then `kl_comp_recv_after_output`, which posts the next receive only when `comp_tlsq_idle` (A-M1).
+- **Cancel:** client RST_STREAM -> session close callback -> `h2_cb_on_stream_reset` ->
+  `h2_stream_closed` (seal, notify once) -> `h2_stream_destroy`. Connection teardown:
+  `kl_http2_server_cleanup` cancels the flush timer, then `h2_streams_release_all` seals every
+  streamed response before notifying any.
+- **Stop:** `kl_http_server_stop` -> claim (CAS none -> claimed) -> publish (deadline, then
+  `draining`, then established) or, on an established drain, `running = 0`. The loop reads the
+  deadline only after a seq-cst load of `draining`.
+
+### 3. Findings
+
+**Medium**
+- **A-M1 (confirmed by reading; not reproduced): completion loops do not read an HTTP/2 client while
+  output is pending, so per-stream cancel and flow control lag behind other streams' output.**
+  - Where: `kl_comp_recv_after_output` (`completion_http_server.c`): `if (!comp_tlsq_idle(c))
+    { comp_tlsq_then_recv = 1; return; }`, called by `kl_comp_http2_drive` after each feed.
+  - Principle: equivalent Keel-level semantics on both models (goals 2 and 8). Readiness keeps READ
+    armed for an HTTP/2 connection (`http_server.c`, the HTTP2 rearm), so a client's RST_STREAM,
+    WINDOW_UPDATE, PING or new request is read while responses go out.
+  - Why it matters now: before streamed responses, output pending meant a finite buffered body.
+    Now a long-lived stream (SSE, a relay) can keep the queue busy indefinitely.
+  - Failure scenario: on io_uring, IOCP or pollcomp, stream B streams continuously to a client that
+    opened large windows; the client resets stalled stream A. A's RST_STREAM is not read until the
+    queue idles (B pauses, or exhausts its window), so A's producer keeps its buffer and hears
+    `on_close` late; on readiness it hears it at once. With a client that has stopped reading
+    entirely, the queue never idles and no frame is read at all, including the RST that would free
+    the stream. The e2e test passes on completion only because its streaming stream idles between
+    events.
+  - Smallest fix: for the HTTP2 state, keep one receive posted regardless of output (the input
+    bound then comes from the session: nghttp2 limits concurrent streams and queued control-frame
+    acks), or post it when the queue is at the producer bound; add a completion e2e case with a
+    continuously busy stream and a reset of another.
+
+**Low**
+- **A-L1: the deferred flush depends on a timer that may not be armed.** `h2_schedule_flush`
+  silently skips on `kl_timer_add` failure, and `h2_stream_body_ready` clears `deferred` before a
+  `resume_body` whose failure it ignores; output then waits for the connection's next event (C-M3).
+  Fix: keep the deferral on failure and retry from the next flush.
+- **A-L2: a failed timer flush does not close a completion connection** (`h2_flush_tick`): readiness
+  asks for WRITE and fails at the writable flush; completion has no such follow-up (C-L1). Fix: close
+  through the completion driver on -1.
+
+**Informational**
+- **A-I1: per-stream bound, per-connection multiple.** Memory is `stream_capacity` per streaming
+  stream, up to `max_concurrent_streams` times per connection; a producer has no way to abort a
+  stalled stream (C-M2). A protocol asymmetry, not a model one: an HTTP/1.1 producer can
+  `kl_async_cancel`. The abort API belongs on the response surface, above both axes.
+- **A-I2: the stop publication is single-writer.** Only the claimer writes `drain_deadline_ms`, and
+  readers load it after the seq-cst `draining` load, so the 64-bit deadline can no longer be torn by
+  a second writer on 32-bit targets.
+- **A-I3: build-system tool selection (goal 13).** GNU ar wrote an aarch64 COFF archive with no
+  symbol index; the freestanding build now prefers the LLVM tools wherever clang installed them.
+- **A-I4: the HTTP/2 correctness bugs found by the C audit (C-H1 middleware-begun streams, C-M1
+  `on_error` after `on_complete`) are protocol-layer only**; neither involves an axis seam.
+
+### 4. Protocol independence (mechanical)
+
+No protocol TU includes an engine header or names an engine symbol: the grep for `sys/epoll.h`,
+`sys/event.h`, `liburing.h`, `epoll_*`, `kevent`, `io_uring_*`, `WSA*`, `OVERLAPPED` and the IOCP
+calls finds none outside comments. The platform includes in `dns_sys_win.c`,
+`http_server_plat_posix.c` and `http_server_plat_win.c` are the platform-service TUs accepted by
+earlier passes. `http2_server.c` calls only `kl_timer_add` / `kl_timer_cancel` of the axis-adjacent
+API. Gates green: `check-substrate-purity`, `check-protocol-no-integration`, `check-integration-seam`,
+`check-sockaddr-neutral`, `check-backend-isolation`, `check-readiness-identity`.
+
+### 5. Compatibility matrix (HTTP/2 streamed responses)
+
+| Pairing | Status | Evidence |
+|---|---|---|
+| Linux sockets + epoll | tested | `e2e_h2_stream_flow` plain and ASan+UBSan on core; full suite under ASan |
+| Linux sockets + io_uring | tested | `e2e_h2_stream_flow` plain and ASan on core; A-M1 applies |
+| Darwin sockets + kqueue | tested | `e2e_h2_stream_flow`, full suite |
+| Winsock + select() | built and unit-tested | affected core suites on edge (MSYS2); the nghttp2 e2e tests were POSIX-only, so no e2e |
+| Winsock + IOCP | built and unit-tested | affected core suites on edge; no e2e (as above); A-M1 applies |
+| pollcomp double | tested | `e2e_h2_stream_flow` incl. the queue-bound phase, ASan on core; A-M1 applies |
+| lwIP raw / UEFI | not applicable | no HTTP/2 server session in those builds |
+
+Not production-ready on any pairing until C-H1 and C-M1 are fixed; the completion pairings also
+carry A-M1.
+
+### 6. Contract deltas
+
+- `docs/contracts/streaming.md` ("HTTP/2") should state the completion read gating until A-M1 is
+  fixed, and the abort API once added (A-I1).
+- `KlHttp2ServerSession`: the three new ops never call back; closes come only from flush or recv
+  (documented in `http2_server.h`).
+
+### 7. Roadmap
+
+1. Before merging `feat/h2-streaming`: C-H1, C-M1, and an abort API (A-I1 / C-M2).
+2. A-M1 with a completion e2e case (busy stream plus reset of another).
+3. A-L1 and A-L2 (small, in the same change).
+4. An nghttp2 e2e run on Windows (select() and IOCP): MSYS2 UCRT64 ships nghttp2; the e2e tests
+   need a portable client.
+
+### 8. Changes made
+
+None to source. This report is the only file written.
+
+### 9. Resolution (PR #538, after this pass)
+
+Fixed on `feat/h2-streaming` after the audited revision above, in one fix commit ("fix(http2):
+answered streams, body-reader lifecycle, producer abort, completion reads during output"). Unit
+tests are in `tests/protocols/http2/test_http2.c` (against a mock session with the streaming ops)
+and `tests/protocols/http/test_http_response.c`; the end-to-end test is
+`integrations/http2/nghttp2/tests/e2e_h2_stream_control.c`, portable to Windows.
+
+| Finding | Status | Fix | Regression test |
+|---|---|---|---|
+| A-M1 (Medium) | fixed | `kl_comp_recv_alongside_output` (`completion_http_server.c`): an HTTP/2 connection keeps one receive posted whether or not output is queued. Called by `kl_comp_http2_drive` (`completion_http2.c`) and the h2c-upgrade transition; the idle-queue deferred receive (`comp_tlsq_settle`) no longer posts a second one. WebSocket keeps its gating | `e2e_h2_stream_control` part 2: with the client not reading and `/flood`'s output held, a WINDOW_UPDATE for `/slow` is read, and `/victim`'s RST_STREAM cancels its producer while `/flood` still has queued output; then `/flood` and `/slow` arrive whole |
+| A-L1 / C-M3 (Low) | fixed, one residual | `h2_stream_resume`: a failed `resume_body` keeps the stream deferred and the next flush retries it. A failed `kl_timer_add` marks the flush owed (`flush_owed`): readiness asks for WRITE, completion flushes on the next send completion (`kl_http2_server_comp_sent`) or input (a receive is now always posted) | none: no fault injection for `kl_timer_add` or the session's resume. Residual: on a completion loop with no send in flight and a silent client, an owed flush waits |
+| A-L2 / C-L1 (Low) | open | a failed timer flush on a completion loop still does not close the connection itself; with a receive always posted (A-M1), the client's next frame reaches the failed session, which closes it | none |
+| A-I1 / C-M2 | fixed | `kl_http_response_stream_abort()` (`http_response.h`), with the sink op `h2_sink_abort`: drops the stream's buffer, RST_STREAM CANCEL on the next flush, close notification once with `completed` 0. No server-side no-progress timeout was added: the producer enforces its own | `test_http_response.c` `response.stream_abort_terminates_a_sink_stream_once`; `test_http2.c` `h2.abort_resets_only_its_stream_without_a_writable_edge`; `e2e_h2_stream_control` part 1 (a window-stalled `/stuck` aborted from a timer with no writable edge since its stall; `/events` runs on to its end) |
+| A-I2, A-I3 | no action | informational | n/a |
+| A-I4 / C-H1 (High) | fixed | a stream answered while its request is still arriving is marked `answered` (`h2_answer_and_release`): later DATA is ignored, and `h2_cb_on_stream_end` runs no post-body middleware, handler or 404. A body refused after the stream began is reset (`h2_refuse_begun`, INTERNAL_ERROR) instead of answered 413/415. The body setters refuse a begun stream (`res_stream_begun`, `http_response.c`) | `test_http2.c` `h2.a_stream_begun_by_pre_body_middleware_finishes_without_the_handler`, `h2.a_stream_begun_by_pre_body_middleware_finishes_without_the_404`, `h2.a_body_refused_on_a_begun_stream_resets_it`; `test_http_response.c` `response.body_setters_refuse_a_begun_stream` |
+| A-I4 / C-M1 (Medium) | fixed | `body_done` on the stream: set when the body reader gets `on_complete` (or `on_error`); `h2_cb_on_stream_reset` and the refusal paths skip `on_error` after it | `test_http2.c` `h2.a_completed_body_gets_no_on_error_when_its_stream_closes_or_aborts` |
+| C-L2, C-L3 (Low) | open | unchanged: a frame above the 1 MiB queue bound (unreachable with 16 KiB DATA frames); `h2_sink_begin` splitting `hdr_buf` before a submit that can fail (harmless: that path answers 500 with its own headers) | none |
+
+**Verification of the fixes.** Each unit regression test above fails with its fix reverted (the
+`answered` checks in `h2_cb_on_data` and `h2_cb_on_stream_end`, the `body_done` check, the body
+setters' refusal, the abort's CANCEL code, the reset of a refused begun stream). `e2e_h2_stream_control`
+passes on epoll, poll, io_uring and pollcomp (Linux, plain and ASan+UBSan for epoll, io_uring and
+pollcomp), kqueue (macOS), and IOCP and Windows select() (MSYS2 UCRT64 with its nghttp2). With the
+A-M1 fix reverted it fails on pollcomp, io_uring and IOCP ("WINDOW_UPDATE not read while output was
+held"); with that check also bypassed, pollcomp fails on the RST_STREAM ("RST_STREAM not read while
+output was held"). The full unit suite passes on macOS, and under ASan+UBSan on Linux epoll
+(`debug-test`), pollcomp (`debug-pollcomp`) and io_uring (`debug-iouring`). The affected suites pass
+on Windows select() and IOCP. cppcheck and scan-build are clean.
+
+**Compatibility matrix after the fixes:** every pairing in section 5 that runs HTTP/2 now has
+`e2e_h2_stream_control`, Winsock + select() and Winsock + IOCP included (`e2e_h2_stream_flow`
+stays POSIX-only). A-M1 no longer applies to the completion pairings.
+
 ## Nineteenth pass: 3.6.0 pre-release audit; separation holds, one completion-edge Medium (2026-11-25)
 
 **Revision:** `main` `65568ff` (#521, bounded compressed streaming; the changes since v3.5.0).
