@@ -102,6 +102,7 @@ int fprintf(KL_FS_FILE *stream, const char *fmt, ...) { (void)stream; (void)fmt;
  * state machine pulled in transitively has a ~4 KiB frame). This is a real,
  * spec-correct probe (touch one byte per page). Written in asm so the prologue
  * ABI (rax in/out, only r10/r11 clobbered) is exact. */
+#if defined(__x86_64__)
 __attribute__((naked)) void __chkstk(void);
 __attribute__((naked)) void __chkstk(void) {
     __asm__ volatile(
@@ -124,3 +125,23 @@ __attribute__((naked)) void __chkstk(void) {
         "ret\n\t"
         ::: "memory");
 }
+#elif defined(__aarch64__)
+/* The ARM64 contract differs (MS ARM64 ABI): on entry x15 = the frame size in 16-byte units, the
+ * caller subtracts it from sp itself afterwards, and only x16/x17 (and the flags) may be clobbered.
+ * The same page-by-page probe, below the caller's sp, down to the frame's end. */
+__attribute__((naked)) void __chkstk(void);
+__attribute__((naked)) void __chkstk(void) {
+    __asm__ volatile(
+        "lsl  x16, x15, #4\n\t"         /* x16 = frame size in bytes */
+        "mov  x17, sp\n\t"
+        "1:\n\t"
+        "sub  x17, x17, #0x1000\n\t"    /* step down one page */
+        "subs x16, x16, #0x1000\n\t"
+        "ldr  xzr, [x17]\n\t"           /* touch it (fault-in / validate) */
+        "b.gt 1b\n\t"
+        "ret\n\t"
+        ::: "memory");
+}
+#else
+#error "u1_link_stubs.c: __chkstk is defined for x86_64 and aarch64 UEFI targets only"
+#endif
