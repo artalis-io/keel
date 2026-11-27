@@ -183,6 +183,7 @@ int  kl_sockdef_connect(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a
 int  kl_sockdef_close(KlSocketHandle f) { (void)f; return -1; }
 int  kl_sockdef_set_nonblocking(KlSocketHandle f) { (void)f; return -1; }
 void kl_sockdef_set_nosigpipe(KlSocketHandle f) { (void)f; }
+void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }   /* the async client marks its sockets */
 int  kl_sockdef_get_so_error(KlSocketHandle f, int *e) { (void)f; if (e) *e = 0; return -1; }
 KlIoStatus kl_sockdef_io_status(void) { return KL_IO_FATAL; }
 
