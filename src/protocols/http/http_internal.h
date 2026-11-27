@@ -107,7 +107,7 @@ int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add);
 /* Output a WebSocket or HTTP/2 connection holds was added outside the connection's own events (a
  * WebSocket drain that went from empty to holding bytes; HTTP/2 output the session keeps for a full
  * socket): make sure it is flushed. Readiness arms READ|WRITE, the mask of both states (the
- * connection keeps reading); that mask is wrong for any other state, so call it for those two only.
+ * connection keeps reading); any other state is refused, its mask being different.
  * A completion loop sends from its queue, so there is nothing to do. */
 void kl_http_conn_request_write(KlHttpConn *c);
 

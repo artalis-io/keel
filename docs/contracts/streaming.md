@@ -283,15 +283,18 @@ compressed writers, `kl_http_response_end_stream`). The differences follow from 
   fails the stream: its response answers ERROR and the stream is reset (RST_STREAM
   INTERNAL_ERROR); the close notification follows with `completed` 0. A flush that fails (the
   session cannot send) fails the connection, on both event models: no later flush reaches the
-  session, and every write, end or begin on its streams answers ERROR at once. The connection's
-  own next event or, at the latest, the next sweep ends every open stream (its close notification
-  fires once with `completed` 0, never from inside a producer's call) and closes the connection.
-  The streams end then even where the close itself waits for queued output (a completion loop).
+  session, its input is no longer read, and every write, end or begin on its streams answers ERROR
+  at once. The connection's own event that saw the failure or, for a failure outside its events,
+  the server's pass before the loop next waits ends every open stream (its close notification fires
+  once with `completed` 0, never from inside a producer's call). That event then closes the
+  connection, or for a failure outside its events the sweep does. The streams end then even where the close itself waits for queued output (a
+  completion loop).
 
 Tests: `tests/protocols/http/test_http_response.c` (the response layer over a stream sink, abort,
 the body setters' refusal), `tests/protocols/http2/test_http2.c` (middleware-begun streams, the
-body reader's lifecycle, abort, an owed flush the sweep sends, a failed flush that closes the
-connection, against a mock session),
+body reader's lifecycle, abort, output written outside the connection's events, including output the drain's GOAWAY flush leaves
+held,
+a failed flush that closes the connection, against a mock session),
 `integrations/http2/nghttp2/tests/e2e_h2_stream_flow.c` (two streams on one connection, one with an
 exhausted window; resetting it cancels only its producer; a body past the completion queue bound)
 and `integrations/http2/nghttp2/tests/e2e_h2_stream_control.c` (aborting a window-stalled stream

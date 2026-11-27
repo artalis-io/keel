@@ -3061,4 +3061,258 @@ UTEST(h2, held_output_does_not_make_the_wait_zero) {
     ASSERT_EQ(0, idle_flushes);                            /* and no flush retried for it */
 }
 
+/* ── The drain's flush, a failed session's input, the request-write seam ─────────────────────── */
+
+/* Is WRITE reported for c's stream on the sweep server's (readiness) loop? */
+static int sweep_write_armed(KlHttpConn *c) {
+    KlEvent evs[8];
+    int n = kl_event_wait(&h2_sweep_srv.ev.loop, evs, 8, 0);
+    for (int i = 0; i < n; i++)
+        if (evs[i].udata == &c->stream && (evs[i].ready & KL_EVENT_WRITE)) return 1;
+    return 0;
+}
+
+/* A producer writes from outside the connection's events (a timer, a thread pool), and in the same
+ * iteration a graceful stop begins: the drain's GOAWAY flush takes the producer's output too, until
+ * the socket is full. That flush cleared what the settle pass looks for, so on a readiness loop
+ * nothing asked for WRITE: the rest waited for the client's next frame, and a client that only
+ * reads saw the in-flight stream cut off at the drain deadline. The drain's flush now asks for
+ * WRITE itself, so the held output moves on the connection's writable event with no client
+ * traffic at all. */
+UTEST(h2, output_held_by_the_drain_flush_is_sent_without_client_traffic) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    if (comp) {                                            /* a completion loop sends from its queue */
+        kl_http_server_free(&h2_sweep_srv);
+        kl_test_closesock(pfd[0]);
+        test_teardown();
+        UTEST_SKIP("readiness only");
+    }
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    /* The connection's own last event left READ only: nothing was held then. */
+    ASSERT_EQ(0, kl_event_add(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1], KL_EVENT_READ,
+                              &c->stream));
+    (void)sweep_write_armed(c);
+    int recvs = mock.recv_count;
+
+    mock.want_write_return = 1;                            /* from here the socket is full */
+    int wr = kl_http_response_stream_try_write(g_sres[0], "more", 4);
+    kl_http2_server_drain_shutdown(c);                     /* the drain's progress step */
+    int shutdowns = mock.shutdown_count;
+    kl_http_server_settle_h2(&h2_sweep_srv);               /* the next iteration's pass */
+    int due = kl_http_server_settle_h2_due(&h2_sweep_srv);
+    int armed = sweep_write_armed(c);
+
+    mock.want_write_return = 0;                            /* the client read: the socket drains */
+    int flushes = mock.flush_count;
+    int st = kl_http2_server_on_writable(c);
+    char buf[16];
+    int eof = 0;
+    kl_ssize_t got = mock.callbacks.read_body(mock.cb_user_data, 1, buf, sizeof buf, &eof);
+    int sent_flushes = mock.flush_count - flushes;
+    int recvs_after = mock.recv_count;
+
+    kl_event_del(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1]);
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_STREAM_ACCEPTED, wr);
+    ASSERT_EQ(1, shutdowns);                               /* the GOAWAY */
+    ASSERT_EQ(0, due);                                     /* held, not due: no zero wait */
+    ASSERT_EQ(1, armed);                                   /* was 0: nothing watched for WRITE */
+    ASSERT_EQ(KL_HTTP_CONN_HTTP2, st);
+    ASSERT_EQ(1, sent_flushes);                            /* the writable event flushed */
+    ASSERT_EQ(6, (int)got);                                /* the producer's bytes reach the session */
+    ASSERT_EQ(0, memcmp(buf, "himore", 6));
+    ASSERT_EQ(recvs, recvs_after);                         /* without a frame from the client */
+}
+
+/* A session whose flush failed can answer nothing more. Its input was still parsed, so a request
+ * that arrived before the close ran its handler, side effects and all, for an answer that could
+ * only be the close. The connection's input is now refused once the session has failed. */
+UTEST(h2, a_failed_session_reads_no_more_input) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    mock.want_write_return = 1;
+    mock.flush_return = -1;                                /* the session cannot send */
+    (void)kl_http_response_stream_try_write(g_sres[0], "x", 1);
+    kl_http_server_settle_h2(&h2_sweep_srv);               /* the failure, outside the events */
+    int failed = c->h2->failed;
+    int recvs = mock.recv_count;
+    KlHttpConnState st = kl_http2_server_feed(c, "frame", 5);
+    int recvs_after = mock.recv_count;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(1, failed);
+    ASSERT_EQ(KL_HTTP_CONN_CLOSED, st);
+    ASSERT_EQ(recvs, recvs_after);                         /* was +1: the session parsed it */
+}
+
+/* A flush that fails inside the connection's own event (its input's flush) closes it. On a
+ * completion loop the close waits for queued output, which a client that stopped reading never
+ * takes, and the settle pass does not visit a closing connection: the producers heard nothing until
+ * the slot was released. The failing event now ends the streams itself, after its flush returned. */
+UTEST(h2, a_failed_flush_in_the_connection_event_ends_its_streams) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    g_sclose_calls[1] = 0;                                 /* one stream: the other slot is unused */
+    g_closes_in_flush = -1;
+    mock.on_flush = record_closes_in_flush;
+    mock.want_write_return = 1;
+    mock.flush_return = -1;
+    KlHttpConnState st = kl_http2_server_feed(c, "frame", 5);
+    int closes = g_sclose_calls[0], completed = g_sclose_completed[0];
+    int left = c->h2 ? c->h2->num_streams : -1;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_CONN_CLOSED, st);
+    ASSERT_EQ(0, g_closes_in_flush);                       /* never from inside the flush */
+    ASSERT_EQ(1, closes);                                  /* was 0 until the slot's release */
+    ASSERT_EQ(0, completed);
+    ASSERT_EQ(0, left);
+}
+
+/* A fatal session error on the client's input (recv fails) closes the connection in that event too,
+ * and so ends its streams there, for the same reason. */
+UTEST(h2, a_fatal_session_error_ends_its_streams) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    mock.recv_return = -1;
+    KlHttpConnState st = kl_http2_server_feed(c, "bad", 3);
+    int closes = g_sclose_calls[0], completed = g_sclose_completed[0];
+    int left = c->h2 ? c->h2->num_streams : -1;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_CONN_CLOSED, st);
+    ASSERT_EQ(1, closes);
+    ASSERT_EQ(0, completed);
+    ASSERT_EQ(0, left);
+}
+
+/* The same for the flush a completion loop's send completion runs to resume output the queue had
+ * refused: it is the connection's own event too. */
+UTEST(h2, a_failed_flush_in_a_send_completion_ends_its_streams) {
+    test_setup();
+    g_nsres = 0;
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_stream = 1;
+    g_mock_session = &mock;
+    kl_http_router_add(&test_router, "GET", "/s", streaming_handler, NULL, NULL);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, sweep_open_stream(&mock, 1));
+    kl_http_server_settle_h2(&h2_sweep_srv);
+    g_sclose_calls[1] = 0;
+    g_closes_in_flush = -1;
+    mock.on_flush = record_closes_in_flush;
+    c->h2->out_refused = 1;                                /* the queue had refused output */
+    mock.want_write_return = 1;
+    mock.flush_return = -1;
+    KlHttpConnState st = kl_http2_server_comp_sent(c);
+    int closes = g_sclose_calls[0], completed = g_sclose_completed[0];
+    int left = c->h2 ? c->h2->num_streams : -1;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(KL_HTTP_CONN_CLOSED, st);
+    ASSERT_EQ(0, g_closes_in_flush);
+    ASSERT_EQ(1, closes);
+    ASSERT_EQ(0, completed);
+    ASSERT_EQ(0, left);
+}
+
+/* kl_http_conn_request_write arms READ|WRITE, the mask of the WebSocket and HTTP/2 states only: any
+ * other state's registration is left as it is. */
+UTEST(h2, request_write_leaves_other_states_alone) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    if (comp) {
+        kl_http_server_free(&h2_sweep_srv);
+        kl_test_closesock(pfd[0]);
+        test_teardown();
+        UTEST_SKIP("readiness only");
+    }
+    ASSERT_EQ(0, kl_event_add(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1], KL_EVENT_READ,
+                              &c->stream));
+    (void)sweep_write_armed(c);
+    c->state = KL_HTTP_CONN_READING;
+    kl_http_conn_request_write(c);
+    int other = sweep_write_armed(c);
+    c->state = KL_HTTP_CONN_HTTP2;
+    kl_http_conn_request_write(c);
+    int h2 = sweep_write_armed(c);
+
+    kl_event_del(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1]);
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(0, other);
+    ASSERT_EQ(1, h2);
+}
+
 UTEST_MAIN();

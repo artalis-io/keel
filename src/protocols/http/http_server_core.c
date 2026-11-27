@@ -577,6 +577,8 @@ void kl_http_server_free(KlHttpServer *s) {
  * per pass, so a producer that writes from every edge costs one flush per iteration, not a loop
  * that never waits. */
 void kl_http_server_settle_h2(KlHttpServer *s) {
+    /* No HTTP/2 configured: no connection can reach the HTTP2 state, so no scan. */
+    if (!s->config.h2) return;
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (!h2h || !h2h->settle) return;
     for (int i = 0; i < s->pool.capacity; i++) {
@@ -589,6 +591,7 @@ void kl_http_server_settle_h2(KlHttpServer *s) {
  * that wrote from an edge or close notification it fired, or from any callback the loop ran after
  * it, such as a completion loop's writable edges)? Checked last before the wait. */
 int kl_http_server_settle_h2_due(const KlHttpServer *s) {
+    if (!s->config.h2) return 0;
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (!h2h || !h2h->settle_due) return 0;
     for (int i = 0; i < s->pool.capacity; i++) {
@@ -1058,7 +1061,8 @@ void kl_http_conn_request_write(KlHttpConn *c) {
      * this; a write from anywhere else (another connection's event, a timer, a thread-pool done_fn)
      * has no such event behind it, and the backlog would sit until the peer sent something. */
     if (!c || c->comp_driven || !c->stream.ctx) return;
-    if (c->state == KL_HTTP_CONN_SUSPENDED) return;   /* never overwrite a suspended fd's hang-up watch */
+    /* READ|WRITE is the mask of these two states only (never a suspended fd's hang-up watch). */
+    if (c->state != KL_HTTP_CONN_WEBSOCKET && c->state != KL_HTTP_CONN_HTTP2) return;
     (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
                        (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
 }

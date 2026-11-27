@@ -18,7 +18,6 @@
 #include "platform.h"   /* kl_plat_file_pread */
 #include "http_proto_hooks.h"       /* H2 server upgrade seam: registered for the core */
 #include "http_response_internal.h" /* KlHttpStreamSink: a streamed response's body as DATA */
-#include <keel/timer.h>             /* the deferred flush of a streamed response's output */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -270,9 +269,10 @@ static int h2_session_streams(const KlHttp2ServerConn *h2c) {
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force);
 static int h2_flush(KlHttp2ServerConn *h2c) { return h2_flush_ex(h2c, 0); }
 
-/* A flush from outside the connection's own events (the settle hook, once per loop iteration).
- * Nothing here closes the connection: a failure marks the session failed (h2_flush_ex) and the
- * sweep closes it, on readiness and completion alike. */
+/* A flush from outside the connection's own events (the settle hook, the drain's GOAWAY). Every
+ * such flush goes through here: it clears flush_due, so it, not the settle pass, must ask for WRITE
+ * while output is held. Nothing here closes the connection: a failure marks the session failed
+ * (h2_flush_ex) and the sweep closes it, on readiness and completion alike. */
 static void h2_flush_outside(KlHttp2ServerConn *h2c) {
     if (h2_flush(h2c) < 0) return;
     /* Readiness: output that is still held (a full socket) needs WRITE interest, which only the
@@ -472,7 +472,10 @@ KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->failed) return KL_HTTP_CONN_CLOSED;
     if (!h2c->out_refused) return KL_HTTP_CONN_HTTP2;
-    if (h2_flush(h2c) < 0) return KL_HTTP_CONN_CLOSED;
+    if (h2_flush(h2c) < 0) {          /* in the connection's own event: end the streams, as feed does */
+        h2_streams_release_all(h2c);
+        return KL_HTTP_CONN_CLOSED;
+    }
     return KL_HTTP_CONN_HTTP2;
 }
 
@@ -1145,14 +1148,25 @@ static int h2_session_done(const KlHttp2ServerConn *h2c) {
 KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
+    /* A failed session can answer nothing: its input would only run handlers for requests whose
+     * answer is the close. */
+    if (h2c->failed) return KL_HTTP_CONN_CLOSED;
 
     c->last_active_ms = kl_monotonic_ms();
 
     kl_ssize_t consumed = h2c->session->recv(h2c->session, data, len);
-    if (consumed < 0) return KL_HTTP_CONN_CLOSED;
-
-    if (h2_flush(h2c) < 0)
+    if (consumed < 0) {               /* a fatal session error: the close is this event's, as below */
+        h2_streams_release_all(h2c);
         return KL_HTTP_CONN_CLOSED;
+    }
+
+    /* A failed flush ends the streams here, inside the connection's own event and outside every
+     * producer's call: a completion close then waits for the queued output, which a client that
+     * stopped reading never takes, and the settle pass does not visit a closing connection. */
+    if (h2_flush(h2c) < 0) {
+        h2_streams_release_all(h2c);
+        return KL_HTTP_CONN_CLOSED;
+    }
 
     /* Session done: close now rather than lingering until the peer times out. Flushed above, so
      * the GOAWAY is on the wire. */
@@ -1201,7 +1215,9 @@ void kl_http2_server_drain_shutdown(KlHttpConn *c) {
     if (!h2c || !h2c->session || h2c->goaway_sent) return;
 
     h2c->session->shutdown(h2c->session);
-    (void)h2_flush(h2c);
+    /* Outside the connection's events (the drain's progress step): held output, the GOAWAY or a
+     * producer's, needs WRITE interest on readiness, or it waits for the client's next frame. */
+    h2_flush_outside(h2c);
     h2c->goaway_sent = 1;
 }
 
@@ -1250,9 +1266,10 @@ static int kl_http2_server_done_hook(const KlHttpConn *c) {
 /* Once per loop iteration, before the loop waits, on both event models (kl_http_server_settle_h2):
  * the flush of output written from outside the connection's events, the retry of a body resume
  * that failed, and the release of a failed session's streams (each producer told once, `completed`
- * 0). Their streams end here, not when the connection is released: a completion close waits for
- * the queued output, which a client that stopped reading never takes, and meanwhile the producers
- * would go on writing into a session that sends nothing more. The sweep then closes it (done). */
+ * 0), for a failure first seen outside the connection's events (a failure inside them ends the
+ * streams in kl_http2_server_feed). Their streams end here, not when the connection is released: a
+ * completion close waits for the queued output, which a client that stopped reading never takes.
+ * The sweep then closes it (done). */
 static void kl_http2_server_settle_hook(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return;
