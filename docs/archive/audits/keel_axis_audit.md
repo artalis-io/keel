@@ -5,6 +5,249 @@
 > docs: [architecture.md](../../architecture/overview.md), [architecture_invariants.md](../../architecture/invariants.md).
 > Index: [audits/README.md](README.md).
 
+## Twenty-first pass: the HTTP/2 settle pass keeps the separation; one readiness drain regression (2026-11-27)
+
+**Revision:** PR #543 head `5586facf` (`refactor(http2): settle streamed output from one per-iteration
+pass, not a flush timer` + `test(http2): held output never makes the settle check ask for a zero
+wait`) over `main` `b43d3110`. Closes #540. Read-only; no tracked file changed. It ran beside a C
+audit of the same PR, whose findings are not repeated here.
+**Scope:** what the PR changes and what it touches transitively: `kl_http_server_settle_h2` /
+`kl_http_server_settle_h2_due` (`src/protocols/http/http_server_core.c`), their call sites in the
+readiness run loop (`kl_http_server_run`, `http_server.c`) and in `kl_http_server_run_completion_loop`
+(shared with the freestanding/UEFI server), the `settle` / `settle_due` hooks that replace `service`
+in `KlHttp2ServerHooks` (`http_proto_hooks.h`), `flush_due` replacing `flush_timer` / `flush_armed` /
+`flush_owed` (`http2_internal.h`, `http2_server.c`), and the merge of
+`kl_http_conn_http2_request_write` into `kl_http_conn_request_write`.
+
+**Verdict:** the three-axis separation holds, and is tighter than before: `http2_server.c` no longer
+calls the timer API at all and names no event, completion or socket symbol; the pass is HTTP-layer
+code reached only through the existing hook table, and no substrate file changed. Readiness and
+completion place the pass and its due check at equivalent points (after every callback that can
+write, before the wait), and the due check never asks for a zero wait on held output, so neither a
+lost wakeup nor a spin was found on the paths the PR names. **One Medium (A-M1, proven, a regression
+against `main`):** on readiness loops a flush outside the connection's events that is not the settle
+hook's (the graceful drain's GOAWAY flush, `kl_http2_server_drain_shutdown`) now consumes
+`flush_due` without asking for WRITE, so producer output it could not send waits for the client's
+next frame or the drain deadline. The flush timer used to cover that case. One Low (cost on every
+hosted server, HTTP/2 configured or not), one Low (stale contract wording), three Informational.
+
+### 1. Architecture map (drift since the twentieth pass)
+
+- **Settle pass (`http_server_core.c`).** `kl_http_server_settle_h2(s)` scans `s->pool.conns` and
+  calls `KlHttp2ServerHooks.settle` on each connection in `KL_HTTP_CONN_HTTP2`;
+  `kl_http_server_settle_h2_due(s)` scans again and returns 1 if any `settle_due` hook does. Both
+  return at once when `kl_http2_server_hooks()` is NULL (no `http2_server.c` linked: freestanding).
+- **Hooks (`http2_server.c`).** `kl_http2_server_settle_hook`: when the session has not failed and
+  `flush_due` is set or a stream has `resume_due`, `h2_flush_outside` (flush, then
+  `kl_http_conn_request_write` while `want_write`); then, if failed, `h2_streams_release_all`.
+  `kl_http2_server_settle_due_hook`: `failed ? num_streams > 0 : flush_due` (a failing resume
+  deliberately does not count).
+- **Producer side.** `h2_schedule_flush` is now only `flush_due = 1`. `h2_flush_ex` clears
+  `flush_due` at its start, for every caller.
+- **Request-write seam.** One `kl_http_conn_request_write` (readiness: `kl_event_mod(READ|WRITE,
+  &c->stream)`; completion: no-op; refuses `SUSPENDED`). The HTTP/2 variant's own
+  `state == KL_HTTP_CONN_HTTP2` guard is gone; the precondition is now the header comment ("call it
+  for those two only").
+- **Removed.** The zero-delay flush timer (`h2_flush_tick`) and its cancellation in
+  `kl_http2_server_cleanup` / `h2_conn_abandon`; `flush_owed` and its use in
+  `kl_http2_server_comp_sent`; the sweep's `service` step.
+- **Substrate.** Unchanged: the diff touches only `src/protocols/{http,http2,websocket}/`, one test
+  file and `docs/contracts/streaming.md`.
+
+### 2. Traces
+
+Loop order, readiness (`kl_http_server_run`, per iteration):
+`kl_http_server_settle_h2` -> `kl_async_sync_stream_interest` -> `h2_due = kl_http_server_settle_h2_due`
+-> `server_accept_backoff_check` -> async-deadline clamp -> `if (h2_due) wait_timeout = 0` ->
+`kl_timer_next_timeout` -> `kl_http_server_drain_wait` -> `kl_event_ctx_dispatch_begin` ->
+`kl_event_wait` -> file-I/O tick -> dispatch (watchers via `kl_event_dispatch`, connections) ->
+`kl_event_ctx_dispatch_end` -> `kl_http_server_sweep_conn_timeouts` -> `kl_async_sweep_deadlines` ->
+`kl_timer_fire` -> `kl_http_server_drain_progress`.
+
+Loop order, completion (`kl_http_server_run_completion_loop`, hosted io_uring / IOCP / pollcomp and
+the freestanding server): `kl_http_server_settle_h2` -> `edge_due = kl_http_comp_stream_edges` ->
+`h2_due = kl_http_server_settle_h2_due` -> `cwait = (edge_due || h2_due) ? 0 : 1000` -> deadline,
+accept-backoff, timer and drain clamps -> `kl_http_comp_run` -> `kl_comp_run` (drain, dispatch incl.
+`KL_COMP_WATCHER` relays, `kl_timer_fire`) -> sweep -> `kl_async_sweep_deadlines` -> `kl_timer_fire`
+-> `kl_http_server_drain_progress`.
+
+Nothing between the due check and the wait runs user code on either model
+(`server_accept_backoff_check` only re-arms the listener; the clamps are pure; `kl_comp_run` dispatches
+only after `kl_comp_drain` returns). So every write that happens after the due check happens after
+the wait and is seen by the next iteration's pass, before its wait.
+
+Producer write to bytes on the wire (`h2_sink_write` -> `h2_stream_body_ready` -> `h2_stream_resume`
+if deferred -> `h2_schedule_flush` sets `flush_due`):
+
+- **From a timer.** Readiness: `kl_timer_fire` at the iteration's end; next top's settle ->
+  `h2_flush_outside` -> session flush -> `h2_cb_send` -> `conn_write` -> `kl_stream_send`; a full
+  socket leaves `want_write` -> `kl_http_conn_request_write` -> `kl_event_mod(READ|WRITE,
+  &c->stream)` -> writable event -> `kl_http2_server_on_writable` -> `h2_flush_ex(force)`.
+  Completion: the timer fires inside `kl_comp_run` or after the sweep; next top's settle -> the same
+  flush -> `kl_comp_queue_write` (or the TLS engine, then `kl_comp_tls_flush`) -> one posted send;
+  past the producer bound `out_refused`, resumed by `KlHttp2CompHooks.sent` ->
+  `kl_http2_server_comp_sent`.
+- **From a watcher / thread pool `done_fn`.** Readiness: watcher dispatch inside the batch; completion:
+  the `KL_COMP_WATCHER` relay -> `kl_event_dispatch`. Then as above from the next top's settle.
+- **From a writable edge.** HTTP/2 edges fire only from `h2_flush_ex` after the session's send, and
+  only for streams whose bytes the session took (`progress_due`, set in `h2_cb_read_body`). An edge
+  the settle pass fires that writes again sets `flush_due` after the pass's flush cleared it; the due
+  check reports it and the wait is zero; the next iteration's pass sends it. An HTTP/1.1 edge (readiness:
+  the suspended stream's write watch inside dispatch; completion: `kl_http_comp_stream_edges`, which
+  runs after the settle pass) that writes HTTP/2 is seen by the due check (completion) or by the next
+  top (readiness, where the edge ran inside dispatch).
+- **Close notification.** `h2_streams_release_all` in the settle hook of a failed session; a producer
+  that writes from it gets ERROR (`h2_sink_write` refuses a failed session), so `flush_due` is not
+  set by it; `settle_due` answers 0 once `num_streams` is 0.
+
+Spin check: `flush_due` stays set only if no flush runs, which on a non-failed session the settle hook
+always does; held output (`want_write`, `out_refused`, a spent window) does not set it; a failing
+`resume_body` sets `resume_due`, which the hook retries but the due check ignores. The PR's
+`h2.held_output_does_not_make_the_wait_zero` and `h2.a_failed_body_resume_is_retried_by_the_settle_pass`
+pin this. A producer that writes from every edge makes the loop run with a zero wait only while the
+session keeps taking its bytes, which is the producer's own pace; on a full socket the session takes
+nothing, no edge fires, and the wait blocks with WRITE armed. Starvation: each due connection gets
+one flush per pass, bounded by the socket (readiness) or the queue's producer bound (completion);
+other connections are dispatched in the same iteration.
+
+### 3. Findings
+
+**Medium**
+- **A-M1 (proven defect, regression against `main`): on readiness, the graceful drain's flush
+  consumes `flush_due` and leaves held output without WRITE interest.**
+  - Where: `kl_http2_server_drain_shutdown` (`http2_server.c`) calls `(void)h2_flush(h2c)`;
+    `h2_flush_ex` clears `flush_due` for every caller; only `h2_flush_outside` asks for WRITE.
+    Reached from `kl_http_server_drain_progress`, the last step of every iteration on both loops,
+    i.e. outside every connection's events.
+  - Principle: equivalent delivery on both models (goals 2 and 7); the "outside the connection's
+    events" contract the PR states in `docs/contracts/streaming.md` ("sent before the loop next
+    waits ... nothing can refuse it"). On a completion loop the flush queues the bytes and a send is
+    posted, so only readiness is affected.
+  - Why it is a regression: on `main` the producer's write armed the flush timer (`flush_armed`),
+    which the drain's flush did not cancel; the next tick's `h2_flush_tick` -> `h2_flush_outside`
+    then asked for WRITE. With `flush_due` as the only record, the drain's flush erases it and the
+    settle hook has nothing to do.
+  - Failure scenario: an epoll/kqueue/poll/select server streams a large response from a timer or
+    thread-pool producer; the connection's last own event left READ only (nothing held then). The
+    producer writes; in the same iteration `kl_http_server_stop` starts a drain and
+    `kl_http_server_drain_progress` -> `kl_http2_server_drain_shutdown` flushes the GOAWAY and the
+    producer's bytes until the socket is full (`want_write` 1, `flush_due` 0). The next settle pass
+    skips the connection; nothing arms WRITE. A client with a large receive window sends nothing,
+    so the stream stalls until the drain deadline closes the connection and the producer hears
+    `completed` 0: the drain cuts off exactly the in-flight stream it exists to finish.
+  - Reproduced: a probe built from `tests/protocols/http2/test_http2.c` (mock session, the
+    connection registered for READ on the server's loop, `want_write` held at 1) checks for a
+    WRITE event after the next settle pass. Control (no drain): WRITE armed on both. With
+    `kl_http2_server_drain_shutdown` between the write and the pass: **not armed** on the PR head on
+    kqueue (macOS) and epoll (core, ASan+UBSan); **armed** on `main` with the timer in place of the
+    pass. The probe
+    is kept with the audit's scratch files; the regression test in the dispositions below is the
+    same scenario.
+  - Smallest fix: in `kl_http2_server_drain_shutdown`, replace `(void)h2_flush(h2c);` with
+    `h2_flush_outside(h2c);` (it already ignores the result; on completion the extra
+    `kl_http_conn_request_write` is a no-op; on the sweep's idle-close path the connection is
+    deleted right after). Verified on macOS: the probe passes and the full `make test` reports no
+    failure with that one-line change. Add the probe as a unit test
+    (`h2.held_output_after_the_drain_flush_is_watched_for_write`). An alternative, keeping every
+    future outside-event flush safe, is to have `h2_flush_ex` leave `flush_due` set when it ran
+    outside the connection's events and the session still wants to write on readiness; the one-line
+    fix is enough for the current callers (every other `h2_flush` / `h2_flush_ex` call runs inside the
+    connection's own event, whose dispatch recomputes the mask).
+
+**Low**
+- **A-L1 (theoretical concern, measured): the pass adds two full pool scans per iteration on every
+  hosted server, HTTP/2 configured or not.**
+  - Where: `kl_http_server_settle_h2` / `_due`; `kl_http_server_init` installs the HTTP/2 hooks
+    unconditionally on hosted builds, so the `!h2h` early return never applies there.
+  - Principle: the "O(n) sweep is fine" design note assumes one scan per iteration at the default
+    256 slots; the old `service` step rode inside the existing sweep scan.
+  - Measured (macOS, `-O2`, no HTTP/2 connections, `sizeof(KlHttpConn)` 4736 B, `state` at offset
+    560): settle + due 0.31 / 8.3 / 65.8 us per iteration at 256 / 4096 / 16384 slots, against the
+    sweep's 0.34 / 5.4 / 44.1 us. At large `max_connections` the fixed per-iteration cost more than
+    doubles, on HTTP/1.1-only servers too.
+  - Smallest fix: return early from both functions when `!s->config.h2` (no connection can reach
+    `KL_HTTP_CONN_HTTP2` without it; `pool.conns[i].h2_config` is set from it). A count of HTTP/2
+    connections maintained at upgrade/release would bound it further but is not needed now.
+- **A-L2 (documentation): `docs/contracts/streaming.md` "Failure" still says the next sweep ends a
+  failed session's streams.** The settle pass now does it, before the next wait; the sweep only
+  closes the connection afterwards. Fix: "The connection's own next event or, at the latest, the
+  server's pass before the next wait ends every open stream ...; the sweep then closes the
+  connection." `docs/architecture/invariants.md` and `docs/contracts/stream.md` are unaffected (the
+  `KlStream` deferred 0 ms check in `stream.md` is a separate mechanism and still accurate).
+
+**Informational**
+- **A-I1: the merged request-write seam no longer enforces its state precondition.** The HTTP/2
+  variant refused any state but `KL_HTTP_CONN_HTTP2`; `kl_http_conn_request_write` refuses only
+  `SUSPENDED`. Every current caller complies (the settle pass filters on `KL_HTTP_CONN_HTTP2`;
+  `ws_send_frame` runs in the WebSocket state), and registration identity stays `&c->stream`
+  (`check-readiness-identity` OK). A one-line `if (c->state != KL_HTTP_CONN_HTTP2 && c->state !=
+  KL_HTTP_CONN_WEBSOCKET) return;` would make the comment a check.
+- **A-I2: a failed session holds its slot until the sweep after the next wait (up to 1 s), and a
+  failing custom `resume_body` is retried at the loop's pace (up to 1 s).** Both match `main` and
+  are deliberate: answering due for a failed session until it closes would spin on a completion
+  close that waits for output a non-reading client never takes.
+- **A-I3: settle runs user code (writable edges, close notifications) outside a dispatch bracket.**
+  So do `kl_timer_fire` and the sweep; no batch is captured at that point, so immediate watcher
+  frees are safe. No change needed.
+
+### 4. Protocol independence (mechanical)
+
+`http2_server.c` names no `kl_event_*`, `kl_timer_*`, `kl_comp_*` or `comp_driven` symbol after the
+PR (it named `kl_timer_add` / `kl_timer_cancel` before), and no platform header. The run-loop hooks
+live in the HTTP layer (`http_server.c`, `http_server_core.c`) and reach HTTP/2 only through
+`KlHttp2ServerHooks`. No remaining reference to `flush_armed`, `flush_owed`, `flush_timer`,
+`service_hook`, `kl_http_conn_http2_request_write` or `kl_http_conn_ws_request_write` outside
+`docs/archive/`. Gates green on the PR head: `check-substrate-purity` (G1),
+`check-protocol-no-integration` (G2), `check-integration-seam` (G3), `check-protocol-home` (G4),
+`check-readiness-identity`, `check-no-milestones`, `check-no-em-dash`.
+
+### 5. Compatibility matrix (HTTP/2 streamed output via the settle pass)
+
+| Pairing | Status | Evidence (this pass) |
+|---|---|---|
+| Linux sockets + epoll | unit-tested; A-M1 applies | `test_http2` 74/74 under ASan+UBSan on core; the A-M1 probe fails there. No nghttp2 dev package on core or the spark hosts, so the nghttp2 e2e was not run here (the PR reports it) |
+| Linux sockets + io_uring | unit-tested | `test_http2` 75/75 under ASan+UBSan on core (`BACKEND=iouring`); e2e not run here (as above) |
+| Darwin sockets + kqueue | unit-tested; A-M1 applies | `test_http2` 74/74; full `make test` green with the A-M1 fix applied; A-M1 probe fails on the PR head, passes on `main` and with the fix. No nghttp2 headers on this host, so no e2e here |
+| Winsock + select() | unit- and e2e-tested; A-M1 applies (by code: shared readiness path) | `test_http2` 74/74; `e2e_h2_stream_control`, `e2e_socket`, `e2e_idle` pass (edge, MSYS2 UCRT64 nghttp2) |
+| Winsock + IOCP | unit- and e2e-tested | `test_http2` 75/75; `e2e_h2_stream_control`, `e2e_socket`, `e2e_idle` pass (edge) |
+| pollcomp double | unit-tested | `test_http2` 75/75 under ASan+UBSan on core; e2e not run here |
+| poll() readiness | buildable, not run here; A-M1 applies by code | shared readiness run loop |
+| lwIP (BSD readiness / raw completion) | buildable, untested with HTTP/2 | the pass is generic HTTP-layer code over the same loops; no HTTP/2 run exists for these providers |
+| UEFI / freestanding server | not applicable (no-op) | `http2_server.c` is not in `FREESTANDING_SERVER_SRC`; the hooks are NULL and both functions return after one atomic load; `make freestanding-lib-server` builds and passes its symbol gate for x86_64 and aarch64 `-unknown-windows` |
+
+Not production-ready on the readiness pairings until A-M1 is fixed. Code presence alone was not
+taken as support: the lwIP and poll() rows are inferred, not run.
+
+### 6. Contract deltas
+
+- `docs/contracts/streaming.md` "Failure": A-L2 wording.
+- `docs/contracts/streaming.md` "Producing later": true once A-M1 is fixed; it should name the
+  invariant the code relies on: every flush outside a connection's events goes through
+  `h2_flush_outside` (or otherwise asks for WRITE while the session still wants to write).
+- `http_internal.h` `kl_http_conn_request_write`: its precondition is a comment only (A-I1).
+
+### 7. Roadmap
+
+1. Before merging #543: A-M1 (one line plus the probe as a unit test).
+2. A-L1 (gate on `s->config.h2`) and A-L2 (wording), in the same change.
+3. A-I1 if the seam gains a caller outside the two states.
+4. An nghttp2 dev package on a Linux host, so the e2e suite can run on epoll, io_uring and pollcomp
+   outside CI.
+
+### 8. Changes made
+
+None to tracked files. The probe, the cost harness and the one-line fix were built in scratch copies
+of the PR tree on macOS, core and edge.
+
+**Dispositions:** A-M1 fixed in #543 (the drain flushes through `h2_flush_outside`; test
+`h2.output_held_by_the_drain_flush_is_sent_without_client_traffic`, which checks that the producer's
+bytes are delivered on the connection's writable event with no client traffic, and fails with the
+old line). A-L1 fixed in #543 (the `config.h2` gate). A-L2 fixed in #543 (`streaming.md` "Failure"
+and its test list). A-I1 fixed in #543 (the state guard, the C audit's 543-L2). A-I2 and A-I3: no
+action. The C audit's 543-L3 and 543-L4 were fixed in the same change. The "Producing later" contract
+now holds on every readiness pairing, and `h2_flush_outside`'s comment states the invariant: every
+flush outside a connection's events goes through it.
+
 ## Twentieth pass: HTTP/2 streamed responses keep the separation; one completion input-gating Medium (2026-11-27)
 
 **Revision:** `main` `ff259280` with three unmerged branches combined locally: `fix/stop-drain-claim`
