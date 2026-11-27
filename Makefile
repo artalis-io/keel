@@ -579,6 +579,13 @@ tests/test_iouring_sqe_fail: tests/test_iouring_sqe_fail.c $(KEEL_LIB) $(TEST_CO
 	$(CC) $(CFLAGS) -DKEEL_IOURING_TEST_HOOKS -c -o tests/event_iouring_hooked.o src/event_iouring.c
 	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/event_iouring_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
 
+# A failed start restores the signal handlers it installed. Links a -DKEEL_HTTP_SERVER_TEST_HOOKS
+# copy of the server ahead of libkeel.a (as test_iouring_sqe_fail does the io_uring backend), whose
+# hook makes the readiness accept path fail to start.
+tests/test_server_start_fail: tests/test_server_start_fail.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_TEST_HOOKS -Isrc -Isrc/protocols/http -c -o tests/http_server_hooked.o src/protocols/http/http_server.c
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket -o $@ $< tests/http_server_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
+
 test: $(TEST_BIN)
 	@failed=0; \
 	for t in $(TEST_BIN); do \
@@ -2226,10 +2233,16 @@ FREESTANDING_LIB_CC := $(shell command -v clang >/dev/null 2>&1 && echo clang ||
 FREESTANDING_TARGETS ?= x86_64-unknown-windows aarch64-unknown-windows
 FREESTANDING_IS_CLANG := $(shell $(FREESTANDING_LIB_CC) --version 2>/dev/null | grep -qi clang && echo yes)
 # The cross archives hold PE/COFF objects; GNU binutils nm/ar may not read every
-# COFF variant reliably. Prefer the LLVM tools when present (the task installs
-# them alongside clang+lld); fall back to the project's $(NM)/$(AR).
-FREESTANDING_NM := $(shell command -v llvm-nm >/dev/null 2>&1 && echo llvm-nm || echo $(NM))
-FREESTANDING_AR := $(shell command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo $(AR))
+# COFF variant reliably: GNU ar writes an aarch64 COFF archive with no symbol
+# index, so the aarch64 link finds no library symbol at all. Prefer the LLVM
+# tools: llvm-nm / llvm-ar on PATH, else the ones installed beside the
+# freestanding clang (Debian/Ubuntu put only versioned names such as llvm-ar-18
+# on PATH; clang -print-prog-name finds its own), else the project's $(NM)/$(AR).
+freestanding_llvm_tool = $(shell command -v $(1) >/dev/null 2>&1 && echo $(1) || \
+  { p=$$($(FREESTANDING_LIB_CC) -print-prog-name=$(1) 2>/dev/null); \
+    [ -x "$$p" ] && echo "$$p" || echo $(2); })
+FREESTANDING_NM := $(call freestanding_llvm_tool,llvm-nm,$(NM))
+FREESTANDING_AR := $(call freestanding_llvm_tool,llvm-ar,$(AR))
 
 # Freestanding cross-target shim headers: the few hosted C-library headers clang's
 # -ffreestanding does NOT provide (string.h / stdlib.h / stdio.h / sys/types.h /

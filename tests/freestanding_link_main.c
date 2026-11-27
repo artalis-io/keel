@@ -126,11 +126,13 @@ KlIoStatus kl_sockdef_io_status(void) { return KL_IO_FATAL; }
 ssize_t kl_sockdef_send(KlSocketHandle f, const void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
+/* Every link: the async HTTP client marks the sockets it creates close-on-exec (kl_sock_set_cloexec),
+ * as the datagram core does. */
+void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
 #if defined(KEEL_FS_LINK_DGRAM) || defined(KEEL_FS_LINK_DNS)
 /* Datagram-path socket seams referenced by the datagram core (a client-only link never binds / reads
  * the local addr / needs the datagram data-plane, so these live under the composition-probe guard). The
  * DNS layer rides KlDatagram, so its probe needs them too. */
-void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
 int  kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a; return -1; }
 int  kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f;(void)a; return -1; }
 const struct KlDatagramOps *kl_sockdef_dgram(void) { return NULL; }

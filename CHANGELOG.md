@@ -42,6 +42,19 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   change nothing, and those that return a value return -1. They used to replace the begun stream's
   body, which on HTTP/2 left a stream that could never end.
 
+### Fixed
+
+- **Concurrent `kl_http_server_stop` calls.** Two stops that overlapped (a SIGTERM and a stop from
+  another thread, say) could both see the server not yet draining and both enter the drain, each
+  writing the 64-bit drain deadline while the run loop might be reading it: a data race, and on a
+  32-bit target a torn read could end the drain at the wrong time. Exactly one call now enters the
+  drain and writes its deadline; a call that overlaps that entry only wakes the loop, and a call made
+  once the drain is established still stops the server at once, as documented.
+- **A run that failed to start left its signal handlers behind.** With `install_signal_handlers`, a
+  `kl_http_server_run` whose accept path could not start after the handlers were installed returned
+  -1 with SIGTERM/SIGINT still routed to that server, so a later signal stopped a server the caller
+  may already have freed. The handlers are now restored on that path too.
+
 ## [3.6.0]
 
 Minor release that makes Keel's HTTP server usable as a streaming gateway. A streamed response, plain

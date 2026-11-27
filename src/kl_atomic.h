@@ -115,6 +115,13 @@ static inline void kl_atomic_store_int(int *p, int v) {
     (void)_InterlockedExchange((volatile long *)p, (long)v);
 }
 
+/** Atomic compare-and-swap (seq-cst) of a plain-int flag: stores @p desired only if the flag holds
+ *  @p expected. Returns 1 if it stored, 0 if the flag held another value (left unchanged). */
+static inline int kl_atomic_cas_int(int *p, int expected, int desired) {
+    return _InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected) ==
+           (long)expected;
+}
+
 #else
 
 /* GCC / Clang, including MinGW gcc, Cosmopolitan clang and clang-cl. */
@@ -127,6 +134,13 @@ static inline int kl_atomic_load_int(const int *p) {
 /** Atomic store (seq-cst) of a plain-int flag. */
 static inline void kl_atomic_store_int(int *p, int v) {
     __atomic_store_n(p, v, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic compare-and-swap (seq-cst) of a plain-int flag: stores @p desired only if the flag holds
+ *  @p expected. Returns 1 if it stored, 0 if the flag held another value (left unchanged). */
+static inline int kl_atomic_cas_int(int *p, int expected, int desired) {
+    return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+               ? 1 : 0;
 }
 
 #endif

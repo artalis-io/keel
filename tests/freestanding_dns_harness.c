@@ -273,8 +273,8 @@ int main(void) {
 /* ── Datagram-path sockdef seams referenced by the datagram machine (never called: the mock
  *    provider supplies the live datagram ops; these are fail-closed link fodder,
  *    mirroring the KEEL_FS_LINK_DGRAM stubs in freestanding_link_main.c). The
- *    stream sockdef seams (socket/connect/close/...) come from the host platform TU. */
-void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
+ *    stream sockdef seams (socket/connect/close/..., and set_cloexec, which the async client uses
+ *    too) come from the host platform TU. */
 int  kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a; return -1; }
 int  kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f;(void)a; return -1; }
 const struct KlDatagramOps *kl_sockdef_dgram(void) { return NULL; }
