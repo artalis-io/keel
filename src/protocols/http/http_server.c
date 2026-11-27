@@ -287,7 +287,17 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
         kl_http_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
 }
 
+#ifdef KEEL_HTTP_SERVER_TEST_HOOKS
+/* Test-only (a -DKEEL_HTTP_SERVER_TEST_HOOKS copy linked ahead of libkeel.a): nonzero makes the
+ * readiness accept path fail to start, the one start-up failure after the signal handlers are
+ * installed. */
+int kl_http_server_test_fail_listener_start;
+#endif
+
 static int server_accept_listener_start(KlHttpServer *s) {
+#ifdef KEEL_HTTP_SERVER_TEST_HOOKS
+    if (kl_http_server_test_fail_listener_start) return -1;
+#endif
     s->accept_alive = 1;                               /* liveness token live before any lease issues */
     KlListenerHooks h = {
         .reserve = server_accept_reserve, .release = server_accept_release, .credit_ctx = s,
