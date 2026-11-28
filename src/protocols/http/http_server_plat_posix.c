@@ -39,36 +39,105 @@ _Static_assert(sizeof(((KlHttpServer *)0)->unix_node) >= KL_UNIX_NODE_STORAGE,
 #if !defined(KL_NO_SIGNAL)
 #include <signal.h>
 #include <stdatomic.h>
+#include <sched.h>   /* sched_yield */
+#include <time.h>    /* nanosleep */
 #endif
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
 #if !defined(KL_NO_SIGNAL)
-static _Atomic(KlHttpServer *) kl_signal_server = NULL;
+/* A process-directed SIGTERM/SIGINT runs the handler on any thread that does not block it, so the
+ * loop thread's restore cannot tell whether a handler elsewhere has already loaded the server.
+ * Every run of the handler counts itself in kl_signal_inflight BEFORE it loads the pointer, and
+ * leaves after its kl_http_server_stop. The restore clears the pointer first and then waits for the
+ * count to reach zero. All of these are sequentially consistent, so a handler that loaded the
+ * server had counted itself before the pointer was cleared, and the restore's wait sees it: it
+ * returns only after that handler is done with the server, and the caller may then free it. A
+ * handler that loads after the clear sees NULL (or a later server's pointer) and touches nothing.
+ * The handler never waits, so a signal that interrupts the restoring thread itself runs to
+ * completion before the wait resumes. The count is process-wide: a restore also waits out handlers
+ * stopping another server, each a few microseconds. A process that forks while a handler is running
+ * on another thread leaves the child a count that never drains; fork from a thread that is not in a
+ * handler, or while another thread is installing or restoring (the child would find this lock
+ * held for good).
+ *
+ * Both objects must be lock-free for the handler to use them: 0 fails the build here; 1 (object
+ * dependent) is asked at runtime in the install, which then leaves the handlers uninstalled. */
+#if ATOMIC_INT_LOCK_FREE == 0 || ATOMIC_POINTER_LOCK_FREE == 0
+#error "KEEL's signal handler needs lock-free int and pointer atomics"
+#endif
+static _Atomic(KlHttpServer *) kl_signal_server   = NULL;
+static atomic_int              kl_signal_inflight = 0;
+
+/* Install and restore run on loop threads, possibly two servers' at once; the handler never takes
+ * this lock (a spin lock: it is held only across a few sigaction calls, and needs no libpthread
+ * static initialiser). The dispositions in place before the first server installed are saved once and put
+ * back when the server currently receiving signals (the last to install) restores. Only that server
+ * receives signals: if it returns while an earlier one still runs, the earlier one gets none. */
+static atomic_int          kl_signal_lock = 0;   /* 1 = held, only across a few sigactions */
+static int                 kl_signal_saved = 0;
 static struct sigaction    kl_old_term, kl_old_int;
+
+static void kl_signal_lock_take(void) {
+    int unheld = 0;
+    for (int spins = 0; !atomic_compare_exchange_weak(&kl_signal_lock, &unheld, 1); spins++) {
+        unheld = 0;
+        if (spins < 64) { sched_yield(); continue; }
+        struct timespec ts = { 0, 100000 };   /* as the restore's wait: a real-time spinner */
+        nanosleep(&ts, NULL);                  /* cannot starve the holder on its CPU */
+    }
+}
+
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+/* Test-only: called by the handler after it has loaded the server, before it stops it. */
+void (*kl_http_server_test_signal_loaded)(void) = NULL;
+#endif
 
 static void kl_signal_handler(int sig) {
     (void)sig;
     int saved_errno = errno;   /* the wakeup write may set it (EAGAIN on a full pipe): keep the
                                 * interrupted code's errno intact */
+    atomic_fetch_add(&kl_signal_inflight, 1);
     KlHttpServer *s = atomic_load(&kl_signal_server);
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+    if (s && kl_http_server_test_signal_loaded) kl_http_server_test_signal_loaded();
+#endif
     if (s) kl_http_server_stop(s);
+    atomic_fetch_sub(&kl_signal_inflight, 1);
     errno = saved_errno;
 }
+
+#ifdef KEEL_HTTP_SERVER_PLAT_TEST_HOOKS
+/* Test-only: the handler itself, to run on a chosen thread without a signal. */
+void kl_http_server_test_signal_handler(int sig) { kl_signal_handler(sig); }
+#endif
 #endif
 
 void kl_http_server_plat_signals_install(KlHttpServer *s) {
 #if !defined(KL_NO_SIGNAL)
     signal(SIGPIPE, SIG_IGN);
     if (s->config.install_signal_handlers) {
-        atomic_store(&kl_signal_server, s);
+        if (!atomic_is_lock_free(&kl_signal_server) || !atomic_is_lock_free(&kl_signal_inflight)) {
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
+                               "signal handlers not installed: atomics are not lock-free here");
+            return;
+        }
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = kl_signal_handler;
         sa.sa_flags = 0;
         sigemptyset(&sa.sa_mask);
-        sigaction(SIGTERM, &sa, &kl_old_term);
-        sigaction(SIGINT, &sa, &kl_old_int);
+        kl_signal_lock_take();
+        atomic_store(&kl_signal_server, s);
+        if (!kl_signal_saved) {
+            sigaction(SIGTERM, &sa, &kl_old_term);
+            sigaction(SIGINT, &sa, &kl_old_int);
+            kl_signal_saved = 1;
+        } else {
+            sigaction(SIGTERM, &sa, NULL);   /* still the first server's saved dispositions */
+            sigaction(SIGINT, &sa, NULL);
+        }
+        atomic_store(&kl_signal_lock, 0);
     }
 #else
     (void)s;
@@ -79,9 +148,25 @@ void kl_http_server_plat_signals_install(KlHttpServer *s) {
 void kl_http_server_plat_signals_restore(KlHttpServer *s) {
 #if !defined(KL_NO_SIGNAL)
     if (s->config.install_signal_handlers) {
-        sigaction(SIGTERM, &kl_old_term, NULL);
-        sigaction(SIGINT, &kl_old_int, NULL);
-        atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
+        kl_signal_lock_take();
+        /* Only the server receiving signals puts the old dispositions back: one that installed
+         * earlier and was superseded leaves the later server its signals. */
+        if (atomic_load(&kl_signal_server) == s) {
+            sigaction(SIGTERM, &kl_old_term, NULL);
+            sigaction(SIGINT, &kl_old_int, NULL);
+            kl_signal_saved = 0;
+            atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
+        }
+        atomic_store(&kl_signal_lock, 0);
+        /* Whether or not it was still installed, a handler may have loaded this server before the
+         * pointer moved on: wait for every run in progress. */
+        /* Yield first; then sleep, so a real-time restoring thread cannot starve a preempted
+         * handler on its CPU. A handler runs for microseconds, so the wait is short. */
+        for (int spins = 0; atomic_load(&kl_signal_inflight) != 0; spins++) {
+            if (spins < 64) { sched_yield(); continue; }
+            struct timespec ts = { 0, 100000 };   /* 100 us */
+            nanosleep(&ts, NULL);
+        }
     }
 #else
     (void)s;

@@ -596,6 +596,15 @@ tests/test_ctrl_handler_win$(EXE): tests/test_ctrl_handler_win.c src/protocols/h
 	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_PLAT_TEST_HOOKS -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -c $(OBJ_OUT)$(CTRL_HOOKED_OBJ) src/protocols/http/http_server_plat_win.c
 	$(CC) $(CFLAGS) $(CC_FORCE_INC)win_prelude.h $(CC_TEST_RELAX) -Itests -Ivendor -Isrc -Isrc/protocols/http -Isrc/protocols/http2 -Isrc/protocols/websocket $(TEST_OBJ_TMP) $(EXE_OUT)$@ $< $(LD_SEP) $(CTRL_HOOKED_OBJ) $(TEST_COMPAT_OBJ) $(LD_KEEL) $(LDFLAGS)
 
+# The SIGTERM/SIGINT handler cannot stop a server its caller has freed (POSIX only: never in the
+# Windows suite lists). Links a -DKEEL_HTTP_SERVER_PLAT_TEST_HOOKS copy of http_server_plat_posix.c
+# ahead of libkeel.a (as test_server_start_fail does the server), which exposes the handler and a
+# hook it calls once it has loaded the server.
+tests/test_signal_handler_posix: tests/test_signal_handler_posix.c src/protocols/http/http_server_plat_posix.c $(KEEL_LIB) $(TEST_COMPAT_OBJ)
+	@mkdir -p $(OBJDIR)/tests
+	$(CC) $(CFLAGS) -DKEEL_HTTP_SERVER_PLAT_TEST_HOOKS -Isrc -Isrc/protocols/http -c -o $(OBJDIR)/tests/http_server_plat_posix_hooked.o src/protocols/http/http_server_plat_posix.c
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Itests -Ivendor -Isrc -Isrc/protocols/http -o $@ $< $(OBJDIR)/tests/http_server_plat_posix_hooked.o $(TEST_COMPAT_OBJ) $(LD_SEP) $(LD_KEEL) $(LDFLAGS)
+
 test: $(TEST_BIN)
 	@failed=0; \
 	for t in $(TEST_BIN); do \
