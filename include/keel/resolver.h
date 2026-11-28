@@ -98,6 +98,11 @@ struct KlResolver {
      * cancelled as by cancel(), so its done_fn is never called and its handle becomes invalid.
      * destroy may be called from inside a done_fn of this resolver; the teardown completes once
      * that callback returns. Third-party resolvers should provide the same.
+     *
+     * Nothing may be called on a destroyed resolver, nor on any handle it returned. If a resolver
+     * is destroyed from inside a callback it delivers during its own resolve(), that resolve()
+     * returns NULL: the resolver cache guarantees this (it cancels and releases the request being
+     * started), and the built-in DNS resolver never delivers a callback from inside resolve().
      */
     void (*destroy)(KlResolver *self);
 };

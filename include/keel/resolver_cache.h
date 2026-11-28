@@ -41,14 +41,26 @@ typedef struct {
  * destroy function.  The inner resolver is borrowed (not owned); the
  * caller must destroy it separately after destroying the cache.
  *
+ * Ordering: the inner resolver must still be alive when the cache is
+ * destroyed whenever a lookup through the cache may be in flight, because
+ * destroy cancels those lookups with the inner resolver.  Destroying the
+ * inner resolver first is undefined behavior.  This holds for a shared inner
+ * resolver too: whichever owner destroys it must do so after every cache
+ * wrapping it.
+ *
  * Each cache miss is forwarded to the inner resolver as its own request
  * (lookups are not coalesced).  Destroying the cache with lookups still in
  * flight is allowed: destroy cancels each with the inner resolver's cancel()
- * and frees it, so their done_fn is never called, their handles become
- * invalid, and nothing is left registered with the inner resolver.  This
- * relies on the inner resolver's cancel() guaranteeing no later done_fn
- * (resolver.h).  destroy may be called from inside a done_fn delivered by the
- * cache; the cache is freed once that callback returns.
+ * and frees it, so their done_fn is never called and nothing is left
+ * registered with the inner resolver.  This relies on the inner resolver's
+ * cancel() guaranteeing no later done_fn (resolver.h).  destroy may be called
+ * from inside a done_fn delivered by the cache; the cache is freed once that
+ * callback returns.
+ *
+ * Every handle the cache returned that is still outstanding becomes invalid
+ * at destroy: it must not be passed to cancel() afterwards.  A client holding
+ * one (for example a KlHttpClient whose request is still resolving) must be
+ * freed, or cancel its request, before the cache is destroyed.
  *
  * @param inner  Inner resolver to delegate cache misses to (borrowed).
  * @param cfg    Config (NULL = defaults: 64 entries, 60 s TTL).

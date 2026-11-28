@@ -82,7 +82,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   in the documented order (the cache, then the inner resolver) each such lookup leaked instead.
   Destroy now cancels every outstanding lookup with the inner resolver and frees it: its `done_fn` is
   never called, as after `cancel()`. Destroying the cache from inside one of its `done_fn` callbacks
-  is also handled (the cache is freed once the callback returns). `resolver.h` now states what every
+  is also handled (the cache is freed once the callback returns). The inner resolver must still be
+  alive when the cache is destroyed (destroying it first, shared or not, is undefined behavior), and
+  any handle a caller still holds becomes invalid at destroy. `resolver.h` now states what every
   `KlResolver` implementation's `cancel()` must guarantee (no later `done_fn`) and the destroy
   behaviour of the in-tree resolvers.
 
