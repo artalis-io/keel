@@ -444,8 +444,11 @@ int kl_http_server_run(KlHttpServer *s) {
         }
         /* Last thing before the wait: everything that can write ran in the previous tick (dispatch,
          * sweep, deadlines, timers), so a suspended stream whose output is waiting is now watched for
-         * writability, and one whose output went is not. */
+         * writability, and one whose output went is not. HTTP/2 output written outside its
+         * connection's events is flushed first, since a producer it notifies may write. */
+        kl_http_server_settle_h2(s);
         kl_async_sync_stream_interest(s);
+        const int h2_due = kl_http_server_settle_h2_due(s);
 
         /* Compute dynamic timeout based on nearest async op deadline */
         server_accept_backoff_check(s);
@@ -465,6 +468,7 @@ int kl_http_server_run(KlHttpServer *s) {
             }
         }
 
+        if (h2_due) wait_timeout = 0;
         wait_timeout = kl_timer_next_timeout(&s->ev, wait_timeout);
         wait_timeout = kl_http_server_drain_wait(s, now, wait_timeout);
 

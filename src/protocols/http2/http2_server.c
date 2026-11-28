@@ -18,7 +18,6 @@
 #include "platform.h"   /* kl_plat_file_pread */
 #include "http_proto_hooks.h"       /* H2 server upgrade seam: registered for the core */
 #include "http_response_internal.h" /* KlHttpStreamSink: a streamed response's body as DATA */
-#include <keel/timer.h>             /* the deferred flush of a streamed response's output */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -259,7 +258,7 @@ static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *strea
  * bytes wait in the stream's own buffer, bounded by the response's stream capacity; the session
  * pulls them (read_body) as the stream's flow-control windows allow, so a stalled stream fills only
  * its own buffer while the others keep sending. Output a producer adds outside the connection's
- * events is sent by a flush on the next loop iteration (a zero-delay timer): never from inside a
+ * events is sent by the server's settle pass before the loop next waits: never from inside a
  * response call, so a stream's close cannot happen under its producer's own write. */
 
 static int h2_session_streams(const KlHttp2ServerConn *h2c) {
@@ -270,39 +269,23 @@ static int h2_session_streams(const KlHttp2ServerConn *h2c) {
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force);
 static int h2_flush(KlHttp2ServerConn *h2c) { return h2_flush_ex(h2c, 0); }
 
-/* A flush from outside the connection's own events (the flush timer, or the sweep for a flush
- * that no timer could be armed for). Nothing here closes the connection: a failure marks the
- * session failed (h2_flush_ex) and the sweep closes it, on readiness and completion alike. */
+/* A flush from outside the connection's own events (the settle hook, the drain's GOAWAY). Every
+ * such flush goes through here: it clears flush_due, so it, not the settle pass, must ask for WRITE
+ * while output is held. Nothing here closes the connection: a failure marks the session failed
+ * (h2_flush_ex) and the sweep closes it, on readiness and completion alike. */
 static void h2_flush_outside(KlHttp2ServerConn *h2c) {
     if (h2_flush(h2c) < 0) return;
     /* Readiness: output that is still held (a full socket) needs WRITE interest, which only the
      * connection's own events recompute. A completion loop sends from its queue. */
     if (h2c->session->want_write(h2c->session))
-        kl_http_conn_http2_request_write(h2c->conn);
+        kl_http_conn_request_write(h2c->conn);
 }
 
-static void h2_flush_tick(void *ud) {
-    KlHttp2ServerConn *h2c = ud;
-    h2c->flush_armed = 0;
-    KlHttpConn *c = h2c->conn;
-    if (!c || c->h2 != h2c) return;
-    h2_flush_outside(h2c);
-}
-
+/* Output to send soon. Never a flush from here: this runs inside a producer's call. Inside the
+ * connection's own events the event's flush sends it; otherwise the server's pass does, before the
+ * loop next waits (kl_http2_server_settle_hook), which nothing can refuse. */
 static void h2_schedule_flush(KlHttp2ServerConn *h2c) {
-    if (h2c->flush_armed || !h2c->conn || !h2c->conn->stream.ctx) return;
-    int64_t id = kl_timer_add(h2c->conn->stream.ctx, 0, h2_flush_tick, h2c);
-    if (id < 0) {
-        /* No timer: the flush is owed. The connection's next event flushes it (readiness asks
-         * for WRITE; completion flushes on a send completion, kl_http2_server_comp_sent, or on
-         * input), and failing those the sweep does, on the next loop iteration
-         * (kl_http2_server_service_hook): a silent client with nothing in flight would leave it. */
-        h2c->flush_owed = 1;
-        kl_http_conn_http2_request_write(h2c->conn);
-        return;
-    }
-    h2c->flush_timer = id;
-    h2c->flush_armed = 1;
+    h2c->flush_due = 1;
 }
 
 /* New body bytes, or the end, for a stream: un-defer it with the session and send soon. */
@@ -457,7 +440,7 @@ static kl_ssize_t h2_cb_read_body(void *ud, uint32_t stream_id, void *buf, size_
  * session's send, outside it: a producer that writes from its edge only schedules the next flush. */
 static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
     if (!h2c->session || h2c->failed) return -1;
-    h2c->flush_owed = 0;
+    h2c->flush_due = 0;
     for (int i = 0; i < h2c->slots_hwm; i++) {
         KlHttp2ServerStream *s = &h2c->streams[i];
         if (!s->in_use) continue;
@@ -488,8 +471,11 @@ static int h2_flush_ex(KlHttp2ServerConn *h2c, int force) {
 KlHttpConnState kl_http2_server_comp_sent(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->failed) return KL_HTTP_CONN_CLOSED;
-    if (!h2c->out_refused && !h2c->flush_owed) return KL_HTTP_CONN_HTTP2;
-    if (h2_flush(h2c) < 0) return KL_HTTP_CONN_CLOSED;
+    if (!h2c->out_refused) return KL_HTTP_CONN_HTTP2;
+    if (h2_flush(h2c) < 0) {          /* in the connection's own event: end the streams, as feed does */
+        h2_streams_release_all(h2c);
+        return KL_HTTP_CONN_CLOSED;
+    }
     return KL_HTTP_CONN_HTTP2;
 }
 
@@ -939,9 +925,6 @@ static kl_ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
 /* Free an h2 connection object that never became c->h2 (session destroyed too). */
 static void h2_conn_abandon(KlHttp2ServerConn *h2c) {
     KlAllocator *alloc = h2c->alloc;
-    if (h2c->flush_armed && h2c->conn && h2c->conn->stream.ctx)
-        (void)kl_timer_cancel(h2c->conn->stream.ctx, h2c->flush_timer);
-    h2c->flush_armed = 0;
     h2_streams_release_all(h2c);                /* streams a fed leftover created: their storage */
     if (h2c->session && h2c->session->destroy)
         h2c->session->destroy(h2c->session);
@@ -1165,14 +1148,25 @@ static int h2_session_done(const KlHttp2ServerConn *h2c) {
 KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
+    /* A failed session can answer nothing: its input would only run handlers for requests whose
+     * answer is the close. */
+    if (h2c->failed) return KL_HTTP_CONN_CLOSED;
 
     c->last_active_ms = kl_monotonic_ms();
 
     kl_ssize_t consumed = h2c->session->recv(h2c->session, data, len);
-    if (consumed < 0) return KL_HTTP_CONN_CLOSED;
-
-    if (h2_flush(h2c) < 0)
+    if (consumed < 0) {               /* a fatal session error: the close is this event's, as below */
+        h2_streams_release_all(h2c);
         return KL_HTTP_CONN_CLOSED;
+    }
+
+    /* A failed flush ends the streams here, inside the connection's own event and outside every
+     * producer's call: a completion close then waits for the queued output, which a client that
+     * stopped reading never takes, and the settle pass does not visit a closing connection. */
+    if (h2_flush(h2c) < 0) {
+        h2_streams_release_all(h2c);
+        return KL_HTTP_CONN_CLOSED;
+    }
 
     /* Session done: close now rather than lingering until the peer times out. Flushed above, so
      * the GOAWAY is on the wire. */
@@ -1221,7 +1215,9 @@ void kl_http2_server_drain_shutdown(KlHttpConn *c) {
     if (!h2c || !h2c->session || h2c->goaway_sent) return;
 
     h2c->session->shutdown(h2c->session);
-    (void)h2_flush(h2c);
+    /* Outside the connection's events (the drain's progress step): held output, the GOAWAY or a
+     * producer's, needs WRITE interest on readiness, or it waits for the client's next frame. */
+    h2_flush_outside(h2c);
     h2c->goaway_sent = 1;
 }
 
@@ -1229,9 +1225,6 @@ void kl_http2_server_cleanup(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c) return;
 
-    if (h2c->flush_armed && c->stream.ctx)
-        (void)kl_timer_cancel(c->stream.ctx, h2c->flush_timer);
-    h2c->flush_armed = 0;
     h2_streams_release_all(h2c);   /* a streamed response's producer hears it was cut short */
 
     if (h2c->streams) {
@@ -1270,26 +1263,32 @@ static int kl_http2_server_done_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && (c->h2->failed || h2_session_done(c->h2));
 }
 
-/* Each sweep, before done/idle. A failed session's streams are released (each producer told once,
- * `completed` 0), so producers hear at once on both event models. Otherwise a flush that is owed
- * (no timer could be armed for it) or a body resume that failed is retried here, outside every
- * connection event, as the timer would have. The sweep runs once per loop iteration, which waits
- * at most a second, so a flush is never owed for longer than that, whatever the client does. */
-static void kl_http2_server_service_hook(KlHttpConn *c) {
+/* Once per loop iteration, before the loop waits, on both event models (kl_http_server_settle_h2):
+ * the flush of output written from outside the connection's events, the retry of a body resume
+ * that failed, and the release of a failed session's streams (each producer told once, `completed`
+ * 0), for a failure first seen outside the connection's events (a failure inside them ends the
+ * streams in kl_http2_server_feed). Their streams end here, not when the connection is released: a
+ * completion close waits for the queued output, which a client that stopped reading never takes.
+ * The sweep then closes it (done). */
+static void kl_http2_server_settle_hook(KlHttpConn *c) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return;
-    if (h2c->failed) {
-        /* Its streams end now, not when the connection is released: a completion close waits for
-         * the queued output, which a client that stopped reading never takes, and meanwhile the
-         * producers would go on writing into a session that sends nothing more. */
-        if (h2c->num_streams > 0) h2_streams_release_all(h2c);
-        return;
+    if (!h2c->failed) {
+        int due = h2c->flush_due;
+        for (int i = 0; !due && i < h2c->slots_hwm; i++)
+            due = h2c->streams[i].in_use && h2c->streams[i].resume_due;
+        if (due) h2_flush_outside(h2c);
     }
-    if (h2c->flush_armed) return;
-    int due = h2c->flush_owed;
-    for (int i = 0; !due && i < h2c->slots_hwm; i++)
-        due = h2c->streams[i].in_use && h2c->streams[i].resume_due;
-    if (due) h2_flush_outside(h2c);
+    if (h2c->failed && h2c->num_streams > 0) h2_streams_release_all(h2c);
+}
+
+/* Is something for the settle hook still to do: output that became due after its pass (a producer
+ * that wrote from a writable edge or a close notification), or a failed session not yet settled?
+ * A resume that failed again is not: it is retried on the next pass, not in a zero-wait loop. */
+static int kl_http2_server_settle_due_hook(const KlHttpConn *c) {
+    const KlHttp2ServerConn *h2c = c->h2;
+    if (!h2c || !h2c->session) return 0;
+    return h2c->failed ? h2c->num_streams > 0 : h2c->flush_due;
 }
 
 static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
@@ -1302,7 +1301,8 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .drain_shutdown  = kl_http2_server_drain_shutdown,
     .idle            = kl_http2_server_idle_hook,
     .done            = kl_http2_server_done_hook,
-    .service         = kl_http2_server_service_hook,
+    .settle          = kl_http2_server_settle_hook,
+    .settle_due      = kl_http2_server_settle_due_hook,
 };
 
 /* No GCC constructor auto-installing this. kl_http_server_init() calls every installer

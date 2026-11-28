@@ -569,6 +569,38 @@ void kl_http_server_free(KlHttpServer *s) {
     }
 }
 
+/* ── HTTP/2 settle pass ───────────────────────────────────────────────────────
+ * Run once per loop iteration, last before the wait, on both event models: everything that can
+ * write ran in the previous iteration (dispatch, sweeps, deadlines, timers), so output an HTTP/2
+ * producer wrote from outside its connection's events is flushed here, outside every producer's
+ * call, rather than from a timer that could fail to arm. Each connection is settled at most once
+ * per pass, so a producer that writes from every edge costs one flush per iteration, not a loop
+ * that never waits. */
+void kl_http_server_settle_h2(KlHttpServer *s) {
+    /* No HTTP/2 configured: no connection can reach the HTTP2 state, so no scan. */
+    if (!s->config.h2) return;
+    const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
+    if (!h2h || !h2h->settle) return;
+    for (int i = 0; i < s->pool.capacity; i++) {
+        KlHttpConn *c = &s->pool.conns[i];
+        if (c->state == KL_HTTP_CONN_HTTP2) h2h->settle(c);
+    }
+}
+
+/* Must the wait not block: did something become due for the settle pass after it ran (a producer
+ * that wrote from an edge or close notification it fired, or from any callback the loop ran after
+ * it, such as a completion loop's writable edges)? Checked last before the wait. */
+int kl_http_server_settle_h2_due(const KlHttpServer *s) {
+    if (!s->config.h2) return 0;
+    const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
+    if (!h2h || !h2h->settle_due) return 0;
+    for (int i = 0; i < s->pool.capacity; i++) {
+        const KlHttpConn *c = &s->pool.conns[i];
+        if (c->state == KL_HTTP_CONN_HTTP2 && h2h->settle_due(c)) return 1;
+    }
+    return 0;
+}
+
 /* ── Completion run-loop tick (the freestanding server's whole loop body) ──────
  * One iteration of the completion event loop, factored out of kl_http_server_run so
  * BOTH the hosted completion backends (io_uring/IOCP/pollcomp) and a freestanding
@@ -579,12 +611,17 @@ int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Bound the tick by the nearest async-op deadline / timer so they fire on time
      * (the completion loop is a full event loop; watchers relayed via
      * KL_COMP_WATCHER; timers + async deadlines serviced here). */
+    /* HTTP/2 output written outside its connection's events goes first: a producer it notifies
+     * may install a writable callback, whose edge the pass below fires. */
+    kl_http_server_settle_h2(s);
     /* Last tick's dispatch, sweeps and timers may have installed a writable callback on a stream
      * whose output already went: its edge fires here, before the wait, as readiness's write watch
-     * (kl_async_sync_stream_interest) would. */
+     * (kl_async_sync_stream_interest) would. An edge's producer may write HTTP/2 output, which
+     * the settle check below then does not leave waiting for the next wake-up. */
     const int edge_due = kl_http_comp_stream_edges(s);
+    const int h2_due = kl_http_server_settle_h2_due(s);
     uint64_t cnow = kl_monotonic_ms();
-    int cwait = edge_due ? 0 : KL_POLL_TIMEOUT_MS;
+    int cwait = (edge_due || h2_due) ? 0 : KL_POLL_TIMEOUT_MS;
     for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
         if (aop->deadline_ms > 0) {
             if (cnow >= aop->deadline_ms) { cwait = 0; break; }
@@ -751,13 +788,10 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         }
         /* HTTP/2: streams in progress are the session's business, but a connection with none open
          * and nothing to send is idle, and is timed out like any other idle connection; one whose
-         * session is done (a graceful GOAWAY out, no stream left) or failed is closed now. Output
-         * owed from outside the connection's events (no flush timer could be armed) is sent
-         * first. */
+         * session is done (a graceful GOAWAY out, no stream left) or failed is closed now. */
         if (tc->state == KL_HTTP_CONN_HTTP2) {
             const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
             if (!h2h) continue;
-            if (h2h->service) h2h->service(tc);   /* output owed outside its events (no timer) */
             int done = h2h->done && h2h->done(tc);
             if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
                 continue;
@@ -1022,18 +1056,13 @@ int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add) {
     return c->comp_driven && (kl_comp_ws_queue_full(c, add) || kl_comp_http2_queue_full(c, add));
 }
 
-void kl_http_conn_http2_request_write(KlHttpConn *c) {
-    if (!c || c->comp_driven || !c->stream.ctx || c->state != KL_HTTP_CONN_HTTP2) return;
-    (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
-                       (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
-}
-
-void kl_http_conn_ws_request_write(KlHttpConn *c) {
+void kl_http_conn_request_write(KlHttpConn *c) {
     /* Inside the connection's own event the dispatch transition recomputes the same mask after
      * this; a write from anywhere else (another connection's event, a timer, a thread-pool done_fn)
      * has no such event behind it, and the backlog would sit until the peer sent something. */
     if (!c || c->comp_driven || !c->stream.ctx) return;
-    if (c->state == KL_HTTP_CONN_SUSPENDED) return;   /* never overwrite a suspended fd's hang-up watch */
+    /* READ|WRITE is the mask of these two states only (never a suspended fd's hang-up watch). */
+    if (c->state != KL_HTTP_CONN_WEBSOCKET && c->state != KL_HTTP_CONN_HTTP2) return;
     (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd,
                        (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE), &c->stream);
 }

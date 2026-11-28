@@ -94,11 +94,8 @@ struct KlHttp2ServerConn {
     void       *out_ctx;           /**< Context for out_write. */
     int slots_hwm;                 /**< One past the highest live slot (find scans [0, slots_hwm)). */
     /* Streamed responses are written from outside the connection's own events (a timer, a watcher):
-     * their output is sent by a flush on the next loop iteration, from a zero-delay timer. */
-    int64_t flush_timer;           /**< The pending flush timer (valid while flush_armed). */
-    int flush_armed;               /**< 1 = a flush is scheduled. */
-    int flush_owed;                /**< A flush could not be scheduled (no timer): the next send
-                                        completion or connection event flushes. */
+     * their output is sent by the server's pass before the loop next waits (the settle hook). */
+    int flush_due;                 /**< Output written outside the connection's events awaits a flush. */
     int out_refused;               /**< A completion output queue at its bound refused frames: flush
                                         again once a send completes. */
     int failed;                    /**< A flush failed: the session is unusable, every later flush
