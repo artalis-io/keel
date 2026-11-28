@@ -196,13 +196,18 @@ alpn-interop: $(LIB)
 # The graceful-drain linger over real TLS: e2e_h2_drain_linger with its TLS case, the server on the
 # OpenSSL adapter (ALPN h2), the client on OpenSSL directly. Requires NGHTTP2_DIR and OPENSSL_DIR
 # (BYO, out of CI).
+# Windows (MinGW): OS=windows, or the Windows_NT the environment sets, links the system libraries
+# the core and OpenSSL need.
+ifneq ($(filter windows Windows_NT,$(OS)),)
+E2E_TLS_SYSLIBS = -lws2_32 -lmswsock -liphlpapi -ladvapi32 -lbcrypt -lcrypt32
+endif
 e2e-tls: $(LIB)
 	@test -n "$(OPENSSL_DIR)" || { echo "set OPENSSL_DIR (and NGHTTP2_DIR)"; exit 1; }
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
 	$(CC) $(CFLAGS) -DE2E_TLS -I$(KEEL_ROOT)/src -I../../tls/openssl -I$(OPENSSL_DIR)/include \
 	  -o tests/e2e_h2_drain_linger_tls tests/e2e_h2_drain_linger.c ../../tls/openssl/tls_openssl.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) \
-	  -L$(OPENSSL_DIR)/lib -lssl -lcrypto -lpthread
+	  -L$(OPENSSL_DIR)/lib -lssl -lcrypto -lpthread $(E2E_TLS_SYSLIBS)
 	./tests/e2e_h2_drain_linger_tls
 
 clean:

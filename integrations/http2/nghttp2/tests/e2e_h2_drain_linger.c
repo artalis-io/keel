@@ -244,6 +244,15 @@ static int cli_connect(Cli *c, int port, int tls) {
     if (c->fd == CLI_BAD) return -1;
     int rcv = 32 * 1024;                 /* a small receive buffer: the server's send queue fills */
     setsockopt(c->fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
+    /* The socket blocks (OpenSSL and nghttp2 run straight on it), so bound each call: a TLS record
+     * the server never finishes must fail the case, not hang it in SSL_read. */
+#if defined(_WIN32)
+    DWORD tmo = 5000;
+#else
+    struct timeval tmo = { 5, 0 };
+#endif
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof tmo);
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tmo, sizeof tmo);
 #ifdef SO_NOSIGPIPE
     int one = 1;
     setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
@@ -317,6 +326,15 @@ static int cli_step(Cli *c, int wait_ms) {
             c->tls_clean = e == SSL_ERROR_ZERO_RETURN;   /* close_notify, then the FIN */
             if (e == SSL_ERROR_SYSCALL && sock_err() != 0) c->reset = 1;
             return c->reset ? -1 : 1;
+        }
+        /* SSL_read returns at most one TLS record, and the server's records are often tiny (a PING
+         * ACK, or the 9-byte tail of a 16393-byte DATA frame split at the 16 KiB record limit).
+         * Fill the 16 KiB step from every record already here, as recv() does across frames, or
+         * the slow reader falls behind its own PINGs (on Windows a 1 ms nap sleeps ~16 ms). */
+        while (n < (int)sizeof buf && (SSL_pending(c->ssl) > 0 || cli_poll(c->fd, 0) > 0)) {
+            int m = SSL_read(c->ssl, buf + n, (int)sizeof buf - n);
+            if (m <= 0) break;           /* WANT_READ, or the end: the next step reports it */
+            n += m;
         }
     } else
 #endif
