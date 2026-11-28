@@ -115,6 +115,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   would-block (it was fatal before, though the built-in providers already retry EINTR themselves),
   anything else fails. Unchanged for the built-in POSIX
   and Winsock providers and for lwIP.
+- **UEFI EFI_TCP4 provider: a failure on a dead connection is reported as a failure.** The
+  provider's `io_status` reports the status its last call published, and a send or receive on a
+  connection that was gone (closed, marked dead, quarantined by a pump timeout) or made after
+  ExitBootServices published nothing: it read as whatever the previous call left, often a
+  would-block, so a caller classifying by `io_status` (the TLS adapters now do) re-armed a dead
+  connection until a deadline. Every failure now publishes a fatal status, and a latched receive
+  error is never published as retryable.
+- **lwIP raw provider:** a hard send or receive failure now sets `errno` (EIO); it left `errno`
+  as the previous call set it, which could read as a would-block.
 
 ## [3.6.0]
 

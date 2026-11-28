@@ -1100,6 +1100,61 @@ static void t_cancel_fails_quarantine(void) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+ * io_status after a failure on a conn that is gone: the provider-global status io_status reads
+ * must describe THAT failure. A send after ExitBootServices, a send whose pump timeout quarantined
+ * the slot, and a send on the dead slot afterwards all report fatal, never the would-block an
+ * earlier recv left behind (a TLS BIO classifying by io_status would otherwise re-arm a dead
+ * connection until a deadline instead of failing it).
+ * ───────────────────────────────────────────────────────────────────────────── */
+static void t_io_status_after_failure_on_a_gone_conn(void) {
+    T_CASE("io_status: a failure on a gone conn is fatal, not the previous op's would-block");
+    char buf[8] = "x";
+
+    /* After ExitBootServices. */
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK;
+    g_tcp_receive_mode = TOK_HANG;
+    g_tcp_close_mode   = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    KlSockAddr a; mk_addr(&a);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connect_now ok");
+    CHECK(p->ops->recv(p->context, fd, buf, 1) == -1, "recv with nothing received: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_WOULD_BLOCK, "... classified would-block");
+    g_after_ebs = 1;
+    CHECK(p->ops->send(p->context, fd, buf, 1) == -1, "send after EBS: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "send after EBS: io_status fatal");
+    CHECK(p->ops->recv(p->context, fd, buf, 1) == -1, "recv after EBS: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "recv after EBS: io_status fatal");
+    g_after_ebs = 0;
+    p->ops->close(p->context, fd);
+
+    /* A send whose Transmit hangs and whose cancel cannot be confirmed quarantines the slot. */
+    reset_counters();
+    g_tcp_connect_mode  = TOK_COMPLETE_OK;
+    g_tcp_receive_mode  = TOK_HANG;
+    g_tcp_transmit_mode = TOK_HANG;
+    g_cancel_signals    = 0;
+    p = fresh_provider();
+    fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connect_now ok");
+    CHECK(p->ops->recv(p->context, fd, buf, 1) == -1, "recv with nothing received: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_WOULD_BLOCK, "... classified would-block");
+    CHECK(p->ops->send(p->context, fd, buf, 1) == -1, "send on a hung Transmit: -1 (quarantined)");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "quarantining send: io_status fatal");
+    CHECK(p->ops->recv(p->context, fd, buf, 1) == -1, "recv on the dead slot: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "recv on the dead slot: io_status fatal");
+    CHECK(p->ops->send(p->context, fd, buf, 1) == -1, "send on the dead slot: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "send on the dead slot: io_status fatal");
+    p->ops->close(p->context, fd);
+    g_cancel_signals    = 1;   /* restore */
+    g_tcp_transmit_mode = TOK_COMPLETE_OK;
+    g_tcp_receive_mode  = TOK_COMPLETE_OK;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
  * close must NOT spin on an ALREADY-CONSUMED connect
  * token. A completed connect retired its token (event consumed by CheckEvent); close()
  * must skip it (conn_posted cleared) rather than pump ~forever on an event that will
@@ -3196,6 +3251,7 @@ int main(void) {
     t_clock_snapshot();                /* TLS-platform-lifetime snapshot clock gate */
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
+    t_io_status_after_failure_on_a_gone_conn();
     t_close_no_spin_on_consumed_connect();
     t_bad_rx_length();
     /* Server accept-lifetime (verifies bind/listen/accept + post_accept).

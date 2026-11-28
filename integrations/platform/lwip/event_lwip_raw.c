@@ -341,13 +341,21 @@ static kl_ssize_t lwr_io_eagain(void) {
     return -1;
 }
 
+/* Return -1 with errno = EIO: a hard failure. This provider has no io_status op, so Keel classifies
+ * its failures from errno; a -1 that left errno alone would be read as whatever the previous call
+ * left there (an EAGAIN, say: a retry instead of a failure). */
+static kl_ssize_t lwr_io_fail(void) {
+    errno = EIO;
+    return -1;
+}
+
 /* CLIENT send: route to the glue's real client send. Server conns never call this (server
  * I/O rides the completion post path), so a non-client pcb falls through to a hard error. `would_
  * block` (no tcp_sndbuf headroom / ERR_MEM) maps to EAGAIN so the client re-arms the WRITE watcher.
  * A short write (chunk < n) is a normal partial send; the client loops. */
 static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
     (void)c;
-    if (!kl_handle_valid(fd)) return -1;
+    if (!kl_handle_valid(fd)) return lwr_io_fail();
     void *lctx = kl_lwr_active_ctx();
     int wb = 0;
     long r = kl_lwr_client_send(lctx, (void *)fd, b, n, &wb);
@@ -356,7 +364,7 @@ static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_
      * the server sync-send. If neither claims the pcb it is a genuine hard error. */
     if (r < 0) {
         r = kl_lwr_srv_sync_send(lctx, (void *)fd, b, n, &wb);
-        if (r < 0) return -1;
+        if (r < 0) return lwr_io_fail();
     }
     if (r == 0 && wb) return lwr_io_eagain();
     return (kl_ssize_t)r;
@@ -366,10 +374,10 @@ static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_
  * 0 on peer close (EOF), >0 bytes, or EAGAIN when connected with no data yet. */
 static kl_ssize_t lwr_sock_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
     (void)c;
-    if (!kl_handle_valid(fd)) return -1;
+    if (!kl_handle_valid(fd)) return lwr_io_fail();
     int wb = 0;
     long r = kl_lwr_client_recv(kl_lwr_active_ctx(), (void *)fd, b, n, &wb);
-    if (r < 0) return wb ? lwr_io_eagain() : (kl_ssize_t)-1;
+    if (r < 0) return wb ? lwr_io_eagain() : lwr_io_fail();
     return (kl_ssize_t)r;   /* 0 = EOF, >0 = bytes */
 }
 
