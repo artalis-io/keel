@@ -319,7 +319,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
         }
         c->tls->reset(c->tls);
     }
-    c->tls_shutdown_sent = c->tls_shutdown_pending = 0;
+    c->tls_shutdown_sent = c->tls_shutdown_pending = c->tls_shutdown_tries = 0;
     if (kl_handle_valid(c->stream.fd)) {
         kl_sock_close(conn_sp(c), c->stream.fd);
         c->stream.fd = KL_INVALID_SOCKET;
@@ -1648,9 +1648,17 @@ static void conn_graceful_half_close(KlHttpConn *c) {
         (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
 }
 
+/* Writable events a refused close_notify gets before the drain gives up on it. A real engine takes
+ * the alert as soon as the socket has room (a few dozen bytes); one that keeps answering WANT_WRITE
+ * on a writable socket would otherwise make the loop spin on writability until the deadline. */
+#define KL_HTTP_TLS_SHUTDOWN_TRIES 8
+
 KlHttpConnState kl_http_conn_drain_on_writable(KlHttpConn *c) {
     if (c->state != KL_HTTP_CONN_DRAINING || !c->tls_shutdown_pending) return c->state;
-    if (c->tls->shutdown(c->tls, c->stream.fd) == KL_TLS_WANT_WRITE) return c->state;
+    if (c->tls->shutdown(c->tls, c->stream.fd) == KL_TLS_WANT_WRITE &&
+        ++c->tls_shutdown_tries < KL_HTTP_TLS_SHUTDOWN_TRIES)
+        return c->state;
+    /* Out, or given up on: half-close either way; the drain and its deadline go on. */
     c->tls_shutdown_pending = 0;
     (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
     return c->state;
@@ -1882,7 +1890,9 @@ KlHttpConnState kl_http_conn_drain_step(KlHttpConn *c, uint64_t now_ms) {
           /* Nothing pending right now. If the framing is already complete there is nothing further to
            * wait for and the socket is drained, so close; otherwise keep the drain armed and let the
            * deadline decide. */
-          if (c->request_body_complete) {
+          /* Not while a close_notify a full socket refused is still to go: closing now would drop
+           * it (the drain stays open for its writable events, bounded by those and the deadline). */
+          if (c->request_body_complete && !c->tls_shutdown_pending) {
               DRAIN_TRACE(c, "wouldblock-complete");
               c->state = KL_HTTP_CONN_CLOSED;
           }

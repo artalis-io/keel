@@ -163,6 +163,7 @@ struct KlHttpConn {
     int tls_shutdown_sent;      /* close_notify already sent (a drain, before its half-close) */
     int tls_shutdown_pending;   /* readiness: close_notify refused by a full socket; the half-close
                                  * waits for it (kl_http_conn_drain_on_writable) */
+    int tls_shutdown_tries;     /* writable events that close_notify was refused on (capped) */
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;

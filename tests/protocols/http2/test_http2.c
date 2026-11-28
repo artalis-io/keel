@@ -1951,6 +1951,105 @@ UTEST(h2, a_lingering_tls_connection_sends_close_notify_before_its_fin) {
     ASSERT_EQ(eof, 1);                                     /* then the FIN */
 }
 
+/* An engine whose close_notify a full socket refuses (WANT_WRITE) a given number of times, then
+ * writes it through; it counts the shutdown calls. */
+typedef struct {
+    KlTls base;
+    int refuse, calls;
+} RefuseTls;
+static KlTlsResult rtls_shutdown(KlTls *self, KlSocketHandle fd) {
+    RefuseTls *t = (RefuseTls *)self;
+    t->calls++;
+    if (t->refuse > 0) { t->refuse--; return KL_TLS_WANT_WRITE; }
+    (void)kl_test_sockwrite(fd, "<close_notify>", 14);
+    return KL_TLS_OK;
+}
+static void rtls_init(RefuseTls *t, int refuse) {
+    memset(t, 0, sizeof *t);
+    t->refuse = refuse;
+    t->base.handshake = ltls_handshake;
+    t->base.read      = ltls_read;
+    t->base.write     = ltls_write;
+    t->base.shutdown  = rtls_shutdown;
+    t->base.pending   = ltls_pending;
+    t->base.reset     = ltls_reset;
+    t->base.destroy   = ltls_destroy;
+}
+/* A rejected request whose framing completed with bytes over-sent past it: the drain starts with
+ * its input already complete (nothing is left to wait for once a read would block). */
+static void drain_conn_over_sent(KlHttpConn *conn, int fd, char *buf, size_t cap, KlTls *tls) {
+    linger_conn_init(conn, fd, buf, cap);
+    conn->tls = tls;
+    conn->req.content_length = 4;
+    conn->request_body_received = 8;                       /* over-sent past its framing */
+    conn->request_body_complete = 1;                       /* the framing's verdict */
+}
+
+/* A drain whose input is already complete closes at the first read that would block, but not while
+ * its close_notify waits for a writable socket: that close dropped the alert. It stays open for the
+ * alert's writable event, then the half-close, then it closes. */
+UTEST(h1_tls_drain, a_complete_drain_waits_for_its_refused_close_notify) {
+    test_setup();
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    char rbuf[64];
+    RefuseTls tls;
+    rtls_init(&tls, 1);
+    KlHttpConn conn;
+    drain_conn_over_sent(&conn, pfd[1], rbuf, sizeof rbuf, &tls.base);
+    int st = (int)kl_http_conn_begin_drain(&conn);
+    int pending = conn.tls_shutdown_pending;
+    int st_idle = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());   /* would block */
+    (void)kl_http_conn_drain_on_writable(&conn);           /* the alert, then the half-close */
+    char got[64];
+    int eof = 0;
+    size_t n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+    int st_after = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(pending, 1);
+    ASSERT_EQ(st_idle, (int)KL_HTTP_CONN_DRAINING);        /* was CLOSED, the alert dropped */
+    ASSERT_EQ(n, (size_t)14);
+    ASSERT_EQ(0, memcmp(got, "<close_notify>", 14));
+    ASSERT_EQ(eof, 1);
+    ASSERT_EQ(st_after, (int)KL_HTTP_CONN_CLOSED);         /* then it closes, as before */
+}
+
+/* An engine that never takes the alert, though the socket is writable, must not keep the drain
+ * spinning on writability until the deadline: after a bounded number of writable events it gives up
+ * on the alert and half-closes. */
+UTEST(h1_tls_drain, a_close_notify_refused_for_good_is_given_up_after_bounded_tries) {
+    test_setup();
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    char rbuf[64];
+    RefuseTls tls;
+    rtls_init(&tls, 1000000);
+    KlHttpConn conn;
+    drain_conn_over_sent(&conn, pfd[1], rbuf, sizeof rbuf, &tls.base);
+    (void)kl_http_conn_begin_drain(&conn);
+    for (int i = 0; i < 100; i++) (void)kl_http_conn_drain_on_writable(&conn);
+    int calls = tls.calls, pending = conn.tls_shutdown_pending;
+    KlEventMask m = kl_http_conn_drain_interest(&conn, 0);
+    char got[64];
+    int eof = 0;
+    size_t n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+    int st = (int)conn.state;
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_LE(calls, 10);                                  /* was one per writable event */
+    ASSERT_EQ(pending, 0);
+    ASSERT_FALSE(m & KL_EVENT_WRITE);                      /* writability no longer watched */
+    ASSERT_EQ(n, (size_t)0);
+    ASSERT_EQ(eof, 1);                                     /* the FIN, without the alert */
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* the drain and its deadline go on */
+}
+
 /* A session that becomes done outside its connection's events (the drain's GOAWAY, the settle
  * pass's flush) must not wait for the next event to be ended: the due check reports it, so the
  * loop's wait does not block and the sweep after it ends the connection. On a readiness loop it
@@ -3026,10 +3125,12 @@ static kl_ssize_t livetls_write(KlTls *self, KlSocketHandle fd, const void *buf,
 }
 static int g_livetls_shutdowns;   /* every shutdown call (the server thread; read after join) */
 static int g_livetls_refuse_cn;   /* readiness: the first close_notify meets a full socket */
+static int g_livetls_refuse_all;  /* readiness: every close_notify is refused (a broken engine) */
 static KlTlsResult livetls_shutdown(KlTls *self, KlSocketHandle fd) {
     LiveTls *t = (LiveTls *)self;
-    g_livetls_shutdowns++;
+    kl_atomic_store_int(&g_livetls_shutdowns, kl_atomic_load_int(&g_livetls_shutdowns) + 1);
     if (!t->comp && kl_atomic_cas_int(&g_livetls_refuse_cn, 1, 0)) return KL_TLS_WANT_WRITE;
+    if (!t->comp && kl_atomic_load_int(&g_livetls_refuse_all)) return KL_TLS_WANT_WRITE;
     if (!t->cn_sent && livetls_put(t, fd, LTLS_CN, 4) == 4) t->cn_sent = 1;   /* sent once */
     return KL_TLS_OK;
 }
@@ -3293,7 +3394,7 @@ UTEST(h1_tls_drain, an_async_answer_with_a_refused_close_notify_ends_when_writab
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)g_h1t_srv.bound_port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    int ok = 0, refused_used = 0;
+    int ok = 0, refused_used = 0, released = 0;
     long took = -1;
     if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
         /* The whole request and a pipelined one in one write: the server reads both at once, so
@@ -3315,6 +3416,16 @@ UTEST(h1_tls_drain, an_async_answer_with_a_refused_close_notify_ends_when_writab
         ok = eof == 1 && n > 16 && memcmp(got, "HTTP/1.1 200", 12) == 0 &&
              memcmp(got + n - 4, LTLS_CN, 4) == 0;
         refused_used = kl_atomic_load_int(&g_livetls_refuse_cn) == 0;
+        /* Readiness: its input was complete, so once the alert is out nothing is left, and the
+         * server closes its end itself (the sweep's drain step, the same iteration), without waiting
+         * for this client to close or for the drain's 3 s. (A completion drain reads only what a
+         * posted receive brings, so it waits for the client or the deadline, as before.) */
+        for (int i = 0; !comp && i < 100 && !released; i++) {
+            KlHttpServerStats st;
+            kl_http_server_stats(&g_h1t_srv, &st);
+            released = st.active_connections == 0;
+            if (!released) kl_test_sleep_ms(10);
+        }
     }
     if (fd >= 0) kl_test_closesock(fd);
 
@@ -3341,6 +3452,32 @@ UTEST(h1_tls_drain, an_async_answer_with_a_refused_close_notify_ends_when_writab
         refused408 = kl_atomic_load_int(&g_livetls_refuse_cn) == 0;
     }
     if (fd >= 0) kl_test_closesock(fd);
+
+    /* The same 408 with an engine that never takes the alert: the drain gives up on it after a
+     * bounded number of writable events and sends the FIN, rather than spinning to the deadline. */
+    long took_all = -1;
+    int fin_all = 0, calls_all = -1;
+    if (!comp) {
+        kl_atomic_store_int(&g_livetls_refuse_all, 1);
+        int before = kl_atomic_load_int(&g_livetls_shutdowns);
+        fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+            uint64_t t0 = kl_monotonic_ms();
+            (void)kl_test_sockwrite(fd, "POST /as HTTP/1.1\r\nHo", 21);
+            char got[2048];
+            size_t n = 0;
+            while (n < sizeof got && kl_test_poll1(fd, 0, 6000) > 0) {
+                long rr = kl_test_sockread(fd, got + n, sizeof got - n);
+                if (rr <= 0) { fin_all = rr == 0; break; }
+                n += (size_t)rr;
+            }
+            took_all = (long)(kl_monotonic_ms() - t0);
+        }
+        if (fd >= 0) kl_test_closesock(fd);
+        kl_test_sleep_ms(100);
+        kl_atomic_store_int(&g_livetls_refuse_all, 0);
+        calls_all = kl_atomic_load_int(&g_livetls_shutdowns) - before;
+    }
     kl_http_server_stop(&g_h1t_srv);
     kl_plat_thread_join(&t);
     kl_http_server_free(&g_h1t_srv);
@@ -3348,10 +3485,16 @@ UTEST(h1_tls_drain, an_async_answer_with_a_refused_close_notify_ends_when_writab
     ASSERT_TRUE(ok);                                       /* the answer, close_notify, the FIN */
     ASSERT_TRUE(refused_used);
     ASSERT_TRUE(took >= 0 && took < 1500);                 /* was ~3 s: WRITE was not watched */
+    if (!comp) ASSERT_TRUE(released);                      /* within 1 s, the client still open */
     ASSERT_TRUE(ok408);
     ASSERT_TRUE(refused408);
     /* The header deadline (300 ms) plus up to one sweep tick (~1 s), not the drain's 3 s. */
     ASSERT_TRUE(took408 >= 0 && took408 < 2600);
+    if (!comp) {
+        ASSERT_TRUE(fin_all);                              /* the FIN came, without the alert */
+        ASSERT_TRUE(took_all >= 0 && took_all < 2600);     /* not the drain's 3 s deadline */
+        ASSERT_TRUE(calls_all >= 1 && calls_all <= 12);    /* was millions (a spin) */
+    }
 }
 
 /* ── A session whose flush reports the stream it just finished as closed ───────────────────── */

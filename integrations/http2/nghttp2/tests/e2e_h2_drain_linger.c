@@ -612,12 +612,12 @@ static int case_h1_reject_tls(KlTlsConfig *tlscfg) {
              cli_send_cb(NULL, (const uint8_t *)body, sizeof body, 0, &c) > 0;   /* EINTR-safe */
     char got[4096];
     size_t n = 0;
-    int clean = 0;
+    int clean = 0, intr = 0;
     while (ok && n < sizeof got) {
         int rr = SSL_read(c.ssl, got + n, (int)(sizeof got - n));
         if (rr > 0) { n += (size_t)rr; continue; }
         int e = SSL_get_error(c.ssl, rr);
-        if (e == SSL_ERROR_WANT_READ && cli_interrupted()) continue;   /* a signal: read on */
+        if (e == SSL_ERROR_WANT_READ && cli_interrupted() && ++intr < 100) continue;   /* a signal */
         clean = e == SSL_ERROR_ZERO_RETURN;                            /* close_notify */
         break;
     }
