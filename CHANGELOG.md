@@ -45,11 +45,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   (it walks the suspended-operation list), safe elsewhere only when no run is in progress.
 - **`kl_http_server_bound_port` is safe from any thread, and nonzero means startup succeeded.** The
   run now publishes the port with an atomic store once startup has succeeded (the socket listens and
-  is registered with the loop, and no startup step is left that can fail), and the function reads it
+  is registered with the loop, a completion loop's accept path is set up, and no startup step is
+  left that can fail), and the function reads it
   with an atomic load. It used to be a plain write made right after the bind, before `listen()`, and
   stayed set when the start then failed. Polling it from another thread until it is nonzero, as a test
   or a supervisor starting a server on its own thread does, is now well defined; a run that fails to
-  start never publishes a port. A nonzero value says only that startup got that far, not that the
+  start never publishes a port (so a poller also watches the run's result). A nonzero value says only that startup got that far, not that the
   server still accepts after a stop. Reading the `bound_port` field directly from another thread is
   still a data race.
 

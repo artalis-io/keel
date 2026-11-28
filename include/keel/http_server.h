@@ -559,8 +559,10 @@ const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
  * Ownership: none (returns a value). NULL: returns -1 when @p s is NULL (deterministic).
  *
  * Value: 0 from kl_http_server_init until kl_http_server_run has finished starting up (the socket
- * is bound, listening and registered with the loop, and no startup step is left that can fail),
- * then the bound port. A run that fails to start never publishes a port. A UNIX-socket server
+ * is bound, listening and registered with the loop, a completion loop's accept path is set up, and
+ * no startup step is left that can fail), then the bound port. A run that fails to start never
+ * publishes a port, so a thread polling for it must also watch the run's result (bound the poll, or
+ * stop once kl_http_server_run has returned). A UNIX-socket server
  * reports 0 throughout. A nonzero value says only that startup got that far: it does not say the
  * server is still accepting, since a stop or a drain may have closed the listener since; the value
  * is not reset when that happens or when the run returns.

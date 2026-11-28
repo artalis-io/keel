@@ -14,6 +14,7 @@
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* event↔socket capability negotiation */
 #include "completion_io.h"    /* completion-loop tick dispatch (IOCP) */
+#include "completion_http.h"  /* kl_http_comp_accept_setup: a completion loop's accept path */
 #include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals: per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup: self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
@@ -435,14 +436,22 @@ int kl_http_server_run(KlHttpServer *s) {
         s->accept_via_listener = 1;
     }
 
-    /* Startup has succeeded: the socket listens and is registered with the loop, and no setup step
-     * below can fail. Publish the port only now, with an atomic store, so a nonzero port is never
-     * seen for a run that then fails to start; another thread may poll kl_http_server_bound_port (an
-     * atomic load) until it is nonzero. */
-    kl_atomic_store_int(&s->bound_port, port);
-
     int run_failed = 0;                 /* the loop stopped on an error, not on a stop */
-    while (kl_atomic_load_int(&s->running)) {
+
+    /* A completion loop sets up its accept path (prime the accepts, start the accept listener) here,
+     * before the port is published, rather than in its first tick. A failure takes the same exit a
+     * failed first tick did. */
+    if (completion_loop && kl_http_comp_accept_setup(s) < 0)
+        run_failed = 1;
+
+    /* Startup has succeeded: the socket listens and is registered with the loop, its accept path is
+     * set up, and no setup step is left that can fail. Publish the port only now, with an atomic
+     * store, so a nonzero port is never seen for a run that fails to start; another thread may poll
+     * kl_http_server_bound_port (an atomic load) until it is nonzero. */
+    if (!run_failed)
+        kl_atomic_store_int(&s->bound_port, port);
+
+    while (!run_failed && kl_atomic_load_int(&s->running)) {
         if (completion_loop) {
             /* One completion-loop tick: factored into the freestanding-safe server
              * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */
