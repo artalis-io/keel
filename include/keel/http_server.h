@@ -526,7 +526,11 @@ int  kl_http_server_draining(const KlHttpServer *s);
  * (kl_http_server_init) even if it never submitted anything. Shortly after this call, one blocking
  * socket call with a timeout (SO_RCVTIMEO / SO_SNDTIMEO) on that thread can therefore fail with
  * EINTR, as for any signal (socket(7): such calls are not restarted); calls without a timeout are
- * restarted transparently. No io_uring setup flag changes this.
+ * restarted transparently. No io_uring setup flag changes this. It is only that interruption: the
+ * kernel runs no application code for it, no Keel callback fires after the free, and the ring's
+ * posted operations are cancelled without writing to their buffers once the ring is closed. Keel's
+ * own blocking API (the sync HTTP client) is not affected: it uses non-blocking sockets and a
+ * deadline-bounded poll that treats an interruption as "not ready yet".
  */
 void kl_http_server_free(KlHttpServer *s);
 
