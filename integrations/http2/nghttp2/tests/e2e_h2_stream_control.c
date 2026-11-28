@@ -489,8 +489,8 @@ int main(void) {
     kl_http_server_route(&g_srv, "GET", "/slow", handle, &g_slow, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 400 && g_srv.bound_port == 0; i++) nap(5);
-    if (g_srv.bound_port <= 0) return fail("server never bound");
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) == 0; i++) nap(5);
+    if (kl_http_server_bound_port(&g_srv) <= 0) return fail("server never bound");
 
     memset(&c, 0, sizeof(c));
     c.statuses_ok = 1;
@@ -502,7 +502,7 @@ int main(void) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_port = htons((uint16_t)g_srv.bound_port);
+    sa.sin_port = htons((uint16_t)kl_http_server_bound_port(&g_srv));
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(c.fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) return fail("connect");
     if (cli_nonblock(c.fd) != 0) return fail("nonblocking");

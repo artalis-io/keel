@@ -1243,7 +1243,7 @@ static void test_server_tls_hangup_while_suspended(KlAllocator *alloc, PemPair *
     kl_http_server_route(&g_hup_srv, "GET", "/park", hup_park, NULL, NULL);
     pthread_t tid;
     assert(pthread_create(&tid, NULL, hup_srv_main, NULL) == 0);
-    for (int i = 0; i < 300 && g_hup_srv.bound_port == 0; i++) (void)poll(NULL, 0, 10);   /* poll, not usleep: hidden by -std=c11 on glibc */
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&g_hup_srv) == 0; i++) (void)poll(NULL, 0, 10);   /* poll, not usleep: hidden by -std=c11 on glibc */
 
     static const char req[] = "GET /park HTTP/1.1\r\nHost: server.local\r\n\r\n";
     for (int variant = 0; variant < 2; variant++) {        /* 0: close_notify first; 1: TCP only */
@@ -1253,7 +1253,7 @@ static void test_server_tls_hangup_while_suspended(KlAllocator *alloc, PemPair *
         memset(&a, 0, sizeof a);
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        a.sin_port = htons((uint16_t)g_hup_srv.bound_port);
+        a.sin_port = htons((uint16_t)kl_http_server_bound_port(&g_hup_srv));
         HUP_CHECK(connect(fd, (struct sockaddr *)&a, sizeof a) == 0);
         KlTls *t = kl_tls_mbedtls_create(cctx, alloc);     /* blocking fd: each call waits */
         HUP_CHECK(t != NULL);

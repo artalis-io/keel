@@ -20,7 +20,7 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static void server_thread_fn(void *arg) {
@@ -118,8 +118,8 @@ UTEST(tls_integration, hello_request) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     /* Connect and send plain HTTP: passthrough TLS is transparent */
     int fd = connect_to(port);
@@ -155,7 +155,7 @@ UTEST(tls_integration, keep_alive) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    int port = srv.bound_port;
+    int port = kl_http_server_bound_port(&srv);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -199,7 +199,7 @@ UTEST(tls_integration, concurrent) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    int port = srv.bound_port;
+    int port = kl_http_server_bound_port(&srv);
 
     /* 3 concurrent TLS connections */
     int fds[3];
@@ -271,7 +271,7 @@ UTEST(tls_integration, record_split_in_headers_waits_for_the_rest) {
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     mock_tls_split_after = 0;
     mock_tls_split_record = strlen(req);
-    split_round_trip(split_srv.bound_port, req, 20, buf, sizeof buf);
+    split_round_trip(kl_http_server_bound_port(&split_srv), req, 20, buf, sizeof buf);
     mock_tls_split_record = 0;
 
     kl_http_server_stop(&split_srv);
@@ -298,7 +298,7 @@ UTEST(tls_integration, record_split_in_body_waits_for_the_rest) {
     mock_tls_split_after = strlen(hdrs);       /* the headers arrive whole; the body record splits */
     mock_tls_split_record = 10;
     /* headers alone first, then half the body, then the rest */
-    int fd = connect_to(split_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&split_srv));
     buf[0] = '\0';
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, req, strlen(hdrs));
@@ -365,7 +365,7 @@ UTEST(tls_integration, paused_body_stays_paused) {
 
     g_tls_pause_calls = 0;
     const char *h = "POST /pause HTTP/1.1\r\nHost: localhost\r\nContent-Length: 30\r\n\r\n";
-    int fd = connect_to(pause_tls_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&pause_tls_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, h, strlen(h));
         for (int i = 0; i < 3; i++) {                      /* three separate chunks */
@@ -410,7 +410,7 @@ UTEST(tls_integration, a_stalled_reader_does_not_block_other_connections) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &tq_srv);
     wait_for_bind(&tq_srv);
-    int port = tq_srv.bound_port;
+    int port = kl_http_server_bound_port(&tq_srv);
 
     int a = connect_to(port);                              /* asks for 4 MiB, then reads nothing */
     if (a >= 0) {
@@ -454,7 +454,7 @@ UTEST(tls_integration, a_rejected_upload_gets_its_413) {
 
     char buf[2048];
     buf[0] = '\0';
-    int fd = connect_to(tq_rej_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_rej_srv));
     if (fd >= 0) {
         const char *h = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 20000\r\n\r\n";
         (void)kl_test_sockwrite(fd, h, strlen(h));
@@ -497,7 +497,7 @@ UTEST(tls_integration, a_client_that_never_reads_does_not_hold_its_slot) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &tq_hold_srv);
     wait_for_bind(&tq_hold_srv);
-    int port = tq_hold_srv.bound_port;
+    int port = kl_http_server_bound_port(&tq_hold_srv);
 
     int a = connect_small_rcvbuf(port);                    /* asks for 16 MiB, never reads */
     if (a >= 0) {
@@ -542,7 +542,7 @@ UTEST(tls_integration, a_body_that_came_with_its_headers_is_not_left_in_the_engi
 
     char buf[4096];
     buf[0] = '\0';
-    int fd = connect_to(tq_rec_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_rec_srv));
     if (fd >= 0) {
         static char rq[2048];
         int hl = snprintf(rq, sizeof rq,
@@ -592,7 +592,7 @@ UTEST(tls_integration, a_body_held_in_the_engine_after_the_header_read_is_read_o
     buf[0] = '\0';
     mock_tls_split_after = 0;
     mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
-    int fd = connect_to(tq_hold_body_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_hold_body_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_one_response(fd, buf, sizeof buf, 2500);
@@ -682,7 +682,7 @@ UTEST(tls_integration, a_body_held_in_the_engine_is_read_on_after_an_async_resum
     buf[0] = '\0';
     mock_tls_split_after = 0;
     mock_tls_split_record = len;
-    int fd = connect_to(tq_hold_async_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_hold_async_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_response(fd, buf, sizeof buf, 2500);
@@ -763,7 +763,7 @@ UTEST(tls_integration, a_body_paused_by_on_data_still_takes_the_record_held_in_t
     buf[0] = '\0';
     mock_tls_split_after = 0;
     mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
-    int fd = connect_to(tq_pause_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_pause_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_response(fd, buf, sizeof buf, 3000);
@@ -793,7 +793,7 @@ UTEST(tls_integration, a_timed_out_request_gets_its_408) {
 
     char buf[1024];
     buf[0] = '\0';
-    int fd = connect_to(tq_408_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_408_srv));
     if (fd >= 0) {
         const char *part = "GET /hello HTTP/1.1\r\nHost: x\r\n";   /* and then nothing */
         (void)kl_test_sockwrite(fd, part, strlen(part));
@@ -824,7 +824,7 @@ UTEST(tls_integration, a_rejected_chunked_upload_gets_its_413) {
     char buf[2048];
     buf[0] = '\0';
     int closed = 0;
-    int fd = connect_to(tq_chk_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&tq_chk_srv));
     if (fd >= 0) {
         static char big[16384 + 64];
         const char *h = "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
@@ -881,7 +881,7 @@ UTEST(tls_integration, a_graceful_stop_lets_queued_output_finish) {
     }
 
     long total = 0;
-    int a = connect_small_rcvbuf(tq_stop_srv.bound_port);
+    int a = connect_small_rcvbuf(kl_http_server_bound_port(&tq_stop_srv));
     if (a >= 0) {
         const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(a, rq, strlen(rq));
@@ -923,7 +923,7 @@ UTEST(tls_integration, tls_100_continue_survives_a_refused_write) {
 
     char interim[256];
     interim[0] = '\0';
-    int fd = connect_to(cw_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&cw_srv));
     if (fd >= 0) {
         mock_tls_write_want = 1;                           /* the server's next write is refused once */
         const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
@@ -991,7 +991,7 @@ UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
     g_er_errors = 0;
     char interim[256];
     interim[0] = '\0';
-    int fd = connect_to(ce_srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&ce_srv));
     if (fd >= 0) {
         mock_tls_write_want = 100000;                      /* every write refused: the server gives up */
         const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
@@ -1038,7 +1038,7 @@ static int hdl_start(int read_timeout_ms, KlPlatThread *tid) {
     kl_http_server_route(&hdl_srv, "GET", "/hello", handle_hello, NULL, NULL);
     kl_plat_thread_create(tid, server_thread_fn, &hdl_srv);
     wait_for_bind(&hdl_srv);
-    return hdl_srv.bound_port;
+    return kl_http_server_bound_port(&hdl_srv);
 }
 
 static void hdl_stop(KlPlatThread *tid) {

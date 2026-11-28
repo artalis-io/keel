@@ -124,7 +124,7 @@ static void server_thread(void *arg) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static char url_buf[256];
@@ -308,7 +308,7 @@ static void ensure_servers(void) {
 
     kl_plat_thread_create(&redir_tid, server_thread, &redir_srv);
     wait_for_bind(&redir_srv);
-    redir_port = redir_srv.bound_port;
+    redir_port = kl_http_server_bound_port(&redir_srv);
 
     KlHttpServerConfig cfg2 = { .port = 0, .max_connections = 4 };
     kl_http_server_init(&redir_srv2, &cfg2);
@@ -317,7 +317,7 @@ static void ensure_servers(void) {
 
     kl_plat_thread_create(&redir_tid2, server_thread, &redir_srv2);
     wait_for_bind(&redir_srv2);
-    redir_port2 = redir_srv2.bound_port;
+    redir_port2 = kl_http_server_bound_port(&redir_srv2);
 }
 
 /* Called via atexit: stops servers once when process exits */

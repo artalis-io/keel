@@ -1124,5 +1124,5 @@ const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s) {
 }
 
 int kl_http_server_bound_port(const KlHttpServer *s) {
-    return s ? s->bound_port : -1;
+    return s ? kl_atomic_load_int(&s->bound_port) : -1;   /* any thread: see http_server.h */
 }

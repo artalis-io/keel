@@ -109,10 +109,10 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
 
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, rfc_srv_thread, NULL));
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) rfc_nap(5);
-    ASSERT_TRUE(g_srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) rfc_nap(5);
+    ASSERT_TRUE(kl_http_server_bound_port(&g_srv) > 0);
 
-    int fd = rfc_connect(g_srv.bound_port);
+    int fd = rfc_connect(kl_http_server_bound_port(&g_srv));
     ASSERT_TRUE(fd >= 0);
 
     char hdr[128];
@@ -188,10 +188,10 @@ UTEST(read_flow_control, shutdown_while_paused) {
 
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, rfc_srv_thread, NULL));
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) rfc_nap(5);
-    ASSERT_TRUE(g_srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) rfc_nap(5);
+    ASSERT_TRUE(kl_http_server_bound_port(&g_srv) > 0);
 
-    int fd = rfc_connect(g_srv.bound_port);
+    int fd = rfc_connect(kl_http_server_bound_port(&g_srv));
     ASSERT_TRUE(fd >= 0);
     char hdr[128];
     int hn = snprintf(hdr, sizeof(hdr),

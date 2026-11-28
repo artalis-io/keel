@@ -14,6 +14,7 @@
 #include <keel/keel.h>
 #include <keel/async.h>
 #include "net_compat.h"
+#include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include <string.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 
@@ -715,8 +716,8 @@ UTEST(async, e2e_handler_suspend_resume) {
                     handle_async_sleep, &async_server, NULL);
 
     kl_plat_thread_create(&async_server_tid, async_server_thread, NULL);
-    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) kl_test_sleep_ms(10);
-    int port = async_server.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&async_server) == 0; i++) kl_test_sleep_ms(10);
+    int port = kl_http_server_bound_port(&async_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -802,9 +803,9 @@ UTEST(async, e2e_resume_without_state_still_sends) {
                     handle_async_nostate, &async_server, NULL);
 
     kl_plat_thread_create(&async_server_tid, async_server_thread, NULL);
-    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&async_server) == 0; i++) kl_test_sleep_ms(10);
 
-    int fd = connect_to(async_server.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&async_server));
     ASSERT_TRUE(fd >= 0);
     /* Bound the read: a regression here stalls the connection forever, and a hung
      * CI job is a worse signal than a failed assertion. */
@@ -930,6 +931,7 @@ UTEST(async, resuspend_after_terminal_is_pending) {
  * (close). And kl_async_cancel, documented for deadline-as-failure, only retired the op: the
  * connection stayed suspended, out of the loop, exempt from the sweep, until the server was freed. */
 static KlHttpServer end_srv;
+static KlTestStatsProbe end_probe;   /* end_srv's stats, read from the test thread */
 static KlPlatThread end_tid;
 static int g_end_cancels;
 
@@ -1001,13 +1003,15 @@ static void end_start_with(int body_timeout_ms) {
     kl_http_server_route(&end_srv, "GET", "/nest", handle_nest, NULL, NULL);
     kl_http_server_route_streaming_async(&end_srv, "POST", "/od", handle_od, NULL, od_factory);
     g_end_cancels = 0;
+    (void)kl_test_stats_probe_init(&end_probe, &end_srv);
     kl_plat_thread_create(&end_tid, end_server_thread, NULL);
-    for (int i = 0; i < 200 && end_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&end_srv) == 0; i++) kl_test_sleep_ms(10);
 }
 static void end_start(void) { end_start_with(0); }
 static void end_stop(void) {
     kl_http_server_stop(&end_srv);
     kl_plat_thread_join(&end_tid);
+    kl_test_stats_probe_free(&end_probe);
     kl_http_server_free(&end_srv);
 }
 
@@ -1048,7 +1052,7 @@ static int end_hellos(int port) {
 
 UTEST(async, complete_inside_the_handler_sends_one_response) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[2048];
     int closed = 0, responses = -1;
     int fd = connect_to(port);
@@ -1068,7 +1072,7 @@ UTEST(async, complete_inside_the_handler_sends_one_response) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     end_stop();
     ASSERT_EQ(responses, 1);                               /* was 2 (keep-alive): a phantom response */
@@ -1078,7 +1082,7 @@ UTEST(async, complete_inside_the_handler_sends_one_response) {
 
 UTEST(async, cancel_inside_the_handler_closes_the_connection) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[512];
     int closed = 0;
     int fd = connect_to(port);
@@ -1090,7 +1094,7 @@ UTEST(async, cancel_inside_the_handler_closes_the_connection) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int cancels = g_end_cancels;
     end_stop();
     ASSERT_EQ(cancels, 1);
@@ -1100,7 +1104,7 @@ UTEST(async, cancel_inside_the_handler_closes_the_connection) {
 
 UTEST(async, a_cancelled_op_releases_its_connection) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[512];
     int closed = 0;
     int fd = connect_to(port);
@@ -1112,7 +1116,7 @@ UTEST(async, a_cancelled_op_releases_its_connection) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int cancels = g_end_cancels;
     end_stop();
     ASSERT_EQ(cancels, 1);
@@ -1148,7 +1152,7 @@ static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 UTEST(async, a_cancel_inside_on_resume_releases_once) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[512];
     int closed = 0;
     int fd = connect_to(port);
@@ -1160,7 +1164,7 @@ UTEST(async, a_cancel_inside_on_resume_releases_once) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     int cancels = g_end_cancels;
     end_stop();
@@ -1194,7 +1198,7 @@ static void handle_nest(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 UTEST(async, a_nested_complete_inside_on_resume_keeps_the_connection) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[1024];
     int closed = 0, first = 0, second = 0;
     int fd = connect_to(port);
@@ -1273,7 +1277,7 @@ static void handle_od(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 static void od_case(int *utest_result, int cancel_now) {
     g_od_cancel_now = cancel_now;
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[1024];
     int closed = 0;
     int fd = connect_to(port);
@@ -1286,7 +1290,7 @@ static void od_case(int *utest_result, int cancel_now) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     int cancels = g_end_cancels;
     end_stop();
@@ -1332,7 +1336,7 @@ static uint64_t process_cpu_ms(void) {
 
 UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     end_start();
-    int port = end_srv.bound_port;
+    int port = kl_http_server_bound_port(&end_srv);
     char buf[1024];
     buf[0] = '\0';
     int closed = 0;
@@ -1349,7 +1353,7 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     kl_test_sleep_ms(800);                                 /* idle: nothing should run */
     uint64_t used = process_cpu_ms() - cpu0;
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     end_stop();
     ASSERT_TRUE(answered);
@@ -1473,12 +1477,12 @@ UTEST(async, suspend_at_dispatch_then_await_body_reads_the_whole_body) {
     g_aw_pause = 0;
     end_start();
     char buf[1024];
-    int ok = aw_exchange(end_srv.bound_port,
+    int ok = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 300,
                          " world", "[hello world]", buf, sizeof buf);
     kl_test_sleep_ms(100);
     KlHttpServerStats st;
-    kl_http_server_stats(&end_srv, &st);
+    (void)kl_test_stats_probe_get(&end_probe, &st);
     end_stop();
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);           /* was (readiness): no response; 408 */
     ASSERT_TRUE(ok);                                       /* was (completion): "hello" dropped */
@@ -1492,9 +1496,9 @@ UTEST(async, suspend_at_dispatch_then_await_chunked_body) {
     char buf[1024], buf2[1024];
     const char *head = "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
     const char *rest = "6\r\n world\r\n0\r\n\r\n";
-    int first = aw_exchange(end_srv.bound_port, head, 300, rest, "[hello world]", buf, sizeof buf);
+    int first = aw_exchange(kl_http_server_bound_port(&end_srv), head, 300, rest, "[hello world]", buf, sizeof buf);
     /* The slot is reused: its decoder ended the previous request DONE. */
-    int second = aw_exchange(end_srv.bound_port, head, 300, rest, "[hello world]", buf2, sizeof buf2);
+    int second = aw_exchange(kl_http_server_bound_port(&end_srv), head, 300, rest, "[hello world]", buf2, sizeof buf2);
     end_stop();
     ASSERT_TRUE(first);                                    /* was: "hello" dropped, or no response */
     ASSERT_TRUE(second);                                   /* was: the decoder ran from DONE */
@@ -1505,7 +1509,7 @@ UTEST(async, time_suspended_is_not_charged_to_the_body_deadline) {
     g_aw_pause = 0;
     end_start_with(600);
     char buf[1024];
-    int ok = aw_exchange(end_srv.bound_port,
+    int ok = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 1150,
                          " world", "[hello world]", buf, sizeof buf);
     end_stop();
@@ -1524,10 +1528,10 @@ UTEST(async, kept_body_bytes_are_fed_once_when_the_resume_unpauses) {
     g_aw_pause = 1;
     end_start();
     char buf[1024], buf2[1024];
-    int cl = aw_exchange(end_srv.bound_port,
+    int cl = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello", 300,
                          " world", "[hello world]", buf, sizeof buf);
-    int ch = aw_exchange(end_srv.bound_port,
+    int ch = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
                          300, "6\r\n world\r\n0\r\n\r\n", "[hello world]", buf2, sizeof buf2);
     end_stop();
@@ -1547,10 +1551,10 @@ UTEST(async, a_body_sent_after_the_head_is_read_alone_when_the_resume_unpauses) 
     g_aw_pause = 1;
     end_start();
     char buf[1024], buf2[1024];
-    int cl = aw_exchange(end_srv.bound_port,
+    int cl = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\n", 300,
                          "hello world", "[hello world]", buf, sizeof buf);
-    int ch = aw_exchange(end_srv.bound_port,
+    int ch = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", 300,
                          "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", "[hello world]", buf2,
                          sizeof buf2);
@@ -1574,7 +1578,7 @@ UTEST(async, a_paused_body_read_stays_paused_after_a_nested_complete) {
     g_aw_len_at_unpause = (size_t)-1;
     end_start();
     char buf[1024];
-    int ok = aw_exchange(end_srv.bound_port,
+    int ok = aw_exchange(kl_http_server_bound_port(&end_srv),
                          "POST /aw HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\n", 200,
                          "hello world", "[hello world]", buf, sizeof buf);
     end_stop();

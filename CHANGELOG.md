@@ -41,11 +41,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `kl_http_response_json`, `kl_http_response_error`) refuse a response whose stream has begun: they
   change nothing, and those that return a value return -1. They used to replace the begun stream's
   body, which on HTTP/2 left a stream that could never end.
-- Documented which thread may call `kl_http_server_stats` and `kl_http_server_bound_port`. The
-  stats snapshot is a loop-thread read (it walks the suspended-operation list), safe elsewhere only
-  when no run is in progress. The bound port is written once, by `kl_http_server_run` as it binds,
-  and may be read from another thread only once that thread is ordered after the bind by its own
-  synchronization or after the run has returned; polling it during startup is a data race.
+- Documented which thread may call `kl_http_server_stats`: the stats snapshot is a loop-thread read
+  (it walks the suspended-operation list), safe elsewhere only when no run is in progress.
+- **`kl_http_server_bound_port` is safe from any thread, and nonzero means listening.** The run now
+  publishes the port with an atomic store once the socket is listening (it used to be a plain write
+  made after the bind, before `listen()`), and the function reads it with an atomic load. Polling
+  it from another thread until it is nonzero, as a test or a supervisor starting a server on its own
+  thread does, is now well defined and connects to a listening socket. Reading the `bound_port` field
+  directly from another thread is still a data race.
 
 ### Fixed
 

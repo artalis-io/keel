@@ -50,7 +50,7 @@ static kl_ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 UTEST(timeout, idle_connection) {
@@ -64,7 +64,7 @@ UTEST(timeout, idle_connection) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     /* Connect but send nothing */
     int fd = connect_to(port);
@@ -94,7 +94,7 @@ UTEST(timeout, partial_headers) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -127,7 +127,7 @@ UTEST(timeout, partial_body) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -164,7 +164,7 @@ UTEST(timeout, active_not_affected) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -211,7 +211,7 @@ UTEST(timeout, body_timeout) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -250,7 +250,7 @@ UTEST(timeout, fast_large_body) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -299,7 +299,7 @@ UTEST(timeout, keepalive_idle_timeout) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -346,7 +346,7 @@ UTEST(timeout, concurrent_timeouts) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    int port = timeout_server.bound_port;
+    int port = kl_http_server_bound_port(&timeout_server);
 
     /* Connect two idle clients */
     int fd1 = connect_to(port);
@@ -391,7 +391,7 @@ static void start_server(KlHttpServerConfig *cfg, KlPlatThread *tid, int *port) 
     kl_http_server_route(&timeout_server, "POST", "/echo", handle_ok, NULL, kl_http_body_reader_buffer);
     kl_plat_thread_create(tid, server_thread, NULL);
     wait_for_bind(&timeout_server);
-    *port = timeout_server.bound_port;
+    *port = kl_http_server_bound_port(&timeout_server);
 }
 
 static void stop_server(KlPlatThread *tid) {

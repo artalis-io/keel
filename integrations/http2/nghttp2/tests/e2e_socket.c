@@ -70,11 +70,11 @@ int main(void) {
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap(5);
-    if (g_srv.bound_port <= 0) return fail("server never bound");
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) nap(5);
+    if (kl_http_server_bound_port(&g_srv) <= 0) return fail("server never bound");
 
     char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d", g_srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", kl_http_server_bound_port(&g_srv));
 
     /* Client: real kl_http2_client_connect over cleartext h2c, nghttp2-backed. */
     KlEventCtx ev;

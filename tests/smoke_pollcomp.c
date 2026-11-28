@@ -541,7 +541,7 @@ static int proxy_over_completion_ok(void) {
     kl_http_server_route(&srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
     pthread_t th;
     if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_http_server_free(&srv); return 0; }
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) nap_ms(5);
 
     int ok = 0;
     int cs = socket(AF_INET, SOCK_STREAM, 0);
@@ -605,7 +605,7 @@ static int backlog_exhaustion_queues_not_drops(void) {
     kl_http_server_route(&srv, "GET", "/", handle_ok, NULL, NULL);
     pthread_t th;
     if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_http_server_free(&srv); return 0; }
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) nap_ms(5);
 
     int ok = 0, a = -1, b = -1;
     struct sockaddr_in to;

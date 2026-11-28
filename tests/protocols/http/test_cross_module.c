@@ -26,7 +26,7 @@
  * ═══════════════════════════════════════════════════════════════════ */
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static void server_thread_fn(void *arg) {
@@ -373,9 +373,9 @@ UTEST(cross, tls_async_suspend_resume) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_to(srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /tls-async HTTP/1.1\r\n"
@@ -483,7 +483,7 @@ UTEST(cross, middleware_body_async) {
 
     /* Test: missing auth header → 401 */
     {
-        int fd = connect_to(srv.bound_port);
+        int fd = connect_to(kl_http_server_bound_port(&srv));
         ASSERT_TRUE(fd >= 0);
         const char *req = "POST /process HTTP/1.1\r\n"
                           "Host: localhost\r\n"
@@ -498,7 +498,7 @@ UTEST(cross, middleware_body_async) {
 
     /* Test: valid auth + body → async handler echoes body */
     {
-        int fd = connect_to(srv.bound_port);
+        int fd = connect_to(kl_http_server_bound_port(&srv));
         ASSERT_TRUE(fd >= 0);
         const char *req = "POST /process HTTP/1.1\r\n"
                           "Host: localhost\r\n"
@@ -622,7 +622,7 @@ UTEST(cross, tls_middleware_compress) {
 
     /* Unauthenticated → 401 (middleware short-circuits before compression) */
     {
-        int fd = connect_to(srv.bound_port);
+        int fd = connect_to(kl_http_server_bound_port(&srv));
         ASSERT_TRUE(fd >= 0);
         const char *req = "GET /compressed HTTP/1.1\r\n"
                           "Host: localhost\r\n"
@@ -636,7 +636,7 @@ UTEST(cross, tls_middleware_compress) {
 
     /* Authenticated → 200 with compressed body + Content-Encoding */
     {
-        int fd = connect_to(srv.bound_port);
+        int fd = connect_to(kl_http_server_bound_port(&srv));
         ASSERT_TRUE(fd >= 0);
         const char *req = "GET /compressed HTTP/1.1\r\n"
                           "Host: localhost\r\n"
@@ -729,7 +729,7 @@ UTEST(cross, stats_during_async) {
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
 
-    int fd = connect_to(srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /hold HTTP/1.1\r\n"
                       "Host: localhost\r\n"

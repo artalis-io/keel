@@ -239,7 +239,7 @@ static double now_s(void) {
 UTEST(gzip_backpressure, a_stalled_reader_bounds_the_producer_and_the_body_arrives_whole) {
     size_t live0 = g_ca.live;
     ASSERT_EQ(server_up(), 0);
-    int fd = connect_small(g_srv.bound_port);
+    int fd = connect_small(kl_http_server_bound_port(&g_srv));
     ASSERT_GE(fd, 0);
     EXPECT_TRUE(wait_for_backpressure());                   /* stall: every buffer fills */
     usleep(100000);
@@ -277,7 +277,7 @@ UTEST(gzip_backpressure, a_stalled_reader_bounds_the_producer_and_the_body_arriv
 UTEST(gzip_backpressure, a_client_that_leaves_mid_stall_cancels_and_releases_the_stream) {
     size_t live0 = g_ca.live;
     ASSERT_EQ(server_up(), 0);
-    int fd = connect_small(g_srv.bound_port);
+    int fd = connect_small(kl_http_server_bound_port(&g_srv));
     ASSERT_GE(fd, 0);
     EXPECT_TRUE(wait_for_backpressure());
     close(fd);                                              /* gone without reading */

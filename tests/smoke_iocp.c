@@ -208,7 +208,7 @@ static int proxy_over_completion_ok(void) {
     kl_http_server_route(&g_proxy_srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
     pthread_t th;
     if (pthread_create(&th, NULL, proxy_server_thread, NULL) != 0) { kl_http_server_free(&g_proxy_srv); return 0; }
-    for (int i = 0; i < 200 && g_proxy_srv.bound_port == 0; i++) nap_ms(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_proxy_srv) == 0; i++) nap_ms(5);
 
     int ok = 0;
     SOCKET cs = socket(AF_INET, SOCK_STREAM, 0);

@@ -502,15 +502,15 @@ UTEST(unix_socket, http_request_over_tcp_has_no_peer_credentials) {
     kl_http_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
-    for (int i = 0; i < 300 && srv.bound_port == 0; i++) usleep(10000);
-    ASSERT_TRUE(srv.bound_port != 0);
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) usleep(10000);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) != 0);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)srv.bound_port);
+    a.sin_port = htons((uint16_t)kl_http_server_bound_port(&srv));
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     ASSERT_EQ(0, connect(fd, (struct sockaddr *)&a, sizeof(a)));
     const char *req = "GET /whoami HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";

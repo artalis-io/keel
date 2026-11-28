@@ -58,7 +58,7 @@ static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 static void server_thread_fn(void *arg) { kl_http_server_run((KlHttpServer *)arg); return; }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static int connect_to(int port) {
@@ -113,7 +113,7 @@ static int run_one(int mode) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    int status = post_upload_status(srv.bound_port);
+    int status = post_upload_status(kl_http_server_bound_port(&srv));
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&srv);

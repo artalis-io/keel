@@ -145,7 +145,7 @@ static void start_ex(KlHttpSuspendHangup policy, int tls, const KlEventProvider 
     kl_http_server_route(&srv, "GET", "/park", handle_park, NULL, NULL);
     kl_http_server_route(&srv, "GET", "/fast", handle_fast, NULL, NULL);
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
-    for (int i = 0; i < 300 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static void start_tls(KlHttpSuspendHangup policy, int tls) { start_ex(policy, tls, NULL); }
@@ -169,7 +169,7 @@ static int client(void) {
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)srv.bound_port);
+    a.sin_port = htons((uint16_t)kl_http_server_bound_port(&srv));
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0) { kl_test_closesock(fd); return -1; }
     kl_test_set_rcvtimeo(fd, 4000);
@@ -436,7 +436,7 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
     ASSERT_EQ(kl_http_server_init(&srv, &cfg), 0);
     kl_http_server_route(&srv, "GET", "/quiet", handle_quiet, NULL, NULL);
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
-    for (int i = 0; i < 300 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 
     static int fds[SWEEP_MAX];
     static const char q[] = "GET /quiet HTTP/1.1\r\nHost: x\r\n\r\n";
@@ -597,7 +597,7 @@ UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
     ASSERT_TRUE(td_pool != NULL);
     kl_http_server_route(&srv, "GET", "/td", handle_td, NULL, NULL);
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
-    for (int i = 0; i < 300 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 
     static const char q[] = "GET /td HTTP/1.1\r\nHost: x\r\n\r\n";
     int fds[3];

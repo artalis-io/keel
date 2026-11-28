@@ -245,7 +245,6 @@ int kl_http_server_plat_bind_unix(KlHttpServer *s) {
         return -1;
     }
     s->unix_socket_owned = 1;
-    s->bound_port = 0;
     return 0;
 }
 

@@ -2385,13 +2385,13 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
     ASSERT_EQ(kl_http_server_init(&g_pk_srv, &cfg), 0);
     KlPlatThread t;
     kl_plat_thread_create(&t, pk_server_thread, NULL);
-    for (int i = 0; i < 200 && g_pk_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_pk_srv) == 0; i++) kl_test_sleep_ms(10);
 
     int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)g_pk_srv.bound_port);
+    addr.sin_port = htons((uint16_t)kl_http_server_bound_port(&g_pk_srv));
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     int ok = fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0;
     static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";

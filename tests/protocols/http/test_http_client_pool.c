@@ -490,7 +490,7 @@ static void server_thread_fn(void *arg) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 UTEST(cpool, sync_pooled_reuse) {
@@ -503,10 +503,10 @@ UTEST(cpool, sync_pooled_reuse) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", kl_http_server_bound_port(&srv));
 
     KlAllocator a = kl_allocator_default();
     KlHttpClientPool pool;
@@ -556,10 +556,10 @@ UTEST(cpool, async_pooled_reuse) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", kl_http_server_bound_port(&srv));
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
@@ -636,7 +636,7 @@ static int prov_pool_server_start(void) {
     kl_http_server_route(&g_prov_pool_srv, "GET", "/hello", handle_hello, NULL, NULL);
     kl_plat_thread_create(&g_prov_pool_tid, server_thread_fn, &g_prov_pool_srv);
     wait_for_bind(&g_prov_pool_srv);
-    return g_prov_pool_srv.bound_port > 0 ? 0 : -1;
+    return kl_http_server_bound_port(&g_prov_pool_srv) > 0 ? 0 : -1;
 }
 static void prov_pool_server_stop(void) {
     kl_http_server_stop(&g_prov_pool_srv);
@@ -650,7 +650,7 @@ static void prov_pool_server_stop(void) {
 UTEST(cpool, sync_pooled_connection_keeps_its_provider) {
     ASSERT_EQ(prov_pool_server_start(), 0);
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", g_prov_pool_srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", kl_http_server_bound_port(&g_prov_pool_srv));
     memset(&g_pcnt, 0, sizeof g_pcnt);
 
     KlAllocator a = kl_allocator_default();
@@ -691,7 +691,7 @@ UTEST(cpool, sync_pooled_connection_keeps_its_provider) {
 UTEST(cpool, async_pooled_connection_keeps_its_provider) {
     ASSERT_EQ(prov_pool_server_start(), 0);
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", g_prov_pool_srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hello", kl_http_server_bound_port(&g_prov_pool_srv));
     memset(&g_pcnt, 0, sizeof g_pcnt);
 
     KlAllocator a = kl_allocator_default();
@@ -762,7 +762,7 @@ static int tls_pool_server_start(void) {
     kl_http_server_route(&g_tls_pool_srv, "GET", "/hello", handle_hello, NULL, NULL);
     kl_plat_thread_create(&g_tls_pool_tid, server_thread_fn, &g_tls_pool_srv);
     wait_for_bind(&g_tls_pool_srv);
-    return g_tls_pool_srv.bound_port > 0 ? 0 : -1;
+    return kl_http_server_bound_port(&g_tls_pool_srv) > 0 ? 0 : -1;
 }
 static void tls_pool_server_stop(void) {
     kl_http_server_stop(&g_tls_pool_srv);
@@ -773,7 +773,7 @@ static void tls_pool_server_stop(void) {
 UTEST(cpool, sync_pooled_tls_keyed_by_config) {
     ASSERT_EQ(tls_pool_server_start(), 0);
     char url[128];
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", g_tls_pool_srv.bound_port);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", kl_http_server_bound_port(&g_tls_pool_srv));
     KlAllocator a = kl_allocator_default();
     KlHttpClientPool pool;
     int ok = kl_http_client_pool_init(&pool, NULL, &a, NULL) == 0;
@@ -804,7 +804,7 @@ UTEST(cpool, sync_pooled_tls_keyed_by_config) {
 UTEST(cpool, async_pooled_tls_keyed_by_config) {
     ASSERT_EQ(tls_pool_server_start(), 0);
     char url[128];
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", g_tls_pool_srv.bound_port);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/hello", kl_http_server_bound_port(&g_tls_pool_srv));
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     int ok = kl_event_ctx_init(&ev, &a) == 0;

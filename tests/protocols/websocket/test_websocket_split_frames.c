@@ -53,8 +53,8 @@ static int srv_start(Srv *s) {
     s->ws_cfg.callbacks.on_message = srv_on_message;
     if (kl_http_server_ws_upgrade(&s->srv, "/ws", &s->ws_cfg) != 0) return -1;
     if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
-    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s->port = s->srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s->srv) == 0; i++) kl_test_sleep_ms(10);
+    s->port = kl_http_server_bound_port(&s->srv);
     return s->port > 0 ? 0 : -1;
 }
 
@@ -288,8 +288,8 @@ static int srv_start_tls(Srv *s) {
     s->ws_cfg.callbacks.on_message = srv_on_message;
     if (kl_http_server_ws_upgrade(&s->srv, "/ws", &s->ws_cfg) != 0) return -1;
     if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
-    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s->port = s->srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s->srv) == 0; i++) kl_test_sleep_ms(10);
+    s->port = kl_http_server_bound_port(&s->srv);
     return s->port > 0 ? 0 : -1;
 }
 
@@ -471,8 +471,8 @@ static int srv_start_no_on_message(Srv *s) {
     kl_ws_server_config_init(&s->ws_cfg);           /* no callbacks at all */
     if (kl_http_server_ws_upgrade(&s->srv, "/ws", &s->ws_cfg) != 0) return -1;
     if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
-    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s->port = s->srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s->srv) == 0; i++) kl_test_sleep_ms(10);
+    s->port = kl_http_server_bound_port(&s->srv);
     return s->port > 0 ? 0 : -1;
 }
 
@@ -655,8 +655,8 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
     s.ws_cfg.callbacks.on_message = big_on_message;
     ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
     ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
-    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s.port = s.srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s.srv) == 0; i++) kl_test_sleep_ms(10);
+    s.port = kl_http_server_bound_port(&s.srv);
 
 #if !defined(_WIN32)
     signal(SIGPIPE, SIG_IGN);                       /* the fixed server may close before "more" */
@@ -712,8 +712,8 @@ UTEST(ws_server_send, no_pong_after_the_server_stopped_sending) {
     s.ws_cfg.callbacks.on_message = close_on_message;
     ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
     ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
-    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s.port = s.srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s.srv) == 0; i++) kl_test_sleep_ms(10);
+    s.port = kl_http_server_bound_port(&s.srv);
 
     int saw_close = 0, saw_pong = 0;
     KlSocketHandle fd = ws_open_raw(s.port);
@@ -767,8 +767,8 @@ UTEST(ws_server_send, a_frame_the_drain_cuts_short_closes_the_connection) {
     s.ws_cfg.callbacks.on_message = drain_big_on_message;
     ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
     ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
-    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s.port = s.srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s.srv) == 0; i++) kl_test_sleep_ms(10);
+    s.port = kl_http_server_bound_port(&s.srv);
 
     int closed = 0;
     g_drain_refused = 0;
@@ -817,8 +817,8 @@ UTEST(ws_server_send, a_reset_with_a_receive_and_a_send_in_flight_releases_once)
     s.ws_cfg.callbacks.on_message = rst_big_on_message;
     ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
     ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
-    for (int i = 0; i < 300 && s.srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s.port = s.srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s.srv) == 0; i++) kl_test_sleep_ms(10);
+    s.port = kl_http_server_bound_port(&s.srv);
 
     KlSocketHandle fd = ws_open_raw(s.port);
     if (kl_handle_valid(fd)) {

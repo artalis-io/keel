@@ -58,8 +58,8 @@ static int srv_start(Srv *s, size_t max_header_size) {
     if (kl_http_server_init(&s->srv, &cfg) != 0) return -1;
     kl_http_server_route(&s->srv, "GET", "/echo", handle_echo, NULL, NULL);
     if (kl_plat_thread_create(&s->t, server_thread_fn, &s->srv) != 0) return -1;
-    for (int i = 0; i < 300 && s->srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    s->port = s->srv.bound_port;
+    for (int i = 0; i < 300 && kl_http_server_bound_port(&s->srv) == 0; i++) kl_test_sleep_ms(10);
+    s->port = kl_http_server_bound_port(&s->srv);
     return s->port > 0 ? 0 : -1;
 }
 

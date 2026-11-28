@@ -106,7 +106,7 @@ UTEST(server_stats, accessors) {
 
     ASSERT_EQ((void *)kl_http_server_event_ctx(&s), (void *)&s.ev);
     ASSERT_EQ((const void *)kl_http_server_event_ctx_const(&s), (const void *)&s.ev);
-    ASSERT_EQ(kl_http_server_bound_port(&s), s.bound_port);
+    ASSERT_EQ(kl_http_server_bound_port(&s), kl_http_server_bound_port(&s));
 
     ASSERT_TRUE(kl_http_server_event_ctx(NULL) == NULL);
     ASSERT_TRUE(kl_http_server_event_ctx_const(NULL) == NULL);

@@ -36,15 +36,15 @@ UTEST(peer_addr, tcp_ipv4) {
 
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)srv.bound_port);
+    a.sin_port = htons((uint16_t)kl_http_server_bound_port(&srv));
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     ASSERT_EQ(0, connect(fd, (struct sockaddr *)&a, sizeof(a)));
 
@@ -71,8 +71,8 @@ UTEST(peer_addr, tcp_ipv6) {
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    if (srv.bound_port <= 0) {
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    if (kl_http_server_bound_port(&srv) <= 0) {
         kl_http_server_stop(&srv); kl_plat_thread_join(&t); kl_http_server_free(&srv);
         UTEST_SKIP("IPv6 bind failed");
     }
@@ -81,7 +81,7 @@ UTEST(peer_addr, tcp_ipv6) {
     struct sockaddr_in6 a6;
     memset(&a6, 0, sizeof(a6));
     a6.sin6_family = AF_INET6;
-    a6.sin6_port = htons((uint16_t)srv.bound_port);
+    a6.sin6_port = htons((uint16_t)kl_http_server_bound_port(&srv));
     inet_pton(AF_INET6, "::1", &a6.sin6_addr);
     int crc = (fd >= 0) ? connect(fd, (struct sockaddr *)&a6, sizeof(a6)) : -1;
     if (crc == 0) {
@@ -124,10 +124,10 @@ UTEST(peer_addr, proxy_v1_trusted) {
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_local(srv.bound_port);
+    int fd = connect_local(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     const char *msg =
         "PROXY TCP4 203.0.113.7 10.0.0.1 5000 443\r\n"
@@ -151,10 +151,10 @@ UTEST(peer_addr, proxy_v2_trusted) {
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_local(srv.bound_port);
+    int fd = connect_local(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     uint8_t hdr[28];
     static const uint8_t sig[12] = {0x0D,0x0A,0x0D,0x0A,0x00,0x0D,0x0A,0x51,0x55,0x49,0x54,0x0A};
@@ -189,10 +189,10 @@ UTEST(peer_addr, proxy_trusted_no_header) {
     kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, srv_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_local(srv.bound_port);
+    int fd = connect_local(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     ASSERT_EQ((long)strlen(req), kl_test_sockwrite(fd, req, strlen(req)));

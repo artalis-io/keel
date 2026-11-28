@@ -291,7 +291,8 @@ typedef struct KlHttpServer {
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */
     KlSocketHandle listen_fd;              /**< Listening socket fd */
-    int bound_port;             /**< actual port after bind (useful with port=0) */
+    int bound_port;             /**< actual port once listening (useful with port=0); from another
+                                 *   thread, read it only with kl_http_server_bound_port() */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
     /* Opaque, fixed lifecycle storage for the substrate AF_UNIX node-cleanup state
      * (src/unix_socket_node.h). Managed only by that module; the concrete state type stays in
@@ -555,16 +556,15 @@ const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
  * Resolved even when the config requested an ephemeral port (port 0): after the listen socket is
  * bound this returns the actual port. Prefer this over reading `s->bound_port` directly.
  *
- * Ownership: none (returns a value). Lifetime: meaningful once the listener is bound (0 before
- * binding). NULL: returns -1 when @p s is NULL (deterministic).
+ * Ownership: none (returns a value). Lifetime: 0 until kl_http_server_run has the listener
+ * listening, then the bound port, unchanged afterwards (also after the run returns). A UNIX-socket
+ * server reports 0 throughout. NULL: returns -1 when @p s is NULL (deterministic).
  *
- * Thread: the port is written once, by kl_http_server_run on its own thread when it binds the
- * listener, before the first connection is accepted, and never written again. That thread may read
- * it at any time (from a handler, say). Another thread may read it once something orders the read
- * after that write: kl_http_server_run has returned (the thread was joined), or the loop thread
- * published "listening" through the caller's own synchronization (a mutex, an atomic flag or a
- * condition variable set from a callback). Polling it from another thread while the run starts is a
- * data race; the value is a plain int, not an atomic.
+ * Thread: safe from any thread. kl_http_server_run publishes the port with an atomic store once the
+ * socket is listening, and this function reads it with an atomic load, so another thread may poll
+ * it until it is nonzero and then connect: a nonzero value means the listener accepts connections.
+ * That holds for this function only: reading the `bound_port` field directly from another thread
+ * while the run starts is a data race.
  */
 int kl_http_server_bound_port(const KlHttpServer *s);
 

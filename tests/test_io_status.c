@@ -198,9 +198,9 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, iod_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_GT(srv.bound_port, 0);
-    g_iod_port = srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_GT(kl_http_server_bound_port(&srv), 0);
+    g_iod_port = kl_http_server_bound_port(&srv);
 
     KlSocketProvider cprov = { &IOD_OPS, &g_cdeco, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator a = kl_allocator_default();
@@ -497,8 +497,8 @@ UTEST(iostatus, accept_loop_backs_off_on_provider_resource_exhausted) {
     kl_http_server_route(&g_pz_srv, "GET", "/ok", iod_handler, NULL, NULL);
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, pz_srv_thread, &g_pz_srv));
-    for (int i = 0; i < 200 && g_pz_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    int port = g_pz_srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_pz_srv) == 0; i++) kl_test_sleep_ms(10);
+    int port = kl_http_server_bound_port(&g_pz_srv);
 
     g_pz.accept_fail = 1;
     KlSocketHandle cfd = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);

@@ -245,8 +245,8 @@ UTEST(client, configured_provider_is_per_client_and_leaves_ctx_unchanged) {
     ASSERT_EQ(0, kl_http_server_init(&g_prov_srv, &scfg));
     kl_http_server_route(&g_prov_srv, "GET", "/", prov_hello, NULL, NULL);
     ASSERT_EQ(0, kl_plat_thread_create(&g_prov_tid, prov_server_thread, &g_prov_srv));
-    for (int i = 0; i < 200 && g_prov_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    int port = g_prov_srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_prov_srv) == 0; i++) kl_test_sleep_ms(10);
+    int port = kl_http_server_bound_port(&g_prov_srv);
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
 
@@ -340,8 +340,8 @@ UTEST(client, default_resolver_uses_the_client_provider) {
     ASSERT_EQ(0, kl_http_server_init(&g_prov_srv, &scfg));
     kl_http_server_route(&g_prov_srv, "GET", "/", prov_hello, NULL, NULL);
     ASSERT_EQ(0, kl_plat_thread_create(&g_prov_tid, prov_server_thread, &g_prov_srv));
-    for (int i = 0; i < 200 && g_prov_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    int port = g_prov_srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_prov_srv) == 0; i++) kl_test_sleep_ms(10);
+    int port = kl_http_server_bound_port(&g_prov_srv);
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
 
@@ -607,11 +607,11 @@ UTEST(client, async_default_resolver_localhost) {
     kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, wire_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     char url[64];
-    snprintf(url, sizeof(url), "http://localhost:%d/", srv.bound_port);
+    snprintf(url, sizeof(url), "http://localhost:%d/", kl_http_server_bound_port(&srv));
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
@@ -639,11 +639,11 @@ UTEST(client, async_system_dns) {
     kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
     KlPlatThread t;
     ASSERT_EQ(0, kl_plat_thread_create(&t, wire_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", kl_http_server_bound_port(&srv));
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;

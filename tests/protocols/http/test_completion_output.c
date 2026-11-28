@@ -16,6 +16,7 @@
 #include <keel/keel.h>
 #include <keel/tls.h>
 #include "net_compat.h"
+#include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include "mock_tls.h"
 #include "event_caps.h"
 #include "http_internal.h"              /* kl_comp_http2_queue_full / kl_comp_ws_queue_full */
@@ -37,7 +38,7 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 static void server_thread_fn(void *arg) {
@@ -120,7 +121,7 @@ UTEST(completion_output, a_stalled_stream_reader_does_not_block_other_connection
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &st_srv);
     wait_for_bind(&st_srv);
-    int port = st_srv.bound_port;
+    int port = kl_http_server_bound_port(&st_srv);
 
     int a = connect_rcvbuf(port, 4096);                    /* asks for 64 MiB, then reads nothing */
     if (a >= 0) {
@@ -158,7 +159,7 @@ UTEST(completion_output, a_stalled_websocket_reader_does_not_block_other_connect
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &ws_srv);
     wait_for_bind(&ws_srv);
-    int port = ws_srv.bound_port;
+    int port = kl_http_server_bound_port(&ws_srv);
 
     int a = connect_rcvbuf(port, 4096);                    /* upgrades, is sent 64 MiB, reads nothing */
     if (a >= 0) {
@@ -287,7 +288,7 @@ UTEST(completion_output, a_slow_websocket_reader_answering_pings_is_kept_alive) 
     memset(&rd, 0, sizeof rd);
     int closed = 0, upgraded = 0;
     size_t got = 0;
-    int fd = connect_rcvbuf(sw_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&sw_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -356,7 +357,7 @@ UTEST(completion_output, tls_100_continue_is_sent_before_the_body) {
     char interim[256], final[1024];
     int closed = 0;
     interim[0] = final[0] = '\0';
-    int fd = connect_rcvbuf(ct_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ct_srv), 0);
     if (fd >= 0) {
         const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                          "Expect: 100-continue\r\nConnection: close\r\n\r\n";
@@ -451,7 +452,7 @@ UTEST(completion_output, a_long_streamed_download_that_moves_is_not_timed_out) {
     wait_for_bind(&ls_srv);
     size_t got = 0;
     int closed = 0;
-    int fd = connect_rcvbuf(ls_srv.bound_port, 16 * 1024);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ls_srv), 16 * 1024);
     if (fd >= 0) {
         const char *rq = "GET /long HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -497,7 +498,7 @@ UTEST(completion_output, a_long_file_download_that_moves_is_not_timed_out) {
     wait_for_bind(&lf_srv);
     size_t got = 0;
     int closed = 0;
-    int fd = connect_rcvbuf(lf_srv.bound_port, 16 * 1024);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&lf_srv), 16 * 1024);
     if (fd >= 0) {
         const char *rq = "GET /file HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -542,7 +543,7 @@ UTEST(completion_output, a_websocket_backlog_to_a_stalled_reader_is_bounded) {
     kl_plat_thread_create(&tid, server_thread_fn, &wsb_srv);
     wait_for_bind(&wsb_srv);
     g_ws_sent_ok = -1;
-    int a = connect_rcvbuf(wsb_srv.bound_port, 4096);
+    int a = connect_rcvbuf(kl_http_server_bound_port(&wsb_srv), 4096);
     if (a >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -616,7 +617,7 @@ UTEST(completion_output, one_oversized_websocket_write_cannot_cross_the_queue_bo
     kl_plat_thread_create(&tid, server_thread_fn, &wso_srv);
     wait_for_bind(&wso_srv);
     g_oversized_frame_rc = 1;
-    int fd = connect_rcvbuf(wso_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&wso_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -660,7 +661,7 @@ static void large_ws_drain_case(int *utest_result, int many) {
     KlPlatThread thread;
     ASSERT_EQ(0, kl_plat_thread_create(&thread, server_thread_fn, &server));
     wait_for_bind(&server);
-    int fd = connect_rcvbuf(server.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&server), 0);
     size_t got = 0;
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -725,7 +726,7 @@ UTEST(completion_output, a_tls_websocket_auto_ping_reaches_an_idle_client) {
     wait_for_bind(&tp_srv);
 
     int pings = 0, close_seen = 0, eof = 0;
-    int fd = connect_rcvbuf(tp_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&tp_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -807,7 +808,7 @@ UTEST(completion_output, a_stream_after_a_response_reset_still_goes_out) {
     char buf[1024];
     int closed = 0;
     buf[0] = '\0';
-    int fd = connect_rcvbuf(rs_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&rs_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /rs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -846,10 +847,12 @@ UTEST(completion_output, a_send_from_on_close_after_an_abnormal_closure_is_refus
     wcfg.callbacks.on_close = ws_bye_on_close;
     ASSERT_EQ(0, kl_http_server_ws_upgrade(&bc_srv, "/ws", &wcfg));
     kl_http_server_route(&bc_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &bc_srv));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &bc_srv);
     wait_for_bind(&bc_srv);
-    int port = bc_srv.bound_port;
+    int port = kl_http_server_bound_port(&bc_srv);
     g_bye_sent = g_bye_closes = 0;
 
     for (int round = 0; round < 4; round++) {             /* each one a dead client's release */
@@ -866,11 +869,12 @@ UTEST(completion_output, a_send_from_on_close_after_an_abnormal_closure_is_refus
     }
     kl_test_sleep_ms(300);
     KlHttpServerStats st;
-    kl_http_server_stats(&bc_srv, &st);
+    (void)kl_test_stats_probe_get(&probe, &st);
     int served = 0;
     for (int i = 0; i < 4; i++) served += hello_answered(port);
     kl_http_server_stop(&bc_srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
     kl_http_server_free(&bc_srv);
     ASSERT_EQ(g_bye_closes, 4);                            /* every dead client's on_close ran */
     ASSERT_EQ(g_bye_sent, 0);                              /* was 4: the frame was taken */
@@ -927,7 +931,7 @@ UTEST(completion_output, a_tls_stream_written_while_suspended_goes_out) {
     char buf[2048];
     size_t have = 0;
     buf[0] = '\0';
-    int fd = connect_rcvbuf(ss_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ss_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1001,7 +1005,7 @@ UTEST(completion_output, a_suspended_tls_stream_to_a_stalled_client_is_bounded) 
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &bp_srv);
     wait_for_bind(&bp_srv);
-    int fd = connect_rcvbuf(bp_srv.bound_port, 4096);    /* reads nothing */
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&bp_srv), 4096);    /* reads nothing */
     if (fd >= 0) {
         const char *rq = "GET /bp HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1072,10 +1076,12 @@ UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resum
     ASSERT_EQ(0, kl_http_server_init(&ds_srv, &cfg));
     kl_http_server_route(&ds_srv, "GET", "/ds", handle_dead_stream, NULL, NULL);
     kl_http_server_route(&ds_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &ds_srv));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &ds_srv);
     wait_for_bind(&ds_srv);
-    int port = ds_srv.bound_port;
+    int port = kl_http_server_bound_port(&ds_srv);
     int fd = connect_rcvbuf(port, 0);
     if (fd >= 0) {
         const char *rq = "GET /ds HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -1100,11 +1106,12 @@ UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resum
     }
     kl_test_sleep_ms(1300);                                /* the pushes, then the finish */
     KlHttpServerStats st;
-    kl_http_server_stats(&ds_srv, &st);
+    (void)kl_test_stats_probe_get(&probe, &st);
     int served = 0;
     for (int i = 0; i < 4; i++) served += hello_answered(port);
     kl_http_server_stop(&ds_srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
     kl_http_server_free(&ds_srv);
     ASSERT_TRUE(g_ds.suspended);
     ASSERT_EQ(g_ds.resumed + g_ds.cancelled, 1);           /* exactly one end */
@@ -1131,7 +1138,7 @@ UTEST(completion_output, a_tls_websocket_backlog_to_a_stalled_reader_is_bounded)
     kl_plat_thread_create(&tid, server_thread_fn, &twsb_srv);
     wait_for_bind(&twsb_srv);
     g_ws_sent_ok = -1;
-    int a = connect_rcvbuf(twsb_srv.bound_port, 4096);
+    int a = connect_rcvbuf(kl_http_server_bound_port(&twsb_srv), 4096);
     if (a >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -1167,7 +1174,7 @@ UTEST(completion_output, one_oversized_tls_websocket_write_cannot_cross_the_queu
     kl_plat_thread_create(&tid, server_thread_fn, &twso_srv);
     wait_for_bind(&twso_srv);
     g_oversized_frame_rc = 1;
-    int fd = connect_rcvbuf(twso_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&twso_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -1223,7 +1230,7 @@ static int run_oversized_counted(KlTlsConfig *tls_cfg) {
     wait_for_bind(&ff_srv);
     g_fast_fail_rc = 1;
     g_fast_fail_refusals = 0;
-    int fd = connect_rcvbuf(ff_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ff_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -1297,7 +1304,7 @@ UTEST(completion_output, a_stream_on_a_provider_stamped_without_the_overlapped_b
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &stamp_srv);
     wait_for_bind(&stamp_srv);
-    int port = stamp_srv.bound_port;
+    int port = kl_http_server_bound_port(&stamp_srv);
 
     /* A asks for 960 KiB (it fits the stream's outbound buffer on either model) and pauses. */
     int a = connect_rcvbuf(port, 4096);
@@ -1405,7 +1412,7 @@ UTEST(completion_output, a_websocket_backlog_sent_from_another_connection_goes_o
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &xw_srv);
     wait_for_bind(&xw_srv);
-    int port = xw_srv.bound_port;
+    int port = kl_http_server_bound_port(&xw_srv);
 
     size_t want = (size_t)XW_FRAMES * (XW_FRAME + 4), got = 0;
     int b = ws_connect_upgraded(port, 4096);               /* the subscriber: reads, never sends */
@@ -1507,7 +1514,7 @@ UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
     size_t have = 0;
     buf[0] = '\0';
     int seen_last = 0;
-    int fd = connect_rcvbuf(sf_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&sf_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1607,7 +1614,7 @@ UTEST(completion_output, a_suspended_stream_paced_on_on_drain_completes) {
     wait_for_bind(&pace_srv);
     size_t got = 0;
     int ended = 0;
-    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&pace_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1652,7 +1659,7 @@ static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
     wait_for_bind(&pace_srv);
-    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&pace_srv), 4096);
     size_t got = 0;
     if (fd >= 0) {                                        /* no early return: the server must stop */
         const char *rq = "GET /paced HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -1721,7 +1728,7 @@ static void half_close_case(int *utest_result, KlHttpSuspendHangup policy) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &pace_srv);
     wait_for_bind(&pace_srv);
-    int fd = connect_rcvbuf(pace_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&pace_srv), 4096);
     size_t got = 0;
     int ended = 0;
     double cpu_ms = 0, wall_ms = 0;
@@ -1854,7 +1861,7 @@ UTEST(completion_output, a_buffered_response_above_send_max_arrives_whole) {
     static char buf[SMAX_BODY + 1024];
     int closed = 0;
     kl_ssize_t got = 0;
-    int fd = connect_rcvbuf(smax_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&smax_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1931,7 +1938,7 @@ UTEST(completion_output, the_queue_gives_back_a_large_response_buffer_at_keep_al
     int closed = 0;
     kl_ssize_t got = 0;
     buf[0] = buf2[0] = '\0';
-    int fd = connect_rcvbuf(smax_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&smax_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -2011,7 +2018,7 @@ static void run_unended_stream(int use_tls, size_t *got, int *closed) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &ue_srv);
     wait_for_bind(&ue_srv);
-    int fd = connect_rcvbuf(ue_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ue_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /unended HTTP/1.1\r\nHost: x\r\n\r\n";   /* keep-alive */
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -2090,7 +2097,7 @@ UTEST(completion_output, a_stream_resumed_unended_with_a_backlog_ends_the_connec
     wait_for_bind(&ur_srv);
     size_t got = 0;
     int closed = 0;
-    int fd = connect_rcvbuf(ur_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ur_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /resume HTTP/1.1\r\nHost: x\r\n\r\n";     /* keep-alive */
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -2152,7 +2159,7 @@ UTEST(completion_output, an_idle_suspended_event_stream_outlives_the_read_timeou
     static char buf[4096];
     int closed = 0;
     buf[0] = '\0';
-    int fd = connect_rcvbuf(is_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&is_srv), 0);
     if (fd >= 0) {
         /* Connection: close: an ended stream is otherwise kept alive for the next request. */
         const char *rq = "GET /events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -2231,7 +2238,7 @@ static void te_run(void) {
         return;
     }
     wait_for_bind(&te_srv);
-    int fd = connect_rcvbuf(te_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&te_srv), 0);
     if (fd >= 0) {
         const char *rq1 = "GET /twice HTTP/1.1\r\nHost: x\r\n\r\n";       /* keep-alive */
         (void)kl_test_sockwrite(fd, rq1, strlen(rq1));
@@ -2370,7 +2377,7 @@ static void legacy_drain_case(int *utest_result, int tls, int early) {
     wait_for_bind(&ld_srv);
     size_t got = 0;
     int closed = 0;
-    int fd = connect_rcvbuf(ld_srv.bound_port, 64 * 1024);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&ld_srv), 64 * 1024);
     if (fd >= 0) {
         const char *rq = "GET /ld HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -2565,7 +2572,7 @@ static void bounded_stream_case(int *utest_result, int tls, int mixed) {
     unsigned char *body = malloc(SA_TOTAL);
     ASSERT_TRUE(raw && body);
     size_t raw_len = 0;
-    int fd = connect_rcvbuf(sa_srv.bound_port, 8192);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&sa_srv), 8192);
     if (fd >= 0) {
         const char *rq = "GET /sa HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -2629,7 +2636,7 @@ UTEST(completion_output, a_bounded_stream_whose_client_leaves_is_cancelled_witho
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &sa_srv);
     wait_for_bind(&sa_srv);
-    int fd = connect_rcvbuf(sa_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&sa_srv), 4096);
     size_t got = 0;
     if (fd >= 0) {
         const char *rq = "GET /sa HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -2722,7 +2729,7 @@ static void idle_case(int *utest_result, int no_callback) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &id_srv);
     wait_for_bind(&id_srv);
-    int fd = connect_rcvbuf(id_srv.bound_port, 8192);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&id_srv), 8192);
     int ended = 0, watched_idle = -1, suspended_idle = 0, edges_at_start = 0;
     double cpu_ms = 0, wall_ms = 0;
     if (fd >= 0) {
@@ -2968,7 +2975,7 @@ static void late_install_case(int *utest_result, int mode, int tls) {
     unsigned char *body = malloc(LA_RAW_CAP);
     ASSERT_TRUE(raw && body);
     size_t raw_len = 0;
-    int fd = connect_rcvbuf(la_srv.bound_port, 8192);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&la_srv), 8192);
     if (fd >= 0) {
         const char *rq = "GET /la HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -3149,7 +3156,7 @@ static void direct_send_case(int *utest_result, int use_tls) {
     const char *b1 = NULL, *b2 = NULL;
     size_t b1_len = 0, b2_len = 0, extra1 = 0, extra2 = 0;
     r1[0] = r2[0] = '\0';
-    int fd = connect_rcvbuf(dsend_srv.bound_port, 0);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&dsend_srv), 0);
     if (fd >= 0) {
         const char *rq = "GET /direct HTTP/1.1\r\nHost: x\r\n\r\n";      /* keep-alive */
         (void)kl_test_sockwrite(fd, rq, strlen(rq));

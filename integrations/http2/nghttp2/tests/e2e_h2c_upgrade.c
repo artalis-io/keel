@@ -169,11 +169,11 @@ int main(void) {
     kl_http_server_route(&g_srv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap(5);
-    if (g_srv.bound_port <= 0) return fail("server never bound");
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) nap(5);
+    if (kl_http_server_bound_port(&g_srv) <= 0) return fail("server never bound");
 
     RawClient c;
-    int up = raw_upgrade(&c, g_srv.bound_port);
+    int up = raw_upgrade(&c, kl_http_server_bound_port(&g_srv));
     int first = 0, second = 0, status1 = 0, status3 = 0;
     if (up == 0) {
         for (int i = 0; i < 200 && !c.answered[1] && !c.eof; i++) raw_pump(&c, 10);

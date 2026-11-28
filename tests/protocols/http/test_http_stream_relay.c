@@ -431,7 +431,7 @@ static int relay_servers_up(KlPlatThread *up_tid, KlPlatThread *rl_tid, int mode
     kl_plat_thread_create(rl_tid, rl_thread_fn, &rl_srv);
     if (!wait_ready(&g_up_ready) || !wait_ready(&g_rl_ready)) return -1;
     snprintf(g_up_url, sizeof g_up_url, "%s://127.0.0.1:%d/up",
-             (mode & RL_UP_REAL) ? "https" : "http", up_srv.bound_port);
+             (mode & RL_UP_REAL) ? "https" : "http", kl_http_server_bound_port(&up_srv));
     return 0;
 }
 static void relay_servers_down(KlPlatThread *up_tid, KlPlatThread *rl_tid) {
@@ -481,7 +481,7 @@ static int dn_read_tls(Dechunk *d) {
                                .tls = &ct };
     KlHttpClientStreamCfg sc = { .on_body = dn_on_body, .on_complete = dn_on_complete, .user_data = d };
     char url[64];
-    snprintf(url, sizeof url, "https://127.0.0.1:%d/relay", rl_srv.bound_port);
+    snprintf(url, sizeof url, "https://127.0.0.1:%d/relay", kl_http_server_bound_port(&rl_srv));
     KlHttpClientResponse resp;
     memset(&resp, 0, sizeof resp);
     int rc = kl_http_client_request_s(&a, &cfg, "GET", url, NULL, 0, NULL, 0, &sc, &resp);
@@ -504,7 +504,7 @@ static void relay_case(int *utest_result, int mode) {
     if (mode & RL_DOWN_REAL) fd = dn_read_tls(&d) == 0 ? 0 : -1;
     else
 #endif
-    fd = connect_rcvbuf(rl_srv.bound_port, 16384);
+    fd = connect_rcvbuf(kl_http_server_bound_port(&rl_srv), 16384);
     if (fd > 0) {
         const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -588,7 +588,7 @@ UTEST(stream_relay, a_relay_over_real_tls_both_ways_is_bounded) {
 UTEST(stream_relay, a_downstream_client_that_leaves_while_upstream_is_paused_ends_both) {
     KlPlatThread up_tid, rl_tid;
     ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 0), 0);
-    int fd = connect_rcvbuf(rl_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&rl_srv), 4096);
     size_t got = 0;
     if (fd >= 0) {
         const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -623,7 +623,7 @@ UTEST(stream_relay, a_downstream_client_that_leaves_while_upstream_is_paused_end
 UTEST(stream_relay, a_server_stop_while_upstream_is_paused_ends_the_relay) {
     KlPlatThread up_tid, rl_tid;
     ASSERT_EQ(relay_servers_up(&up_tid, &rl_tid, 0, 0), 0);
-    int fd = connect_rcvbuf(rl_srv.bound_port, 4096);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&rl_srv), 4096);
     if (fd >= 0) {
         const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -649,7 +649,7 @@ UTEST(stream_relay, a_server_stop_while_upstream_is_paused_ends_the_relay) {
 /* Request the relay, read `first` payload bytes, then stop reading until the relay has paused on its
  * bound and its upstream has stopped on its own. Returns the socket, or -1. */
 static int rl_read_then_stall(Dechunk *d, size_t first) {
-    int fd = connect_rcvbuf(rl_srv.bound_port, 16384);
+    int fd = connect_rcvbuf(kl_http_server_bound_port(&rl_srv), 16384);
     if (fd < 0) return -1;
     const char *rq = "GET /relay HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -690,7 +690,7 @@ UTEST(stream_relay, a_drain_while_backpressured_completes_once_the_reader_resume
     kl_http_server_stop(&rl_srv);
     kl_test_sleep_ms(150);                                   /* a loop tick has run */
     int draining = kl_http_server_draining(&rl_srv);
-    int late = connect_rcvbuf(rl_srv.bound_port, 0);         /* refused: no new connections */
+    int late = connect_rcvbuf(kl_http_server_bound_port(&rl_srv), 0);         /* refused: no new connections */
     if (late >= 0) kl_test_closesock(late);
     kl_test_sleep_ms(300);
     int held = !g_rl_run_done && !g_rl.cancelled && !g_rl.completed;   /* the relay holds the drain */

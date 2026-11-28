@@ -202,7 +202,7 @@ static int keel_https_on_lwip(void) {
     if (pthread_create(&tid, NULL, tls_srv_thread, NULL) != 0) {
         kl_http_server_free(&g_tls_srv); kl_tls_mbedtls_ctx_destroy(sctx); return 0;
     }
-    for (int i = 0; i < 400 && g_tls_srv.bound_port == 0; i++) usleep(5000);
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_tls_srv) == 0; i++) usleep(5000);
 
     /* Keel async HTTPS client on the lwIP providers; mbedTLS BIO routed through lwIP. */
     KlEventCtx cev;
@@ -214,7 +214,7 @@ static int keel_https_on_lwip(void) {
             /* No explicit provider call: the client auto-wires it from KlHttpClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
             char url[64];
-            snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);
+            snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)kl_http_server_bound_port(&g_tls_srv));
             KlHttpClientConfig ccfg = {
                 .sockets = kl_socket_provider_lwip(), .system_dns = 1,
                 .timeout_ms = 5000, .tls = &ctls,
@@ -263,14 +263,14 @@ int main(void) {
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) { fprintf(stderr, "thread\n"); return 1; }
-    for (int i = 0; i < 400 && g_srv.bound_port == 0; i++) usleep(5000);
-    if (g_srv.bound_port <= 0) { fprintf(stderr, "server never bound\n"); return 1; }
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) == 0; i++) usleep(5000);
+    if (kl_http_server_bound_port(&g_srv) <= 0) { fprintf(stderr, "server never bound\n"); return 1; }
 
     /* lwIP client → the Keel server, over lwIP loopback. */
     int c = lwip_socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in in; memset(&in, 0, sizeof in);
     in.sin_family = AF_INET;
-    in.sin_port = lwip_htons((uint16_t)g_srv.bound_port);
+    in.sin_port = lwip_htons((uint16_t)kl_http_server_bound_port(&g_srv));
     in.sin_addr.s_addr = lwip_htonl(INADDR_LOOPBACK);
     if (lwip_connect(c, (struct sockaddr *)&in, sizeof in) != 0) { fprintf(stderr, "connect failed\n"); return 1; }
 
@@ -289,7 +289,7 @@ int main(void) {
            ok ? "200 OK (correct)" : "UNEXPECTED");
 
     /* A Keel async client on lwIP → the same server. */
-    int client_ok = keel_client_on_lwip((uint16_t)g_srv.bound_port);
+    int client_ok = keel_client_on_lwip((uint16_t)kl_http_server_bound_port(&g_srv));
     printf("lwIP loopback: Keel client on lwIP got %s\n",
            client_ok ? "200 (correct)" : "UNEXPECTED");
 

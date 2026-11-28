@@ -259,13 +259,13 @@ int main(void) {
     for (size_t i = 0; i < sizeof(g_big); i++) g_big[i] = (char)(i % 251);
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 400 && g_srv.bound_port == 0; i++) nap(5);
-    if (g_srv.bound_port <= 0) return fail("server never bound");
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) == 0; i++) nap(5);
+    if (kl_http_server_bound_port(&g_srv) <= 0) return fail("server never bound");
 
     Cli c;
     memset(&c, 0, sizeof(c));
     c.fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)g_srv.bound_port) };
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)kl_http_server_bound_port(&g_srv)) };
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(c.fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) return fail("connect");
 
