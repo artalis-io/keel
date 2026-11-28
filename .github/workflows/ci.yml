@@ -730,7 +730,8 @@ jobs:
   # the system package via pkg-config.
   integrations:
     name: Integrations (mbedTLS + nghttp2)
-    runs-on: ubuntu-latest
+    # Pinned: the miniz step uses clang-18, which ubuntu-24.04 ships; ubuntu-latest may move on.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
