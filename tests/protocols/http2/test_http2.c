@@ -2016,6 +2016,7 @@ UTEST(h1_tls_drain, a_complete_drain_waits_for_its_refused_close_notify) {
     ASSERT_EQ(0, memcmp(got, "<close_notify>", 14));
     ASSERT_EQ(eof, 1);
     ASSERT_EQ(st_after, (int)KL_HTTP_CONN_CLOSED);         /* then it closes, as before */
+    ASSERT_EQ(conn.tls_shutdown_abandoned, 0);             /* delivered: a clean TLS end */
 }
 
 /* An engine that never takes the alert, though the socket is writable, must not keep the drain
@@ -2034,6 +2035,7 @@ UTEST(h1_tls_drain, a_close_notify_refused_for_good_is_given_up_after_bounded_tr
     (void)kl_http_conn_begin_drain(&conn);
     for (int i = 0; i < 100; i++) (void)kl_http_conn_drain_on_writable(&conn);
     int calls = tls.calls, pending = conn.tls_shutdown_pending;
+    int abandoned = conn.tls_shutdown_abandoned;
     KlEventMask m = kl_http_conn_drain_interest(&conn, 0);
     char got[64];
     int eof = 0;
@@ -2044,10 +2046,78 @@ UTEST(h1_tls_drain, a_close_notify_refused_for_good_is_given_up_after_bounded_tr
     test_teardown();
     ASSERT_LE(calls, 10);                                  /* was one per writable event */
     ASSERT_EQ(pending, 0);
+    ASSERT_EQ(abandoned, 1);                               /* recorded as given up, not as clean */
     ASSERT_FALSE(m & KL_EVENT_WRITE);                      /* writability no longer watched */
     ASSERT_EQ(n, (size_t)0);
     ASSERT_EQ(eof, 1);                                     /* the FIN, without the alert */
     ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* the drain and its deadline go on */
+}
+
+/* Giving up on the alert never costs output already admitted: the alert is only attempted once
+ * the session's output is out (all of it handed to the socket on readiness), so a refusal for good
+ * cuts nothing but the alert itself. Here a done HTTP/2 session's last output, then an engine that
+ * never takes the alert: every output byte, then the FIN, the end recorded as abandoned. */
+UTEST(h1_tls_drain, giving_up_on_the_alert_keeps_the_output_before_it) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    RefuseTls tls;
+    rtls_init(&tls, 1000000);
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    char rbuf[64];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    conn.tls = &tls.base;
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.state = KL_HTTP_CONN_HTTP2;
+    mock.flush_send_len = 48;                              /* the last frames */
+    linger_session_done(&mock);
+    int st = kl_http2_server_on_writable(&conn);
+    for (int i = 0; i < 50; i++) (void)kl_http_conn_drain_on_writable(&conn);
+    char got[128];
+    int eof = 0;
+    size_t n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+    int calls = tls.calls, abandoned = conn.tls_shutdown_abandoned;
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(n, (size_t)48);                              /* every output byte */
+    ASSERT_EQ(eof, 1);                                     /* then the FIN, no alert */
+    ASSERT_LE(calls, 10);
+    ASSERT_EQ(abandoned, 1);
+}
+
+/* On a completion loop the alert goes into the engine's ring behind all output and is never
+ * retried: an engine whose ring refuses it does not stall the half-close (it follows once the
+ * queue is out), and that end is recorded as abandoned, not as a clean TLS shutdown. */
+UTEST(h1_tls_drain, a_completion_drain_records_a_refused_alert_as_abandoned) {
+    test_setup();
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    char rbuf[64];
+    RefuseTls tls;
+    rtls_init(&tls, 1000000);
+    KlHttpConn conn;
+    drain_conn_over_sent(&conn, pfd[1], rbuf, sizeof rbuf, &tls.base);
+    conn.comp_driven = 1;
+    int st = (int)kl_http_conn_begin_drain(&conn);
+    int pending = conn.tls_shutdown_pending, then_shutwr = conn.comp_tlsq_then_shutwr;
+    int abandoned = conn.tls_shutdown_abandoned, calls = tls.calls;
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(calls, 1);                                   /* tried once, behind the output */
+    ASSERT_EQ(pending, 0);                                 /* no writability to wait for */
+    ASSERT_EQ(then_shutwr, 1);                             /* the FIN once the queue is out */
+    ASSERT_EQ(abandoned, 1);
 }
 
 /* A session that becomes done outside its connection's events (the drain's GOAWAY, the settle

@@ -320,6 +320,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
         c->tls->reset(c->tls);
     }
     c->tls_shutdown_sent = c->tls_shutdown_pending = c->tls_shutdown_tries = 0;
+    c->tls_shutdown_abandoned = 0;
     if (kl_handle_valid(c->stream.fd)) {
         kl_sock_close(conn_sp(c), c->stream.fd);
         c->stream.fd = KL_INVALID_SOCKET;
@@ -1636,10 +1637,16 @@ static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
 static void conn_graceful_half_close(KlHttpConn *c) {
     if (c->tls && !c->tls_shutdown_sent) {
         KlTlsResult r = c->tls->shutdown(c->tls, c->stream.fd);
-        c->tls_shutdown_sent = 1;
+        c->tls_shutdown_sent = 1;              /* attempted: the release does not repeat it */
         if (!c->comp_driven && r == KL_TLS_WANT_WRITE) {
             c->tls_shutdown_pending = 1;       /* half-close once the alert is out */
             return;
+        }
+        /* Not taken (a completion engine's ring refused it, or the engine failed it): the FIN
+         * follows without it, and nothing may take this end for a clean TLS shutdown. */
+        if (r == KL_TLS_WANT_WRITE || r == KL_TLS_ERROR) {
+            c->tls_shutdown_abandoned = 1;
+            DRAIN_TRACE(c, "close-notify-not-taken");
         }
     }
     if (c->comp_driven)
@@ -1648,17 +1655,30 @@ static void conn_graceful_half_close(KlHttpConn *c) {
         (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
 }
 
-/* Writable events a refused close_notify gets before the drain gives up on it. A real engine takes
- * the alert as soon as the socket has room (a few dozen bytes); one that keeps answering WANT_WRITE
- * on a writable socket would otherwise make the loop spin on writability until the deadline. */
+/* Writable events a refused close_notify gets before the drain gives up on it. KlTls reports no
+ * partial progress on an alert, so this counts events, and is safe because of what is pending when
+ * it counts: the alert is attempted only once the protocol's output is out of the engine (an HTTP/2
+ * session is done only when tls->write took every frame whole; an HTTP/1.1 answer only once it is
+ * retired), so the engine holds the alert alone (a record of a few dozen bytes), or behind it at most
+ * the tail of a best-effort rejection answer (a few hundred). A writable report means the socket
+ * takes at least its low-water mark (a kilobyte or more on Linux and BSD; Winsock reports writable
+ * only when a send would not block), so a working engine finishes on the first or second event.
+ * Eight in a row without the alert going is an engine that does not make progress, which would
+ * otherwise make the loop spin on writability until the deadline. */
 #define KL_HTTP_TLS_SHUTDOWN_TRIES 8
 
 KlHttpConnState kl_http_conn_drain_on_writable(KlHttpConn *c) {
     if (c->state != KL_HTTP_CONN_DRAINING || !c->tls_shutdown_pending) return c->state;
-    if (c->tls->shutdown(c->tls, c->stream.fd) == KL_TLS_WANT_WRITE &&
-        ++c->tls_shutdown_tries < KL_HTTP_TLS_SHUTDOWN_TRIES)
+    KlTlsResult r = c->tls->shutdown(c->tls, c->stream.fd);
+    if (r == KL_TLS_WANT_WRITE && ++c->tls_shutdown_tries < KL_HTTP_TLS_SHUTDOWN_TRIES)
         return c->state;
-    /* Out, or given up on: half-close either way; the drain and its deadline go on. */
+    /* Out, or given up on: half-close either way; the drain and its deadline go on. Given up, it is
+     * recorded as such (tls_shutdown_abandoned), never as a clean TLS shutdown: the release does not
+     * retry it on a socket whose send side is shut, and nothing reports this end as clean. */
+    if (r == KL_TLS_WANT_WRITE || r == KL_TLS_ERROR) {
+        c->tls_shutdown_abandoned = 1;
+        DRAIN_TRACE(c, "close-notify-abandoned");
+    }
     c->tls_shutdown_pending = 0;
     (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
     return c->state;

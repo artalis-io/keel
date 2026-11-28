@@ -45,6 +45,10 @@ int  kl_comp_tls_flush(KlHttpConn *c);
 /* Close once the connection's queued TLS output is out (or now, when nothing is queued). */
 void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c);
 
+/* A TLS read failed: the client's close_notify (at_eof) gets the server's after everything queued,
+ * then the close once it is out; any other failure closes now. */
+void kl_comp_tls_read_failed(struct KlHttpServer *s, KlHttpConn *c);
+
 /* Post the next recv once the queued TLS output is out (or now, when nothing is queued). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c);
 

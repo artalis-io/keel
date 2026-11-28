@@ -554,6 +554,22 @@ void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
     kl_comp_close(s, c);
 }
 
+/* completion_internal.h: a TLS read failed. If it is the client's clean end (its close_notify,
+ * at_eof), the client sends nothing more, as with its FIN: what is queued for it still goes, then the
+ * server's own close_notify, then the close once that is out (a close over nothing unread is a FIN,
+ * not a reset). The release cannot send the alert itself on a completion loop (nothing is posted on
+ * a closing connection), so it is written here, once. Any other failure closes now. */
+void kl_comp_tls_read_failed(struct KlHttpServer *s, KlHttpConn *c) {
+    if (!(c->tls->at_eof && c->tls->at_eof(c->tls))) { kl_comp_close(s, c); return; }
+    if (!c->tls_shutdown_sent) {
+        KlTlsResult r = c->tls->shutdown(c->tls, c->stream.fd);
+        c->tls_shutdown_sent = 1;
+        if (r == KL_TLS_WANT_WRITE || r == KL_TLS_ERROR) c->tls_shutdown_abandoned = 1;
+    }
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+    kl_comp_close_after_output(s, c);
+}
+
 /* Read the next recv once the queued output is out (h2: no new input while output is pending), or
  * now when nothing is queued. Exported (completion_internal.h). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c) {
@@ -955,7 +971,7 @@ static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c) {
             if (c->stream.read_paused) return;
             if (c->comp_recv_posted) return;           /* one receive at a time */
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
-            if (p < 0) { kl_comp_close(s, c); return; }
+            if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
             if (p == 0) {                              /* WANT_READ: need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;
@@ -982,7 +998,7 @@ static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c) {
             /* grew: read_cap increased, off (== read_len) unchanged, so space is now available */
         }
         kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
-        if (p < 0) { kl_comp_close(s, c); return; }
+        if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
         if (p == 0) {                                  /* WANT_READ: need the network */
             if (c->comp_recv_posted) return;           /* one receive at a time */
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -1276,15 +1292,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         if (c->tls->feed_input(c->tls, c->comp_cipher, ev->bytes) < 0) { kl_comp_close(s, c); return; }
         for (;;) {
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
-            if (p < 0) {
-                /* The client's close_notify (a clean TLS end, at_eof) says it sends nothing more,
-                 * as its FIN does: what is queued for it still goes (the end of the answer, the
-                 * server's own close_notify), then the close, as for the FIN above. Any other
-                 * failure closes now. */
-                if (c->tls->at_eof && c->tls->at_eof(c->tls)) kl_comp_close_after_output(s, c);
-                else kl_comp_close(s, c);
-                return;
-            }
+            if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
             if (p == 0) break;                         /* WANT_READ */
             KlHttpConnState st = kl_http_conn_drain_ingest(c, (size_t)p, kl_monotonic_ms());
             c->stream.read_len = 0;

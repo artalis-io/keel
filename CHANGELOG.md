@@ -159,7 +159,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   socket and the client saw its answer end in a truncation. Every drain, HTTP/1.1 and HTTP/2 alike,
   now sends close_notify after the last record and only then half-closes; on a readiness loop a
   full send buffer delays the half-close until close_notify is out (bounded by the drain's
-  deadline). It is not sent a second time at release.
+  deadline). It is not sent a second time at release. An engine that refuses the alert on 8
+  writable events in a row is given up on (the FIN goes without it). On a completion loop, a client
+  that ends its TLS session (close_notify) now gets the server's close_notify after everything
+  already queued for it: an HTTP/1.1 connection was closed without one, and an HTTP/2 connection
+  was closed at once, cancelling output still queued.
 - **HTTP/2 on readiness loops: a session done outside its connection's events closed a second
   late.** A session that finished in the drain's GOAWAY flush or the settle pass was left until the
   next wait timed out (about one second), so every drain of a server with an HTTP/2 connection took

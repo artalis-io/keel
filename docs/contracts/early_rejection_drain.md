@@ -131,11 +131,14 @@ On a readiness loop a full send buffer can refuse it (WANT_WRITE): the half-clos
 drain watches for writability and sends it then (every readiness path that leaves a connection
 draining registers the drain's interest, `kl_http_server_drain_mask`: the dispatch, the sweep and
 its 408, an async resume, a file-I/O completion; the release retries an alert still refused; an
-engine that refuses it on 8 writable events in a row is given up on, and the half-close goes ahead;
+engine that refuses it on 8 writable events in a row is given up on, and the half-close goes ahead,
+recorded as an abandoned TLS end, never as a clean one (the alert is attempted only after all
+application output has left the engine, so giving up costs the alert alone);
 a drain whose input is already complete stays open until the alert is out or given up on), and a client that never reads leaves it pending
 until the drain's deadline closes the connection. The client therefore sees a clean TLS end, not a
-truncation. A client's own close_notify during a completion drain counts as its FIN: what is queued
-for it still goes, then the connection closes; it does not cancel admitted output. (A readiness
+truncation. A client's own close_notify on a completion loop (in a drain, or on a kept-alive connection whose
+answer is still queued) counts as its FIN: what is queued for it still goes, then the server's own
+close_notify, then the close; it does not cancel admitted output. (A readiness
 drain reads raw bytes past its half-close and never decodes it.)
 
 ### Three kinds of end

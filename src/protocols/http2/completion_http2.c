@@ -28,7 +28,7 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
          * out (kl_comp_recv_alongside_output). */
         for (;;) {
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
-            if (p < 0) { kl_comp_close(s, c); return; }
+            if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify keeps the queue */
             if (p == 0) break;                         /* WANT_READ, batch done */
             KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)p);
             if (st == KL_HTTP_CONN_DRAINING) {         /* done: the linger (later records discarded) */
