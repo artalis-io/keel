@@ -168,7 +168,7 @@ KEEL_CFLAGS=(
   # declares an offset via kl_uefi_set_unspecified_tz(). See wallclock_uefi.h.
   -DKL_UEFI_ASSUME_UNSPECIFIED_UTC
   "${PROD_DEFS[@]}"
-  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
+  -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src" -I. -I..
   -I"$MBEDTLS_ADAPTER"            # u4_selftest.c includes keel_tls_mbedtls.h
   -isystem "$SHIM"
   -Wall -Wextra
